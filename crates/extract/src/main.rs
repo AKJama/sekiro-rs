@@ -10,6 +10,11 @@ use clap::{Parser, Subcommand};
 use rayon::prelude::*;
 use sekiro_formats::{bnd4, dvd::Vfs};
 
+mod anims;
+mod models;
+mod paramlite;
+mod params;
+
 const DEFAULT_GAME: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Sekiro";
 
 #[derive(Parser)]
@@ -38,10 +43,39 @@ enum Command {
         #[arg(long)]
         filter: Option<String>,
     },
+    /// Convert character models in cache/raw to skinned, textured GLB files in cache/models.
+    Models {
+        /// Model ids to export (e.g. c1010, c0000). Defaults to the milestone set.
+        ids: Vec<String>,
+        /// Print which FLVER mesh each glTF primitive came from.
+        #[arg(long)]
+        verbose: bool,
+    },
+    /// Print a summary of a FLVER or TPF file.
+    ModelInfo {
+        path: PathBuf,
+        /// For a TPF: also decode every texture to PNG in this folder.
+        #[arg(long)]
+        dump: Option<PathBuf>,
+    },
+    /// Decode cache/raw PARAM binders with Paramdex defs into cache/params/<Table>.json.
+    Params,
+    /// Decode Havok skeletons, animation clips and TAE events into cache/anim/<chr>/.
+    Anims {
+        /// Character ids (e.g. c0000 c1010). Defaults to c0000 and c1010.
+        chrs: Vec<String>,
+    },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    match &cli.command {
+        Command::Models { ids, verbose } => return models::export(&cli.cache, ids, *verbose),
+        Command::ModelInfo { path, dump } => return models::info(path, dump.as_deref()),
+        Command::Params => return params::export(&cli.cache),
+        Command::Anims { chrs } => return anims::export(&cli.cache, chrs),
+        _ => {}
+    }
     let vfs = open_vfs(&cli.game, &cli.cache)?;
     match cli.command {
         Command::List { filter } => {
@@ -56,6 +90,10 @@ fn main() -> Result<()> {
             eprintln!("{} of {} entries named", paths.len(), vfs.len());
         }
         Command::Unpack { filter } => unpack(&vfs, &cli.cache.join("raw"), filter.as_deref())?,
+        Command::Models { .. }
+        | Command::ModelInfo { .. }
+        | Command::Params
+        | Command::Anims { .. } => unreachable!(),
     }
     Ok(())
 }

@@ -1,0 +1,15 @@
+[package]
+name = "sekiro-game"
+description = "The sekiro-rs Bevy app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sekiro-rs"
+path = "src/main.rs"
+
+[dependencies]
+bevy = { version = "=0.19.1", default-features = false, features = ["3d", "png"] }
+anyhow.workspace = true

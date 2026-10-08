@@ -15,3 +15,8 @@ libloading.workspace = true
 encoding_rs = "0.8"
 glam.workspace = true
 serde.workspace = true
+roxmltree = "0.21"
+postcard.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

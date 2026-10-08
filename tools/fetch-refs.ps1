@@ -10,10 +10,13 @@ New-Item -ItemType Directory -Path $out -Force | Out-Null
 
 $uxm = 'https://raw.githubusercontent.com/Nordgaren/UXM-Selective-Unpack/9501be87e272b6dae55e60a13c3f4753ca6fb3bb/UXM'
 $paramdex = 'https://raw.githubusercontent.com/soulsmods/Paramdex/ff7245e524329bc3eab00036723d2bd53384cedf/SDT'
+$dsas = 'https://raw.githubusercontent.com/Meowmaritus/DSAnimStudio/f1bff06cd422de991b0a0fa8a2da81db43417318/DSAnimStudioNETCore/Res'
 
 $files = @{
     'ArchiveKeys.cs'        = "$uxm/ArchiveKeys.cs"
     'SekiroDictionary.txt'  = "$uxm/res/SekiroDictionary.txt"
+    # TAE event parameter schemas (sekiro-extract anims).
+    'TAE.Template.SDT.xml'  = "$dsas/TAE.Template.SDT.xml"
 }
 foreach ($name in $files.Keys) {
     Invoke-WebRequest -Uri $files[$name] -OutFile (Join-Path $out $name)
