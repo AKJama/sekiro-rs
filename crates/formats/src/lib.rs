@@ -6,12 +6,15 @@
 pub mod anim;
 pub mod bhd;
 pub mod bnd4;
+pub mod bxf4;
 pub mod dcx;
 pub mod dvd;
 pub mod flver;
 pub mod hkb;
+pub mod hknp;
 pub mod hks;
 pub mod hkx;
+pub mod msb;
 pub mod mtd;
 pub mod param;
 pub mod paramdef;

@@ -222,6 +222,8 @@ fn npc(raw: &Path, params: &Params, id: &str) -> Result<Model> {
 /// row, the face part, and the starting katana with its scabbard.
 fn wolf(raw: &Path, params: &Params) -> Result<Model> {
     const CHARA_INIT_ROW: i32 = 10010; // "Castle": ordinary gear, katana, prosthetic
+    // Dummy poly on the c0000 `Sheath` bone where the katana scabbard hangs (left hip).
+    const SCABBARD_DUMMY: i16 = 147;
     let skeleton = read_flver(&raw.join("chr/c0000.chrbnd.d/c0000.flver"))?;
     let mut notes = Vec::new();
     let init = params.load("CharaInitParam")?;
@@ -276,10 +278,10 @@ fn wolf(raw: &Path, params: &Params) -> Result<Model> {
             let model = w.int("equipModelId")?;
             let name = format!("WP_A_{model:04}");
             notes.push(format!(
-                "equip_Wep_Right = weapon {wep_id} -> {name} in R_Weapon, scabbard {name}_1 on Sheath"
+                "equip_Wep_Right = weapon {wep_id} -> {name} in R_Weapon, scabbard {name}_1 at dummy {SCABBARD_DUMMY} (Sheath bone)"
             ));
             part_files.push((name.clone(), Some("R_Weapon".to_string())));
-            part_files.push((format!("{name}_1"), Some("Sheath".to_string())));
+            part_files.push((format!("{name}_1"), Some(format!("dmy:{SCABBARD_DUMMY}"))));
         }
         None => notes.push(format!(
             "equip_Wep_Right = {wep_id}: no EquipParamWeapon row"
@@ -527,6 +529,29 @@ fn build(raw: &Path, model: &Model, verbose: bool) -> Result<Vec<u8>> {
         for t in &part.tpfs {
             store.load_tpf(t)?;
         }
+        // Parts hung on a dummy poly (`dmy:<ref id>`) get a node at the dummy's frame, parented
+        // to the dummy's attach bone, so they follow that bone when animated.
+        if let Some(id) = part.attach.as_deref().and_then(|a| a.strip_prefix("dmy:"))
+            && !scene.by_name.contains_key(part.attach.as_deref().unwrap_or_default())
+        {
+            let id: i16 = id.parse()?;
+            let d = model
+                .skeleton
+                .dummies
+                .iter()
+                .find(|d| d.reference_id == id)
+                .with_context(|| format!("skeleton has no dummy {id}"))?;
+            let skel_world = world_matrices(&model.skeleton.nodes);
+            let bone = usize::try_from(d.attach_bone).context("dummy without attach bone")?;
+            let parent_world = usize::try_from(d.parent_bone)
+                .ok()
+                .map_or(Mat4::IDENTITY, |p| skel_world[p]);
+            let frame = parent_world * dummy_matrix(d);
+            let local = mirror_matrix(skel_world[bone].inverse() * frame);
+            let name = part.attach.clone().unwrap_or_default();
+            let n = scene.add(&name, local, Some(bone));
+            scene.by_name.insert(name, n);
+        }
         let world = world_matrices(&part.flver.nodes);
         let mut nodes = PartNodes {
             part,
@@ -575,6 +600,7 @@ fn build(raw: &Path, model: &Model, verbose: bool) -> Result<Vec<u8>> {
             } else {
                 0
             };
+            let mut zero_weight = 0usize;
             let mut joint_data = Vec::with_capacity(count);
             let mut weight_data = Vec::with_capacity(count);
             for k in 0..count {
@@ -584,6 +610,7 @@ fn build(raw: &Path, model: &Model, verbose: bool) -> Result<Vec<u8>> {
                 };
                 let total: f32 = w.iter().sum();
                 if total <= 1e-6 {
+                    zero_weight += 1;
                     let s = slot_of(default_bone, &mut scene);
                     joint_data.push([s, s, s, s]);
                     weight_data.push([1.0, 0.0, 0.0, 0.0]);
@@ -603,6 +630,9 @@ fn build(raw: &Path, model: &Model, verbose: bool) -> Result<Vec<u8>> {
                 }
                 joint_data.push(j);
                 weight_data.push(ww);
+            }
+            if verbose && zero_weight > 0 {
+                eprintln!("    {} mesh {mi}: {zero_weight}/{count} vertices without weights", part.label);
             }
             let positions: Vec<[f32; 3]> = v.positions.iter().map(|&p| mirror_point(p)).collect();
             let normals: Vec<[f32; 3]> = v
@@ -691,6 +721,10 @@ fn build(raw: &Path, model: &Model, verbose: bool) -> Result<Vec<u8>> {
         ));
         if primitives.is_empty() {
             continue;
+        }
+        if verbose {
+            let names: Vec<&str> = joints.iter().map(|&n| scene.nodes[n].name.as_str()).collect();
+            eprintln!("    {} joints: {}", part.label, names.join(" "));
         }
         let ibm = g.mat4s(&ibms);
         g.skins.push(json!({
@@ -829,4 +863,19 @@ fn material_json(
         }
     }
     Ok(mat)
+}
+
+/// A dummy poly's frame in its parent node's space (FromSoftware space): +Z along `forward`,
+/// +Y along `upward`, origin at `position`.
+fn dummy_matrix(d: &flver::Dummy) -> Mat4 {
+    let z = Vec3::from(d.forward).normalize_or(Vec3::Z);
+    let up = Vec3::from(d.upward).normalize_or(Vec3::Y);
+    let x = up.cross(z).normalize_or(Vec3::X);
+    let y = z.cross(x);
+    Mat4::from_cols(
+        x.extend(0.0),
+        y.extend(0.0),
+        z.extend(0.0),
+        Vec3::from(d.position).extend(1.0),
+    )
 }

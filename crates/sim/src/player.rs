@@ -41,6 +41,12 @@ pub const ENV_ACTION_UNLOCKED: i32 = 3033;
 pub const ENV_SP_EFFECT_REF: i32 = 3036;
 pub const ENV_CAN_RELEASE_CROUCH: i32 = 3037;
 pub const ACT_SET_VARIABLE: i32 = 148;
+pub const ACT_RESET_INPUT: i32 = 9101;
+pub const ACT_FACE_DIRECTION: i32 = 3025;
+pub const ENV_FALLING: i32 = 200;
+pub const ENV_FALL_HEIGHT: i32 = 224;
+pub const ENV_DT: i32 = 333;
+pub const ENV_LOCKED_ON: i32 = 1118;
 
 /// Action-arm ids used as the argument of env 1106 and 1108.
 pub mod arm {
@@ -68,6 +74,24 @@ pub struct PlayerEnv {
     pub sp_effect_refs: HashSet<i32>,
     /// Unlocked action types (env 3033).
     pub unlocked: HashSet<i32>,
+    /// Airborne and moving down (env 200).
+    pub falling: bool,
+    /// Height of the last fall in metres (env 224).
+    pub fall_height: f32,
+    /// Frame time in seconds (env 333).
+    pub dt: f32,
+    /// Lock-on active (env 1118).
+    pub locked_on: bool,
+    /// env 1105 ("standby state") from TAE cancel windows; `None` uses the clip-end
+    /// approximation.
+    pub standby: Option<bool>,
+    /// env 2000 ("can cancel into movement") from TAE cancel windows; `None` as above.
+    pub move_cancel: Option<bool>,
+    /// Counts `act(9101)` (reset input acceptance) calls; the input layer clears its buffer.
+    pub input_resets: std::cell::Cell<u32>,
+    /// `act(3025, degrees)`: turn to face a direction relative to the current facing
+    /// (positive to the left). The body applies and clears it.
+    pub face_turn: std::cell::Cell<Option<f32>>,
     /// Fixed answers for any other `(id, first argument)`; `None` matches any argument.
     pub overrides: Vec<(i32, Option<i32>, f32)>,
 }
@@ -84,83 +108,16 @@ impl Default for PlayerEnv {
             sp_effect_refs: HashSet::new(),
             // Main weapon (5) and the basics; progression unlocks are a save-file matter.
             unlocked: [0, 1, 2, 3, 4, 5].into_iter().collect(),
+            falling: false,
+            fall_height: 0.0,
+            dt: 1.0 / 30.0,
+            locked_on: false,
+            standby: None,
+            move_cancel: None,
+            input_resets: std::cell::Cell::new(0),
+            face_turn: std::cell::Cell::new(None),
             overrides: Vec::new(),
         }
-    }
-}
-
-/// Reads clip lengths from the extracted animation cache (`cache/anim/c0000/<name>.bin`).
-///
-/// Some animations have no HKX of their own and play another's, as recorded in the TAE
-/// headers (for example the fourth repeated-deflect animation). [`Self::with_tae_dir`] loads
-/// those aliases.
-pub struct AnimCacheDurations {
-    dir: PathBuf,
-    cache: HashMap<String, Option<f32>>,
-    /// Full animation id to the id whose HKX it plays.
-    hkx_alias: HashMap<i64, i64>,
-}
-
-impl AnimCacheDurations {
-    pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self {
-            dir: dir.into(),
-            cache: HashMap::new(),
-            hkx_alias: HashMap::new(),
-        }
-    }
-
-    /// Reads every `*.tae` in `dir` (an extracted `anibnd`) for HKX aliases.
-    pub fn with_tae_dir(mut self, dir: &Path) -> Self {
-        use sekiro_formats::tae;
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return self;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("tae") {
-                continue;
-            }
-            let Ok(t) = std::fs::read(&path)
-                .map_err(|_| ())
-                .and_then(|d| tae::parse(&d).map_err(|_| ()))
-            else {
-                continue;
-            };
-            let category = tae::category_from_file_name(
-                &path.file_name().unwrap_or_default().to_string_lossy(),
-            );
-            for a in &t.animations {
-                let id = tae::full_id(category, a.id);
-                let src = tae::full_id(category, a.hkx_source());
-                if src != id {
-                    self.hkx_alias.insert(id, src);
-                }
-            }
-        }
-        self
-    }
-
-    fn load(&self, animation: &str) -> Option<f32> {
-        std::fs::read(self.dir.join(format!("{animation}.bin")))
-            .ok()
-            .and_then(|b| sekiro_formats::anim::AnimClip::from_bytes(&b).ok())
-            .map(|c| c.duration)
-    }
-}
-
-impl ClipDurations for AnimCacheDurations {
-    fn duration(&mut self, animation: &str) -> Option<f32> {
-        if let Some(d) = self.cache.get(animation) {
-            return *d;
-        }
-        let d = self.load(animation).or_else(|| {
-            let id = sekiro_formats::tae::anim_id(animation)?;
-            let src = *self.hkx_alias.get(&id)?;
-            self.load(&sekiro_formats::tae::anim_name(src))
-        });
-        self.cache.insert(animation.to_owned(), d);
-        d
     }
 }
 
@@ -221,7 +178,11 @@ impl Adapter<'_> {
         }
         let env = self.env;
         match id {
+            ENV_FALLING => truth(env.falling),
             ENV_LANDED | ENV_REALLY_LANDED => truth(env.landed),
+            ENV_FALL_HEIGHT => env.fall_height,
+            ENV_DT => env.dt,
+            ENV_LOCKED_ON => truth(env.locked_on),
             ENV_ARM_STYLE => env.arm_style as f32,
             ENV_WEAPON_CATEGORY => match arg {
                 Some(1) => env.weapon_category[0] as f32,
@@ -232,6 +193,8 @@ impl Adapter<'_> {
             ENV_HP => env.hp,
             // Approximation until TAE cancel windows are wired: a state counts as standby once
             // its animation has ended or when it loops.
+            ENV_STANDBY_STATE if env.standby.is_some() => truth(env.standby == Some(true)),
+            ENV_MOVE_CANCEL if env.move_cancel.is_some() => truth(env.move_cancel == Some(true)),
             ENV_STANDBY_STATE | ENV_MOVE_CANCEL => truth(
                 self.hook_state
                     .and_then(|s| self.rt.state_clip(s))
@@ -277,6 +240,14 @@ impl Host for Adapter<'_> {
     }
 
     fn act(&mut self, id: CommandId<'_>, args: &[Value]) -> Value {
+        if id == CommandId::Number(ACT_FACE_DIRECTION)
+            && let Some(deg) = args.first().and_then(Value::as_number)
+        {
+            self.env.face_turn.set(Some(deg));
+        }
+        if id == CommandId::Number(ACT_RESET_INPUT) {
+            self.env.input_resets.set(self.env.input_resets.get() + 1);
+        }
         if id == CommandId::Number(ACT_SET_VARIABLE)
             && let (Some(name), Some(value)) =
                 (args.first(), args.get(1).and_then(Value::as_number))
@@ -366,7 +337,7 @@ impl PlayerBehavior {
             &cache_root.join("raw/action/script"),
             &cache_root.join("raw/chr/c0000.behbnd.d/c0000.hkx"),
             Box::new(
-                AnimCacheDurations::new(cache_root.join("anim/c0000"))
+                crate::clips::ClipLibrary::new(cache_root.join("anim/c0000"))
                     .with_tae_dir(&cache_root.join("raw/chr/c0000.anibnd.d")),
             ),
         )

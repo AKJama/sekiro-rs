@@ -5,10 +5,14 @@
 //!   [--distance <m>] [--height <m>] [--hide m12,hair] [--only m68,m69]`: inspect an exported
 //!   model in bind pose; `--hide`/`--only` filter primitives by material name, `--combat` shows
 //!   enemies with weapons drawn.
+//! - `sekiro-rs --map <id> [--screenshot <out.png>] [--at <s>] [--camera x,y,z,yaw,pitch]
+//!   [--collision] [--no-pieces]`: fly through an area exported by `sekiro-extract map`.
 
 mod arena;
 mod character;
 mod draw_mask;
+mod map;
+mod play;
 mod viewer;
 
 use std::path::PathBuf;
@@ -46,6 +50,34 @@ fn main() -> anyhow::Result<()> {
         };
         return viewer::run(options);
     }
+    if let Some(id) = arg_value(&args, "--map") {
+        return map::run(map::Options {
+            cache: PathBuf::from(arg_value(&args, "--cache").unwrap_or_else(|| "cache".into())),
+            id,
+            screenshot: arg_value(&args, "--screenshot").map(PathBuf::from),
+            at: arg_f32(&args, "--at", 2.0)?,
+            camera: map::parse_camera(arg_value(&args, "--camera").as_deref())?,
+            collision: args.iter().any(|a| a == "--collision"),
+            no_pieces: args.iter().any(|a| a == "--no-pieces"),
+        });
+    }
+    if args.iter().any(|a| a == "--play") {
+        let screenshots = arg_list(&args, "--shots")
+            .into_iter()
+            .map(|s| {
+                let (step, path) = s
+                    .split_once(':')
+                    .ok_or_else(|| anyhow::anyhow!("--shots wants step:path, got {s}"))?;
+                Ok((step.parse()?, PathBuf::from(path)))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        return play::run(play::Options {
+            cache: PathBuf::from(arg_value(&args, "--cache").unwrap_or_else(|| "cache".into())),
+            script: arg_value(&args, "--script"),
+            screenshots,
+            exit_after_script: args.iter().any(|a| a == "--exit"),
+        });
+    }
     if args.iter().any(|a| a == "--arena") {
         return arena::run(arena::Options {
             cache: PathBuf::from(arg_value(&args, "--cache").unwrap_or_else(|| "cache".into())),
@@ -53,6 +85,7 @@ fn main() -> anyhow::Result<()> {
             at: arg_f32(&args, "--at", 3.0)?,
         });
     }
+    eprintln!("usage: sekiro-rs --play [--script FILE|builtin] [--shots step:path,...] [--exit]");
     eprintln!("usage: sekiro-rs --arena [--screenshot <out.png> --at <seconds>]");
     eprintln!("       sekiro-rs --viewer <file.glb> [--screenshot <out.png>] [--yaw <deg>]");
     eprintln!("                 [--pitch <deg>] [--distance <m>] [--height <m>]");
