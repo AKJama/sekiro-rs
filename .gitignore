@@ -1,0 +1,27 @@
+# Whitelist: only original source and documentation may be tracked.
+# Game data, extracted assets, decompiled output and analysis databases never enter git.
+*
+!/.gitignore
+!/AGENTS.md
+!/README.md
+!/STATUS.md
+!/CREDITS.md
+!/Cargo.toml
+!/Cargo.lock
+!/rust-toolchain.toml
+!/rustfmt.toml
+!/docs/
+!/docs/**/
+!/docs/**/*.md
+!/crates/
+!/crates/**/
+!/crates/**/Cargo.toml
+!/crates/**/*.rs
+!/crates/**/*.wgsl
+!/tools/
+!/tools/**/
+!/tools/**/*.ps1
+!/tools/**/*.py
+!/tools/**/*.java
+!/tools/**/pyproject.toml
+!/tools/**/uv.lock

@@ -1,0 +1,13 @@
+[package]
+name = "sekiro-extract"
+description = "Turns a Sekiro install into the cache/ the game reads"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+sekiro-formats.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+rayon.workspace = true
