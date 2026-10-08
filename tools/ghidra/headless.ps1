@@ -9,6 +9,6 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $env:JAVA_HOME = 'C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot'
 $env:GHIDRA_MAXMEM = '20G'
-$resolved = $ScriptArgs | ForEach-Object { if ($_ -like 're/*') { Join-Path $root $_ } else { $_ } }
+Set-Location $root
 & '~\tools\ghidra\support\analyzeHeadless.bat' (Join-Path $root 're\ghidra') sekiro `
-    -process -noanalysis -scriptPath (Join-Path $root 'tools\ghidra') -postScript $Script @resolved
+    -process -noanalysis -scriptPath (Join-Path $root 'tools\ghidra') -postScript $Script @ScriptArgs
