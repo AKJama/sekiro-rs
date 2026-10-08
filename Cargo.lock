@@ -4636,6 +4636,7 @@ dependencies = [
  "anyhow",
  "clap",
  "glam",
+ "memmap2",
  "png",
  "rayon",
  "sekiro-formats",
@@ -4668,6 +4669,7 @@ dependencies = [
  "anyhow",
  "bevy",
  "sekiro-formats",
+ "serde_json",
 ]
 
 [[package]]

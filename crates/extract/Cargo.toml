@@ -16,3 +16,4 @@ serde.workspace = true
 glam.workspace = true
 png = "0.18"
 texture2ddecoder = "0.1"
+memmap2.workspace = true

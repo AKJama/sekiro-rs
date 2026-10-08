@@ -11,8 +11,8 @@ use rayon::prelude::*;
 use sekiro_formats::{bnd4, dvd::Vfs};
 
 mod anims;
+mod maps;
 mod models;
-mod paramlite;
 mod params;
 
 const DEFAULT_GAME: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Sekiro";
@@ -65,6 +65,14 @@ enum Command {
         /// Character ids (e.g. c0000 c1010). Defaults to c0000 and c1010.
         chrs: Vec<String>,
     },
+    /// Export one map area (e.g. m11_00_00_00) to cache/maps/<id>: map piece GLBs, layout JSON
+    /// and the hit collision mesh. Needs the game folder for Oodle (read only).
+    Map {
+        id: String,
+        /// Only print a summary of the MSB.
+        #[arg(long)]
+        summary: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -74,6 +82,13 @@ fn main() -> Result<()> {
         Command::ModelInfo { path, dump } => return models::info(path, dump.as_deref()),
         Command::Params => return params::export(&cli.cache),
         Command::Anims { chrs } => return anims::export(&cli.cache, chrs),
+        Command::Map { id, summary } => {
+            return if *summary {
+                maps::summary(&cli.cache, id)
+            } else {
+                maps::export(&cli.game, &cli.cache, id)
+            };
+        }
         _ => {}
     }
     let vfs = open_vfs(&cli.game, &cli.cache)?;
@@ -93,7 +108,8 @@ fn main() -> Result<()> {
         Command::Models { .. }
         | Command::ModelInfo { .. }
         | Command::Params
-        | Command::Anims { .. } => unreachable!(),
+        | Command::Anims { .. }
+        | Command::Map { .. } => unreachable!(),
     }
     Ok(())
 }

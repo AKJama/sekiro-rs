@@ -3,10 +3,12 @@
 //! Modes:
 //! - `sekiro-rs --viewer <file.glb> [--screenshot <out.png>] [--yaw <deg>] [--pitch <deg>]
 //!   [--distance <m>] [--height <m>] [--hide m12,hair] [--only m68,m69]`: inspect an exported
-//!   model in bind pose; `--hide`/`--only` filter primitives by material name.
+//!   model in bind pose; `--hide`/`--only` filter primitives by material name, `--combat` shows
+//!   enemies with weapons drawn.
 
 mod arena;
 mod character;
+mod draw_mask;
 mod viewer;
 
 use std::path::PathBuf;
@@ -40,6 +42,7 @@ fn main() -> anyhow::Result<()> {
             height: arg_f32(&args, "--height", 0.95)?,
             hide: arg_list(&args, "--hide"),
             only: arg_list(&args, "--only"),
+            combat: args.iter().any(|a| a == "--combat"),
         };
         return viewer::run(options);
     }

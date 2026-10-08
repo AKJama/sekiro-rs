@@ -14,6 +14,8 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::world_serialization::WorldInstanceReady;
 
+use crate::draw_mask::{self, DrawMask, MaskSource};
+
 pub struct Options {
     pub glb: PathBuf,
     pub screenshot: Option<PathBuf>,
@@ -25,10 +27,12 @@ pub struct Options {
     pub hide: Vec<String>,
     /// When non-empty, show only primitives whose material matches one of these.
     pub only: Vec<String>,
+    /// Show enemies with weapons drawn (`combatDrawMask`) instead of their default look.
+    pub combat: bool,
 }
 
 #[derive(Resource)]
-struct Model(String);
+struct Model(String, MaskSource);
 
 #[derive(Resource)]
 struct Filter {
@@ -97,7 +101,14 @@ pub fn run(options: Options) -> Result<()> {
         brightness: 450.0,
         ..default()
     })
-    .insert_resource(Model(file))
+    .insert_resource(Model(
+        file,
+        if options.combat {
+            MaskSource::Combat
+        } else {
+            MaskSource::Default
+        },
+    ))
     .insert_resource(Filter {
         hide: options.hide,
         only: options.only,
@@ -111,7 +122,7 @@ pub fn run(options: Options) -> Result<()> {
     .init_resource::<Loaded>()
     .add_systems(Startup, setup)
     .add_systems(Update, (orbit_input, apply_orbit).chain())
-    .add_systems(Update, apply_filter);
+    .add_systems(Update, (draw_mask::apply_draw_masks, apply_filter).chain());
     if let Some(path) = options.screenshot {
         if path.exists() {
             std::fs::remove_file(&path)?;
@@ -167,8 +178,9 @@ fn setup(
         })),
     ));
     commands
-        .spawn(WorldAssetRoot(
-            assets.load(GltfAssetLabel::Scene(0).from_asset(model.0.clone())),
+        .spawn((
+            WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(model.0.clone()))),
+            DrawMask::new(model.1),
         ))
         .observe(|_: On<WorldInstanceReady>, mut loaded: ResMut<Loaded>| {
             info!("model spawned");
@@ -252,10 +264,7 @@ fn matches(material: &str, token: &str) -> bool {
     }
 }
 
-fn apply_filter(
-    filter: Res<Filter>,
-    mut meshes: Query<(&GltfMaterialName, &mut Visibility), Added<GltfMaterialName>>,
-) {
+fn apply_filter(filter: Res<Filter>, mut meshes: Query<(&GltfMaterialName, &mut Visibility)>) {
     if filter.hide.is_empty() && filter.only.is_empty() {
         return;
     }

@@ -6,21 +6,21 @@
 //! kept: FromSoftware front faces are clockwise in their left-handed space, which the mirror
 //! turns into the counter-clockwise front faces glTF expects (verified on single-sided meshes).
 
-mod glb;
+pub(crate) mod glb;
 mod info;
-mod textures;
+pub(crate) mod textures;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use glam::{Mat4, Vec3};
-use sekiro_formats::{flver, mtd};
+use sekiro_formats::{flver, mtd, param, paramdef};
 use serde_json::{Value, json};
 
 pub use info::info;
 
-use crate::paramlite::{Def, Param};
 use glb::Glb;
 use textures::{TextureStore, Usage};
 
@@ -61,6 +61,9 @@ struct Model {
     parts: Vec<Part>,
     /// Human-readable record of the choices made (variant masks, equipment).
     notes: Vec<String>,
+    /// Display-mask groups on by default and in combat (enemies; `None` exports only what
+    /// shows).
+    draw_masks: Option<([bool; 32], [bool; 32])>,
 }
 
 struct Part {
@@ -109,57 +112,96 @@ impl Params {
         })
     }
 
-    fn load(&self, name: &str) -> Result<(Param, Def)> {
-        Ok((
-            Param::load(&self.root.join(format!("{name}.param")))?,
-            Def::load(&self.defs.join(format!("{name}.xml")))?,
-        ))
+    /// Loads one PARAM table with its Paramdex def.
+    fn load(&self, name: &str) -> Result<param::Table> {
+        let path = self.root.join(format!("{name}.param"));
+        let raw = param::RawParam::parse(
+            std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?,
+        )?;
+        let def = paramdef::ParamDef::load(&self.defs.join(format!("{name}.xml")))?;
+        Ok(param::Table::new(name, &raw, Arc::new(def), None)?)
     }
 }
 
-/// An enemy/NPC character: its chrbnd FLVER, textures from its texbnd, and the variant meshes
-/// enabled by the NpcParam row `<model number> * 10000` (the first row for that model).
+/// NpcParam row used for an enemy model's default look: `<model number> * 10000`.
+fn npc_row(id: &str) -> Result<i32> {
+    Ok(id.trim_start_matches('c').parse::<i32>()? * 10000)
+}
+
+/// The draw-mask change made by the enemy's weapon-draw animation (`a000_001040`, which
+/// switches the soldier from sheathed to katana in hand), from `cache/anim/<id>/tae.json`.
+/// Values per group: 0 off, 1 on, 255 unchanged.
+fn combat_draw_mask_event(cache: &Path, id: &str) -> Option<Vec<u8>> {
+    const DRAW_WEAPON_ANIM: i64 = 1040;
+    let text = std::fs::read_to_string(cache.join(format!("anim/{id}/tae.json"))).ok()?;
+    let tae: Value = serde_json::from_str(&text).ok()?;
+    let anims = tae["files"]
+        .as_array()?
+        .iter()
+        .flat_map(|f| f["animations"].as_array().into_iter().flatten());
+    for anim in anims {
+        if anim["id"].as_i64() != Some(DRAW_WEAPON_ANIM) {
+            continue;
+        }
+        for event in anim["events"].as_array()? {
+            let decoded = &event["decoded"];
+            if decoded["name"] == "ChangeChrDrawMask" {
+                return decoded["fields"]
+                    .as_array()?
+                    .iter()
+                    .map(|f| f["value"].as_u64().map(|v| v as u8))
+                    .collect();
+            }
+        }
+    }
+    None
+}
+
+/// An enemy/NPC character: its chrbnd FLVER and textures from its texbnd.
+///
+/// Every variant mesh is exported. Which `#NN#` groups show is game state: the scene extras
+/// carry `drawMask` (NpcParam `modelDispMask0..31`, the out-of-combat look) and
+/// `combatDrawMask` (that plus the weapon-draw TAE event), and `sekiro-game` applies them.
 fn npc(raw: &Path, params: &Params, id: &str) -> Result<Model> {
     let chrbnd = raw.join(format!("chr/{id}.chrbnd.d"));
     let flver = read_flver(&chrbnd.join(format!("{id}.flver")))?;
     let mut notes = Vec::new();
-    let number: i32 = id.trim_start_matches('c').parse()?;
-    let (npc_param, npc_def) = params.load("NpcParam")?;
-    let row_id = number * 10000;
-    let masks: Option<Vec<bool>> = match npc_param.row(&npc_def, row_id) {
-        Some(row) => Some(
-            (0..32)
-                .map(|i| row.int(&format!("modelDispMask{i}")).map(|v| v != 0))
-                .collect::<Result<_>>()?,
-        ),
-        None => None,
-    };
-    match &masks {
-        Some(m) => notes.push(format!(
-            "NpcParam {row_id} display masks on: {:?}",
-            m.iter()
-                .enumerate()
-                .filter(|(_, on)| **on)
-                .map(|(i, _)| i)
-                .collect::<Vec<_>>()
-        )),
+    let row_id = npc_row(id)?;
+    let npc_param = params.load("NpcParam")?;
+    let mut mask = [false; 32];
+    match npc_param.find(row_id) {
+        Some(row) => {
+            for (i, m) in mask.iter_mut().enumerate() {
+                *m = row.int(&format!("modelDispMask{i}"))? != 0;
+            }
+        }
         None => notes.push(format!(
-            "NpcParam {row_id} missing; showing only unmasked meshes"
+            "NpcParam {row_id} missing; no display-mask group is on"
         )),
     }
-    let visible = flver
-        .meshes
-        .iter()
-        .map(|m| {
-            let name = &flver.materials[m.material].name;
-            match mask_group(name) {
-                Some(g) => masks
-                    .as_ref()
-                    .is_some_and(|m| m.get(g).copied().unwrap_or(false)),
-                None => true,
+    let on = |m: &[bool; 32]| (0..32).filter(|&i| m[i]).collect::<Vec<_>>();
+    notes.push(format!(
+        "NpcParam {row_id} draw mask groups on: {:?}",
+        on(&mask)
+    ));
+    let cache = raw.parent().unwrap_or(raw);
+    let mut combat = mask;
+    match combat_draw_mask_event(cache, id) {
+        Some(event) => {
+            for (m, v) in combat.iter_mut().zip(event) {
+                match v {
+                    0 => *m = false,
+                    1 => *m = true,
+                    _ => {}
+                }
             }
-        })
-        .collect();
+            notes.push(format!("combat draw mask groups on: {:?}", on(&combat)));
+        }
+        None => notes.push(format!(
+            "no weapon-draw TAE event in cache/anim/{id}/tae.json; combat mask = default"
+        )),
+    }
+    let visible = vec![true; flver.meshes.len()];
     let mut tpfs = vec![raw.join(format!("chr/{id}.texbnd.d/{id}.tpf"))];
     tpfs.push(chrbnd.join(format!("{id}.tpf")));
     Ok(Model {
@@ -172,6 +214,7 @@ fn npc(raw: &Path, params: &Params, id: &str) -> Result<Model> {
             attach: None,
         }],
         notes,
+        draw_masks: Some((mask, combat)),
     })
 }
 
@@ -181,11 +224,11 @@ fn wolf(raw: &Path, params: &Params) -> Result<Model> {
     const CHARA_INIT_ROW: i32 = 10010; // "Castle": ordinary gear, katana, prosthetic
     let skeleton = read_flver(&raw.join("chr/c0000.chrbnd.d/c0000.flver"))?;
     let mut notes = Vec::new();
-    let (init, init_def) = params.load("CharaInitParam")?;
-    let (prot, prot_def) = params.load("EquipParamProtector")?;
-    let (wep, wep_def) = params.load("EquipParamWeapon")?;
+    let init = params.load("CharaInitParam")?;
+    let prot = params.load("EquipParamProtector")?;
+    let wep = params.load("EquipParamWeapon")?;
     let row = init
-        .row(&init_def, CHARA_INIT_ROW)
+        .find(CHARA_INIT_ROW)
         .context("CharaInitParam new-game row missing")?;
 
     let mut part_files: Vec<(String, Option<String>)> = Vec::new();
@@ -193,7 +236,7 @@ fn wolf(raw: &Path, params: &Params) -> Result<Model> {
     let mut hidden = [false; 96];
     for slot in ["equip_Helm", "equip_Armer", "equip_Gaunt", "equip_Leg"] {
         let id = row.int(slot)? as i32;
-        let Some(p) = prot.row(&prot_def, id) else {
+        let Some(p) = prot.find(id) else {
             notes.push(format!("{slot} = {id}: no EquipParamProtector row"));
             continue;
         };
@@ -228,7 +271,7 @@ fn wolf(raw: &Path, params: &Params) -> Result<Model> {
     }
 
     let wep_id = row.int("equip_Wep_Right")? as i32;
-    match wep.row(&wep_def, wep_id) {
+    match wep.find(wep_id) {
         Some(w) => {
             let model = w.int("equipModelId")?;
             let name = format!("WP_A_{model:04}");
@@ -280,6 +323,7 @@ fn wolf(raw: &Path, params: &Params) -> Result<Model> {
         skeleton,
         parts,
         notes,
+        draw_masks: None,
     })
 }
 
@@ -709,6 +753,8 @@ fn build(raw: &Path, model: &Model, verbose: bool) -> Result<Vec<u8>> {
         "source": "sekiro-extract models",
         "convention": "FromSoftware x mirrored (x -> -x); see docs/FORMATS.md",
         "notes": model.notes,
+        "drawMask": model.draw_masks.map(|m| m.0),
+        "combatDrawMask": model.draw_masks.map(|m| m.1),
         "dummies": dummies,
     });
     Ok(g.finish(&scene.roots, extras))

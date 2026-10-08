@@ -14,6 +14,7 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 
 use crate::character::{AnimLibrary, Animator, Rig, animate, bind_rigs};
+use crate::draw_mask::{DrawMask, MaskSource, apply_draw_masks};
 
 pub struct Options {
     pub cache: PathBuf,
@@ -90,7 +91,8 @@ pub fn run(options: Options) -> Result<()> {
     .add_systems(
         Update,
         (bind_rigs, (wolf_input, soldier_ai), animate, hud).chain(),
-    );
+    )
+    .add_systems(Update, apply_draw_masks);
     if let Some(path) = options.screenshot {
         if path.exists() {
             std::fs::remove_file(&path)?;
@@ -163,6 +165,8 @@ fn setup(
     commands.spawn((
         Soldier { next_attack: 2.0 },
         WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset("c1010.glb"))),
+        // In combat the soldier holds his katana: the weapon-draw TAE draw mask.
+        DrawMask::new(MaskSource::Combat),
         Transform::from_xyz(0.0, 0.0, -SOLDIER_DISTANCE)
             .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
         Rig::new(Arc::new(libs.soldier.skeleton.clone())),

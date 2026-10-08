@@ -126,6 +126,11 @@ Tangents are not exported; Bevy generates MikkTSpace tangents for materials with
 Characters ship every look in one FLVER.
 A material named `#NN#...` belongs to display-mask group NN.
 For enemies, NpcParam `modelDispMask0..31` of the row `<model number> * 10000` (10100000 for c1010) switches groups on; unmasked meshes always show.
+Enemy GLBs contain every variant mesh; the draw mask is game state, not baked in.
+Scene extras carry `drawMask` (NpcParam, the out-of-combat look) and `combatDrawMask`, which applies the `ChangeChrDrawMask` TAE event of the weapon-draw animation `a000_001040` (values per group: 0 off, 1 on, 255 unchanged).
+Enemy weapons live inside the chrbnd FLVER, skinned to weapon bones that the Havok skeleton animates: for c1010, group 0 is the katana in hand (bone `Kodachi`, under `R_Hand`), group 2 a wakizashi in hand (`Wakizashi`), and groups 1 and 3 the hip pieces on the `Sheath01`/`Sheath02` bones (1 shows the sheathed katana with its hilt, 3 stays on in combat; exact split not verified in game).
+Drawing sets groups 0 and 3 on and 1 and 2 off; sheathing (`a000_201000`) turns 1 back on and 0 off.
+`sekiro-game` applies a mask with the `DrawMask` component (`crates/game/src/draw_mask.rs`), matching primitives by the `#NN#` FLVER material name; `DrawMask::apply_event` takes TAE event values.
 For the player, all groups show unless an equipped protector sets `invisibleFlagNN`.
 The Wolf is the c0000 skeleton plus the parts named by CharaInitParam row 10010 (Ashina Castle start: protectors 100000, 131000, 102000, 103000, weapon 5100).
 Protector models map to `BD_M_`/`AM_M_`/`LG_M_` by the body/arm/leg flags; head protector model 200 has no `HD_M_0200`, and is the face part `FC_M_0200` (head, hair, eyes, beard).

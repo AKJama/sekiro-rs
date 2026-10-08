@@ -116,6 +116,15 @@ impl Glb {
         self.textures.len() - 1
     }
 
+    /// References an external image file (relative URI, e.g. `../tex/x.dds`) and returns its
+    /// texture index. Used by the map export, which shares textures between many GLBs.
+    pub fn texture_uri(&mut self, uri: &str, name: &str) -> usize {
+        self.images.push(json!({ "uri": uri, "name": name }));
+        self.textures
+            .push(json!({ "source": self.images.len() - 1, "sampler": 0 }));
+        self.textures.len() - 1
+    }
+
     pub fn finish(mut self, roots: &[usize], extras: Value) -> Vec<u8> {
         while !self.bin.len().is_multiple_of(4) {
             self.bin.push(0);
