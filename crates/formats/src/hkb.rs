@@ -279,6 +279,11 @@ pub enum NodeKind {
     Modifier {
         child: Option<NodeId>,
     },
+    /// `hkbBehaviorReferenceGenerator`: runs another behaviour file, e.g. `Behaviors\c9997`
+    /// (the shared NPC graph that `c1010.hkx` wraps).
+    BehaviorReference {
+        behavior_name: String,
+    },
     /// Any other generator; child generators found by walking pointer members.
     Other {
         children: Vec<NodeId>,
@@ -309,6 +314,7 @@ impl Node {
             }
             NodeKind::Script(s) => s.child.into_iter().collect(),
             NodeKind::Modifier { child } => child.iter().copied().collect(),
+            NodeKind::BehaviorReference { .. } => Vec::new(),
             NodeKind::Other { children } => children.clone(),
         }
     }
@@ -689,6 +695,10 @@ impl<'a> Builder<'a> {
                 on_handle_event: v.get("onHandleEventScript")?.string()?,
                 on_deactivate: v.get("onDeactivateScript")?.string()?,
             })
+        } else if v.is_a("hkbBehaviorReferenceGenerator") {
+            NodeKind::BehaviorReference {
+                behavior_name: v.get("behaviorName")?.string()?,
+            }
         } else if v.is_a("hkbModifierGenerator") {
             NodeKind::Modifier {
                 child: self.child(v.get("generator")?, depth)?,

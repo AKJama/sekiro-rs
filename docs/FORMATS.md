@@ -144,3 +144,44 @@ cargo run --release -p sekiro-game -- --viewer cache/models/c1010.glb --screensh
 
 The viewer orbits with the left mouse button, raises the target with the right button and zooms with the wheel.
 `--hide`/`--only` take comma-separated material tokens: `m12` matches FLVER mesh 12 exactly, anything else is a substring of the material name `m<mesh> <material> | <owner node> | <mtd>`.
+
+## Behaviour graphs: hkbBehaviorGraph in `chr/*.behbnd`
+
+`cXXXX.behbnd` holds the character's Havok behaviour graph as one self-contained `TAG0` tagfile (the type section is inline; no compendium is needed).
+The player's is `c0000.hkx` (3 MB, 5,151 generator nodes).
+NPCs ship a tiny wrapper (`c1010.hkx`) whose only generator is an `hkbBehaviorReferenceGenerator` naming `Behaviors\c9997`, the shared NPC graph that sits next to it in the same binder.
+The reader is `crates/formats/src/hkb.rs`, built on the generic tagfile reader; `cargo run -p sekiro-sim --bin hkb-outline -- <file.hkx>` prints the tree.
+
+### Data model
+
+- `hkbBehaviorGraph.data` holds the string tables: 1,908 event names, 311 variable names and 2,324 animation names for the player.
+  Variables have a declared type (bool, int, real, quad, ...) and an initial value in `hkbVariableValueSet`; reals are stored as f32 bit patterns in the word array, vectors index the quad array.
+- Every generator becomes a `Node` in one arena with its name, `userData` and variable bindings (`memberPath` such as `selectedGeneratorIndex` or `blendingControlData/weight`, plus a variable index).
+- `hkbStateMachine`: states (`stateId`, name, generator, own transitions) and wildcard transitions.
+  A transition is an event index, a target state id, optional nested target, priority, flags and a transition effect.
+  Every wildcard in the player graph uses flags `0xE00` (global wildcard, local wildcard, self transition allowed).
+- `CustomManualSelectorGenerator` (CMSG, 2,041 in the player graph): FromSoftware's per-state animation node.
+  It carries the six-digit `animId`, an `offsetType` and one or more candidate clips named `aOOO_IIIIII`; the engine plays the candidate whose `aOOO` prefix matches the offset it derives for that type.
+  Observed types: 0 and 11 fixed (mostly `a000`), 13 right-hand weapon motion category (`a050` with the katana), 14 left-hand prosthetic (`a070` to `a079`), 17 throw-specific (`a2xx`).
+  `animeEndEventType` says what happens when the clip ends: 0 takes the state's own transition (stand-to-guard into guard idle), 2 sends the CMSG end event (event 0, `Idle_wild`, back to idle), 1 and 3 do nothing (hold or loop).
+  These meanings are inferred from the data and checked only against our own simulation, not against the exe.
+  `enableScript` marks states with HKS hooks.
+- `hkbClipGenerator`: animation name, playback mode (0 single, 1 loop), speed, start time and crop amounts.
+- `hkbManualSelectorGenerator` picks one child by `selectedGeneratorIndex`, almost always bound to a variable.
+- `hkbLayerGenerator` layers each wrap a generator; the top-level additive layers have their weight bound to a `*Blend` variable (`AddDeflectGuardBlend`, ...), and two have on/off events.
+- `hkbBlenderGenerator`, `hkbScriptGenerator` (named script callbacks such as `ModifiersLayer_onGenerate()`), `hkbModifierGenerator` and `CustomDockingGenerator` (kept generically) complete the tree.
+- Transition effects are `CustomTransitionEffect` / `hkbBlendingTransitionEffect` (all with duration 0 in the player graph; blending is TAE-driven) and `hkbManualSelectorTransitionEffect`, which picks among effects by a bound variable.
+
+### How the player graph is organised
+
+The root machine has one state, `Master`, whose script and modifier generators lead to `Master LayerGenerator`.
+Its layers are the additive machines (`AddActionInput_SM`, `AddDeflectGuard_SM`, `AddDamage_SM`, ...) and `Master Blend`, which holds `Master_SM` (172 states) for the full body.
+`Master_SM` states group behaviours into nested machines (`Idle_SM`, `DeflectGuard_SM` with 44 states, `StandMoveableAction_SM`, `GroundAttack_SM`, ...).
+Script events (`W_StandToDeflectGuard`) are global wildcards of the nested machine that owns the target state, so firing one also switches every enclosing machine to the state containing it.
+HKS state hooks are named after the state, not the CMSG: `StandToDeflectGuard_onActivate`, `_onUpdate`, `_onDeactivate`.
+
+### Runtime
+
+`crates/sim/src/behavior.rs` (`BehaviorRuntime`) runs a graph: current state per machine, event matching (active machines first, then global wildcards of inactive ones), the active clip set with times, layer enable rules, clip-end events and state hooks.
+Blends are not modelled; transitions switch instantly.
+`crates/sim/src/player.rs` (`PlayerBehavior`) wires it to the HKS VM; `cargo run -p sekiro-sim --bin player-sim -- hold` (or `repeat`) prints state and animation per frame.
