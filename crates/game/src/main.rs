@@ -5,6 +5,8 @@
 //!   [--distance <m>] [--height <m>] [--hide m12,hair] [--only m68,m69]`: inspect an exported
 //!   model in bind pose; `--hide`/`--only` filter primitives by material name.
 
+mod arena;
+mod character;
 mod viewer;
 
 use std::path::PathBuf;
@@ -41,7 +43,15 @@ fn main() -> anyhow::Result<()> {
         };
         return viewer::run(options);
     }
-    eprintln!("usage: sekiro-rs --viewer <file.glb> [--screenshot <out.png>] [--yaw <deg>]");
+    if args.iter().any(|a| a == "--arena") {
+        return arena::run(arena::Options {
+            cache: PathBuf::from(arg_value(&args, "--cache").unwrap_or_else(|| "cache".into())),
+            screenshot: arg_value(&args, "--screenshot").map(PathBuf::from),
+            at: arg_f32(&args, "--at", 3.0)?,
+        });
+    }
+    eprintln!("usage: sekiro-rs --arena [--screenshot <out.png> --at <seconds>]");
+    eprintln!("       sekiro-rs --viewer <file.glb> [--screenshot <out.png>] [--yaw <deg>]");
     eprintln!("                 [--pitch <deg>] [--distance <m>] [--height <m>]");
     std::process::exit(2);
 }
