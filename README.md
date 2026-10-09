@@ -58,6 +58,20 @@ A gamepad works too.
 - `crates/game`: the `sekiro-rs` Bevy app.
 - `docs/`: formats, params, the player script interface and the combat rules, in our own words.
 
+## Tested setup
+
+Windows 11 64-bit, Steam Sekiro app 814380, build 5794815 (game version 1.6.0.0), Rust 1.99 (MSVC), Bevy 0.19.1.
+Other game versions are untested.
+
+## Research boundary
+
+Format and engine research happens in local, gitignored folders (`cache/` and `re/`) and is never committed.
+That includes extracted game data, analysis databases and any decompiler output.
+The Rust code in this repository is original and written from that research and from public community documentation; no game code is loaded, linked or copied into it.
+Engine-side rules are documented in our own words in `docs/`, with confidence labels.
+
+This is an AI-assisted project, developed with Anthropic Claude Code (Claude Opus 5.5) and reviewed and playtested by the author.
+
 ## Disclaimer
 
 sekiro-rs is an unofficial, non-commercial fan project made for education and research into game engine design and interoperability.
