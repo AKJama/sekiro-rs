@@ -118,6 +118,126 @@ impl MapTextures {
     }
 }
 
+/// Converts a Sekiro normal map (X in red, Y in green, DirectX-style Y down, other channels
+/// unrelated) to a BC5 DDS with a full mip chain and glTF's Y-up convention. Bevy treats BC5
+/// normal maps as two-channel and rebuilds Z, which is exactly what the source data needs.
+pub fn normal_to_bc5(dds: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let header = tpf::Dds::parse(dds)?;
+    let rgba = crate::models::textures::decode_rgba(&header, dds)?;
+    let (mut w, mut h) = (header.width as usize, header.height as usize);
+    // Two 8-bit channels: X, and Y flipped to point up the texture.
+    let mut rg: Vec<[u8; 2]> = rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|p| [p[0], 255 - p[1]])
+        .collect();
+    let mut body = Vec::new();
+    let mut mips = 0u32;
+    loop {
+        encode_bc5(&rg, w, h, &mut body);
+        mips += 1;
+        if w == 1 && h == 1 {
+            break;
+        }
+        let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+        let mut next = vec![[0u8; 2]; nw * nh];
+        for y in 0..nh {
+            for x in 0..nw {
+                let mut sum = [0u32; 2];
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let (sx, sy) = ((2 * x + dx).min(w - 1), (2 * y + dy).min(h - 1));
+                    let p = rg[sy * w + sx];
+                    sum[0] += p[0] as u32;
+                    sum[1] += p[1] as u32;
+                }
+                next[y * nw + x] = [(sum[0] / 4) as u8, (sum[1] / 4) as u8];
+            }
+        }
+        rg = next;
+        (w, h) = (nw, nh);
+    }
+    let mut out = Vec::with_capacity(148 + body.len());
+    let u32le = |out: &mut Vec<u8>, v: u32| out.extend_from_slice(&v.to_le_bytes());
+    out.extend_from_slice(b"DDS ");
+    u32le(&mut out, 124);
+    // CAPS | HEIGHT | WIDTH | PIXELFORMAT | MIPMAPCOUNT | LINEARSIZE
+    u32le(&mut out, 0x1 | 0x2 | 0x4 | 0x1000 | 0x20000 | 0x80000);
+    u32le(&mut out, header.height);
+    u32le(&mut out, header.width);
+    u32le(
+        &mut out,
+        (header.width.div_ceil(4) * header.height.div_ceil(4) * 16).max(16),
+    );
+    u32le(&mut out, 0);
+    u32le(&mut out, mips);
+    out.extend_from_slice(&[0u8; 44]);
+    // Pixel format: FOURCC "DX10".
+    u32le(&mut out, 32);
+    u32le(&mut out, 0x4);
+    out.extend_from_slice(b"DX10");
+    out.extend_from_slice(&[0u8; 20]);
+    u32le(&mut out, 0x1000 | 0x8 | 0x400000); // TEXTURE | COMPLEX | MIPMAP
+    out.extend_from_slice(&[0u8; 16]);
+    // DX10 header: DXGI_FORMAT_BC5_UNORM, 2D texture, one array element.
+    u32le(&mut out, 83);
+    u32le(&mut out, 3);
+    u32le(&mut out, 0);
+    u32le(&mut out, 1);
+    u32le(&mut out, 0);
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+/// Appends one BC5 mip level (two BC4 blocks per 4x4 tile).
+fn encode_bc5(rg: &[[u8; 2]], w: usize, h: usize, out: &mut Vec<u8>) {
+    for by in 0..h.div_ceil(4) {
+        for bx in 0..w.div_ceil(4) {
+            for c in [0usize, 1] {
+                let mut v = [0u8; 16];
+                for (i, t) in v.iter_mut().enumerate() {
+                    let (x, y) = ((bx * 4 + i % 4).min(w - 1), (by * 4 + i / 4).min(h - 1));
+                    *t = rg[y * w + x][c];
+                }
+                out.extend_from_slice(&encode_bc4(&v));
+            }
+        }
+    }
+}
+
+/// A BC4 block in its eight-value mode: endpoints are the block's max and min, indices pick
+/// the nearest of the eight interpolated values.
+fn encode_bc4(v: &[u8; 16]) -> [u8; 8] {
+    let hi = *v.iter().max().unwrap();
+    let lo = *v.iter().min().unwrap();
+    let mut out = [0u8; 8];
+    out[0] = hi;
+    out[1] = lo;
+    if hi == lo {
+        return out;
+    }
+    // Palette in code order: 0 = hi, 1 = lo, 2..7 = (6 hi + lo) / 7 .. (hi + 6 lo) / 7.
+    let mut palette = [0f32; 8];
+    palette[0] = hi as f32;
+    palette[1] = lo as f32;
+    for k in 1..7 {
+        palette[k + 1] = ((7 - k) as f32 * hi as f32 + k as f32 * lo as f32) / 7.0;
+    }
+    let mut bits: u64 = 0;
+    for (i, &x) in v.iter().enumerate() {
+        let code = (0..8)
+            .min_by(|&a, &b| {
+                (palette[a] - x as f32)
+                    .abs()
+                    .total_cmp(&(palette[b] - x as f32).abs())
+            })
+            .unwrap() as u64;
+        bits |= code << (3 * i);
+    }
+    out[2..8].copy_from_slice(&bits.to_le_bytes()[..6]);
+    out
+}
+
 /// `m11\tex\m11_rock_04_a.tpf.dcx` -> `m11_rock_04_a`.
 fn tpf_stem(file_name: &str) -> String {
     let lower = file_name.to_ascii_lowercase();

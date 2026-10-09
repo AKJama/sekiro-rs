@@ -153,7 +153,7 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
     );
 
     // Pass 1: which textures do the pieces want?
-    let wanted: BTreeSet<String> = used
+    let wanted: BTreeSet<(String, bool)> = used
         .par_iter()
         .filter_map(|(_, path)| {
             let data = std::fs::read(path).ok()?;
@@ -181,12 +181,16 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
     );
     let written: BTreeSet<String> = wanted
         .par_iter()
-        .filter_map(|name| {
+        .filter_map(|(name, is_normal)| {
             let path = out.join("models/tex").join(format!("{name}.dds"));
             if path.is_file() {
                 return Some(name.clone());
             }
-            match store.dds(name) {
+            let dds = store.dds(name).and_then(|d| match d {
+                Some(d) if *is_normal => textures::normal_to_bc5(&d).map(Some),
+                other => Ok(other),
+            });
+            match dds {
                 Ok(Some(dds)) => match std::fs::write(&path, dds) {
                     Ok(()) => Some(name.clone()),
                     Err(e) => {
@@ -204,7 +208,11 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
         .collect::<Vec<_>>()
         .into_iter()
         .collect();
-    let missing: Vec<&String> = wanted.difference(&written).collect();
+    let missing: Vec<&String> = wanted
+        .iter()
+        .map(|(n, _)| n)
+        .filter(|n| !written.contains(*n))
+        .collect();
     eprintln!(
         "  wrote {} textures, {} missing{}",
         written.len(),

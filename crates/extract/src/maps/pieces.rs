@@ -22,6 +22,8 @@ pub struct TexRef {
 #[derive(Clone, Debug, Default)]
 pub struct MaterialChoice {
     pub albedo: Option<TexRef>,
+    /// Tangent-space normal map (exported converted to BC5, see `textures::normal_to_bc5`).
+    pub normal: Option<TexRef>,
     pub alpha_mode: Option<(&'static str, f32)>,
     pub mtd: String,
 }
@@ -38,15 +40,17 @@ impl Mtds {
     }
 }
 
-/// Picks the base colour for a map material. Normal maps are not exported yet: Sekiro's are
-/// two-channel BC7, which Bevy would read as three-channel (see docs/FORMATS.md, Maps).
+/// Picks the base colour and normal map for a map material.
 ///
 /// Map materials stack many layers (`M_Multiple`, `MultiBlend3`, ...) and leave the FLVER
 /// texture paths empty, so paths come from the MTD. The base layer is the first albedo slot
 /// with a path, in MTD order (for `M_Multiple` that is slot 8, the main surface; later slots
 /// are moss, snow and other overlays). A slot named after the material (`<name>_a`) wins.
+/// The normal map is the one named like the albedo (`x_a` -> `x_n`), else the one named after
+/// the material (`<name>_n`, often the mesh's own baked normal), else the first with a path.
 pub fn choose_material(material: &flver::Material, mtd: Option<&mtd::Mtd>) -> MaterialChoice {
     let mut albedo = Vec::new();
+    let mut normal = Vec::new();
     for t in &material.textures {
         let from_mtd = mtd.and_then(|m| m.textures.iter().find(|mt| mt.kind == t.param));
         let path = if t.path.is_empty() {
@@ -64,6 +68,8 @@ pub fn choose_material(material: &flver::Material, mtd: Option<&mtd::Mtd>) -> Ma
         let r = TexRef { path, uv };
         if param.contains("albedomap") || param.contains("diffuse") {
             albedo.push(r);
+        } else if param.contains("normalmap") {
+            normal.push(r);
         }
     }
     let own = format!("{}_a", material.name.to_ascii_lowercase());
@@ -71,8 +77,21 @@ pub fn choose_material(material: &flver::Material, mtd: Option<&mtd::Mtd>) -> Ma
         .iter()
         .position(|r| texture_stem(&r.path).eq_ignore_ascii_case(&own))
         .or(if albedo.is_empty() { None } else { Some(0) });
+    let named = |want: &str| {
+        normal
+            .iter()
+            .position(|r| texture_stem(&r.path).eq_ignore_ascii_case(want))
+    };
+    let n = a
+        .and_then(|a| {
+            let stem = texture_stem(&albedo[a].path).to_ascii_lowercase();
+            named(&format!("{}_n", stem.strip_suffix("_a")?))
+        })
+        .or_else(|| named(&format!("{}_n", material.name.to_ascii_lowercase())))
+        .or(if normal.is_empty() { None } else { Some(0) });
     let mut choice = MaterialChoice {
         albedo: a.map(|i| albedo[i].clone()),
+        normal: n.map(|i| normal[i].clone()),
         alpha_mode: None,
         mtd: texture_stem(&material.mtd).to_string(),
     };
@@ -197,6 +216,11 @@ pub fn build(
             "pbrMetallicRoughness": pbr,
             "doubleSided": !lod0.cull_backfaces,
         });
+        if let Some(r) = &choice.normal
+            && let Some((t, uv)) = texture(r, &mut g)
+        {
+            mat["normalTexture"] = json!({ "index": t, "texCoord": uv });
+        }
         if let Some((mode, cutoff)) = choice.alpha_mode {
             mat["alphaMode"] = json!(mode);
             if mode == "MASK" {
@@ -231,8 +255,9 @@ pub fn build(
     })
 }
 
-/// Texture names (lower case) a FLVER's visible materials would use.
-pub fn wanted_textures(flver: &flver::Flver, mtds: &Mtds) -> Vec<String> {
+/// Texture names (lower case) a FLVER's visible materials would use, and whether each is a
+/// normal map.
+pub fn wanted_textures(flver: &flver::Flver, mtds: &Mtds) -> Vec<(String, bool)> {
     let mut out = Vec::new();
     for mesh in &flver.meshes {
         let material = &flver.materials[mesh.material];
@@ -241,7 +266,10 @@ pub fn wanted_textures(flver: &flver::Flver, mtds: &Mtds) -> Vec<String> {
             continue;
         }
         if let Some(r) = choice.albedo {
-            out.push(texture_stem(&r.path).to_ascii_lowercase());
+            out.push((texture_stem(&r.path).to_ascii_lowercase(), false));
+        }
+        if let Some(r) = choice.normal {
+            out.push((texture_stem(&r.path).to_ascii_lowercase(), true));
         }
     }
     out

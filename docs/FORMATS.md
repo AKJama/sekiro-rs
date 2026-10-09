@@ -283,8 +283,30 @@ C toggles the collision wireframe, G cycles draw-group modes, M toggles enemy (r
 
 ### Known approximations
 
-- No normal maps: Sekiro's are BC7 with X and Y in red and green, which Bevy would read as a three-channel normal; they need converting (for example to BC5) first.
+- Normal maps: Sekiro's are BC7 with X and Y in red and green (DirectX Y down); the export decodes them, flips Y and re-encodes BC5 with a box-filtered mip chain, which Bevy reads as two-channel and rebuilds Z from.
+  The FLVER tangents are not exported, so Bevy generates MikkTSpace tangents at load (the map takes about 14 s to load instead of 2 s).
+  The normal map is the one named like the albedo, else the one named after the material, else the first; detail normals of other layers are ignored.
 - Single albedo layer: moss, snow and blend-mask layers, vertex-colour blending, detail maps and the multi-layer shaders are ignored.
 - Objects are off by default: many are event-state props (siege barricades, a 400 m dome around the castle gate) that the game enables from its event scripts.
 - Lighting is a single sun, ambient light and distance fog, not the map's GPARAM light sets.
 - Bevy's IO threads overflow the default 2 MiB stack while loading all map GLBs and DDS files at once (still at 4 MiB), so `--map` raises `RUST_MIN_STACK` to 16 MiB before Bevy starts; the root cause inside Bevy's loaders was not tracked down.
+
+### Walking on the map
+
+Code: `crates/sim/src/collision.rs` (`CollisionWorld`), the `Ground` trait in `crates/sim/src/body.rs`, `crates/game/src/play.rs`.
+
+- `collision.bin` is bucketed in a 4 m grid on the horizontal plane (2.3 million triangles index in 0.2 s).
+- Floors: the highest surface within 50 degrees of level under the feet, no higher than a step (0.5 m) above them, sampled at the centre and four points 8 cm around it so seams between triangles do not drop the body.
+  Tests use `|normal.y|` and a vertical line, so the inconsistent winding of the collision (and the X mirror) does not matter.
+  A grounded body follows the floor up or down by a step plus what a 50 degree slope rises over the tick's travel; an airborne body lands on the highest floor between its previous height plus a step and its new height.
+- Walls: three spheres of radius 0.35 m stacked above the step zone are pushed out of every nearby triangle horizontally, in sub-steps of half a radius, so the body stops at walls, slides along them, and treats steep slopes as walls.
+- The camera is pulled in front of the first triangle between Wolf and the eye.
+- `crates/sim/tests/map_collision.rs` walks the castle gate route (off the start terrace, through the moat gate, up the stairs, and back down) at run and sprint speed and asserts every grounded tick stands on the highest floor within a step; it fails without the step-tolerant landing.
+
+```powershell
+cargo run --release -p sekiro-game -- --play --map m11_00_00_00 --start 3
+cargo run --release -p sekiro-game -- --play --map m11_00_00_00 --start 3 --no-enemy --script crates/game/scripts/m11_gate_route.txt --shots 860:cache/screens/play_m11_stairs.png --exit
+cargo run --release -p sekiro-game -- --play --map m11_00_00_00 --spawn -142.6,-44.0,125.0,180,0 --no-enemy --script crates/game/scripts/m11_ledge_jump.txt --shots 125:cache/screens/play_m11_ledge_top.png --exit
+```
+
+`--spawn x,y,z,yaw,0` puts Wolf on the floor at or below `y + 1` instead of at a player start; `PLAY_LOG_ALL=1` logs every simulation step of a script instead of every 30th.

@@ -12,6 +12,7 @@
 
 mod arena;
 mod character;
+mod combat_hud;
 mod deathblow_demo;
 mod draw_mask;
 mod map;
@@ -53,7 +54,9 @@ fn main() -> anyhow::Result<()> {
         };
         return viewer::run(options);
     }
-    if let Some(id) = arg_value(&args, "--map") {
+    if let Some(id) = arg_value(&args, "--map")
+        && !args.iter().any(|a| a == "--play")
+    {
         return map::run(map::Options {
             cache: PathBuf::from(arg_value(&args, "--cache").unwrap_or_else(|| "cache".into())),
             id,
@@ -86,6 +89,11 @@ fn main() -> anyhow::Result<()> {
             exit_after_script: args.iter().any(|a| a == "--exit"),
             enemy: !args.iter().any(|a| a == "--no-enemy"),
             lock_on: args.iter().any(|a| a == "--lock-on"),
+            simple_ai: args.iter().any(|a| a == "--simple-ai"),
+            map: arg_value(&args, "--map"),
+            start: arg_f32(&args, "--start", 0.0)? as usize,
+            spawn: map::parse_camera(arg_value(&args, "--spawn").as_deref())?
+                .map(|[x, y, z, yaw, _]| [x, y, z, yaw]),
         });
     }
     if args.iter().any(|a| a == "--arena") {
@@ -97,6 +105,10 @@ fn main() -> anyhow::Result<()> {
         });
     }
     eprintln!("usage: sekiro-rs --play [--script FILE|builtin] [--shots step:path,...] [--exit]");
+    eprintln!(
+        "                 [--map <id> [--start <n> | --spawn x,y,z,yaw,0]] [--no-enemy] [--lock-on]"
+    );
+    eprintln!("                 [--simple-ai]");
     eprintln!("usage: sekiro-rs --arena [--deathblow] [--screenshot <out.png> --at <seconds>]");
     eprintln!("       sekiro-rs --map <id> [--start <n>] [--camera x,y,z,yaw,pitch] [--collision]");
     eprintln!("                 [--screenshot <out.png> --at <seconds>] (see src/map.rs)");

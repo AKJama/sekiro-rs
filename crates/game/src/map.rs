@@ -8,8 +8,11 @@
 //! `--screenshot <png> [--at <seconds>]` waits until every piece and texture has loaded, then
 //! `--at` more seconds, saves a frame and exits. `--camera x,y,z,yaw,pitch` (degrees) places
 //! the camera; otherwise it starts at the first player start point.
+//!
+//! [`add_map`] puts the same map (pieces, draw-group culling around a [`MapFocus`] entity, sun,
+//! fog, collision view) into another mode; `--play --map` uses it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -183,24 +186,67 @@ fn pose(row: &Value) -> Option<Pose> {
 struct Layout {
     json: Value,
     collision: Option<sekiro_formats::hknp::CollisionMesh>,
-    options_collision: bool,
-    no_pieces: bool,
-    hide: Vec<String>,
-    objects: bool,
+    scene: MapScene,
 }
 
-pub fn run(options: Options) -> Result<()> {
-    let dir = options
-        .cache
+/// How a map is shown.
+#[derive(Clone, Debug)]
+pub struct MapScene {
+    /// Asset path of the map folder below the asset root, with a trailing slash ("" when the
+    /// asset root is the map folder).
+    pub prefix: String,
+    /// Start with the collision wireframe visible.
+    pub collision: bool,
+    /// Hide the map pieces (collision only).
+    pub no_pieces: bool,
+    /// Skip models whose name starts with any of these.
+    pub hide: Vec<String>,
+    /// Also spawn MSB objects.
+    pub objects: bool,
+    pub groups: GroupMode,
+    /// Enemy and player start markers.
+    pub markers: bool,
+}
+
+/// The entity whose position picks the draw groups (the free camera, or the player).
+#[derive(Component)]
+pub struct MapFocus;
+
+/// `cache/maps/<id>`, or an error naming the export command.
+pub fn map_dir(cache: &Path, id: &str) -> Result<PathBuf> {
+    cache
         .join("maps")
-        .join(&options.id)
+        .join(id)
         .canonicalize()
-        .with_context(|| {
-            format!(
-                "cache/maps/{} not found: run `sekiro-extract map {}`",
-                options.id, options.id
-            )
-        })?;
+        .with_context(|| format!("cache/maps/{id} not found: run `sekiro-extract map {id}`"))
+}
+
+/// Bevy's IO threads overflow the default 2 MiB stack while loading a whole map's GLBs and DDS
+/// textures at once (still at 4 MiB; 8 MiB is enough). Threads read this when spawned, so call
+/// it before the `App` is built.
+pub fn raise_io_stack() {
+    if std::env::var_os("RUST_MIN_STACK").is_none() {
+        // SAFETY: no other thread exists yet, so nothing reads the environment concurrently.
+        unsafe { std::env::set_var("RUST_MIN_STACK", (16usize << 20).to_string()) };
+    }
+}
+
+/// The player start `index` from `layout.json`: position and Bevy-space yaw in degrees.
+pub fn player_start(dir: &Path, index: usize) -> Result<(Vec3, f32)> {
+    let json: Value = serde_json::from_slice(
+        &std::fs::read(dir.join("layout.json")).context("reading layout.json")?,
+    )?;
+    let p = json["players"]
+        .get(index)
+        .with_context(|| format!("no player start {index}"))?;
+    let pos = vec3(&p["translation"]).context("player start without translation")?;
+    Ok((pos, p["yaw_degrees"].as_f64().unwrap_or(0.0) as f32))
+}
+
+/// Adds a map to an app built with `DefaultPlugins`: its pieces, draw-group culling around the
+/// [`MapFocus`] entity, a sun, ambient light, sky colour, fog and far plane on every 3D camera,
+/// and the collision view (C toggles it, G cycles group modes, M toggles markers).
+pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
     let json: Value = serde_json::from_slice(
         &std::fs::read(dir.join("layout.json")).context("reading layout.json")?,
     )?;
@@ -208,32 +254,6 @@ pub fn run(options: Options) -> Result<()> {
         Ok(bytes) => Some(sekiro_formats::hknp::CollisionMesh::from_bytes(&bytes)?),
         Err(_) => None,
     };
-
-    // Start pose: --camera, else the first player start, at eye height.
-    let (start, yaw, pitch) = match options.camera {
-        Some([x, y, z, yaw, pitch]) => (Vec3::new(x, y, z), yaw, pitch),
-        None => {
-            let player = json["players"].get(options.start);
-            let pos = player
-                .and_then(|p| vec3(&p["translation"]))
-                .unwrap_or(Vec3::ZERO);
-            let yaw = player
-                .and_then(|p| p["yaw_degrees"].as_f64())
-                .unwrap_or(0.0) as f32;
-            // Over the shoulder: 3.5 m behind and 2.2 m above the start point, so its marker
-            // shows. Forward at yaw 0 is -Z.
-            let back = Quat::from_rotation_y(yaw.to_radians()) * Vec3::Z * 3.5;
-            (pos + back + Vec3::new(0.0, 2.2, 0.0), yaw, -12.0)
-        }
-    };
-
-    // Bevy's IO threads overflow the default 2 MiB stack while loading this many GLBs and DDS
-    // textures at once (still at 4 MiB; 8 MiB is enough). Threads read this when spawned.
-    if std::env::var_os("RUST_MIN_STACK").is_none() {
-        // SAFETY: no other thread exists yet, so nothing reads the environment concurrently.
-        unsafe { std::env::set_var("RUST_MIN_STACK", (16usize << 20).to_string()) };
-    }
-
     let mut group_parts = Vec::new();
     if let Some(c) = &collision {
         for row in json["collisions"].as_array().into_iter().flatten() {
@@ -261,7 +281,87 @@ pub fn run(options: Options) -> Result<()> {
             });
         }
     }
+    let mode = scene.groups;
+    app.add_plugins(WireframePlugin::default())
+        .insert_resource(ClearColor(SKY))
+        .insert_resource(GlobalAmbientLight {
+            color: Color::srgb(0.80, 0.85, 1.0),
+            brightness: 900.0,
+            ..default()
+        })
+        .insert_resource(Layout {
+            json,
+            collision,
+            scene,
+        })
+        .insert_resource(Groups {
+            mode,
+            parts: group_parts,
+            current: None,
+            active: None,
+            checked_at: None,
+            dirty: true,
+        })
+        .init_resource::<Pending>()
+        .add_observer(|_: On<WorldInstanceReady>, mut pending: ResMut<Pending>| {
+            pending.ready += 1;
+        })
+        .add_systems(Startup, spawn_map)
+        .add_systems(
+            Update,
+            (
+                camera_environment,
+                toggle_collision,
+                track_loading,
+                (pick_groups, apply_groups).chain(),
+            ),
+        );
+    Ok(())
+}
 
+/// Sky-coloured distance fog and a far plane for every new 3D camera.
+fn camera_environment(
+    mut commands: Commands,
+    cameras: Query<Entity, (Added<Camera3d>, Without<DistanceFog>)>,
+) {
+    for e in &cameras {
+        commands.entity(e).insert((
+            Projection::Perspective(PerspectiveProjection {
+                fov: 60f32.to_radians(),
+                near: 0.1,
+                far: 20_000.0,
+                ..default()
+            }),
+            DistanceFog {
+                color: SKY,
+                directional_light_color: Color::srgba(1.0, 0.92, 0.75, 0.4),
+                directional_light_exponent: 24.0,
+                falloff: FogFalloff::from_visibility_colors(
+                    2_500.0,
+                    Color::srgb(0.55, 0.58, 0.62),
+                    Color::srgb(0.75, 0.78, 0.82),
+                ),
+            },
+        ));
+    }
+}
+
+pub fn run(options: Options) -> Result<()> {
+    let dir = map_dir(&options.cache, &options.id)?;
+
+    // Start pose: --camera, else over the shoulder of a player start point.
+    let (start, yaw, pitch) = match options.camera {
+        Some([x, y, z, yaw, pitch]) => (Vec3::new(x, y, z), yaw, pitch),
+        None => {
+            let (pos, yaw) = player_start(&dir, options.start).unwrap_or((Vec3::ZERO, 0.0));
+            // 3.5 m behind and 2.2 m above the start point, so its marker shows. Forward at
+            // yaw 0 is -Z.
+            let back = Quat::from_rotation_y(yaw.to_radians()) * Vec3::Z * 3.5;
+            (pos + back + Vec3::new(0.0, 2.2, 0.0), yaw, -12.0)
+        }
+    };
+
+    raise_io_stack();
     let mut app = App::new();
     app.add_plugins((
         DefaultPlugins
@@ -282,58 +382,34 @@ pub fn run(options: Options) -> Result<()> {
                 file_path: dir.to_string_lossy().into_owned(),
                 ..default()
             }),
-        WireframePlugin::default(),
         FrameTimeDiagnosticsPlugin::default(),
         bevy::render::diagnostic::RenderDiagnosticsPlugin,
     ))
     // Keep rendering at full rate when the window is not focused, so screenshots and
     // `--uncapped` measurements from a terminal are not throttled to 60 Hz.
-    .insert_resource(bevy::winit::WinitSettings::continuous())
-    .insert_resource(ClearColor(SKY))
-    .insert_resource(GlobalAmbientLight {
-        color: Color::srgb(0.80, 0.85, 1.0),
-        brightness: 900.0,
-        ..default()
-    })
-    .insert_resource(Layout {
-        json,
-        collision,
-        options_collision: options.collision,
-        no_pieces: options.no_pieces,
-        hide: options.hide,
-        objects: options.objects,
-    })
-    .insert_resource(Fly {
+    .insert_resource(bevy::winit::WinitSettings::continuous());
+    add_map(
+        &mut app,
+        &dir,
+        MapScene {
+            prefix: String::new(),
+            collision: options.collision,
+            no_pieces: options.no_pieces,
+            hide: options.hide,
+            objects: options.objects,
+            groups: options.groups,
+            markers: true,
+        },
+    )?;
+    app.insert_resource(Fly {
         yaw: yaw.to_radians(),
         pitch: pitch.to_radians(),
         speed: 12.0,
     })
-    .insert_resource(Groups {
-        mode: options.groups,
-        parts: group_parts,
-        current: None,
-        active: None,
-        checked_at: None,
-        dirty: true,
+    .add_systems(Startup, move |commands: Commands| {
+        setup_view(commands, start)
     })
-    .init_resource::<Pending>()
-    .add_observer(|_: On<WorldInstanceReady>, mut pending: ResMut<Pending>| {
-        pending.ready += 1;
-    })
-    .add_systems(
-        Startup,
-        move |commands: Commands,
-              assets: Res<AssetServer>,
-              layout: Res<Layout>,
-              pending: ResMut<Pending>,
-              meshes: ResMut<Assets<Mesh>>,
-              materials: ResMut<Assets<StandardMaterial>>| {
-            setup(commands, assets, layout, pending, meshes, materials, start)
-        },
-    )
-    .add_systems(Update, (fly, apply_fly).chain())
-    .add_systems(Update, (toggle_collision, hud, track_loading))
-    .add_systems(Update, (pick_groups, apply_groups).chain().after(apply_fly));
+    .add_systems(Update, (fly, apply_fly, hud).chain());
     if let Some(path) = options.screenshot {
         if path.exists() {
             std::fs::remove_file(&path)?;
@@ -355,50 +431,11 @@ pub fn run(options: Options) -> Result<()> {
 
 const SKY: Color = Color::srgb(0.62, 0.68, 0.74);
 
-fn setup(
-    mut commands: Commands,
-    assets: Res<AssetServer>,
-    layout: Res<Layout>,
-    mut pending: ResMut<Pending>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    start: Vec3,
-) {
+fn setup_view(mut commands: Commands, start: Vec3) {
     commands.spawn((
+        MapFocus,
         Camera3d::default(),
-        Projection::Perspective(PerspectiveProjection {
-            fov: 60f32.to_radians(),
-            near: 0.1,
-            far: 20_000.0,
-            ..default()
-        }),
         Transform::from_translation(start),
-        DistanceFog {
-            color: SKY,
-            directional_light_color: Color::srgba(1.0, 0.92, 0.75, 0.4),
-            directional_light_exponent: 24.0,
-            falloff: FogFalloff::from_visibility_colors(
-                2_500.0,
-                Color::srgb(0.55, 0.58, 0.62),
-                Color::srgb(0.75, 0.78, 0.82),
-            ),
-        },
-    ));
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 14_000.0,
-            color: Color::srgb(1.0, 0.95, 0.86),
-            shadow_maps_enabled: true,
-            ..default()
-        },
-        CascadeShadowConfigBuilder {
-            num_cascades: 4,
-            maximum_distance: 250.0,
-            first_cascade_far_bound: 15.0,
-            ..default()
-        }
-        .build(),
-        Transform::from_xyz(0.0, 0.0, 0.0).looking_to(Vec3::new(0.45, -0.75, 0.35), Vec3::Y),
     ));
     commands.spawn((
         Hud,
@@ -415,12 +452,39 @@ fn setup(
             ..default()
         },
     ));
+}
 
-    if !layout.no_pieces {
+fn spawn_map(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    layout: Res<Layout>,
+    mut pending: ResMut<Pending>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 14_000.0,
+            color: Color::srgb(1.0, 0.95, 0.86),
+            shadow_maps_enabled: true,
+            ..default()
+        },
+        CascadeShadowConfigBuilder {
+            num_cascades: 4,
+            maximum_distance: 250.0,
+            first_cascade_far_bound: 15.0,
+            ..default()
+        }
+        .build(),
+        Transform::from_xyz(0.0, 0.0, 0.0).looking_to(Vec3::new(0.45, -0.75, 0.35), Vec3::Y),
+    ));
+
+    let scene = &layout.scene;
+    if !scene.no_pieces {
         let models = &layout.json["models"];
         let mut spawned = 0;
         let mut seen = std::collections::HashSet::new();
-        let kinds: &[&str] = if layout.objects {
+        let kinds: &[&str] = if scene.objects {
             &["pieces", "objects"]
         } else {
             &["pieces"]
@@ -432,21 +496,22 @@ fn setup(
             let Some(model) = row["model"].as_str() else {
                 continue;
             };
-            if layout.hide.iter().any(|h| model.starts_with(h.as_str())) {
+            if scene.hide.iter().any(|h| model.starts_with(h.as_str())) {
                 continue;
             }
             let Some(glb) = models[model]["glb"].as_str() else {
                 continue;
             };
+            let glb = format!("{}{glb}", scene.prefix);
             let Some(p) = pose(row) else { continue };
-            if seen.insert(glb.to_string()) {
+            if seen.insert(glb.clone()) {
                 pending
                     .handles
-                    .push(assets.load::<Gltf>(glb.to_string()).untyped());
+                    .push(assets.load::<Gltf>(glb.clone()).untyped());
             }
             commands.spawn((
                 DrawGroups(groups8(&row["draw_groups"])),
-                WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(glb.to_string()))),
+                WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(glb))),
                 Transform {
                     translation: p.translation,
                     rotation: p.rotation,
@@ -473,7 +538,12 @@ fn setup(
     let enemy = marker_material(Color::srgb(0.85, 0.12, 0.10));
     let dummy = marker_material(Color::srgb(0.95, 0.55, 0.10));
     let player = marker_material(Color::srgb(0.15, 0.35, 0.95));
-    for (key, default_material) in [("enemies", &enemy), ("players", &player)] {
+    let marker_sets: &[(&str, &Handle<StandardMaterial>)] = if scene.markers {
+        &[("enemies", &enemy), ("players", &player)]
+    } else {
+        &[]
+    };
+    for &(key, default_material) in marker_sets {
         for row in layout.json[key].as_array().into_iter().flatten() {
             let Some(p) = pose(row) else { continue };
             let material = if row["dummy"].as_bool() == Some(true) {
@@ -503,7 +573,7 @@ fn setup(
     }
 
     if let Some(c) = &layout.collision {
-        let visibility = if layout.options_collision {
+        let visibility = if scene.collision {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -524,7 +594,7 @@ fn setup(
             NoFrustumCulling,
             visibility,
         ));
-        if layout.no_pieces {
+        if scene.no_pieces {
             // Without map pieces, also draw the collision solid, flat shaded and coloured by
             // hit material, so its shape reads clearly.
             commands.spawn((
@@ -640,14 +710,14 @@ fn pick_groups(
     keys: Res<ButtonInput<KeyCode>>,
     layout: Res<Layout>,
     mut groups: ResMut<Groups>,
-    camera: Query<&Transform, With<Camera3d>>,
+    focus: Query<&Transform, With<MapFocus>>,
 ) {
     if keys.just_pressed(KeyCode::KeyG) {
         groups.mode = groups.mode.next();
         groups.dirty = true;
         groups.checked_at = None;
     }
-    let (Ok(t), Some(c)) = (camera.single(), &layout.collision) else {
+    let (Some(t), Some(c)) = (focus.iter().next(), &layout.collision) else {
         return;
     };
     if groups.mode == GroupMode::Off {

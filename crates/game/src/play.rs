@@ -12,6 +12,11 @@
 //! guard, Space jump, Shift step (hold to sprint), C crouch, F grapple, Ctrl or MMB prosthetic,
 //! R item, Q lock-on. Gamepad: left stick move, right stick camera, R1 attack, L1 guard, A jump,
 //! B step/sprint, L3 crouch, L2 grapple, R2 prosthetic, X item, R3 lock-on. Esc frees the mouse.
+//!
+//! With `--map <id> [--start <n>]` the fight happens on an exported map instead of the floor:
+//! Wolf stands at the player start, the soldier 5 m in front of him, both bodies walk on the
+//! map's hit collision (`sekiro_sim::collision`), the map renders as in `--map` (see
+//! [`crate::map::add_map`]) and the camera is pulled in when a wall is between it and Wolf.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,7 +34,10 @@ use sekiro_sim::duel::{Duel, DuelReport};
 use sekiro_sim::{Buttons, InputFrame, StepReport, demo};
 
 use crate::character::{AnimLibrary, Animator, Rig, animate, bind_rigs};
+use crate::combat_hud;
 use crate::draw_mask::{DrawMask, MaskSource, apply_draw_masks};
+use crate::map::{self, MapFocus, MapScene};
+use sekiro_sim::collision::CollisionWorld;
 
 pub struct Options {
     pub cache: PathBuf,
@@ -43,7 +51,24 @@ pub struct Options {
     pub enemy: bool,
     /// Start locked on to the soldier.
     pub lock_on: bool,
+    /// Drive the soldier with the stand-in brain instead of its own AI scripts.
+    pub simple_ai: bool,
+    /// Play on this exported map (`cache/maps/<id>`) instead of the flat floor.
+    pub map: Option<String>,
+    /// Player start point on the map.
+    pub start: usize,
+    /// Place Wolf at `x, y, z` (on the floor at or below `y + 1`) facing `yaw` degrees,
+    /// instead of at a start point.
+    pub spawn: Option<[f32; 4]>,
 }
+
+/// The map's collision, for the camera; absent on the flat floor.
+#[derive(Resource)]
+struct MapCollision(Arc<CollisionWorld>);
+
+/// Where model GLBs live below the asset root.
+#[derive(Resource)]
+struct ModelPath(&'static str);
 
 const STEP_HZ: f64 = 60.0;
 const CAMERA_HEIGHT: f32 = 1.4;
@@ -108,6 +133,45 @@ pub fn run(options: Options) -> Result<()> {
     let mut duel =
         Duel::load(&cache, 6.0).map_err(|e| anyhow::anyhow!("loading the simulation: {e}"))?;
     duel.enemy_active = options.enemy;
+    if options.simple_ai {
+        duel.use_simple_ai();
+    }
+    let mut on_map = None;
+    let mut start_yaw = 0.0;
+    if let Some(id) = &options.map {
+        let dir = map::map_dir(&cache, id)?;
+        let world =
+            Arc::new(CollisionWorld::load(&dir.join("collision.bin")).map_err(anyhow::Error::msg)?);
+        let (start, yaw_degrees) = match options.spawn {
+            Some([x, y, z, yaw]) => {
+                let y = world.floor(x, z, y + 1.0).unwrap_or(y);
+                (Vec3::new(x, y, z), yaw)
+            }
+            None => map::player_start(&dir, options.start)?,
+        };
+        let yaw = yaw_degrees.to_radians();
+        start_yaw = yaw;
+        let floor_at = |x: f32, z: f32, near: f32| world.floor(x, z, near + 1.0).unwrap_or(near);
+        let wolf = &mut duel.player.body;
+        wolf.position = [start.x, floor_at(start.x, start.z, start.y), start.z];
+        wolf.yaw = yaw;
+        // The soldier 5 m in front of Wolf, facing him.
+        let ahead = Quat::from_rotation_y(yaw) * Vec3::NEG_Z * 5.0;
+        let (ex, ez) = (start.x + ahead.x, start.z + ahead.z);
+        let enemy = &mut duel.enemy.body;
+        enemy.position = [ex, floor_at(ex, ez, start.y), ez];
+        enemy.yaw = yaw + std::f32::consts::PI;
+        duel.player.ground = Box::new(world.clone());
+        duel.enemy.ground = Box::new(world.clone());
+        eprintln!(
+            "{id}: start {} at {:?}, {} collision triangles",
+            options.start,
+            duel.player.body.position,
+            world.triangle_count()
+        );
+        on_map = Some((dir, id.clone(), world));
+        map::raise_io_stack();
+    }
     let script = match options.script.as_deref() {
         None => None,
         Some("builtin") => Some(demo::parse(demo::DEMO).map_err(anyhow::Error::msg)?),
@@ -144,21 +208,29 @@ pub fn run(options: Options) -> Result<()> {
                 ..default()
             })
             .set(AssetPlugin {
-                file_path: cache.join("models").to_string_lossy().into_owned(),
+                // On a map the asset root is the cache, so models and map pieces both load.
+                file_path: if on_map.is_some() {
+                    cache.to_string_lossy().into_owned()
+                } else {
+                    cache.join("models").to_string_lossy().into_owned()
+                },
                 ..default()
             }),
     )
+    .insert_resource(ModelPath(if on_map.is_some() { "models/" } else { "" }))
     .insert_resource(ClearColor(Color::srgb(0.52, 0.60, 0.70)))
     .insert_resource(GlobalAmbientLight {
         color: Color::srgb(0.95, 0.95, 1.0),
         brightness: 450.0,
         ..default()
     })
+    .insert_resource(bevy::winit::WinitSettings::continuous())
     .insert_resource(Time::<Fixed>::from_hz(STEP_HZ))
     .insert_resource(Libraries(libraries))
     .insert_resource(LiveInput::default())
     .insert_resource(Orbit {
-        yaw: 0.0,
+        // Behind Wolf, so scripted "forward" is the way he faces.
+        yaw: start_yaw,
         pitch: 0.25,
         distance: 4.2,
     })
@@ -176,6 +248,7 @@ pub fn run(options: Options) -> Result<()> {
         step: 0,
         lock_requested: options.lock_on,
     })
+    .init_resource::<combat_hud::Gauges>()
     .add_systems(Startup, setup)
     .add_systems(FixedUpdate, simulate)
     .add_systems(
@@ -188,10 +261,28 @@ pub fn run(options: Options) -> Result<()> {
             animate,
             follow_camera,
             hud,
+            combat_hud::update,
             capture,
         )
             .chain(),
     );
+    if let Some((dir, id, world)) = on_map {
+        // The map's sun, ambient light and sky replace the floor setup's.
+        map::add_map(
+            &mut app,
+            &dir,
+            MapScene {
+                prefix: format!("maps/{id}/"),
+                collision: false,
+                no_pieces: false,
+                hide: Vec::new(),
+                objects: false,
+                groups: map::GroupMode::Draw,
+                markers: false,
+            },
+        )?;
+        app.insert_resource(MapCollision(world));
+    }
     app.run();
     Ok(())
 }
@@ -202,12 +293,68 @@ fn setup(
     mut libraries: ResMut<Libraries>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    model_path: Res<ModelPath>,
+    on_map: Option<Res<MapCollision>>,
 ) {
     commands.spawn((
         FollowCamera,
         Camera3d::default(),
         Transform::from_xyz(0.0, 2.0, 4.0).looking_at(Vec3::new(0.0, 1.2, 0.0), Vec3::Y),
     ));
+    combat_hud::spawn(&mut commands);
+    let on_map = on_map.is_some();
+    if !on_map {
+        spawn_floor_stage(&mut commands, &mut meshes, &mut materials);
+    }
+    let models = [
+        format!("{}c0000.glb", model_path.0),
+        format!("{}c1010.glb", model_path.0),
+    ];
+    for actor in [WOLF, SOLDIER] {
+        let lib = &mut libraries.0[actor];
+        let mut idle = Animator::new(
+            lib.clip("a000_000000").expect("idle clip is extracted"),
+            false,
+        );
+        idle.apply_root_motion = false;
+        idle.speed = 0.0;
+        let mut e = commands.spawn((
+            Actor(actor),
+            WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(models[actor].clone()))),
+            Transform::IDENTITY,
+            Rig::new(Arc::new(lib.skeleton.clone())),
+            idle,
+        ));
+        if actor == SOLDIER {
+            e.insert(DrawMask::new(MaskSource::Combat));
+        }
+        if actor == WOLF && on_map {
+            // Draw groups follow Wolf.
+            e.insert(MapFocus);
+        }
+    }
+    commands.spawn((
+        Hud,
+        Text::new(""),
+        TextFont {
+            font_size: bevy::text::FontSize::Px(15.0),
+            ..default()
+        },
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(12),
+            left: px(12),
+            ..default()
+        },
+    ));
+}
+
+/// Two lights and a checkered floor, so movement and speed are visible off the map.
+fn spawn_floor_stage(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) {
     commands.spawn((
         DirectionalLight {
             illuminance: 12_000.0,
@@ -248,40 +395,6 @@ fn setup(
             ));
         }
     }
-    let models = ["c0000.glb", "c1010.glb"];
-    for actor in [WOLF, SOLDIER] {
-        let lib = &mut libraries.0[actor];
-        let mut idle = Animator::new(
-            lib.clip("a000_000000").expect("idle clip is extracted"),
-            false,
-        );
-        idle.apply_root_motion = false;
-        idle.speed = 0.0;
-        let mut e = commands.spawn((
-            Actor(actor),
-            WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(models[actor]))),
-            Transform::IDENTITY,
-            Rig::new(Arc::new(lib.skeleton.clone())),
-            idle,
-        ));
-        if actor == SOLDIER {
-            e.insert(DrawMask::new(MaskSource::Combat));
-        }
-    }
-    commands.spawn((
-        Hud,
-        Text::new(""),
-        TextFont {
-            font_size: bevy::text::FontSize::Px(15.0),
-            ..default()
-        },
-        Node {
-            position_type: PositionType::Absolute,
-            top: px(12),
-            left: px(12),
-            ..default()
-        },
-    ));
 }
 
 fn gather_input(
@@ -415,7 +528,7 @@ fn simulate(
     let step = sim.step;
     for (hit, res) in &report.hits {
         let text = format!(
-            "step {step}: {} hit {} ({}), AtkParam {}",
+            "step {step}: {} hit {} ({}), AtkParam {}: HP -{}, posture -{} / attacker -{}",
             ["Wolf", "soldier"][hit.attacker],
             ["Wolf", "soldier"][hit.defender],
             if res.deflected {
@@ -425,7 +538,10 @@ fn simulate(
             } else {
                 "hit"
             },
-            hit.attack.atk_id
+            hit.attack.atk_id,
+            res.hp_damage,
+            res.posture_damage,
+            res.attacker_posture_damage
         );
         info!("{text}");
         sim.hit_log.push(text);
@@ -433,11 +549,15 @@ fn simulate(
             sim.hit_log.remove(0);
         }
     }
-    if sim.script.is_some() && step.is_multiple_of(30) {
+    if sim.script.is_some()
+        && (step.is_multiple_of(30) || std::env::var_os("PLAY_LOG_ALL").is_some())
+    {
         info!(
-            "step {step} wolf {} {} | soldier {} {}",
+            "step {step} wolf {} {} at {:.2?}{} | soldier {} {}",
             report.player.behavior.state_path.join("/"),
             report.player.animation.as_deref().unwrap_or("-"),
+            report.player.position,
+            if report.player.grounded { "" } else { " AIR" },
             report.enemy.behavior.state_path.join("/"),
             report.enemy.animation.as_deref().unwrap_or("-"),
         );
@@ -490,6 +610,7 @@ fn sync_actors(
 fn follow_camera(
     sim: NonSend<Sim>,
     orbit: Res<Orbit>,
+    collision: Option<Res<MapCollision>>,
     mut cam: Query<&mut Transform, With<FollowCamera>>,
 ) {
     let Ok(mut tf) = cam.single_mut() else {
@@ -502,11 +623,31 @@ fn follow_camera(
         target = target.lerp(Vec3::from_array(t) + Vec3::Y * 1.2, 0.3);
     }
     let rot = Quat::from_euler(EulerRot::YXZ, orbit.yaw, -orbit.pitch, 0.0);
-    let eye = target + rot * Vec3::new(0.0, 0.0, orbit.distance);
+    let back = rot * Vec3::Z;
+    let mut distance = orbit.distance;
+    // Pull the camera in front of walls between it and Wolf.
+    if let Some(c) = collision
+        && let Some(hit) = c.0.raycast(target, back, orbit.distance + 0.3)
+    {
+        distance = (hit - 0.3).clamp(0.4, orbit.distance);
+    }
+    let eye = target + back * distance;
     *tf = Transform::from_translation(eye).looking_at(target, Vec3::Y);
 }
 
-fn hud(sim: NonSend<Sim>, mut text: Query<&mut Text, With<Hud>>) {
+fn hud(
+    sim: NonSend<Sim>,
+    mut text: Query<&mut Text, With<Hud>>,
+    mut gauges: ResMut<combat_hud::Gauges>,
+) {
+    let f = &sim.duel.rules.fighters;
+    *gauges = combat_hud::Gauges {
+        hp: [0, 1].map(|i| (f[i].vitality.hp, f[i].vitality.max_hp)),
+        posture: [0, 1].map(|i| (f[i].posture.remaining, f[i].posture.max)),
+        enemy_head: Some(Vec3::from_array(sim.duel.enemy.body.position) + Vec3::Y * 2.0),
+        enemy_alive: !f[1].dead(),
+        deathblow: sim.duel.deathblow_available(),
+    };
     let Ok(mut text) = text.single_mut() else {
         return;
     };
@@ -518,14 +659,14 @@ fn hud(sim: NonSend<Sim>, mut text: Query<&mut Text, With<Hud>>) {
         r.player.behavior.state_path.join(" / "),
         r.player.animation.as_deref().unwrap_or("-"),
         r.player.anim_time,
-        sim.duel.hp[0],
+        sim.duel.rules.fighters[0].vitality.hp,
         if r.locked_on { "  LOCKED ON" } else { "" },
         r.player.behavior_refs,
         flags,
         r.enemy.behavior.state_path.join(" / "),
         r.enemy.animation.as_deref().unwrap_or("-"),
         r.enemy.anim_time,
-        sim.duel.hp[1],
+        sim.duel.rules.fighters[1].vitality.hp,
     );
     for line in &sim.hit_log {
         s += line;

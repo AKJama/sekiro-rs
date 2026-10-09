@@ -6,8 +6,8 @@
 //!
 //! Movement on the ground comes only from root motion; turning comes from root-motion yaw plus
 //! steering toward the stick at the TAE turn speed. In the air, a velocity set by a TAE velocity
-//! change (jumps) integrates under gravity. Ground is a [`Ground`] query so a collision mesh can
-//! replace the flat plane later.
+//! change (jumps) integrates under gravity. Ground is a [`Ground`]: a flat plane, or the map's
+//! hit collision ([`crate::collision::CollisionWorld`]), which also blocks horizontal moves.
 
 use crate::input::angle_diff;
 use crate::tae::VelocityChange;
@@ -20,6 +20,25 @@ pub const GRAVITY: f32 = 20.0;
 pub trait Ground {
     /// Height of the walkable surface below `(x, z)`, if any.
     fn height(&self, x: f32, z: f32) -> Option<f32>;
+
+    /// The walkable surface under `(x, z)` that is no higher than `top` (multi-level ground).
+    fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
+        let _ = top;
+        self.height(x, z)
+    }
+
+    /// The horizontal displacement a body at `feet` actually makes when it tries to move by
+    /// `delta` (walls stop it and it slides along them). Unobstructed by default.
+    fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
+        let _ = feet;
+        delta
+    }
+
+    /// Highest ledge a grounded body steps onto, and the furthest it follows the floor down
+    /// before it starts falling.
+    fn max_step(&self) -> f32 {
+        0.3
+    }
 }
 
 /// An infinite flat plane.
@@ -91,8 +110,7 @@ impl Body {
         // rotate_y(yaw) applied to (lx, 0, lz).
         let wx = c * lx + s * lz;
         let wz = -s * lx + c * lz;
-        self.position[0] += wx;
-        self.position[2] += wz;
+        let mut travel = [wx, wz];
         self.yaw -= ryaw;
 
         if let Some(target) = input.steer_to
@@ -119,10 +137,22 @@ impl Body {
             }
         }
 
-        let floor = ground.height(self.position[0], self.position[2]);
+        if !self.grounded {
+            travel[0] += self.velocity[0] * dt;
+            travel[1] += self.velocity[2] * dt;
+        }
+        let [mx, mz] = ground.slide(self.position, travel);
+        self.position[0] += mx;
+        self.position[2] += mz;
+
+        let step = ground.max_step();
         if self.grounded {
+            // Follow the floor up or down by a step, plus what a 50 degree slope rises over
+            // this tick's travel, so a fast tick on a ramp or stairs keeps contact.
+            let reach = step + (mx * mx + mz * mz).sqrt() * 1.2;
+            let floor = ground.floor(self.position[0], self.position[2], self.position[1] + reach);
             match floor {
-                Some(h) if self.position[1] - h < 0.3 => self.position[1] = h,
+                Some(h) if self.position[1] - h < reach => self.position[1] = h,
                 _ => {
                     self.grounded = false;
                     self.fall_top = self.position[1];
@@ -133,10 +163,12 @@ impl Body {
             }
         }
         self.velocity[1] -= GRAVITY * dt;
-        for (p, v) in self.position.iter_mut().zip(self.velocity) {
-            *p += v * dt;
-        }
+        let previous_y = self.position[1];
+        self.position[1] += self.velocity[1] * dt;
         self.fall_top = self.fall_top.max(self.position[1]);
+        // Land on the highest floor the feet passed through this tick, or one up to a step
+        // above them (a stair tread or ledge the body was carried into while airborne).
+        let floor = ground.floor(self.position[0], self.position[2], previous_y + step);
         if let Some(h) = floor
             && self.velocity[1] <= 0.0
             && self.position[1] <= h
