@@ -10,6 +10,8 @@ pub mod behavior;
 pub mod body;
 pub mod character;
 pub mod clips;
+pub mod combat;
+pub mod deathblow;
 pub mod demo;
 pub mod input;
 pub mod player;
