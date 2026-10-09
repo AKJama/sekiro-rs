@@ -9,12 +9,24 @@ fn main() {
     let mut cache = PathBuf::from("cache");
     let mut script = None;
     let mut all = false;
+    let mut calls: Option<(usize, usize)> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--cache" => cache = PathBuf::from(args.next().expect("--cache DIR")),
             "--script" => script = Some(args.next().expect("--script FILE")),
             "--all" => all = true,
+            "--calls" => {
+                let a: usize = args
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .expect("--calls FROM TO");
+                let b: usize = args
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .expect("--calls FROM TO");
+                calls = Some((a, b));
+            }
             other => panic!("unknown argument {other}"),
         }
     }
@@ -33,7 +45,19 @@ fn main() {
     );
     let mut last = String::new();
     for (i, f) in frames.iter().enumerate() {
+        let logging = calls.is_some_and(|(a, b)| (a..=b).contains(&i));
+        if logging {
+            wolf.behavior.call_log = Some(Vec::new());
+        }
         let r = wolf.tick(f, dt);
+        if logging && let Some(log) = wolf.behavior.call_log.take() {
+            println!("--- step {i} calls (requested {:?}):", r.requested);
+            for c in log.iter().filter(|c| {
+                c.function != "env" || c.result.first().is_some_and(|v| v.as_number() != Some(0.0))
+            }) {
+                println!("    {c}");
+            }
+        }
         let key = format!(
             "{} {}",
             r.behavior.state_path.join("/"),

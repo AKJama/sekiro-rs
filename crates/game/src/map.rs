@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use bevy::app::AppExit;
+use bevy::asset::RenderAssetUsages;
 use bevy::asset::{AssetPlugin, LoadState, UntypedAssetId};
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
@@ -24,7 +25,7 @@ use bevy::pbr::wireframe::{Wireframe, WireframeColor, WireframePlugin};
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
-use bevy::asset::RenderAssetUsages;
+use bevy::world_serialization::WorldInstanceReady;
 use serde_json::Value;
 
 pub struct Options {
@@ -39,6 +40,77 @@ pub struct Options {
     pub collision: bool,
     /// Hide the map pieces (collision only).
     pub no_pieces: bool,
+    /// Player start point to begin at when `camera` is not given.
+    pub start: usize,
+    /// Skip map piece models whose name starts with any of these (e.g. `m9` for far models).
+    pub hide: Vec<String>,
+    /// Disable vsync, to measure frame rate.
+    pub uncapped: bool,
+    /// Draw-group culling: which collision group block selects the visible pieces.
+    pub groups: GroupMode,
+}
+
+/// How map pieces are culled by draw groups. In the game, the hit collision the player stands
+/// on selects which pieces draw, which swaps distant stand-ins for detailed geometry; `Display`
+/// uses the collision's display groups (word block 0 of the MSB mask struct), `Draw` its draw
+/// groups (block 1), matched against each piece's draw groups (block 1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupMode {
+    Off,
+    Display,
+    Draw,
+}
+
+impl GroupMode {
+    pub fn parse(s: Option<&str>) -> Result<Self> {
+        Ok(match s.unwrap_or("display") {
+            "off" => Self::Off,
+            "display" => Self::Display,
+            "draw" => Self::Draw,
+            other => anyhow::bail!("--groups {other}: want off, display or draw"),
+        })
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::Display => Self::Draw,
+            Self::Draw => Self::Off,
+            Self::Off => Self::Display,
+        }
+    }
+}
+
+/// A piece's draw groups.
+#[derive(Component)]
+struct DrawGroups([u32; 8]);
+
+struct CollisionPart {
+    name: String,
+    first: usize,
+    count: usize,
+    min: Vec2,
+    max: Vec2,
+    display: [u32; 8],
+    draw: [u32; 8],
+}
+
+#[derive(Resource)]
+struct Groups {
+    mode: GroupMode,
+    parts: Vec<CollisionPart>,
+    /// Collision part under the camera and the groups in force.
+    current: Option<usize>,
+    active: Option<[u32; 8]>,
+    checked_at: Option<Vec3>,
+    dirty: bool,
+}
+
+fn groups8(v: &Value) -> [u32; 8] {
+    let mut out = [0u32; 8];
+    for (o, x) in out.iter_mut().zip(v.as_array().into_iter().flatten()) {
+        *o = x.as_u64().unwrap_or(0) as u32;
+    }
+    out
 }
 
 #[derive(Resource)]
@@ -58,6 +130,9 @@ struct Hud;
 #[derive(Resource, Default)]
 struct Pending {
     handles: Vec<UntypedHandle>,
+    /// Map piece scene instances spawned, and how many have finished spawning.
+    instances: usize,
+    ready: usize,
     loaded_at: Option<Instant>,
 }
 
@@ -103,6 +178,7 @@ struct Layout {
     collision: Option<sekiro_formats::hknp::CollisionMesh>,
     options_collision: bool,
     no_pieces: bool,
+    hide: Vec<String>,
 }
 
 pub fn run(options: Options) -> Result<()> {
@@ -129,7 +205,7 @@ pub fn run(options: Options) -> Result<()> {
     let (start, yaw, pitch) = match options.camera {
         Some([x, y, z, yaw, pitch]) => (Vec3::new(x, y, z), yaw, pitch),
         None => {
-            let player = json["players"].get(0);
+            let player = json["players"].get(options.start);
             let pos = player
                 .and_then(|p| vec3(&p["translation"]))
                 .unwrap_or(Vec3::ZERO);
@@ -140,6 +216,40 @@ pub fn run(options: Options) -> Result<()> {
         }
     };
 
+    // Bevy's IO threads overflow the default 2 MiB stack while loading this many GLBs and DDS
+    // textures at once (still at 4 MiB; 8 MiB is enough). Threads read this when spawned.
+    if std::env::var_os("RUST_MIN_STACK").is_none() {
+        // SAFETY: no other thread exists yet, so nothing reads the environment concurrently.
+        unsafe { std::env::set_var("RUST_MIN_STACK", (16usize << 20).to_string()) };
+    }
+
+    let mut group_parts = Vec::new();
+    if let Some(c) = &collision {
+        for row in json["collisions"].as_array().into_iter().flatten() {
+            let Some([first, count]) = row["triangles"].as_array().and_then(|r| {
+                Some([r.first()?.as_u64()? as usize, r.get(1)?.as_u64()? as usize])
+            }) else {
+                continue;
+            };
+            let mut min = Vec2::splat(f32::MAX);
+            let mut max = Vec2::splat(f32::MIN);
+            for &i in &c.indices[first * 3..(first + count) * 3] {
+                let v = c.vertices[i as usize];
+                min = min.min(Vec2::new(v[0], v[2]));
+                max = max.max(Vec2::new(v[0], v[2]));
+            }
+            group_parts.push(CollisionPart {
+                name: row["name"].as_str().unwrap_or_default().to_string(),
+                first,
+                count,
+                min,
+                max,
+                display: groups8(&row["display_groups"]),
+                draw: groups8(&row["draw_groups"]),
+            });
+        }
+    }
+
     let mut app = App::new();
     app.add_plugins((
         DefaultPlugins
@@ -147,6 +257,11 @@ pub fn run(options: Options) -> Result<()> {
                 primary_window: Some(Window {
                     title: format!("sekiro-rs map - {}", options.id),
                     resolution: (1600, 900).into(),
+                    present_mode: if options.uncapped {
+                        bevy::window::PresentMode::AutoNoVsync
+                    } else {
+                        bevy::window::PresentMode::AutoVsync
+                    },
                     ..default()
                 }),
                 ..default()
@@ -169,22 +284,39 @@ pub fn run(options: Options) -> Result<()> {
         collision,
         options_collision: options.collision,
         no_pieces: options.no_pieces,
+        hide: options.hide,
     })
     .insert_resource(Fly {
         yaw: yaw.to_radians(),
         pitch: pitch.to_radians(),
         speed: 12.0,
     })
-    .init_resource::<Pending>()
-    .add_systems(Startup, move |commands: Commands,
-                                 assets: Res<AssetServer>,
-                                 layout: Res<Layout>,
-                                 pending: ResMut<Pending>,
-                                 meshes: ResMut<Assets<Mesh>>| {
-        setup(commands, assets, layout, pending, meshes, start)
+    .insert_resource(Groups {
+        mode: options.groups,
+        parts: group_parts,
+        current: None,
+        active: None,
+        checked_at: None,
+        dirty: true,
     })
+    .init_resource::<Pending>()
+    .add_observer(|_: On<WorldInstanceReady>, mut pending: ResMut<Pending>| {
+        pending.ready += 1;
+    })
+    .add_systems(
+        Startup,
+        move |commands: Commands,
+              assets: Res<AssetServer>,
+              layout: Res<Layout>,
+              pending: ResMut<Pending>,
+              meshes: ResMut<Assets<Mesh>>,
+              materials: ResMut<Assets<StandardMaterial>>| {
+            setup(commands, assets, layout, pending, meshes, materials, start)
+        },
+    )
     .add_systems(Update, (fly, apply_fly).chain())
-    .add_systems(Update, (toggle_collision, hud, track_loading));
+    .add_systems(Update, (toggle_collision, hud, track_loading))
+    .add_systems(Update, (pick_groups, apply_groups).chain().after(apply_fly));
     if let Some(path) = options.screenshot {
         if path.exists() {
             std::fs::remove_file(&path)?;
@@ -212,6 +344,7 @@ fn setup(
     layout: Res<Layout>,
     mut pending: ResMut<Pending>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     start: Vec3,
 ) {
     commands.spawn((
@@ -270,12 +403,13 @@ fn setup(
         let models = &layout.json["models"];
         let mut spawned = 0;
         let mut seen = std::collections::HashSet::new();
-        let limit: usize = std::env::var("MAP_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
-        let skip: usize = std::env::var("MAP_SKIP").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
-        for row in layout.json["pieces"].as_array().into_iter().flatten().skip(skip).take(limit) {
+        for row in layout.json["pieces"].as_array().into_iter().flatten() {
             let Some(model) = row["model"].as_str() else {
                 continue;
             };
+            if layout.hide.iter().any(|h| model.starts_with(h.as_str())) {
+                continue;
+            }
             let Some(glb) = models[model]["glb"].as_str() else {
                 continue;
             };
@@ -286,6 +420,7 @@ fn setup(
                     .push(assets.load::<Gltf>(glb.to_string()).untyped());
             }
             commands.spawn((
+                DrawGroups(groups8(&row["draw_groups"])),
                 WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(glb.to_string()))),
                 Transform {
                     translation: p.translation,
@@ -295,11 +430,20 @@ fn setup(
             ));
             spawned += 1;
         }
+        pending.instances = spawned;
         info!("spawned {spawned} map piece instances");
     }
 
     if let Some(c) = &layout.collision {
-        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
+        let visibility = if layout.options_collision {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::RENDER_WORLD,
+        );
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, c.vertices.clone());
         mesh.insert_indices(Indices::U32(c.indices.clone()));
         commands.spawn((
@@ -310,17 +454,55 @@ fn setup(
                 color: Color::srgb(1.0, 0.25, 0.1),
             },
             NoFrustumCulling,
-            if layout.options_collision {
-                Visibility::Visible
-            } else {
-                Visibility::Hidden
-            },
+            visibility,
         ));
-        info!(
-            "collision: {} triangles",
-            c.indices.len() / 3
-        );
+        if layout.no_pieces {
+            // Without map pieces, also draw the collision solid, flat shaded and coloured by
+            // hit material, so its shape reads clearly.
+            commands.spawn((
+                CollisionView,
+                Mesh3d(meshes.add(solid_collision(c))),
+                MeshMaterial3d(materials.add(StandardMaterial {
+                    base_color: Color::WHITE,
+                    perceptual_roughness: 0.9,
+                    ..default()
+                })),
+                NoFrustumCulling,
+                visibility,
+            ));
+        }
+        info!("collision: {} triangles", c.indices.len() / 3);
     }
+}
+
+/// Flat-shaded triangle soup with one colour per hit material id.
+fn solid_collision(c: &sekiro_formats::hknp::CollisionMesh) -> Mesh {
+    let tris = c.indices.len() / 3;
+    let mut positions = Vec::with_capacity(tris * 3);
+    let mut normals = Vec::with_capacity(tris * 3);
+    let mut colors = Vec::with_capacity(tris * 3);
+    for (t, tri) in c.indices.as_chunks::<3>().0.iter().enumerate() {
+        let p = tri.map(|i| Vec3::from(c.vertices[i as usize]));
+        let n = (p[1] - p[0]).cross(p[2] - p[0]).normalize_or(Vec3::Y);
+        let m = c.materials.get(t).copied().unwrap_or(u32::MAX);
+        // A stable pastel colour per material id.
+        let h = m.wrapping_mul(2_654_435_761);
+        let color = Color::hsl((h % 360) as f32, 0.45, 0.6)
+            .to_linear()
+            .to_f32_array();
+        for v in p {
+            positions.push(v.to_array());
+            normals.push(n.to_array());
+            colors.push(color);
+        }
+    }
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
 }
 
 fn fly(
@@ -384,6 +566,105 @@ fn apply_fly(fly: Res<Fly>, mut camera: Query<&mut Transform, With<Camera3d>>) {
     }
 }
 
+/// Finds the collision part under the camera (the nearest surface below, else the nearest
+/// above) and takes its groups. Runs when the camera has moved a couple of metres.
+fn pick_groups(
+    keys: Res<ButtonInput<KeyCode>>,
+    layout: Res<Layout>,
+    mut groups: ResMut<Groups>,
+    camera: Query<&Transform, With<Camera3d>>,
+) {
+    if keys.just_pressed(KeyCode::KeyG) {
+        groups.mode = groups.mode.next();
+        groups.dirty = true;
+        groups.checked_at = None;
+    }
+    let (Ok(t), Some(c)) = (camera.single(), &layout.collision) else {
+        return;
+    };
+    if groups.mode == GroupMode::Off {
+        return;
+    }
+    let pos = t.translation;
+    if groups.checked_at.is_some_and(|p| p.distance(pos) < 2.0) {
+        return;
+    }
+    groups.checked_at = Some(pos);
+    let p2 = Vec2::new(pos.x, pos.z);
+    let mut best: Option<(f32, usize)> = None;
+    for (pi, part) in groups.parts.iter().enumerate() {
+        if p2.cmplt(part.min).any() || p2.cmpgt(part.max).any() {
+            continue;
+        }
+        let tris = &c.indices[part.first * 3..(part.first + part.count) * 3];
+        for tri in tris.as_chunks::<3>().0 {
+            let [a, b, cc] = tri.map(|i| Vec3::from(c.vertices[i as usize]));
+            if let Some(h) = vertical_hit(pos, a, b, cc) {
+                // Prefer the nearest surface below; surfaces above count only if none is below.
+                let score = if h >= -0.5 { h } else { 1000.0 - h };
+                if best.is_none_or(|(s, _)| score < s) {
+                    best = Some((score, pi));
+                }
+            }
+        }
+    }
+    let Some((_, pi)) = best else { return };
+    let part = &groups.parts[pi];
+    let g = match groups.mode {
+        GroupMode::Display => part.display,
+        _ => part.draw,
+    };
+    groups.current = Some(pi);
+    // A collision with no groups leaves the previous selection in force.
+    if g.iter().any(|&w| w != 0) && groups.active != Some(g) {
+        groups.active = Some(g);
+        groups.dirty = true;
+    }
+}
+
+/// Height of `p` above the triangle (`p.y - surface y`) where the vertical line through `p`
+/// crosses it.
+fn vertical_hit(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
+    let (x, z) = (p.x, p.z);
+    let d = (b.z - c.z) * (a.x - c.x) + (c.x - b.x) * (a.z - c.z);
+    if d.abs() < 1e-9 {
+        return None;
+    }
+    let l1 = ((b.z - c.z) * (x - c.x) + (c.x - b.x) * (z - c.z)) / d;
+    let l2 = ((c.z - a.z) * (x - c.x) + (a.x - c.x) * (z - c.z)) / d;
+    let l3 = 1.0 - l1 - l2;
+    if l1 < 0.0 || l2 < 0.0 || l3 < 0.0 {
+        return None;
+    }
+    Some(p.y - (l1 * a.y + l2 * b.y + l3 * c.y))
+}
+
+fn apply_groups(
+    mut groups: ResMut<Groups>,
+    mut pieces: Query<(&DrawGroups, &mut Visibility)>,
+    added: Query<(), Added<DrawGroups>>,
+) {
+    if !groups.dirty && added.is_empty() {
+        return;
+    }
+    groups.dirty = false;
+    let active = match groups.mode {
+        GroupMode::Off => None,
+        _ => groups.active,
+    };
+    for (g, mut v) in &mut pieces {
+        let show = active.is_none_or(|a| a.iter().zip(g.0).any(|(x, y)| x & y != 0));
+        let want = if show {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *v != want {
+            *v = want;
+        }
+    }
+}
+
 fn toggle_collision(
     keys: Res<ButtonInput<KeyCode>>,
     mut view: Query<&mut Visibility, With<CollisionView>>,
@@ -400,6 +681,7 @@ fn toggle_collision(
 
 fn hud(
     diagnostics: Res<DiagnosticsStore>,
+    groups: Res<Groups>,
     fly: Res<Fly>,
     pending: Res<Pending>,
     camera: Query<&Transform, With<Camera3d>>,
@@ -416,7 +698,8 @@ fn hud(
     };
     text.0 = format!(
         "{fps:.0} fps | {} mesh entities | pos {:.1} {:.1} {:.1} yaw {:.0} pitch {:.0} | speed {:.0}{}\n\
-         RMB look, WASD fly, Space/Q up/down, Shift fast, wheel speed, C collision, P print pose",
+         groups {:?} from {} | RMB look, WASD fly, Space/Q up/down, Shift fast, wheel speed, \
+         C collision, G groups, P print pose",
         meshes.iter().count(),
         t.translation.x,
         t.translation.y,
@@ -428,12 +711,20 @@ fn hud(
             " | loading"
         } else {
             ""
-        }
+        },
+        groups.mode,
+        groups
+            .current
+            .map(|i| groups.parts[i].name.as_str())
+            .unwrap_or("-"),
     );
 }
 
 fn track_loading(assets: Res<AssetServer>, mut pending: ResMut<Pending>) {
     if pending.loaded_at.is_some() {
+        return;
+    }
+    if pending.ready < pending.instances {
         return;
     }
     let done = pending.handles.iter().all(|h| {
@@ -453,6 +744,8 @@ fn capture(
     mut capture: ResMut<Capture>,
     diagnostics: Res<DiagnosticsStore>,
     meshes: Query<(), With<Mesh3d>>,
+    pieces: Query<&Visibility, With<DrawGroups>>,
+    groups: Res<Groups>,
     mut exit: MessageWriter<AppExit>,
 ) {
     if capture.started.elapsed() > Duration::from_secs(300) {
@@ -469,9 +762,16 @@ fn capture(
                 .get(&FrameTimeDiagnosticsPlugin::FPS)
                 .and_then(|d| d.smoothed())
                 .unwrap_or(0.0);
+            let shown = pieces.iter().filter(|v| **v != Visibility::Hidden).count();
             println!(
-                "{fps:.1} fps, {} mesh entities, loaded in {:.1} s",
+                "{fps:.1} fps, {} mesh entities, {shown}/{} pieces shown (groups {:?} from {}), loaded in {:.1} s",
                 meshes.iter().count(),
+                pieces.iter().count(),
+                groups.mode,
+                groups
+                    .current
+                    .map(|i| groups.parts[i].name.as_str())
+                    .unwrap_or("-"),
                 (loaded - capture.started).as_secs_f32()
             );
             commands

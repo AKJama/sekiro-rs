@@ -18,6 +18,8 @@ pub struct AnimLibrary {
     dir: PathBuf,
     pub skeleton: Skeleton,
     clips: HashMap<String, Arc<AnimClip>>,
+    /// Animations that play another's HKX (`aliases.json` from the extractor).
+    aliases: HashMap<String, String>,
 }
 
 impl AnimLibrary {
@@ -26,10 +28,15 @@ impl AnimLibrary {
         let bytes = std::fs::read(dir.join("skeleton.bin"))
             .with_context(|| format!("{}: run `sekiro-extract anims {chr}`", dir.display()))?;
         let skeleton = to_bevy::skeleton(&Skeleton::from_bytes(&bytes)?);
+        let aliases = std::fs::read_to_string(dir.join("aliases.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
         Ok(Self {
             dir,
             skeleton,
             clips: HashMap::new(),
+            aliases,
         })
     }
 
@@ -37,7 +44,8 @@ impl AnimLibrary {
         if let Some(c) = self.clips.get(name) {
             return Ok(c.clone());
         }
-        let path = self.dir.join(format!("{name}.bin"));
+        let file = self.aliases.get(name).map_or(name, String::as_str);
+        let path = self.dir.join(format!("{file}.bin"));
         let bytes = std::fs::read(&path).with_context(|| format!("{}", path.display()))?;
         let clip = Arc::new(to_bevy::clip(&AnimClip::from_bytes(&bytes)?));
         self.clips.insert(name.to_string(), clip.clone());
@@ -55,33 +63,71 @@ pub struct Animator {
     pub apply_root_motion: bool,
     /// Root motion sample at the previous frame, for deltas.
     last_root: [f32; 4],
+    /// The animation name that was asked for (an alias may play another clip's data).
+    name: String,
+    /// Crossfade from the previous pose: (clip, its time when replaced, duration, elapsed).
+    blend: Option<(Arc<AnimClip>, f32, f32, f32)>,
 }
 
 impl Animator {
     pub fn new(clip: Arc<AnimClip>, looping: bool) -> Self {
         Self {
-            clip,
             time: 0.0,
             looping,
             speed: 1.0,
             apply_root_motion: true,
             last_root: [0.0; 4],
+            name: clip_name_of(&clip),
+            blend: None,
+            clip,
         }
     }
 
     pub fn play(&mut self, clip: Arc<AnimClip>, looping: bool) {
+        self.name = clip_name_of(&clip);
+        self.blend = None;
         self.clip = clip;
         self.time = 0.0;
         self.looping = looping;
         self.last_root = [0.0; 4];
     }
 
+    /// Turns root motion on from the current clip time, without replaying the motion so far.
+    pub fn resume_root_motion(&mut self) {
+        let t = self.time.min(self.clip.duration);
+        self.last_root = self
+            .clip
+            .root_motion
+            .as_ref()
+            .map_or([0.0; 4], |rm| rm.sample(t));
+        self.apply_root_motion = true;
+    }
+
     pub fn finished(&self) -> bool {
         !self.looping && self.time >= self.clip.duration
     }
 
+    /// Plays `clip` under the requested animation `name`, crossfading from the current pose over
+    /// `blend_secs` (0 cuts).
+    pub fn play_named(&mut self, name: &str, clip: Arc<AnimClip>, looping: bool, blend_secs: f32) {
+        let from = (self.clip.clone(), self.time);
+        self.play(clip, looping);
+        self.name = name.to_string();
+        if blend_secs > 0.0 {
+            self.blend = Some((from.0, from.1, blend_secs, 0.0));
+        }
+    }
+
+    /// The requested animation name (which may be an alias of the clip data playing).
     pub fn clip_name(&self) -> &str {
-        &self.clip.name
+        &self.name
+    }
+
+    /// Remaining crossfade weight of the previous pose, 0 when not blending.
+    pub fn blend_weight(&self) -> f32 {
+        self.blend
+            .as_ref()
+            .map_or(0.0, |(_, _, d, e)| (1.0 - e / d).clamp(0.0, 1.0))
     }
 }
 
@@ -207,7 +253,22 @@ pub fn animate(
             body.rotate_y(delta[3]);
         }
 
-        let pose = clip.sample(t, &rig.skeleton);
+        let mut pose = clip.sample(t, &rig.skeleton);
+        // Crossfade from the previous clip's pose, frozen where it was replaced.
+        if let Some((from, from_t, dur, elapsed)) = anim.blend.as_mut() {
+            *elapsed += dt;
+            let w = (1.0 - *elapsed / *dur).clamp(0.0, 1.0);
+            if w > 0.0 {
+                let from_t = from_t.min(from.duration);
+                let old = from.sample(from_t, &rig.skeleton);
+                for (p, o) in pose.iter_mut().zip(&old) {
+                    *p = p.lerp(o, w);
+                }
+            }
+        }
+        if anim.blend.as_ref().is_some_and(|(_, _, d, e)| e >= d) {
+            anim.blend = None;
+        }
         let model = rig.skeleton.model_space(&pose);
         for (i, joint) in rig.joints.iter().enumerate() {
             let Some((entity, parent)) = joint else {
@@ -223,4 +284,8 @@ pub fn animate(
         }
         rig.model = model;
     }
+}
+
+fn clip_name_of(clip: &AnimClip) -> String {
+    clip.name.clone()
 }

@@ -166,7 +166,11 @@ pub struct StateMachine {
     pub wildcard_transitions: Vec<Transition>,
     pub return_to_previous_state_event: i32,
     pub self_transition_mode: i64,
+    /// `hkbStateMachine::StartStateMode`: 0 uses `start_state_id`, 1 (sync) starts in the state
+    /// whose id is stored in `sync_variable`, which every machine sharing it keeps up to date.
     pub start_state_mode: i64,
+    /// Behaviour variable that machines in sync mode share (-1 for none).
+    pub sync_variable: i32,
 }
 
 impl StateMachine {
@@ -614,6 +618,7 @@ impl<'a> Builder<'a> {
                 return_to_previous_state_event: int_of(&v, "returnToPreviousStateEventId")? as i32,
                 self_transition_mode: int_of(&v, "selfTransitionMode")?,
                 start_state_mode: int_of(&v, "startStateMode")?,
+                sync_variable: int_of(&v, "syncVariableIndex")? as i32,
             })
         } else if v.is_a("CustomManualSelectorGenerator") {
             NodeKind::Cmsg(Cmsg {

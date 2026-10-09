@@ -6,10 +6,12 @@
 //!   model in bind pose; `--hide`/`--only` filter primitives by material name, `--combat` shows
 //!   enemies with weapons drawn.
 //! - `sekiro-rs --map <id> [--screenshot <out.png>] [--at <s>] [--camera x,y,z,yaw,pitch]
-//!   [--collision] [--no-pieces]`: fly through an area exported by `sekiro-extract map`.
+//!   [--start <n>] [--collision] [--no-pieces] [--hide m9,m8] [--groups display|draw|off]
+//!   [--uncapped]`: fly through an area exported by `sekiro-extract map`.
 
 mod arena;
 mod character;
+mod deathblow_demo;
 mod draw_mask;
 mod map;
 mod play;
@@ -59,6 +61,10 @@ fn main() -> anyhow::Result<()> {
             camera: map::parse_camera(arg_value(&args, "--camera").as_deref())?,
             collision: args.iter().any(|a| a == "--collision"),
             no_pieces: args.iter().any(|a| a == "--no-pieces"),
+            start: arg_f32(&args, "--start", 0.0)? as usize,
+            hide: arg_list(&args, "--hide"),
+            uncapped: args.iter().any(|a| a == "--uncapped"),
+            groups: map::GroupMode::parse(arg_value(&args, "--groups").as_deref())?,
         });
     }
     if args.iter().any(|a| a == "--play") {
@@ -83,10 +89,11 @@ fn main() -> anyhow::Result<()> {
             cache: PathBuf::from(arg_value(&args, "--cache").unwrap_or_else(|| "cache".into())),
             screenshot: arg_value(&args, "--screenshot").map(PathBuf::from),
             at: arg_f32(&args, "--at", 3.0)?,
+            deathblow: args.iter().any(|a| a == "--deathblow"),
         });
     }
     eprintln!("usage: sekiro-rs --play [--script FILE|builtin] [--shots step:path,...] [--exit]");
-    eprintln!("usage: sekiro-rs --arena [--screenshot <out.png> --at <seconds>]");
+    eprintln!("usage: sekiro-rs --arena [--deathblow] [--screenshot <out.png> --at <seconds>]");
     eprintln!("       sekiro-rs --viewer <file.glb> [--screenshot <out.png>] [--yaw <deg>]");
     eprintln!("                 [--pitch <deg>] [--distance <m>] [--height <m>]");
     std::process::exit(2);

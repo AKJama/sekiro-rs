@@ -32,8 +32,10 @@ pub struct Mtds(pub HashMap<String, mtd::Mtd>);
 
 impl Mtds {
     pub fn get(&self, mtd_path: &str) -> Option<&mtd::Mtd> {
-        self.0
-            .get(&format!("{}.mtd", texture_stem(mtd_path).to_ascii_lowercase()))
+        self.0.get(&format!(
+            "{}.mtd",
+            texture_stem(mtd_path).to_ascii_lowercase()
+        ))
     }
 }
 
@@ -104,7 +106,12 @@ pub fn choose_material(material: &flver::Material, mtd: Option<&mtd::Mtd>) -> Ma
 pub fn skip_material(mtd_name: &str) -> bool {
     let m = mtd_name.to_ascii_lowercase();
     // Shadow casters, invisible blockers and light-probe helpers.
-    m.contains("shadow") || m.contains("[dummy]") || m.contains("_dummy") || m.contains("invisible")
+    m.contains("shadow")
+        || m.contains("[dummy]")
+        || m.contains("_dummy")
+        || m.contains("invisible")
+        // Ground fog and cloud cards: drawn by fog shaders we do not have.
+        || m.contains("fog")
 }
 
 pub struct BuiltPiece {

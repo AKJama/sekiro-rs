@@ -127,6 +127,10 @@ pub struct BehaviorRuntime {
     pinned: HashSet<NodeId>,
     /// Layer on/off overrides set by layer events, keyed by (layer generator, layer index).
     layer_on: HashMap<(NodeId, usize), bool>,
+    /// The active state each active node was reached from in the last rebuild. Nodes can be
+    /// shared between states, so this, not the static [`Self::enclosing`] map, says which state
+    /// an active clip belongs to right now.
+    active_enclosing: HashMap<NodeId, StateRef>,
     /// For every clip, the CMSG that owns it (if any).
     clip_owner: Vec<Option<NodeId>>,
     /// Clips whose end has already been signalled since they started.
@@ -190,6 +194,7 @@ impl BehaviorRuntime {
             pinned: HashSet::new(),
             layer_on: HashMap::new(),
             clip_owner,
+            active_enclosing: HashMap::new(),
             end_signalled: HashSet::new(),
             dirty: false,
             main_machine,
@@ -225,11 +230,19 @@ impl BehaviorRuntime {
         let NodeKind::StateMachine(sm) = &self.graph.nodes[sm_id].kind else {
             return 0;
         };
-        self.current
-            .get(&sm_id)
-            .copied()
-            .or_else(|| sm.state_index(sm.start_state_id))
-            .unwrap_or(0)
+        if let Some(i) = self.current.get(&sm_id) {
+            return *i;
+        }
+        // Sync mode: start in the state whose id the shared sync variable holds.
+        if sm.start_state_mode == 1
+            && let Some(v) = usize::try_from(sm.sync_variable)
+                .ok()
+                .and_then(|v| self.variables.get(v))
+            && let Some(i) = sm.state_index(*v as i32)
+        {
+            return i;
+        }
+        sm.state_index(sm.start_state_id).unwrap_or(0)
     }
 
     /// Queues an event by name. Returns false if the graph has no such event.
@@ -335,39 +348,65 @@ impl BehaviorRuntime {
                 }
             }
         }
-        // Active machines, outermost first: the current state's transitions, then wildcards.
+        // Havok delivers an event to every state machine, so several can transition at once: the
+        // additive layers, or the upper- and lower-body machines of a layered state that both
+        // listen for the same event. Choices made for this event must agree on every enclosing
+        // machine; a machine whose ancestor already switched is skipped.
+        let mut chosen: HashMap<NodeId, usize> = HashMap::new();
         let mut machines: Vec<NodeId> = Vec::new();
         for s in &self.active_states {
             if !machines.contains(&s.sm) {
                 machines.push(s.sm);
             }
         }
+        // Active machines, outermost first: the current state's transitions, then wildcards.
         for &sm_id in &machines {
+            if self.ancestor_switched(sm_id, &chosen) {
+                continue;
+            }
             let NodeKind::StateMachine(sm) = &graph.nodes[sm_id].kind else {
                 continue;
             };
             let cur = self.current_index(sm_id);
             let hit = Self::find_transition(&sm.states[cur].transitions, ev)
                 .or_else(|| Self::find_transition(&sm.wildcard_transitions, ev));
-            if let Some(t) = hit {
-                return self.take(sm_id, t) || handled;
+            if let Some(t) = hit
+                && self.take(sm_id, t, &mut chosen)
+            {
+                handled = true;
             }
         }
-        // Global wildcards of inactive machines.
+        // Global wildcards of inactive machines, as long as they agree with what was chosen.
         for (sm_id, sm) in graph.state_machines() {
             if self.active[sm_id] {
                 continue;
             }
             if let Some(t) = Self::find_transition(&sm.wildcard_transitions, ev)
                 && t.flags & transition_flags::IS_GLOBAL_WILDCARD != 0
+                && self.take(sm_id, t, &mut chosen)
             {
-                return self.take(sm_id, t) || handled;
+                handled = true;
             }
         }
         handled
     }
 
-    fn take(&mut self, sm_id: NodeId, t: &Transition) -> bool {
+    /// True if a machine enclosing `sm_id` was switched by this event to a state that is not on
+    /// `sm_id`'s path (so `sm_id` is about to become inactive or was just entered).
+    fn ancestor_switched(&self, sm_id: NodeId, chosen: &HashMap<NodeId, usize>) -> bool {
+        let mut up = self.enclosing[sm_id];
+        while let Some(s) = up {
+            if chosen.get(&s.sm).is_some_and(|&i| i != s.index) {
+                return true;
+            }
+            up = self.enclosing[s.sm];
+        }
+        false
+    }
+
+    /// Takes transition `t` of machine `sm_id` unless it conflicts with `chosen` (the states
+    /// already picked for this event), and records its path in `chosen`.
+    fn take(&mut self, sm_id: NodeId, t: &Transition, chosen: &mut HashMap<NodeId, usize>) -> bool {
         let graph = self.graph.clone();
         let NodeKind::StateMachine(sm) = &graph.nodes[sm_id].kind else {
             return false;
@@ -375,12 +414,29 @@ impl BehaviorRuntime {
         let Some(index) = sm.state_index(t.to_state) else {
             return false;
         };
+        if chosen.get(&sm_id).is_some_and(|&i| i != index) {
+            return false;
+        }
+        let mut up = self.enclosing[sm_id];
+        while let Some(s) = up {
+            if chosen.get(&s.sm).is_some_and(|&i| i != s.index) {
+                return false;
+            }
+            up = self.enclosing[s.sm];
+        }
+        chosen.insert(sm_id, index);
+        let mut up = self.enclosing[sm_id];
+        while let Some(s) = up {
+            chosen.insert(s.sm, s.index);
+            up = self.enclosing[s.sm];
+        }
         let target = StateRef { sm: sm_id, index };
         if self.active[sm_id] && self.current_index(sm_id) == index {
             self.restarted.insert(target);
         }
         self.current.insert(sm_id, index);
         self.pinned.insert(sm_id);
+        self.write_sync(sm_id, index);
         // Nested target state inside the destination state's own machine.
         if t.flags & transition_flags::TO_NESTED_STATE_ID_IS_VALID != 0
             && let Some(g) = sm.states[index].generator
@@ -406,12 +462,16 @@ impl BehaviorRuntime {
         let restarted: HashSet<StateRef> = self.restarted.iter().copied().collect();
         let mut states = Vec::new();
         let mut clips = Vec::new();
-        let mut stack = vec![graph.root];
-        while let Some(id) = stack.pop() {
+        let mut stack: Vec<(NodeId, Option<StateRef>)> = vec![(graph.root, None)];
+        self.active_enclosing.clear();
+        while let Some((id, enc)) = stack.pop() {
             if self.active[id] {
                 continue;
             }
             self.active[id] = true;
+            if let Some(e) = enc {
+                self.active_enclosing.insert(id, e);
+            }
             let node = &graph.nodes[id];
             match &node.kind {
                 NodeKind::StateMachine(sm) => {
@@ -422,9 +482,11 @@ impl BehaviorRuntime {
                         continue;
                     }
                     let index = self.current_index(id);
-                    states.push(StateRef { sm: id, index });
+                    self.write_sync(id, index);
+                    let here = StateRef { sm: id, index };
+                    states.push(here);
                     if let Some(g) = sm.states[index].generator {
-                        stack.push(g);
+                        stack.push((g, Some(here)));
                     }
                 }
                 NodeKind::ManualSelector(m) => {
@@ -435,11 +497,11 @@ impl BehaviorRuntime {
                         .or(m.generators.first())
                         .copied()
                         .flatten();
-                    stack.extend(pick);
+                    stack.extend(pick.map(|p| (p, enc)));
                 }
                 NodeKind::Cmsg(c) => {
                     if let Some(g) = self.pick_cmsg_clip(c) {
-                        stack.push(g);
+                        stack.push((g, enc));
                     }
                 }
                 NodeKind::Clip(_) => clips.push(id),
@@ -448,13 +510,13 @@ impl BehaviorRuntime {
                         if self.layer_enabled(id, i, l)
                             && let Some(g) = l.generator
                         {
-                            stack.push(g);
+                            stack.push((g, enc));
                         }
                     }
                 }
                 _ => {
                     for ch in node.children().into_iter().rev() {
-                        stack.push(ch);
+                        stack.push((ch, enc));
                     }
                 }
             }
@@ -499,7 +561,7 @@ impl BehaviorRuntime {
 
     /// The nearest state machine state enclosing `node`, following the active path.
     fn enclosing_state(&self, node: NodeId) -> Option<StateRef> {
-        self.enclosing[node]
+        self.encl(node)
     }
 
     /// A layer contributes when it is switched on (by default or by its on/off events) and its
@@ -527,8 +589,26 @@ impl BehaviorRuntime {
             .find(|s| self.state_name(**s) == state)?;
         self.clips
             .values()
-            .filter(|c| self.enclosing[c.node] == Some(s))
+            .filter(|c| self.encl(c.node) == Some(s))
             .min_by_key(|c| c.node)
+    }
+
+    /// The enclosing state of `node` on the active path, else its first static parent.
+    fn encl(&self, node: NodeId) -> Option<StateRef> {
+        self.active_enclosing
+            .get(&node)
+            .copied()
+            .or(self.enclosing[node])
+    }
+
+    /// Stores machine `sm_id`'s current state id in its sync variable, if it has one.
+    fn write_sync(&mut self, sm_id: NodeId, index: usize) {
+        if let NodeKind::StateMachine(sm) = &self.graph.nodes[sm_id].kind
+            && let Ok(v) = usize::try_from(sm.sync_variable)
+            && let Some(slot) = self.variables.get_mut(v)
+        {
+            *slot = sm.states[index].id as f32;
+        }
     }
 
     fn bound_index(&self, node: &sekiro_formats::hkb::Node, member: &str, default: i64) -> usize {
@@ -581,7 +661,7 @@ impl BehaviorRuntime {
                 continue;
             };
             let event = match c.anime_end_event_type {
-                0 => self.enclosing[clip].and_then(|s| match &graph.nodes[s.sm].kind {
+                0 => self.encl(clip).and_then(|s| match &graph.nodes[s.sm].kind {
                     NodeKind::StateMachine(sm) => {
                         sm.states[s.index].transitions.first().map(|t| t.event)
                     }
@@ -624,7 +704,7 @@ impl BehaviorRuntime {
             let next = self
                 .clips
                 .values()
-                .filter(|c| self.enclosing[c.node] == Some(StateRef { sm, index: idx }))
+                .filter(|c| self.encl(c.node) == Some(StateRef { sm, index: idx }))
                 .min_by_key(|c| c.node);
             if next.is_some() {
                 best = next;
@@ -632,7 +712,7 @@ impl BehaviorRuntime {
             let child_sm = self
                 .active_states
                 .iter()
-                .find(|s| s.sm != sm && self.enclosing[s.sm] == Some(StateRef { sm, index: idx }))
+                .find(|s| s.sm != sm && self.encl(s.sm) == Some(StateRef { sm, index: idx }))
                 .map(|s| s.sm);
             match child_sm {
                 Some(c) => sm = c,
@@ -656,7 +736,7 @@ impl BehaviorRuntime {
             match self
                 .active_states
                 .iter()
-                .find(|s| s.sm != sm && self.enclosing[s.sm] == Some(here))
+                .find(|s| s.sm != sm && self.encl(s.sm) == Some(here))
             {
                 Some(s) => sm = s.sm,
                 None => break,
@@ -675,9 +755,10 @@ impl BehaviorRuntime {
 
     /// `env(339, slot)`: whether an animation has ended. When a state hook is running, the
     /// question is about that state's own clip (additive-layer states ask with slot 0 too);
-    /// otherwise about the full-body clip. Only slot 0 is modelled.
+    /// otherwise about the full-body clip. Slots 0 and 1 are modelled.
     pub fn anim_ended(&self, slot: i32, hook_state: Option<&str>) -> bool {
-        if slot != 0 {
+        // The player asks with slot 0, NPC scripts with slot 1; both mean the full-body clip.
+        if !(0..=1).contains(&slot) {
             return false;
         }
         hook_state
@@ -767,6 +848,7 @@ mod tests {
                 return_to_previous_state_event: -1,
                 self_transition_mode: 0,
                 start_state_mode: 0,
+                sync_variable: -1,
             }),
         }
     }

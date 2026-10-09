@@ -27,17 +27,32 @@ struct Inner {
 pub struct ClipLibrary(Rc<RefCell<Inner>>);
 
 impl ClipLibrary {
+    /// Opens `dir` (`cache/anim/<chr>`), reading the extractor's `aliases.json` (animation name
+    /// to the decoded clip it plays, chains already resolved) when present.
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self(Rc::new(RefCell::new(Inner {
-            dir: dir.into(),
+        let dir = dir.into();
+        let aliases: std::collections::BTreeMap<String, String> =
+            std::fs::read_to_string(dir.join("aliases.json"))
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+        let lib = Self(Rc::new(RefCell::new(Inner {
+            dir,
             ..Inner::default()
-        })))
+        })));
+        for (name, src) in aliases {
+            if let (Some(a), Some(b)) = (tae::anim_id(&name), tae::anim_id(&src)) {
+                lib.add_alias(a, b);
+            }
+        }
+        lib
     }
 
-    /// Records that animation `id` plays the HKX of `source` (full ids).
+    /// Records that animation `id` plays the HKX of `source` (full ids). The first alias recorded
+    /// for an id wins, so the resolved `aliases.json` takes precedence over single TAE hops.
     pub fn add_alias(&self, id: i64, source: i64) {
         if id != source {
-            self.0.borrow_mut().hkx_alias.insert(id, source);
+            self.0.borrow_mut().hkx_alias.entry(id).or_insert(source);
         }
     }
 

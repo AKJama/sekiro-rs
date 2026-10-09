@@ -4709,8 +4709,10 @@ dependencies = [
 name = "sekiro-sim"
 version = "0.1.0"
 dependencies = [
+ "glam",
  "sekiro-formats",
  "sekiro-hks",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 

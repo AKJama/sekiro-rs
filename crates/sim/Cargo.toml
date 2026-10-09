@@ -10,3 +10,5 @@ license.workspace = true
 sekiro-formats.workspace = true
 sekiro-hks = { path = "../hks" }
 thiserror.workspace = true
+glam.workspace = true
+serde_json.workspace = true

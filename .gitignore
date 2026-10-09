@@ -6,6 +6,8 @@
 !/README.md
 !/STATUS.md
 !/CREDITS.md
+!/LICENSE-MIT
+!/LICENSE-APACHE
 !/Cargo.toml
 !/Cargo.lock
 !/rust-toolchain.toml
@@ -25,3 +27,4 @@
 !/tools/**/*.java
 !/tools/**/pyproject.toml
 !/tools/**/uv.lock
+

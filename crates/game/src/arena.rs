@@ -14,6 +14,7 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 
 use crate::character::{AnimLibrary, Animator, Rig, animate, bind_rigs};
+use crate::deathblow_demo::{self, DeathblowDemo};
 use crate::draw_mask::{DrawMask, MaskSource, apply_draw_masks};
 
 pub struct Options {
@@ -21,13 +22,15 @@ pub struct Options {
     pub screenshot: Option<PathBuf>,
     /// Seconds after both rigs bind at which to take the screenshot.
     pub at: f32,
+    /// Demo: the soldier's posture breaks and Wolf performs the front deathblow.
+    pub deathblow: bool,
 }
 
 #[derive(Component)]
-struct Wolf;
+pub(crate) struct Wolf;
 
 #[derive(Component)]
-struct Soldier {
+pub(crate) struct Soldier {
     next_attack: f32,
 }
 
@@ -36,9 +39,9 @@ struct Hud;
 
 /// Clip libraries, kept outside the ECS lookup path for simple synchronous loading.
 #[derive(Resource)]
-struct Libraries {
-    wolf: AnimLibrary,
-    soldier: AnimLibrary,
+pub(crate) struct Libraries {
+    pub(crate) wolf: AnimLibrary,
+    pub(crate) soldier: AnimLibrary,
 }
 
 #[derive(Resource)]
@@ -51,6 +54,11 @@ struct Capture {
 
 const ATTACK_INTERVAL: f32 = 4.0;
 const SOLDIER_DISTANCE: f32 = 2.4;
+/// Starting distance for the deathblow demo: inside the far deathblow's grab range.
+const DEATHBLOW_DISTANCE: f32 = 2.0;
+
+#[derive(Resource, Clone, Copy)]
+struct SoldierDistance(f32);
 
 pub fn run(options: Options) -> Result<()> {
     let cache = options.cache.canonicalize()?;
@@ -93,6 +101,19 @@ pub fn run(options: Options) -> Result<()> {
         (bind_rigs, (wolf_input, soldier_ai), animate, hud).chain(),
     )
     .add_systems(Update, apply_draw_masks);
+    if options.deathblow {
+        app.insert_resource(DeathblowDemo::load(&cache)?)
+            .insert_resource(SoldierDistance(DEATHBLOW_DISTANCE))
+            .add_systems(
+                Update,
+                (deathblow_demo::drive, deathblow_demo::follow_camera)
+                    .chain()
+                    .after(animate)
+                    .before(hud),
+            );
+    } else {
+        app.insert_resource(SoldierDistance(SOLDIER_DISTANCE));
+    }
     if let Some(path) = options.screenshot {
         if path.exists() {
             std::fs::remove_file(&path)?;
@@ -111,6 +132,7 @@ pub fn run(options: Options) -> Result<()> {
 
 fn setup(
     mut commands: Commands,
+    distance: Res<SoldierDistance>,
     assets: Res<AssetServer>,
     mut libs: ResMut<Libraries>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -119,7 +141,7 @@ fn setup(
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(1.1, 1.9, 3.2)
-            .looking_at(Vec3::new(0.0, 1.0, -SOLDIER_DISTANCE * 0.5), Vec3::Y),
+            .looking_at(Vec3::new(0.0, 1.0, -distance.0 * 0.5), Vec3::Y),
     ));
     commands.spawn((
         DirectionalLight {
@@ -167,7 +189,7 @@ fn setup(
         WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset("c1010.glb"))),
         // In combat the soldier holds his katana: the weapon-draw TAE draw mask.
         DrawMask::new(MaskSource::Combat),
-        Transform::from_xyz(0.0, 0.0, -SOLDIER_DISTANCE)
+        Transform::from_xyz(0.0, 0.0, -distance.0)
             .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
         Rig::new(Arc::new(libs.soldier.skeleton.clone())),
         soldier_anim,
@@ -207,9 +229,13 @@ fn wolf_input(
 
 fn soldier_ai(
     time: Res<Time>,
+    demo: Option<Res<DeathblowDemo>>,
     mut libs: ResMut<Libraries>,
     mut q: Query<(&mut Soldier, &mut Animator, &Rig)>,
 ) {
+    if demo.is_some() {
+        return; // the deathblow demo drives the soldier
+    }
     for (mut soldier, mut anim, rig) in &mut q {
         if !rig.bound {
             continue;
@@ -225,7 +251,11 @@ fn soldier_ai(
     }
 }
 
-fn hud(mut text: Query<&mut Text, With<Hud>>, q: Query<(&Animator, Has<Wolf>)>) {
+fn hud(
+    mut text: Query<&mut Text, With<Hud>>,
+    q: Query<(&Animator, Has<Wolf>)>,
+    demo: Option<Res<DeathblowDemo>>,
+) {
     let Ok(mut text) = text.single_mut() else {
         return;
     };
@@ -233,6 +263,9 @@ fn hud(mut text: Query<&mut Text, With<Hud>>, q: Query<(&Animator, Has<Wolf>)>) 
     for (anim, is_wolf) in &q {
         let who = if is_wolf { "Wolf" } else { "Soldier" };
         s += &format!("{who}: {} {:.2}s\n", anim.clip_name(), anim.time);
+    }
+    if let Some(d) = demo {
+        s += &format!("{}\n", d.status);
     }
     text.0 = s;
 }

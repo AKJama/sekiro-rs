@@ -43,10 +43,24 @@ pub const ENV_CAN_RELEASE_CROUCH: i32 = 3037;
 pub const ACT_SET_VARIABLE: i32 = 148;
 pub const ACT_RESET_INPUT: i32 = 9101;
 pub const ACT_FACE_DIRECTION: i32 = 3025;
+pub const ACT_FACE_LOCK_TARGET: i32 = 2019;
 pub const ENV_FALLING: i32 = 200;
 pub const ENV_FALL_HEIGHT: i32 = 224;
 pub const ENV_DT: i32 = 333;
 pub const ENV_LOCKED_ON: i32 = 1118;
+pub const ENV_DAMAGE_TYPE: i32 = 202;
+pub const ENV_DAMAGE_DIRECTION: i32 = 222;
+pub const ENV_DAMAGE_LEVEL: i32 = 236;
+pub const ENV_GUARD_LEVEL: i32 = 237;
+pub const ENV_TOOK_DAMAGE: i32 = 256;
+pub const ENV_DAMAGE_ELEMENT: i32 = 285;
+pub const ENV_AI_ACTION: i32 = 106;
+pub const ENV_ANIM_EXISTS: i32 = 1114;
+pub const ENV_GUARD_REPELLED: i32 = 3018;
+pub const ENV_JUST_GUARD_REPELLED: i32 = 3019;
+pub const ENV_DAMAGE_FRONT_BACK: i32 = 3032;
+pub const ENV_GUARD_REPEL_DIR: i32 = 3056;
+pub const ENV_JUST_GUARD_REPEL_DIR: i32 = 3057;
 
 /// Action-arm ids used as the argument of env 1106 and 1108.
 pub mod arm {
@@ -92,6 +106,14 @@ pub struct PlayerEnv {
     /// `act(3025, degrees)`: turn to face a direction relative to the current facing
     /// (positive to the left). The body applies and clears it.
     pub face_turn: std::cell::Cell<Option<f32>>,
+    /// `act(2019)`: turn to the lock-on target immediately. The body applies and clears it.
+    pub face_lock_target: std::cell::Cell<bool>,
+    /// The hit being reacted to this step, if any (env 202, 222, 236, 237, 256, 285, ...).
+    pub damage: Option<IncomingDamage>,
+    /// NPC only: the action the AI requests (env 106), an animation-id-like code.
+    pub ai_action: i32,
+    /// Full animation ids this character has (env 1114, "does the animation exist").
+    pub existing_anims: std::rc::Rc<HashSet<i64>>,
     /// Fixed answers for any other `(id, first argument)`; `None` matches any argument.
     pub overrides: Vec<(i32, Option<i32>, f32)>,
 }
@@ -116,6 +138,10 @@ impl Default for PlayerEnv {
             move_cancel: None,
             input_resets: std::cell::Cell::new(0),
             face_turn: std::cell::Cell::new(None),
+            face_lock_target: std::cell::Cell::new(false),
+            damage: None,
+            ai_action: 0,
+            existing_anims: std::rc::Rc::default(),
             overrides: Vec::new(),
         }
     }
@@ -206,6 +232,20 @@ impl Adapter<'_> {
                 .and_then(|a| env.held_ms.get(&a).copied())
                 .unwrap_or(0.0),
             ENV_ACTION_UNLOCKED => truth(arg.is_some_and(|a| env.unlocked.contains(&a))),
+            ENV_AI_ACTION => env.ai_action as f32,
+            ENV_ANIM_EXISTS => truth(arg.is_some_and(|a| env.existing_anims.contains(&(a as i64)))),
+            ENV_TOOK_DAMAGE => truth(env.damage.is_some()),
+            ENV_DAMAGE_TYPE => env.damage.map_or(0.0, |d| d.damage_type as f32),
+            ENV_DAMAGE_LEVEL => env.damage.map_or(0.0, |d| d.level as f32),
+            ENV_DAMAGE_DIRECTION => env.damage.map_or(0.0, |d| d.direction as f32),
+            ENV_DAMAGE_FRONT_BACK => env.damage.map_or(0.0, |d| d.front_back as f32),
+            ENV_GUARD_LEVEL => env.damage.map_or(0.0, |d| d.guard_level as f32),
+            ENV_DAMAGE_ELEMENT => env.damage.map_or(0.0, |d| d.element as f32),
+            ENV_GUARD_REPELLED => env.damage.map_or(0.0, |d| d.repelled as f32),
+            ENV_JUST_GUARD_REPELLED => env.damage.map_or(0.0, |d| d.just_repelled as f32),
+            ENV_GUARD_REPEL_DIR | ENV_JUST_GUARD_REPEL_DIR => {
+                env.damage.map_or(0.0, |d| d.repel_dir as f32)
+            }
             ENV_SP_EFFECT_REF => truth(arg.is_some_and(|a| env.sp_effect_refs.contains(&a))),
             ENV_CAN_RELEASE_CROUCH => 1.0,
             _ => 0.0,
@@ -244,6 +284,9 @@ impl Host for Adapter<'_> {
             && let Some(deg) = args.first().and_then(Value::as_number)
         {
             self.env.face_turn.set(Some(deg));
+        }
+        if id == CommandId::Number(ACT_FACE_LOCK_TARGET) {
+            self.env.face_lock_target.set(true);
         }
         if id == CommandId::Number(ACT_RESET_INPUT) {
             self.env.input_resets.set(self.env.input_resets.get() + 1);
@@ -299,9 +342,27 @@ impl PlayerBehavior {
         behavior_hkx: &Path,
         durations: Box<dyn ClipDurations>,
     ) -> Result<Self, LoadError> {
+        let scripts: Vec<PathBuf> = PLAYER_SCRIPTS.iter().map(|c| script_dir.join(c)).collect();
+        Self::load_scripts(
+            &scripts,
+            behavior_hkx,
+            durations,
+            AnimOffsets::player_default(),
+        )
+    }
+
+    /// Loads any character: its script chunks in load order (for NPCs the shared `c9997.hks`
+    /// first, then their own), its behaviour graph and clip lengths, then runs `Initialize` (if
+    /// the scripts define it) and the initial state hooks.
+    pub fn load_scripts(
+        scripts: &[PathBuf],
+        behavior_hkx: &Path,
+        durations: Box<dyn ClipDurations>,
+        offsets: AnimOffsets,
+    ) -> Result<Self, LoadError> {
         let read = |p: &Path| std::fs::read(p).map_err(|e| LoadError::Io(p.to_owned(), e));
         let graph: Graph = sekiro_formats::hkb::parse(&read(behavior_hkx)?)?;
-        let runtime = BehaviorRuntime::new(Arc::new(graph), AnimOffsets::player_default());
+        let runtime = BehaviorRuntime::new(Arc::new(graph), offsets);
         let mut me = Self {
             vm: Vm::new(),
             runtime,
@@ -312,8 +373,12 @@ impl PlayerBehavior {
         };
         me.vm.seed(1);
         let mut events = Vec::new();
-        for chunk in PLAYER_SCRIPTS {
-            let data = read(&script_dir.join(chunk))?;
+        for path in scripts {
+            let data = read(path)?;
+            let chunk = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             let mut host = Adapter {
                 rt: &mut me.runtime,
                 env: &me.env,
@@ -321,7 +386,7 @@ impl PlayerBehavior {
                 log: None,
                 hook_state: None,
             };
-            me.vm.load(&mut host, chunk, &data)?;
+            me.vm.load(&mut host, &chunk, &data)?;
         }
         let mut errors = Vec::new();
         me.call(&[("Initialize".to_owned(), None)], &mut events, &mut errors);
@@ -431,4 +496,26 @@ impl PlayerBehavior {
     pub fn animation(&self) -> Option<&str> {
         self.runtime.main_clip().map(|c| c.animation.as_str())
     }
+}
+
+/// What the engine reports about the hit a character is reacting to, for one step.
+///
+/// Codes follow `docs/HKS-COMBAT.md`: `damage_type` is env 202 (3 guard, 99999 ordinary hit,
+/// 1000/1003 guarded-and-deflected for the attacker, 1001 guard break, ...), `level` env 236
+/// (`DAMAGE_LEVEL_*`), `direction` env 222 and `front_back` env 3032 (`SELECTOR_DAMAGE_DIR_*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IncomingDamage {
+    pub damage_type: i32,
+    pub level: i32,
+    pub direction: i32,
+    pub front_back: i32,
+    /// env 237: guard level action (above zero lets the full guard reaction play).
+    pub guard_level: i32,
+    /// env 285: special attribute (element), 0 for none.
+    pub element: i32,
+    /// env 3018 / 3019: how the attacker's own blocked or deflected attack recoils.
+    pub repelled: i32,
+    pub just_repelled: i32,
+    /// env 3056 / 3057: deflect direction (1 left, 2 right).
+    pub repel_dir: i32,
 }

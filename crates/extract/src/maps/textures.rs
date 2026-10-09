@@ -45,7 +45,9 @@ impl MapTextures {
             }
             for f in std::fs::read_dir(&area)? {
                 let f = f?.path();
-                if f.extension().is_some_and(|e| e.eq_ignore_ascii_case("tpfbhd")) {
+                if f.extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("tpfbhd"))
+                {
                     bhds.push(f);
                 }
             }

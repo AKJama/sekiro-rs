@@ -386,6 +386,35 @@ pub fn export_chr(cache: &Path, chr: &str, template: Option<&Template>) -> Resul
             });
         }
     }
+    // Aliases: animations without an HKX of their own play another's. Resolve chains across all
+    // TAE files so every name maps straight to a decoded clip.
+    let direct: HashMap<String, String> = tae_files
+        .iter()
+        .flat_map(|f| f.animations.iter())
+        .filter(|a| a.hkx != a.name)
+        .map(|a| (a.name.clone(), a.hkx.clone()))
+        .collect();
+    let mut aliases: BTreeMap<String, String> = BTreeMap::new();
+    for name in direct.keys() {
+        let mut src = name.clone();
+        for _ in 0..16 {
+            match direct.get(&src) {
+                Some(next) if *next != src => src = next.clone(),
+                _ => break,
+            }
+        }
+        if decoded.contains(&src) && !decoded.contains(name) {
+            aliases.insert(name.clone(), src);
+        }
+    }
+    std::fs::write(
+        out_dir.join("aliases.json"),
+        serde_json::to_string_pretty(&aliases)?,
+    )?;
+    eprintln!(
+        "{chr}: {} animations play another's HKX (aliases.json)",
+        aliases.len()
+    );
     let n_anims: usize = tae_files.iter().map(|f| f.animations.len()).sum();
     std::fs::write(
         out_dir.join("tae.json"),

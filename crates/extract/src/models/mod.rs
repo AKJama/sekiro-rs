@@ -222,6 +222,8 @@ fn npc(raw: &Path, params: &Params, id: &str) -> Result<Model> {
 /// row, the face part, and the starting katana with its scabbard.
 fn wolf(raw: &Path, params: &Params) -> Result<Model> {
     const CHARA_INIT_ROW: i32 = 10010; // "Castle": ordinary gear, katana, prosthetic
+    // Dummy poly on `R_Weapon` that the drawn katana is held at (blade along its forward).
+    const WEAPON_DUMMY: i16 = 1;
     // Dummy poly on the c0000 `Sheath` bone where the katana scabbard hangs (left hip).
     const SCABBARD_DUMMY: i16 = 147;
     let skeleton = read_flver(&raw.join("chr/c0000.chrbnd.d/c0000.flver"))?;
@@ -278,9 +280,9 @@ fn wolf(raw: &Path, params: &Params) -> Result<Model> {
             let model = w.int("equipModelId")?;
             let name = format!("WP_A_{model:04}");
             notes.push(format!(
-                "equip_Wep_Right = weapon {wep_id} -> {name} in R_Weapon, scabbard {name}_1 at dummy {SCABBARD_DUMMY} (Sheath bone)"
+                "equip_Wep_Right = weapon {wep_id} -> {name} at dummy {WEAPON_DUMMY} (R_Weapon), scabbard {name}_1 at dummy {SCABBARD_DUMMY} (Sheath bone)"
             ));
-            part_files.push((name.clone(), Some("R_Weapon".to_string())));
+            part_files.push((name.clone(), Some(format!("dmyblade:{WEAPON_DUMMY}"))));
             part_files.push((format!("{name}_1"), Some(format!("dmy:{SCABBARD_DUMMY}"))));
         }
         None => notes.push(format!(
@@ -529,10 +531,19 @@ fn build(raw: &Path, model: &Model, verbose: bool) -> Result<Vec<u8>> {
         for t in &part.tpfs {
             store.load_tpf(t)?;
         }
-        // Parts hung on a dummy poly (`dmy:<ref id>`) get a node at the dummy's frame, parented
-        // to the dummy's attach bone, so they follow that bone when animated.
-        if let Some(id) = part.attach.as_deref().and_then(|a| a.strip_prefix("dmy:"))
-            && !scene.by_name.contains_key(part.attach.as_deref().unwrap_or_default())
+        // Parts hung on a dummy poly get a node at the dummy's frame, parented to the dummy's
+        // attach bone, so they follow that bone when animated. `dmy:<id>` puts the part's +Y on
+        // the dummy's upward vector; `dmyblade:<id>` points the part's -Y (a blade) along the
+        // dummy's forward vector, which is how the hand-held katana sits (see FORMATS.md).
+        let dummy_attach = part.attach.as_deref().and_then(|a| {
+            a.strip_prefix("dmy:")
+                .map(|id| (id, false))
+                .or_else(|| a.strip_prefix("dmyblade:").map(|id| (id, true)))
+        });
+        if let Some((id, blade)) = dummy_attach
+            && !scene
+                .by_name
+                .contains_key(part.attach.as_deref().unwrap_or_default())
         {
             let id: i16 = id.parse()?;
             let d = model
@@ -546,7 +557,12 @@ fn build(raw: &Path, model: &Model, verbose: bool) -> Result<Vec<u8>> {
             let parent_world = usize::try_from(d.parent_bone)
                 .ok()
                 .map_or(Mat4::IDENTITY, |p| skel_world[p]);
-            let frame = parent_world * dummy_matrix(d);
+            let frame = parent_world
+                * if blade {
+                    blade_dummy_matrix(d)
+                } else {
+                    dummy_matrix(d)
+                };
             let local = mirror_matrix(skel_world[bone].inverse() * frame);
             let name = part.attach.clone().unwrap_or_default();
             let n = scene.add(&name, local, Some(bone));
@@ -632,7 +648,10 @@ fn build(raw: &Path, model: &Model, verbose: bool) -> Result<Vec<u8>> {
                 weight_data.push(ww);
             }
             if verbose && zero_weight > 0 {
-                eprintln!("    {} mesh {mi}: {zero_weight}/{count} vertices without weights", part.label);
+                eprintln!(
+                    "    {} mesh {mi}: {zero_weight}/{count} vertices without weights",
+                    part.label
+                );
             }
             let positions: Vec<[f32; 3]> = v.positions.iter().map(|&p| mirror_point(p)).collect();
             let normals: Vec<[f32; 3]> = v
@@ -723,7 +742,10 @@ fn build(raw: &Path, model: &Model, verbose: bool) -> Result<Vec<u8>> {
             continue;
         }
         if verbose {
-            let names: Vec<&str> = joints.iter().map(|&n| scene.nodes[n].name.as_str()).collect();
+            let names: Vec<&str> = joints
+                .iter()
+                .map(|&n| scene.nodes[n].name.as_str())
+                .collect();
             eprintln!("    {} joints: {}", part.label, names.join(" "));
         }
         let ibm = g.mat4s(&ibms);
@@ -872,6 +894,21 @@ fn dummy_matrix(d: &flver::Dummy) -> Mat4 {
     let up = Vec3::from(d.upward).normalize_or(Vec3::Y);
     let x = up.cross(z).normalize_or(Vec3::X);
     let y = z.cross(x);
+    Mat4::from_cols(
+        x.extend(0.0),
+        y.extend(0.0),
+        z.extend(0.0),
+        Vec3::from(d.position).extend(1.0),
+    )
+}
+
+/// A dummy frame for a blade: the part's -Y along `forward`, +Z toward `upward`.
+fn blade_dummy_matrix(d: &flver::Dummy) -> Mat4 {
+    let blade = Vec3::from(d.forward).normalize_or(Vec3::Z);
+    let y = -blade;
+    let up = Vec3::from(d.upward).normalize_or(Vec3::Y);
+    let z = (up - y * up.dot(y)).normalize_or(Vec3::Z);
+    let x = y.cross(z);
     Mat4::from_cols(
         x.extend(0.0),
         y.extend(0.0),

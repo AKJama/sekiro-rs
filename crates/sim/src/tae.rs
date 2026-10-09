@@ -54,10 +54,20 @@ pub enum TaeKind {
     SpEffect(i32),
     TurnSpeed(f32),
     VelocityChange(i32),
-    Attack { judge: i32, attack_type: i32 },
-    Bullet { judge: i32, dummy_poly: i32 },
-    PcBehavior { judge: i32 },
+    Attack {
+        judge: i32,
+        attack_type: i32,
+    },
+    Bullet {
+        judge: i32,
+        dummy_poly: i32,
+    },
+    PcBehavior {
+        judge: i32,
+    },
     IFrames(i32),
+    /// `Blend` (16): crossfade into this animation over the event's length.
+    Blend,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -247,6 +257,21 @@ impl TaeDb {
         self.anims.get(&tae::anim_id(name)?)
     }
 
+    /// Full ids of every animation with a TAE entry (what env 1114 "does the animation exist"
+    /// is answered from).
+    pub fn anim_ids(&self) -> impl Iterator<Item = i64> + '_ {
+        self.anims.keys().copied()
+    }
+
+    /// Crossfade length into `name`: the end of its `Blend` event that starts at 0, if any.
+    pub fn blend_in(&self, name: &str) -> Option<f32> {
+        self.anim(name)?
+            .events
+            .iter()
+            .find(|e| e.kind == TaeKind::Blend && e.start <= 0.001)
+            .map(|e| e.end)
+    }
+
     /// Full id to HKX source id, for every animation that borrows another's HKX.
     pub fn hkx_aliases(&self) -> impl Iterator<Item = (i64, i64)> + '_ {
         self.anims
@@ -276,6 +301,7 @@ fn decode(template: &Template, e: &tae::TaeEvent) -> Option<TimedEvent> {
             judge: int("BehaviorJudgeID")?,
         },
         954 => TaeKind::IFrames(int("IFrameType").unwrap_or(0)),
+        16 => TaeKind::Blend,
         _ => return None,
     };
     Some(TimedEvent {
@@ -376,6 +402,7 @@ impl TaeRuntime {
                         f.attacks.push(e.clone());
                     }
                     TaeKind::IFrames(kind) => f.iframes.push(*kind),
+                    TaeKind::Blend => {}
                 }
             }
         }

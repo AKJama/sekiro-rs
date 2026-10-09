@@ -189,19 +189,14 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
         if missing.is_empty() {
             String::new()
         } else {
-            format!(
-                " (e.g. {:?})",
-                missing.iter().take(8).collect::<Vec<_>>()
-            )
+            format!(" (e.g. {:?})", missing.iter().take(8).collect::<Vec<_>>())
         }
     );
 
     // Pass 3: one GLB per model.
     let failed = AtomicUsize::new(0);
     let uri = |name: &str| -> Option<String> {
-        written
-            .contains(name)
-            .then(|| format!("tex/{name}.dds"))
+        written.contains(name).then(|| format!("tex/{name}.dds"))
     };
     let models: Vec<(String, Value)> = used
         .par_iter()
@@ -248,7 +243,11 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
     let mut piece_rows = Vec::new();
     let mut bmin = Vec3::splat(f32::MAX);
     let mut bmax = Vec3::splat(f32::MIN);
-    for p in msb.parts.iter().filter(|p| p.kind == msb::PartKind::MapPiece) {
+    for p in msb
+        .parts
+        .iter()
+        .filter(|p| p.kind == msb::PartKind::MapPiece)
+    {
         let model = model_name(p);
         let Some(m) = models.get(&model) else {
             continue;
@@ -262,6 +261,7 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
         let mut row = transform_json(p);
         row["name"] = json!(p.name);
         row["model"] = json!(model);
+        row["draw_groups"] = json!(groups(p, 1));
         piece_rows.push(row);
     }
     let rows_of = |kinds: &[msb::PartKind]| -> Vec<Value> {
@@ -284,6 +284,8 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
                 if let Some(c) = &p.collision {
                     row["hit_filter_id"] = json!(c.hit_filter_id);
                     row["map_name_id"] = json!(c.map_name_id);
+                    row["display_groups"] = json!(groups(p, 0));
+                    row["draw_groups"] = json!(groups(p, 1));
                 }
                 row
             })
@@ -291,7 +293,7 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
     };
 
     // Collision.
-    let (collision, collision_note) = export_collision(&raw, id, &msb, oodle)?;
+    let (collision, ranges, collision_note) = export_collision(&raw, id, &msb, oodle)?;
     std::fs::write(out.join("collision.bin"), collision.to_bytes()?)?;
     eprintln!(
         "  collision: {} triangles, {} vertices ({collision_note})",
@@ -309,17 +311,22 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
         "objects": rows_of(&[msb::PartKind::Object]),
         "enemies": rows_of(&[msb::PartKind::Enemy, msb::PartKind::DummyEnemy]),
         "players": rows_of(&[msb::PartKind::Player]),
-        "collisions": rows_of(&[msb::PartKind::Collision]),
+        "collisions": rows_of(&[msb::PartKind::Collision])
+            .into_iter()
+            .map(|mut row| {
+                if let Some(r) = row["name"].as_str().and_then(|n| ranges.get(n)) {
+                    row["triangles"] = json!(r);
+                }
+                row
+            })
+            .collect::<Vec<_>>(),
         "collision": {
             "file": "collision.bin",
             "triangles": collision.triangle_count(),
             "note": collision_note,
         },
     });
-    std::fs::write(
-        out.join("layout.json"),
-        serde_json::to_vec_pretty(&layout)?,
-    )?;
+    std::fs::write(out.join("layout.json"), serde_json::to_vec_pretty(&layout)?)?;
     eprintln!(
         "  layout: {} pieces, bounds {:?}..{:?}; wrote {}",
         piece_rows.len(),
@@ -328,6 +335,15 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
         out.display()
     );
     Ok(())
+}
+
+/// One 8-word group block of a part's mask struct: 0 display groups, 1 draw groups
+/// (SoulsFormats' MSBS `UnkStruct1` layout: display[8], draw[8], collision mask[32]).
+fn groups(p: &msb::Part, block: usize) -> Vec<u32> {
+    p.masks
+        .get(block * 8..block * 8 + 8)
+        .map(|g| g.to_vec())
+        .unwrap_or_default()
 }
 
 fn corners(min: &Value, max: &Value) -> Vec<Vec3> {
@@ -349,23 +365,21 @@ fn corners(min: &Value, max: &Value) -> Vec<Vec3> {
 
 /// Decodes the high-resolution hit collision of every collision part in the MSB.
 ///
-/// The HKX vertices are already in map space (their bodies carry identity transforms), so the
-/// MSB part transform is not applied; see docs/FORMATS.md.
+/// HKX vertices are in the collision model's own space (the hknp bodies carry identity
+/// transforms); the MSB collision part transform places them, like any other part. Checked
+/// against the player start points, which sit within a metre of collision only with it.
 fn export_collision(
     raw: &Path,
     id: &str,
     msb: &msb::Msb,
     oodle: &'static Oodle,
-) -> Result<(hknp::CollisionMesh, String)> {
+) -> Result<(hknp::CollisionMesh, HashMap<String, [usize; 2]>, String)> {
     let tail = &id[1..];
     let dir = raw.join(format!("map/{id}"));
     let bhd = std::fs::read(dir.join(format!("h{tail}.hkxbhd")))?;
     let bdt = std::fs::read(dir.join(format!("h{tail}.hkxbdt")))?;
     let files = bxf4::parse(&bhd, &bdt)?;
-    let compendium = match files
-        .iter()
-        .find(|f| f.file_name().contains("compendium"))
-    {
+    let compendium = match files.iter().find(|f| f.file_name().contains("compendium")) {
         Some(f) => Some(Compendium::parse(&f.contents(Some(oodle))?)?),
         None => None,
     };
@@ -373,38 +387,41 @@ fn export_collision(
         .iter()
         .map(|f| (f.file_name().to_ascii_lowercase(), f))
         .collect();
-    let wanted: BTreeSet<String> = msb
+    let parts: Vec<&msb::Part> = msb
         .parts
         .iter()
         .filter(|p| p.kind == msb::PartKind::Collision)
+        .collect();
+    let wanted: BTreeSet<String> = parts
+        .iter()
         .filter_map(|p| msb.model(p).map(|m| m.name.clone()))
         .collect();
-    let decoded: Vec<Result<(hknp::CollisionMesh, hknp::DecodeStats)>> = wanted
+    let decoded: Vec<(String, Result<(hknp::CollisionMesh, hknp::DecodeStats)>)> = wanted
         .par_iter()
         .filter_map(|model| {
             let digits = model.trim_start_matches('h');
             let f = by_name.get(&format!("h{tail}_{digits}.hkx.dcx"))?;
-            Some((|| {
+            let r = (|| {
                 let data = f.contents(Some(oodle))?;
-                let (m, s) = hknp::decode(&data, compendium.as_ref())
-                    .with_context(|| format!("decoding {}", f.name))?;
-                Ok((m, s))
-            })())
+                hknp::decode(&data, compendium.as_ref())
+                    .with_context(|| format!("decoding {}", f.name))
+            })();
+            Some((model.clone(), r))
         })
         .collect();
-    let mut mesh = hknp::CollisionMesh::default();
+    let mut by_model = HashMap::new();
     let mut total = hknp::DecodeStats::default();
     let mut errors = 0;
-    for r in decoded {
+    for (model, r) in decoded {
         match r {
             Ok((m, s)) => {
-                mesh.extend(&m);
                 total.bodies += s.bodies;
                 total.sections += s.sections;
                 total.primitives += s.primitives;
                 total.quads += s.quads;
                 total.convex_skipped += s.convex_skipped;
                 total.unmatched_material += s.unmatched_material;
+                by_model.insert(model, m);
             }
             Err(e) => {
                 errors += 1;
@@ -412,12 +429,45 @@ fn export_collision(
             }
         }
     }
-    for v in &mut mesh.vertices {
-        v[0] = -v[0];
+    let mut mesh = hknp::CollisionMesh::default();
+    let mut ranges = HashMap::new();
+    for p in &parts {
+        let Some(model) = msb.model(p).and_then(|m| by_model.get(&m.name)) else {
+            continue;
+        };
+        let world = mirror(p.matrix());
+        let mut placed = model.clone();
+        for v in &mut placed.vertices {
+            // Mirror first (FromSoftware space -> Bevy space), then the mirrored part matrix.
+            *v = world
+                .transform_point3(Vec3::new(-v[0], v[1], v[2]))
+                .to_array();
+        }
+        ranges.insert(
+            p.name.clone(),
+            [mesh.triangle_count(), placed.triangle_count()],
+        );
+        mesh.extend(&placed);
     }
+
+    // Validation: every player start should stand on collision.
+    let verts: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from(*v)).collect();
+    let start_gap = msb
+        .parts
+        .iter()
+        .filter(|p| p.kind == msb::PartKind::Player)
+        .map(|p| {
+            let s = Vec3::new(-p.position[0], p.position[1], p.position[2]);
+            verts
+                .par_iter()
+                .map(|v| v.distance(s))
+                .reduce(|| f32::MAX, f32::min)
+        })
+        .fold(0.0f32, f32::max);
     let materials: BTreeSet<u32> = mesh.materials.iter().copied().collect();
     let note = format!(
-        "{} collision models, {} failed, {} bodies, {} sections, {} primitives ({} quads, {} convex skipped), {} without material, {} distinct materials",
+        "{} collision parts, {} models, {} failed, {} bodies, {} sections, {} primitives ({} quads, {} convex skipped), {} triangles without material, {} distinct materials, furthest player start {:.2} m from a collision vertex",
+        parts.len(),
         wanted.len(),
         errors,
         total.bodies,
@@ -426,7 +476,8 @@ fn export_collision(
         total.quads,
         total.convex_skipped,
         total.unmatched_material,
-        materials.len()
+        materials.len(),
+        start_gap,
     );
-    Ok((mesh, note))
+    Ok((mesh, ranges, note))
 }

@@ -6,10 +6,12 @@
 //! controls and move the character, and [`character`] puts them together into a playable Wolf.
 //! [`scenario`] and [`demo`] hold scripted input for tests and CLIs.
 
+pub mod ai;
 pub mod behavior;
 pub mod body;
 pub mod character;
 pub mod clips;
+pub mod hits;
 pub mod combat;
 pub mod deathblow;
 pub mod demo;
@@ -19,6 +21,6 @@ pub mod scenario;
 pub mod tae;
 
 pub use behavior::{AnimOffsets, BehaviorRuntime, ClipDurations, ClipState, HookCall, HookKind};
-pub use character::{PlayerCharacter, StepReport};
+pub use character::{Character, ControlKind, NpcControl, PlayerCharacter, StepReport};
 pub use input::{Buttons, InputFrame};
 pub use player::{PlayerBehavior, PlayerEnv, TickReport};
