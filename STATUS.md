@@ -40,6 +40,13 @@ Useful flags: `--play` alone uses a flat floor; `--lock-on`, `--no-enemy`, `--si
 
 Uncommitted files in the working tree belong to these tasks; check `git status` and build before committing.
 
+### Leads for grapple, ledges and Mikiri (found, not built)
+
+- Ledges: `map/<id>/<id>.edgebhd/.edgebdt` hold one `.edge` file per collision part (16 files, 255 edges on m11). Header `u32 version=4, u32 count, u32 collision number, u32 0`, then 64-byte records: two vec4 endpoints, a zero vec4, `u32 chain id`, `u32 flags` (low byte 2 or 3, second byte 0..3 or 10, meaning unknown), 8 bytes padding. Endpoints are in the collision part's local space; apply its layout transform. `.wallbhd/.wallbdt` is likely wall-hug data, undecoded.
+- Grapple: map pieces have no dummies; object `o000100` (placed 67 times on m11) carries dummy 90 and is very likely the grapple point. Search rules: WirePointSearchParam row 0 (act 3 to 15 m, find to 25 m, filter and soft-lock boxes); WireSetParam picks search rows per area; WireVariationParam (angles, marker type, homing offset) is probably set per placed object in MSB fields the parser still skips.
+- Mikiri: find the soldier's perilous thrusts (AtkParam rows that disable guarding) and the warning effect; the counter likely uses an attack-cancel window plus a ThrowParam row, wired like deathblows in `crates/sim/src/duel.rs`.
+- Study tools: `crates/sim/examples/bxf_list.rs`, `dummy_census.rs`.
+
 ## Decision needed from the user
 
 - 62 of 174 sound banks (`sm*`, `smain`, `vm*`, `xm*`, `rm*`: footsteps, most hit sounds, voices, music) are encrypted FSB. Reading them means decrypting with a key from the game. Ask before touching them; without them, decode the FEV event-record index next (see `docs/AUDIO.md`).
