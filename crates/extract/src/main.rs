@@ -20,8 +20,8 @@ const DEFAULT_GAME: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Sekir
 #[derive(Parser)]
 #[command(about = "Extract data from your own Sekiro install into cache/")]
 struct Cli {
-    /// Sekiro install folder (read only).
-    #[arg(long, default_value = DEFAULT_GAME)]
+    /// Sekiro install folder (read only). Also settable with the SEKIRO_DIR environment variable.
+    #[arg(long, env = "SEKIRO_DIR", default_value = DEFAULT_GAME)]
     game: PathBuf,
     /// Output cache folder.
     #[arg(long, default_value = "cache")]
