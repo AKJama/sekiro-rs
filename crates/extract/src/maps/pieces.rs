@@ -122,6 +122,9 @@ pub fn skip_material(mtd_name: &str) -> bool {
         || m.contains("fog")
 }
 
+/// Sign applied to the FLVER bitangent sign after the X mirror (see the TANGENT export).
+const TANGENT_W_MIRROR: f32 = 1.0;
+
 pub struct BuiltPiece {
     pub glb: Vec<u8>,
     pub triangles: usize,
@@ -181,6 +184,29 @@ pub fn build(
                 })
                 .collect();
             attributes["NORMAL"] = json!(g.vec3(&normals, false));
+            // FLVER tangents, so Bevy need not generate MikkTSpace tangents at load. Mirrored
+            // on X like the normals; the handedness flips with the mirror (checked against
+            // Bevy's generated tangents in crates/game/tests/map_tangents.rs).
+            if choice.normal.is_some()
+                && let Some(t) = v.tangents.first()
+                && t.len() == count
+            {
+                let tangents: Vec<[f32; 4]> = t
+                    .iter()
+                    .zip(&normals)
+                    .map(|(t, n)| {
+                        let n = Vec3::from(*n);
+                        let t3 = Vec3::new(-t[0], t[1], t[2]);
+                        // Gram-Schmidt against the normal; fall back to any perpendicular.
+                        let t3 = (t3 - n * n.dot(t3))
+                            .try_normalize()
+                            .unwrap_or_else(|| n.any_orthonormal_vector());
+                        let w = if t[3] < 0.0 { 1.0 } else { -1.0 } * TANGENT_W_MIRROR;
+                        [t3.x, t3.y, t3.z, w]
+                    })
+                    .collect();
+                attributes["TANGENT"] = json!(g.vec4(&tangents));
+            }
         }
         for (c, uv) in v.uvs.iter().take(2).enumerate() {
             if uv.len() == count {

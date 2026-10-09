@@ -40,6 +40,10 @@ Useful flags: `--play` alone uses a flat floor; `--lock-on`, `--no-enemy`, `--si
 
 Uncommitted files in the working tree belong to these tasks; check `git status` and build before committing.
 
+## Decision needed from the user
+
+- 62 of 174 sound banks (`sm*`, `smain`, `vm*`, `xm*`, `rm*`: footsteps, most hit sounds, voices, music) are encrypted FSB. Reading them means decrypting with a key from the game. Ask before touching them; without them, decode the FEV event-record index next (see `docs/AUDIO.md`).
+
 ## Known issues
 
 - Wolf's max HP/posture come from CalcCorrectGraph at progression level 1; the real progression input is not yet traced.

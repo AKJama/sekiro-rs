@@ -22,7 +22,7 @@ use bevy::asset::{AssetPlugin, LoadState, UntypedAssetId};
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
-use bevy::light::{CascadeShadowConfigBuilder, GlobalAmbientLight};
+use bevy::light::GlobalAmbientLight;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::pbr::wireframe::{Wireframe, WireframeColor, WireframePlugin};
 use bevy::pbr::{DistanceFog, FogFalloff};
@@ -30,6 +30,8 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::world_serialization::WorldInstanceReady;
 use serde_json::Value;
+
+use crate::lighting::{MapLighting, apply_lighting, spawn_lights};
 
 pub struct Options {
     pub cache: PathBuf,
@@ -54,6 +56,9 @@ pub struct Options {
     /// Also spawn MSB objects. Off by default: many are event-state props (siege barricades,
     /// story-gated doors) that the game enables from its event scripts, which we do not run.
     pub objects: bool,
+    /// Time of day (hours) and draw param override, see [`MapScene`].
+    pub hour: f32,
+    pub gparam: Option<String>,
 }
 
 /// How map pieces are culled by draw groups. In the game, the hit collision the player stands
@@ -98,6 +103,8 @@ struct CollisionPart {
     max: Vec2,
     display: [u32; 8],
     draw: [u32; 8],
+    /// Light set id of the collision's gparam config (-1 when none).
+    light_set: i32,
 }
 
 #[derive(Resource)]
@@ -206,6 +213,15 @@ pub struct MapScene {
     pub groups: GroupMode,
     /// Enemy and player start markers.
     pub markers: bool,
+    /// Time of day in hours for the draw params (light sets are keyed by time).
+    pub hour: f32,
+    /// Draw param file stem (`param/drawparam/<stem>.gparam`); default `<mXX>_<YY>_0000`.
+    pub gparam: Option<String>,
+}
+
+/// Default draw param of a map: `m11_00_00_00` -> `m11_00_0000`.
+fn default_gparam(id: &str) -> String {
+    format!("{}_0000", id.get(..6).unwrap_or(id))
 }
 
 /// The entity whose position picks the draw groups (the free camera, or the player).
@@ -278,10 +294,28 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
                 max,
                 display: groups8(&row["display_groups"]),
                 draw: groups8(&row["draw_groups"]),
+                light_set: row["light_set"].as_i64().unwrap_or(-1) as i32,
             });
         }
     }
     let mode = scene.groups;
+    let id = dir
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let stem = scene.gparam.clone().unwrap_or_else(|| default_gparam(&id));
+    // `dir` is canonical (verbatim on Windows), so walk up instead of joining "..".
+    let cache = dir
+        .parent()
+        .and_then(Path::parent)
+        .context("map folder has no cache above it")?;
+    let gparam_path = cache.join(format!("raw/param/drawparam/{stem}.gparam"));
+    let gparam = sekiro_formats::gparam::parse(
+        &std::fs::read(&gparam_path)
+            .with_context(|| format!("reading {}", gparam_path.display()))?,
+    )?;
+    let hour = scene.hour;
     app.add_plugins(WireframePlugin::default())
         .insert_resource(ClearColor(SKY))
         .insert_resource(GlobalAmbientLight {
@@ -302,6 +336,13 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
             checked_at: None,
             dirty: true,
         })
+        .insert_resource(MapLighting {
+            gparam,
+            hour,
+            light_set: 0,
+            applied: None,
+            source: stem,
+        })
         .init_resource::<Pending>()
         .add_observer(|_: On<WorldInstanceReady>, mut pending: ResMut<Pending>| {
             pending.ready += 1;
@@ -313,7 +354,7 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
                 camera_environment,
                 toggle_collision,
                 track_loading,
-                (pick_groups, apply_groups).chain(),
+                (pick_groups, apply_groups, apply_lighting).chain(),
             ),
         );
     Ok(())
@@ -399,6 +440,8 @@ pub fn run(options: Options) -> Result<()> {
             objects: options.objects,
             groups: options.groups,
             markers: true,
+            hour: options.hour,
+            gparam: options.gparam,
         },
     )?;
     app.insert_resource(Fly {
@@ -462,22 +505,7 @@ fn spawn_map(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 14_000.0,
-            color: Color::srgb(1.0, 0.95, 0.86),
-            shadow_maps_enabled: true,
-            ..default()
-        },
-        CascadeShadowConfigBuilder {
-            num_cascades: 4,
-            maximum_distance: 250.0,
-            first_cascade_far_bound: 15.0,
-            ..default()
-        }
-        .build(),
-        Transform::from_xyz(0.0, 0.0, 0.0).looking_to(Vec3::new(0.45, -0.75, 0.35), Vec3::Y),
-    ));
+    spawn_lights(&mut commands);
 
     let scene = &layout.scene;
     if !scene.no_pieces {
@@ -710,6 +738,7 @@ fn pick_groups(
     keys: Res<ButtonInput<KeyCode>>,
     layout: Res<Layout>,
     mut groups: ResMut<Groups>,
+    mut lighting: ResMut<MapLighting>,
     focus: Query<&Transform, With<MapFocus>>,
 ) {
     if keys.just_pressed(KeyCode::KeyG) {
@@ -752,7 +781,11 @@ fn pick_groups(
         GroupMode::Display => part.display,
         _ => part.draw,
     };
+    let light_set = part.light_set;
     groups.current = Some(pi);
+    if light_set >= 0 && lighting.light_set != light_set {
+        lighting.light_set = light_set;
+    }
     // A collision with no groups leaves the previous selection in force.
     if g.iter().any(|&w| w != 0) && groups.active != Some(g) {
         groups.active = Some(g);

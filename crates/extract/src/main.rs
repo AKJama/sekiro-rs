@@ -14,6 +14,7 @@ mod anims;
 mod maps;
 mod models;
 mod params;
+mod sound;
 
 const DEFAULT_GAME: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Sekiro";
 
@@ -73,6 +74,15 @@ enum Command {
         #[arg(long)]
         summary: bool,
     },
+    /// Decode FSB5 sound banks in cache/raw/sound to WAV in cache/sound/<bank>/ with an
+    /// events.json per bank. Needs the Vorbis headers from tools/sound/vorbis_setups.py.
+    Sound {
+        /// Banks to decode (e.g. c1010 main). Defaults to main, c1010 and m11.
+        banks: Vec<String>,
+        /// Decode every unencrypted bank (about 2.3 GB of WAV).
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -82,6 +92,7 @@ fn main() -> Result<()> {
         Command::ModelInfo { path, dump } => return models::info(path, dump.as_deref()),
         Command::Params => return params::export(&cli.cache),
         Command::Anims { chrs } => return anims::export(&cli.cache, chrs),
+        Command::Sound { banks, all } => return sound::export(&cli.cache, banks, *all),
         Command::Map { id, summary } => {
             return if *summary {
                 maps::summary(&cli.cache, id)
@@ -109,7 +120,8 @@ fn main() -> Result<()> {
         | Command::ModelInfo { .. }
         | Command::Params
         | Command::Anims { .. }
-        | Command::Map { .. } => unreachable!(),
+        | Command::Map { .. }
+        | Command::Sound { .. } => unreachable!(),
     }
     Ok(())
 }

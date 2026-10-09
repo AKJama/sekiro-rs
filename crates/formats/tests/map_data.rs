@@ -98,3 +98,21 @@ fn m11_collision_decodes() {
     let bytes = mesh.to_bytes().unwrap();
     assert_eq!(hknp::CollisionMesh::from_bytes(&bytes).unwrap(), mesh);
 }
+
+#[test]
+fn m11_light_set_reads() {
+    let path = map_dir().join("../param/drawparam/m11_00_0000.gparam");
+    let Some(data) = read(&path) else {
+        return;
+    };
+    let g = sekiro_formats::gparam::parse(&data).unwrap();
+    assert_eq!(g.groups.len(), 23);
+    let angle = g.param("LightSet", "Directional Light Angle0").unwrap();
+    let a = angle.at(0, 12.0).unwrap();
+    assert!(
+        (a[0] + 1.361).abs() < 1e-3 && (a[1] - 2.094).abs() < 1e-3,
+        "{a:?}"
+    );
+    let colour = g.param("LightSet", "Directional Light DiffColor0").unwrap();
+    assert_eq!(colour.at(0, 18.0).unwrap().len(), 4);
+}

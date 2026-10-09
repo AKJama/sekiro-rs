@@ -119,6 +119,8 @@ pub struct Part {
     pub collision: Option<CollisionData>,
     /// For connect collisions: (collision part index, target map id bytes).
     pub connect: Option<(i32, [u8; 4])>,
+    /// Draw-param selection: light set, fog, light scattering and environment map ids.
+    pub gparam: Option<[i32; 4]>,
 }
 
 impl Part {
@@ -227,6 +229,7 @@ fn read_part(data: &[u8], start: usize) -> Result<Part> {
     let unk2 = r.i64()?;
     let entity = r.offset64()?;
     let type_data = r.offset64()?;
+    let gparam = r.i64()?;
 
     let mut part = Part {
         name: utf16z(data, start + name_offset)?,
@@ -245,7 +248,12 @@ fn read_part(data: &[u8], start: usize) -> Result<Part> {
         enemy: None,
         collision: None,
         connect: None,
+        gparam: None,
     };
+    if gparam > 0 {
+        let mut g = Reader::at(data, start + gparam as usize);
+        part.gparam = Some([g.i32()?, g.i32()?, g.i32()?, g.i32()?]);
+    }
 
     if unk1 > 0 {
         let mut u = Reader::at(data, start + unk1 as usize);

@@ -60,6 +60,9 @@ pub struct Options {
     /// Place Wolf at `x, y, z` (on the floor at or below `y + 1`) facing `yaw` degrees,
     /// instead of at a start point.
     pub spawn: Option<[f32; 4]>,
+    /// Time of day (hours) and draw param override for the map lighting.
+    pub hour: f32,
+    pub gparam: Option<String>,
 }
 
 /// The map's collision, for the camera; absent on the flat floor.
@@ -249,6 +252,9 @@ pub fn run(options: Options) -> Result<()> {
         lock_requested: options.lock_on,
     })
     .init_resource::<combat_hud::Gauges>()
+    .add_plugins(crate::audio::GameAudioPlugin {
+        cache: cache.clone(),
+    })
     .add_systems(Startup, setup)
     .add_systems(FixedUpdate, simulate)
     .add_systems(
@@ -279,6 +285,8 @@ pub fn run(options: Options) -> Result<()> {
                 objects: false,
                 groups: map::GroupMode::Draw,
                 markers: false,
+                hour: options.hour,
+                gparam: options.gparam.clone(),
             },
         )?;
         app.insert_resource(MapCollision(world));
@@ -496,6 +504,8 @@ fn simulate(
     live: Res<LiveInput>,
     orbit: Res<Orbit>,
     rigs: Query<&Rig, With<Actor>>,
+    sounds: Res<crate::audio::SoundLibrary>,
+    mut cues: MessageWriter<crate::audio::SoundCue>,
 ) {
     // Hold the simulation until the models are on screen, so scripted runs line up with frames.
     if rigs.is_empty() || !rigs.iter().all(|r| r.bound) {
@@ -515,6 +525,7 @@ fn simulate(
         frame.buttons.lock_on = true;
     }
     let report = sim.duel.step(&frame, dt);
+    crate::audio::emit(&sim.duel, &report, &sounds, &mut cues);
     for (i, r) in [&report.player, &report.enemy].into_iter().enumerate() {
         if !r.behavior.script_errors.is_empty() {
             warn!("script errors ({i}): {:?}", r.behavior.script_errors);

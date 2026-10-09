@@ -11,7 +11,7 @@ name = "sekiro-rs"
 path = "src/main.rs"
 
 [dependencies]
-bevy = { version = "=0.19.1", default-features = false, features = ["3d", "png", "dds", "ui", "default_font"] }
+bevy = { version = "=0.19.1", default-features = false, features = ["3d", "png", "dds", "ui", "default_font", "bevy_audio", "wav"] }
 anyhow.workspace = true
 sekiro-formats.workspace = true
 sekiro-sim.workspace = true

@@ -11,10 +11,12 @@
 //!   `sekiro-extract map`.
 
 mod arena;
+mod audio;
 mod character;
 mod combat_hud;
 mod deathblow_demo;
 mod draw_mask;
+mod lighting;
 mod map;
 mod play;
 mod viewer;
@@ -70,6 +72,8 @@ fn main() -> anyhow::Result<()> {
             uncapped: args.iter().any(|a| a == "--uncapped"),
             groups: map::GroupMode::parse(arg_value(&args, "--groups").as_deref())?,
             objects: args.iter().any(|a| a == "--objects"),
+            hour: arg_f32(&args, "--hour", 16.0)?,
+            gparam: arg_value(&args, "--gparam"),
         });
     }
     if args.iter().any(|a| a == "--play") {
@@ -94,6 +98,8 @@ fn main() -> anyhow::Result<()> {
             start: arg_f32(&args, "--start", 0.0)? as usize,
             spawn: map::parse_camera(arg_value(&args, "--spawn").as_deref())?
                 .map(|[x, y, z, yaw, _]| [x, y, z, yaw]),
+            hour: arg_f32(&args, "--hour", 16.0)?,
+            gparam: arg_value(&args, "--gparam"),
         });
     }
     if args.iter().any(|a| a == "--arena") {

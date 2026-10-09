@@ -74,6 +74,13 @@ pub fn summary(cache: &Path, id: &str) -> Result<()> {
         }
     }
     println!("collision parts by map name id: {names:?}");
+    let mut sets: BTreeMap<[i32; 4], usize> = BTreeMap::new();
+    for p in &m.parts {
+        if let Some(g) = p.gparam {
+            *sets.entry(g).or_default() += 1;
+        }
+    }
+    println!("parts by gparam [light set, fog, scattering, env map]: {sets:?}");
     for p in m.parts.iter().filter(|p| p.kind == msb::PartKind::Player) {
         println!(
             "player start {} at {:?}, yaw {}",
@@ -327,6 +334,7 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
                     row["hit_filter_id"] = json!(c.hit_filter_id);
                     row["map_name_id"] = json!(c.map_name_id);
                     row["display_groups"] = json!(groups(p, 0));
+                    row["light_set"] = json!(p.gparam.map_or(-1, |g| g[0]));
                     row["draw_groups"] = json!(groups(p, 1));
                 }
                 row
