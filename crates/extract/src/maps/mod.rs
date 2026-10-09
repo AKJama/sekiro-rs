@@ -1,6 +1,7 @@
 //! `sekiro-extract map <id>`: one map area to `cache/maps/<id>/`:
 //!
-//! - `models/<model>.glb`: one static GLB per map piece model used by the MSB (LOD0 only),
+//! - `models/<model>.glb`: one static GLB per map piece and object model the MSB places
+//!   (LOD0 only),
 //! - `models/tex/<name>.dds`: the textures those GLBs reference, as the original DDS data
 //!   (next to the GLBs so viewers that forbid `..` in asset paths load them),
 //! - `layout.json`: map piece instances, objects, enemies, player starts, in Bevy space,
@@ -112,6 +113,11 @@ fn piece_flver(raw: &Path, id: &str, model: &str) -> PathBuf {
     ))
 }
 
+/// `o000100` -> `raw/obj/o000100.objbnd.d/o000100.flver`.
+fn object_flver(raw: &Path, model: &str) -> PathBuf {
+    raw.join(format!("obj/{model}.objbnd.d/{model}.flver"))
+}
+
 pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
     let raw = cache.join("raw");
     let out = cache.join("maps").join(id);
@@ -121,26 +127,36 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
     let msb = read_msb(cache, id)?;
     let mtds = load_mtds(&raw)?;
 
-    // Map piece models actually placed.
-    let mut used: BTreeMap<String, usize> = BTreeMap::new();
+    // Map piece and object models actually placed, with their FLVER (and object TPF).
+    let mut used: BTreeMap<String, PathBuf> = BTreeMap::new();
+    let mut instances = [0usize; 2];
     for p in &msb.parts {
-        if p.kind == msb::PartKind::MapPiece
-            && let Some(m) = msb.model(p)
-        {
-            *used.entry(m.name.clone()).or_default() += 1;
-        }
+        let Some(m) = msb.model(p) else { continue };
+        let path = match p.kind {
+            msb::PartKind::MapPiece => {
+                instances[0] += 1;
+                piece_flver(&raw, id, &m.name)
+            }
+            msb::PartKind::Object => {
+                instances[1] += 1;
+                object_flver(&raw, &m.name)
+            }
+            _ => continue,
+        };
+        used.entry(m.name.clone()).or_insert(path);
     }
     eprintln!(
-        "{id}: {} map piece instances of {} models",
-        used.values().sum::<usize>(),
+        "{id}: {} map piece and {} object instances of {} models",
+        instances[0],
+        instances[1],
         used.len()
     );
 
     // Pass 1: which textures do the pieces want?
     let wanted: BTreeSet<String> = used
         .par_iter()
-        .filter_map(|(model, _)| {
-            let data = std::fs::read(piece_flver(&raw, id, model)).ok()?;
+        .filter_map(|(_, path)| {
+            let data = std::fs::read(path).ok()?;
             let f = flver::parse(&data).ok()?;
             Some(pieces::wanted_textures(&f, &mtds))
         })
@@ -150,7 +166,14 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
         .collect();
 
     // Pass 2: write the textures that exist.
-    let store = MapTextures::open(&raw, oodle)?;
+    let mut store = MapTextures::open(&raw, oodle)?;
+    // Objects carry their own textures next to their FLVER.
+    for path in used.values() {
+        let tpf = path.with_extension("tpf");
+        if tpf.is_file() {
+            store.add_tpf(&tpf)?;
+        }
+    }
     eprintln!(
         "  {} textures wanted, {} indexed",
         wanted.len(),
@@ -200,11 +223,10 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
     };
     let models: Vec<(String, Value)> = used
         .par_iter()
-        .filter_map(|(model, _)| {
-            let path = piece_flver(&raw, id, model);
+        .filter_map(|(model, path)| {
             let result = (|| -> Result<_> {
                 let data =
-                    std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+                    std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
                 let f = flver::parse(&data)?;
                 let built = pieces::build(&f, &mtds, &uri)?;
                 if built.primitives == 0 {
@@ -241,6 +263,7 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
     // Layout.
     let model_name = |p: &msb::Part| msb.model(p).map(|m| m.name.clone()).unwrap_or_default();
     let mut piece_rows = Vec::new();
+    let mut never_drawn = 0;
     let mut bmin = Vec3::splat(f32::MAX);
     let mut bmax = Vec3::splat(f32::MIN);
     for p in msb
@@ -252,6 +275,14 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
         let Some(m) = models.get(&model) else {
             continue;
         };
+        if p.masks
+            .get(8..16)
+            .is_some_and(|g| g.iter().all(|&w| w == 0))
+        {
+            // No draw groups: the piece never draws.
+            never_drawn += 1;
+            continue;
+        }
         let world = mirror(p.matrix());
         for corner in corners(&m["min"], &m["max"]) {
             let c = world.transform_point3(corner);
@@ -274,6 +305,9 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
                 row["model"] = json!(model_name(p));
                 row["yaw_degrees"] = json!(yaw_degrees(p));
                 row["entity_id"] = json!(p.entity_id);
+                if p.masks.len() >= 16 && p.kind != msb::PartKind::Collision {
+                    row["draw_groups"] = json!(groups(p, 1));
+                }
                 if let Some(e) = &p.enemy {
                     row["npc_param"] = json!(e.npc_param_id);
                     row["think_param"] = json!(e.think_param_id);
@@ -328,7 +362,7 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
     });
     std::fs::write(out.join("layout.json"), serde_json::to_vec_pretty(&layout)?)?;
     eprintln!(
-        "  layout: {} pieces, bounds {:?}..{:?}; wrote {}",
+        "  layout: {} pieces ({never_drawn} without draw groups left out), bounds {:?}..{:?}; wrote {}",
         piece_rows.len(),
         bmin.to_array(),
         bmax.to_array(),

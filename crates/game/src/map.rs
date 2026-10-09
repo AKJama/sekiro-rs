@@ -48,6 +48,9 @@ pub struct Options {
     pub uncapped: bool,
     /// Draw-group culling: which collision group block selects the visible pieces.
     pub groups: GroupMode,
+    /// Also spawn MSB objects. Off by default: many are event-state props (siege barricades,
+    /// story-gated doors) that the game enables from its event scripts, which we do not run.
+    pub objects: bool,
 }
 
 /// How map pieces are culled by draw groups. In the game, the hit collision the player stands
@@ -63,7 +66,7 @@ pub enum GroupMode {
 
 impl GroupMode {
     pub fn parse(s: Option<&str>) -> Result<Self> {
-        Ok(match s.unwrap_or("display") {
+        Ok(match s.unwrap_or("draw") {
             "off" => Self::Off,
             "display" => Self::Display,
             "draw" => Self::Draw,
@@ -123,6 +126,10 @@ struct Fly {
 #[derive(Component)]
 struct CollisionView;
 
+/// Enemy and player start markers.
+#[derive(Component)]
+struct Marker;
+
 #[derive(Component)]
 struct Hud;
 
@@ -179,6 +186,7 @@ struct Layout {
     options_collision: bool,
     no_pieces: bool,
     hide: Vec<String>,
+    objects: bool,
 }
 
 pub fn run(options: Options) -> Result<()> {
@@ -212,7 +220,10 @@ pub fn run(options: Options) -> Result<()> {
             let yaw = player
                 .and_then(|p| p["yaw_degrees"].as_f64())
                 .unwrap_or(0.0) as f32;
-            (pos + Vec3::new(0.0, 1.7, 0.0), yaw, -5.0)
+            // Over the shoulder: 3.5 m behind and 2.2 m above the start point, so its marker
+            // shows. Forward at yaw 0 is -Z.
+            let back = Quat::from_rotation_y(yaw.to_radians()) * Vec3::Z * 3.5;
+            (pos + back + Vec3::new(0.0, 2.2, 0.0), yaw, -12.0)
         }
     };
 
@@ -226,9 +237,10 @@ pub fn run(options: Options) -> Result<()> {
     let mut group_parts = Vec::new();
     if let Some(c) = &collision {
         for row in json["collisions"].as_array().into_iter().flatten() {
-            let Some([first, count]) = row["triangles"].as_array().and_then(|r| {
-                Some([r.first()?.as_u64()? as usize, r.get(1)?.as_u64()? as usize])
-            }) else {
+            let Some([first, count]) = row["triangles"]
+                .as_array()
+                .and_then(|r| Some([r.first()?.as_u64()? as usize, r.get(1)?.as_u64()? as usize]))
+            else {
                 continue;
             };
             let mut min = Vec2::splat(f32::MAX);
@@ -272,7 +284,11 @@ pub fn run(options: Options) -> Result<()> {
             }),
         WireframePlugin::default(),
         FrameTimeDiagnosticsPlugin::default(),
+        bevy::render::diagnostic::RenderDiagnosticsPlugin,
     ))
+    // Keep rendering at full rate when the window is not focused, so screenshots and
+    // `--uncapped` measurements from a terminal are not throttled to 60 Hz.
+    .insert_resource(bevy::winit::WinitSettings::continuous())
     .insert_resource(ClearColor(SKY))
     .insert_resource(GlobalAmbientLight {
         color: Color::srgb(0.80, 0.85, 1.0),
@@ -285,6 +301,7 @@ pub fn run(options: Options) -> Result<()> {
         options_collision: options.collision,
         no_pieces: options.no_pieces,
         hide: options.hide,
+        objects: options.objects,
     })
     .insert_resource(Fly {
         yaw: yaw.to_radians(),
@@ -403,7 +420,15 @@ fn setup(
         let models = &layout.json["models"];
         let mut spawned = 0;
         let mut seen = std::collections::HashSet::new();
-        for row in layout.json["pieces"].as_array().into_iter().flatten() {
+        let kinds: &[&str] = if layout.objects {
+            &["pieces", "objects"]
+        } else {
+            &["pieces"]
+        };
+        let rows = kinds
+            .iter()
+            .flat_map(|k| layout.json[*k].as_array().into_iter().flatten());
+        for row in rows {
             let Some(model) = row["model"].as_str() else {
                 continue;
             };
@@ -431,7 +456,50 @@ fn setup(
             spawned += 1;
         }
         pending.instances = spawned;
-        info!("spawned {spawned} map piece instances");
+        info!("spawned {spawned} map piece and object instances");
+    }
+
+    // Enemy (red, dummy enemies orange) and player start (blue) markers, 1.8 m tall, facing
+    // their MSB direction (the nose points along the character's -Z forward).
+    let body = meshes.add(Capsule3d::new(0.3, 1.2));
+    let nose = meshes.add(Cuboid::new(0.12, 0.12, 0.5));
+    let mut marker_material = |color: Color| {
+        materials.add(StandardMaterial {
+            base_color: color,
+            emissive: color.to_linear() * 0.3,
+            ..default()
+        })
+    };
+    let enemy = marker_material(Color::srgb(0.85, 0.12, 0.10));
+    let dummy = marker_material(Color::srgb(0.95, 0.55, 0.10));
+    let player = marker_material(Color::srgb(0.15, 0.35, 0.95));
+    for (key, default_material) in [("enemies", &enemy), ("players", &player)] {
+        for row in layout.json[key].as_array().into_iter().flatten() {
+            let Some(p) = pose(row) else { continue };
+            let material = if row["dummy"].as_bool() == Some(true) {
+                dummy.clone()
+            } else {
+                default_material.clone()
+            };
+            commands
+                .spawn((
+                    Marker,
+                    Transform::from_translation(p.translation).with_rotation(p.rotation),
+                    Visibility::Visible,
+                ))
+                .with_children(|c| {
+                    c.spawn((
+                        Mesh3d(body.clone()),
+                        MeshMaterial3d(material.clone()),
+                        Transform::from_xyz(0.0, 0.9, 0.0),
+                    ));
+                    c.spawn((
+                        Mesh3d(nose.clone()),
+                        MeshMaterial3d(material),
+                        Transform::from_xyz(0.0, 1.5, -0.35),
+                    ));
+                });
+        }
     }
 
     if let Some(c) = &layout.collision {
@@ -667,15 +735,20 @@ fn apply_groups(
 
 fn toggle_collision(
     keys: Res<ButtonInput<KeyCode>>,
-    mut view: Query<&mut Visibility, With<CollisionView>>,
+    mut collision: Query<&mut Visibility, (With<CollisionView>, Without<Marker>)>,
+    mut markers: Query<&mut Visibility, (With<Marker>, Without<CollisionView>)>,
 ) {
+    let flip = |v: &mut Visibility| {
+        *v = match *v {
+            Visibility::Hidden => Visibility::Visible,
+            _ => Visibility::Hidden,
+        };
+    };
     if keys.just_pressed(KeyCode::KeyC) {
-        for mut v in &mut view {
-            *v = match *v {
-                Visibility::Hidden => Visibility::Visible,
-                _ => Visibility::Hidden,
-            };
-        }
+        collision.iter_mut().for_each(|mut v| flip(&mut v));
+    }
+    if keys.just_pressed(KeyCode::KeyM) {
+        markers.iter_mut().for_each(|mut v| flip(&mut v));
     }
 }
 
@@ -699,7 +772,7 @@ fn hud(
     text.0 = format!(
         "{fps:.0} fps | {} mesh entities | pos {:.1} {:.1} {:.1} yaw {:.0} pitch {:.0} | speed {:.0}{}\n\
          groups {:?} from {} | RMB look, WASD fly, Space/Q up/down, Shift fast, wheel speed, \
-         C collision, G groups, P print pose",
+         C collision, G groups, M markers, P print pose",
         meshes.iter().count(),
         t.translation.x,
         t.translation.y,
@@ -738,16 +811,28 @@ fn track_loading(assets: Res<AssetServer>, mut pending: ResMut<Pending>) {
     }
 }
 
+/// What the screenshot log reports.
+#[derive(bevy::ecs::system::SystemParam)]
+struct CaptureStats<'w, 's> {
+    diagnostics: Res<'w, DiagnosticsStore>,
+    meshes: Query<'w, 's, (), With<Mesh3d>>,
+    pieces: Query<'w, 's, &'static Visibility, With<DrawGroups>>,
+    groups: Res<'w, Groups>,
+}
+
 fn capture(
     mut commands: Commands,
     pending: Res<Pending>,
     mut capture: ResMut<Capture>,
-    diagnostics: Res<DiagnosticsStore>,
-    meshes: Query<(), With<Mesh3d>>,
-    pieces: Query<&Visibility, With<DrawGroups>>,
-    groups: Res<Groups>,
+    stats: CaptureStats,
     mut exit: MessageWriter<AppExit>,
 ) {
+    let CaptureStats {
+        diagnostics,
+        meshes,
+        pieces,
+        groups,
+    } = stats;
     if capture.started.elapsed() > Duration::from_secs(300) {
         error!("timed out waiting for the map to load");
         exit.write(AppExit::error());
@@ -774,6 +859,16 @@ fn capture(
                     .unwrap_or("-"),
                 (loaded - capture.started).as_secs_f32()
             );
+            // GPU time of the heaviest render passes (timestamp queries), when available.
+            let mut passes: Vec<(String, f64)> = diagnostics
+                .iter()
+                .filter(|d| d.path().as_str().ends_with("elapsed_gpu"))
+                .filter_map(|d| Some((d.path().as_str().to_string(), d.smoothed()?)))
+                .collect();
+            passes.sort_by(|a, b| b.1.total_cmp(&a.1));
+            for (path, ms) in passes.iter().take(6) {
+                println!("  gpu {ms:.2} ms  {path}");
+            }
             commands
                 .spawn(Screenshot::primary_window())
                 .observe(save_to_disk(capture.path.clone()));

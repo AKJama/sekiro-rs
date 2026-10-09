@@ -44,6 +44,8 @@ pub struct ActiveEffect {
     pub guard_def_flick_power_rate: f32,
     pub guard_stamina_cut_rate: f32,
     pub def_stamina_attack_rate: f32,
+    /// `staminaAttackRate`: the owner's own posture attack multiplier.
+    pub stamina_attack_rate: f32,
     pub def_stamina_dmg_rates: StaminaRates,
     pub stamina_recover_speed_rate: f32,
     pub stamina_recover_change_speed: i32,
@@ -63,6 +65,7 @@ impl Default for ActiveEffect {
             guard_def_flick_power_rate: 1.0,
             guard_stamina_cut_rate: 1.0,
             def_stamina_attack_rate: 1.0,
+            stamina_attack_rate: 1.0,
             def_stamina_dmg_rates: StaminaRates::ONE,
             stamina_recover_speed_rate: 1.0,
             stamina_recover_change_speed: 0,
@@ -179,4 +182,16 @@ pub fn recover_speed_rate(effects: &[ActiveEffect]) -> f32 {
 /// the field "adds to the base recovery speed"; Ghidra lost the loop body, so the sum is assumed.
 pub fn recover_change_speed(effects: &[ActiveEffect]) -> i32 {
     effects.iter().map(|e| e.stamina_recover_change_speed).sum()
+}
+
+/// Product of `staminaAttackRate` over the attacker's active effects.
+///
+/// Read from code (`bfe3b0`, `c057d0`): the hit-record builder folds this into the three posture
+/// bases it stores (record +0x34, +0x38, +0x3C). Effects flagged `bGameClearBonus` are further
+/// scaled by a NG+ table, which is left out.
+pub fn attacker_stamina_attack_rate(effects: &[ActiveEffect]) -> f32 {
+    effects
+        .iter()
+        .filter(|e| e.stamina_attack_rate != 1.0)
+        .fold(1.0, |acc, e| acc * e.stamina_attack_rate)
 }

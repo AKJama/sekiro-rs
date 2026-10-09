@@ -203,11 +203,12 @@ impl Character {
         match self.kind {
             ControlKind::Player => {
                 let level = self.input.stick_level();
-                // Stick direction relative to facing, positive to the left.
+                // Stick direction relative to facing in degrees, positive to the RIGHT: the script
+                // quick-turns right for TurnAngle > 0 and picks the right strafe for MoveAngle > 0.
                 let turn = self
                     .input
                     .stick_world_yaw()
-                    .map(|y| angle_diff(y, self.body.yaw).to_degrees())
+                    .map(|y| -angle_diff(y, self.body.yaw).to_degrees())
                     .unwrap_or(0.0);
                 // The engine's stick level runs 0..2; full keyboard or stick deflection runs.
                 rt.set_variable("MoveSpeedLevel", level * 2.0);

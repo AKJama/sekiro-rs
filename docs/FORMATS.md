@@ -193,3 +193,98 @@ HKS state hooks are named after the state, not the CMSG: `StandToDeflectGuard_on
 `crates/sim/src/behavior.rs` (`BehaviorRuntime`) runs a graph: current state per machine, event matching (active machines first, then global wildcards of inactive ones), the active clip set with times, layer enable rules, clip-end events and state hooks.
 Blends are not modelled; transitions switch instantly.
 `crates/sim/src/player.rs` (`PlayerBehavior`) wires it to the HKS VM; `cargo run -p sekiro-sim --bin player-sim -- hold` (or `repeat`) prints state and animation per frame.
+
+## Maps: MSB layouts, map pieces and hit collision
+
+Code: `crates/formats/src/msb.rs`, `crates/formats/src/bxf4.rs`, `crates/formats/src/hknp.rs`, `crates/extract/src/maps/`, `crates/game/src/map.rs`.
+Layouts were reimplemented from SoulsFormatsNEXT (`MSBS`, `BXF4`) and DSMapStudio's collision loader (`HavokCollisionResource`, HKX2 `hknpCompressedMeshShapeData`); no code was copied.
+
+### Area
+
+`m11_00_00_00` holds both Ashina Outskirts and Ashina Castle (place names 1100 and 1110 in the English `item.msgbnd` place-name FMG).
+It places 43 Ashina soldiers (`c1010`) among 144 enemies, 4498 map pieces of 535 models, 1509 objects, 166 hit collision parts and 10 player start points.
+
+### MSB (`map/mapstudio/<id>.msb`)
+
+- Header `MSB `, then a chain of params, each: version, entry count + 1, name offset, entry offsets, next-param offset (0 ends the chain).
+  The loader reads `MODEL_PARAM_ST` and `PARTS_PARAM_ST` and skips the rest (events, regions, routes, layers).
+- Models: name, type (0 map piece, 1 object, 2 enemy, 4 player, 5 collision), SIB path, instance count.
+- Parts: name, type, model index, position, rotation in degrees, scale, then offsets to optional blocks.
+  The transform composes like FLVER nodes: `T * Ry * Rz * Rx * S` in column-vector form (`Part::matrix`).
+- Part mask block (map pieces, objects, enemies, collisions): 48 words, which DSMapStudio splits as display groups[8], draw groups[8], collision mask[32].
+- Enemy type data: think param, NPC param, talk id, platoon, chara init, collision part index, backup event anim, event flag.
+- Collision type data: hit filter, sound space, map name id (the place-name FMG id), play region.
+
+### BXF4 split binders (`.tpfbhd` + `.tpfbdt`, `.hkxbhd` + `.hkxbdt`)
+
+The `BHF4` header is laid out exactly like a BND4 header (same format byte and per-file records); payload offsets point into the separate `BDF4` file.
+Every payload in Sekiro's map binders is a KRAK (Oodle) DCX, so the map export needs the game folder for `oo2core_6_win64.dll` (read only).
+Map textures live in `map/mXX/mXX_000N.tpfbhd`, one TPF per texture; `other/maptex.tpf` and each object's own TPF fill the gaps.
+
+### Map pieces and textures
+
+- `map/<id>/<id>_<model digits>.mapbnd.d/<id>_<model digits>.flver`, with a `_S` sibling that is not used.
+  Map piece FLVERs are static (one node, no skinning); LOD0 face sets only.
+- Map materials leave FLVER texture paths empty and stack many layers (`M_Multiple`, `MultiBlend3`, ...).
+  The base colour is the first albedo slot with a path in MTD order (for `M_Multiple` slot 8, the main surface; moss and snow overlays come later), or the slot named `<material>_a`.
+- Real UVs are the Short2/Short4 channels (UV 0 and 1); the UByte4Norm "UVs" carry blend data and are not exported.
+- Textures are written as the DDS files the TPFs contain (BC1 and BC7 sRGB in m11), next to the GLBs in `models/tex/`, so the GPU gets the original block compression and mip chain.
+- Materials whose MTD is a shadow caster, dummy, invisible blocker or fog card (`GroundFog`, `LandScape_CloudFog`) are not exported.
+
+### Hit collision (`map/<id>/h<area>.hkxbhd`)
+
+- One Havok 2016 tagfile per collision model, sharing a type compendium stored in the same binder.
+  Each holds `hknpPhysicsSceneData` with one `hknpPhysicsSystemData` whose body uses `fsnpCustomParamCompressedMeshShape`.
+- Compressed mesh: sections with a run of primitives (`primitives.data`: start `>> 8`, count `& 0xFF`) and packed vertices.
+  `sharedVertices.data & 0xFF` is the section's packed vertex count and `>> 8` its first entry in `sharedVerticesIndex`.
+  A primitive index below the packed count is a packed vertex (x 11, y 11, z 10 bits, scaled by the section's `codecParms` scale and offset); otherwise it is a shared vertex (x 21, y 21, z 22 bits over the mesh tree domain).
+  Indices `(a, b, c, d)` with `c != d` are a quad, split as `(a, b, c)` and `(a, c, d)`; `DE AD DE AD` marks a convex primitive (78 in m11, skipped).
+- Materials: `triangleIndexToShapeKey` maps each authored triangle to its shape key (left-aligned in `numShapeKeyBits`), and `pParam.triangleDataArray[i].primitiveDataIndex` selects a `PrimitiveData` whose `materialNameData` is the hit material id.
+  The shape key of a decoded triangle is `(section << 8) | (primitive << 1) | second_triangle_of_quad`; with that every one of the 2.3 million m11 triangles finds its material (34 distinct ids).
+- The HKX bodies carry identity transforms and the vertices are in the collision model's own space: the MSB collision part transform places them like any other part (all m11 collision parts share `(90, 3, -40)`, rotated 20 degrees about Y).
+  Check: with the transform every player start is within 0.7 m of a collision vertex, without it up to 51 m away.
+- The low-resolution `l*` and `f*` binders are not decoded.
+
+### Draw groups
+
+In the game the hit collision under the player selects which pieces draw, swapping distant stand-ins (`m9*` far models, low-detail blocks) for detailed geometry.
+The map viewer finds the collision part under the camera and shows pieces whose draw groups intersect that collision's draw groups (`--groups draw`, the default).
+Using the collision's display groups instead (`--groups display`) looked the same from the starts compared, but 49 of 166 collision parts, including the ones under player starts 5 and 7, have no display groups, while the collision under every player start tested (0 to 5 and 7) has draw groups.
+Which block the engine really uses is not confirmed.
+Eleven map pieces have no draw groups at all and are left out of the layout.
+
+### Cache layout
+
+`sekiro-extract map <id>` writes `cache/maps/<id>/`:
+
+| File | Content |
+|---|---|
+| `models/<model>.glb` | One static GLB per placed map piece and object model, mirrored on X like every export |
+| `models/tex/<name>.dds` | Textures the GLBs reference by relative URI |
+| `layout.json` | Bevy-space instances: `pieces`, `objects`, `enemies` (chr model, NPC and think params, dummy flag), `players`, `collisions` (groups, triangle range in `collision.bin`), `models` (GLB, triangle count, bounds) |
+| `collision.bin` | `sekiro_formats::hknp::CollisionMesh` in postcard: vertices, indices, one hit material id per triangle, in Bevy space |
+
+Transforms in `layout.json` are translation, quaternion `[x, y, z, w]` and scale, already mirrored (`M -> S M S`).
+Enemy and player rows also carry `yaw_degrees`, the Bevy-space yaw (FromSoftware's Y rotation negated).
+
+### Regenerate and view
+
+```powershell
+cargo run --release -p sekiro-extract -- map m11_00_00_00 --summary
+cargo run --release -p sekiro-extract -- map m11_00_00_00
+cargo run --release -p sekiro-game -- --map m11_00_00_00 --start 3
+cargo run --release -p sekiro-game -- --map m11_00_00_00 --start 3 --screenshot cache/screens/map_m11_gate.png --at 2
+cargo run --release -p sekiro-game -- --map m11_00_00_00 --start 3 --collision --no-pieces
+```
+
+The viewer flies with the right mouse button held (look), WASD, Space/E and Q/Ctrl for up and down, Shift for speed and the wheel for base speed.
+C toggles the collision wireframe, G cycles draw-group modes, M toggles enemy (red, dummy orange) and player start (blue) markers, P prints the camera pose as a `--camera x,y,z,yaw,pitch` argument.
+`--objects` also spawns MSB objects, `--hide m9,o11` skips models by name prefix, `--uncapped` turns vsync off.
+
+### Known approximations
+
+- No normal maps: Sekiro's are BC7 with X and Y in red and green, which Bevy would read as a three-channel normal; they need converting (for example to BC5) first.
+- Single albedo layer: moss, snow and blend-mask layers, vertex-colour blending, detail maps and the multi-layer shaders are ignored.
+- Objects are off by default: many are event-state props (siege barricades, a 400 m dome around the castle gate) that the game enables from its event scripts.
+- Lighting is a single sun, ambient light and distance fog, not the map's GPARAM light sets.
+- Bevy's IO threads overflow the default 2 MiB stack while loading all map GLBs and DDS files at once (still at 4 MiB), so `--map` raises `RUST_MIN_STACK` to 16 MiB before Bevy starts; the root cause inside Bevy's loaders was not tracked down.

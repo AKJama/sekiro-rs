@@ -541,7 +541,13 @@ impl BehaviorRuntime {
                 self.end_signalled.remove(&id);
             }
             let state = match (keep, self.clips.remove(&id)) {
-                (true, Some(s)) => s,
+                // Clips first activated before lengths were available learn them now.
+                (true, Some(mut s)) => {
+                    if s.duration.is_none() {
+                        s.duration = durations.duration(&c.animation);
+                    }
+                    s
+                }
                 _ => ClipState {
                     node: id,
                     animation: c.animation.clone(),
@@ -692,46 +698,63 @@ impl BehaviorRuntime {
     }
 
     /// The clip playing under the main state machine (the full-body slot 0).
+    ///
+    /// Follows current states down through nested machines. Where a state runs several machines
+    /// in parallel (layers, blends), the first one that leads to a real clip wins; the
+    /// `a*_009999` placeholder clips (the empty "no additive" animation) never do.
     pub fn main_clip(&self) -> Option<&ClipState> {
-        let mut sm = self.main_machine;
-        // Follow current states down through nested machines to the deepest clip.
-        let mut best: Option<&ClipState> = None;
-        for _ in 0..64 {
-            if !self.active[sm] {
-                break;
-            }
-            let idx = self.current_index(sm);
-            let next = self
-                .clips
-                .values()
-                .filter(|c| self.encl(c.node) == Some(StateRef { sm, index: idx }))
-                .min_by_key(|c| c.node);
-            if next.is_some() {
-                best = next;
-            }
-            let child_sm = self
-                .active_states
-                .iter()
-                .find(|s| s.sm != sm && self.encl(s.sm) == Some(StateRef { sm, index: idx }))
-                .map(|s| s.sm);
-            match child_sm {
-                Some(c) => sm = c,
-                None => break,
-            }
-        }
-        best
+        self.descend(self.main_machine, 0).map(|(c, _)| c)
     }
 
-    /// Names of the active states under the main machine, outermost first.
+    fn is_placeholder(c: &ClipState) -> bool {
+        c.animation.ends_with("_009999")
+    }
+
+    /// The best clip under machine `sm` and the state path leading to it.
+    fn descend(&self, sm: NodeId, depth: usize) -> Option<(&ClipState, Vec<StateRef>)> {
+        if depth > 64 || !self.active[sm] {
+            return None;
+        }
+        let here = StateRef {
+            sm,
+            index: self.current_index(sm),
+        };
+        for child in self
+            .active_states
+            .iter()
+            .filter(|s| s.sm != sm && self.encl(s.sm) == Some(here))
+        {
+            if let Some((c, mut path)) = self.descend(child.sm, depth + 1) {
+                path.insert(0, here);
+                return Some((c, path));
+            }
+        }
+        self.clips
+            .values()
+            .filter(|c| self.encl(c.node) == Some(here) && !Self::is_placeholder(c))
+            .min_by_key(|c| c.node)
+            .map(|c| (c, vec![here]))
+    }
+
+    /// Names of the active states under the main machine, outermost first, along the path that
+    /// leads to [`Self::main_clip`] (or the first nested machine when there is no clip).
     pub fn main_state_path(&self) -> Vec<String> {
+        if let Some((_, path)) = self.descend(self.main_machine, 0) {
+            return path
+                .iter()
+                .map(|s| self.state_name(*s).to_owned())
+                .collect();
+        }
         let mut path = Vec::new();
         let mut sm = self.main_machine;
         for _ in 0..64 {
             if !self.active[sm] {
                 break;
             }
-            let idx = self.current_index(sm);
-            let here = StateRef { sm, index: idx };
+            let here = StateRef {
+                sm,
+                index: self.current_index(sm),
+            };
             path.push(self.state_name(here).to_owned());
             match self
                 .active_states

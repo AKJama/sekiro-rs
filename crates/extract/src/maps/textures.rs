@@ -1,5 +1,5 @@
-//! Map textures: every `map/mXX/*.tpfbhd` split binder plus `other/maptex.tpf`, indexed by
-//! texture name. Textures are written out as the DDS files the TPFs already contain, so the GPU
+//! Map textures: every `map/mXX/*.tpfbhd` split binder, `other/maptex.tpf` and the TPFs of
+//! placed objects, indexed by texture name. Textures are written out as the DDS files the TPFs already contain, so the GPU
 //! gets the original block-compressed data with its mip chain.
 
 use std::collections::HashMap;
@@ -70,20 +70,24 @@ impl MapTextures {
             }
             store.binders.push(Binder { bhd, bdt });
         }
-        for loose in ["other/maptex.tpf"] {
-            let path = raw.join(loose);
-            if let Ok(data) = std::fs::read(&path) {
-                let file = store.tpfs.len();
-                for (index, t) in tpf::parse(&data)?.iter().enumerate() {
-                    store
-                        .by_name
-                        .entry(t.name.to_ascii_lowercase())
-                        .or_insert(Source::Tpf { file, index });
-                }
-                store.tpfs.push(data);
-            }
+        let maptex = raw.join("other/maptex.tpf");
+        if maptex.is_file() {
+            store.add_tpf(&maptex)?;
         }
         Ok(store)
+    }
+
+    /// Makes the textures of a loose TPF findable. Earlier sources win on name clashes.
+    pub fn add_tpf(&mut self, path: &Path) -> Result<()> {
+        let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let file = self.tpfs.len();
+        for (index, t) in tpf::parse(&data)?.iter().enumerate() {
+            self.by_name
+                .entry(t.name.to_ascii_lowercase())
+                .or_insert(Source::Tpf { file, index });
+        }
+        self.tpfs.push(data);
+        Ok(())
     }
 
     pub fn len(&self) -> usize {

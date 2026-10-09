@@ -122,13 +122,6 @@ impl Animator {
     pub fn clip_name(&self) -> &str {
         &self.name
     }
-
-    /// Remaining crossfade weight of the previous pose, 0 when not blending.
-    pub fn blend_weight(&self) -> f32 {
-        self.blend
-            .as_ref()
-            .map_or(0.0, |(_, _, d, e)| (1.0 - e / d).clamp(0.0, 1.0))
-    }
 }
 
 /// Havok skeleton plus the glTF joint entity for each bone (filled once the scene spawns).

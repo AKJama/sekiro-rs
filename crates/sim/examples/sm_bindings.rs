@@ -11,9 +11,20 @@ fn main() {
         let b: Vec<String> = n
             .bindings
             .iter()
-            .map(|b| format!("{} <- {}", b.member_path, g.variables[b.variable as usize].name))
+            .map(|b| {
+                format!(
+                    "{} <- {}",
+                    b.member_path, g.variables[b.variable as usize].name
+                )
+            })
             .collect();
-        println!("{} start={} mode={}: {}", n.name, sm.start_state_id, sm.start_state_mode, b.join(", "));
+        println!(
+            "{} start={} mode={}: {}",
+            n.name,
+            sm.start_state_id,
+            sm.start_state_mode,
+            b.join(", ")
+        );
     }
     let _ = NodeKind::Other { children: vec![] };
 }

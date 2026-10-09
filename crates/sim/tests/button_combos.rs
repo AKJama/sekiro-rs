@@ -45,8 +45,16 @@ fn guard_with_move_and_sprint_with_attack() {
     let mut states = Vec::new();
     for (i, f) in demo::parse(script).unwrap().iter().enumerate() {
         let r = wolf.tick(f, DT);
-        assert!(r.behavior.script_errors.is_empty(), "{:?}", r.behavior.script_errors);
-        assert!(r.animation.is_some(), "no clip at step {i} in {:?}", r.behavior.state_path);
+        assert!(
+            r.behavior.script_errors.is_empty(),
+            "{:?}",
+            r.behavior.script_errors
+        );
+        assert!(
+            r.animation.is_some(),
+            "no clip at step {i} in {:?}",
+            r.behavior.state_path
+        );
         let s = r.behavior.state_path.last().cloned().unwrap_or_default();
         if states.last() != Some(&s) {
             states.push(s);
@@ -60,7 +68,10 @@ fn guard_with_move_and_sprint_with_attack() {
         "SprintStartFromStep",
         "SprintAttack",
     ] {
-        assert!(states.iter().any(|s| s == expected), "{expected} missing: {states:?}");
+        assert!(
+            states.iter().any(|s| s == expected),
+            "{expected} missing: {states:?}"
+        );
     }
     assert!(
         !states.iter().any(|s| s.starts_with("Item")),
@@ -93,7 +104,11 @@ fn random_button_mash_never_loses_the_clip() {
                 ..Buttons::default()
             };
             let dir = (r >> 8 & 7) as f32 * std::f32::consts::FRAC_PI_4;
-            frame.move_stick = if bit(11) { [dir.sin(), dir.cos()] } else { [0.0, 0.0] };
+            frame.move_stick = if bit(11) {
+                [dir.sin(), dir.cos()]
+            } else {
+                [0.0, 0.0]
+            };
         }
         let r = wolf.tick(&frame, DT);
         assert!(

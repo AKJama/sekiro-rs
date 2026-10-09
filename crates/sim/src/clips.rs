@@ -95,6 +95,8 @@ impl ClipLibrary {
 
 impl ClipDurations for ClipLibrary {
     fn duration(&mut self, animation: &str) -> Option<f32> {
-        self.clip(animation).map(|c| c.duration)
+        // An animation the game data does not contain (the graph references a few, such as
+        // a000_206100) counts as zero length, so its state ends at once instead of hanging.
+        Some(self.clip(animation).map_or(0.0, |c| c.duration))
     }
 }

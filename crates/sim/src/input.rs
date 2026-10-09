@@ -9,7 +9,7 @@
 //!   sprinting in swamps, with 200, so milliseconds is our working unit (unverified).
 //! - Behaviour variables the engine writes every frame: `MoveSpeedLevel` (0 to 2, stick
 //!   magnitude), `TurnAngle` and `MoveAngle` (degrees from the character's facing to the stick
-//!   direction, positive to the left), and the per-action copies `JumpAngle`, `AttackAngle`,
+//!   direction, positive to the right), and the per-action copies `JumpAngle`, `AttackAngle`,
 //!   `JumpStickLevel`, `AttackStickLevel` and so on.
 //!
 //! Action-arm ids (`ACTION_ARM_*` in the define script): attack 0, prosthetic 1, guard 2, grapple

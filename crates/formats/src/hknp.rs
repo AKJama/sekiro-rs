@@ -21,9 +21,9 @@
 //! key, the key left-aligned in `numShapeKeyBits`) and `pParam`, whose per-triangle
 //! `primitiveDataIndex` selects a `PrimitiveData` with the hit material id
 //! (`materialNameData`). The shape key of a triangle is
-//! `(section << 8) | (primitive_in_section << 1) | second_triangle_of_quad`: sections hold at
-//! most 128 primitives, and `numShapeKeyBits` is the section bits plus 8 (checked on every
-//! m11_00_00_00 collision file: the key count equals the triangle count).
+//! `(section << 8) | (primitive_in_section << 1) | second_triangle_of_quad`, so sections hold
+//! at most 128 primitives and `numShapeKeyBits` is the section index bits plus 8. On
+//! m11_00_00_00 every decoded triangle finds its key this way.
 //!
 //! Output is in the file's own (FromSoftware, left-handed) space with the body transform
 //! applied.

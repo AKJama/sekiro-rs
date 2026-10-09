@@ -22,7 +22,6 @@ pub struct TexRef {
 #[derive(Clone, Debug, Default)]
 pub struct MaterialChoice {
     pub albedo: Option<TexRef>,
-    pub normal: Option<TexRef>,
     pub alpha_mode: Option<(&'static str, f32)>,
     pub mtd: String,
 }
@@ -39,7 +38,8 @@ impl Mtds {
     }
 }
 
-/// Picks the base colour (and its normal map) for a map material.
+/// Picks the base colour for a map material. Normal maps are not exported yet: Sekiro's are
+/// two-channel BC7, which Bevy would read as three-channel (see docs/FORMATS.md, Maps).
 ///
 /// Map materials stack many layers (`M_Multiple`, `MultiBlend3`, ...) and leave the FLVER
 /// texture paths empty, so paths come from the MTD. The base layer is the first albedo slot
@@ -47,7 +47,6 @@ impl Mtds {
 /// are moss, snow and other overlays). A slot named after the material (`<name>_a`) wins.
 pub fn choose_material(material: &flver::Material, mtd: Option<&mtd::Mtd>) -> MaterialChoice {
     let mut albedo = Vec::new();
-    let mut normal = Vec::new();
     for t in &material.textures {
         let from_mtd = mtd.and_then(|m| m.textures.iter().find(|mt| mt.kind == t.param));
         let path = if t.path.is_empty() {
@@ -65,8 +64,6 @@ pub fn choose_material(material: &flver::Material, mtd: Option<&mtd::Mtd>) -> Ma
         let r = TexRef { path, uv };
         if param.contains("albedomap") || param.contains("diffuse") {
             albedo.push(r);
-        } else if param.contains("normalmap") || param.contains("bumpmap") {
-            normal.push(r);
         }
     }
     let own = format!("{}_a", material.name.to_ascii_lowercase());
@@ -74,16 +71,8 @@ pub fn choose_material(material: &flver::Material, mtd: Option<&mtd::Mtd>) -> Ma
         .iter()
         .position(|r| texture_stem(&r.path).eq_ignore_ascii_case(&own))
         .or(if albedo.is_empty() { None } else { Some(0) });
-    let n = a.and_then(|a| {
-        let stem = texture_stem(&albedo[a].path).to_ascii_lowercase();
-        let want = format!("{}_n", stem.strip_suffix("_a")?);
-        normal
-            .iter()
-            .position(|r| texture_stem(&r.path).eq_ignore_ascii_case(&want))
-    });
     let mut choice = MaterialChoice {
         albedo: a.map(|i| albedo[i].clone()),
-        normal: n.map(|i| normal[i].clone()),
         alpha_mode: None,
         mtd: texture_stem(&material.mtd).to_string(),
     };

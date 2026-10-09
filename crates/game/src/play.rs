@@ -1,10 +1,12 @@
-//! `--play`: Wolf on a floor, driven by the game's own scripts, behaviour graph and TAE.
+//! `--play`: Wolf against an Ashina soldier on a floor, both driven by the game's own scripts,
+//! behaviour graphs and TAE (`sekiro_sim::duel::Duel`).
 //!
-//! The simulation (`sekiro_sim::PlayerCharacter`) runs at a fixed 60 steps per second. Each
-//! step it receives an [`InputFrame`] built from keyboard, mouse and gamepad (or from an input
-//! script), and reports the full-body clip, its time and the body's position and facing. This
-//! module only renders that: the [`Animator`] plays the reported clip at the reported time with
-//! root motion disabled, and the character entity follows the simulated body.
+//! The simulation runs at a fixed 60 steps per second. Each step it receives an [`InputFrame`]
+//! built from keyboard, mouse and gamepad (or from an input script) and reports, per character,
+//! the full-body clip, its time, whether it just started and its TAE blend-in, plus the body's
+//! position and facing. This module renders that: an [`Animator`] per character plays the
+//! reported clip at the reported time with root motion disabled, crossfading over the blend-in,
+//! and the entity follows the simulated body.
 //!
 //! Controls follow Sekiro's PC defaults where possible: WASD move, mouse look, LMB attack, RMB
 //! guard, Space jump, Shift step (hold to sprint), C crouch, F grapple, Ctrl or MMB prosthetic,
@@ -23,9 +25,11 @@ use bevy::light::GlobalAmbientLight;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::window::{CursorGrabMode, CursorOptions};
-use sekiro_sim::{Buttons, InputFrame, PlayerCharacter, StepReport, demo};
+use sekiro_sim::duel::{Duel, DuelReport};
+use sekiro_sim::{Buttons, InputFrame, StepReport, demo};
 
 use crate::character::{AnimLibrary, Animator, Rig, animate, bind_rigs};
+use crate::draw_mask::{DrawMask, MaskSource, apply_draw_masks};
 
 pub struct Options {
     pub cache: PathBuf,
@@ -35,15 +39,22 @@ pub struct Options {
     pub screenshots: Vec<(usize, PathBuf)>,
     /// Exit when the script ends and every screenshot is saved.
     pub exit_after_script: bool,
+    /// Let the soldier fight (it always stands there; without this it stays passive).
+    pub enemy: bool,
+    /// Start locked on to the soldier.
+    pub lock_on: bool,
 }
 
 const STEP_HZ: f64 = 60.0;
 const CAMERA_HEIGHT: f32 = 1.4;
 const MOUSE_SENSITIVITY: f32 = 0.0035;
 const STICK_CAMERA_SPEED: f32 = 2.6;
+const WOLF: usize = 0;
+const SOLDIER: usize = 1;
 
+/// Which simulated character an entity shows (0 Wolf, 1 the soldier).
 #[derive(Component)]
-struct Wolf;
+struct Actor(usize);
 
 #[derive(Component)]
 struct Hud;
@@ -51,15 +62,21 @@ struct Hud;
 #[derive(Component)]
 struct FollowCamera;
 
+/// Clip libraries per actor.
 #[derive(Resource)]
-struct Library(AnimLibrary);
+struct Libraries([AnimLibrary; 2]);
 
 /// The simulation and its last report. Not `Send`: the HKS VM uses `Rc`.
 struct Sim {
-    wolf: PlayerCharacter,
-    last: StepReport,
+    duel: Duel,
+    last: DuelReport,
+    /// Clip starts not yet shown, per actor: (clip, blend-in seconds).
+    started: [Option<(String, f32)>; 2],
+    /// The last hits, for the HUD.
+    hit_log: Vec<String>,
     script: Option<Vec<InputFrame>>,
     step: usize,
+    lock_requested: bool,
 }
 
 /// Live input gathered every rendered frame, consumed by the fixed steps.
@@ -84,10 +101,13 @@ struct Captures {
 
 pub fn run(options: Options) -> Result<()> {
     let cache = options.cache.canonicalize().context("cache directory")?;
-    let library = AnimLibrary::load(&cache, "c0000")?;
-    let mut wolf = PlayerCharacter::load_from_cache(&cache)
-        .map_err(|e| anyhow::anyhow!("loading the player simulation: {e}"))?;
-    wolf.settle(1.0 / STEP_HZ as f32, 400);
+    let libraries = [
+        AnimLibrary::load(&cache, "c0000")?,
+        AnimLibrary::load(&cache, "c1010")?,
+    ];
+    let mut duel =
+        Duel::load(&cache, 6.0).map_err(|e| anyhow::anyhow!("loading the simulation: {e}"))?;
+    duel.enemy_active = options.enemy;
     let script = match options.script.as_deref() {
         None => None,
         Some("builtin") => Some(demo::parse(demo::DEMO).map_err(anyhow::Error::msg)?),
@@ -135,7 +155,7 @@ pub fn run(options: Options) -> Result<()> {
         ..default()
     })
     .insert_resource(Time::<Fixed>::from_hz(STEP_HZ))
-    .insert_resource(Library(library))
+    .insert_resource(Libraries(libraries))
     .insert_resource(LiveInput::default())
     .insert_resource(Orbit {
         yaw: 0.0,
@@ -148,10 +168,13 @@ pub fn run(options: Options) -> Result<()> {
         exit_after_script: options.exit_after_script,
     })
     .insert_non_send(Sim {
-        last: StepReport::default(),
-        wolf,
+        last: DuelReport::default(),
+        duel,
+        started: [None, None],
+        hit_log: Vec::new(),
         script,
         step: 0,
+        lock_requested: options.lock_on,
     })
     .add_systems(Startup, setup)
     .add_systems(FixedUpdate, simulate)
@@ -160,7 +183,8 @@ pub fn run(options: Options) -> Result<()> {
         (
             (gather_input, orbit_camera),
             bind_rigs,
-            sync_wolf,
+            apply_draw_masks,
+            sync_actors,
             animate,
             follow_camera,
             hud,
@@ -175,7 +199,7 @@ pub fn run(options: Options) -> Result<()> {
 fn setup(
     mut commands: Commands,
     assets: Res<AssetServer>,
-    mut library: ResMut<Library>,
+    mut libraries: ResMut<Libraries>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -224,22 +248,26 @@ fn setup(
             ));
         }
     }
-    let mut idle = Animator::new(
-        library
-            .0
-            .clip("a000_000000")
-            .expect("idle clip is extracted"),
-        false,
-    );
-    idle.apply_root_motion = false;
-    idle.speed = 0.0;
-    commands.spawn((
-        Wolf,
-        WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset("c0000.glb"))),
-        Transform::IDENTITY,
-        Rig::new(Arc::new(library.0.skeleton.clone())),
-        idle,
-    ));
+    let models = ["c0000.glb", "c1010.glb"];
+    for actor in [WOLF, SOLDIER] {
+        let lib = &mut libraries.0[actor];
+        let mut idle = Animator::new(
+            lib.clip("a000_000000").expect("idle clip is extracted"),
+            false,
+        );
+        idle.apply_root_motion = false;
+        idle.speed = 0.0;
+        let mut e = commands.spawn((
+            Actor(actor),
+            WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(models[actor]))),
+            Transform::IDENTITY,
+            Rig::new(Arc::new(lib.skeleton.clone())),
+            idle,
+        ));
+        if actor == SOLDIER {
+            e.insert(DrawMask::new(MaskSource::Combat));
+        }
+    }
     commands.spawn((
         Hud,
         Text::new(""),
@@ -322,8 +350,17 @@ fn orbit_camera(
     motion: Res<AccumulatedMouseMotion>,
     cursor: Query<&CursorOptions>,
     gamepads: Query<&Gamepad>,
+    sim: NonSend<Sim>,
     mut orbit: ResMut<Orbit>,
 ) {
+    // Locked on, the camera swings behind Wolf toward the target.
+    if let Some(t) = sim.duel.player.lock_target {
+        let want = sim.duel.player.yaw_to(t);
+        let d = sekiro_sim::input::angle_diff(want, orbit.yaw);
+        orbit.yaw += d * (6.0 * time.delta_secs()).min(1.0);
+        orbit.pitch += (0.18 - orbit.pitch) * (4.0 * time.delta_secs()).min(1.0);
+        return;
+    }
     let locked = cursor
         .single()
         .is_ok_and(|c| c.grab_mode == CursorGrabMode::Locked);
@@ -345,74 +382,109 @@ fn simulate(
     mut sim: NonSendMut<Sim>,
     live: Res<LiveInput>,
     orbit: Res<Orbit>,
-    rigs: Query<&Rig, With<Wolf>>,
+    rigs: Query<&Rig, With<Actor>>,
 ) {
-    // Hold the simulation until the model is on screen, so scripted runs line up with frames.
-    if !rigs.single().is_ok_and(|r| r.bound) {
+    // Hold the simulation until the models are on screen, so scripted runs line up with frames.
+    if rigs.is_empty() || !rigs.iter().all(|r| r.bound) {
         return;
     }
     let dt = 1.0 / STEP_HZ as f32;
-    let frame = match &sim.script {
-        Some(frames) => match frames.get(sim.step) {
-            Some(f) => {
-                // Scripted sticks are camera-relative to the current orbit, like a player's.
-                let mut f = *f;
-                f.camera_yaw += orbit.yaw;
-                f
-            }
-            None => InputFrame {
-                camera_yaw: orbit.yaw,
-                ..InputFrame::default()
-            },
-        },
+    let mut frame = match &sim.script {
+        Some(frames) => {
+            // Scripted sticks are camera-relative to the current orbit, like a player's.
+            let mut f = frames.get(sim.step).copied().unwrap_or_default();
+            f.camera_yaw += orbit.yaw;
+            f
+        }
         None => live.frame,
     };
-    let report = sim.wolf.tick(&frame, dt);
-    if !report.behavior.script_errors.is_empty() {
-        warn!("script errors: {:?}", report.behavior.script_errors);
+    if sim.lock_requested && sim.step == 0 {
+        frame.buttons.lock_on = true;
     }
-    if sim.script.is_some() && sim.step.is_multiple_of(30) {
+    let report = sim.duel.step(&frame, dt);
+    for (i, r) in [&report.player, &report.enemy].into_iter().enumerate() {
+        if !r.behavior.script_errors.is_empty() {
+            warn!("script errors ({i}): {:?}", r.behavior.script_errors);
+        }
+        if r.clip_started
+            && let Some(name) = &r.animation
+        {
+            sim.started[i] = Some((name.clone(), r.blend_in));
+        }
+    }
+    let step = sim.step;
+    for (hit, res) in &report.hits {
+        let text = format!(
+            "step {step}: {} hit {} ({}), AtkParam {}",
+            ["Wolf", "soldier"][hit.attacker],
+            ["Wolf", "soldier"][hit.defender],
+            if res.deflected {
+                "deflected"
+            } else if res.guarded {
+                "blocked"
+            } else {
+                "hit"
+            },
+            hit.attack.atk_id
+        );
+        info!("{text}");
+        sim.hit_log.push(text);
+        if sim.hit_log.len() > 4 {
+            sim.hit_log.remove(0);
+        }
+    }
+    if sim.script.is_some() && step.is_multiple_of(30) {
         info!(
-            "step {} {} {} t={:.2} pos={:?}",
-            sim.step,
-            report.behavior.state_path.join("/"),
-            report.animation.as_deref().unwrap_or("-"),
-            report.anim_time,
-            report.position
+            "step {step} wolf {} {} | soldier {} {}",
+            report.player.behavior.state_path.join("/"),
+            report.player.animation.as_deref().unwrap_or("-"),
+            report.enemy.behavior.state_path.join("/"),
+            report.enemy.animation.as_deref().unwrap_or("-"),
         );
     }
     sim.last = report;
     sim.step += 1;
 }
 
-fn sync_wolf(
-    sim: NonSend<Sim>,
-    mut library: ResMut<Library>,
-    mut q: Query<(&mut Animator, &mut Transform), With<Wolf>>,
+fn sync_actors(
+    mut sim: NonSendMut<Sim>,
+    mut libraries: ResMut<Libraries>,
+    mut q: Query<(&Actor, &mut Animator, &mut Transform)>,
 ) {
-    let Ok((mut anim, mut tf)) = q.single_mut() else {
-        return;
-    };
-    let body = &sim.wolf.body;
-    tf.translation = Vec3::from_array(body.position);
-    tf.rotation = Quat::from_rotation_y(body.yaw);
-    let Some(name) = sim.last.animation.as_deref() else {
-        return;
-    };
-    if anim.clip_name() != name {
-        match library.0.clip(name) {
-            Ok(clip) => {
-                anim.play(clip, false);
-                anim.apply_root_motion = false;
-                anim.speed = 0.0;
-            }
-            Err(_) => {
+    for (actor, mut anim, mut tf) in &mut q {
+        let i = actor.0;
+        let body = if i == WOLF {
+            &sim.duel.player.body
+        } else {
+            &sim.duel.enemy.body
+        };
+        tf.translation = Vec3::from_array(body.position);
+        tf.rotation = Quat::from_rotation_y(body.yaw);
+        let report: &StepReport = if i == WOLF {
+            &sim.last.player
+        } else {
+            &sim.last.enemy
+        };
+        let Some(name) = report.animation.clone() else {
+            continue;
+        };
+        let time = report.anim_time;
+        let started = sim.started[i].take();
+        let restart = started.as_ref().is_some_and(|(n, _)| *n == name);
+        if anim.clip_name() != name || restart {
+            let blend = started.map_or(0.0, |(_, b)| b);
+            match libraries.0[i].clip(&name) {
+                Ok(clip) => {
+                    anim.play_named(&name, clip, false, blend);
+                    anim.apply_root_motion = false;
+                    anim.speed = 0.0;
+                }
                 // Not extracted: keep showing the previous clip.
-                return;
+                Err(_) => continue,
             }
         }
+        anim.time = time;
     }
-    anim.time = sim.last.anim_time;
 }
 
 fn follow_camera(
@@ -423,7 +495,12 @@ fn follow_camera(
     let Ok(mut tf) = cam.single_mut() else {
         return;
     };
-    let target = Vec3::from_array(sim.wolf.body.position) + Vec3::Y * CAMERA_HEIGHT;
+    let wolf = Vec3::from_array(sim.duel.player.body.position);
+    let mut target = wolf + Vec3::Y * CAMERA_HEIGHT;
+    // Locked on, aim between Wolf and the target, biased to Wolf.
+    if let Some(t) = sim.duel.player.lock_target {
+        target = target.lerp(Vec3::from_array(t) + Vec3::Y * 1.2, 0.3);
+    }
     let rot = Quat::from_euler(EulerRot::YXZ, orbit.yaw, -orbit.pitch, 0.0);
     let eye = target + rot * Vec3::new(0.0, 0.0, orbit.distance);
     *tf = Transform::from_translation(eye).looking_at(target, Vec3::Y);
@@ -434,23 +511,28 @@ fn hud(sim: NonSend<Sim>, mut text: Query<&mut Text, With<Hud>>) {
         return;
     };
     let r = &sim.last;
-    let mut flags = r.action_flags.clone();
-    flags.retain(|f| [7, 11, 26, 115, 117, 119].contains(f));
-    text.0 = format!(
-        "{}\nclip {} t={:.2}\npos ({:.2}, {:.2}, {:.2}) yaw {:.0}{}\nbehaviour refs {:?}\nSpEffects {:?}\ncancel windows {:?}\n\
-         WASD move, mouse look, LMB attack, RMB guard, Space jump, Shift step/sprint, C crouch, Esc mouse",
-        r.behavior.state_path.join(" / "),
-        r.animation.as_deref().unwrap_or("-"),
-        r.anim_time,
-        r.position[0],
-        r.position[1],
-        r.position[2],
-        r.yaw.to_degrees(),
-        if r.grounded { "" } else { "  (airborne)" },
-        r.behavior_refs,
-        r.sp_effects,
+    let mut flags = r.player.action_flags.clone();
+    flags.retain(|f| [3, 7, 11, 26, 115, 117, 119].contains(f));
+    let mut s = format!(
+        "Wolf  {}  [{} t={:.2}]  HP {}{}\nrefs {:?}  windows {:?}\nSoldier  {}  [{} t={:.2}]  HP {}\n",
+        r.player.behavior.state_path.join(" / "),
+        r.player.animation.as_deref().unwrap_or("-"),
+        r.player.anim_time,
+        sim.duel.hp[0],
+        if r.locked_on { "  LOCKED ON" } else { "" },
+        r.player.behavior_refs,
         flags,
+        r.enemy.behavior.state_path.join(" / "),
+        r.enemy.animation.as_deref().unwrap_or("-"),
+        r.enemy.anim_time,
+        sim.duel.hp[1],
     );
+    for line in &sim.hit_log {
+        s += line;
+        s.push('\n');
+    }
+    s += "WASD move, mouse look, LMB attack, RMB guard, Space jump, Shift step/sprint, C crouch, Q lock-on, Esc mouse";
+    text.0 = s;
 }
 
 fn capture(

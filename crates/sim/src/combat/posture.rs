@@ -8,7 +8,7 @@ use super::effects::{
     ActiveEffect, defender_stamina_rate, deflect_stamina_attack_rate, guard_stamina_cut_rate,
 };
 use super::hit::HitOutcome;
-use super::params::{AttackProfile, StaminaControl};
+use super::params::{AttackProfile, StaminaControl, WeaponGuard};
 use super::trunc;
 
 /// Limits imposed by the active StaminaControlParam recovery type, in posture points.
@@ -130,11 +130,17 @@ pub struct DefenderPosture {
     /// 1.0 for the player (inferred: the player's rate comes from armour, which Sekiro lacks).
     pub attribute_rate: f32,
     /// Guard posture cut in percent: NpcParam `staminaGuardDef` for NPCs; for the player the
-    /// weapon's `staminaGuardDef` when blocking and `staminaJustGuardDef` when deflecting.
+    /// weapon's `staminaGuardDef` when blocking and `staminaJustGuardDef` when deflecting, times
+    /// ReinforceParamWeapon `staminaGuardDefRate`, plus the stat bonus from
+    /// `staminaGuardDef_MaxCorrect` (0 on the Kusabimaru).
     pub guard_def: f32,
+    /// Added to `guard_def` before the multipliers: 1.0 for the player, 0 for NPCs (read from
+    /// code: `840870` adds a constant 1.0, `840550` does not).
+    pub cut_bias: f32,
     /// `guardStaminaCutRate` of the guard action's AtkParam row.
     pub guard_row_cut_rate: i16,
-    /// NPC only: `stamina` of the guard action's BehaviorParam row, added after the cut.
+    /// `stamina` of the guard action's BehaviorParam row, added after the cut (both NPCs and the
+    /// player, read from code).
     pub guard_behavior_stamina: i32,
 }
 
@@ -143,6 +149,26 @@ impl Default for DefenderPosture {
         Self {
             attribute_rate: 1.0,
             guard_def: 0.0,
+            cut_bias: 0.0,
+            guard_row_cut_rate: 0,
+            guard_behavior_stamina: 0,
+        }
+    }
+}
+
+impl DefenderPosture {
+    /// The player guarding with `weapon` (block or deflect), with reinforcement rate
+    /// `staminaGuardDefRate` and no stat bonus.
+    pub fn player(weapon: &WeaponGuard, deflect: bool, reinforce_guard_def_rate: f32) -> Self {
+        let def = if deflect {
+            weapon.stamina_just_guard_def
+        } else {
+            weapon.stamina_guard_def
+        };
+        Self {
+            attribute_rate: 1.0,
+            guard_def: def as f32 * reinforce_guard_def_rate,
+            cut_bias: 1.0,
             guard_row_cut_rate: 0,
             guard_behavior_stamina: 0,
         }
@@ -155,16 +181,20 @@ impl Default for DefenderPosture {
 /// Read from code:
 /// - Direct hit (`844070`): `trunc(directAtkStamDamage * attack_rate * attribute_rate *
 ///   effect_rate)`.
-/// - Block or deflect (`8439a0`, NPC guard cut `840550`): the base is `repelLostStamDamage` on a
-///   block and `atkStam` on a deflect, times `attack_rate`. The guard cut is
-///   `clamp((1 + guard_row_cut_rate / 100) * guard_def * cut_effects, 0, 100)` percent, and the
-///   guarded value is `(1 - cut / 100) * base + guard_behavior_stamina`. That is multiplied by
-///   `attribute_rate` and the guard-family effect rate and truncated.
+/// - Block or deflect (`8439a0`, NPC guard cut `840550`, player guard cut `840870`): the base is
+///   `repelLostStamDamage` on a block and `atkStam` on a deflect, times `attack_rate`. The guard
+///   cut is `clamp((guard_def + cut_bias) * (1 + guard_row_cut_rate / 100) * cut_effects, 0, 100)`
+///   percent, and the guarded value is `(1 - cut / 100) * base + guard_behavior_stamina`. That is
+///   multiplied by `attribute_rate` and the guard-family effect rate and truncated.
+///   The player version also scales the stat bonus by 1.5 and the result by 0.7 (weapon
+///   category 12) or 0.9 in an unidentified guard state, and by a percent at PlayerIns +0x21EC
+///   when a module flag is set; these are not modelled.
 ///
-/// `attack_rate` is the attacker's posture attack multiplier (record slot +0x188, inferred to be
-/// the attacker's `staminaAttackRate` effects; 1.0 without effects).
-/// The player's own guard cut (`840870`) has an extra stat term that Ghidra could not recover
-/// fully; it is treated like the NPC formula without the flat behaviour cost (inferred).
+/// `attack_rate` is the attacker's posture attack multiplier: the product of its
+/// `staminaAttackRate` effects ([`super::effects::attacker_stamina_attack_rate`], folded into the
+/// record by the builder, read from code) times record slot +0x188 (writer not found; 1.0
+/// assumed). For player weapon attacks use [`player_posture_base`] with
+/// [`defender_posture_damage_from_base`] instead.
 pub fn defender_posture_damage(
     outcome: HitOutcome,
     attack: &AttackProfile,
@@ -172,22 +202,58 @@ pub fn defender_posture_damage(
     defender: &DefenderPosture,
     defender_effects: &[ActiveEffect],
 ) -> i32 {
+    let base = match outcome {
+        HitOutcome::Hit => attack.direct_stam,
+        HitOutcome::Block => attack.blocked_stam,
+        HitOutcome::Deflect => attack.deflected_stam,
+    } as f32
+        * attack_rate;
+    defender_posture_damage_from_base(outcome, base, attack, defender, defender_effects)
+}
+
+/// The posture base a player weapon attack stores in the hit record (`847e10`, read from code):
+/// `(staminaAttackPowerRate * field + correction / 100 * attackBaseStamina * reinforce) *
+/// reinforce * attack_rate`, where `field` is the AtkParam_Pc value for the outcome
+/// (`directAtkStamDamage`, `repelLostStamDamage` or `atkStam`), `correction` is
+/// `directAtkStamCorrection` for a direct hit and `atkStamCorrection` otherwise, and `reinforce`
+/// is ReinforceParamWeapon `staminaAtkRate`. Non-weapon player attacks use `field * attack_rate`.
+pub fn player_posture_base(
+    outcome: HitOutcome,
+    attack: &AttackProfile,
+    weapon: &WeaponGuard,
+    reinforce_stamina_atk_rate: f32,
+    attack_rate: f32,
+) -> f32 {
+    let (field, correction) = match outcome {
+        HitOutcome::Hit => (attack.direct_stam, attack.direct_atk_stam_correction),
+        HitOutcome::Block => (attack.blocked_stam, attack.atk_stam_correction),
+        HitOutcome::Deflect => (attack.deflected_stam, attack.atk_stam_correction),
+    };
+    let weapon_part =
+        correction as f32 * 0.01 * (weapon.attack_base_stamina as f32 * reinforce_stamina_atk_rate);
+    (weapon.stamina_attack_power_rate * field as f32 + weapon_part)
+        * reinforce_stamina_atk_rate
+        * attack_rate
+}
+
+/// [`defender_posture_damage`] from an already computed record base (`844070`, `8439a0`).
+pub fn defender_posture_damage_from_base(
+    outcome: HitOutcome,
+    base: f32,
+    attack: &AttackProfile,
+    defender: &DefenderPosture,
+    defender_effects: &[ActiveEffect],
+) -> i32 {
     let attr = attack.stamina_attribute;
     match outcome {
         HitOutcome::Hit => {
             let effect_rate = defender_stamina_rate(defender_effects, attr, false, false);
-            trunc(attack.direct_stam as f32 * attack_rate * defender.attribute_rate * effect_rate)
+            trunc(base * defender.attribute_rate * effect_rate)
         }
         HitOutcome::Block | HitOutcome::Deflect => {
             let deflect = outcome == HitOutcome::Deflect;
-            let base = if deflect {
-                attack.deflected_stam
-            } else {
-                attack.blocked_stam
-            } as f32
-                * attack_rate;
-            let cut = ((defender.guard_row_cut_rate as f32 * 0.01 + 1.0)
-                * defender.guard_def
+            let cut = ((defender.guard_def + defender.cut_bias)
+                * (defender.guard_row_cut_rate as f32 * 0.01 + 1.0)
                 * guard_stamina_cut_rate(defender_effects, deflect))
             .clamp(0.0, 100.0);
             let guarded = (1.0 - cut * 0.01) * base + defender.guard_behavior_stamina as f32;

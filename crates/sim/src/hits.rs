@@ -54,7 +54,9 @@ fn node_world(nodes: &[flver::Node]) -> Vec<Mat4> {
         out[i] = Some(m);
         m
     }
-    (0..nodes.len()).map(|i| resolve(i, nodes, &mut out, 0)).collect()
+    (0..nodes.len())
+        .map(|i| resolve(i, nodes, &mut out, 0))
+        .collect()
 }
 
 fn dummy_matrix(d: &flver::Dummy, blade: bool) -> Mat4 {
@@ -120,7 +122,11 @@ impl DummyRig {
         holder_dummy: i16,
     ) -> bool {
         let world = node_world(&model.nodes);
-        let Some(h) = model.dummies.iter().find(|d| d.reference_id == holder_dummy) else {
+        let Some(h) = model
+            .dummies
+            .iter()
+            .find(|d| d.reference_id == holder_dummy)
+        else {
             return false;
         };
         let Some(attach) = usize::try_from(h.attach_bone).ok() else {
@@ -152,7 +158,11 @@ impl DummyRig {
             .get(&id)
             .into_iter()
             .flatten()
-            .filter_map(|(b, off)| model.get(*b).map(|m| to_world.transform_point3((*m * *off).w_axis.truncate())))
+            .filter_map(|(b, off)| {
+                model
+                    .get(*b)
+                    .map(|m| to_world.transform_point3((*m * *off).w_axis.truncate()))
+            })
             .collect()
     }
 
@@ -261,7 +271,27 @@ impl Combatant {
                 c.rig.add_weapon(&model, skeleton, &blade, 1);
             }
         }
-        c.attacks = load_attacks(&pd, &dd, "BehaviorParam_PC", "AtkParam_Pc", 100_000_000, c.variation);
+        // Rows missing for the weapon's own variation fall back to its hundred (5001 -> 5000),
+        // where the katana's ordinary attacks live (observed in the data, as in DS3).
+        let base = c.variation / 100 * 100;
+        c.attacks = load_attacks(
+            &pd,
+            &dd,
+            "BehaviorParam_PC",
+            "AtkParam_Pc",
+            100_000_000,
+            base,
+        );
+        if base != c.variation {
+            c.attacks.extend(load_attacks(
+                &pd,
+                &dd,
+                "BehaviorParam_PC",
+                "AtkParam_Pc",
+                100_000_000,
+                c.variation,
+            ));
+        }
         c
     }
 
@@ -273,9 +303,10 @@ impl Combatant {
             height: 1.7,
             ..Combatant::default()
         };
-        if let Some(model) = std::fs::read(cache.join(format!("raw/chr/{chr}.chrbnd.d/{chr}.flver")))
-            .ok()
-            .and_then(|b| flver::parse(&b).ok())
+        if let Some(model) =
+            std::fs::read(cache.join(format!("raw/chr/{chr}.chrbnd.d/{chr}.flver")))
+                .ok()
+                .and_then(|b| flver::parse(&b).ok())
         {
             c.rig = DummyRig::from_flver(&model, skeleton);
         }
@@ -290,7 +321,14 @@ impl Combatant {
         }) {
             (c.variation, c.radius, c.height) = row;
         }
-        c.attacks = load_attacks(&pd, &dd, "BehaviorParam", "AtkParam_Npc", 200_000_000, c.variation);
+        c.attacks = load_attacks(
+            &pd,
+            &dd,
+            "BehaviorParam",
+            "AtkParam_Npc",
+            200_000_000,
+            c.variation,
+        );
         c
     }
 }
@@ -379,7 +417,11 @@ impl HitResolver for SimpleResolver {
         let right = fz * ix - fx * iz;
         let from_front = front >= 0.0;
         let guarding = defender.tae_frame().flag(FLAG_GUARD) && from_front;
-        let deflect = guarding && defender.tae_frame().behavior_refs.contains(&REF_JUST_DEFLECT);
+        let deflect = guarding
+            && defender
+                .tae_frame()
+                .behavior_refs
+                .contains(&REF_JUST_DEFLECT);
         let direction = if front.abs() >= right.abs() {
             if from_front { 2 } else { 3 }
         } else if right > 0.0 {
@@ -517,8 +559,12 @@ impl HitDetector {
                 for (si, shape) in attack.shapes.iter().enumerate() {
                     let rig = &fighters[ai].rig;
                     let (Some(a), Some(b)) = (
-                        rig.positions(shape.dummy_a, &model, to_world).first().copied(),
-                        rig.positions(shape.dummy_b, &model, to_world).first().copied(),
+                        rig.positions(shape.dummy_a, &model, to_world)
+                            .first()
+                            .copied(),
+                        rig.positions(shape.dummy_b, &model, to_world)
+                            .first()
+                            .copied(),
                     ) else {
                         continue;
                     };
@@ -531,7 +577,10 @@ impl HitDetector {
                         }
                         let f = fighters[di];
                         let base = Vec3::from_array(defender.body.position);
-                        let axis = (base + Vec3::Y * f.radius, base + Vec3::Y * (f.height - f.radius).max(f.radius));
+                        let axis = (
+                            base + Vec3::Y * f.radius,
+                            base + Vec3::Y * (f.height - f.radius).max(f.radius),
+                        );
                         // Sweep: the blade now, before, and the two arcs its ends traced.
                         let d = segment_distance(a, b, axis.0, axis.1)
                             .min(segment_distance(pa, pb, axis.0, axis.1))
@@ -539,8 +588,12 @@ impl HitDetector {
                             .min(segment_distance(pb, b, axis.0, axis.1));
                         if d <= shape.radius + f.radius {
                             self.done.insert((ai, judge, w.start.to_bits(), di));
-                            let dir = Vec3::new(base.x - attacker.body.position[0], 0.0, base.z - attacker.body.position[2])
-                                .normalize_or(Vec3::Z);
+                            let dir = Vec3::new(
+                                base.x - attacker.body.position[0],
+                                0.0,
+                                base.z - attacker.body.position[2],
+                            )
+                            .normalize_or(Vec3::Z);
                             let mid = (a + b) * 0.5;
                             hits.push(HitEvent {
                                 attacker: ai,

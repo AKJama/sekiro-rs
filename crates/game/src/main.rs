@@ -6,8 +6,9 @@
 //!   model in bind pose; `--hide`/`--only` filter primitives by material name, `--combat` shows
 //!   enemies with weapons drawn.
 //! - `sekiro-rs --map <id> [--screenshot <out.png>] [--at <s>] [--camera x,y,z,yaw,pitch]
-//!   [--start <n>] [--collision] [--no-pieces] [--hide m9,m8] [--groups display|draw|off]
-//!   [--uncapped]`: fly through an area exported by `sekiro-extract map`.
+//!   [--start <n>] [--collision] [--no-pieces] [--objects] [--hide m9,m8]
+//!   [--groups draw|display|off] [--uncapped]`: fly through an area exported by
+//!   `sekiro-extract map`.
 
 mod arena;
 mod character;
@@ -65,6 +66,7 @@ fn main() -> anyhow::Result<()> {
             hide: arg_list(&args, "--hide"),
             uncapped: args.iter().any(|a| a == "--uncapped"),
             groups: map::GroupMode::parse(arg_value(&args, "--groups").as_deref())?,
+            objects: args.iter().any(|a| a == "--objects"),
         });
     }
     if args.iter().any(|a| a == "--play") {
@@ -82,6 +84,8 @@ fn main() -> anyhow::Result<()> {
             script: arg_value(&args, "--script"),
             screenshots,
             exit_after_script: args.iter().any(|a| a == "--exit"),
+            enemy: !args.iter().any(|a| a == "--no-enemy"),
+            lock_on: args.iter().any(|a| a == "--lock-on"),
         });
     }
     if args.iter().any(|a| a == "--arena") {
@@ -94,6 +98,8 @@ fn main() -> anyhow::Result<()> {
     }
     eprintln!("usage: sekiro-rs --play [--script FILE|builtin] [--shots step:path,...] [--exit]");
     eprintln!("usage: sekiro-rs --arena [--deathblow] [--screenshot <out.png> --at <seconds>]");
+    eprintln!("       sekiro-rs --map <id> [--start <n>] [--camera x,y,z,yaw,pitch] [--collision]");
+    eprintln!("                 [--screenshot <out.png> --at <seconds>] (see src/map.rs)");
     eprintln!("       sekiro-rs --viewer <file.glb> [--screenshot <out.png>] [--yaw <deg>]");
     eprintln!("                 [--pitch <deg>] [--distance <m>] [--height <m>]");
     std::process::exit(2);
