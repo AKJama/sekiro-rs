@@ -103,7 +103,7 @@ pub fn npc_guard_repel(guard_row_break_rate: u16, effects: &[ActiveEffect]) -> i
 ///
 /// Read from code (`a28da0`, `84ce20`), with two simplifications: the engine first zeroes the
 /// value when the player's stats are below the weapon's requirements and then adds a stat bonus
-/// of up to 10; Sekiro has no such stats, so both are left out (inferred).
+/// `clamp(stat - overStrength, 0, 10)`; Sekiro weapons have `overStrength` 99, so the bonus is 0.
 pub fn player_guard_repel(
     guard_break_correction: u16,
     weapon_guard_base_repel: u8,
@@ -118,11 +118,81 @@ pub fn player_guard_repel(
 /// `incoming` is the attack's travel direction (attacker toward defender) on the ground plane.
 /// `defender_effects` are the defender's active SpEffects.
 ///
-/// Not modelled (open, see `docs/COMBAT-RULES.md`): the attack-versus-attack clash path that
-/// forces a guard through `guardAtkRate`/`guardBreakRate` of two attack rows, the position-based
-/// arc test used for bullets, and the per-target filter `c03aa0` on effects.
+/// The attack's repel power is its `guardAtkRate`, which is right for NPC attacks; for player
+/// weapon attacks use [`resolve_hit_with_repel`] with [`player_attack_repel`].
+///
+/// Not modelled (open, see `docs/COMBAT-RULES.md`): the position-based arc test used for
+/// bullets and the per-target filter `c03aa0` on effects. Hits on armoured body parts are
+/// [`resolve_part_hit`].
 pub fn resolve_hit(
     attack: &AttackProfile,
+    incoming: [f32; 2],
+    guard: &GuardInput,
+    defender_effects: &[ActiveEffect],
+) -> HitResolution {
+    resolve_hit_with_repel(
+        attack,
+        attack.guard_atk_rate as i32,
+        incoming,
+        guard,
+        defender_effects,
+    )
+}
+
+/// Repel attack power of a player weapon attack (record +0x40, `84c7b0`, read from code):
+/// `trunc(guardAtkRateCorrection / 100 * weapon attackBaseRepel)` plus a stat bonus
+/// `clamp(stat - overStrength, 0, 10)` (0 for Sekiro weapons, whose `overStrength` is 99),
+/// minus 5 or 10 in two hand states (not modelled). Non-weapon player attacks use `guardAtkRate`.
+/// When the player fails the weapon's stat requirements the engine uses TentativePlayerParam
+/// `LowStatus_AtkGuardBreak` (5) instead.
+///
+/// Kusabimaru (`attackBaseRepel` 10) with the common correction 300 gives 30, the same as an
+/// ordinary NPC attack.
+pub fn player_attack_repel(attack: &AttackProfile, weapon_attack_base_repel: u8) -> i32 {
+    trunc(attack.guard_atk_rate_correction as f32 * 0.01 * weapon_attack_base_repel as f32)
+}
+
+/// A hit on an armoured body part (`b6c880`, read from code).
+///
+/// The hit collision body carries a part group 1 to 8 (`1058380`); NpcParam
+/// `partsAtkParamId<group>` names an AtkParam_Npc row for that part. If the attack row's raw
+/// `guardAtkRate` is below that row's `guardBreakRate`, the hit is treated as guarded by the part
+/// (record +0x1CE) whatever the defender is doing, and the part row is the guard row for the
+/// repel test that follows, which uses `repel_power` (record +0x40). The defender then reports
+/// damage type 12 on a block, and the attacker 1022..1026 when deflected. Returns `None` when the
+/// part does not guard. Note that every AtkParam_Pc row has `guardAtkRate` 0, so any part with a
+/// positive `guardBreakRate` guards against the player.
+pub fn resolve_part_hit(
+    attack: &AttackProfile,
+    repel_power: i32,
+    part_row: &AttackProfile,
+    defender_effects: &[ActiveEffect],
+) -> Option<HitResolution> {
+    if attack.guard_atk_rate >= part_row.guard_break_rate {
+        return None;
+    }
+    let guard = GuardInput {
+        guarding: true,
+        forward: [0.0, 0.0],
+        guard_angle: 0,
+        base_repel: npc_guard_repel(part_row.guard_break_rate, defender_effects),
+        guard_attribute: part_row.guard_attribute,
+    };
+    let mut probe = attack.clone();
+    probe.is_all_dir_guard = true;
+    Some(resolve_hit_with_repel(
+        &probe,
+        repel_power,
+        [1.0, 0.0],
+        &guard,
+        defender_effects,
+    ))
+}
+
+/// [`resolve_hit`] with an explicit repel attack power (record +0x40).
+pub fn resolve_hit_with_repel(
+    attack: &AttackProfile,
+    repel_power: i32,
     incoming: [f32; 2],
     guard: &GuardInput,
     defender_effects: &[ActiveEffect],
@@ -139,7 +209,7 @@ pub fn resolve_hit(
     }
     let attr = guard.guard_attribute as usize;
     let flag = |flags: &[bool; 2]| attr < 2 && flags[attr];
-    let (outcome, bypassed) = if repel < attack.guard_atk_rate as i32 {
+    let (outcome, bypassed) = if repel < repel_power {
         if flag(&attack.disable_guard) {
             (HitOutcome::Hit, true)
         } else {
