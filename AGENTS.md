@@ -25,7 +25,7 @@ A Rust/Bevy reimplementation of Sekiro: Shadows Die Twice (Steam, v1.6.0.0, buil
 
 - Never write to the game install, its saves, or the running game's memory.
 - Back up saves before any session that runs the game.
-- No game files, extracted data, decompiled code or Ghidra databases in git (whitelist `.gitignore`).
+- Game files, extracted data and research artefacts stay in the local gitignored `cache/` and `re/` folders; only original source and docs are tracked (whitelist `.gitignore`).
 - No online play, anti-cheat or DRM work.
 - Local commits are fine; never add a remote, push or publish without asking.
 
