@@ -31,7 +31,10 @@ mod tests;
 
 pub use damage_type::{AttackerReaction, DefenderReaction, attacker_reaction, defender_reaction};
 pub use effects::{ActiveEffect, StaminaAttribute};
-pub use hit::{GuardInput, HitOutcome, HitResolution, resolve_hit};
+pub use hit::{
+    GuardInput, HitOutcome, HitResolution, player_attack_repel, resolve_hit,
+    resolve_hit_with_repel, resolve_part_hit,
+};
 pub use hp::Vitality;
 pub use posture::{ControlRange, PostureMeter};
 pub use recovery::{RecoveryAccumulator, RecoveryInputs, posture_recovery_per_second};

@@ -31,6 +31,30 @@ A fresh character has remaining equal to max (`bd6ae0` calls the setter with max
 The bar on screen is max minus remaining.
 A break is remaining below 1.
 
+## The hit record
+
+When an attack connects, `10b6880` builds the hit record the defender's damage module consumes.
+It looks up the attack's AtkParam row (record +0x50 kind, +0x54 id) and BehaviorParam row (+0x4C), and fills the slots below (read from code).
+
+| Slot | Value | Source |
+|---|---|---|
+| +0x34 | Posture base on a deflect: attacker virtual 0x1E8 with the flag set (thunk `847860` loads 1) | `850f00` |
+| +0x38 | Posture base on a block: virtual 0x1E8 with the flag clear | `8476f0` |
+| +0x3C | Posture base on a direct hit: virtual 0x1F0 | `841b10` |
+| +0x40 | Repel attack power | `84c650` |
+| +0x44 | Extra value for record kind 64 | `844290` |
+| +0x24 | `dmgLevel` | AtkParam +0x7A |
+| +0xEC bit 1 | `disableStaminaAttack` | AtkParam +0x86 bit 1 |
+| +0xEC bit 6 | `isGhostAtk`: cannot be guarded unless the defender passes a character check | AtkParam +0x86 bit 6 |
+| +0xED bit 0 | `isDisableNoDamage` | AtkParam +0x86 bit 7 |
+
+The posture virtuals for NPC attackers (`a12b20`, `a12f90` into `847d50`) return `directAtkStamDamage`, `repelLostStamDamage` or `atkStam` times the product of the attacker's SpEffect `staminaAttackRate` (`bfe3b0`, `c057d0` reads SpEffect +0xC8).
+For player weapon attacks (`a24420`, `a25d70` into `847e10`) the base is `(staminaAttackPowerRate * field + correction / 100 * attackBaseStamina * reinforce) * reinforce * staminaAttackRate effects`, with `directAtkStamCorrection` for a direct hit, `atkStamCorrection` otherwise and `reinforce` the ReinforceParamWeapon `staminaAtkRate`.
+The repel attack power for NPC attacks is `guardAtkRate` (`a13630`, `84c760`).
+For player weapon attacks it is `trunc(guardAtkRateCorrection / 100 * weapon attackBaseRepel)` plus a stat bonus capped at 10 that Sekiro weapons do not give, minus 5 or 10 in two hand states; failing the weapon's stat requirements gives TentativePlayerParam `LowStatus_AtkGuardBreak` (5) instead (`a288a0`, `84c7b0`).
+The Kusabimaru (`attackBaseRepel` 10) with the common correction 300 (349 of 443 AtkParam_Pc rows) gives 30.
+Record slot +0x188 multiplies all three posture bases again in `844070` and `8439a0`; its writer was not found.
+
 ## Order of one hit
 
 The defender's damage module runs `b6f690` per hit record, which calls in order:
@@ -55,16 +79,18 @@ The attacker's damage module runs `b698d0` for the same contact, which picks the
 | Repel defence of a non-guarding NPC is NpcParam `defFlickPower`. | `a137e0` | code |
 | Every active SpEffect's `defFlickPower` overrides repel defence when it is higher. | `bfc440` | code |
 | Repel defence below the attack's repel power is a block; at or above it is a deflect. | `b6c880` | code |
-| The attack's repel power is AtkParam `guardAtkRate`. | record slot +0x40 | inferred |
+| The attack's repel power is record +0x40: `guardAtkRate` for NPC attacks, a weapon formula for the player (see the hit record). | `10b6880`, `84c650` | code |
 | A block becomes a direct hit when `disableGuard_vsGuardAttribute[g]` is set, where `g` is the guard row's `guardAttribute` (0 or 1). | `b6c880`, table at 0x142a7ce28 | code |
 | A deflect becomes a direct hit when `disableJustGuard_vsGuardAttribute[g]` is set. | `b6c880`, table at 0x142a7ce38 | code |
-| A second path forces a guard when two attack rows clash, comparing their `guardAtkRate` and `guardBreakRate`. | `b6c880` | code, not modelled |
+| A hit on an armoured body part is guarded whatever the defender is doing when the attack row's `guardAtkRate` is below the part row's `guardBreakRate`; the part row (NpcParam `partsAtkParamId1..8`, chosen by the part group 1 to 8 of the hit collision body) then acts as the guard row. | `b6c880`, `1058380`, `10c66a0` | code |
+| On an unguarded hit on a body part, the part's damage group sets the HP and posture rates (record +0x210, +0x214) through damage module virtuals 0x30 and 0x38; group 31 has extra handling. | `b6c880` | code, rates not traced |
 
 Worked numbers: ordinary NPC attacks have `guardAtkRate` 30 (2154 of 2396 AtkParam_Npc rows).
 The just-guard window effect 105010 has `stateInfo` 158 and `defFlickPower` 40, so a guard inside the window deflects.
 Outside the window the Kusabimaru's `guardBaseRepel` is 20, so the guard blocks.
 Rows with `guardAtkRate` 100 (213 rows) can never be deflected by the 40 override.
-Every AtkParam_Pc row has `guardAtkRate` 0, so a guarding NPC always deflects the player's attack.
+Every AtkParam_Pc row has `guardAtkRate` 0, but player weapon attacks use the weapon formula (30 for the Kusabimaru), so a guarding NPC deflects the player when its guard row's `guardBreakRate` times its effect rate reaches 30.
+Armoured parts compare the raw `guardAtkRate`, so any part with a positive `guardBreakRate` guards against the player.
 
 Perilous attacks are the unblockable flags, not a separate system.
 In AtkParam_Npc, 238 rows block both guard types for both block and deflect (grabs), 60 rows block only the katana (guard type 0) for both (the Loaded Umbrella still blocks them), and 111 rows forbid only blocking with the katana, so they must be deflected.
@@ -74,21 +100,23 @@ The Mikiri counter is not in this path; see `docs/HKS-COMBAT.md`.
 
 | Outcome | Base | Source | Confidence |
 |---|---|---|---|
-| Direct hit | `directAtkStamDamage` | `844070`, record +0x3C | code, field inferred |
-| Block | `repelLostStamDamage` | `8439a0`, record +0x38 | code, field inferred |
-| Deflect | `atkStam` | `8439a0`, record +0x34 | code, field inferred |
+| Direct hit | `directAtkStamDamage` | `844070`, record +0x3C | code |
+| Block | `repelLostStamDamage` | `8439a0`, record +0x38 | code |
+| Deflect | `atkStam` | `8439a0`, record +0x34 | code |
 
 | Rule | Source | Confidence |
 |---|---|---|
-| The base is multiplied by the attacker's posture attack rate (record +0x188). | `844070`, `8439a0` | code, source of the rate inferred |
+| The base already includes the attacker's `staminaAttackRate` effects (see the hit record) and is multiplied again by record +0x188. | `844070`, `8439a0` | code; +0x188 writer not found |
 | Then by the defender's per-attribute rate chosen by `staminaPhysicsAttribute`: 1 slash, 2 light hit, 3 thrust, 4 neutral, 5 deathblow, 6 heavy hit, 7 anti-ground, 8 anti-air, 9 light shoot, 10 to 12 attributes A to C, anything else 1.0. | `844660` (NpcParam +0x27C on), `10ce8d0` (SpEffect +0x328 on) | code |
 | SpEffect per-attribute rates: on a direct hit all effects except `stateInfo` 158, 204, 110 and 300 multiply; on a block only 158 effects; on a deflect only 204 effects. | `bfafa0` | code |
 | On a block or deflect an NPC applies a guard cut of `clamp((1 + guardRow.guardStaminaCutRate / 100) * staminaGuardDef * product of guardStaminaCutRate over 158 or 204 effects, 0, 100)` percent, then adds the guard behaviour's BehaviorParam `stamina`. | `840550`, `bfcd40` | code, guard row identity inferred |
-| The player's guard cut uses the weapon's `staminaGuardDef` (block) or `staminaJustGuardDef` (deflect) with the same row and effect factors plus a stat term. | `840870`, `bfcde0` | code, tail not recovered |
+| The player's guard cut is `clamp((weaponDef * staminaGuardDefRate + stat bonus + 1) * (1 + guardRow.guardStaminaCutRate / 100) * product of guardStaminaCutRate over 158 or 204 effects, 0, 100)` percent, where `weaponDef` is `staminaGuardDef` on a block and `staminaJustGuardDef` on a deflect and the stat bonus comes from `staminaGuardDef_MaxCorrect` through CalcCorrectGraph 163 (0 on the Kusabimaru). The guard behaviour's `stamina` is added as for NPCs. | `a24180`, `840870`, `845d80`, `bfcde0` | code |
+| In an unidentified guard state (a value of 2 or 3 at PlayerIns +0x2140, +8) the stat bonus is scaled by 1.5 and the result by 0.7 for weapon category 12 or 0.9 otherwise; a further percent at PlayerIns +0x21EC applies when a module flag is set. | `840870`, `a24180` | code, states not identified |
 | The value is truncated to int, multiplied by a player-versus-enemy correction product and the hit part's rate, and truncated again. | `b6c880`, `8480a0` | code |
 | `disableStaminaAttack` zeroes the applied posture damage but the break test uses the value projected before zeroing. | `b6e6a0` | code |
 
-With the soldier's slash (AtkParam_Npc 10100100) and neutral multipliers, Wolf takes 18 on a direct hit, 18 on a block and 9 on a deflect.
+With the soldier's slash (AtkParam_Npc 10100100) and neutral multipliers, Wolf takes 18 on a direct hit.
+On a block the constant 1 in the player's cut makes it `trunc(0.99 * 18)` = 17, and on a deflect `trunc(0.99 * 9)` = 8, before any guard behaviour cost.
 
 ## Posture damage to the attacker
 
@@ -167,20 +195,25 @@ These match the HKS branches in `docs/HKS-COMBAT.md`: 1000, 1003 and 1033 select
 | Rule | Source | Confidence |
 |---|---|---|
 | Five elements (physical, magic, fire, lightning, dark) each go through an attack-versus-defence curve, are multiplied by seven per-element multiplier arrays and clamped at 0, then summed. | `840eb0` | code |
-| The curve is piecewise quadratic in `attack / defence` with knots 0.12, 1, 2.5 and 8; its five output percents are globals that are all zero in the analysed code, which makes it return the attack unchanged. | `840ce0` | code, run-time values open |
+| The curve is piecewise quadratic in `attack / defence` with knots 0.12, 1, 2.5 and 8; its five output percents are zero-initialised globals at 0x143d5c100..114 that nothing writes (only the curve reads them, and a debug menu labelled "growth defence settings" binds them in `848c50`), so the curve returns the attack unchanged and defence has no effect. | `840ce0`, `848c50` | code |
 | A positive total below 1 rounds up to 1. | `840eb0` | code |
-| The total is multiplied by a damage manager factor, the hit part's rate and a repel cut (when repel defence met the attack's repel power), then truncated. | `b6c880`, `6dba10`, `841c80` | code, factors not traced |
-| A blocking NPC's physical multiplier is `(100 - k * physGuardCutRate * (1 + guardRow.guardRate / 100)) / 100`, with `k` from an unrecovered per-attribute lookup. | `845ed0` | code, `k` assumed 1 |
+| The damage manager (`6dba10`) passes the total through unchanged unless a map event registered a damage override for the defender's hit part, in which case it replaces the damage and the damage levels. | `6dba10` | code |
+| The total is then multiplied by the hit part's rate and a repel cut (when repel defence met the attack's repel power), then truncated. | `b6c880`, `841c80` | code, repel cut source not traced |
+| A blocking NPC's physical multiplier is `(100 - k * physGuardCutRate * (1 + guardRow.guardRate / 100)) / 100`, where `k = 1 + NpcParam <attr>GuardCutRate / 100` for the attack's `atkAttribute` (slash, blow, thrust, neutral, deathblow, heavy hit, anti-ground, anti-air, light shoot, A, B, C). | `845ed0`, `10c60d0` | code |
+| The guarding player's physical multiplier is `(100 - k * (cut * reinforce physicsGuardCutRate + stat bonus) * durability * (1 + guardRow.guardRate / 100) * special) / 100`, with `cut` the weapon's `physGuardCutRate` on a block or `physJustGuardCutRate` on a deflect, `k = 1 + weapon <attr>GuardCutRate / 100`, durability 1.0, 0.7 or 0.5 by weapon durability (Sekiro weapons have none) and `special` a factor for blocks in an unidentified state. | `8460d0`, `10d1b40`, `841bd0` | code |
 | Damage at least 1.5 times max HP sets an extra flag. | `b6e6a0` | code |
 
-The soldier's slash (80 physical) on a defender with neutral multipliers deals 80; blocked by a guard with `physGuardCutRate` 100 it deals 0.
+The soldier's slash (80 physical) on a defender with neutral multipliers deals 80.
+The Kusabimaru (`physGuardCutRate` and `physJustGuardCutRate` 100) lets none through; the soldier's own block has `k` = 2 from `slashGuardCutRate` 100, so it also blocks everything.
 
 ## Posture recovery
 
 | Rule | Source | Confidence |
 |---|---|---|
 | Speed per second is `product of staminaRecoverSpeedRate over active effects * (base + sum of staminaRecoverChangeSpeed) * anim percent / 100 * character scale`, and times `staminaRecoverRatio / 100` when a StaminaControl type is active. | `a04850`, `bfe360`, `c05740` | code; the sum and the anim percent source inferred |
-| NPC base is NpcParam `staminaRecoverBaseVel`; the player's base comes from another virtual. | `a13a70`, `a2a5d0` | code |
+| NPC base is NpcParam `staminaRecoverBaseVel`. | `a13a70` | code |
+| The player's base is CalcCorrectGraph 504 ("Stamina recovery speed") at the player game data value +0x248, truncated: 30 at 1, rising linearly to 105 at 11 and above. Which progression value +0x248 is was not identified. | `a2a5d0`, `a2a680`, `844cc0`, `850b10` | code |
+| CalcCorrectGraph evaluation: input capped at the last breakpoint, the first segment whose upper breakpoint is at least the input, output `g0 + t^e * (g1 - g0)` for `e >= 0` or `g0 + (1 - (1 - t)^(-e)) * (g1 - g0)` for `e < 0`, clamped to the segment. | `850b10` | code |
 | Each frame the engine adds `speed * dt` to a float carry, applies the whole part through the posture setter and keeps the fraction. | `a04850`, `5460b0`, `9e6bf0` | code |
 | The update is skipped while an action-state flag (bit 21 of +0x88) is set. | `a04850` | code, meaning inferred |
 | The StaminaControl row is NpcParam `staminaControlParamId` for NPCs and row 0 for the player. | `bd58c0` | code |
@@ -213,16 +246,16 @@ Soldier numbers (base 20, resident effects 300600, 300601, 300602 gated at 80%, 
 
 ## Open questions
 
-- Which record slots hold `guardAtkRate` (+0x40), the three posture bases (+0x34, +0x38, +0x3C) and the attacker's posture attack rate (+0x188): the record builder was not found; the matches are by offset pattern and values.
-- The player's guard posture cut tail in `840870` and the player HP guard cut in `8460d0`.
-- The per-attribute factor in the NPC HP guard cut (`10c60d0`) and how `guardCutCancelRate` enters.
-- The five defence curve globals at 0x143d5c100..114, zero in the analysed code.
-- The damage manager factor `6dba10` and the repel cut source in `841c80`.
-- The player's base recovery speed (virtual 0x210 of PlayerIns) and the anim percent byte's writer.
-- The guard-break reaction flag (record +0x1C5, a character virtual) and the clash path.
+- The writer of record +0x188 (a second posture multiplier).
+- How `guardCutCancelRate` enters the HP guard cut; it is passed to the guard cut virtual but its use was not traced.
+- The player guard states behind the 0.7 / 0.9 posture factor and the `special` HP factor, and the PlayerIns +0x21EC percent.
+- The repel cut source in `841c80` (a damage-module virtual for unguarded hits, a param table 0x80 value at +0x1C for guarded ones).
+- The progression value at player game data +0x248 that drives the player's base recovery, and the writer of the animation recovery percent byte (action state +0x14) and the no-recovery flag (+0x88 bit 21).
+- The part damage-group rates (damage module virtuals 0x30 and 0x38) and group 31.
+- The guard-break reaction flag (record +0x1C5, a character virtual).
 - Inclusivity of the `conditionHp` gate.
 
 ## Tools
 
-`tools/ghidra/Callers.java` lists callers and callees, `tools/ghidra/ReadData.java` prints values at RVAs and `tools/ghidra/FindScalar.java` finds instructions using given constants.
-All three write only under `re/`.
+`tools/ghidra/Callers.java` lists callers and callees, `tools/ghidra/ReadData.java` prints values at RVAs, `tools/ghidra/FindScalar.java` finds instructions using given constants and `tools/ghidra/Disasm.java` dumps a function's instructions.
+All four write only under `re/`.

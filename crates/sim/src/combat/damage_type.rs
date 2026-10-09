@@ -16,7 +16,7 @@ pub enum DefenderReaction {
     GuardBreakFling,
     /// 1001: guard break.
     GuardBreak,
-    /// 12: guarded through an attack-versus-attack clash (not modelled in [`super::hit`]).
+    /// 12: blocked by an armoured body part (see [`super::hit::resolve_part_hit`]).
     GuardClash,
     /// 1028: guarded or deflected, and the attacker's posture broke from it with
     /// `doesBreakRepelStamDamage` set.
@@ -110,12 +110,12 @@ pub fn defender_reaction(f: DefenderFacts) -> DefenderReaction {
 pub struct AttackerReaction(pub i32);
 
 /// Picks the attacker's code (`b698d0`). `category` is the attack's BehaviorParam `category`
-/// (2, 6, 7 and 8 have their own codes); `clash` is the attack-versus-attack path.
+/// (2, 6, 7 and 8 have their own codes); `clash` means the hit was guarded by an armoured body part (record +0x1CE).
 ///
 /// Read from code:
 /// - blocked: 1017, or 1018 / 1019 / 1020 / 1021 for categories 2 / 6 / 7 / 8;
 /// - deflected: 1000, or 1003 / 1008 / 1009 / 1010 for those categories (1022 / 1023 / 1024 /
-///   1025 / 1026 on the clash path);
+///   1025 / 1026 when an armoured part did it);
 /// - deflected and the attacker's posture broke with `doesBreakRepelStamDamage`: 1033.
 ///
 /// Returns `None` for a direct hit or a guard break, where the attacker gets no code.

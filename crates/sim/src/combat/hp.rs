@@ -6,9 +6,10 @@ use super::trunc;
 ///
 /// Read from code: a piecewise-quadratic absorption curve over `attack / defence` with knots at
 /// 0.12, 1, 2.5 and 8 (globals at 0x143b01918..24) and absorption percents plus a flat share in
-/// five globals at 0x143d5c100..114. In the analysed code those five are all zero, which makes the
-/// curve return the attack unchanged, so this function does that. Whether the game fills them at
-/// run time (they live in zero-initialised data) is open; NPC defence values are mostly 0 anyway.
+/// five globals at 0x143d5c100..114. Those five are zero-initialised and nothing in the
+/// executable writes them: the only references are the curve's own reads and a debug-menu
+/// binding labelled "総成長防御力関連" (growth defence settings) in `848c50`. With them at zero
+/// the curve returns the attack unchanged, so defence values have no effect (read from code).
 pub fn defence_curve(attack: f32, _defence: f32) -> f32 {
     attack
 }
@@ -46,18 +47,46 @@ pub fn element_damage(
 /// The guard HP multiplier of a blocking NPC for physical damage (`845ed0`).
 ///
 /// Read from code: `(100 - attribute_factor * physGuardCutRate * (1 + guardRate / 100)) / 100`,
-/// where `guardRate` is from the guard action's AtkParam row. `attribute_factor` comes from a
-/// per-attribute NpcParam lookup that Ghidra could not recover; 1.0 is assumed (inferred). A
-/// negative result becomes 0 in [`element_damage`]. The player's guard cut (`8460d0`) was not
-/// traced; using the weapon's `physGuardCutRate` (block) or `physJustGuardCutRate` (deflect) in
-/// the same formula is our assumption.
+/// where `guardRate` is from the guard action's AtkParam row and `attribute_factor` is
+/// [`attribute_guard_factor`] of NpcParam `<attr>GuardCutRate` for the attack's `atkAttribute`
+/// (`10c60d0`). A negative result becomes 0 in [`element_damage`]. The other elements use
+/// `magGuardCutRate`, `fireGuardCutRate`, `thunGuardCutRate` and `darkGuardCutRate` without the
+/// attribute factor.
 pub fn npc_guard_cut(phys_guard_cut_rate: f32, guard_rate: i16, attribute_factor: f32) -> f32 {
     (100.0 - attribute_factor * phys_guard_cut_rate * (guard_rate as f32 * 0.01 + 1.0)) * 0.01
+}
+
+/// `1 + rate / 100` for a per-attribute guard cut correction (read from code, `845ed0`,
+/// `8460d0`). The soldier's `slashGuardCutRate` 100 doubles its physical guard cut.
+pub fn attribute_guard_factor(rate: f32) -> f32 {
+    rate * 0.01 + 1.0
+}
+
+/// The guard HP multiplier of the guarding player for physical damage (`8460d0`, read from code):
+/// `(100 - attribute_factor * (cut * reinforce + stat_bonus) * durability * (1 + guardRate / 100)
+/// * special) / 100`, where `cut` is the weapon's `physGuardCutRate` (block) or
+/// `physJustGuardCutRate` (deflect), `reinforce` ReinforceParamWeapon `physicsGuardCutRate`,
+/// `attribute_factor` [`attribute_guard_factor`] of the weapon's per-attribute rate,
+/// `stat_bonus` from `physGuardCutRate_MaxCorrect` (0 on the Kusabimaru) and `durability`
+/// 1.0, 0.7 or 0.5 by weapon durability (`841bd0`; Sekiro weapons have none, so 1.0).
+/// `special` is a factor applied on blocks in a state `a8e120` reports (not identified; 1.0).
+pub fn player_guard_cut(
+    weapon_cut_rate: f32,
+    reinforce_rate: f32,
+    attribute_factor: f32,
+    guard_rate: i16,
+) -> f32 {
+    (100.0
+        - attribute_factor * (weapon_cut_rate * reinforce_rate) * (guard_rate as f32 * 0.01 + 1.0))
+        * 0.01
 }
 
 /// Final HP damage of one hit (`b6c880`): the element total times the part's damage-group rate
 /// and the repel cut (`841c80`, applied when the defender's repel defence met the attack's repel
 /// power), truncated. Read from code for the order and the truncation.
+/// Between the element total and these multipliers the damage manager (`6dba10`) may replace the
+/// value, but only when a map event has registered a damage override for the defender's hit
+/// part; otherwise it passes the value through (read from code).
 pub fn final_hp_damage(element_total: f32, part_rate: f32, repel_cut: f32) -> i32 {
     trunc(element_total * part_rate * repel_cut)
 }

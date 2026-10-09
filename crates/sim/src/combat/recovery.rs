@@ -30,8 +30,7 @@ use super::trunc;
 /// Inputs to [`posture_recovery_per_second`] besides SpEffects.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RecoveryInputs {
-    /// NpcParam `staminaRecoverBaseVel` for NPCs; the player's comes from another virtual (not
-    /// traced).
+    /// NpcParam `staminaRecoverBaseVel` for NPCs; [`player_base_speed`] for the player.
     pub base_speed: f32,
     /// Animation percent byte (100 = normal), inferred default.
     pub anim_percent: u8,
@@ -50,6 +49,14 @@ impl RecoveryInputs {
             control_ratio: None,
         }
     }
+}
+
+/// The player's base recovery speed (PlayerIns virtual 0x210 = `a2a680`, read from code):
+/// CalcCorrectGraph row 504 ("Stamina recovery speed") evaluated at the player game data value
+/// at +0x248, truncated to a whole number. Row 504 maps 1 to 30 and 11 or more to 105, linearly
+/// between. Which progression value +0x248 holds is not identified (open).
+pub fn player_base_speed(graph_504: &super::params::CalcCorrectGraph, stat: f32) -> f32 {
+    trunc(graph_504.eval(stat)) as f32
 }
 
 /// Recovery speed in posture points per second, as the engine computes it before integrating.

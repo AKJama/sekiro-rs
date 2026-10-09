@@ -7,15 +7,22 @@ use sekiro_formats::param::ParamSet;
 
 use super::damage_type::{DefenderFacts, attacker_reaction, defender_reaction};
 use super::effects::ActiveEffect;
-use super::hit::{GuardInput, HitOutcome, npc_guard_repel, player_guard_repel, resolve_hit};
-use super::hp::{Vitality, element_damage, final_hp_damage, keep_hp, npc_guard_cut};
-use super::params::{AttackProfile, NpcCombat, StaminaControl, WeaponGuard};
+use super::hit::{
+    GuardInput, HitOutcome, npc_guard_repel, player_attack_repel, player_guard_repel, resolve_hit,
+    resolve_part_hit,
+};
+use super::hp::{
+    Vitality, attribute_guard_factor, element_damage, final_hp_damage, keep_hp, npc_guard_cut,
+    player_guard_cut,
+};
+use super::params::{AttackProfile, CalcCorrectGraph, NpcCombat, StaminaControl, WeaponGuard};
 use super::posture::{
     ControlRange, DefenderPosture, PostureMeter, apply_defender_posture, attacker_breaks,
-    attacker_posture_damage, defender_posture_damage,
+    attacker_posture_damage, defender_posture_damage, player_posture_base,
 };
 use super::recovery::{
-    RecoveryAccumulator, RecoveryInputs, displayed_recovery, posture_recovery_per_second,
+    RecoveryAccumulator, RecoveryInputs, displayed_recovery, player_base_speed,
+    posture_recovery_per_second,
 };
 
 fn set() -> Option<&'static ParamSet> {
@@ -169,21 +176,21 @@ fn npc_guard_repel_uses_guard_break_rate() {
 }
 
 #[test]
-fn posture_damage_to_wolf_for_each_outcome() {
+fn posture_damage_to_a_neutral_npc_defender() {
     let Some(set) = set() else { return };
     let atk = soldier_attack(set);
-    let wolf = DefenderPosture::default();
+    let npc = DefenderPosture::default();
     let window = [effect(set, 105010), effect(set, 105020)];
     assert_eq!(
-        defender_posture_damage(HitOutcome::Hit, &atk, 1.0, &wolf, &[]),
+        defender_posture_damage(HitOutcome::Hit, &atk, 1.0, &npc, &[]),
         18
     );
     assert_eq!(
-        defender_posture_damage(HitOutcome::Block, &atk, 1.0, &wolf, &[]),
+        defender_posture_damage(HitOutcome::Block, &atk, 1.0, &npc, &[]),
         18
     );
     assert_eq!(
-        defender_posture_damage(HitOutcome::Deflect, &atk, 1.0, &wolf, &window),
+        defender_posture_damage(HitOutcome::Deflect, &atk, 1.0, &npc, &window),
         9
     );
 }
@@ -196,6 +203,7 @@ fn soldier_guard_posture_includes_cut_and_behavior_cost() {
     let npc = DefenderPosture {
         attribute_rate: 1.0,
         guard_def: 50.0,
+        cut_bias: 0.0,
         guard_row_cut_rate: 0,
         guard_behavior_stamina: 3,
     };
@@ -463,4 +471,99 @@ fn discord_claims_for_the_general() {
         .map(|&id| effect(set, id).def_stamina_attack_rate)
         .collect();
     assert_eq!(rates, [1.0, 0.5, 0.25, 0.125]);
+}
+
+#[test]
+fn wolf_guard_posture_includes_the_player_cut_bias() {
+    let Some(set) = set() else { return };
+    let atk = soldier_attack(set);
+    let weapon = kusabimaru(set);
+    // Kusabimaru staminaGuardDef 0: the player's cut is still 1% from the constant bias, so
+    // trunc(0.99 * 18) = 17 on a block and trunc(0.99 * 9) = 8 on a deflect.
+    let block = DefenderPosture::player(&weapon, false, 1.0);
+    assert_eq!(
+        defender_posture_damage(HitOutcome::Block, &atk, 1.0, &block, &[]),
+        17
+    );
+    let deflect = DefenderPosture::player(&weapon, true, 1.0);
+    let window = [effect(set, 105010), effect(set, 105020)];
+    assert_eq!(
+        defender_posture_damage(HitOutcome::Deflect, &atk, 1.0, &deflect, &window),
+        8
+    );
+}
+
+#[test]
+fn player_attack_repel_and_posture_base() {
+    let Some(set) = set() else { return };
+    let weapon = kusabimaru(set);
+    assert_eq!(weapon.attack_base_repel, 10);
+    let table = set.table("AtkParam_Pc").unwrap();
+    let row = table
+        .rows()
+        .find(|r| r.u16("guardAtkRateCorrection").unwrap() == 300)
+        .expect("a PC attack with correction 300");
+    let atk = AttackProfile::from_row(&row).unwrap();
+    assert_eq!(atk.guard_atk_rate, 0);
+    assert_eq!(player_attack_repel(&atk, weapon.attack_base_repel), 30);
+    // With attackBaseStamina 0 the weapon part vanishes and the fixed field remains.
+    let base = player_posture_base(HitOutcome::Hit, &atk, &weapon, 1.0, 1.0);
+    assert_eq!(
+        base,
+        atk.direct_stam as f32 * weapon.stamina_attack_power_rate
+    );
+}
+
+#[test]
+fn armoured_parts_guard_player_attacks() {
+    let Some(set) = set() else { return };
+    let mut part = soldier_attack(set);
+    part.guard_break_rate = 50;
+    let mut player_atk = soldier_attack(set);
+    player_atk.guard_atk_rate = 0;
+    // Part repel 50 >= player repel 30: deflected by the part.
+    let r = resolve_part_hit(&player_atk, 30, &part, &[]).unwrap();
+    assert_eq!(r.outcome, HitOutcome::Deflect);
+    // Part repel 50 < 60: blocked by the part.
+    let r = resolve_part_hit(&player_atk, 60, &part, &[]).unwrap();
+    assert_eq!(r.outcome, HitOutcome::Block);
+    // An attack whose own guardAtkRate reaches the part's guardBreakRate ignores the part.
+    player_atk.guard_atk_rate = 50;
+    assert!(resolve_part_hit(&player_atk, 30, &part, &[]).is_none());
+}
+
+#[test]
+fn guard_cuts_for_hp() {
+    let Some(set) = set() else { return };
+    let npc = soldier(set);
+    let atk = soldier_attack(set);
+    // Slash (atkAttribute 1) against the soldier's slashGuardCutRate 100 doubles its cut.
+    let rate = npc.guard_cut_attribute_rates[atk.atk_attribute as usize - 1];
+    assert_eq!(rate, 100);
+    let factor = attribute_guard_factor(rate as f32);
+    assert_eq!(factor, 2.0);
+    assert!(npc_guard_cut(npc.phys_guard_cut_rate, 0, factor) < 0.0);
+    // The Kusabimaru blocks all physical damage.
+    let weapon = kusabimaru(set);
+    let wf = attribute_guard_factor(weapon.guard_cut_attribute_rates[0] as f32);
+    assert_eq!(
+        player_guard_cut(weapon.phys_guard_cut_rate, 1.0, wf, 0),
+        0.0
+    );
+    assert_eq!(
+        player_guard_cut(weapon.phys_just_guard_cut_rate, 1.0, wf, 0),
+        0.0
+    );
+}
+
+#[test]
+fn player_base_recovery_graph() {
+    let Some(set) = set() else { return };
+    let graph =
+        CalcCorrectGraph::from_row(&set.table("CalcCorrectGraph").unwrap().row(504).unwrap())
+            .unwrap();
+    assert_eq!(player_base_speed(&graph, 1.0), 30.0);
+    assert_eq!(player_base_speed(&graph, 6.0), 67.0);
+    assert_eq!(player_base_speed(&graph, 11.0), 105.0);
+    assert_eq!(player_base_speed(&graph, 50.0), 105.0);
 }
