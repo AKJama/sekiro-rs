@@ -77,7 +77,10 @@ fn main() {
                 res.deflected,
                 res.defender.damage_type,
                 res.defender.level,
-                duel.hp
+                [
+                    duel.rules.fighters[0].vitality.hp,
+                    duel.rules.fighters[1].vitality.hp
+                ]
             );
         }
         for e in r

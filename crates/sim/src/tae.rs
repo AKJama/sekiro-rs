@@ -68,6 +68,41 @@ pub enum TaeKind {
     IFrames(i32),
     /// `Blend` (16): crossfade into this animation over the event's length.
     Blend,
+    /// `ChrActionFlag` 3 (`ShieldBlock`): guarding. ArgB is the behaviour judge of the guard
+    /// action, whose AtkParam row is the guard row (the soldier's BehaviorParam for judge 900 is
+    /// its "deflect" row, Wolf's judge 90 is "sword_guard").
+    Guard {
+        judge: i32,
+    },
+    /// `StaminaControlParam` (960): which `staminaRecoverRatio_forTypeNNN` posture recovery uses.
+    StaminaControl(i32),
+    /// `PlaySound_*` (128 to 132): a sound of type `kind` (0 a, 1 c, ...; see
+    /// [`sound_name`]) and number `id`.
+    Sound {
+        kind: i32,
+        id: i32,
+    },
+}
+
+/// The sound event name for a TAE sound type and id: the type letter followed by the id padded
+/// to nine digits (type 1, id 101001001 gives `c101001001`). Letters from the DSAnimStudio
+/// Sekiro template.
+pub fn sound_name(kind: i32, id: i32) -> String {
+    let letter = match kind {
+        0 => 'a',
+        1 => 'c',
+        2 => 'f',
+        3 => 'o',
+        4 => 'p',
+        5 => 's',
+        6 => 'm',
+        7 => 'v',
+        8 => 'x',
+        9 => 'b',
+        10 => 'g',
+        _ => '?',
+    };
+    format!("{letter}{id:09}")
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -285,7 +320,11 @@ fn decode(template: &Template, e: &tae::TaeEvent) -> Option<TimedEvent> {
     let d = template.decode(e)?;
     let int = |name: &str| d.field(name).and_then(|v| v.as_int()).map(|v| v as i32);
     let kind = match e.event_type {
+        0 if int("FlagType")? == 3 => TaeKind::Guard {
+            judge: int("ArgB").unwrap_or(-1),
+        },
         0 => TaeKind::ActionFlag(int("FlagType")?),
+        960 => TaeKind::StaminaControl(int("StaminaRatioType")?),
         66 | 67 | 401 => TaeKind::SpEffect(int("SpEffectID")?),
         224 => TaeKind::TurnSpeed(d.field("TurnSpeed")?.as_f32()?),
         920 => TaeKind::VelocityChange(int("ChrPhysicsVelocityParam ID")?),
@@ -302,6 +341,10 @@ fn decode(template: &Template, e: &tae::TaeEvent) -> Option<TimedEvent> {
         },
         954 => TaeKind::IFrames(int("IFrameType").unwrap_or(0)),
         16 => TaeKind::Blend,
+        128..=132 => TaeKind::Sound {
+            kind: int("SoundType")?,
+            id: int("SoundID")?,
+        },
         _ => return None,
     };
     Some(TimedEvent {
@@ -329,6 +372,10 @@ pub struct TaeFrame {
     pub behavior_refs: HashSet<i32>,
     /// Smallest active `SetTurnSpeed`, degrees per second.
     pub turn_speed: Option<f32>,
+    /// Guard judge of an active `ShieldBlock` flag (see [`TaeKind::Guard`]).
+    pub guard_judge: Option<i32>,
+    /// Posture recovery control type (TAE 960) of the first playing clip that sets one.
+    pub stamina_type: Option<i32>,
     /// Velocity changes whose event started this tick.
     pub velocity_changes: Vec<i32>,
     pub attacks: Vec<TimedEvent>,
@@ -336,6 +383,8 @@ pub struct TaeFrame {
     /// True if any playing clip has action flags at all. Clips without any (idle, locomotion
     /// loops) put no limits on actions.
     pub restricted: bool,
+    /// Sound events that started this tick: (sound type, sound id).
+    pub sounds: Vec<(i32, i32)>,
 }
 
 impl TaeFrame {
@@ -366,7 +415,7 @@ impl TaeRuntime {
             };
             let t = clip.time;
             for e in anim.events.iter() {
-                if let TaeKind::ActionFlag(_) = e.kind {
+                if let TaeKind::ActionFlag(_) | TaeKind::Guard { .. } = e.kind {
                     f.restricted = true;
                 }
                 // Started this tick: the event's start lies in [prev_time, time). A clip that just
@@ -403,6 +452,20 @@ impl TaeRuntime {
                     }
                     TaeKind::IFrames(kind) => f.iframes.push(*kind),
                     TaeKind::Blend => {}
+                    TaeKind::Guard { judge } => {
+                        f.flags.insert(3);
+                        f.guard_judge.get_or_insert(*judge);
+                    }
+                    TaeKind::Sound { kind, id } => {
+                        if started {
+                            f.sounds.push((*kind, *id));
+                        }
+                    }
+                    TaeKind::StaminaControl(kind) => {
+                        if e.active_at(t) {
+                            f.stamina_type.get_or_insert(*kind);
+                        }
+                    }
                 }
             }
         }

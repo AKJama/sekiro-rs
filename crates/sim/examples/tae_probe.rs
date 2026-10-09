@@ -1,4 +1,4 @@
-//! `tae_probe <anim>...`: prints the TAE events of player animations, with SpEffect behaviour
+//! `tae_probe <anim>...`: prints the TAE events of player animations (or of `$CHR`), with SpEffect behaviour
 //! reference ids resolved through SpEffectParam. Run from the repository root.
 
 use sekiro_formats::param::ParamSet;
@@ -6,7 +6,8 @@ use sekiro_formats::tae::{self, Template};
 use std::collections::HashMap;
 
 fn main() {
-    let dir = std::path::Path::new("cache/raw/chr/c0000.anibnd.d");
+    let chr = std::env::var("CHR").unwrap_or_else(|_| "c0000".into());
+    let dir = std::path::PathBuf::from(format!("cache/raw/chr/{chr}.anibnd.d"));
     let template =
         Template::parse_xml(&std::fs::read_to_string("cache/refs/TAE.Template.SDT.xml").unwrap())
             .unwrap();

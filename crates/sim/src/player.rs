@@ -33,6 +33,9 @@ pub const ENV_WEAPON_CATEGORY: i32 = 225;
 pub const ENV_REALLY_LANDED: i32 = 248;
 pub const ENV_ANIM_END: i32 = 339;
 pub const ENV_HP: i32 = 1000;
+/// Remaining posture ("stamina"); the NPC script divides it by env 2010 for `GetStaminaRatio`.
+pub const ENV_POSTURE: i32 = 1001;
+pub const ENV_MAX_POSTURE: i32 = 2010;
 pub const ENV_STANDBY_STATE: i32 = 1105;
 pub const ENV_ACTION_REQUEST: i32 = 1106;
 pub const ENV_ACTION_HELD: i32 = 1108;
@@ -74,6 +77,9 @@ pub mod arm {
 #[derive(Debug, Clone)]
 pub struct PlayerEnv {
     pub hp: f32,
+    /// Remaining and maximum posture (env 1001, 2010).
+    pub posture: f32,
+    pub max_posture: f32,
     pub landed: bool,
     /// Right and left hand weapon motion categories (50 is the katana).
     pub weapon_category: [i32; 2],
@@ -122,6 +128,8 @@ impl Default for PlayerEnv {
     fn default() -> Self {
         Self {
             hp: 100.0,
+            posture: 100.0,
+            max_posture: 100.0,
             landed: true,
             weapon_category: [50, 70],
             arm_style: 1,
@@ -217,6 +225,8 @@ impl Adapter<'_> {
             },
             ENV_ANIM_END => truth(self.rt.anim_ended(arg.unwrap_or(0), self.hook_state)),
             ENV_HP => env.hp,
+            ENV_POSTURE => env.posture,
+            ENV_MAX_POSTURE => env.max_posture,
             // Approximation until TAE cancel windows are wired: a state counts as standby once
             // its animation has ended or when it loops.
             ENV_STANDBY_STATE if env.standby.is_some() => truth(env.standby == Some(true)),
@@ -478,6 +488,14 @@ impl PlayerBehavior {
             self.settle(&mut events, &mut errors, &mut ran);
         }
         self.runtime.advance(dt);
+        // A clip that reached its end in this advance sends its end event now, as Havok does
+        // inside the graph update, so the next script update already runs in the following
+        // state. Otherwise a held stick sees the ended jump wind-up as "free to move" and the
+        // script cancels a running jump into locomotion before the take-off.
+        if self.runtime.queue_clip_end_events() > 0 {
+            events.push("(clip end)".to_owned());
+            self.settle(&mut events, &mut errors, &mut ran);
+        }
         let clip: Option<ClipState> = self.runtime.main_clip().cloned();
         let report = TickReport {
             frame: self.frame,

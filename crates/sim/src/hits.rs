@@ -14,12 +14,11 @@
 //! 4. While the window is open the capsule is swept from the previous step's pose to this one
 //!    and tested against the defender's vertical body capsule. Each window hits a defender once.
 //!
-//! The result is a [`HitEvent`]. Turning it into damage, posture and reactions is a
-//! [`HitResolver`]: [`SimpleResolver`] is a placeholder (guard arc and deflect window, damage
-//! level from the AtkParam), and the engine-derived rules in `crate::combat` (when that module is
-//! enabled) are meant to replace it behind the same trait.
+//! The result is a [`HitEvent`]. [`crate::fight::CombatRules`] turns it into HP and posture
+//! damage and the reaction codes both scripts read, on the engine rules in [`crate::combat`].
 
-use crate::character::{Character, ControlKind};
+use crate::character::Character;
+use crate::combat::params::AttackProfile;
 use crate::player::IncomingDamage;
 use crate::tae::{TaeKind, TimedEvent};
 use glam::{Mat4, Vec3};
@@ -183,7 +182,8 @@ pub struct HitShape {
     pub radius: f32,
 }
 
-/// The AtkParam fields hit detection and the placeholder resolver need.
+/// One behaviour judge: its AtkParam row (capsules plus the combat fields) and the BehaviorParam
+/// fields the rules read. Guard actions are judges too (the TAE `ShieldBlock` flag names them).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AttackData {
     pub atk_id: i32,
@@ -192,9 +192,25 @@ pub struct AttackData {
     pub damage_level: i32,
     pub atk_phys: i32,
     pub atk_stam: i32,
+    /// `atk{Phys,Mag,Fire,Thun,Dark}Correction`: percent of the weapon attack power a player
+    /// attack uses.
+    pub atk_corrections: [i32; 5],
+    /// The combat fields of the AtkParam row.
+    pub profile: Option<AttackProfile>,
+    /// BehaviorParam `category` (picks the attacker's recoil code family).
+    pub category: u8,
+    /// BehaviorParam `stamina`: for a guard judge, posture added to every guarded hit.
+    pub behavior_stamina: i32,
 }
 
 impl AttackData {
+    fn from_rows(row: &Row, behavior: &Row) -> Self {
+        let mut me = Self::from_row(row);
+        me.category = behavior.int("category").unwrap_or(0) as u8;
+        me.behavior_stamina = behavior.int("stamina").unwrap_or(0) as i32;
+        me
+    }
+
     fn from_row(row: &Row) -> Self {
         let int = |f: &str| row.int(f).unwrap_or(0) as i32;
         let shapes = (0..4)
@@ -215,11 +231,26 @@ impl AttackData {
             damage_level: int("dmgLevel"),
             atk_phys: int("atkPhys"),
             atk_stam: int("atkStam"),
+            atk_corrections: [
+                int("atkPhysCorrection"),
+                int("atkMagCorrection"),
+                int("atkFireCorrection"),
+                int("atkThunCorrection"),
+                int("atkDarkCorrection"),
+            ],
+            profile: AttackProfile::from_row(row).ok(),
+            category: 0,
+            behavior_stamina: 0,
         }
     }
 }
 
-fn load_table(param_dir: &Path, defs_dir: &Path, file: &str, def: &str) -> Option<Table> {
+pub(crate) fn load_table(
+    param_dir: &Path,
+    defs_dir: &Path,
+    file: &str,
+    def: &str,
+) -> Option<Table> {
     let raw = RawParam::parse(std::fs::read(param_dir.join(format!("{file}.param"))).ok()?).ok()?;
     let def = ParamDef::load(&defs_dir.join(format!("{def}.xml"))).ok()?;
     Table::new(file, &raw, Arc::new(def), None).ok()
@@ -236,6 +267,9 @@ pub struct Combatant {
     pub height: f32,
     /// Attacks by behaviour judge id.
     pub attacks: HashMap<i32, AttackData>,
+    /// The row the combat rules read: EquipParamWeapon of the player's right-hand weapon, or
+    /// the NPC's NpcParam.
+    pub param_id: i32,
 }
 
 impl Combatant {
@@ -261,6 +295,7 @@ impl Combatant {
             .and_then(|id| weapons.as_ref()?.find(id as i32));
         if let Some(w) = wep {
             c.variation = w.int("behaviorVariationId").unwrap_or(0) as i32;
+            c.param_id = w.id();
             let model_id = w.int("equipModelId").unwrap_or(0);
             let name = format!("WP_A_{model_id:04}");
             let path = cache.join(format!(
@@ -320,6 +355,7 @@ impl Combatant {
             })
         }) {
             (c.variation, c.radius, c.height) = row;
+            c.param_id = npc_param;
         }
         c.attacks = load_attacks(
             &pd,
@@ -362,7 +398,7 @@ fn load_attacks(
             continue;
         }
         if let Some(r) = a.find(row.int("refId").unwrap_or(-1) as i32) {
-            out.insert(id - first, AttackData::from_row(&r));
+            out.insert(id - first, AttackData::from_rows(&r, &row));
         }
     }
     out
@@ -387,94 +423,20 @@ pub struct HitResult {
     pub defender: IncomingDamage,
     pub attacker: Option<IncomingDamage>,
     pub hp_damage: i32,
+    /// Posture taken by the defender.
     pub posture_damage: i32,
+    /// Posture sent back to the attacker (deflects and blocks).
+    pub attacker_posture_damage: i32,
     pub deflected: bool,
     pub guarded: bool,
+    /// The defender (direct hit) or the attacker (deflected or blocked) had its posture broken.
+    pub posture_broke: bool,
 }
 
-/// Turns a contact into damage and reaction codes. Engine-derived combat rules plug in here.
-pub trait HitResolver {
-    fn resolve(&mut self, hit: &HitEvent, attacker: &Character, defender: &Character) -> HitResult;
-}
-
-/// Behaviour reference of the just-deflect window (TAE SpEffect 105010 on guard starts).
-pub const REF_JUST_DEFLECT: i32 = 203;
-/// ChrActionFlag type for "guarding" (`ShieldBlock`); its ArgB is the guard arc in degrees.
+/// ChrActionFlag type for "guarding" (`ShieldBlock`). Its ArgB is the behaviour judge of the
+/// guard action (90 for Wolf's sword guard, 900 for the soldier's), whose AtkParam row is the
+/// guard row the rules read.
 pub const FLAG_GUARD: i32 = 3;
-
-/// A placeholder: a hit inside the defender's front 180 degrees while its guard flag is up is
-/// guarded (deflected if the just-deflect window is open), otherwise it is an ordinary hit with
-/// the attack's damage level. No HP or posture arithmetic beyond the raw AtkParam values.
-#[derive(Debug, Default)]
-pub struct SimpleResolver;
-
-impl HitResolver for SimpleResolver {
-    fn resolve(&mut self, hit: &HitEvent, attacker: &Character, defender: &Character) -> HitResult {
-        let [fx, fz] = defender.body.forward();
-        // Incoming direction as seen from the defender: from defender toward attacker.
-        let (ix, iz) = (-hit.direction[0], -hit.direction[1]);
-        let front = fx * ix + fz * iz;
-        let right = fz * ix - fx * iz;
-        let from_front = front >= 0.0;
-        let guarding = defender.tae_frame().flag(FLAG_GUARD) && from_front;
-        let deflect = guarding
-            && defender
-                .tae_frame()
-                .behavior_refs
-                .contains(&REF_JUST_DEFLECT);
-        let direction = if front.abs() >= right.abs() {
-            if from_front { 2 } else { 3 }
-        } else if right > 0.0 {
-            1
-        } else {
-            0
-        };
-        let front_back = if from_front { 0 } else { 1 };
-        let npc_attacker = attacker.kind == ControlKind::Npc;
-        let mut r = HitResult {
-            guarded: guarding,
-            deflected: deflect,
-            ..HitResult::default()
-        };
-        if guarding {
-            r.defender = IncomingDamage {
-                damage_type: 3,
-                level: hit.attack.damage_level.max(1),
-                direction,
-                front_back,
-                guard_level: 1,
-                repel_dir: 2,
-                ..IncomingDamage::default()
-            };
-            r.posture_damage = hit.attack.atk_stam;
-            // The attacker recoils: NPC scripts read 1008 ("bound", deflected) or 1019 (blocked)
-            // with env 3019 / 3018; the player reads 1000 (deflected) or 1017 (blocked).
-            r.attacker = Some(IncomingDamage {
-                damage_type: match (npc_attacker, deflect) {
-                    (true, true) => 1008,
-                    (true, false) => 1019,
-                    (false, true) => 1000,
-                    (false, false) => 1017,
-                },
-                level: 1,
-                just_repelled: if deflect { 1 } else { 0 },
-                repelled: if deflect { 0 } else { 1 },
-                ..IncomingDamage::default()
-            });
-        } else {
-            r.defender = IncomingDamage {
-                damage_type: 99999,
-                level: hit.attack.damage_level.max(1),
-                direction,
-                front_back,
-                ..IncomingDamage::default()
-            };
-            r.hp_damage = hit.attack.atk_phys;
-            r.posture_damage = hit.attack.atk_stam;
-        }
-        r
-    }
-}
 
 /// Closest distance between segments `p1-q1` and `p2-q2`.
 pub fn segment_distance(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) -> f32 {

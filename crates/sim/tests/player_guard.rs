@@ -61,6 +61,13 @@ fn hold_guard_then_release() {
 fn repeated_presses_chain_guard_variants() {
     let Some(mut p) = load() else { return };
     let reports = scenario::run(&mut p, &scenario::guard_repeat(), true);
+    let idle_frames = reports
+        .iter()
+        .filter(|r| r.animation.as_deref() == Some("a050_002000"))
+        .count();
+    // The fourth variant ends into guard idle (its end transition) for one step before the
+    // script sees the released button.
+    assert!(idle_frames <= 1, "{idle_frames}");
     let anims: Vec<String> = sequence(&reports).into_iter().map(|(_, a)| a).collect();
     assert_eq!(
         anims,
@@ -70,6 +77,7 @@ fn repeated_presses_chain_guard_variants() {
             "a050_203005",
             "a050_203006",
             "a050_203007",
+            "a050_002000",
             "a050_203010",
             "a000_000000"
         ]

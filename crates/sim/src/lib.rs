@@ -22,6 +22,7 @@ pub mod input;
 pub mod lua_ai;
 pub mod player;
 pub mod scenario;
+pub mod sound;
 pub mod tae;
 
 pub use behavior::{AnimOffsets, BehaviorRuntime, ClipDurations, ClipState, HookCall, HookKind};
