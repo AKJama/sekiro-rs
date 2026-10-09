@@ -58,10 +58,22 @@ A gamepad works too.
 - `crates/game`: the `sekiro-rs` Bevy app.
 - `docs/`: formats, params, the player script interface and the combat rules, in our own words.
 
-## Legal
+## Disclaimer
 
-Everything derived from the game stays in the gitignored `cache/` and `re/` folders on your machine.
-Never commit or share those folders.
+sekiro-rs is an unofficial, non-commercial fan project made for education and research into game engine design and interoperability.
+It is not affiliated with, endorsed by, or sponsored by FromSoftware, Inc. or Activision Publishing, Inc.
+
+Sekiro: Shadows Die Twice and all of its content, including characters, models, textures, animations, audio, data and trademarks, belong to FromSoftware, Inc. and its publishers.
+None of that content is included in or distributed with this repository.
+This repository contains only original source code and documentation written for this project.
+
+- You need your own legitimately purchased copy of the game; the tools read it locally and never modify the installation or save files.
+- Everything derived from the game stays in the gitignored `cache/` and `re/` folders on your machine. Do not commit, upload or share those folders or anything generated into them.
+- This project is single-player only. It has no online features and does not interact with online services or anti-cheat systems.
+- No warranty is given; use it at your own risk.
+
+If you are a rights holder and have a concern about this project, please open an issue and it will be addressed promptly.
+
 See [CREDITS.md](CREDITS.md) for the community research this builds on.
 
 Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option.
