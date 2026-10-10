@@ -168,6 +168,7 @@ The rows use `defSorbDmyId` (dummy 230 sits 1.3 m in front of him, facing back) 
 - The Owl rarely guards or deflects Wolf's slashes in our runs (2 blocks in a minute of slashing).
   His `Parry` deflects with a chance of 50 % per consecutive guard; the count rises on SpEffect 200250, which his weak guard reactions (`a000_008500`, `8501`, `8504`) add, through the shared table-logic interrupt now that observed SpEffects raise interrupts.
   Why he guards so seldom is not checked yet (his `Parry` also needs Wolf inside `GetDist_Parry` and both front cones).
+  Until 2026-10-10 his blocks also played the hit flinch `a000_008010` instead of a guard reaction: his script indexes `guard_damage_table` by env 258, his NpcParam `guardLevel` (4; "which guard motion receives the enemy's attack"), which we answered 0. That env meaning is inferred from the param description and the table's shape, not traced in the exe.
 - Owl warp transparency (3506030) and the smoke vanish are not rendered; bullets are drawn as small spheres.
 - After the finishing blow the duel respawns both characters 6 s after the death, before his 12 s death clip ends.
 
