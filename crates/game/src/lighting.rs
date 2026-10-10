@@ -151,9 +151,10 @@ pub fn apply_lighting(
     mut sun: Query<(&mut DirectionalLight, &mut Transform), (With<Sun>, Without<FillLight>)>,
     mut fill: Query<(&mut DirectionalLight, &mut Transform), (With<FillLight>, Without<Sun>)>,
     mut fogs: Query<&mut DistanceFog>,
-    new_fogs: Query<(), Added<DistanceFog>>,
 ) {
-    if lighting.applied == Some(lighting.light_set) && new_fogs.is_empty() {
+    // Reading the change ticks through `iter_mut` does not mark the fog changed.
+    let new_fog = fogs.iter_mut().any(|f| f.is_added());
+    if lighting.applied == Some(lighting.light_set) && !new_fog {
         return;
     }
     let set = LightSet::from_gparam(&lighting.gparam, lighting.light_set, lighting.hour);
