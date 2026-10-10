@@ -9,6 +9,7 @@
 pub mod ai;
 pub mod behavior;
 pub mod body;
+pub mod camera;
 pub mod character;
 pub mod clips;
 pub mod collision;

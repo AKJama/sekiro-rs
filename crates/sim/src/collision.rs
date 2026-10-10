@@ -25,8 +25,9 @@ use sekiro_formats::hknp::CollisionMesh;
 
 use crate::body::Ground;
 
-/// Body radius in metres (an assumption; Sekiro's character capsule size is not read yet).
-pub const RADIUS: f32 = 0.35;
+/// Body radius in metres: the player's physics capsule is 1.5 m tall with a 0.4 m radius, read
+/// from the running game by FwLo's RustSekiro (`docs/kb/movement.md`).
+pub const RADIUS: f32 = 0.4;
 /// Highest ledge a walking body steps onto, and the furthest it follows the floor down.
 pub const STEP_HEIGHT: f32 = 0.5;
 /// Steepest walkable surface.

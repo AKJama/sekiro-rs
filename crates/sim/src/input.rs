@@ -2,9 +2,9 @@
 //!
 //! The script never sees keys. It asks the engine:
 //!
-//! - `env(1106, arm)`: is the action requested now. The engine keeps a press for a short buffer
-//!   and only reports it while the current animation allows that action (TAE cancel windows, see
-//!   [`crate::tae::cancel`]). Starting an action calls `act(9101)`, which clears the buffer.
+//! - `env(1106, arm)`: is the action requested now. The engine latches a press inside the
+//!   animation's accept window and reports it inside its execute window (see [`accept_flags`]).
+//!   Starting an action calls `act(9101)`, which clears the buffer.
 //! - `env(1108, arm)`: how long the button has been held. The script compares it with 0 and, for
 //!   sprinting in swamps, with 200, so milliseconds is our working unit (unverified).
 //! - Behaviour variables the engine writes every frame: `MoveSpeedLevel` (0 to 2, stick
@@ -17,7 +17,7 @@
 //! press and sprints while held, which the script reads as 1106 and 1108 of arm 5.
 
 use crate::tae::{TaeFrame, cancel};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Action-arm ids, as the script names them.
 pub mod arm {
@@ -31,9 +31,6 @@ pub mod arm {
     pub const CROUCH: i32 = 15;
     pub const COMBAT_ART: i32 = 32;
 }
-
-/// Seconds a press stays requested while waiting for its cancel window (assumed).
-pub const INPUT_BUFFER: f32 = 0.4;
 
 /// Logical buttons, true while held.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -77,18 +74,55 @@ pub struct InputFrame {
     pub buttons: Buttons,
 }
 
-/// The cancel-window flag that lets an action interrupt the current animation.
-pub fn cancel_flag(action: i32) -> Option<i32> {
+/// `ChrActionFlag` that accepts a press of every action (`AttackAction_Complex`).
+pub const ACCEPT_ALL: i32 = 87;
+
+/// The engine's action-request buffer works in two steps, each driven by `ChrActionFlag`
+/// events of the current animations:
+///
+/// - Accept: a press is latched only while one of the action's accept flags is active. A press
+///   outside them is dropped, so mashing before the window does nothing.
+/// - Execute: a latched press is reported to the script (`env(1106)`) only while one of its
+///   execute flags is active. It waits for that with no timer; `act(9101)` clears it.
+///
+/// The flag-to-action table is the exe's `ChrActionFlag` handler, traced by FwLo's RustSekiro
+/// (`docs/kb/input-buffer.md`). Animations without any action flags (idle, locomotion loops)
+/// accept and execute everything.
+pub fn accept_flags(action: i32) -> Option<&'static [i32]> {
+    Some(match action {
+        arm::ATTACK => &[1],
+        arm::PROSTHETIC => &[1, 136],
+        arm::GUARD => &[9, 150],
+        arm::COMBAT_ART => &[1, 9],
+        arm::JUMP => &[25, 151],
+        arm::DODGE => &[25],
+        arm::ITEM => &[30],
+        _ => return None,
+    })
+}
+
+/// Execute flags of `action`; see [`accept_flags`].
+pub fn execute_flags(action: i32) -> &'static [i32] {
     match action {
-        arm::ATTACK => Some(cancel::ATTACK),
-        arm::PROSTHETIC => Some(cancel::PROSTHETIC),
-        arm::GUARD => Some(cancel::GUARD),
-        arm::JUMP => Some(cancel::JUMP),
-        arm::DODGE => Some(cancel::DODGE),
-        arm::ITEM => Some(cancel::ITEM),
-        arm::COMBAT_ART => Some(cancel::COMBAT_ART),
-        arm::CROUCH => Some(cancel::MOVE),
-        _ => None,
+        arm::ATTACK => &[4, cancel::ATTACK],
+        arm::PROSTHETIC => &[116, cancel::PROSTHETIC],
+        arm::GUARD => &[16, cancel::GUARD],
+        arm::COMBAT_ART => &[cancel::COMBAT_ART],
+        arm::JUMP => &[cancel::JUMP],
+        arm::DODGE => &[cancel::DODGE],
+        arm::ITEM => &[cancel::ITEM],
+        _ => &[cancel::MOVE],
+    }
+}
+
+/// Whether a press of `action` is latched under the current flags.
+pub fn accepts(action: i32, tae: &TaeFrame) -> bool {
+    if !tae.restricted || tae.flag(ACCEPT_ALL) {
+        return true;
+    }
+    match accept_flags(action) {
+        Some(flags) => flags.iter().any(|&f| tae.flag(f)),
+        None => true,
     }
 }
 
@@ -96,24 +130,21 @@ pub fn cancel_flag(action: i32) -> Option<i32> {
 #[derive(Debug, Default)]
 pub struct InputState {
     prev: Buttons,
-    /// Seconds since each buffered press.
-    pending: HashMap<i32, f32>,
+    /// Latched presses waiting for their execute window.
+    pending: HashSet<i32>,
     /// Milliseconds each button has been held.
     held_ms: HashMap<i32, f32>,
     pub frame: InputFrame,
 }
 
 impl InputState {
-    /// Takes this frame's input.
-    pub fn update(&mut self, frame: &InputFrame, dt: f32) {
-        for age in self.pending.values_mut() {
-            *age += dt;
-        }
-        self.pending.retain(|_, age| *age <= INPUT_BUFFER);
+    /// Takes this frame's input. `tae` holds the action flags the last animation update set,
+    /// which is what the engine's request module sees when it reads the buttons.
+    pub fn update(&mut self, frame: &InputFrame, dt: f32, tae: &TaeFrame) {
         let prev = self.prev.arms();
         for (i, (action, down)) in frame.buttons.arms().into_iter().enumerate() {
-            if down && !prev[i].1 {
-                self.pending.insert(action, 0.0);
+            if down && !prev[i].1 && accepts(action, tae) {
+                self.pending.insert(action);
             }
             if down {
                 *self.held_ms.entry(action).or_insert(0.0) += dt * 1000.0;
@@ -130,22 +161,21 @@ impl InputState {
         self.pending.clear();
     }
 
-    /// `env(1106, action)` given the current TAE windows.
+    /// `env(1106, action)` given the current TAE windows. A buffered guard fires only while the
+    /// button is still held (a tap let go before its window is dropped, as in the game); other
+    /// presses survive being let go.
     pub fn requested(&self, action: i32, tae: &TaeFrame) -> bool {
-        if !self.pending.contains_key(&action) {
+        if !self.pending.contains(&action) {
             return false;
         }
-        if !tae.restricted {
-            return true;
+        if action == arm::GUARD && !self.frame.buttons.guard {
+            return false;
         }
-        match cancel_flag(action) {
-            Some(flag) => tae.flag(flag),
-            None => tae.flag(cancel::MOVE),
-        }
+        !tae.restricted || execute_flags(action).iter().any(|&f| tae.flag(f))
     }
 
     pub fn pending_actions(&self) -> impl Iterator<Item = i32> + '_ {
-        self.pending.keys().copied()
+        self.pending.iter().copied()
     }
 
     /// `env(1108, action)` in milliseconds.
@@ -189,24 +219,68 @@ pub fn angle_diff(to: f32, from: f32) -> f32 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn press_buffers_until_window_and_reset() {
-        let mut s = InputState::default();
-        let mut f = InputFrame::default();
-        f.buttons.attack = true;
-        s.update(&f, 1.0 / 30.0);
-        let free = TaeFrame::default();
-        assert!(s.requested(arm::ATTACK, &free));
-        let mut busy = TaeFrame {
+    fn busy(flags: &[i32]) -> TaeFrame {
+        TaeFrame {
             restricted: true,
+            flags: flags.iter().copied().collect(),
             ..TaeFrame::default()
+        }
+    }
+
+    fn press(s: &mut InputState, buttons: Buttons, tae: &TaeFrame) {
+        let f = InputFrame {
+            buttons,
+            ..InputFrame::default()
         };
-        assert!(!s.requested(arm::ATTACK, &busy));
-        busy.flags.insert(cancel::ATTACK);
-        assert!(s.requested(arm::ATTACK, &busy));
+        s.update(&f, 1.0 / 30.0, tae);
+    }
+
+    #[test]
+    fn press_waits_for_execute_window_without_timer_until_reset() {
+        let mut s = InputState::default();
+        let attack = Buttons {
+            attack: true,
+            ..Buttons::default()
+        };
+        press(&mut s, attack, &busy(&[1]));
+        // Let go and wait well past any short buffer: the latched press stays.
+        for _ in 0..60 {
+            press(&mut s, Buttons::default(), &busy(&[1]));
+        }
+        assert!(!s.requested(arm::ATTACK, &busy(&[1])));
+        assert!(s.requested(arm::ATTACK, &busy(&[cancel::ATTACK])));
         s.reset_requests();
-        assert!(!s.requested(arm::ATTACK, &free));
+        assert!(!s.requested(arm::ATTACK, &TaeFrame::default()));
+    }
+
+    #[test]
+    fn press_outside_accept_window_is_dropped() {
+        let mut s = InputState::default();
+        let attack = Buttons {
+            attack: true,
+            ..Buttons::default()
+        };
+        // Mashing before the accept flag does nothing.
+        press(&mut s, attack, &busy(&[]));
+        press(&mut s, Buttons::default(), &busy(&[1]));
+        assert!(!s.requested(arm::ATTACK, &busy(&[cancel::ATTACK])));
+        // The all-actions accept flag and free animations latch anything.
+        press(&mut s, attack, &busy(&[ACCEPT_ALL]));
+        assert!(s.requested(arm::ATTACK, &busy(&[cancel::ATTACK])));
         assert!(s.held_ms(arm::ATTACK) > 30.0);
+    }
+
+    #[test]
+    fn buffered_guard_needs_the_button_held() {
+        let mut s = InputState::default();
+        let guard = Buttons {
+            guard: true,
+            ..Buttons::default()
+        };
+        press(&mut s, guard, &busy(&[9]));
+        assert!(s.requested(arm::GUARD, &busy(&[cancel::GUARD])));
+        press(&mut s, Buttons::default(), &busy(&[9]));
+        assert!(!s.requested(arm::GUARD, &busy(&[cancel::GUARD])));
     }
 
     #[test]
@@ -219,6 +293,7 @@ mod tests {
                 ..InputFrame::default()
             },
             0.0,
+            &TaeFrame::default(),
         );
         assert!((s.stick_world_yaw().unwrap() - 0.5).abs() < 1e-6);
         s.update(
@@ -228,6 +303,7 @@ mod tests {
                 ..InputFrame::default()
             },
             0.0,
+            &TaeFrame::default(),
         );
         // Right is a clockwise (negative) yaw.
         assert!((s.stick_world_yaw().unwrap() + std::f32::consts::FRAC_PI_2).abs() < 1e-6);

@@ -74,9 +74,7 @@ struct MapCollision(Arc<CollisionWorld>);
 struct ModelPath(&'static str);
 
 const STEP_HZ: f64 = 60.0;
-const CAMERA_HEIGHT: f32 = 1.4;
 const MOUSE_SENSITIVITY: f32 = 0.0035;
-const STICK_CAMERA_SPEED: f32 = 2.6;
 const WOLF: usize = 0;
 const SOLDIER: usize = 1;
 
@@ -115,6 +113,7 @@ struct LiveInput {
 
 #[derive(Resource)]
 struct Orbit {
+    focus: Vec3,
     yaw: f32,
     pitch: f32,
     distance: f32,
@@ -232,10 +231,11 @@ pub fn run(options: Options) -> Result<()> {
     .insert_resource(Libraries(libraries))
     .insert_resource(LiveInput::default())
     .insert_resource(Orbit {
+        focus: Vec3::from_array(duel.player.body.position) + Vec3::Y * duel.camera.chr_org_offset_y,
         // Behind Wolf, so scripted "forward" is the way he faces.
         yaw: start_yaw,
         pitch: 0.25,
-        distance: 4.2,
+        distance: duel.camera.cam_dist,
     })
     .insert_resource(Captures {
         pending: options.screenshots,
@@ -295,6 +295,7 @@ pub fn run(options: Options) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn setup(
     mut commands: Commands,
     assets: Res<AssetServer>,
@@ -303,10 +304,15 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
     model_path: Res<ModelPath>,
     on_map: Option<Res<MapCollision>>,
+    sim: NonSend<Sim>,
 ) {
     commands.spawn((
         FollowCamera,
         Camera3d::default(),
+        Projection::Perspective(PerspectiveProjection {
+            fov: sim.duel.camera.cam_fov_y.to_radians(),
+            ..default()
+        }),
         Transform::from_xyz(0.0, 2.0, 4.0).looking_at(Vec3::new(0.0, 1.2, 0.0), Vec3::Y),
     ));
     combat_hud::spawn(&mut commands);
@@ -475,11 +481,18 @@ fn orbit_camera(
     mut orbit: ResMut<Orbit>,
 ) {
     // Locked on, the camera swings behind Wolf toward the target.
+    let params = &sim.duel.camera;
+    let dt = time.delta_secs();
     if let Some(t) = sim.duel.player.lock_target {
-        let want = sim.duel.player.yaw_to(t);
+        let target = Vec3::from_array(t) + Vec3::Y * params.chr_org_offset_y;
+        let want = sekiro_sim::camera::lock_target_yaw(orbit.focus, target);
         let d = sekiro_sim::input::angle_diff(want, orbit.yaw);
-        orbit.yaw += d * (6.0 * time.delta_secs()).min(1.0);
-        orbit.pitch += (0.18 - orbit.pitch) * (4.0 * time.delta_secs()).min(1.0);
+        orbit.yaw += d * sekiro_sim::camera::chase(params.lock_rot_chase_rate_y, dt);
+        let pitch = params.lock_target_pitch(orbit.focus, target);
+        orbit.pitch +=
+            (pitch - orbit.pitch) * sekiro_sim::camera::chase(params.lock_rot_chase_rate_x, dt);
+        let (min, max) = params.pitch_limits(true, target.y - orbit.focus.y);
+        orbit.pitch = orbit.pitch.clamp(min, max);
         return;
     }
     let locked = cursor
@@ -492,11 +505,12 @@ fn orbit_camera(
     for pad in &gamepads {
         let r = pad.right_stick();
         if r.length() > 0.2 {
-            orbit.yaw -= r.x * STICK_CAMERA_SPEED * time.delta_secs();
-            orbit.pitch -= r.y * STICK_CAMERA_SPEED * time.delta_secs();
+            orbit.yaw -= r.x * params.rot_speed_max_y * dt;
+            orbit.pitch -= r.y * params.rot_speed_max_x * dt;
         }
     }
-    orbit.pitch = orbit.pitch.clamp(-0.6, 1.2);
+    let (min, max) = params.pitch_limits(false, 0.0);
+    orbit.pitch = orbit.pitch.clamp(min, max);
 }
 
 fn simulate(
@@ -620,7 +634,8 @@ fn sync_actors(
 
 fn follow_camera(
     sim: NonSend<Sim>,
-    orbit: Res<Orbit>,
+    time: Res<Time>,
+    mut orbit: ResMut<Orbit>,
     collision: Option<Res<MapCollision>>,
     mut cam: Query<&mut Transform, With<FollowCamera>>,
 ) {
@@ -628,11 +643,14 @@ fn follow_camera(
         return;
     };
     let wolf = Vec3::from_array(sim.duel.player.body.position);
-    let mut target = wolf + Vec3::Y * CAMERA_HEIGHT;
-    // Locked on, aim between Wolf and the target, biased to Wolf.
-    if let Some(t) = sim.duel.player.lock_target {
-        target = target.lerp(Vec3::from_array(t) + Vec3::Y * 1.2, 0.3);
-    }
+    let params = &sim.duel.camera;
+    let wanted = wolf + Vec3::Y * params.chr_org_offset_y;
+    let xz = sekiro_sim::camera::chase(params.chr_trans_chase_rate_xz, time.delta_secs());
+    let y = sekiro_sim::camera::chase(params.chr_trans_chase_rate_y, time.delta_secs());
+    orbit.focus.x += (wanted.x - orbit.focus.x) * xz;
+    orbit.focus.z += (wanted.z - orbit.focus.z) * xz;
+    orbit.focus.y += (wanted.y - orbit.focus.y) * y;
+    let target = orbit.focus;
     let rot = Quat::from_euler(EulerRot::YXZ, orbit.yaw, -orbit.pitch, 0.0);
     let back = rot * Vec3::Z;
     let mut distance = orbit.distance;

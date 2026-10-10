@@ -26,8 +26,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-/// Steering speed when no TAE `SetTurnSpeed` is active, degrees per second (assumed).
-pub const DEFAULT_TURN_SPEED: f32 = 540.0;
+/// Steering speed when no TAE `SetTurnSpeed` is active, degrees per second: the exe's turn
+/// controller default (traced by FwLo's RustSekiro, `docs/kb/movement.md`).
+pub const DEFAULT_TURN_SPEED: f32 = 720.0;
 
 /// One step's outcome, for HUDs, logs and tests.
 #[derive(Debug, Clone, Default)]
@@ -282,7 +283,7 @@ impl Character {
     /// Runs one step of `dt` seconds. `frame` is the player's input; NPCs read [`Self::npc`].
     pub fn tick(&mut self, frame: &InputFrame, dt: f32) -> StepReport {
         if self.kind == ControlKind::Player {
-            self.input.update(frame, dt);
+            self.input.update(frame, dt, &self.tae_runtime.frame);
         }
         self.set_engine_variables();
         self.fill_env(dt);

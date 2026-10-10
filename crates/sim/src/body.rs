@@ -12,9 +12,11 @@
 use crate::input::angle_diff;
 use crate::tae::VelocityChange;
 
-/// Downward acceleration in m/s². An assumption tuned so the game's jump velocity (9.64 m/s up)
-/// gives an apex near 2.3 m and lands as the jump-start clip ends; the engine value is unknown.
-pub const GRAVITY: f32 = 20.0;
+/// Downward acceleration in m/s²: Havok world gravity (9.8) plus the extra vertical
+/// acceleration of the normal fall type (13.72) from the exe's fall-control table. Measured
+/// in the running game as a constant 23.52 m/s² over five jumps (traced by FwLo's
+/// RustSekiro, `docs/kb/movement.md`); a 9.64 m/s jump rises about 2 m and lands after 0.82 s.
+pub const GRAVITY: f32 = 9.8 + 13.72;
 
 /// Something the character can stand on.
 pub trait Ground {
@@ -162,9 +164,10 @@ impl Body {
                 return;
             }
         }
-        self.velocity[1] -= GRAVITY * dt;
+        // Exact constant-acceleration step, so the arc does not depend on the tick rate.
         let previous_y = self.position[1];
-        self.position[1] += self.velocity[1] * dt;
+        self.position[1] += self.velocity[1] * dt - 0.5 * GRAVITY * dt * dt;
+        self.velocity[1] -= GRAVITY * dt;
         self.fall_top = self.fall_top.max(self.position[1]);
         // Land on the highest floor the feet passed through this tick, or one up to a step
         // above them (a stair tread or ledge the body was carried into while airborne).
@@ -222,9 +225,14 @@ mod tests {
             frames += 1;
         }
         let airtime = frames as f32 / 60.0;
-        assert!((0.9..1.05).contains(&airtime), "airtime {airtime}");
-        assert!(b.last_fall_height > 2.0 && b.last_fall_height < 2.6);
-        assert!(b.position[2] < -6.0, "jumped forward: {:?}", b.position);
+        // The running game: 0.82 s in the air and a 1.98 m rise for this launch.
+        assert!((0.8..0.86).contains(&airtime), "airtime {airtime}");
+        assert!(
+            (1.94..2.02).contains(&b.last_fall_height),
+            "rise {}",
+            b.last_fall_height
+        );
+        assert!(b.position[2] < -5.0, "jumped forward: {:?}", b.position);
     }
 
     #[test]

@@ -20,11 +20,12 @@ pub const DEMO: &str = "\
 # jump forward and land
 1 0 1 jump
 80 0 0 -
-# three attacks: press, release, press again in the combo window
+# three attacks: press, release, press again in the combo window (a press before the next
+# slash's accept window would be dropped, as in the game)
 1 0 0 attack
 25 0 0 -
 1 0 0 attack
-25 0 0 -
+40 0 0 -
 1 0 0 attack
 70 0 0 -
 # hold guard, then release

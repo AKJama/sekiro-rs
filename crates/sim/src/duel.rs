@@ -15,9 +15,6 @@ use crate::player::LoadError;
 use sekiro_formats::flver::{self, Flver};
 use std::path::{Path, PathBuf};
 
-/// Lock-on reach, metres (assumed; the game reads it from LockCamParam and the target's size).
-pub const LOCK_RANGE: f32 = 15.0;
-
 /// Seconds between a death and both characters respawning at their start positions (a stand-in
 /// for the game's death screen and reload).
 pub const RESPAWN_DELAY: f32 = 6.0;
@@ -69,6 +66,7 @@ struct Throws {
 }
 
 pub struct Duel {
+    pub camera: crate::camera::CameraParams,
     pub player: Character,
     pub enemy: Character,
     /// The stand-in brain, used when [`Duel::ai`] is `None`.
@@ -128,6 +126,7 @@ impl Duel {
             })
         });
         Ok(Self {
+            camera: crate::camera::CameraParams::load(cache),
             player,
             enemy,
             brain: SimpleBrain::default(),
@@ -283,7 +282,7 @@ impl Duel {
         let p = self.player.body.position;
         let e = self.enemy.body.position;
         let dist = ((e[0] - p[0]).powi(2) + (e[2] - p[2]).powi(2)).sqrt();
-        if dist <= LOCK_RANGE && enemy_alive {
+        if dist <= self.camera.lock_range && enemy_alive {
             self.player.lock_target = Some(e);
         }
     }
