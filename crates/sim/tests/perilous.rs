@@ -11,6 +11,165 @@ use sekiro_sim::{Buttons, Character, InputFrame};
 
 const DT: f32 = 1.0 / 60.0;
 
+#[test]
+fn forward_step_counters_the_thrust() {
+    let Some(cache) = cache() else { return };
+    for (spec, act, step, reaction) in [
+        (EnemySpec::soldier(), 3013, 35, "ThrowDef13100"),
+        (EnemySpec::owl(), 3033, 75, "ThrowDef13800"),
+    ] {
+        let mut d = Duel::load_with(&cache, 2.0, spec).unwrap();
+        d.enemy_active = false;
+        let mut countered = false;
+        let hp = d.rules.fighters[0].vitality.hp;
+        for i in 0..260 {
+            d.force_act = (i < 10).then_some(act);
+            let input = InputFrame {
+                move_stick: if i == step { [0.0, 1.0] } else { [0.0; 2] },
+                buttons: Buttons {
+                    dodge: i == step,
+                    lock_on: i == 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let r = d.step(&input, DT);
+            assert!(r.player.behavior.script_errors.is_empty(), "{r:?}");
+            assert!(r.enemy.behavior.script_errors.is_empty(), "{r:?}");
+            if let Some((row, damage)) = r.mikiri {
+                assert_eq!(damage, 90);
+                assert_eq!(row, if act == 3013 { 11010120 } else { 15060190 });
+            }
+            if d.enemy.state() == reaction && !countered {
+                countered = true;
+                assert_eq!(
+                    d.rules.fighters[1].posture.remaining,
+                    (d.rules.fighters[1].posture.max - 90).max(0)
+                );
+                assert!(d.player.state().starts_with("ThrowAtk511"));
+            }
+            assert!(
+                r.hits.iter().all(|(h, _)| h.attacker != 1),
+                "Wolf hit: {act} at {i}"
+            );
+            assert_eq!(d.rules.fighters[0].vitality.hp, hp);
+        }
+        assert!(countered, "no counter for {act}");
+        assert!(
+            !d.player.state().starts_with("ThrowAtk511"),
+            "counter never released"
+        );
+    }
+}
+
+#[test]
+fn mikiri_requires_a_timed_forward_step_and_a_thrust() {
+    let Some(cache) = cache() else { return };
+    for (spec, act, step, stick) in [
+        (EnemySpec::soldier(), 3013, 0, [0.0, 1.0]),
+        (EnemySpec::soldier(), 3013, 60, [0.0, 1.0]),
+        (EnemySpec::owl(), 3033, 10, [0.0, 1.0]),
+        (EnemySpec::owl(), 3033, 115, [0.0, 1.0]),
+        (EnemySpec::soldier(), 3013, 35, [0.0, -1.0]),
+        (EnemySpec::soldier(), 3013, 35, [1.0, 0.0]),
+        (EnemySpec::owl(), 3033, 75, [0.0, -1.0]),
+        (EnemySpec::owl(), 3033, 75, [-1.0, 0.0]),
+        (EnemySpec::soldier(), 3020, 55, [0.0, 1.0]),
+        (EnemySpec::owl(), 3004, 40, [0.0, 1.0]),
+        (EnemySpec::soldier(), 3000, 35, [0.0, 1.0]),
+        (EnemySpec::owl(), 3000, 35, [0.0, 1.0]),
+    ] {
+        let mut d = Duel::load_with(&cache, 2.0, spec).unwrap();
+        d.enemy_active = false;
+        for i in 0..150 {
+            d.force_act = (i < 10).then_some(act);
+            let r = d.step(
+                &InputFrame {
+                    move_stick: if i == step { stick } else { [0.0; 2] },
+                    buttons: Buttons {
+                        dodge: i == step,
+                        lock_on: i == 1,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                DT,
+            );
+            assert!(
+                r.mikiri.is_none(),
+                "unexpected counter: {act}, {step}, {stick:?}"
+            );
+            assert!(!d.player.state().starts_with("ThrowAtk511"));
+        }
+    }
+}
+
+#[test]
+fn stepping_forward_away_from_an_unlocked_thrust_does_not_counter() {
+    let Some(cache) = cache() else { return };
+    let mut d = Duel::load_with(&cache, 2.0, EnemySpec::soldier()).unwrap();
+    d.enemy_active = false;
+    d.player.body.yaw = std::f32::consts::PI;
+    for i in 0..100 {
+        d.force_act = (i < 10).then_some(3013);
+        let r = d.step(
+            &InputFrame {
+                camera_yaw: std::f32::consts::PI,
+                move_stick: if i == 35 { [0.0, 1.0] } else { [0.0; 2] },
+                buttons: Buttons {
+                    dodge: i == 35,
+                    ..Default::default()
+                },
+            },
+            DT,
+        );
+        assert!(r.mikiri.is_none());
+    }
+}
+
+#[test]
+fn forward_step_window_and_counter_dummies_follow_the_data() {
+    let Some(cache) = cache() else { return };
+    let d = Duel::load_with(&cache, 2.0, EnemySpec::soldier()).unwrap();
+    let anim = d.player.tae.anim("a000_213301").unwrap();
+    let event = anim
+        .events
+        .iter()
+        .find(|e| e.kind == sekiro_sim::tae::TaeKind::ActionFlag(125))
+        .unwrap();
+    assert_eq!(event.start, 0.0);
+    assert!((event.end - 0.4).abs() < 0.00001);
+    for judge in [940, 941] {
+        assert!(sekiro_sim::perilous::counter_dummy(
+            &d.fighters[1].attacks[&judge]
+        ));
+    }
+    let owl = Duel::load_with(&cache, 2.0, EnemySpec::owl()).unwrap();
+    assert!(sekiro_sim::perilous::counter_dummy(
+        &owl.fighters[1].attacks[&311]
+    ));
+    let mut bullets: Vec<_> = owl.fighters[1]
+        .bullets
+        .values()
+        .map(|b| b.as_ref())
+        .collect();
+    let mut smoke = None;
+    while let Some(b) = bullets.pop() {
+        if let Some(a) = b.attack.as_ref().filter(|a| a.atk_id == 50600721) {
+            smoke = Some(a);
+            break;
+        }
+        if let Some(child) = &b.child {
+            bullets.push(child);
+        }
+        if let Some(interval) = &b.interval {
+            bullets.push(&interval.def);
+        }
+    }
+    let smoke = smoke.expect("Owl's blinding bullet is missing");
+    assert!(!sekiro_sim::perilous::counter_dummy(smoke));
+}
+
 fn cache() -> Option<PathBuf> {
     let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
     let ok = cache.join("anim/c1010/tae.json").is_file()
@@ -69,7 +228,7 @@ fn the_warning_follows_the_dummy_bullet() {
     let (t, w) = first_warning(&cache, EnemySpec::soldier(), 3013, 2.0).expect("no warning");
     assert!(t < 0.05, "soldier thrust warning at {t:.3} s");
     assert_eq!(w.kind, Some(Perilous::Thrust));
-    // The Owl's Shinobi stab a000_003033: 987 at 0.667 s, blow 50601310.
+    // The Owl's Shinobi stab a000_003033: 987 at 0.667 s, blow 50600310.
     let (t, w) = first_warning(&cache, EnemySpec::owl(), 3033, 3.0).expect("no warning");
     assert!((t - 0.667).abs() < 0.03, "Owl stab warning at {t:.3} s");
     assert_eq!((w.judge, w.kind), (987, Some(Perilous::Thrust)));

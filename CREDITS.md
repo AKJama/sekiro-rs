@@ -31,6 +31,7 @@ From [FFwLo/RustSekiro](https://github.com/FFwLo/RustSekiro), under the MIT lice
 - The deathblow camera (TAE 151 / 153 / 155 rules) in `crates/sim/src/camera.rs` and `crates/game/src/play.rs`, from his `src/camera.rs`.
 - The perilous kanji HUD stand-in in `crates/game/src/combat_hud.rs`, from his `src/hud.rs`.
 - The sweep i-frame and kick-off (env 2004) rules in `crates/sim/src/hits.rs` and `crates/sim/src/duel.rs`, from his `src/combat.rs` and `src/player.rs`.
+- The Mikiri contact/flag rule, parry posture field and counter/break ThrowParam selection in `crates/sim/src/perilous.rs` and `crates/sim/src/duel.rs`, from his `src/combat.rs` and knowledge base, checked against our soldier and Owl data.
 
 ```
 MIT License

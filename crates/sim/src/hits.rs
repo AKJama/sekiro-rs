@@ -225,6 +225,8 @@ pub struct AttackData {
     pub sp_effects: Vec<i32>,
     /// AtkParam `atkType`, the hit's sound and effect family: 0 slash, 1 blow, 2 thrust.
     pub atk_type: u8,
+    /// AtkParam `staminaDamageAttackHitParry`: posture lost when Mikiri-countered.
+    pub mikiri_posture: i32,
 }
 
 /// What kind of perilous attack (the red kanji) an AtkParam row is, from its guard flags.
@@ -311,6 +313,7 @@ impl AttackData {
                 .filter(|&id| id > 0)
                 .collect(),
             atk_type: int("atkType") as u8,
+            mikiri_posture: int("staminaDamageAttackHitParry"),
         }
     }
 }
@@ -686,6 +689,8 @@ impl HitDetector {
                         };
                         if di == ai
                             || !reachable
+                            || (crate::perilous::counter_dummy(attack)
+                                && !defender.tae_frame().flag(crate::perilous::FLAG_MIKIRI))
                             || self.done.contains(&(ai, judge, w.start.to_bits(), di))
                         {
                             continue;

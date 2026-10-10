@@ -24,6 +24,29 @@ use crate::character::Character;
 use crate::hits::{Combatant, Perilous};
 use crate::tae::TaeKind;
 
+/// Forward-step TAE ChrActionFlag 125, active for the first 0.4 seconds.
+pub const FLAG_MIKIRI: i32 = 125;
+
+/// The counter pair holds until Wolf leaves the counter animation through its own cancels.
+pub struct Mikiri {
+    pub row: crate::deathblow::ThrowRow,
+    pub slide: crate::deathblow::AbsorbSlide,
+    pub started: bool,
+}
+
+/// Counter-only BehaviorParam category 6 hitboxes carry posture but no damaging attack.
+pub fn counter_dummy(attack: &crate::hits::AttackData) -> bool {
+    attack.category == 6
+        && attack.atk_type == 0
+        && attack.sp_effects.is_empty()
+        && attack.mikiri_posture > 0
+        && attack.atk_phys == 0
+        && attack
+            .profile
+            .as_ref()
+            .is_some_and(|p| p.attack_power == [0.0; 5] && p.behavior_id == 0)
+}
+
 /// SpEffectVfxParam row 48100, "漢字_「危」": the perilous-attack kanji.
 pub const KANJI_VFX: i32 = 48100;
 

@@ -84,6 +84,8 @@ pub struct DuelReport {
     /// Wolf's anti-ground attack (the air kick) landed on an enemy in a perilous sweep, whose
     /// "jump kick effective" SpEffect multiplied its posture damage this step.
     pub jump_counter: bool,
+    /// ThrowParam row and posture damage of a Mikiri begun this step.
+    pub mikiri: Option<(i32, i32)>,
 }
 
 /// ThrowParam and both models' sorb dummies, for deathblows.
@@ -116,6 +118,7 @@ pub struct Duel {
     pub deathblow: Option<Deathblow>,
     /// The enemy's throw on Wolf in progress.
     pub enemy_throw: Option<EnemyThrow>,
+    mikiri: Option<crate::perilous::Mikiri>,
     /// Testing aid: the enemy requests this action (an animation id such as 3040) whenever it is
     /// not already playing it, on top of its brain (or alone with the brain off).
     pub force_act: Option<i32>,
@@ -320,6 +323,7 @@ impl Duel {
             enemy_active: true,
             deathblow: None,
             enemy_throw: None,
+            mikiri: None,
             force_act: None,
             respawn_in: None,
             throws,
@@ -491,6 +495,7 @@ impl Duel {
         self.knockback = [None; 2];
         self.deathblow = None;
         self.enemy_throw = None;
+        self.mikiri = None;
         self.respawn_in = None;
         self.defender_dying = 0;
         self.last_throw_def_clip = None;
@@ -794,9 +799,105 @@ impl Duel {
 
     /// Whether an enemy throw holds Wolf.
     fn throw_held(&self) -> bool {
-        self.enemy_throw
-            .as_ref()
-            .is_some_and(|t| t.phase == GrabPhase::Held)
+        self.mikiri.is_some()
+            || self
+                .enemy_throw
+                .as_ref()
+                .is_some_and(|t| t.phase == GrabPhase::Held)
+    }
+
+    fn try_mikiri(&mut self, hit: &HitEvent) -> Option<(i32, i32)> {
+        if hit.attacker != 1
+            || hit.defender != 0
+            || !self.player.tae_frame().flag(crate::perilous::FLAG_MIKIRI)
+            || !(hit.attack.atk_type == 2
+                && hit.attack.perilous() == Some(crate::hits::Perilous::Thrust)
+                || crate::perilous::counter_dummy(&hit.attack)
+                    && crate::perilous::upcoming_kind(&self.enemy, &self.fighters[1])
+                        == Some(crate::hits::Perilous::Thrust))
+        {
+            return None;
+        }
+        let throws = self.throws.as_ref()?;
+        let damage = hit.attack.mikiri_posture;
+        let forward = placement(&self.player).forward();
+        let to_enemy = [
+            self.enemy.body.position[0] - self.player.body.position[0],
+            self.enemy.body.position[2] - self.player.body.position[2],
+        ];
+        if forward[0] * to_enemy[0] + forward[1] * to_enemy[1] <= 0.0 {
+            return None;
+        }
+        let broken = self.rules.fighters[1].posture.project(-damage, None) < 1;
+        let row = throws
+            .table
+            .player_row(self.spec.throw_chr(), 0, if broken { 120 } else { 190 })?
+            .clone();
+        self.player.clip_duration(&row.attacker_anim())?;
+        let sorb = DummyFrame::from_flver(&throws.model, row.atk_sorb_dummy)?;
+        self.player.body.yaw = self.player.yaw_to(self.enemy.body.position);
+        self.enemy.body.yaw = self.enemy.yaw_to(self.player.body.position);
+        let slide = crate::deathblow::AbsorbSlide::new(
+            Absorbed::Defender,
+            &sorb,
+            &placement(&self.player),
+            &placement(&self.enemy),
+            row.interpolation_time,
+        );
+        self.rules.fighters[1].posture.take(damage, None);
+        self.player
+            .behavior
+            .runtime
+            .offsets
+            .by_type
+            .insert(THROW_ATK_OFFSET_TYPE, row.atk_anim_offset as u32);
+        self.player
+            .behavior
+            .runtime
+            .fire_event(&format!("W_ThrowAtk{}", row.atk_anim));
+        self.enemy
+            .behavior
+            .runtime
+            .offsets
+            .by_type
+            .insert(THROW_DEF_OFFSET_TYPE, row.def_anim_offset as u32);
+        self.enemy
+            .behavior
+            .runtime
+            .fire_event(&format!("W_ThrowDef{}", row.def_anim));
+        self.last_throw_def_clip = row.defender_anim();
+        self.knockback = [None, None];
+        self.player.pending_damage = None;
+        self.enemy.pending_damage = None;
+        let result = (row.id, damage);
+        self.mikiri = Some(crate::perilous::Mikiri {
+            row,
+            slide,
+            started: false,
+        });
+        Some(result)
+    }
+
+    fn step_mikiri(&mut self, dt: f32) {
+        let Some(mut pair) = self.mikiri.take() else {
+            return;
+        };
+        let playing = self
+            .player
+            .behavior
+            .runtime
+            .main_clip()
+            .is_some_and(|c| c.animation == pair.row.attacker_anim());
+        if playing {
+            pair.started = true;
+        }
+        if pair.started && !playing {
+            return;
+        }
+        if let Some(a) = pair.slide.advance(dt) {
+            self.absorb(&a);
+        }
+        self.mikiri = Some(pair);
     }
 
     /// [`Self::force_act`]: asks for the act whenever the enemy is not already in it or in a
@@ -1150,6 +1251,7 @@ impl Duel {
         env.overrides.retain(|(id, _, _)| {
             ![
                 ENV_IN_THROW,
+                273,
                 ENV_EVENT_COMMAND,
                 ENV_AI_ENDURE_ACTION,
                 crate::player::ENV_MOVE_CANCEL,
@@ -1159,6 +1261,9 @@ impl Duel {
         });
         if in_throw {
             env.overrides.push((ENV_IN_THROW, None, 1.0));
+        }
+        if let Some(pair) = &self.mikiri {
+            env.overrides.push((273, None, pair.row.def_anim as f32));
         }
         if let Some(a) = endure_action.filter(|&a| a > 0) {
             env.overrides.push((ENV_AI_ENDURE_ACTION, None, a as f32));
@@ -1345,6 +1450,7 @@ impl Duel {
         self.step_deathblow(dt, &mut deathblow);
         let mut grab = GrabReport::default();
         self.step_enemy_throw(dt, &mut grab);
+        self.step_mikiri(dt);
         if self.deathblow.is_none() && !self.throw_held() && enemy_alive {
             self.separate();
         }
@@ -1373,6 +1479,18 @@ impl Duel {
             bullet_hits.iter().map(|b| b.sp_effects.clone()).collect();
         found.extend(bullet_hits.into_iter().map(|b| b.hit));
         let mut hits = Vec::new();
+        // Counter contacts win over the damaging blade contact of the same step.
+        let mikiri = if self.deathblow.is_none()
+            && !self.throw_held()
+            && !self.rules.fighters.iter().any(|f| f.dead())
+        {
+            found
+                .iter()
+                .take(first_bullet_hit)
+                .find_map(|hit| self.try_mikiri(hit))
+        } else {
+            None
+        };
         self.enemy_damaged = false;
         for (k, hit) in found.into_iter().enumerate() {
             if self.deathblow.is_some()
@@ -1382,6 +1500,9 @@ impl Duel {
                 break;
             }
             // A throw start grabs instead of hitting (guarding does not stop it).
+            if crate::perilous::counter_dummy(&hit.attack) {
+                continue;
+            }
             if hit.attacker == 1 && hit.attack.throw_flag == 1 {
                 grab.started = self.try_enemy_throw(&hit);
                 continue;
@@ -1473,6 +1594,7 @@ impl Duel {
             respawned,
             perilous,
             jump_counter,
+            mikiri,
         };
         let clip = self
             .player

@@ -93,8 +93,10 @@ Types 5, 1029 and 1031 are parries and contact parries and go to the same break-
 ## Mikiri Counter
 
 The player scripts never mention Mikiri Counter by name, and no step, guard or damage branch selects a dedicated counter animation.
-The most likely path is the native throw system: the counter is a paired animation like a deathblow, started by the engine (throw request env 1112, throw animation id env 273) and played through the many throw-attack states, whose hooks only do throw bookkeeping.
-This is unverified and needs the Ghidra and ThrowParam passes.
+The counter uses the native throw system: ThrowParam suffix 190 pairs `ThrowAtk511800` with `ThrowDef13800`, or suffix 120 pairs `ThrowAtk511100` with `ThrowDef13100` when posture breaks.
+The sim fires those graph events when a thrust contact meets the forward step's TAE flag 125 (0.000 to 0.400 s), and answers the NPC throw hook's env 273 and 206.
+Wolf's throw hooks call normal `UpdateState`; they do not ask env 2004 for this counter.
+The data and remaining native-engine inferences are documented in `docs/COMBAT-RULES.md`, "Mikiri Counter".
 
 ## Where an attack goes: auto-aim, lunge and fixed rotation
 

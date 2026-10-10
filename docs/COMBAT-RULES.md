@@ -103,7 +103,7 @@ Both give 90 degrees for Wolf.
 
 Perilous attacks are the unblockable flags, not a separate system.
 In AtkParam_Npc, 238 rows block both guard types for both block and deflect (grabs), 60 rows block only the katana (guard type 0) for both (the Loaded Umbrella still blocks them), and 111 rows forbid only blocking with the katana, so they must be deflected.
-The Mikiri counter is not in this path; see `docs/HKS-COMBAT.md`.
+The Mikiri counter intercepts a counterable thrust contact before ordinary hit resolution.
 Code: `crates/sim/src/perilous.rs`, `crates/sim/src/hits.rs` (`AttackData::perilous`), the duel; tests `crates/sim/tests/perilous.rs`.
 
 ### The warning (危)
@@ -133,6 +133,42 @@ Here the kind comes from the clip's next attack window: a grab (`throwFlag` 1), 
   The duel now answers env 2004 true from the step one of Wolf's attacks connects until his clip changes (how long it stays true is **inferred**); the script reads it only with reference 204 or a combat art's jump reference.
 - `DuelReport::jump_counter` says when an anti-ground hit landed on an attacker with a `stateInfo` 912 effect.
 - So a jump that is too early (landed before the blade) or too late (the blade arrived before the jump start) is hit, and a kick before or after the attacker's 912 window is an ordinary 10-posture kick, all from the TAE windows; there is no timing constant of ours in it.
+
+### Mikiri Counter
+
+Implemented for the soldier and Great Shinobi Owl on 11 October 2026.
+FwLo's RustSekiro (MIT, local clone; the requested pull failed because GitHub was unreachable) supplied the flag-125/contact rule, the `staminaDamageAttackHitParry` field, and the ThrowParam suffix 190 / posture-break suffix 120 selection.
+His knowledge base describes these as data findings; the break-pair choice also has live c1010 observations in `docs/kb/damage.md`.
+The following values were checked against our own extracted v1.6 data, rather than using his General-specific animation offsets.
+
+| Source | Finding | Confidence |
+|---|---|---|
+| Wolf TAE `a000_213301` (forward step; neutral `213300` aliases it) | ChrActionFlag 125 `MikiriCounter` and SpEffect 100254 (reference 16) run from 0.000 to 0.400 s, 12 frames at 30 Hz. The counter reads the flag; no timing constant or input-buffer change. | data |
+| Soldier TAE `a000_003013` | Damaging judge 230 and counter-only judges 940 / 941 run from 0.767 to 0.933 s. | data |
+| Soldier BehaviorParam 210100230 / 210100940 / 210100941 | AtkParam 10100230 / 10100940 / 10100941. The real thrust has `atkType` 2, katana `disableGuard` 1, `disableJustGuard` 0, and `staminaDamageAttackHitParry` 90. The category-6 dummy rows deal no damage, carry the same 90, and have wider capsules. | data |
+| Owl TAE `a000_003033` | Damaging judge 310 runs 1.467 to 1.867 s; counter-only judge 311 runs 1.333 to 1.867 s. | data |
+| Owl BehaviorParam 250600310 / 250600311 | AtkParam 50600310 / 50600311. The real thrust has the same type/guard/parry fields as the soldier, including 90 posture; the category-6 dummy deals nothing. Row 50601310 is the corresponding variation copy. | data |
+| ThrowParam 11010190 / 15060190 | Surviving-posture pair: Wolf `a200_511800` / `a221_511800`, enemy `ThrowDef13800`; absorb dummy 522 / 523, interpolation 0.5 s. | data |
+| ThrowParam 11010120 / 15060120 | Posture-break pair: Wolf `a200_511100` / `a221_511100`, enemy `ThrowDef13100`; absorb dummy 520 / 523, interpolation 0.5 s. | data; selecting it on projected empty posture follows RustSekiro's observed rule |
+| `c0000.hks`, `c0000_cmsg` and `c0000.hkx` | No dedicated named Mikiri branch: native `W_ThrowAtk511800` / `W_ThrowAtk511100` events enter the graph's `NewThrowAtk_SM` states. HKS runs normal `UpdateState`, clears input via act 9101 and does throw bookkeeping. | script/graph |
+| Shared NPC HKS and each enemy's `c9997.hkx` | `W_ThrowDef13800` / `W_ThrowDef13100` enter `ThrowDef_SM`; `ThrowDefCommonFunction` asks env 273 for its animation id and env 206 for throw state. The duel supplies these for the pair; env 339 remains the existing clip-end signal. | script/graph; native event injection inferred |
+
+Counter-only contacts are recognised by category 6, zero attack power, type 0, no on-hit effects or special behaviour id, and positive parry posture, and associated with the clip's upcoming perilous thrust (**inferred** classification).
+The type and behaviour checks preserve Owl's zero-damage blinding hit (type 1, behaviour id 17), which is not a counter dummy.
+They are not ordinary hits, and are not spent before flag 125 opens.
+A damaging thrust contact can also start the pair if its `atkType` is 2 and its katana guard flags identify a perilous thrust, following RustSekiro's rule (**inferred** engine predicate).
+Ordinary blockable thrusts are therefore not countered by that fallback; a dedicated counter dummy associated with a blockable attack is not yet identified or enabled.
+The damaging blade and dummy contacts are checked before resolving any damage that step, so a counter cancels Wolf's incoming hit and its on-hit effects.
+No sweep, grab, backward step or side step can select a Mikiri pair.
+The enemy must also be in Wolf's forward hemisphere at contact, so an unlocked forward step away from a thrust cannot counter it (**inferred** direction gate).
+
+The counter applies the contacted row's 90 posture directly through the existing posture setter, without HP damage; the soldier's 75 breaks and Owl's 660 does not.
+Both play the real pair with the existing absorb mechanism, and the hold ends when Wolf leaves the counter clip through its data-driven cancels or clip end.
+The pair's initial facing and absorb behaviour use the existing throw convention (**inferred**); the native counter implementation has not been traced in Ghidra.
+Learned-skill `attackHitParryStaminaAttackRate` bonuses are not modelled here.
+The posture-break follow-up deathblow pairs (suffixes 121 / 122) are not automatically chained; this implements the counter and reaction, not that optional execution.
+Mikiri does not ask env 2004; that remains the swing-hit result for the jump counter described above.
+Tests replay real HKS, graph, animation and hit detection: forward steps at ticks 35 / 75 into forced 3013 / 3033 at 2 m counter for 90 with both reaction states and no Wolf hit; early, late, backward, side, sweep and ordinary slash cases do not, and the pair releases normally.
 
 ## Posture damage to the defender
 

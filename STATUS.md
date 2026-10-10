@@ -65,22 +65,46 @@ Testing aids: `--break-posture` holds the enemy's posture at 1 point outside dea
 
 ## In progress when the session paused
 
-- Grappling hook, ledge hang, Mikiri counter and perilous attacks (player/enemy behaviour).
+- Grappling hook and ledge hang (player/enemy behaviour).
 - Fall death and respawn, FLVER tangents to cut the 14 s map load, map lighting from the game's draw params, foliage alpha.
 - Audio (2026-10-10, FMOD path built, to be confirmed by ear): sounds at the TAE events' dummy polys, map reverb, music. Coverage and loudness numbers: `docs/AUDIO.md`.
 
 Uncommitted files in the working tree belong to these tasks; check `git status` and build before committing.
 
-### Leads for grapple, ledges and Mikiri (found, not built)
+### Leads for grapple and ledges (found, not built)
 
 - Ledges: `map/<id>/<id>.edgebhd/.edgebdt` hold one `.edge` file per collision part (16 files, 255 edges on m11). Header `u32 version=4, u32 count, u32 collision number, u32 0`, then 64-byte records: two vec4 endpoints, a zero vec4, `u32 chain id`, `u32 flags` (low byte 2 or 3, second byte 0..3 or 10, meaning unknown), 8 bytes padding. Endpoints are in the collision part's local space; apply its layout transform. `.wallbhd/.wallbdt` is likely wall-hug data, undecoded.
 - Grapple: map pieces have no dummies; object `o000100` (placed 67 times on m11) carries dummy 90 and is very likely the grapple point. Search rules: WirePointSearchParam row 0 (act 3 to 15 m, find to 25 m, filter and soft-lock boxes); WireSetParam picks search rows per area; WireVariationParam (angles, marker type, homing offset) is probably set per placed object in MSB fields the parser still skips.
-- Mikiri: find the soldier's perilous thrusts (AtkParam rows that disable guarding) and the warning effect; the counter likely uses an attack-cancel window plus a ThrowParam row, wired like deathblows in `crates/sim/src/duel.rs`.
+- Mikiri and perilous warning are implemented; see the counter session below and `docs/COMBAT-RULES.md`.
 - Study tools: `crates/sim/examples/bxf_list.rs`, `dummy_census.rs`.
 
 ## Decision needed from the user
 
 - 62 of 174 sound banks (`sm*`, `smain`, `vm*`, `xm*`, `rm*`: area SFX, voices, music, cutscenes) are encrypted FSB that the game's FMOD cannot open without the game's key. Footsteps, hits, clangs, Wolf's and the Owl's sounds are in the plain banks and play; the encrypted ones stay silent. Reading them means decrypting with a key from the game; ask before touching them (see `docs/AUDIO.md`).
+
+## Mikiri Counter session (2026-10-11)
+
+Soldier act 3013 and Owl act 3033 now counter when Wolf steps forward into their thrust during his real TAE ChrActionFlag 125 window, 0.000 to 0.400 s.
+The incoming blow and on-hit effects are cancelled, and the contacted AtkParam's `staminaDamageAttackHitParry` deals 90 posture to the enemy.
+ThrowParam suffix 190 plays Wolf's per-enemy `511800` counter and enemy `ThrowDef13800`; suffix 120 plays `511100` / `ThrowDef13100` when the damage breaks posture (the soldier by default).
+The pair uses its actual absorb dummy and 0.5 s interpolation, and releases through Wolf's existing animation cancels or end, with env 273 / 206 supplied to the enemy throw hook.
+No input buffering, movement, attack timing, hit stop or combo logic changed, and no fixed delay was added.
+FwLo's RustSekiro supplied the rule and pair selection, checked against our extracted data and credited once in its existing CREDITS section; the requested pull failed because this environment could not connect to GitHub.
+Details, data versus inferred rules, and limitations (latent skill multipliers and automatic posture-break deathblow follow-up) are in `docs/COMBAT-RULES.md`, "Mikiri Counter".
+The real-data reproduction first failed with Wolf hit at tick 46; the fixed 2 m replays counter for both enemies and verify their reaction states, Wolf's animation, no incoming damage, and release.
+The ten perilous tests also cover early/late, backward/side, unlocked stepping away, sweeps and ordinary slashes, and confirm the 0.400 s data window and counter dummy rows.
+The full release sim suite passed (268 tests); workspace Clippy with `-D warnings`, formatting and diff whitespace checks passed.
+Owl's smoke blinding hit remains a normal hit and its existing regression passes.
+Logs: `cache/mikiri-tests-final.log`, `cache/mikiri-focused.log`; scripted demo: `crates/game/scripts/soldier_mikiri.txt`.
+The game release executable was built in `target/alt`.
+The soldier demo completed in about eight seconds under a 55 s cap, saving `cache/screens/mikiri_soldier_55.png` and `mikiri_soldier_70.png`.
+Both screenshots were inspected; the blade stomp is visible, and `cache/mikiri-game.err.log` confirms `ThrowAtk511100` / `ThrowDef13100` from tick 47 with no hit stop.
+All Cargo builds and tests used `target/alt` and six jobs; cargo fmt uses `CARGO_BUILD_JOBS=6` because it has no `-j` option.
+No commits, links, junctions, protected brain edits or game-install writes were made.
+
+```powershell
+.\target\alt\release\sekiro-rs.exe --play --passive --god --force-act 3013 --lock-on --enemy-distance 2 --script crates/game/scripts/soldier_mikiri.txt --shots 55:cache/screens/mikiri_soldier_55.png,70:cache/screens/mikiri_soldier_70.png --exit
+```
 
 ## Known issues
 
