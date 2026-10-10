@@ -60,7 +60,10 @@ pub struct LightSet {
 
 fn colour(v: &[f32]) -> (Color, f32) {
     let get = |i: usize| v.get(i).copied().unwrap_or(0.0).max(0.0);
-    (Color::linear_rgb(get(0), get(1), get(2)), v.get(3).copied().unwrap_or(1.0))
+    (
+        Color::linear_rgb(get(0), get(1), get(2)),
+        v.get(3).copied().unwrap_or(1.0),
+    )
 }
 
 /// Direction toward a light from a gparam (pitch, yaw) angle, in Bevy space.
@@ -79,8 +82,7 @@ impl LightSet {
     pub fn from_gparam(g: &Gparam, id: i32, hour: f32) -> Self {
         let get = |name: &str| g.param("LightSet", name).and_then(|p| p.at(id, hour));
         let fog = |name: &str| g.param("VolumetricFog", name).and_then(|p| p.at(id, hour));
-        let (sun_color, sun_w) =
-            colour(&get("DiffColor0").unwrap_or(vec![1.0, 0.95, 0.85, 1.5]));
+        let (sun_color, sun_w) = colour(&get("DiffColor0").unwrap_or(vec![1.0, 0.95, 0.85, 1.5]));
         let (fill_color, fill_w) = colour(&get("DiffColor1").unwrap_or(vec![0.5, 0.6, 0.7, 0.2]));
         let (up, up_w) = colour(&get("Hemi Color Up").unwrap_or(vec![0.6, 0.7, 0.8, 0.5]));
         let (down, down_w) = colour(&get("Hemi Color Down").unwrap_or(vec![0.4, 0.4, 0.4, 0.2]));

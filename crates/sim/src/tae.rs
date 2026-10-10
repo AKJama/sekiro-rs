@@ -66,6 +66,17 @@ pub enum TaeKind {
         judge: i32,
     },
     IFrames(i32),
+    /// `IFrames_MistRaven` (950) and `IFrames_DuringAction` (951): full invulnerability. 950 sits
+    /// on Wolf's knock-down, launch, death and revival animations, 951 on the deathblow throws.
+    Invulnerable,
+    /// `BoostRootMotionToReachTarget` (760): scales root motion so an attack reaches its target.
+    ReachTarget(ReachTarget),
+    /// `SetKnockbackPercent` (226): scales the knockback this animation's character receives.
+    KnockbackPercent(f32),
+    /// `FixedRotationDirection` (703): the character stops turning toward its target.
+    FixedRotation,
+    /// `SetSPRegenRatePercent` (225): scales posture recovery.
+    PostureRegenPercent(f32),
     /// `Blend` (16): crossfade into this animation over the event's length.
     Blend,
     /// `ChrActionFlag` 3 (`ShieldBlock`): guarding. ArgB is the behaviour judge of the guard
@@ -105,11 +116,25 @@ pub fn sound_name(kind: i32, id: i32) -> String {
     format!("{letter}{id:09}")
 }
 
+/// Fields of a `BoostRootMotionToReachTarget` (760) event, metres and degrees.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReachTarget {
+    pub reference_dist: f32,
+    pub range_min: f32,
+    pub range_max: f32,
+    pub arrive_angle: f32,
+    pub arrive_dist: f32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimedEvent {
     pub start: f32,
     pub end: f32,
     pub kind: TaeKind,
+    /// The event's `StateInfo` (action flags, attacks, bullets, sounds, effects). When non-zero
+    /// the engine applies the event only while an SpEffect with that `stateInfo` is active, so
+    /// weapon-enchantment hits and upgraded-prosthetic sounds stay off by default.
+    pub state_info: i32,
 }
 
 impl TimedEvent {
@@ -340,6 +365,20 @@ fn decode(template: &Template, e: &tae::TaeEvent) -> Option<TimedEvent> {
             judge: int("BehaviorJudgeID")?,
         },
         954 => TaeKind::IFrames(int("IFrameType").unwrap_or(0)),
+        950 | 951 => TaeKind::Invulnerable,
+        760 if int("IsEnable").unwrap_or(1) != 0 => {
+            let f = |name: &str| d.field(name).and_then(|v| v.as_f32()).unwrap_or(0.0);
+            TaeKind::ReachTarget(ReachTarget {
+                reference_dist: f("ReferenceDist"),
+                range_min: f("EnableRangeMin"),
+                range_max: f("EnableRangeMax"),
+                arrive_angle: f("ArriveAngleFromTarget"),
+                arrive_dist: f("ArriveDistFromTarget"),
+            })
+        }
+        226 => TaeKind::KnockbackPercent(int("KnockbackPercent")? as f32),
+        703 if int("IsEnable").unwrap_or(1) != 0 => TaeKind::FixedRotation,
+        225 => TaeKind::PostureRegenPercent(int("RegenRatePercent")? as f32),
         16 => TaeKind::Blend,
         128..=132 => TaeKind::Sound {
             kind: int("SoundType")?,
@@ -351,6 +390,7 @@ fn decode(template: &Template, e: &tae::TaeEvent) -> Option<TimedEvent> {
         start: e.start,
         end: e.end,
         kind,
+        state_info: int("StateInfo").unwrap_or(0),
     })
 }
 
@@ -385,6 +425,16 @@ pub struct TaeFrame {
     pub restricted: bool,
     /// Sound events that started this tick: (sound type, sound id).
     pub sounds: Vec<(i32, i32)>,
+    /// TAE 950 / 951: no hit lands at all.
+    pub invulnerable: bool,
+    /// TAE 760 of the first playing clip that has one.
+    pub reach_target: Option<ReachTarget>,
+    /// TAE 226 as a fraction (0.3 for 30 %); `None` is full knockback.
+    pub knockback_scale: Option<f32>,
+    /// TAE 703: stop tracking the target.
+    pub fixed_rotation: bool,
+    /// TAE 225 as a fraction; `None` is normal posture recovery.
+    pub posture_regen_scale: Option<f32>,
 }
 
 impl TaeFrame {
@@ -398,6 +448,8 @@ impl TaeFrame {
 pub struct TaeRuntime {
     /// Effects with a duration, and their remaining seconds.
     timed: HashMap<i32, f32>,
+    /// SpEffects the character always has (equipment, skills); they open `StateInfo` gates.
+    pub resident: Vec<i32>,
     pub frame: TaeFrame,
 }
 
@@ -408,6 +460,7 @@ impl TaeRuntime {
             *remaining -= dt;
         }
         self.timed.retain(|_, r| *r > 0.0);
+        let states = self.active_states(db, clips);
         let mut f = TaeFrame::default();
         for clip in clips {
             let Some(anim) = db.anim(&clip.animation) else {
@@ -415,6 +468,9 @@ impl TaeRuntime {
             };
             let t = clip.time;
             for e in anim.events.iter() {
+                if e.state_info != 0 && !states.contains(&e.state_info) {
+                    continue;
+                }
                 if let TaeKind::ActionFlag(_) | TaeKind::Guard { .. } = e.kind {
                     f.restricted = true;
                 }
@@ -451,6 +507,17 @@ impl TaeRuntime {
                         f.attacks.push(e.clone());
                     }
                     TaeKind::IFrames(kind) => f.iframes.push(*kind),
+                    TaeKind::Invulnerable => f.invulnerable = true,
+                    TaeKind::ReachTarget(r) => {
+                        f.reach_target.get_or_insert(*r);
+                    }
+                    TaeKind::KnockbackPercent(p) => {
+                        f.knockback_scale.get_or_insert(p / 100.0);
+                    }
+                    TaeKind::FixedRotation => f.fixed_rotation = true,
+                    TaeKind::PostureRegenPercent(p) => {
+                        f.posture_regen_scale.get_or_insert(p / 100.0);
+                    }
                     TaeKind::Blend => {}
                     TaeKind::Guard { judge } => {
                         f.flags.insert(3);
@@ -480,5 +547,28 @@ impl TaeRuntime {
             }
         }
         self.frame = f;
+    }
+
+    /// `stateInfo` of every SpEffect active this tick: from the clips' SpEffect events, timed
+    /// effects still running and resident effects.
+    fn active_states(&self, db: &TaeDb, clips: &[PlayingClip]) -> HashSet<i32> {
+        let mut ids: Vec<i32> = self.timed.keys().chain(&self.resident).copied().collect();
+        for clip in clips {
+            let Some(anim) = db.anim(&clip.animation) else {
+                continue;
+            };
+            for e in anim.events.iter() {
+                if let TaeKind::SpEffect(id) = e.kind
+                    && e.active_at(clip.time)
+                {
+                    ids.push(id);
+                }
+            }
+        }
+        ids.iter()
+            .filter_map(|id| db.sp_effects.get(id))
+            .map(|info| info.state_info)
+            .filter(|&s| s != 0)
+            .collect()
     }
 }
