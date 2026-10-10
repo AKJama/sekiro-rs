@@ -1,20 +1,30 @@
-use sekiro_sim::brain::{BossActions, Plan};
+use sekiro_sim::brain::{BossActions, Combo, Plan};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{Backend, Failure, HostedConfig, combo};
+use crate::{Backend, Failure, HostedConfig};
+
+/// The one question's name in both backends.
+pub(crate) const QUESTION: &str = "boss_action";
 
 pub(crate) fn instructions(actions: &BossActions) -> String {
-    let mut text = String::from(
-        "You are the Great Shinobi Owl fighting Wolf. Pick the next action using only the fair observation and outcome tally. Reflexes (guarding, deflecting, counters and reactions) are automatic. Choose lua to leave this act to your own AI. Actions:",
+    let mut text = format!(
+        "You are {} fighting Wolf. Pick your next action. Input: obs is a fair view of both fighters; tally counts this fight per action as [n, hit, blocked, deflected, whiffed, punished]; memory holds every fight so far (earlier fights and wins, the same counts, and Wolf's habits: his attack distance, time at each range, what he does after deflects, guards and your back steps, how he answers and how fast he punishes each of your actions). Bait his habits and punish them. Reflexes (guarding, deflecting, counters and reactions) are automatic. Choose lua to leave this act to your own AI. Actions:",
+        actions.name
     );
     for action in actions.actions {
         text.push_str(&format!("\n{}: {}", action.id, action.label));
     }
-    if let Some(combo) = combo(actions) {
-        text.push_str(&format!("\n{combo}: three-slash combo"));
+    for combo in combos(actions) {
+        text.push_str(&format!("\n{}: {}", combo.value(), combo.label));
     }
     text
+}
+
+/// The boss's named chains that fit in one plan.
+fn combos(actions: &BossActions) -> impl Iterator<Item = &'static Combo> {
+    let max = actions.max_plan;
+    actions.combos.iter().filter(move |c| c.ids.len() <= max)
 }
 
 /// Schemas verified against official documentation on 2026-10-10:
@@ -29,15 +39,15 @@ pub(crate) fn body(config: &HostedConfig, actions: &BossActions, input: &str) ->
         .iter()
         .map(|a| json!({"value": a.id.to_string(), "description": a.label}))
         .collect();
-    if let Some(combo) = combo(actions) {
-        choices.push(json!({"value": combo, "description": "three-slash combo"}));
+    for combo in combos(actions) {
+        choices.push(json!({"value": combo.value(), "description": combo.label}));
     }
     choices.push(json!({"value": "lua", "description": "leave it to his own AI"}));
     let instructions = instructions(actions);
     match config.backend {
         Backend::Decisions => json!({
             "model": config.model, "input": input,
-            "questions": [{"type": "choice", "name": "owl_action",
+            "questions": [{"type": "choice", "name": QUESTION,
                 "instructions": instructions, "choices": choices}]
         }),
         Backend::Responses => {
@@ -45,7 +55,7 @@ pub(crate) fn body(config: &HostedConfig, actions: &BossActions, input: &str) ->
             json!({
                 "model": config.model, "reasoning": {"effort": "none"},
                 "instructions": instructions, "input": [{"role": "user", "content": input}],
-                "text": {"format": {"type": "json_schema", "name": "owl_action", "strict": true,
+                "text": {"format": {"type": "json_schema", "name": QUESTION, "strict": true,
                     "schema": {"type": "object", "properties": {"action": {"type": "string", "enum": values}},
                         "required": ["action"], "additionalProperties": false}}},
                 "max_output_tokens": 16, "store": false
@@ -66,7 +76,7 @@ pub(crate) fn choice(backend: Backend, response: &Value) -> Result<String, Failu
             let answers = response["answers"]
                 .as_array()
                 .ok_or(Failure::InvalidAnswer)?;
-            if answers.len() != 1 || answers[0]["name"] != "owl_action" {
+            if answers.len() != 1 || answers[0]["name"] != QUESTION {
                 return Err(Failure::InvalidAnswer);
             }
             let answer = &answers[0];
@@ -136,7 +146,7 @@ pub(crate) fn plan(value: &str, actions: &BossActions) -> Result<Option<Plan>, F
 mod tests {
     use super::*;
     use crate::ApiKey;
-    use sekiro_sim::brain::OWL;
+    use sekiro_sim::brain::{OWL, SOLDIER};
 
     #[test]
     fn documented_requests_match_wire_bodies() {
@@ -157,7 +167,7 @@ mod tests {
             let config = HostedConfig::new(backend, ApiKey::new("test-key-not-real"));
             assert_eq!(
                 documented,
-                body(&config, &OWL, r#"{"id":1,"obs":{},"tally":{}}"#)
+                body(&config, &OWL, r#"{"id":1,"obs":{},"tally":{},"memory":{}}"#)
             );
         }
     }
@@ -173,5 +183,40 @@ mod tests {
         for invalid in ["", "+3000", "3000+", "03000", "lua+3000", "3000++3001"] {
             assert!(plan(invalid, &OWL).is_err());
         }
+    }
+
+    #[test]
+    fn the_soldier_gets_his_own_vocabulary_and_instructions() {
+        let config = HostedConfig::new(Backend::Decisions, ApiKey::new("test-key-not-real"));
+        let b = body(&config, &SOLDIER, "{}");
+        let q = &b["questions"][0];
+        assert_eq!(q["name"], QUESTION);
+        let values: Vec<_> = q["choices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["value"].as_str().unwrap().to_string())
+            .collect();
+        let mut want: Vec<_> = SOLDIER.actions.iter().map(|a| a.id.to_string()).collect();
+        want.extend(["3000+3001", "3005+3007", "lua"].map(String::from));
+        assert_eq!(values, want);
+        let text = q["instructions"].as_str().unwrap();
+        assert!(
+            text.starts_with("You are an Ashina soldier with a one-handed sword fighting Wolf.")
+        );
+        assert!(text.contains("\n3013: perilous thrust"), "{text}");
+        assert!(
+            text.contains("\n3005+3007: kick, then rising slash"),
+            "{text}"
+        );
+        assert!(text.contains("Bait his habits and punish them."));
+        assert!(!text.contains("Owl"));
+        // His plans validate against his table only.
+        assert_eq!(
+            plan("3005+3007", &SOLDIER).unwrap().unwrap().actions,
+            [3005, 3007]
+        );
+        assert_eq!(plan("3031", &SOLDIER), Err(Failure::UnknownAction));
+        assert_eq!(plan("3004", &SOLDIER), Err(Failure::UnknownAction));
     }
 }

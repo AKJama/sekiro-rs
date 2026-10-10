@@ -130,7 +130,19 @@ pub struct BulletDef {
     /// `intervalCreateBulletId`.
     pub interval: Option<IntervalChild>,
     pub look: BulletLook,
+    /// `EmittePosType` 7: made at the target instead of at the shooter's dummy poly. Only the
+    /// perilous-attack warning dummies use it (10001600, 50601980 to 50601987). That 7 means
+    /// "at the target" is inferred: those rows also set `generationMaxDistWhenOwner`, which only
+    /// makes sense for a bullet made away from its owner, and the warning effect lands on Wolf.
+    pub emit_at_target: bool,
+    /// `generationMaxDistWhenOwner`: not made when where it would be made is farther than this
+    /// from the shooter, metres (def); 0 for no limit. 5 m for the soldier's warning, 9 m for the
+    /// Owl's.
+    pub max_owner_dist: f32,
 }
+
+/// `EmittePosType` of a bullet made at its target ([`BulletDef::emit_at_target`]).
+const EMIT_AT_TARGET: i32 = 7;
 
 /// What a SpEffect does, as far as a bullet's look is concerned.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -274,6 +286,8 @@ fn read_def<'t>(
         child: child("HitBulletID"),
         interval,
         look: BulletLook::Hidden,
+        emit_at_target: i("EmittePosType") == EMIT_AT_TARGET,
+        max_owner_dist: f("generationMaxDistWhenOwner").max(0.0),
     };
     def.choose_look(effects);
     Some(def)
@@ -468,6 +482,13 @@ impl Bullets {
                     .map(|(ti, t)| {
                         Vec3::from_array(t.body.position) + Vec3::Y * fighters[ti].height * 0.6
                     });
+                let origin = match target {
+                    Some(t) if def.emit_at_target => t,
+                    _ => origin,
+                };
+                if def.max_owner_dist > 0.0 && origin.distance(body) > def.max_owner_dist {
+                    continue;
+                }
                 let (yaw, pitch) = match target {
                     Some(t) if def.aim_limit > 0.0 => {
                         let to = t - origin;
@@ -722,6 +743,8 @@ mod tests {
             child: None,
             interval: None,
             look: BulletLook::Hidden,
+            emit_at_target: false,
+            max_owner_dist: 0.0,
         }
     }
 

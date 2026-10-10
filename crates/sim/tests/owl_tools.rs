@@ -27,7 +27,7 @@ fn load(distance: f32, act: i32) -> Option<Duel> {
         return None;
     }
     let mut duel = Duel::load_with(&cache, distance, EnemySpec::owl()).unwrap();
-    duel.set_brain(BrainKind::Repeat(act).build(), false)
+    duel.set_brain(BrainKind::Repeat(act).build("c5060"), false)
         .unwrap();
     Some(duel)
 }

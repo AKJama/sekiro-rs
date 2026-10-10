@@ -80,6 +80,9 @@ pub struct Options {
     /// to `cache/brain_logs/` (`--brain-log`); see `docs/BRAIN.md`.
     pub brain: Box<dyn sekiro_sim::brain::BossBrain>,
     pub brain_log: bool,
+    /// The boss brain's memory file across fights and sessions (`--brain-memory`; by default
+    /// `logs/memory/<chr>.json` for hosted brains, none for the others).
+    pub brain_memory: Option<PathBuf>,
     /// Play on this exported map (`cache/maps/<id>`) instead of the flat floor.
     pub map: Option<String>,
     /// Player start point on the map.
@@ -159,6 +162,8 @@ struct Sim {
     clock: [f32; 2],
     /// Whether each actor is drawn hidden: faded out by its clip's TAE 193 (the Owl's warps).
     faded: [bool; 2],
+    /// Seconds since a perilous-attack warning last reached Wolf, for the kanji.
+    perilous_age: Option<f32>,
 }
 
 /// Live input gathered every rendered frame, consumed by the fixed steps.
@@ -173,6 +178,8 @@ struct Orbit {
     yaw: f32,
     pitch: f32,
     distance: f32,
+    /// The deathblow camera's look limits as they chase TAE 151.
+    look: sekiro_sim::camera::LookLimits,
 }
 
 #[derive(Resource)]
@@ -206,6 +213,9 @@ pub fn run(options: Options) -> Result<()> {
             log.map(|p| format!(", log {}", p.display()))
                 .unwrap_or_default()
         );
+        if let (Some(path), Some(driver)) = (options.brain_memory, duel.boss_brain.as_mut()) {
+            driver.use_memory(path);
+        }
     }
     let mut on_map = None;
     let mut start_yaw = 0.0;
@@ -359,6 +369,7 @@ pub fn run(options: Options) -> Result<()> {
         yaw: start_yaw,
         pitch: 0.25,
         distance: duel.camera.cam_dist,
+        look: Default::default(),
     })
     .insert_resource(Captures {
         pending: options.screenshots,
@@ -377,6 +388,7 @@ pub fn run(options: Options) -> Result<()> {
         previous: [([0.0; 3], 0.0); 2],
         clock: [0.0; 2],
         faded: [false; 2],
+        perilous_age: None,
     })
     .init_resource::<combat_hud::Gauges>()
     .init_resource::<crate::bullet_fx::BulletFx>()
@@ -403,6 +415,7 @@ pub fn run(options: Options) -> Result<()> {
             hud,
             combat_hud::update,
             combat_hud::update_status,
+            combat_hud::update_perilous,
             capture,
             log_camera,
         )
@@ -673,9 +686,17 @@ fn orbit_camera(
     sim: NonSend<Sim>,
     mut orbit: ResMut<Orbit>,
 ) {
-    // Locked on, the camera swings behind Wolf toward the target.
-    let params = &sim.duel.camera;
+    // Locked on, the camera swings behind Wolf toward the target. The rates are the camera
+    // slot's (TAE 155: CameraParam 4000 in deathblows).
+    let director = &sim.duel.camera_director;
+    let params = &sekiro_sim::camera::CameraParams {
+        // The lock-on pitch frames the target from where the camera is (TAE 153 brings it close
+        // in deathblows), as FwLo's port of the exe's formula does.
+        cam_dist: director.distance,
+        ..director.params()
+    };
     let dt = time.delta_secs();
+    clamp_to_look_at(&sim, &mut orbit, dt);
     if let Some(t) = sim.duel.player.lock_target {
         let target = Vec3::from_array(t) + Vec3::Y * params.chr_org_offset_y;
         let want = sekiro_sim::camera::lock_target_yaw(orbit.focus, target);
@@ -817,6 +838,16 @@ fn simulate(
             report.enemy.animation.as_deref().unwrap_or("-"),
         );
     }
+    sim.perilous_age = match (&report.perilous, sim.perilous_age) {
+        (Some(w), _) => {
+            info!("perilous warning: judge {} {:?}", w.judge, w.kind);
+            Some(0.0)
+        }
+        (None, age) => age.map(|a| a + dt),
+    };
+    if report.jump_counter {
+        info!("jump counter: the kick landed on a perilous sweep");
+    }
     sim.last = report;
     sim.step += 1;
 }
@@ -940,6 +971,33 @@ fn sync_bullets(
     );
 }
 
+/// TAE 151 (deathblows): the camera's pitch and yaw stay within the event's limits around the
+/// direction from Wolf to his camera dummy ([`sekiro_sim::camera::CameraDirector::clamp_look`]).
+fn clamp_to_look_at(sim: &Sim, orbit: &mut Orbit, dt: f32) {
+    let director = &sim.duel.camera_director;
+    let Some(look) = director.look_at else {
+        orbit.look = Default::default();
+        return;
+    };
+    let Some(dummy) = i16::try_from(look.dummy)
+        .ok()
+        .and_then(|d| sim.duel.dummy_position(WOLF, d))
+    else {
+        return;
+    };
+    // From Wolf's body centre, as FwLo's RustSekiro measures it (his capsule centre, 0.9 m above
+    // the feet); from the feet the dummy (about 1.1 m up and 0.4 m ahead in the Owl's deathblow)
+    // would centre the limits far below and turn the camera up from under the pair.
+    let centre = Vec3::from_array(sim.duel.player.body.position) + Vec3::Y * 0.9;
+    let dir = Vec3::from_array(dummy) - centre;
+    let rate = director.params().lock_cam_param_lerp_rate;
+    let (yaw, pitch) = orbit
+        .look
+        .clamp(Some(look), rate, orbit.yaw, orbit.pitch, dir, dt);
+    orbit.yaw = yaw;
+    orbit.pitch = pitch;
+}
+
 fn follow_camera(
     sim: NonSend<Sim>,
     time: Res<Time>,
@@ -952,10 +1010,26 @@ fn follow_camera(
         return;
     };
     let wolf = shown(&sim, WOLF, fixed.overstep_fraction()).0;
-    let params = &sim.duel.camera;
-    let wanted = wolf + Vec3::Y * params.chr_org_offset_y;
-    let xz = sekiro_sim::camera::chase(params.chr_trans_chase_rate_xz, time.delta_secs());
-    let y = sekiro_sim::camera::chase(params.chr_trans_chase_rate_y, time.delta_secs());
+    let director = &sim.duel.camera_director;
+    let params = director.params();
+    let mut wanted = wolf + Vec3::Y * director.focus_height;
+    let mut xz = sekiro_sim::camera::chase(params.chr_trans_chase_rate_xz, time.delta_secs());
+    let mut y = sekiro_sim::camera::chase(params.chr_trans_chase_rate_y, time.delta_secs());
+    // TAE 151 (Wolf's deathblow clips): the focus chases his camera dummy, at the event's rate
+    // on every axis when it gives one (FwLo's trace, `docs/kb/camera.md`).
+    if let Some(look) = director.look_at
+        && let Some(dummy) = i16::try_from(look.dummy)
+            .ok()
+            .and_then(|d| sim.duel.dummy_position(WOLF, d))
+    {
+        wanted = Vec3::from_array(dummy);
+        if look.rate > 0.0 {
+            xz = sekiro_sim::camera::chase(look.rate.min(1.0), time.delta_secs());
+            y = xz;
+        }
+    }
+    // TAE 153: the distance the animation asks for.
+    orbit.distance = director.distance;
     orbit.focus.x += (wanted.x - orbit.focus.x) * xz;
     orbit.focus.z += (wanted.z - orbit.focus.z) * xz;
     orbit.focus.y += (wanted.y - orbit.focus.y) * y;
@@ -1013,6 +1087,13 @@ fn hud(
         enemy_marks: sekiro_sim::deathblow::deathblow_marks(f[1].vitality.deathblows_left),
         poison: f[0].status.poison.fraction(),
         status: status_line(&f[0].status, &sim.last.player.behavior.state_path),
+        // Lifted from the chest dummy to above Wolf's head (ours; the effect's own offset is in
+        // its undecoded FXR).
+        perilous_at: sim
+            .duel
+            .dummy_position(WOLF, sekiro_sim::perilous::KANJI_DUMMY)
+            .map(|p| Vec3::from_array(p) + Vec3::Y * 0.6),
+        perilous_age: sim.perilous_age,
     };
     let Ok(mut text) = text.single_mut() else {
         return;

@@ -6,7 +6,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use sekiro_brain_net::{ApiKey, Backend, ConfigError, Failure, HostedBrain, HostedConfig};
-use sekiro_sim::brain::{BossBrain, BrainReply, BrainRequest, OWL, Observation, TallySummary};
+use sekiro_sim::brain::{
+    BossBrain, BrainReply, BrainRequest, Memory, OWL, Observation, SOLDIER, TallySummary,
+};
 use serde_json::{Value, json};
 
 const KEY: &str = "test-key-not-real";
@@ -172,6 +174,7 @@ fn request(id: u64) -> BrainRequest {
         id,
         obs: Observation::default(),
         tally: TallySummary::default(),
+        memory: None,
     }
 }
 
@@ -187,7 +190,7 @@ fn poll(brain: &mut HostedBrain) -> BrainReply {
 }
 
 fn decisions(value: &str, input: u64, output: u64) -> Value {
-    json!({"model": "gpt-6-luna", "answers": [{"name": "owl_action", "type": "choice",
+    json!({"model": "gpt-6-luna", "answers": [{"name": "boss_action", "type": "choice",
         "choice": value, "confidence": 1.0, "probabilities": [{"value": value, "probability": 1.0}]}],
         "usage": {"input_tokens": input, "output_tokens": output}})
 }
@@ -265,7 +268,7 @@ fn decisions_happy_path_lua_usage_log_and_keep_alive() {
         assert_eq!(questions.len(), 1);
         let q = &questions[0];
         assert_eq!(q["type"], "choice");
-        assert_eq!(q["name"], "owl_action");
+        assert_eq!(q["name"], "boss_action");
         assert!(q["instructions"].as_str().unwrap().contains("Reflexes"));
         let choices = q["choices"].as_array().unwrap();
         check_vocabulary(
@@ -329,7 +332,7 @@ fn responses_happy_path_combo_and_exact_schema() {
     );
     let format = &body["text"]["format"];
     assert_eq!(format["type"], "json_schema");
-    assert_eq!(format["name"], "owl_action");
+    assert_eq!(format["name"], "boss_action");
     assert_eq!(format["strict"], true);
     assert_eq!(format["schema"]["type"], "object");
     assert_eq!(format["schema"]["properties"]["action"]["type"], "string");
@@ -355,7 +358,7 @@ fn failures_fall_back_with_specific_reasons_and_never_echo_secrets() {
         (
             Backend::Decisions,
             Response::json(
-                json!({"answers": [{"type": "refusal", "name": "owl_action"}], "usage":{"input_tokens":7}}),
+                json!({"answers": [{"type": "refusal", "name": "boss_action"}], "usage":{"input_tokens":7}}),
             ),
             Failure::Refusal,
         ),
@@ -560,9 +563,48 @@ fn configuration_errors_and_debug_are_redacted() {
 
 #[test]
 fn existing_cli_controllers_still_build_without_credentials() {
-    for name in ["lua", "scripted"] {
-        let brain = sekiro_brain_net::from_cli(name, None).unwrap();
-        assert_eq!(brain.name(), name);
+    for chr in ["c5060", "c1010"] {
+        for name in ["lua", "scripted"] {
+            let brain = sekiro_brain_net::from_cli(name, None, chr).unwrap();
+            assert_eq!(brain.name(), name);
+        }
+        assert!(sekiro_brain_net::from_cli("unknown", None, chr).is_err());
     }
-    assert!(sekiro_brain_net::from_cli("unknown", None).is_err());
+    assert!(sekiro_brain_net::is_hosted("Decisions") && sekiro_brain_net::is_hosted("responses"));
+    assert!(!sekiro_brain_net::is_hosted("scripted"));
+}
+
+#[test]
+fn the_soldier_plays_his_own_combos_and_sends_his_memory() {
+    let mut mock = Mock::new(
+        Backend::Decisions,
+        vec![Response::json(decisions("3005+3007", 9, 1))],
+    );
+    let config = mock.config(Backend::Decisions);
+    let mut brain = HostedBrain::new(config, &SOLDIER).unwrap();
+    let mut memory = Memory::new("c1010");
+    memory.fights = 3;
+    memory.boss_wins = 2;
+    let mut req = request(7);
+    req.memory = Some(memory.summary());
+    brain.submit(&req);
+    let reply = poll(&mut brain);
+    assert_eq!(reply.id, 7);
+    assert_eq!(reply.plan.unwrap().actions, [3005, 3007]);
+    let body = mock.requests.recv().unwrap();
+    let input = body["input"].as_str().unwrap();
+    assert!(
+        input.contains("\"memory\":{\"fights\":3,\"boss_wins\":2,\"wolf_wins\":0"),
+        "{input}"
+    );
+    let q = &body["questions"][0];
+    assert_eq!(q["name"], "boss_action");
+    assert!(
+        q["instructions"]
+            .as_str()
+            .unwrap()
+            .starts_with("You are an Ashina soldier")
+    );
+    drop(brain);
+    mock.finish();
 }

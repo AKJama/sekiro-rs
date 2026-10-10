@@ -3,7 +3,8 @@
 //! Posture bars grow from the centre outward as posture damage builds, from yellow toward red,
 //! and turn solid red when broken. A red mark shows when a deathblow is available. Above Wolf's
 //! vitality, a purple bar shows poison build-up and a line names the status effects on him
-//! (poisoned, recovery sealed, ...) with the seconds left.
+//! (poisoned, recovery sealed, ...) with the seconds left. A red 危 marks a perilous attack's
+//! warning on Wolf (see [`update_perilous`]).
 
 use bevy::prelude::*;
 
@@ -28,6 +29,11 @@ pub struct Gauges {
     pub poison: f32,
     /// Wolf's status effects, one line (empty for none).
     pub status: String,
+    /// Where the perilous-attack kanji is drawn: Wolf's dummy poly 220 (`Spine2`, where
+    /// SpEffectVfxParam 48100 plays the game's kanji effect), lifted to above his head.
+    pub perilous_at: Option<Vec3>,
+    /// Seconds since a perilous warning last reached Wolf; `None` before the first.
+    pub perilous_age: Option<f32>,
 }
 
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
@@ -276,3 +282,82 @@ pub fn update_status(
         };
     }
 }
+
+/// The perilous-attack kanji.
+#[derive(Component)]
+pub struct PerilousMark;
+
+/// How long the kanji shows, seconds: pops in, holds, fades. The game's effect (FXR 600035) is
+/// not decoded; 0.8 s is FwLo's RustSekiro value (`src/hud.rs`), and close to what the game
+/// shows.
+const PERILOUS_SHOW: f32 = 0.8;
+
+/// Windows fonts that have the kanji, tried in order; without one the mark falls back to "!!".
+const KANJI_FONTS: [&str; 3] = ["YuGothB.ttc", "msgothic.ttc", "meiryo.ttc"];
+
+/// Shows the red 危 over Wolf when a perilous warning reaches him (`docs/COMBAT-RULES.md`,
+/// "Perilous attacks"). A stand-in for the game's effect: its texture lives in the install's
+/// effect archive and its FXR is not decoded, so a Japanese system font draws the glyph (FwLo's
+/// RustSekiro does the same, `src/hud.rs`). Spawns the mark on its first run.
+pub fn update_perilous(
+    mut commands: Commands,
+    mut fonts: ResMut<Assets<Font>>,
+    gauges: Res<Gauges>,
+    camera: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    mut mark: Query<
+        (&mut Node, &mut TextColor, &mut TextShadow, &mut Visibility),
+        With<PerilousMark>,
+    >,
+) {
+    let Ok((mut node, mut color, mut shadow, mut vis)) = mark.single_mut() else {
+        let font = KANJI_FONTS
+            .iter()
+            .find_map(|f| std::fs::read(std::path::Path::new("C:/Windows/Fonts").join(f)).ok());
+        let glyph = if font.is_some() { "危" } else { "!!" };
+        let font = font
+            .map(|bytes| bevy::text::FontSource::Handle(fonts.add(Font::from_bytes(bytes))))
+            .unwrap_or_default();
+        commands.spawn((
+            PerilousMark,
+            Text::new(glyph),
+            TextFont {
+                font,
+                font_size: bevy::text::FontSize::Px(PERILOUS_SIZE),
+                ..default()
+            },
+            TextColor(Color::NONE),
+            TextShadow {
+                offset: Vec2::splat(2.0),
+                color: Color::srgba(0.1, 0.0, 0.0, 0.0),
+            },
+            Node {
+                position_type: PositionType::Absolute,
+                ..default()
+            },
+            Visibility::Hidden,
+        ));
+        return;
+    };
+    let shown = gauges.perilous_age.filter(|&a| a < PERILOUS_SHOW);
+    let screen = shown.zip(gauges.perilous_at).and_then(|(_, at)| {
+        let (cam, tf) = camera.single().ok()?;
+        cam.world_to_viewport(tf, at).ok()
+    });
+    match (shown, screen) {
+        (Some(age), Some(p)) => {
+            // Pops in over the first tenth of a second, holds, fades over the last third.
+            let pop = (age / 0.1).min(1.0);
+            let fade = ((PERILOUS_SHOW - age) / (PERILOUS_SHOW / 3.0)).min(1.0);
+            let a = pop.min(fade);
+            color.0 = Color::srgba(0.92, 0.05, 0.04, a);
+            shadow.color = Color::srgba(0.1, 0.0, 0.0, 0.8 * a);
+            node.left = px(p.x - PERILOUS_SIZE * 0.5);
+            node.top = px(p.y - PERILOUS_SIZE * 0.5);
+            *vis = Visibility::Inherited;
+        }
+        _ => *vis = Visibility::Hidden,
+    }
+}
+
+/// The kanji's size on screen, pixels.
+const PERILOUS_SIZE: f32 = 96.0;

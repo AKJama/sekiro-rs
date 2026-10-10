@@ -121,6 +121,29 @@ pub enum TaeKind {
     /// active. The scripts wait for it with `IfCharacterHasEventMessage` (EMEVD 4[8]); the Owl's
     /// first deathblow get-up raises 20, which starts his phase 2 (`docs/OWL.md`).
     EzStateRequest(i32),
+    /// `CameraLookAtTarget` (151): while active the camera focus chases dummy poly `dummy` of
+    /// the character, at `rate` per 1/30 s (the normal chase rates when 0), and the camera's
+    /// pitch and yaw stay within `limits` degrees (up, down, left, right) around the direction
+    /// to the dummy. Field meanings traced by FwLo's RustSekiro (`docs/kb/camera.md`, exe
+    /// `FUN_140b517a0`, `FUN_140742230`); the rate is the template's `Unk04`.
+    CameraLookAt {
+        dummy: i32,
+        rate: f32,
+        limits: [f32; 4],
+    },
+    /// `CameraModule3` (153): the camera distance chases `distance` (metres) while active,
+    /// at `start_speed` per 1/30 s (the param rate when 0); `end_speed`, when above 0, is the rate
+    /// back to the normal distance afterwards; `slow_start` eases from the distance at the
+    /// event's first frame instead (FwLo's trace, `docs/kb/camera.md`).
+    CameraDistance {
+        distance: f32,
+        start_speed: f32,
+        end_speed: f32,
+        slow_start: bool,
+    },
+    /// `SetLockParamID` (155): the camera uses CameraSetParam slot `n` (1 is the default) while
+    /// active: its LockCamParam and CameraParam rows, blended in over the slot's `beginTime`.
+    CameraSlot(i32),
 }
 
 /// The sound event name for a TAE sound type and id: the type letter followed by the id padded
@@ -235,6 +258,9 @@ pub struct SpEffectInfo {
     /// Seconds the effect lasts after it is applied; 0 means only while the TAE event is active.
     pub duration: f32,
     pub state_info: i32,
+    /// `vfxId`: the SpEffectVfxParam row it shows while active (48100 is the perilous-attack
+    /// kanji 危, [`crate::perilous::KANJI_VFX`]); 0 or -1 for none.
+    pub vfx: i32,
 }
 
 /// A velocity change for jumps (`ChrPhysicsVelocityChangeParam`).
@@ -294,6 +320,7 @@ impl TaeDb {
                         behavior_ref: row.i32("behaviorRefId").unwrap_or(0),
                         duration: row.f32("effectEndurance").unwrap_or(0.0),
                         state_info: row.int("stateInfo").unwrap_or(0) as i32,
+                        vfx: row.i32("vfxId").unwrap_or(0),
                     },
                 );
             }
@@ -429,6 +456,29 @@ fn decode(template: &Template, e: &tae::TaeEvent) -> Option<TimedEvent> {
             }
         }
         231 => TaeKind::EzStateRequest(int("EzStateRequestID")?),
+        151 => {
+            let f = |name: &str| d.field(name).and_then(|v| v.as_f32()).unwrap_or(0.0);
+            TaeKind::CameraLookAt {
+                dummy: int("DummyPolyID")?,
+                rate: f("Unk04"),
+                limits: [
+                    f("LookUpLimit"),
+                    f("LookDownLimit"),
+                    f("LookLeftLimit"),
+                    f("LookRightLimit"),
+                ],
+            }
+        }
+        153 => {
+            let f = |name: &str| d.field(name).and_then(|v| v.as_f32()).unwrap_or(0.0);
+            TaeKind::CameraDistance {
+                distance: d.field("CamDistTargetOverride")?.as_f32()?,
+                start_speed: f("StartInterpolationSpeed"),
+                end_speed: f("EndInterpolationSpeed"),
+                slow_start: int("SlowStart").unwrap_or(0) != 0,
+            }
+        }
+        155 => TaeKind::CameraSlot(int("LockParamID")?),
         _ => return None,
     };
     Some(TimedEvent {
@@ -588,6 +638,10 @@ impl TaeRuntime {
                     TaeKind::Blend
                     | TaeKind::CommonBehavior { .. }
                     | TaeKind::ThrowAttack { .. } => {}
+                    // Read by the camera director (`camera::CameraDirector`) from the clip.
+                    TaeKind::CameraLookAt { .. }
+                    | TaeKind::CameraDistance { .. }
+                    | TaeKind::CameraSlot(_) => {}
                     TaeKind::Guard { judge } => {
                         f.flags.insert(3);
                         f.guard_judge.get_or_insert(*judge);

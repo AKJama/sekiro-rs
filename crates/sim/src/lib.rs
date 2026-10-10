@@ -28,6 +28,7 @@ pub mod hits;
 pub mod homing;
 pub mod input;
 pub mod lua_ai;
+pub mod perilous;
 pub mod player;
 pub mod scenario;
 pub mod sound;

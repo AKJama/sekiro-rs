@@ -1,9 +1,10 @@
 //! `duel-sim [--script FILE] [--steps N] [--passive] [--enemy c1010|c5060] [--simple-ai]
-//! [--brain lua|scripted] [--brain-log]`: Wolf (input script, default: guard on and off) against
-//! an enemy (default the Ashina soldier) and its own AI. Prints state changes, AI actions,
-//! unknown AI calls and every hit; `--goals` adds goal starts and interrupts. `--brain` picks
-//! who chooses a boss's acts (`docs/BRAIN.md`); `--brain-log` writes its JSONL log to
-//! `cache/brain_logs/`.
+//! [--brain lua|scripted] [--brain-log] [--brain-memory off|on|PATH]`: Wolf (input script,
+//! default: guard on and off) against an enemy (default the Ashina soldier) and its own AI.
+//! Prints state changes, AI actions, unknown AI calls and every hit; `--goals` adds goal starts
+//! and interrupts. `--brain` picks who chooses a boss's acts (`docs/BRAIN.md`); `--brain-log`
+//! writes its JSONL log to `cache/brain_logs/`; `--brain-memory` keeps the memory of every
+//! fight (`docs/BRAIN.md`).
 
 use sekiro_sim::brain::BrainKind;
 use sekiro_sim::duel::Duel;
@@ -35,6 +36,7 @@ fn main() {
     let mut goals = false;
     let mut brain = None;
     let mut brain_log = false;
+    let mut brain_memory = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -45,6 +47,7 @@ fn main() {
             "--goals" => goals = true,
             "--brain" => brain = Some(BrainKind::by_name(&args.next().unwrap()).unwrap()),
             "--brain-log" => brain_log = true,
+            "--brain-memory" => brain_memory = args.next(),
             "--enemy" => spec = EnemySpec::by_name(&args.next().unwrap()).unwrap(),
             other => panic!("unknown argument {other}"),
         }
@@ -57,10 +60,17 @@ fn main() {
     }
     if brain.is_some() || brain_log {
         let kind = brain.unwrap_or_default();
-        match duel.set_brain(kind.build(), brain_log) {
+        let chr = duel.spec.chr.clone();
+        match duel.set_brain(kind.build(&chr), brain_log) {
             Ok(Some(path)) => println!("brain {kind:?}, log {}", path.display()),
             Ok(None) => println!("brain {kind:?}"),
             Err(e) => panic!("--brain: {e}"),
+        }
+        if let (Some(path), Some(d)) = (
+            sekiro_sim::brain::memory::resolve(brain_memory.as_deref(), &chr, false),
+            duel.boss_brain.as_mut(),
+        ) {
+            d.use_memory(path);
         }
     }
     let mut planned = 0;

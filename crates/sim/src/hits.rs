@@ -31,6 +31,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
+/// The "bone" of a dummy with no attach bone: the character's own frame.
+const ROOT: usize = usize::MAX;
+
 /// Dummy polys of a character (and its held weapon) relative to animated skeleton bones.
 #[derive(Debug, Clone, Default)]
 pub struct DummyRig {
@@ -94,6 +97,12 @@ impl DummyRig {
         let mut rig = DummyRig::default();
         for d in &model.dummies {
             let Some(attach) = usize::try_from(d.attach_bone).ok() else {
+                // No attach bone: fixed in the character's frame (Wolf's throw dummies and the
+                // air kick's 612 to 614 hang off a root-level helper node).
+                rig.dummies
+                    .entry(d.reference_id)
+                    .or_default()
+                    .push((ROOT, parent_world(&world, d) * dummy_matrix(d, false)));
                 continue;
             };
             let Some(node) = model.nodes.get(attach) else {
@@ -159,9 +168,12 @@ impl DummyRig {
             .into_iter()
             .flatten()
             .filter_map(|(b, off)| {
-                model
-                    .get(*b)
-                    .map(|m| to_world.transform_point3((*m * *off).w_axis.truncate()))
+                let m = if *b == ROOT {
+                    Some(Mat4::IDENTITY)
+                } else {
+                    model.get(*b).copied()
+                };
+                m.map(|m| to_world.transform_point3((m * *off).w_axis.truncate()))
             })
             .collect()
     }
@@ -211,9 +223,50 @@ pub struct AttackData {
     /// AtkParam `spEffectId0..4` (positive ids): SpEffects a landed hit leaves on the defender
     /// (the Owl's front kick puts 3506000 on Wolf, which his AI observes).
     pub sp_effects: Vec<i32>,
+    /// AtkParam `atkType`, the hit's sound and effect family: 0 slash, 1 blow, 2 thrust.
+    pub atk_type: u8,
+}
+
+/// What kind of perilous attack (the red kanji) an AtkParam row is, from its guard flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Perilous {
+    /// A grab (`throwFlag` 1): step or jump out of reach.
+    Grab,
+    /// Cannot be blocked or deflected by the katana (guard type 0) and is not a grab: a low
+    /// sweep, to be jumped (TAE 954 i-frame type 1, "Sweeps", covers it).
+    Sweep,
+    /// Cannot be blocked by the katana but can be deflected: a thrust (Mikiri counter).
+    Thrust,
 }
 
 impl AttackData {
+    /// The perilous kind of this attack, if it is one: a grab, or an attack Wolf's katana cannot
+    /// block (AtkParam `disableGuard_vsGuardAttribute0`). Rows that deal nothing (the Mikiri
+    /// "dummy" hitboxes) are not perilous attacks themselves. The split into sweeps and thrusts
+    /// by the deflect flag is ours: in the data every perilous sweep (soldier 240, Owl 120 and
+    /// 300) is undeflectable and every perilous thrust (soldier 230, Owl 310) deflectable.
+    pub fn perilous(&self) -> Option<Perilous> {
+        if self.throw_flag == 1 {
+            return Some(Perilous::Grab);
+        }
+        let p = self.profile.as_ref()?;
+        let deals = self.atk_phys > 0 || p.attack_power.iter().any(|v| *v > 0.0);
+        if !deals || self.throw_flag != 0 || !p.disable_guard[0] {
+            return None;
+        }
+        Some(if p.disable_just_guard[0] {
+            Perilous::Sweep
+        } else {
+            Perilous::Thrust
+        })
+    }
+
+    /// Whether TAE 954 i-frame type 1 ("Sweeps", on Wolf's jumps, air kicks and the first
+    /// 0.27 s of his steps) lets this attack pass.
+    pub fn is_sweep(&self) -> bool {
+        self.perilous() == Some(Perilous::Sweep)
+    }
+
     pub(crate) fn from_rows(row: &Row, behavior: &Row) -> Self {
         let mut me = Self::from_row(row);
         me.category = behavior.int("category").unwrap_or(0) as u8;
@@ -257,6 +310,7 @@ impl AttackData {
                 .map(|k| int(&format!("spEffectId{k}")))
                 .filter(|&id| id > 0)
                 .collect(),
+            atk_type: int("atkType") as u8,
         }
     }
 }
@@ -283,6 +337,10 @@ pub struct Combatant {
     pub height: f32,
     /// Attacks by behaviour judge id.
     pub attacks: HashMap<i32, AttackData>,
+    /// The player's `PCBehavior` (TAE 307) attacks by judge id: BehaviorParam_PC rows below 1000,
+    /// which do not depend on the weapon (the air kick, judge 901, is AtkParam_Pc 901 "kick in
+    /// the air"). Empty for NPCs.
+    pub pc_attacks: HashMap<i32, AttackData>,
     /// The row the combat rules read: EquipParamWeapon of the player's right-hand weapon, or
     /// the NPC's NpcParam.
     pub param_id: i32,
@@ -335,6 +393,16 @@ impl Combatant {
             100_000_000,
             base,
         );
+        // Only the rows that deal damage or posture: the kicks (900, 901, 903). The others are
+        // contact impacts (200 to 222, on every jump and landing: no damage, damage levels 5 and
+        // 8), effect probes for the hands and feet (280 to 286) and the deathblow starts (600 on,
+        // handled by the deathblow rules); leaving them out is ours.
+        c.pc_attacks = load_attacks(&pd, &dd, "BehaviorParam_PC", "AtkParam_Pc", 0, 0)
+            .into_iter()
+            .filter(|(_, a)| {
+                a.atk_phys > 0 || a.profile.as_ref().is_some_and(|p| p.direct_stam > 0)
+            })
+            .collect();
         if base != c.variation {
             c.attacks.extend(load_attacks(
                 &pd,
@@ -530,11 +598,18 @@ pub fn segment_distance(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) -> f32 {
 /// passes through an invulnerable character is not spent: the window can still hit it once the
 /// invulnerability ends, as FwLo's notes say for dodges.
 ///
-/// The typed i-frames of TAE 954 (`IFrameType` general, thrust, grab, sweep) are not applied yet:
-/// which attacks each type ignores is not traced.
+/// Of the typed i-frames of TAE 954, only grab (7, [`can_be_grabbed`]) and sweep (1,
+/// [`IFRAME_SWEEP`]) are applied; general (2) and thrust (6) are not yet: which attacks each
+/// type ignores is not traced.
 pub fn can_be_hit(frame: &TaeFrame) -> bool {
     !frame.invulnerable
 }
+
+/// TAE 954 `IFrameType` 1 ("Sweeps" in the DSAnimStudio template): on Wolf's jumps for most of
+/// their air time, his air kicks, and the first 0.27 s of his steps. A sweep
+/// ([`AttackData::is_sweep`]) passes through it unspent, as FwLo's RustSekiro does for the attacks
+/// that raise a sweep warning (`docs/kb/guard-deflect.md`).
+pub const IFRAME_SWEEP: i32 = 1;
 
 /// TAE 954 `IFrameType` 7: Wolf's steps carry it (with type 2, general) for their first 0.27 s;
 /// FwLo's RustSekiro lists it as the grab type (`docs/kb/guard-deflect.md`).
@@ -567,7 +642,7 @@ impl HitDetector {
                 .tae_frame()
                 .attacks
                 .iter()
-                .filter(|e| matches!(e.kind, TaeKind::Attack { .. }))
+                .filter(|e| matches!(e.kind, TaeKind::Attack { .. } | TaeKind::PcBehavior { .. }))
                 .cloned()
                 .collect();
             if windows.is_empty() {
@@ -576,10 +651,12 @@ impl HitDetector {
             let model = attacker.bone_source_matrices();
             let to_world = attacker.source_to_world();
             for w in windows {
-                let TaeKind::Attack { judge, .. } = w.kind else {
-                    continue;
+                let (judge, table) = match w.kind {
+                    TaeKind::Attack { judge, .. } => (judge, &fighters[ai].attacks),
+                    TaeKind::PcBehavior { judge } => (judge, &fighters[ai].pc_attacks),
+                    _ => continue,
                 };
-                let Some(attack) = fighters[ai].attacks.get(&judge) else {
+                let Some(attack) = table.get(&judge) else {
                     continue;
                 };
                 let window_key = (ai, judge, w.start.to_bits());
@@ -604,6 +681,8 @@ impl HitDetector {
                             can_be_grabbed(defender.tae_frame(), defender.body.grounded)
                         } else {
                             can_be_hit(defender.tae_frame())
+                                && !(attack.is_sweep()
+                                    && defender.tae_frame().iframes.contains(&IFRAME_SWEEP))
                         };
                         if di == ai
                             || !reachable

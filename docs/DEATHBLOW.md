@@ -142,6 +142,29 @@ The pattern is FwLo's (RustSekiro `docs/kb/guard-deflect.md`, the Ashina General
 - A lethal throw keeps Wolf's script at 1 HP until his clip's `ChrActionFlag` 69, then fires `W_ThrowDefDeathStart<defAnimId>` (death clip `defAnimId + 1`), the same structure as the enemy's deathblow death branch; otherwise he gets up in the clip and the throw ends when he leaves it.
 - `--force-act <id>` (`Duel::force_act`) makes the enemy request an act whenever it is free, to test grabs on demand.
 
+## Camera
+
+Wolf's deathblow clips drive the camera through three TAE events; there is no separate camera animation file.
+The rules are FwLo's trace of the exe's camera update (RustSekiro `docs/kb/camera.md`, `src/camera.rs`); sekiro-rs adapts his code in `crates/sim/src/camera.rs` (`CameraDirector`, `LookLimits`) and applies it in `crates/game/src/play.rs` (`orbit_camera`, `follow_camera`, `clamp_to_look_at`).
+
+- TAE 155 `SetLockParamID` picks a CameraSetParam row 0 slot while it runs, then falls back to slot 1.
+  Slot 41 (all of Wolf's deathblow clips) is LockCamParam 0 with CameraParam 4000, whose only differences from row 0 are slower lock chases (`lockRotChaseRateX/Y` 0.4 / 0.2, `targetChaseRateAtLock*` 0.2 / 0.15).
+  It blends in over the slot's `beginTime` (0) and back out over its `endTime` (1.0 s).
+- TAE 153 `CameraModule3` overrides the camera distance: chased at `StartInterpolationSpeed` (the param's `lockCamParamLerpRate` 0.05 when 0), or eased from the first frame's distance with `SlowStart`; `EndInterpolationSpeed` is the rate back to the normal 4.5 m afterwards.
+  The used distance follows that target at 0.1 per 1/30 s.
+  `a200_510000` (soldier, far): 4.0, 3.0, then 1.5 m from 0.867 to 1.567 s, then back to 4.0 with `SlowStart`.
+  `a221_510000` (Owl): 2.0, 3.5, 2.0, 2.5 m over 0 to 2.5 s.
+- TAE 151 `CameraLookAtTarget` makes the focus chase one of Wolf's dummy polys, at the event's rate (the template's `Unk04`) on every axis, and keeps the camera's pitch and yaw within `LookUp/Down/Left/RightLimit` around the direction to it.
+  Dummy 142 hangs off `z_dummy_camera_P`, an animated camera bone in Wolf's skeleton, so the clip's own animation moves the camera's target: in the Owl's deathblow it sits 1.1 to 1.4 m up and 0.2 to 1.5 m in front of Wolf.
+  `a221_510000` has it from 0 to 2.5 s (limits 0 up, 50 down, yaw free), `a200_512500` (soldier, near) from 0 to 1.3 s; `a200_510000` has none.
+- The lock-on pitch frames the target from the current (overridden) distance.
+- Afterwards slot 1, the 4.5 m distance and the normal focus come back on their own chase rates, so the hand-back is smooth (about 1 s for the slot, 2 s for the distance).
+
+Inferred or approximate: the look limits are centred on the direction from Wolf's body centre (0.9 m above his feet, FwLo's capsule centre) to the dummy; the exe builds the centre from the dummy's own basis (a gap FwLo notes).
+From the feet the Owl's deathblow turned the camera up from under the pair.
+Camera shake (TAE 144 to 147 `RumbleCam`, also in these clips) is not done yet.
+`--arena --deathblow` (the old arena demo) keeps its own fixed camera.
+
 ## Gaps
 
 - The engine's own throw search (which candidates it considers each frame, priorities between rows) is not reproduced; `select` tries a fixed order.
@@ -149,10 +172,12 @@ The pattern is FwLo's (RustSekiro `docs/kb/guard-deflect.md`, the Ashina General
 - Stealth, plunge, ledge and wall rows are selected by `select` only for the stealth case; their extra conditions (crouching, falling, wall dummies) are not modelled.
 - The arena demo (`--arena --deathblow`) still passes "one mark left"; the duel tracks marks through the combat rules.
 - The soldier's death clip ends in a ragdoll in the game (`RagdollReviveTime` from 3.67 s); here it just plays out.
-- Sound, blood decals (`DecalParamID_DummyPoly`) and the deathblow camera are ignored.
+- Sound, blood decals (`DecalParamID_DummyPoly`) and camera shake are ignored.
 - The models are not kept apart: near the railing the Owl's arm can rest on or through the top rail while both capsules stay clear of it (`cache/screens/deathblow_owlrail_*.png`).
 
 ## Tests
+
+`crates/sim/tests/deathblow_camera.rs`: the soldier's deathblow takes slot 41 and closes in to under 2 m, then returns to slot 1 and 4.5 m; the Owl's looks at dummy 142 for 0 to 2.5 s, and in the duel the dummy resolves on the moving camera bone; the look limits clamp pitch and leave yaw free.
 
 `crates/sim/tests/owl_grab.rs` (enemy throws on Wolf): the Owl's forced grabs catch a passive, guarding or deflecting Wolf with the data's rows, clips and damage, miss a stepping or jumping Wolf, kill into the death clip, and do not clip at the castle-top railing.
 

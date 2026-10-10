@@ -3,9 +3,11 @@
 //! (deflecting, guarding, reactions, getting up) stay with the Lua goal runtime.
 //!
 //! - [`Observation`] is what a controller sees: only what the player can see, mirrored.
-//! - [`Tally`] is the fight's outcome memory, kept here because hosted models remember nothing.
-//! - A [`Plan`] is 1 to 3 of the boss's own action ids ([`actions::OWL`]); it runs through his
-//!   battle goal exactly like one of his acts (`lua_ai::ActHook`).
+//! - [`Tally`] is this fight's outcome memory, and [`Memory`] the memory of every fight with
+//!   Wolf's habits, kept here (and on disk) because hosted models remember nothing.
+//! - A [`Plan`] is 1 to 3 of the boss's own action ids (his [`BossActions`] table, such as
+//!   [`actions::OWL`] or [`actions::SOLDIER`]); it runs through his battle goal exactly like
+//!   one of his acts (`lua_ai::ActHook`).
 //! - [`BossBrain`] is the controller, with a non-blocking submit / poll API; [`BrainDriver`]
 //!   keeps one request in flight and falls back to the Lua AI's own act when no answer is
 //!   ready, so the boss never freezes.
@@ -14,6 +16,8 @@
 
 pub mod actions;
 pub mod driver;
+pub mod habits;
+pub mod memory;
 pub mod observation;
 pub mod tally;
 
@@ -22,10 +26,15 @@ mod tests;
 
 use serde::{Deserialize, Serialize};
 
-pub use actions::{BossAction, BossActions, OWL};
+pub use actions::{BossAction, BossActions, Combo, OWL, SOLDIER};
 pub use driver::{BrainDriver, BrainStats};
+pub use habits::{HabitSummary, HabitTracker, Habits, WolfFrame};
+pub use memory::{FightEnd, Loaded, Memory, MemorySummary};
 pub use observation::{FighterView, Observation};
-pub use tally::{Counts, Exchange, Outcome, Side, Tally, TallyEvent, TallySummary};
+pub use tally::{Counts, Exchange, Outcome, Side, Tally, TallyEvent, TallySummary, TopMap};
+
+/// The most bytes of JSON a request should take; [`BrainRequest::fit`] trims to it.
+pub const REQUEST_BUDGET: usize = 1200;
 
 /// What the boss does next: his own action ids, run in order as one act.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,13 +50,57 @@ impl Plan {
     }
 }
 
-/// One question to a controller: the observation and the outcome memory.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// One question to a controller: the observation, this fight's tally and the memory of every
+/// fight.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct BrainRequest {
-    /// Increasing per fight; the reply carries it back.
+    /// Increasing per session; the reply carries it back.
     pub id: u64,
     pub obs: Observation,
     pub tally: TallySummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemorySummary>,
+}
+
+impl BrainRequest {
+    /// Bytes of compact JSON.
+    pub fn json_len(&self) -> usize {
+        serde_json::to_string(self).map_or(0, |s| s.len())
+    }
+
+    /// Trims the least telling entries until the JSON fits in `budget` bytes (or nothing is
+    /// left to trim; the observation always stays); returns the final size. Order: earlier
+    /// fights' boss counts, Wolf counts, habit timings, answers and responses, then this
+    /// fight's Wolf and boss counts, each down to 4, 3, 2, 1 and 0 entries; last the single
+    /// habit values and the memory itself.
+    pub fn fit(&mut self, budget: usize) -> usize {
+        let mut len = self.json_len();
+        while len > budget && self.trim_one() {
+            len = self.json_len();
+        }
+        len
+    }
+
+    fn trim_one(&mut self) -> bool {
+        for keep in [4, 3, 2, 1, 0] {
+            if self.memory.as_mut().is_some_and(|m| m.boss.pop(keep)) {
+                return true;
+            }
+            if self.memory.as_mut().is_some_and(|m| m.wolf.pop(keep)) {
+                return true;
+            }
+            if keep > 0 && self.memory.as_mut().is_some_and(|m| m.habits.trim(keep)) {
+                return true;
+            }
+            if self.tally.wolf.pop(keep) || self.tally.boss.pop(keep) {
+                return true;
+            }
+        }
+        if self.memory.as_mut().is_some_and(|m| m.trim(0)) {
+            return true;
+        }
+        self.memory.take().is_some()
+    }
 }
 
 /// A controller's answer.
@@ -107,9 +160,9 @@ pub struct ScriptedBrain {
 }
 
 impl Default for ScriptedBrain {
-    /// Kick (3005); after two deflected kicks, the recovery-sealing throw (3031).
+    /// The Owl's: kick (3005); after two deflected kicks, the recovery-sealing throw (3031).
     fn default() -> Self {
-        Self::new(Plan::new(&[3005]), Plan::new(&[3031]), 2, 0.1)
+        Self::for_actions(&OWL)
     }
 }
 
@@ -124,13 +177,20 @@ impl ScriptedBrain {
         }
     }
 
+    /// The boss's own test plans ([`BossActions::scripted`]): switches after two deflected
+    /// openers, answering after 0.1 s.
+    pub fn for_actions(actions: &BossActions) -> Self {
+        let [opener, fallback] = actions.scripted;
+        Self::new(Plan::new(opener), Plan::new(fallback), 2, 0.1)
+    }
+
     /// The plan this controller picks for a tally.
     pub fn choose(&self, tally: &TallySummary) -> Plan {
         let deflected = self
             .opener
             .actions
             .first()
-            .and_then(|a| tally.owl.get(&a.to_string()))
+            .and_then(|a| tally.boss.get(&a.to_string()))
             .map_or(0, |c| c.deflected);
         if deflected >= self.switch_after_deflects {
             self.fallback_plan.clone()
@@ -162,13 +222,13 @@ impl BossBrain for ScriptedBrain {
     }
 }
 
-/// Which controller a fight uses (`--brain lua|scripted`, or `--force-act <id>`).
+/// Which controller a fight uses (`--brain lua|scripted`), or the repeat testing aid.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum BrainKind {
     #[default]
     Lua,
     Scripted,
-    /// Testing aid: plans the one action over and over (`--force-act`), answering at once.
+    /// Testing aid: plans the one action over and over, answering at once.
     Repeat(i32),
 }
 
@@ -181,10 +241,14 @@ impl BrainKind {
         }
     }
 
-    pub fn build(self) -> Box<dyn BossBrain> {
+    /// The controller for the enemy `chr` (the scripted one plays that enemy's test plans;
+    /// an enemy without a table gets the Owl's, and `Duel::set_brain` refuses it anyway).
+    pub fn build(self, chr: &str) -> Box<dyn BossBrain> {
         match self {
             Self::Lua => Box::new(LuaBrain),
-            Self::Scripted => Box::new(ScriptedBrain::default()),
+            Self::Scripted => Box::new(ScriptedBrain::for_actions(
+                BossActions::for_chr(chr).unwrap_or(&OWL),
+            )),
             Self::Repeat(id) => {
                 let plan = Plan::new(&[id]);
                 Box::new(ScriptedBrain::new(plan.clone(), plan, u32::MAX, 0.0))

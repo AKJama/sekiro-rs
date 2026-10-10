@@ -46,6 +46,9 @@ const COMBO_FLAGS: [i32; 2] = [23, 86];
 /// locked, seconds given, Ninja Army Chief").
 const STATE_INFO_NO_LOCK: i32 = 350;
 
+/// env 2004, "swing is hitting" ([`Duel::publish_swing_hit`]).
+const ENV_SWING_HIT: i32 = 2004;
+
 /// A deathblow as the duel reports it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DeathblowReport {
@@ -76,6 +79,11 @@ pub struct DuelReport {
     pub grab: GrabReport,
     /// Both characters were put back at their start this step.
     pub respawned: bool,
+    /// A perilous-attack warning (the red kanji) reached Wolf this step ([`crate::perilous`]).
+    pub perilous: Option<crate::perilous::PerilousWarning>,
+    /// Wolf's anti-ground attack (the air kick) landed on an enemy in a perilous sweep, whose
+    /// "jump kick effective" SpEffect multiplied its posture damage this step.
+    pub jump_counter: bool,
 }
 
 /// ThrowParam and both models' sorb dummies, for deathblows.
@@ -88,6 +96,9 @@ struct Throws {
 
 pub struct Duel {
     pub camera: crate::camera::CameraParams,
+    /// The camera as Wolf's animation drives it (the deathblow camera, TAE 151 / 153 / 155),
+    /// updated every step.
+    pub camera_director: crate::camera::CameraDirector,
     pub player: Character,
     pub enemy: Character,
     /// The stand-in brain, used when [`Duel::ai`] is `None`.
@@ -124,6 +135,9 @@ pub struct Duel {
     /// The defender clip of the last deathblow; no new deathblow starts while it plays (the
     /// enemy is in its throw-defence state, getting up from a non-lethal blow).
     last_throw_def_clip: Option<String>,
+    /// Wolf's full-body clip in which one of his attacks connected: env 2004 ("swing is hitting")
+    /// reads true while it still plays.
+    swing_hit: Option<String>,
     /// Hit stop of the player and the enemy: a frozen character does not advance.
     pub hit_stop: [HitStop; 2],
     /// Pushes in progress on the player and the enemy.
@@ -295,6 +309,7 @@ impl Duel {
         });
         Ok(Self {
             camera: crate::camera::CameraParams::load(cache),
+            camera_director: crate::camera::CameraDirector::load(cache),
             player,
             enemy,
             brain: SimpleBrain::default(),
@@ -316,6 +331,7 @@ impl Duel {
             attack_button: false,
             enemy_damaged: false,
             last_throw_def_clip: None,
+            swing_hit: None,
             hit_stop: [HitStop::default(); 2],
             knockback: [None; 2],
             last_steps: Default::default(),
@@ -478,6 +494,7 @@ impl Duel {
         self.respawn_in = None;
         self.defender_dying = 0;
         self.last_throw_def_clip = None;
+        self.swing_hit = None;
         self.bullets.clear();
         if let Some(ev) = self.events.as_mut() {
             ev.restart();
@@ -924,6 +941,72 @@ impl Duel {
     /// Passes HP and posture to both scripts (env 1000, 1001, 2010). While a deathblow holds the
     /// enemy its script still sees it alive, so the throw animations (with their own death
     /// branch) play out instead of the script's ordinary death.
+    /// env 2004 ("swing is hitting", `docs/HKS-INTERFACE.md`) for Wolf's script: true while the
+    /// clip in which one of his attacks connected still plays. The script reads it only together
+    /// with SpEffect reference 204 (the air kick's window for kicking off the enemy into
+    /// `AirKickEnemyJumpStart`, as FwLo's RustSekiro `BEH_R_ENEMY_JUMP`) or a combat art's jump
+    /// reference; that it stays true for the rest of the clip is ours.
+    fn publish_swing_hit(&mut self) {
+        let playing = self
+            .player
+            .behavior
+            .runtime
+            .main_clip()
+            .map(|c| c.animation.clone());
+        if self.swing_hit.is_some() && self.swing_hit != playing {
+            self.swing_hit = None;
+        }
+        let env = &mut self.player.behavior.env;
+        env.overrides.retain(|(id, _, _)| *id != ENV_SWING_HIT);
+        if self.swing_hit.is_some() {
+            env.overrides.push((ENV_SWING_HIT, None, 1.0));
+        }
+    }
+
+    /// Notes Wolf's landed attacks of this step for env 2004, and returns whether one was an
+    /// anti-ground hit (the air kick) on an enemy whose active SpEffects say "jump kick
+    /// effective" (a perilous sweep, [`crate::perilous::STATE_INFO_JUMP_KICK_EFFECTIVE`]).
+    fn note_player_hits(&mut self, hits: &[(HitEvent, HitResult)]) -> bool {
+        let mut counter = false;
+        for (hit, _) in hits.iter().filter(|(h, _)| h.attacker == 0) {
+            self.swing_hit = self
+                .player
+                .behavior
+                .runtime
+                .main_clip()
+                .map(|c| c.animation.clone());
+            let anti_ground = hit
+                .attack
+                .profile
+                .as_ref()
+                .is_some_and(|p| p.stamina_attribute.0 == crate::perilous::STAMINA_ANTI_GROUND);
+            counter |= anti_ground
+                && self
+                    .rules
+                    .active_effects(hit.defender, self.chr(hit.defender))
+                    .iter()
+                    .any(|e| e.state_info == crate::perilous::STATE_INFO_JUMP_KICK_EFFECTIVE);
+        }
+        counter
+    }
+
+    /// Character `i`: 0 Wolf, 1 the enemy.
+    fn chr(&self, i: usize) -> &Character {
+        if i == 0 { &self.player } else { &self.enemy }
+    }
+
+    /// World position of dummy poly `id` of character `i` (0 Wolf, 1 the enemy) in its pose as
+    /// of the last step: the camera's look-at target (Wolf's 142 in deathblows) and the kanji's
+    /// spot (Wolf's 220).
+    pub fn dummy_position(&self, i: usize, id: i16) -> Option<[f32; 3]> {
+        let c = self.chr(i);
+        self.fighters[i]
+            .rig
+            .positions(id, &c.bone_source_matrices(), c.source_to_world())
+            .first()
+            .map(|p| p.to_array())
+    }
+
     fn publish_vitals(&mut self) {
         // The script sees HP 0 one step after the death event, once its graph is in the death state.
         let held = self.deathblow.is_some() && self.defender_dying < 2;
@@ -1239,6 +1322,7 @@ impl Duel {
         self.force_enemy_act(enemy_alive);
         self.publish_event_envs(endure_action);
         self.publish_vitals();
+        self.publish_swing_hit();
         // Who each side aims at: auto-aim candidates for Wolf, Wolf for the soldier.
         self.player.aim_candidates = if enemy_alive {
             vec![self.enemy.body.position]
@@ -1340,11 +1424,28 @@ impl Duel {
             }
             hits.push((hit, result));
         }
+        let mut perilous = None;
         for b in effect_hits {
+            let kanji = b.sp_effects.iter().any(|id| {
+                self.player
+                    .tae
+                    .sp_effects
+                    .get(id)
+                    .is_some_and(|e| e.vfx == crate::perilous::KANJI_VFX)
+            });
+            if b.hit.defender == 0 && kanji {
+                let a = b.hit.attacker;
+                perilous = Some(crate::perilous::PerilousWarning {
+                    attacker: a,
+                    judge: b.hit.judge,
+                    kind: crate::perilous::upcoming_kind(self.chr(a), &self.fighters[a]),
+                });
+            }
             if !self.rules.fighters.iter().any(|f| f.dead()) {
                 self.apply_status(b.hit.defender, &b.sp_effects);
             }
         }
+        let jump_counter = self.note_player_hits(&hits);
         self.rules.tick_status(0, dt);
         self.rules.tick_status(1, dt);
         self.rules.apply_effect_hp(0, self.player.tae_frame());
@@ -1370,7 +1471,20 @@ impl Duel {
             deathblow,
             grab,
             respawned,
+            perilous,
+            jump_counter,
         };
+        let clip = self
+            .player
+            .behavior
+            .runtime
+            .main_clip()
+            .map(|c| (c.animation.clone(), c.time));
+        self.camera_director.update(
+            clip.as_ref().map(|(a, t)| (a.as_str(), *t)),
+            &self.player.tae,
+            dt,
+        );
         if let Some(mut d) = self.boss_brain.take() {
             d.after_step(self, &report);
             self.boss_brain = Some(d);

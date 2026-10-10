@@ -43,7 +43,7 @@ pub struct FighterView {
 pub struct Observation {
     /// Fight time, seconds.
     pub t: f32,
-    pub owl: FighterView,
+    pub boss: FighterView,
     pub wolf: FighterView,
     /// Horizontal distance, metres.
     pub dist: f32,
@@ -52,11 +52,11 @@ pub struct Observation {
     /// Where Wolf is from the boss's facing, degrees, positive to the left.
     pub wolf_bearing: f32,
     /// Where the boss is from Wolf's facing, degrees, positive to the left.
-    pub owl_bearing: f32,
+    pub boss_bearing: f32,
     /// Wolf is locked on to the boss.
     pub locked_on: bool,
     /// Seconds since the boss last landed an unguarded hit on Wolf (`None`: never).
-    pub since_owl_hit: Option<f32>,
+    pub since_boss_hit: Option<f32>,
     /// Seconds since Wolf last landed an unguarded hit on the boss.
     pub since_wolf_hit: Option<f32>,
     /// The plan running now (empty while the Lua AI's own act runs).
@@ -121,21 +121,21 @@ fn view(duel: &Duel, c: &Character, f: &Fighter, i: usize) -> FighterView {
 }
 
 /// The observation for the duel now. `t` is the fight clock; `since` the seconds since each
-/// side's last landed hit `[owl, wolf]`; `plan` the plan running.
+/// side's last landed hit `[boss, wolf]`; `plan` the plan running.
 pub fn observe(duel: &Duel, t: f32, since: [Option<f32>; 2], plan: &[i32]) -> Observation {
     let (p, e) = (&duel.player, &duel.enemy);
     let (pp, ep) = (p.body.position, e.body.position);
     Observation {
         t: r2(t),
-        owl: view(duel, e, &duel.rules.fighters[1], 1),
+        boss: view(duel, e, &duel.rules.fighters[1], 1),
         wolf: view(duel, p, &duel.rules.fighters[0], 0),
         dist: r2(((pp[0] - ep[0]).powi(2) + (pp[2] - ep[2]).powi(2)).sqrt()),
         dy: r2(pp[1] - ep[1]),
         // + 0.0 turns -0 into 0.
         wolf_bearing: bearing(e, p).round() + 0.0,
-        owl_bearing: bearing(p, e).round() + 0.0,
+        boss_bearing: bearing(p, e).round() + 0.0,
         locked_on: p.lock_target.is_some(),
-        since_owl_hit: since[0].map(r2),
+        since_boss_hit: since[0].map(r2),
         since_wolf_hit: since[1].map(r2),
         plan: plan.to_vec(),
     }

@@ -99,9 +99,40 @@ FwLo's RustSekiro (`docs/kb/guard-deflect.md`) reads Wolf's half-angle from the 
 Our trace of the player's virtual (`a295c0`) reads it from the weapon's `guardAngle` instead, and ArgB is the guard judge here (the soldier's ArgB is 900, which cannot be an angle), so the sim keeps the weapon value.
 Both give 90 degrees for Wolf.
 
+## Perilous attacks
+
 Perilous attacks are the unblockable flags, not a separate system.
 In AtkParam_Npc, 238 rows block both guard types for both block and deflect (grabs), 60 rows block only the katana (guard type 0) for both (the Loaded Umbrella still blocks them), and 111 rows forbid only blocking with the katana, so they must be deflected.
 The Mikiri counter is not in this path; see `docs/HKS-COMBAT.md`.
+Code: `crates/sim/src/perilous.rs`, `crates/sim/src/hits.rs` (`AttackData::perilous`), the duel; tests `crates/sim/tests/perilous.rs`.
+
+### The warning (危)
+
+All from the data (**data**, except where marked):
+
+1. The clip fires a TAE `BulletBehavior` with a judge from 980 to 989 a little before the blow: soldier sweep `a000_003020` at 0.2 s (blade 1.067 s), soldier thrust `a000_003013` at 0.0 s, Owl sweeps `a000_003004` / `3024` / `3090` at 0.0 s (judges 980, 985, 986), Owl Shinobi stab `a000_003033` at 0.667 s (987).
+2. Its BehaviorParam row names a "dummy bullet, dangerous attack sign" (soldier 10001600, Owl 50601980 to 50601987): 2 m radius, 0.1 s, AtkParam 8 (no damage), `EmittePosType` 7, `generationMaxDistWhenOwner` 5 m (soldier) or 9 m (Owl), SpEffect 211000.
+   We read `EmittePosType` 7 as "made at the target" (**inferred**: only these rows use it, and a maximum distance from the owner only makes sense for a bullet made away from him), so no warning is made when Wolf is farther than that from the attacker.
+3. SpEffect 211000 "dangerous enemy attack VFX" (0.1 s) only lands on the player (`effectTargetPCOnlyTarget`, `effectTargetOpposeTarget`); its `vfxId` 48100 is SpEffectVfxParam "漢字_「危」", effect 600035 (`sfx/sfxbnd_commoneffects`, `f000600035.fxr`) at Wolf's dummy 220 (`Spine2`).
+   So the symbol is on Wolf, not over the attacker.
+4. sekiro-rs reports the warning (`DuelReport::perilous`) when a bullet hit on Wolf carries an effect with `vfxId` 48100, and the HUD draws a red 危 over Wolf for 0.8 s with a Japanese Windows font (`combat_hud::update_perilous`), as FwLo's RustSekiro does; the effect's texture and timing (the FXR) are not decoded, and no sound for it was found (FwLo has none either).
+
+What to do about it is not in the warning: FwLo maps judges 980 / 982 / 983 to sweep / thrust / grab, which holds for the Ashina General but not in general (the Owl's sweeps use 980, 985 and 986).
+Here the kind comes from the clip's next attack window: a grab (`throwFlag` 1), a sweep (katana can neither block nor deflect it), or a thrust (can deflect) (**inferred** split; every perilous sweep in these two characters is undeflectable and every perilous thrust deflectable).
+
+### Jumping a sweep, and the jump counter
+
+- TAE 954 `IFrameType` 1 ("Sweeps") on Wolf's jumps (from the jump start), his air kicks and the first 0.27 s of his steps lets a sweep pass unspent (FwLo's rule for the attacks with a sweep warning; ours uses the AtkParam kind above).
+  General (2) and thrust (6) i-frames are still not applied.
+- A jump press in the air is Wolf's own HKS air kick `a000_213100`, whose `PCBehavior` (TAE 307) judge 901 is BehaviorParam_PC 901, AtkParam_Pc 901 "kick in the air": `directAtkStamDamage` 10, `staminaPhysicsAttribute` 7 (anti-ground), dummies 612 to 614 (fixed in Wolf's frame on a root-level helper node, like the throw dummies).
+  sekiro-rs now detects the damaging `PCBehavior` rows (the kicks 900, 901, 903); the contact-impact rows on every jump and landing (200 to 222, no damage) and the hand and foot effect probes (280 to 286) are left out (ours).
+- Every perilous sweep puts SpEffect 400200 "jump kick effective when posture is low" on its attacker for most of the clip (soldier `3020` 0.0 to 2.667 s, Owl `3004` 0.133 to 1.567 s; the tutorial soldier's `3014` has 310601), `stateInfo` 912, `defAntiGroundStaminaDmgRate` 8 (40 on 310601).
+  The existing posture rule (per-attribute rate by `staminaPhysicsAttribute`, **code**, above) then makes the kick's posture damage 10 x 8 = 80: the soldier's 75 breaks (`TrunkCollapseFront`, deathblow open), the Owl (660) takes 80.
+  The Owl's sweeps also carry 3506001, which replaces his damage levels for the hit reaction.
+- The kick off the enemy (`AirKickEnemyJumpStart*`) is Wolf's HKS: it needs env 2004 "swing is hitting" while the kick's SpEffect 100334 (reference 204) is up.
+  The duel now answers env 2004 true from the step one of Wolf's attacks connects until his clip changes (how long it stays true is **inferred**); the script reads it only with reference 204 or a combat art's jump reference.
+- `DuelReport::jump_counter` says when an anti-ground hit landed on an attacker with a `stateInfo` 912 effect.
+- So a jump that is too early (landed before the blade) or too late (the blade arrived before the jump start) is hit, and a kick before or after the attacker's 912 window is an ordinary 10-posture kick, all from the TAE windows; there is no timing constant of ours in it.
 
 ## Posture damage to the defender
 

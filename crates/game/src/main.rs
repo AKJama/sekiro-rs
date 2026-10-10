@@ -100,6 +100,13 @@ fn main() -> anyhow::Result<()> {
                 Ok((step.parse()?, PathBuf::from(path)))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
+        let opponent = match (arg_value(&args, "--enemy"), boss_arena) {
+            (Some(name), _) => sekiro_sim::enemy::EnemySpec::by_name(&name)
+                .map_err(|e| anyhow::anyhow!("--enemy: {e}"))?,
+            (None, Some(arena)) => arena.enemy_spec(),
+            (None, None) => sekiro_sim::enemy::EnemySpec::soldier(),
+        };
+        let brain_name = arg_value(&args, "--brain").unwrap_or_else(|| "lua".into());
         return play::run(play::Options {
             cache: PathBuf::from(arg_value(&args, "--cache").unwrap_or_else(|| "cache".into())),
             script: arg_value(&args, "--script"),
@@ -107,12 +114,6 @@ fn main() -> anyhow::Result<()> {
             screenshots,
             exit_after_script: args.iter().any(|a| a == "--exit"),
             enemy: !args.iter().any(|a| a == "--no-enemy" || a == "--passive"),
-            opponent: match (arg_value(&args, "--enemy"), boss_arena) {
-                (Some(name), _) => sekiro_sim::enemy::EnemySpec::by_name(&name)
-                    .map_err(|e| anyhow::anyhow!("--enemy: {e}"))?,
-                (None, Some(arena)) => arena.enemy_spec(),
-                (None, None) => sekiro_sim::enemy::EnemySpec::soldier(),
-            },
             arena: boss_arena,
             full_map: args.iter().any(|a| a == "--full-map"),
             hide: arg_list(&args, "--hide"),
@@ -126,11 +127,18 @@ fn main() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("--force-act wants an action id: {e}"))?,
             break_posture: args.iter().any(|a| a == "--break-posture"),
             brain: sekiro_brain_net::from_cli(
-                &arg_value(&args, "--brain").unwrap_or_else(|| "lua".into()),
+                &brain_name,
                 arg_value(&args, "--brain-model"),
+                &opponent.chr,
             )
             .map_err(|e| anyhow::anyhow!("--brain: {e}"))?,
             brain_log: args.iter().any(|a| a == "--brain-log"),
+            brain_memory: sekiro_sim::brain::memory::resolve(
+                arg_value(&args, "--brain-memory").as_deref(),
+                &opponent.chr,
+                sekiro_brain_net::is_hosted(&brain_name),
+            ),
+            opponent,
             map: arg_value(&args, "--map"),
             start: arg_f32(&args, "--start", 0.0)? as usize,
             spawn: map::parse_camera(arg_value(&args, "--spawn").as_deref())?
@@ -153,7 +161,7 @@ fn main() -> anyhow::Result<()> {
         "                 [--map <id> [--start <n> | --spawn x,y,z,yaw,0]] [--no-enemy] [--lock-on]"
     );
     eprintln!(
-        "                 [--simple-ai] [--passive] [--god] [--force-act <id>] [--enemy c1010|c5060] [--brain lua|scripted|decisions|responses] [--brain-model <name>] [--brain-log]"
+        "                 [--simple-ai] [--passive] [--god] [--force-act <id>] [--enemy c1010|c5060] [--brain lua|scripted|decisions|responses] [--brain-model <name>] [--brain-log] [--brain-memory off|on|<path>]"
     );
     eprintln!("       sekiro-rs --arena owl [--full-map] [--play options] (a boss on his own map)");
     eprintln!("usage: sekiro-rs --arena [--deathblow] [--screenshot <out.png> --at <seconds>]");

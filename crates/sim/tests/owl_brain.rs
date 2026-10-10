@@ -161,13 +161,13 @@ fn tally_counts_outcomes_in_a_scripted_duel() {
         serde_json::to_string(&s).unwrap()
     );
     let total = |side: Side, f: fn(&sekiro_sim::brain::Counts) -> u32| {
-        let m = if side == Side::Owl { &s.owl } else { &s.wolf };
+        let m = if side == Side::Boss { &s.boss } else { &s.wolf };
         m.values().map(f).sum::<u32>()
     };
-    let n = total(Side::Owl, |c| c.n);
-    let hit = total(Side::Owl, |c| c.hit);
-    let guarded = total(Side::Owl, |c| c.blocked + c.deflected);
-    let whiffed = total(Side::Owl, |c| c.whiffed);
+    let n = total(Side::Boss, |c| c.n);
+    let hit = total(Side::Boss, |c| c.hit);
+    let guarded = total(Side::Boss, |c| c.blocked + c.deflected);
+    let whiffed = total(Side::Boss, |c| c.whiffed);
     assert!(owl[0] > 0 && owl[1] > 0, "{owl:?}");
     // An exchange counts a hit or a guard once however many of its hits landed.
     assert!(hit > 0 && hit <= owl[0], "{hit} vs {owl:?}");
@@ -176,12 +176,12 @@ fn tally_counts_outcomes_in_a_scripted_duel() {
         whiffed + hit + guarded >= n,
         "every exchange has an outcome"
     );
-    assert!(s.owl["3000"].n > 0 && s.owl["3001"].n > 0);
+    assert!(s.boss["3000"].n > 0 && s.boss["3001"].n > 0);
     // Wolf's slashes are in his tally, and the ones that landed punished the Owl.
     assert!(total(Side::Wolf, |c| c.n) > 0);
     if wolf_hits > 0 {
         assert!(total(Side::Wolf, |c| c.hit) > 0);
-        assert!(total(Side::Owl, |c| c.punished) > 0);
+        assert!(total(Side::Boss, |c| c.punished) > 0);
     }
 }
 
