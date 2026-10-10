@@ -153,6 +153,12 @@ Ours (`Character::fill_env`): env 107 is the request while flag 23 is on and the
 The pairing of flags and requests follows FwLo's RustSekiro notes (`docs/kb/enemy.md`).
 Before this, every NPC combo waited for the previous animation to end and stood in idle for a step between attacks.
 
+### Choosing acts from outside (the act hook)
+
+`AiBrain::enable_act_hook` lets an outside controller (the boss brain, `docs/BRAIN.md`) choose a battle goal's acts.
+It keeps the scripts' shared `Common_Battle_Activate` under another global name and puts a host function in its place; that function queues the outside `ActChoice` (an `Approach_Act_Flex` approach, then the attack goals) on the battle goal, unless the script already queued a reaction or weighted one of the configured reflex acts, and otherwise calls the script's own function unchanged (ours).
+Interrupts, the deflect counters and everything before the act pick still run in the scripts.
+
 ## Not done yet
 
 - Interrupts other than parry timing, FindAttack, damage and observed SpEffects (shoot impact, guard results, item use, observe areas).

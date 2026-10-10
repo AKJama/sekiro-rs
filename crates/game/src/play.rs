@@ -51,6 +51,9 @@ pub struct Options {
     pub cache: PathBuf,
     /// Input script to play instead of live input (`builtin` for the demo).
     pub script: Option<String>,
+    /// Raw keyboard and mouse input to replay through the live input path
+    /// ([`crate::input_replay`]).
+    pub input: Option<String>,
     /// Screenshots to take at given simulation steps of the script: `(step, path)`.
     pub screenshots: Vec<(usize, PathBuf)>,
     /// Exit when the script ends and every screenshot is saved.
@@ -63,6 +66,10 @@ pub struct Options {
     pub lock_on: bool,
     /// Drive the enemy with the stand-in brain instead of its own AI scripts.
     pub simple_ai: bool,
+    /// Who chooses a boss's acts (`--brain lua|scripted`) and whether its decisions are logged
+    /// to `cache/brain_logs/` (`--brain-log`); see `docs/BRAIN.md`.
+    pub brain: sekiro_sim::brain::BrainKind,
+    pub brain_log: bool,
     /// Play on this exported map (`cache/maps/<id>`) instead of the flat floor.
     pub map: Option<String>,
     /// Player start point on the map.
@@ -130,6 +137,8 @@ struct Sim {
     script: Option<Vec<InputFrame>>,
     step: usize,
     lock_requested: bool,
+    /// Each actor's position and drawn yaw before the last step, to draw between steps.
+    previous: [([f32; 3], f32); 2],
 }
 
 /// Live input gathered every rendered frame, consumed by the fixed steps.
@@ -164,6 +173,16 @@ pub fn run(options: Options) -> Result<()> {
     duel.enemy_active = options.enemy;
     if options.simple_ai {
         duel.use_simple_ai();
+    } else if options.brain != sekiro_sim::brain::BrainKind::Lua || options.brain_log {
+        let log = duel
+            .set_brain(options.brain.build(), options.brain_log)
+            .map_err(|e| anyhow::anyhow!("--brain: {e}"))?;
+        eprintln!(
+            "boss brain {:?}{}",
+            options.brain,
+            log.map(|p| format!(", log {}", p.display()))
+                .unwrap_or_default()
+        );
     }
     let mut on_map = None;
     let mut start_yaw = 0.0;
@@ -247,6 +266,15 @@ pub fn run(options: Options) -> Result<()> {
         ),
     };
     let scripted = script.is_some();
+    let replay = match options.input.as_deref() {
+        None => None,
+        Some(path) => Some(crate::input_replay::InputReplay::new(
+            crate::input_replay::parse(
+                &std::fs::read_to_string(path).with_context(|| path.to_string())?,
+            )
+            .map_err(anyhow::Error::msg)?,
+        )),
+    };
     for (_, path) in &options.screenshots {
         if path.exists() {
             std::fs::remove_file(path)?;
@@ -262,9 +290,10 @@ pub fn run(options: Options) -> Result<()> {
                     resolution: (1600, 900).into(),
                     ..default()
                 }),
+                // Scripted and replayed runs leave the cursor alone (a replay clicks to take it).
                 primary_cursor_options: Some(CursorOptions {
-                    visible: scripted,
-                    grab_mode: if scripted {
+                    visible: scripted || replay.is_some(),
+                    grab_mode: if scripted || replay.is_some() {
                         CursorGrabMode::None
                     } else {
                         CursorGrabMode::Locked
@@ -314,6 +343,7 @@ pub fn run(options: Options) -> Result<()> {
         script,
         step: 0,
         lock_requested: options.lock_on,
+        previous: [([0.0; 3], 0.0); 2],
     })
     .init_resource::<combat_hud::Gauges>()
     .add_plugins(crate::audio::GameAudioPlugin {
@@ -324,7 +354,10 @@ pub fn run(options: Options) -> Result<()> {
     .add_systems(
         Update,
         (
-            (gather_input, orbit_camera),
+            // The camera turns first, so the stick read this frame is relative to the camera
+            // that is drawn.
+            orbit_camera,
+            gather_input,
             bind_rigs,
             apply_draw_masks,
             sync_actors,
@@ -334,9 +367,16 @@ pub fn run(options: Options) -> Result<()> {
             hud,
             combat_hud::update,
             capture,
+            log_camera,
         )
             .chain(),
     );
+    if let Some(replay) = replay {
+        app.insert_resource(replay).add_systems(
+            PreUpdate,
+            crate::input_replay::inject.before(bevy::input::InputSystems),
+        );
+    }
     if let Some((dir, id, world)) = on_map {
         // The map's sun, ambient light and sky replace the floor setup's.
         map::add_map(
@@ -511,6 +551,7 @@ fn gather_input(
     orbit: Res<Orbit>,
     mut live: ResMut<LiveInput>,
     mut cursor: Query<&mut CursorOptions>,
+    mut grab_click: Local<bool>,
 ) {
     if keys.just_pressed(KeyCode::Escape)
         && let Ok(mut c) = cursor.single_mut()
@@ -523,13 +564,26 @@ fn gather_input(
         };
         c.visible = locked;
     }
+    // A click while the cursor is free (after Esc) takes the mouse back for the camera; that
+    // click is not an attack.
+    if !mouse.pressed(MouseButton::Left) {
+        *grab_click = false;
+    }
+    if mouse.just_pressed(MouseButton::Left)
+        && let Ok(mut c) = cursor.single_mut()
+        && c.grab_mode != CursorGrabMode::Locked
+    {
+        c.grab_mode = CursorGrabMode::Locked;
+        c.visible = false;
+        *grab_click = true;
+    }
     let key = |k| keys.pressed(k);
     let mut stick = Vec2::new(
         (key(KeyCode::KeyD) as i32 - key(KeyCode::KeyA) as i32) as f32,
         (key(KeyCode::KeyW) as i32 - key(KeyCode::KeyS) as i32) as f32,
     );
     let mut b = Buttons {
-        attack: mouse.pressed(MouseButton::Left),
+        attack: mouse.pressed(MouseButton::Left) && !*grab_click,
         guard: mouse.pressed(MouseButton::Right),
         jump: key(KeyCode::Space),
         dodge: key(KeyCode::ShiftLeft) || key(KeyCode::ShiftRight),
@@ -591,7 +645,9 @@ fn orbit_camera(
     let locked = cursor
         .single()
         .is_ok_and(|c| c.grab_mode == CursorGrabMode::Locked);
-    if locked {
+    // Mouse motion while the map loads (the window appearing, the cursor being captured) would
+    // spin the camera away from the start view before the fight begins.
+    if locked && sim.step > 0 {
         orbit.yaw -= motion.delta.x * MOUSE_SENSITIVITY;
         orbit.pitch += motion.delta.y * MOUSE_SENSITIVITY;
     }
@@ -606,6 +662,7 @@ fn orbit_camera(
     orbit.pitch = orbit.pitch.clamp(min, max);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn simulate(
     mut sim: NonSendMut<Sim>,
     live: Res<LiveInput>,
@@ -614,12 +671,16 @@ fn simulate(
     sounds: Res<crate::audio::SoundLibrary>,
     mut cues: MessageWriter<crate::audio::SoundCue>,
     map_pending: Option<Res<map::Pending>>,
+    replay: Option<ResMut<crate::input_replay::InputReplay>>,
 ) {
     // Hold the simulation until the models (and the map) are on screen, so scripted runs line
     // up with frames.
     if rigs.is_empty() || !rigs.iter().all(|r| r.bound) || map_pending.is_some_and(|p| !p.loaded())
     {
         return;
+    }
+    if let Some(mut r) = replay {
+        r.running = true;
     }
     let dt = 1.0 / STEP_HZ as f32;
     let mut frame = match &sim.script {
@@ -629,12 +690,24 @@ fn simulate(
             f.camera_yaw += orbit.yaw;
             f
         }
-        None => live.frame,
+        // The stick is relative to the camera on screen now (the orbit of the last frame).
+        None => InputFrame {
+            camera_yaw: orbit.yaw,
+            ..live.frame
+        },
     };
     if sim.lock_requested && sim.step == 0 {
         frame.buttons.lock_on = true;
     }
+    sim.previous = [
+        (sim.duel.player.body.position, sim.duel.player.visual_yaw()),
+        (sim.duel.enemy.body.position, sim.duel.enemy.visual_yaw()),
+    ];
+    let before = sim.duel.player.body.position;
     let report = sim.duel.step(&frame, dt);
+    if log_enabled() {
+        log_move(sim.step, &frame, before, &sim.duel, &report.player);
+    }
     crate::audio::emit(&sim.duel, &report, &sounds, &mut cues);
     for (i, r) in [&report.player, &report.enemy].into_iter().enumerate() {
         if !r.behavior.script_errors.is_empty() {
@@ -689,18 +762,15 @@ fn simulate(
 
 fn sync_actors(
     mut sim: NonSendMut<Sim>,
+    fixed: Res<Time<Fixed>>,
     mut libraries: ResMut<Libraries>,
     mut q: Query<(&Actor, &mut Animator, &mut Transform)>,
 ) {
     for (actor, mut anim, mut tf) in &mut q {
         let i = actor.0;
-        let body = if i == WOLF {
-            &sim.duel.player.body
-        } else {
-            &sim.duel.enemy.body
-        };
-        tf.translation = Vec3::from_array(body.position);
-        tf.rotation = Quat::from_rotation_y(body.yaw);
+        let (position, yaw) = shown(&sim, i, fixed.overstep_fraction());
+        tf.translation = position;
+        tf.rotation = Quat::from_rotation_y(yaw);
         let report: &StepReport = if i == WOLF {
             &sim.last.player
         } else {
@@ -710,6 +780,7 @@ fn sync_actors(
             continue;
         };
         let time = report.anim_time;
+        let just_started = report.clip_started;
         let started = sim.started[i].take();
         let restart = started.as_ref().is_some_and(|(n, _)| *n == name);
         if anim.clip_name() != name || restart {
@@ -724,8 +795,34 @@ fn sync_actors(
                 Err(_) => continue,
             }
         }
-        anim.time = time;
+        // The clip time between steps too, matching the drawn position.
+        let behind = (1.0 - fixed.overstep_fraction()) / STEP_HZ as f32;
+        anim.time = if just_started {
+            time
+        } else {
+            (time - behind).max(0.0)
+        };
     }
+}
+
+/// Where actor `i` is drawn: between its position and yaw before and after the last step, by
+/// how far the render time is into the next step, so motion is smooth at any frame rate
+/// (drawing the last step alone stalls and jumps whenever a frame runs no step or two).
+fn shown(sim: &Sim, i: usize, alpha: f32) -> (Vec3, f32) {
+    let chr = if i == WOLF {
+        &sim.duel.player
+    } else {
+        &sim.duel.enemy
+    };
+    let (now, yaw) = (Vec3::from_array(chr.body.position), chr.visual_yaw());
+    let (before, yaw_before) = sim.previous[i];
+    let before = Vec3::from_array(before);
+    // Teleports (respawn, arena reset) are not drawn as a slide.
+    if sim.step == 0 || before.distance(now) > 2.0 {
+        return (now, yaw);
+    }
+    let turn = sekiro_sim::input::angle_diff(yaw, yaw_before);
+    (before.lerp(now, alpha), yaw_before + turn * alpha)
 }
 
 /// Puts a marker on each bullet in flight and hides the rest.
@@ -745,6 +842,7 @@ fn sync_bullets(sim: NonSend<Sim>, mut q: Query<(&BulletMarker, &mut Transform, 
 fn follow_camera(
     sim: NonSend<Sim>,
     time: Res<Time>,
+    fixed: Res<Time<Fixed>>,
     mut orbit: ResMut<Orbit>,
     collision: Option<Res<MapCollision>>,
     mut cam: Query<&mut Transform, With<FollowCamera>>,
@@ -752,7 +850,7 @@ fn follow_camera(
     let Ok(mut tf) = cam.single_mut() else {
         return;
     };
-    let wolf = Vec3::from_array(sim.duel.player.body.position);
+    let wolf = shown(&sim, WOLF, fixed.overstep_fraction()).0;
     let params = &sim.duel.camera;
     let wanted = wolf + Vec3::Y * params.chr_org_offset_y;
     let xz = sekiro_sim::camera::chase(params.chr_trans_chase_rate_xz, time.delta_secs());
@@ -827,6 +925,7 @@ fn capture(
     mut cap: ResMut<Captures>,
     rigs: Query<&Rig>,
     mut exit: MessageWriter<AppExit>,
+    replay: Option<Res<crate::input_replay::InputReplay>>,
 ) {
     if !rigs.iter().all(|r| r.bound) {
         return;
@@ -846,9 +945,99 @@ fn capture(
         cap.in_flight.push(path);
     }
     cap.in_flight.retain(|p| !p.is_file());
-    let script_done = sim.script.as_ref().is_some_and(|s| step >= s.len());
+    let script_done =
+        sim.script.as_ref().is_some_and(|s| step >= s.len()) || replay.is_some_and(|r| r.done());
     if cap.exit_after_script && script_done && cap.pending.is_empty() && cap.in_flight.is_empty() {
         std::thread::sleep(Duration::from_millis(200));
         exit.write(AppExit::Success);
     }
+}
+
+/// Per-frame camera and per-step movement logs, on for `--input` replays or with
+/// `PLAY_LOG_CAMERA` set.
+fn log_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var_os("PLAY_LOG_CAMERA").is_some() || std::env::args().any(|a| a == "--input")
+    })
+}
+
+/// One `move` line per simulation step: the camera yaw the step used, the stick and its world
+/// direction, Wolf's facing and direction of travel, and the travel error against the stick.
+fn log_move(step: usize, frame: &InputFrame, before: [f32; 3], duel: &Duel, r: &StepReport) {
+    let wolf = &duel.player;
+    let (dx, dz) = (r.position[0] - before[0], r.position[2] - before[2]);
+    let speed = (dx * dx + dz * dz).sqrt() * STEP_HZ as f32;
+    let travel = (-dx).atan2(-dz);
+    let stick = wolf.input.stick_world_yaw();
+    let err = match stick {
+        Some(s) if speed > 0.05 => sekiro_sim::input::angle_diff(travel, s).to_degrees(),
+        _ => f32::NAN,
+    };
+    let var = |n: &str| wolf.behavior.runtime.variable(n).unwrap_or(f32::NAN);
+    eprintln!(
+        "move {step} cam {:.1} stick {:.2},{:.2} stick_yaw {:.1} face {:.1} travel {:.1} speed {:.2} err {:.1} MoveAngle {:.1} lock {} {} {}",
+        frame.camera_yaw.to_degrees(),
+        frame.move_stick[0],
+        frame.move_stick[1],
+        stick.map_or(f32::NAN, f32::to_degrees),
+        r.yaw.to_degrees(),
+        travel.to_degrees(),
+        speed,
+        err,
+        var("MoveAngle"),
+        wolf.lock_target.is_some(),
+        r.behavior.state_path.last().map_or("-", String::as_str),
+        r.animation.as_deref().unwrap_or("-"),
+    );
+}
+
+/// One `cam` line per rendered frame: cursor grab, the frame's mouse motion, lock-on, the orbit
+/// and the rendered camera's forward direction as a yaw.
+#[allow(clippy::too_many_arguments)]
+fn log_camera(
+    time: Res<Time>,
+    motion: Res<AccumulatedMouseMotion>,
+    cursor: Query<&CursorOptions>,
+    orbit: Res<Orbit>,
+    live: Res<LiveInput>,
+    sim: NonSend<Sim>,
+    cam: Query<&Transform, With<FollowCamera>>,
+    replay: Option<Res<crate::input_replay::InputReplay>>,
+    window: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    fixed: Res<Time<Fixed>>,
+) {
+    if !log_enabled() {
+        return;
+    }
+    let grab = cursor
+        .single()
+        .map_or("none".to_string(), |c| format!("{:?}", c.grab_mode));
+    let fwd = cam.single().map_or(Vec3::NAN, |t| t.forward().as_vec3());
+    let cam_yaw = (-fwd.x).atan2(-fwd.z);
+    let focus = orbit.focus;
+    let wolf = Vec3::from_array(sim.duel.player.body.position);
+    let drawn = shown(&sim, WOLF, fixed.overstep_fraction()).0;
+    eprintln!(
+        "cam {} t {:.3} dt {:.4} focused {} grab {grab} mouse {:.1},{:.1} lock {} orbit_yaw {:.1} pitch {:.1} cam_yaw {:.1} stick {:.2},{:.2} live_cam {:.1} step {} focus_lag {:.3} drawn {:.3},{:.3} sim {:.3},{:.3}",
+        replay.as_ref().map_or(0, |r| r.frame),
+        time.elapsed_secs(),
+        time.delta_secs(),
+        window.single().is_ok_and(|w| w.focused),
+        motion.delta.x,
+        motion.delta.y,
+        sim.duel.player.lock_target.is_some(),
+        orbit.yaw.to_degrees(),
+        orbit.pitch.to_degrees(),
+        cam_yaw.to_degrees(),
+        live.frame.move_stick[0],
+        live.frame.move_stick[1],
+        live.frame.camera_yaw.to_degrees(),
+        sim.step,
+        Vec2::new(focus.x - wolf.x, focus.z - wolf.z).length(),
+        drawn.x,
+        drawn.z,
+        wolf.x,
+        wolf.z,
+    );
 }

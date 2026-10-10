@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::lua50::{LuaError, Value, Vm, load_chunk};
-use super::runtime::{AiEvent, AiState, tick};
+use super::runtime::{ActHook, AiEvent, AiState, SCRIPT_BATTLE_ACTIVATE, tick};
 use super::world::{AiWorld, ThinkParams};
 use crate::character::NpcControl;
 
@@ -147,6 +147,29 @@ impl AiBrain {
         self.state.target_state = 3;
         self.state.prev_target_state = 3;
         self.state.battle = true;
+    }
+
+    /// Lets an outside controller choose the battle goal's acts (see [`ActHook`]); reflexes,
+    /// interrupts and reactions stay with the scripts. `reflex_acts` are the battle goal's act
+    /// indices that are reactions. Does nothing when already installed or when the scripts
+    /// have no `Common_Battle_Activate`.
+    pub fn enable_act_hook(&mut self, reflex_acts: &[i32]) {
+        if self.state.act_hook.is_some() {
+            return;
+        }
+        let script = self.vm.get_global("Common_Battle_Activate");
+        if script.is_nil() {
+            return;
+        }
+        self.vm.set_global(SCRIPT_BATTLE_ACTIVATE, script);
+        self.vm.set_global(
+            "Common_Battle_Activate",
+            Value::Host("Common_Battle_Activate".into()),
+        );
+        self.state.act_hook = Some(ActHook {
+            reflex_acts: reflex_acts.to_vec(),
+            ..ActHook::default()
+        });
     }
 
     /// Runs one AI tick and returns the control for the character's next step.

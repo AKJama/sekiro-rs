@@ -119,10 +119,38 @@ pub struct Character {
     /// The Havok skeleton the clips animate (source space).
     pub skeleton: Arc<Skeleton>,
     pub ground: Box<dyn Ground>,
+    /// The lower-body twist in degrees (the engine's `TwistLowerRootAngle`, positive after a
+    /// turn to the left): how far the visible body still lags behind [`Body::yaw`] after a
+    /// free move start turned the character to the stick. Unwinds at the default turn speed.
+    pub twist: f32,
     /// Clip times before the last step, by clip node.
     last_times: HashMap<NodeId, (String, f32)>,
     last_main: Option<PlayingClip>,
 }
+
+/// The locked-on strafe class for a stick `angle` degrees from the facing (positive right),
+/// given the `current` class: forward within 55 degrees (65 while already forward), back past
+/// 125 (115 while already back), otherwise left (2) or right (3).
+fn strafe_direction(current: i32, angle: f32) -> i32 {
+    let (front, back) = match current {
+        0 => (65.0, 125.0),
+        1 => (55.0, 115.0),
+        _ => (55.0, 125.0),
+    };
+    if angle.abs() < front {
+        0
+    } else if angle.abs() > back {
+        1
+    } else if angle < 0.0 {
+        2
+    } else {
+        3
+    }
+}
+
+/// SpEffect behaviour reference ids the TAE puts on walk, run and sprint animations
+/// (`SP_EF_REF_TAE_MOVING_WALK/RUN/SPRINT`; the script's `GetLocomotionType`).
+const MOVING_REFS: [i32; 3] = [90, 91, 92];
 
 /// The player.
 pub type PlayerCharacter = Character;
@@ -185,6 +213,7 @@ impl Character {
             pending_damage: None,
             skeleton: load_skeleton(cache, chr),
             ground: Box::new(FlatGround::default()),
+            twist: 0.0,
             last_times: HashMap::new(),
             last_main: None,
         })
@@ -271,10 +300,54 @@ impl Character {
         (-dx).atan2(-dz)
     }
 
+    /// The yaw the character is drawn with: the body's facing minus the lower-body twist that
+    /// has not unwound yet, so a free move start turns the model smoothly while the body (and
+    /// its root motion) already points along the stick.
+    pub fn visual_yaw(&self) -> f32 {
+        angle_diff(self.body.yaw - self.twist.to_radians(), 0.0)
+    }
+
+    /// Free movement (not locked on, no attack target): when the stick is pushed while Wolf is
+    /// not already walking, running or sprinting and may start moving, the body turns to the
+    /// stick at once and the turn becomes the lower-body twist. The script then sees the stick
+    /// ahead (`TurnAngle` 0, so the forward move start) and the twist (`TwistLowerRootAngle`,
+    /// so its 180 degree turn-and-go start past 135 degrees). The directional move starts,
+    /// loops and stops it would otherwise pick from `TurnAngle` (back, left, right) are the
+    /// locked-on strafes; played in free movement they carried Wolf sideways or backwards
+    /// while steering turned him to face the stick.
+    fn free_move_start_turn(&mut self) {
+        let tae = &self.tae_runtime.frame;
+        let moving = MOVING_REFS.iter().any(|r| tae.behavior_refs.contains(r));
+        let ended = self
+            .behavior
+            .runtime
+            .main_clip()
+            .is_some_and(|c| c.at_end());
+        let may_move = !tae.restricted || tae.flag(cancel::MOVE) || ended;
+        // A TAE that stops turning (the sprint quick turn's wind-up) turns by root motion.
+        let may_turn = !tae.flag(cancel::DISABLE_TURN) && tae.turn_speed != Some(0.0);
+        if self.kind != ControlKind::Player
+            || self.attack_target().is_some()
+            || !self.body.grounded
+            || moving
+            || !may_move
+            || !may_turn
+        {
+            return;
+        }
+        let Some(stick) = self.input.stick_world_yaw() else {
+            return;
+        };
+        let turn = angle_diff(stick, self.body.yaw);
+        self.body.yaw = angle_diff(stick, 0.0);
+        self.twist = angle_diff((self.twist.to_radians()) + turn, 0.0).to_degrees();
+    }
+
     fn set_engine_variables(&mut self) {
         let rt = &mut self.behavior.runtime;
         match self.kind {
             ControlKind::Player => {
+                rt.set_variable("TwistLowerRootAngle", self.twist);
                 let level = self.input.stick_level();
                 // Stick direction relative to facing in degrees, positive to the RIGHT: the script
                 // quick-turns right for TurnAngle > 0 and picks the right strafe for MoveAngle > 0.
@@ -304,6 +377,16 @@ impl Character {
                     "KickStickLevel",
                 ] {
                     rt.set_variable(name, level);
+                }
+                // Locked on, the engine keeps the strafe direction (`MoveDirection`, an engine
+                // variable the move loop's selectors read: 0 forward, 1 back, 2 left, 3 right)
+                // following the stick; the script only seeds it when a move starts. The exe's
+                // WalkTwist classifier uses 60 degree cones with 5 degrees of hysteresis (traced
+                // by FwLo's RustSekiro, `docs/kb/movement.md`). Without it, a strafe kept its
+                // first direction: right, then left on the stick, still went right.
+                if self.lock_target.is_some() && level > 0.0 {
+                    let current = rt.variable("MoveDirection").unwrap_or(0.0) as i32;
+                    rt.set_variable("MoveDirection", strafe_direction(current, turn) as f32);
                 }
             }
             ControlKind::Npc => {
@@ -365,6 +448,7 @@ impl Character {
     pub fn tick(&mut self, frame: &InputFrame, dt: f32) -> StepReport {
         if self.kind == ControlKind::Player {
             self.input.update(frame, dt, &self.tae_runtime.frame);
+            self.free_move_start_turn();
         }
         self.set_engine_variables();
         self.fill_env(dt);
@@ -429,8 +513,17 @@ impl Character {
                 let clip = self.clips.clip(&c.animation)?;
                 let rm = clip.root_motion.as_ref()?;
                 let end = clip.duration;
+                // A clip entered from the previous clip's end event starts after this step's
+                // advance, at time 0. Taking its first `dt` of motion keeps the body moving
+                // through the switch instead of standing still for a step (a hitch every time
+                // the run start hands over to the run loop).
+                let time = if c.prev_time == 0.0 && c.time == 0.0 {
+                    dt
+                } else {
+                    c.time
+                };
                 let a = rm.sample(c.prev_time.min(end));
-                let b = rm.sample(c.time.min(end));
+                let b = rm.sample(time.min(end));
                 Some([b[0] - a[0], b[1] - a[1], b[2] - a[2], b[3] - a[3]])
             })
             .unwrap_or_default();
@@ -469,6 +562,9 @@ impl Character {
             velocity_change,
         };
         self.body.step(&body_input, dt, self.ground.as_ref());
+        // The lower body catches up with the facing at the default turn speed.
+        let unwind = DEFAULT_TURN_SPEED * dt;
+        self.twist -= self.twist.clamp(-unwind, unwind);
 
         let mut refs: Vec<i32> = tae.behavior_refs.iter().copied().collect();
         refs.sort_unstable();

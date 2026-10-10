@@ -1,0 +1,203 @@
+//! `--input FILE`: replays raw keyboard and mouse input into Bevy's input messages, so a run
+//! exercises the same path as a player at the keyboard (key state, accumulated mouse motion,
+//! cursor grab, camera orbit, stick building) instead of the simulation-level `--script`.
+//!
+//! One line per segment of rendered frames: `<frames> <keys> [<mouse_dx> <mouse_dy>]`, where
+//! keys is a comma list of `W A S D Q Space Shift C Esc Click` (`Click` is the left mouse
+//! button; a key named in consecutive segments stays held) or `-`, and the mouse moves by the
+//! given counts every frame. `#` starts a comment. Frames count from the first frame the
+//! simulation runs.
+//!
+//! The replay owns the input: real keyboard, mouse button and mouse motion messages are dropped,
+//! so someone using the machine meanwhile does not disturb the run. The run starts with the
+//! cursor free, as after Esc; a `Click` takes it, as a player clicking into the window does.
+//!
+//! Every frame is logged to stderr as a `cam` line (frame, focus, grab mode, mouse delta,
+//! lock-on, camera yaw and pitch, stick) and every simulation step as a `move` line (see
+//! `play.rs`).
+
+use bevy::input::ButtonState;
+use bevy::input::keyboard::{Key, KeyboardInput, NativeKey};
+use bevy::input::mouse::{MouseButtonInput, MouseMotion};
+use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
+
+/// One segment of replayed input.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Segment {
+    pub frames: usize,
+    pub keys: Vec<KeyCode>,
+    /// Left mouse button held.
+    pub click: bool,
+    pub mouse: Vec2,
+}
+
+fn key(name: &str) -> Result<KeyCode, String> {
+    Ok(match name {
+        "W" => KeyCode::KeyW,
+        "A" => KeyCode::KeyA,
+        "S" => KeyCode::KeyS,
+        "D" => KeyCode::KeyD,
+        "Q" => KeyCode::KeyQ,
+        "C" => KeyCode::KeyC,
+        "Space" => KeyCode::Space,
+        "Shift" => KeyCode::ShiftLeft,
+        "Esc" => KeyCode::Escape,
+        other => return Err(format!("unknown key {other:?}")),
+    })
+}
+
+pub fn parse(text: &str) -> Result<Vec<Segment>, String> {
+    let mut out = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let err = |e: String| format!("line {}: {e}", n + 1);
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() != 2 && parts.len() != 4 {
+            return Err(err("expected frames keys [dx dy]".into()));
+        }
+        let frames = parts[0].parse().map_err(|e| err(format!("{e}")))?;
+        let names: Vec<&str> = match parts[1] {
+            "-" => Vec::new(),
+            list => list.split(',').collect(),
+        };
+        let click = names.contains(&"Click");
+        let keys = names
+            .into_iter()
+            .filter(|n| *n != "Click")
+            .map(key)
+            .collect::<Result<_, _>>()
+            .map_err(err)?;
+        let num = |s: &str| s.parse::<f32>().map_err(|e| err(format!("{e}")));
+        let mouse = match parts.get(2..4) {
+            Some([x, y]) => Vec2::new(num(x)?, num(y)?),
+            _ => Vec2::ZERO,
+        };
+        out.push(Segment {
+            frames,
+            keys,
+            click,
+            mouse,
+        });
+    }
+    Ok(out)
+}
+
+/// The replay and how far it has got.
+#[derive(Resource)]
+pub struct InputReplay {
+    segments: Vec<Segment>,
+    /// Frames replayed so far.
+    pub frame: usize,
+    held: Vec<KeyCode>,
+    clicking: bool,
+    /// Set by the game once the simulation runs; frames count from there.
+    pub running: bool,
+}
+
+impl InputReplay {
+    pub fn new(segments: Vec<Segment>) -> Self {
+        Self {
+            segments,
+            frame: 0,
+            held: Vec::new(),
+            clicking: false,
+            running: false,
+        }
+    }
+
+    pub fn total_frames(&self) -> usize {
+        self.segments.iter().map(|s| s.frames).sum()
+    }
+
+    pub fn done(&self) -> bool {
+        self.frame >= self.total_frames()
+    }
+
+    fn segment_at(&self, frame: usize) -> Option<&Segment> {
+        let mut start = 0;
+        for s in &self.segments {
+            if frame < start + s.frames {
+                return Some(s);
+            }
+            start += s.frames;
+        }
+        None
+    }
+}
+
+/// Drops the real input of this frame and writes the replayed key and button changes and mouse
+/// motion instead. Runs before Bevy's input systems, so `ButtonInput` and
+/// `AccumulatedMouseMotion` see them this frame.
+pub fn inject(
+    mut replay: ResMut<InputReplay>,
+    window: Query<Entity, With<PrimaryWindow>>,
+    mut keys: ResMut<Messages<KeyboardInput>>,
+    mut buttons: ResMut<Messages<MouseButtonInput>>,
+    mut motion: ResMut<Messages<MouseMotion>>,
+) {
+    keys.clear();
+    buttons.clear();
+    motion.clear();
+    if !replay.running {
+        return;
+    }
+    let Ok(window) = window.single() else {
+        return;
+    };
+    let frame = replay.frame;
+    let (want, click, mouse) = match replay.segment_at(frame) {
+        Some(s) => (s.keys.clone(), s.click, s.mouse),
+        None => (Vec::new(), false, Vec2::ZERO),
+    };
+    let message = |key_code: KeyCode, state: ButtonState| KeyboardInput {
+        key_code,
+        logical_key: Key::Unidentified(NativeKey::Unidentified),
+        state,
+        text: None,
+        repeat: false,
+        window,
+    };
+    for k in replay.held.iter().filter(|k| !want.contains(k)) {
+        keys.write(message(*k, ButtonState::Released));
+    }
+    for k in want.iter().filter(|k| !replay.held.contains(k)) {
+        keys.write(message(*k, ButtonState::Pressed));
+    }
+    replay.held = want;
+    if click != replay.clicking {
+        buttons.write(MouseButtonInput {
+            button: MouseButton::Left,
+            state: if click {
+                ButtonState::Pressed
+            } else {
+                ButtonState::Released
+            },
+            window,
+        });
+        replay.clicking = click;
+    }
+    if mouse != Vec2::ZERO {
+        motion.write(MouseMotion { delta: mouse });
+    }
+    replay.frame += 1;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_keys_clicks_and_mouse() {
+        let s = parse("# x\n10 W,D,Click 3 -1\n5 -\n").unwrap();
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[0].keys, vec![KeyCode::KeyW, KeyCode::KeyD]);
+        assert!(s[0].click && !s[1].click);
+        assert_eq!(s[0].mouse, Vec2::new(3.0, -1.0));
+        assert_eq!(s[1].mouse, Vec2::ZERO);
+        assert!(parse("3 X").is_err());
+    }
+}

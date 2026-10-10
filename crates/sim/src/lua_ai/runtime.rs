@@ -153,6 +153,69 @@ pub struct Request {
     pub combo: bool,
 }
 
+/// The global the scripts' own `Common_Battle_Activate` is kept under while the act hook
+/// (see [`ActHook`]) stands in for it.
+pub const SCRIPT_BATTLE_ACTIVATE: &str = "__script_Common_Battle_Activate";
+
+/// How an act subgoal sets an AI number when it activates, as the scripts'
+/// `goal:TimingSetNumber(slot, value, AI_TIMING_SET__ACTIVATE)` does.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NumberOnActivate {
+    /// `GetNumber(slot) + n`, read when the act is queued (the scripts compute it then).
+    Add(i32, f64),
+    /// A fixed value.
+    Set(i32, f64),
+}
+
+/// One subgoal of an act chosen outside the scripts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActGoal {
+    /// The goal id's global name in `goal_list.lua`, such as `GOAL_COMMON_ComboFinal`.
+    pub goal: &'static str,
+    /// Lifetime in seconds.
+    pub life: f64,
+    /// Goal parameters after the lifetime, as numbers (`TARGET_ENE_0` is 0).
+    pub params: Vec<f64>,
+    pub number: Option<NumberOnActivate>,
+}
+
+/// An act chosen outside the scripts, queued on the battle goal in place of the act its own
+/// `Common_Battle_Activate` would pick.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActChoice {
+    /// Approach first with the scripts' `Approach_Act_Flex` until within this many metres
+    /// (already less the hit radius, as the acts pass it).
+    pub approach: Option<f64>,
+    pub goals: Vec<ActGoal>,
+}
+
+/// Who chose the act at one battle-goal activation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActSlot {
+    /// The external [`ActChoice`] was queued.
+    External,
+    /// The script's own weighted pick (no external choice was waiting).
+    Script,
+    /// A reaction the script set up itself (subgoals already queued, or a reflex act weighted):
+    /// the script's pick runs and any external choice keeps waiting.
+    Reflex,
+}
+
+/// Lets something outside the scripts choose the battle goal's acts. Installed by
+/// [`super::AiBrain::enable_act_hook`]: the global `Common_Battle_Activate` (the shared helper
+/// every table battle goal calls once it has weighted its acts) is replaced by a host function
+/// that queues [`ActHook::choice`] instead, unless the moment is a reaction.
+#[derive(Debug, Clone, Default)]
+pub struct ActHook {
+    /// Act indices of the battle goal that are reactions (punishing a heal, turning to a
+    /// target behind); when the script weighs any of them, its own pick stands.
+    pub reflex_acts: Vec<i32>,
+    /// The act to queue at the next battle-goal activation; taken when used.
+    pub choice: Option<ActChoice>,
+    /// Every activation since the last drain, with the AI clock.
+    pub slots: Vec<(f32, ActSlot)>,
+}
+
 /// Registered goal and logic information plus all per-character AI state. Implements the
 /// scripts' [`Host`].
 pub struct AiState {
@@ -189,6 +252,8 @@ pub struct AiState {
     /// The SpEffect whose activation or end is being dispatched
     /// (`GetSpecialEffectActivateInterruptType`, `GetSpecialEffectInactivateInterruptType`).
     pub effect_interrupt: Option<i32>,
+    /// External act choices (the boss brain); `None` runs the scripts unchanged.
+    pub act_hook: Option<ActHook>,
 }
 
 impl AiState {
@@ -218,6 +283,7 @@ impl AiState {
             last_parry_timing: false,
             observed_effects: Vec::new(),
             effect_interrupt: None,
+            act_hook: None,
         };
         s.top = s.new_goal(0, -1.0, Vec::new(), None);
         s
@@ -446,6 +512,7 @@ impl Host for AiState {
             "ENABLE_COMBO_ATK_CANCEL" => {
                 self.combo_cancel.insert(n(0) as i32);
             }
+            "Common_Battle_Activate" => return self.battle_activate(_vm, args),
             "REGISTER_LOGIC_FUNC"
             | "REGISTER_GOAL_NO_SUB_GOAL"
             | "REGISTER_GOAL_NO_UPDATE"
@@ -512,6 +579,117 @@ impl Host for AiState {
 }
 
 impl AiState {
+    /// Stands in for the scripts' `Common_Battle_Activate(ai, goal, weights, acts, after,
+    /// params)` while an [`ActHook`] is installed: queues the external act on the battle goal,
+    /// or calls the script's own function.
+    fn battle_activate(&mut self, vm: &mut Vm, args: &[Value]) -> LuaResult<Vec<Value>> {
+        let goal = match args.get(1) {
+            Some(Value::Obj(o))
+                if o.kind == OBJ_GOAL
+                    && self.goals.get(o.id as usize).is_some_and(Option::is_some) =>
+            {
+                Some(o.id)
+            }
+            _ => None,
+        };
+        let time = self.time;
+        let slot = match (&self.act_hook, goal) {
+            (Some(hook), Some(g)) => {
+                // A reaction the script already queued (Common_ActivateAct: a heal, a step
+                // away), or a reflex act among the weighted ones.
+                let queued = !self.goal(g).subgoals.is_empty();
+                let reflex_weighted = match args.get(2) {
+                    Some(Value::Table(t)) => {
+                        let t = t.borrow();
+                        hook.reflex_acts
+                            .iter()
+                            .any(|&a| t.get(&Value::Num(a as f64)).num().unwrap_or(0.0) > 0.0)
+                    }
+                    _ => false,
+                };
+                if queued || reflex_weighted {
+                    ActSlot::Reflex
+                } else if hook.choice.is_some() {
+                    ActSlot::External
+                } else {
+                    ActSlot::Script
+                }
+            }
+            _ => ActSlot::Script,
+        };
+        if let Some(hook) = self.act_hook.as_mut() {
+            hook.slots.push((time, slot));
+        }
+        if slot == ActSlot::External
+            && let (Some(g), Some(choice)) =
+                (goal, self.act_hook.as_mut().and_then(|h| h.choice.take()))
+        {
+            self.queue_act(vm, g, &choice)?;
+            return Ok(vec![]);
+        }
+        let script = vm.get_global(SCRIPT_BATTLE_ACTIVATE);
+        if script.is_nil() {
+            return Ok(vec![]);
+        }
+        vm.call(self, &script, args)
+    }
+
+    /// Queues an external act on battle goal `g` the way the scripts' acts do: an approach,
+    /// then the attack goals with their AI-number settings.
+    fn queue_act(&mut self, vm: &mut Vm, g: u32, choice: &ActChoice) -> LuaResult<()> {
+        let n = Value::Num;
+        if let Some(d) = choice.approach {
+            // Approach_Act_Flex(ai, goal, dist, walkDist, runDist, walkChance, guardChance,
+            // walkLife, runLife). The Owl's acts pass (d, d, 999, 30, 0, 1.5, 3), but his script
+            // only picks an act at a distance that suits it; an outside plan may start from
+            // anywhere, so it runs beyond 3 m more and gets longer lifetimes (ours).
+            vm.call_global(
+                self,
+                "Approach_Act_Flex",
+                &[
+                    ai_obj(),
+                    goal_obj(g),
+                    n(d),
+                    n(d),
+                    n(d + 3.0),
+                    n(30.0),
+                    n(0.0),
+                    n(3.0),
+                    n(5.0),
+                ],
+            )?;
+        }
+        for step in &choice.goals {
+            let Some(kind) = vm.get_global(step.goal).num() else {
+                self.log(AiEvent::Error(format!(
+                    "act goal {} is not defined",
+                    step.goal
+                )));
+                continue;
+            };
+            let mut a = vec![n(kind), n(step.life)];
+            a.extend(step.params.iter().copied().map(n));
+            let Some(Value::Obj(sub)) = self.add_goal(g, false, &a).into_iter().next() else {
+                continue;
+            };
+            if let Some(set) = step.number {
+                let (slot, value) = match set {
+                    NumberOnActivate::Add(slot, v) => {
+                        (slot, self.numbers.get(&slot).copied().unwrap_or(0.0) + v)
+                    }
+                    NumberOnActivate::Set(slot, v) => (slot, v),
+                };
+                self.goal_mut(sub.id).timing_sets.push(TimingSet {
+                    timer: false,
+                    slot,
+                    value,
+                    timing: TIMING_ACTIVATE,
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn add_goal(&mut self, parent: u32, front: bool, a: &[Value]) -> Vec<Value> {
         let n = |i: usize| a.get(i).and_then(Value::num).unwrap_or(0.0);
         let kind = n(0) as i32;

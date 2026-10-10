@@ -1,8 +1,11 @@
-//! `duel-sim [--script FILE] [--steps N] [--passive] [--enemy c1010|c5060] [--simple-ai]`: Wolf
-//! (input script, default: guard on and off) against an enemy (default the Ashina soldier) and
-//! its own AI. Prints state changes, AI actions, unknown AI calls and every hit; `--goals` adds
-//! goal starts and interrupts.
+//! `duel-sim [--script FILE] [--steps N] [--passive] [--enemy c1010|c5060] [--simple-ai]
+//! [--brain lua|scripted] [--brain-log]`: Wolf (input script, default: guard on and off) against
+//! an enemy (default the Ashina soldier) and its own AI. Prints state changes, AI actions,
+//! unknown AI calls and every hit; `--goals` adds goal starts and interrupts. `--brain` picks
+//! who chooses a boss's acts (`docs/BRAIN.md`); `--brain-log` writes its JSONL log to
+//! `cache/brain_logs/`.
 
+use sekiro_sim::brain::BrainKind;
 use sekiro_sim::duel::Duel;
 use sekiro_sim::enemy::EnemySpec;
 use sekiro_sim::lua_ai::AiEvent;
@@ -30,6 +33,8 @@ fn main() {
     let mut spec = EnemySpec::soldier();
     let mut simple = false;
     let mut goals = false;
+    let mut brain = None;
+    let mut brain_log = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -38,6 +43,8 @@ fn main() {
             "--passive" => passive = true,
             "--simple-ai" => simple = true,
             "--goals" => goals = true,
+            "--brain" => brain = Some(BrainKind::by_name(&args.next().unwrap()).unwrap()),
+            "--brain-log" => brain_log = true,
             "--enemy" => spec = EnemySpec::by_name(&args.next().unwrap()).unwrap(),
             other => panic!("unknown argument {other}"),
         }
@@ -48,6 +55,15 @@ fn main() {
     if simple {
         duel.use_simple_ai();
     }
+    if brain.is_some() || brain_log {
+        let kind = brain.unwrap_or_default();
+        match duel.set_brain(kind.build(), brain_log) {
+            Ok(Some(path)) => println!("brain {kind:?}, log {}", path.display()),
+            Ok(None) => println!("brain {kind:?}"),
+            Err(e) => panic!("--brain: {e}"),
+        }
+    }
+    let mut planned = 0;
     println!(
         "player rig {} dummies, {} attacks; enemy rig {} dummies, {} attacks",
         duel.fighters[0].rig.len(),
@@ -117,5 +133,18 @@ fn main() {
                 }
             }
         }
+        if let Some(b) = &duel.boss_brain {
+            for plan in &b.history[planned..] {
+                println!("{i:5} BRAIN plan {plan:?}");
+            }
+            planned = b.history.len();
+        }
+    }
+    if let Some(b) = &duel.boss_brain {
+        println!("brain {}: {:?}", b.brain_name(), b.stats);
+        println!(
+            "tally: {}",
+            serde_json::to_string(&b.tally.summary()).unwrap_or_default()
+        );
     }
 }

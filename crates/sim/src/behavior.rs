@@ -270,6 +270,13 @@ impl BehaviorRuntime {
         !self.queue.is_empty()
     }
 
+    /// A variable changed since the last rebuild, so selectors and layers bound to it may pick
+    /// differently (Havok re-reads bindings every update; a strafe loop follows
+    /// `MoveDirection` while it plays).
+    pub fn bindings_changed(&self) -> bool {
+        self.dirty
+    }
+
     /// Applies all queued events and returns the hooks to run, deactivations first.
     pub fn process_events(&mut self, durations: &mut dyn ClipDurations) -> Vec<HookCall> {
         let before: Vec<StateRef> = self.active_states.clone();

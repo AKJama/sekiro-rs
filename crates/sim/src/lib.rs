@@ -10,6 +10,7 @@ pub mod ai;
 pub mod arena;
 pub mod behavior;
 pub mod body;
+pub mod brain;
 pub mod bullets;
 pub mod camera;
 pub mod character;

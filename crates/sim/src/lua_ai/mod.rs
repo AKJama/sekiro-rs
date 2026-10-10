@@ -15,5 +15,5 @@ pub mod world;
 mod tests;
 
 pub use brain::{AiBrain, AiLoadError, REF_AI_BATTLE, read_luainfo};
-pub use runtime::AiEvent;
+pub use runtime::{ActChoice, ActGoal, ActHook, ActSlot, AiEvent, NumberOnActivate};
 pub use world::{AiActor, AiWorld, ThinkParams, anim_id_from_clip};

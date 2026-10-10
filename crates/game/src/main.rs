@@ -18,6 +18,7 @@ mod character;
 mod combat_hud;
 mod deathblow_demo;
 mod draw_mask;
+mod input_replay;
 mod lighting;
 mod map;
 mod play;
@@ -100,6 +101,7 @@ fn main() -> anyhow::Result<()> {
         return play::run(play::Options {
             cache: PathBuf::from(arg_value(&args, "--cache").unwrap_or_else(|| "cache".into())),
             script: arg_value(&args, "--script"),
+            input: arg_value(&args, "--input"),
             screenshots,
             exit_after_script: args.iter().any(|a| a == "--exit"),
             enemy: !args.iter().any(|a| a == "--no-enemy"),
@@ -115,6 +117,12 @@ fn main() -> anyhow::Result<()> {
             objects: args.iter().any(|a| a == "--objects"),
             lock_on: args.iter().any(|a| a == "--lock-on"),
             simple_ai: args.iter().any(|a| a == "--simple-ai"),
+            brain: match arg_value(&args, "--brain") {
+                Some(name) => sekiro_sim::brain::BrainKind::by_name(&name)
+                    .map_err(|e| anyhow::anyhow!("--brain: {e}"))?,
+                None => sekiro_sim::brain::BrainKind::Lua,
+            },
+            brain_log: args.iter().any(|a| a == "--brain-log"),
             map: arg_value(&args, "--map"),
             start: arg_f32(&args, "--start", 0.0)? as usize,
             spawn: map::parse_camera(arg_value(&args, "--spawn").as_deref())?
@@ -135,7 +143,9 @@ fn main() -> anyhow::Result<()> {
     eprintln!(
         "                 [--map <id> [--start <n> | --spawn x,y,z,yaw,0]] [--no-enemy] [--lock-on]"
     );
-    eprintln!("                 [--simple-ai] [--enemy c1010|c5060]");
+    eprintln!(
+        "                 [--simple-ai] [--enemy c1010|c5060] [--brain lua|scripted] [--brain-log]"
+    );
     eprintln!("       sekiro-rs --arena owl [--full-map] [--play options] (a boss on his own map)");
     eprintln!("usage: sekiro-rs --arena [--deathblow] [--screenshot <out.png> --at <seconds>]");
     eprintln!("       sekiro-rs --map <id> [--start <n>] [--camera x,y,z,yaw,pitch] [--collision]");

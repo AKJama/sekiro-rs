@@ -477,7 +477,7 @@ impl PlayerBehavior {
         ran: &mut Vec<String>,
     ) {
         for _ in 0..MAX_EVENT_ROUNDS {
-            if !self.runtime.has_pending_events() {
+            if !self.runtime.has_pending_events() && !self.runtime.bindings_changed() {
                 break;
             }
             let hooks = self.runtime.process_events(self.durations.as_mut());

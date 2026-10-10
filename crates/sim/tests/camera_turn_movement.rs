@@ -1,0 +1,192 @@
+//! Free-camera movement: the stick is camera-relative, so whatever the camera and Wolf's facing,
+//! Wolf must run where the stick points, turn toward a new stick direction smoothly, and stop
+//! when it is let go. Reproduces "movement inverts / feels like tank controls after spinning
+//! the camera". Skips when `cache/` has not been extracted. `--nocapture` prints a per-step log.
+
+use sekiro_sim::input::angle_diff;
+use sekiro_sim::{Character, InputFrame};
+use std::f32::consts::{FRAC_PI_2, PI, TAU};
+use std::path::PathBuf;
+
+const DT: f32 = 1.0 / 60.0;
+
+fn load() -> Option<Character> {
+    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    if !cache.join("raw/chr/c0000.behbnd.d/c0000.hkx").exists() {
+        return None;
+    }
+    let mut wolf = Character::load_from_cache(&cache).unwrap();
+    wolf.settle(DT, 400);
+    Some(wolf)
+}
+
+/// One step's movement.
+struct Step {
+    /// Angle from the stick direction to the direction Wolf travelled, degrees (NaN when the
+    /// stick is released or Wolf stands still).
+    err: f32,
+    speed: f32,
+}
+
+/// Runs `steps` with the input from `input(i)`, logging each step.
+fn run(wolf: &mut Character, steps: usize, input: impl Fn(usize) -> InputFrame) -> Vec<Step> {
+    let mut out = Vec::new();
+    for i in 0..steps {
+        let frame = input(i);
+        let before = wolf.body.position;
+        let r = wolf.tick(&frame, DT);
+        let stick = wolf.input.stick_world_yaw();
+        let (dx, dz) = (r.position[0] - before[0], r.position[2] - before[2]);
+        let speed = (dx * dx + dz * dz).sqrt() / DT;
+        let travel = (-dx).atan2(-dz);
+        let err = match stick {
+            Some(s) if speed > 0.05 => angle_diff(travel, s).to_degrees(),
+            _ => f32::NAN,
+        };
+        let v = |n: &str| wolf.behavior.runtime.variable(n).unwrap_or(f32::NAN);
+        eprintln!(
+            "{i:3} cam {:7.1} stick {:7.1} face {:7.1} twist {:6.1} TurnAngle {:7.1} v {:.2} \
+             err {:7.1} {} {:?} t {:.2}",
+            frame.camera_yaw.to_degrees(),
+            stick.map_or(f32::NAN, f32::to_degrees),
+            r.yaw.to_degrees(),
+            wolf.twist,
+            v("TurnAngle"),
+            speed,
+            err,
+            r.behavior.state_path.last().cloned().unwrap_or_default(),
+            r.animation,
+            r.anim_time,
+        );
+        out.push(Step { err, speed });
+    }
+    out
+}
+
+fn stick(x: f32, y: f32, camera_yaw: f32) -> InputFrame {
+    InputFrame {
+        move_stick: [x, y],
+        camera_yaw,
+        ..InputFrame::default()
+    }
+}
+
+/// Every moving step in `steps` travels within `limit` degrees of the stick.
+fn assert_follows(steps: &[Step], limit: f32, what: &str) {
+    let moving: Vec<f32> = steps
+        .iter()
+        .map(|s| s.err)
+        .filter(|e| !e.is_nan())
+        .collect();
+    assert!(moving.len() * 2 > steps.len(), "{what}: Wolf barely moved");
+    let worst = moving.iter().fold(0f32, |m, e| m.max(e.abs()));
+    assert!(worst < limit, "{what}: travel {worst:.0} deg off the stick");
+}
+
+#[test]
+fn camera_sweep_with_stick_forward() {
+    let Some(mut wolf) = load() else { return };
+    // Run forward 1 s, then sweep the camera a full turn over 3 s, then hold 1 s.
+    let steps = run(&mut wolf, 300, |i| {
+        let t = (i as f32 - 60.0).clamp(0.0, 180.0) / 180.0;
+        stick(0.0, 1.0, t * TAU)
+    });
+    assert_follows(&steps[30..], 15.0, "sweep");
+}
+
+#[test]
+fn camera_flips_instantly_with_stick_held() {
+    let Some(mut wolf) = load() else { return };
+    let steps = run(&mut wolf, 180, |i| {
+        stick(0.0, 1.0, if i < 60 { 0.0 } else { PI })
+    });
+    assert_follows(&steps[30..60], 15.0, "before the flip");
+    assert_follows(&steps[120..], 15.0, "after the flip");
+}
+
+#[test]
+fn stick_repushed_after_camera_turn() {
+    let Some(mut wolf) = load() else { return };
+    let steps = run(&mut wolf, 220, |i| {
+        let y = if (60..100).contains(&i) { 0.0 } else { 1.0 };
+        stick(0.0, y, if i < 70 { 0.0 } else { 2.5 })
+    });
+    assert_follows(&steps[110..], 15.0, "re-pushed");
+}
+
+#[test]
+fn moves_off_in_every_direction_from_every_facing() {
+    let Some(mut wolf) = load() else { return };
+    for facing in 0..4 {
+        for dir in 0..8 {
+            wolf.settle(DT, 400);
+            wolf.body.yaw = facing as f32 * FRAC_PI_2;
+            let a = dir as f32 * TAU / 8.0;
+            let (x, y) = (a.sin(), a.cos());
+            let steps = run(&mut wolf, 60, |_| stick(x, y, 0.3));
+            assert_follows(&steps[10..], 15.0, &format!("facing {facing} stick {dir}"));
+            run(&mut wolf, 90, |_| stick(0.0, 0.0, 0.3));
+        }
+    }
+}
+
+#[test]
+fn quick_reverse_and_stop() {
+    let Some(mut wolf) = load() else { return };
+    // Run forward, pull the stick back (W then S), then let go.
+    let steps = run(&mut wolf, 260, |i| match i {
+        0..90 => stick(0.0, 1.0, 0.0),
+        90..200 => stick(0.0, -1.0, 0.0),
+        _ => stick(0.0, 0.0, 0.0),
+    });
+    assert_follows(&steps[150..200], 15.0, "reversed");
+    let last = &steps[250..];
+    assert!(
+        last.iter().all(|s| s.speed < 0.3),
+        "still moving after letting go"
+    );
+}
+
+#[test]
+fn sprint_quick_turn_ends_facing_the_stick() {
+    let Some(mut wolf) = load() else { return };
+    // Sprint forward (dodge held), then pull the stick back: the script's sprint quick turn
+    // turns Wolf by its root motion and he sprints the other way.
+    let steps = run(&mut wolf, 240, |i| {
+        let mut f = stick(0.0, if i < 100 { 1.0 } else { -1.0 }, 0.0);
+        f.buttons.dodge = i > 5;
+        f
+    });
+    assert_follows(&steps[60..100], 15.0, "sprinting");
+    assert_follows(&steps[180..], 15.0, "after the sprint quick turn");
+}
+
+#[test]
+fn running_never_stalls_between_clips() {
+    let Some(mut wolf) = load() else { return };
+    // The run start hands over to the run loop at its end; the body keeps moving through it.
+    let steps = run(&mut wolf, 300, |_| stick(0.0, 1.0, 0.0));
+    let slowest = steps[20..].iter().map(|s| s.speed).fold(f32::MAX, f32::min);
+    assert!(
+        slowest > 3.0,
+        "Wolf stalled at {slowest:.2} m/s while running"
+    );
+}
+
+#[test]
+fn locked_on_strafes_follow_the_stick() {
+    let Some(mut wolf) = load() else { return };
+    let target = [0.0, 0.0, -6.0];
+    // Locked on, the camera looks from behind Wolf at the target; strafe right, then left,
+    // then back off and close in.
+    let keys = [(1.0, 0.0), (-1.0, 0.0), (0.0, -1.0), (0.0, 1.0)];
+    for (k, (x, y)) in keys.into_iter().enumerate() {
+        let mut steps = Vec::new();
+        for _ in 0..90 {
+            wolf.lock_target = Some(target);
+            let cam = wolf.yaw_to(target);
+            steps.extend(run(&mut wolf, 1, |_| stick(x, y, cam)));
+        }
+        assert_follows(&steps[30..], 20.0, &format!("locked strafe {k}"));
+    }
+}

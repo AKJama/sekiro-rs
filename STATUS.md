@@ -18,6 +18,7 @@ How much of the game is done overall: `docs/PROGRESS.md`.
 | Deathblows | Real ThrowParam pairs; posture break -> deathblow -> death; Wolf death and respawn | `docs/DEATHBLOW.md` |
 | Enemy | Soldier runs its own HKS script, behaviour graph and real Lua AI (Lua 5.0 VM + goal runtime); real combo cancels | `docs/AI.md` |
 | Great Shinobi Owl | c5060 (not c5070, his bird) with his own HKS, graph, TAE, params and Lua AI on the flat floor and on the Ashina Castle top where the game places him (`--arena owl`); shuriken bullets; two deathblows with the get-up and finishing pairs | `docs/OWL.md` |
+| Boss brain | The Owl's act choices can come from an outside controller (`--brain lua\|scripted`, `--brain-log`): plans of his own action ids run through his battle goal, reflexes stay with his Lua AI, mirrored observation and an outcome tally per action | `docs/BRAIN.md` |
 | Map | m11_00_00_00 (Ashina Outskirts and Castle) and m11_01_00_00 (the invaded castle): pieces, textures, normal maps, collision; boss arenas load the pieces and collision within a radius | `docs/FORMATS.md` (Maps) |
 
 ## How to run
@@ -34,7 +35,7 @@ cargo run --release -p sekiro-game -- --play --map m11_00_00_00 --start 3
 cargo run --release -p sekiro-game -- --arena owl
 ```
 
-Useful flags: `--play` alone uses a flat floor; `--enemy owl` (or `c5060`) fights the Great Shinobi Owl instead of the soldier; `--arena owl` fights him on the castle top where the game places him (only the map within 60 m; `--full-map` loads all of it; `docs/OWL.md`, "The castle top"); in play, `--hide <model prefixes>` skips map piece models and `--objects` adds MSB objects; `--lock-on`, `--no-enemy`, `--simple-ai`, `--script FILE --shots step:path --exit` for scripted runs with screenshots; `--arena --deathblow` for the deathblow demo; `--viewer <glb>` and `--map <id>` for inspection.
+Useful flags: `--play` alone uses a flat floor; `--enemy owl` (or `c5060`) fights the Great Shinobi Owl instead of the soldier; `--arena owl` fights him on the castle top where the game places him (only the map within 60 m; `--full-map` loads all of it; `docs/OWL.md`, "The castle top"); in play, `--hide <model prefixes>` skips map piece models and `--objects` adds MSB objects; `--lock-on`, `--no-enemy`, `--simple-ai`, `--script FILE --shots step:path --exit` for scripted runs with screenshots; `--input FILE` replays raw keys and mouse through the live input path and logs camera and movement per frame and step (`crates/game/src/input_replay.rs`); `--arena --deathblow` for the deathblow demo; `--viewer <glb>` and `--map <id>` for inspection.
 
 ## In progress when the session paused
 
@@ -58,7 +59,9 @@ Uncommitted files in the working tree belong to these tasks; check `git status` 
 ## Known issues
 
 - Mouse look was far too sensitive (reported 2026-10-10); `MOUSE_SENSITIVITY` in play.rs is now 0.0012 radians per mouse count (was 0.0035), not yet confirmed by the user.
-- Free camera: after spinning the camera, movement feels inverted or tank-like (stick direction vs camera yaw vs Wolf facing); reproduce with a scripted run that turns the camera 180 degrees and logs stick yaw, MoveAngle and facing.
+- Fixed 2026-10-10, to be confirmed in play: movement "inverted / tank-like" after turning the camera. Free move starts picked the locked-on strafe clips (back, left, right) from the stick's angle to Wolf's facing while steering turned him to the stick, so he side-stepped or ran backwards; now a free move start turns the body to the stick and keeps the turn as the lower-body twist (`TwistLowerRootAngle`, drawn as a smooth turn), so the script picks the forward start or its 180 degree turn-and-go. That snap-and-twist model is inferred from the script and graph, not traced in the exe. Locked-on strafes now follow the stick (engine `MoveDirection` with the WalkTwist cones, and bound graph selectors re-read when a variable changes). Tests: `crates/sim/tests/camera_turn_movement.rs`.
+- Fixed 2026-10-10: after Esc freed the mouse, the camera ignored it until Esc again (clicking did nothing); a click now takes the mouse back (and does not attack). Mouse motion during map loading no longer turns the start view. Wolf and the enemy are drawn between simulation steps, so frames with no or two steps no longer stall or jump.
+- Root motion of clips that turn (sprint quick turn) is applied in the facing at each step, not in the clip's turning frame, so their path is slightly off.
 - Wolf's max HP/posture come from CalcCorrectGraph at progression level 1; the real progression input is not yet traced.
 - Player HP damage formula is inferred (weapon attack power x correction), not traced.
 - Single-clip rendering: layered upper/lower-body states show one clip (FwLo's RustSekiro plays them with the graph's bone weights; next to port).

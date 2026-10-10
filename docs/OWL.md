@@ -233,4 +233,4 @@ The next boss (Genichiro on the castle roof, for example) is one new row.
 
 1. Decode the EMEVD bank used around entity 1110850 (boss health bar 905060, the phase-2 SpEffect 200051, the heat-up check on 3506080) and run his phase change from it; it also says which castle top floor (`m015070` or `m015072`) the fight shows.
 2. NPC-on-player throws (his grabs 3037, 3040, 3041), firecracker and poison bullets.
-3. The decision-model brain that replaces his Lua AI with mirrored information.
+3. The boss brain is in place (`docs/BRAIN.md`, `--brain scripted`): next, a hosted decision-model controller behind the same `BossBrain` trait.

@@ -106,6 +106,9 @@ pub struct Duel {
     /// A character that falls this far below its start is put back there (a stand-in for
     /// fall death, which is not modelled yet). `None` on the flat floor, where nobody falls.
     pub fall_respawn_depth: Option<f32>,
+    /// The boss brain choosing the enemy's acts with its Lua AI (see [`crate::brain`]);
+    /// `None` leaves the Lua AI alone.
+    pub boss_brain: Option<crate::brain::BrainDriver>,
 }
 
 fn placement(c: &Character) -> Placement {
@@ -173,6 +176,7 @@ impl Duel {
             last_steps: Default::default(),
             bullets: Default::default(),
             fall_respawn_depth: None,
+            boss_brain: None,
         })
     }
 
@@ -203,7 +207,38 @@ impl Duel {
     /// Switches the soldier to the stand-in [`SimpleBrain`] (for comparison and for tests that
     /// need a predictable attacker).
     pub fn use_simple_ai(&mut self) {
+        self.boss_brain = None;
         self.ai = None;
+    }
+
+    /// Puts a boss brain (see [`crate::brain`]) in charge of the enemy's acts; its Lua AI keeps
+    /// the reflexes. `log` writes a JSONL log to `cache/brain_logs/` and returns its path.
+    /// Fails for an enemy without an action table or without its Lua AI.
+    pub fn set_brain(
+        &mut self,
+        brain: Box<dyn crate::brain::BossBrain>,
+        log: bool,
+    ) -> Result<Option<PathBuf>, String> {
+        let actions = crate::brain::BossActions::for_chr(&self.spec.chr)
+            .ok_or_else(|| format!("no boss brain action list for {}", self.spec.chr))?;
+        if self.ai.is_none() {
+            return Err(format!(
+                "{} has no Lua AI to pair the brain with",
+                self.spec.chr
+            ));
+        }
+        let mut driver = crate::brain::BrainDriver::new(brain, actions);
+        let path = if log {
+            Some(
+                driver
+                    .log_to(&self.cache.join("brain_logs"))
+                    .map_err(|e| format!("brain log: {e}"))?,
+            )
+        } else {
+            None
+        };
+        self.boss_brain = Some(driver);
+        Ok(path)
     }
 
     /// Whether Wolf's current attack carries the parry-timing flag ([`FLAG_PARRY_TIMING`]).
@@ -602,13 +637,25 @@ impl Duel {
             input.buttons.attack = false;
         }
 
+        if let Some(d) = self.boss_brain.as_mut() {
+            d.tick(dt);
+        }
         let enemy_alive = !self.rules.fighters[1].dead();
         if self.enemy_active && enemy_alive && self.deathblow.is_none() {
             if self.ai.is_some() {
                 let world = self.ai_world(dt);
-                if let Some(ai) = self.ai.as_mut() {
+                let mut driver = self.boss_brain.take();
+                if let Some(mut ai) = self.ai.take() {
+                    if let Some(d) = driver.as_mut() {
+                        d.before_think(&mut ai, self.fighters[1].radius);
+                    }
                     self.enemy.npc = ai.think(world);
+                    if let Some(d) = driver.as_mut() {
+                        d.after_think(&mut ai, self);
+                    }
+                    self.ai = Some(ai);
                 }
+                self.boss_brain = driver;
             } else {
                 self.brain
                     .think(&mut self.enemy, self.player.body.position, dt);
@@ -692,13 +739,18 @@ impl Duel {
         {
             self.respawn_in = Some(RESPAWN_DELAY);
         }
-        DuelReport {
+        let report = DuelReport {
             locked_on: self.player.lock_target.is_some(),
             player,
             enemy,
             hits,
             deathblow,
             respawned,
+        };
+        if let Some(mut d) = self.boss_brain.take() {
+            d.after_step(self, &report);
+            self.boss_brain = Some(d);
         }
+        report
     }
 }
