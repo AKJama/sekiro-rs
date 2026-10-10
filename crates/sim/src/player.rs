@@ -59,6 +59,7 @@ pub const ENV_GUARD_LEVEL: i32 = 237;
 pub const ENV_GUARD_MOTION_LEVEL: i32 = 258;
 pub const ENV_TOOK_DAMAGE: i32 = 256;
 pub const ENV_DAMAGE_ELEMENT: i32 = 285;
+pub const ENV_DAMAGE_BEHAVIOR_ID: i32 = 334;
 pub const ENV_AI_ACTION: i32 = 106;
 /// The AI's queued action as the script's cancel windows read it ("AI combo action type",
 /// "AI attack cancel type", "AI step type"; env names from the community env list).
@@ -273,6 +274,11 @@ impl Adapter<'_> {
             ENV_GUARD_LEVEL => env.damage.map_or(0.0, |d| d.guard_level as f32),
             ENV_GUARD_MOTION_LEVEL => env.damage.map_or(0.0, |d| d.guard_motion_level as f32),
             ENV_DAMAGE_ELEMENT => env.damage.map_or(0.0, |d| d.element as f32),
+            ENV_DAMAGE_BEHAVIOR_ID => truth(
+                env.damage
+                    .zip(arg)
+                    .is_some_and(|(d, a)| d.behavior_id != 0 && d.behavior_id == a),
+            ),
             ENV_GUARD_REPELLED => env.damage.map_or(0.0, |d| d.repelled as f32),
             ENV_JUST_GUARD_REPELLED => env.damage.map_or(0.0, |d| d.just_repelled as f32),
             ENV_GUARD_REPEL_DIR | ENV_JUST_GUARD_REPEL_DIR => {
@@ -565,4 +571,7 @@ pub struct IncomingDamage {
     pub just_repelled: i32,
     /// env 3056 / 3057: deflect direction (1 left, 2 right).
     pub repel_dir: i32,
+    /// env 334: the hit's AtkParam `atkBehaviorId` ("behaviour identification value"; 17
+    /// blinding), 0 for none. `env(334, v)` is true when it equals `v`.
+    pub behavior_id: i32,
 }

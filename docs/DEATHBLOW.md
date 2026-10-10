@@ -106,6 +106,8 @@ The demo takes the deathblow 0.6 s into the stagger.
   `ThrowTimes::load` reads the same from `cache/anim/<chr>/tae.json`; parsing c0000's 23 MB export took about 0.45 s, which the fight used to do at every deathblow start (a visible freeze), so the duel now uses the decoded TAE and a test checks both agree.
 - `DummyFrame::from_flver`: the sorb dummy as a placement in Wolf's frame.
 - `Deathblow`: the timeline (`Start`, `Body`, `Done`, or `Missed`), returning per step the clips to start, the absorb share to apply (`AbsorbStep`), and when the blow lands and kills; `release` ends the pair when Wolf leaves his body clip.
+- `AbsorbSlide`: the absorb itself (the correction worked out once at the paired clips' frame 0, handed out over `adsrobModelPosInterpolationTime`), shared with enemy throws on Wolf.
+- `ThrowTable::npc_row`: the row an NPC's throw start begins against the player (below).
 
 ## Bosses with more than one mark
 
@@ -122,6 +124,24 @@ The Great Shinobi Owl (c5060, `ninsatuNum` 2) shows how the data handles several
 - A deathblow waits until the enemy has reacted to the breaking hit (not frozen in hit stop, damage read by its script), and does not start again while the enemy still plays the last throw's defender clip.
   Without the first rule, a throw event queued during the hit stop was overridden by the script's stagger.
 
+## Enemy throws on Wolf
+
+The same ThrowParam machinery runs the other way for enemy grabs (the Great Shinobi Owl's 3040 and 3041; details and every value in `docs/OWL.md`, "Grabs").
+Code: `crates/sim/src/grab.rs`; tests `crates/sim/tests/owl_grab.rs`.
+The pattern is FwLo's (RustSekiro `docs/kb/guard-deflect.md`, the Ashina General's neck grab); the Owl's values are his own data.
+
+- The start is not a ThrowParam start row but an ordinary TAE `AttackBehavior` window whose AtkParam row has `throwFlag` 1.
+  Its capsule is detected like any hit; its contact starts the throw instead of hitting, so guarding and deflecting do not matter.
+  A step's TAE 954 i-frame type 7 (on Wolf's steps for 0.27 s), an airborne Wolf (FwLo) or invulnerability let it pass, unspent.
+- The row: `AtkChrId` the enemy's model number, `DefChrId` 0, id `20000000 + chr * 1000 + throwTypeId * 100` from the AtkParam's `throwTypeId` (inferred from the Owl's two rows, 25060000 and 25060100).
+  Its range is checked as for deathblows (the Owl's rows allow 10 m and every angle, so the contact decides).
+- The pair: the enemy's graph gets `W_ThrowAtk<atkAnimId>` (clip `a{atkAnimOffset}_{atkAnimId}`, `a000_004100`), Wolf's `W_ThrowDef<defAnimId>` (`a221_600110`; Wolf's per-enemy thrown clips live in `chr/c0000_cXXXX.anibnd`, here `c0000_c5060`).
+  With `atkSorbDmyId` set (233 on the Owl: 1.0 m in front of him, facing back) Wolf is absorbed onto the enemy's dummy with `AbsorbSlide`, through collision, then both play their own root motion; no push-apart or knockback while held.
+- The damage: each `ThrowAttackBehavior` (TAE 304) in the enemy's clip names a `throwFlag` 2 AtkParam row, resolved as a direct hit (HP, posture, `excessDmgKeepHp`) without a reaction, at the enemy's own clip time.
+- Wolf's thrown clips carry TAE 952 `IFrames_ThrowAtkStillHurts`, now full invulnerability against everything but the throw's damage.
+- A lethal throw keeps Wolf's script at 1 HP until his clip's `ChrActionFlag` 69, then fires `W_ThrowDefDeathStart<defAnimId>` (death clip `defAnimId + 1`), the same structure as the enemy's deathblow death branch; otherwise he gets up in the clip and the throw ends when he leaves it.
+- `--force-act <id>` (`Duel::force_act`) makes the enemy request an act whenever it is free, to test grabs on demand.
+
 ## Gaps
 
 - The engine's own throw search (which candidates it considers each frame, priorities between rows) is not reproduced; `select` tries a fixed order.
@@ -133,6 +153,8 @@ The Great Shinobi Owl (c5060, `ninsatuNum` 2) shows how the data handles several
 - The models are not kept apart: near the railing the Owl's arm can rest on or through the top rail while both capsules stay clear of it (`cache/screens/deathblow_owlrail_*.png`).
 
 ## Tests
+
+`crates/sim/tests/owl_grab.rs` (enemy throws on Wolf): the Owl's forced grabs catch a passive, guarding or deflecting Wolf with the data's rows, clips and damage, miss a stepping or jumping Wolf, kill into the death clip, and do not clip at the castle-top railing.
 
 `crates/sim/tests/deathblow_lock.rs` (Owl, castle roof):
 - `deathblow_ignores_player_steering`: stick and camera turning through the whole throw change nothing until Wolf's move cancel at 4.0 s, and nothing on the Owl at all.

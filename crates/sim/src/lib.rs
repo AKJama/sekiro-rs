@@ -22,6 +22,7 @@ pub mod demo;
 pub mod duel;
 pub mod enemy;
 pub mod fight;
+pub mod grab;
 pub mod hits;
 pub mod homing;
 pub mod input;
@@ -29,6 +30,7 @@ pub mod lua_ai;
 pub mod player;
 pub mod scenario;
 pub mod sound;
+pub mod status;
 pub mod tae;
 
 pub use behavior::{AnimOffsets, BehaviorRuntime, ClipDurations, ClipState, HookCall, HookKind};

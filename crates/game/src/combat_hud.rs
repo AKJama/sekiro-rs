@@ -1,7 +1,9 @@
 //! HP and posture bars laid out like Sekiro's: Wolf's vitality at the bottom left and his
 //! posture bar at the bottom centre; the enemy's vitality and posture float above its head.
 //! Posture bars grow from the centre outward as posture damage builds, from yellow toward red,
-//! and turn solid red when broken. A red mark shows when a deathblow is available.
+//! and turn solid red when broken. A red mark shows when a deathblow is available. Above Wolf's
+//! vitality, a purple bar shows poison build-up and a line names the status effects on him
+//! (poisoned, recovery sealed, ...) with the seconds left.
 
 use bevy::prelude::*;
 
@@ -20,13 +22,27 @@ pub struct Gauges {
     pub enemy_name: &'static str,
     /// Deathblow marks the enemy has left (NpcParam `ninsatuNum`, 0 counting as one).
     pub enemy_marks: i32,
+    /// Wolf's poison build-up as a fraction of his resistance.
+    pub poison: f32,
+    /// Wolf's status effects, one line (empty for none).
+    pub status: String,
 }
 
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 pub enum Fill {
     Hp(usize),
     Posture(usize),
+    /// Wolf's poison build-up.
+    Poison,
 }
+
+/// Wolf's status line.
+#[derive(Component)]
+pub struct StatusText;
+
+/// The poison bar's frame, shown only while poison builds up.
+#[derive(Component)]
+pub struct PoisonRow;
 
 #[derive(Component)]
 pub struct Label(usize);
@@ -41,6 +57,7 @@ pub struct DeathblowMark;
 const WOLF_HP_WIDTH: f32 = 340.0;
 const WOLF_POSTURE_WIDTH: f32 = 420.0;
 const ENEMY_WIDTH: f32 = 150.0;
+const POISON_WIDTH: f32 = 160.0;
 
 fn frame_color() -> Color {
     Color::srgba(0.02, 0.02, 0.02, 0.75)
@@ -101,6 +118,17 @@ pub fn spawn(commands: &mut Commands) {
             ..default()
         })
         .with_children(|p| {
+            p.spawn((
+                StatusText,
+                Text::new(""),
+                TextFont {
+                    font_size: bevy::text::FontSize::Px(13.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.78, 0.55, 0.95)),
+            ));
+            p.spawn((PoisonRow, Node::default(), Visibility::Hidden))
+                .with_children(|r| bar(r, Fill::Poison, POISON_WIDTH, 6.0, false));
             label(p, 0, 13.0);
             bar(p, Fill::Hp(0), WOLF_HP_WIDTH, 12.0, false);
         });
@@ -182,6 +210,7 @@ pub fn update(
                 };
                 (f, c)
             }
+            Fill::Poison => (gauges.poison, Color::srgb(0.55, 0.2, 0.75)),
         };
         node.width = percent(fraction * 100.0);
         color.0 = c;
@@ -219,6 +248,26 @@ pub fn update(
     }
     if let Ok(mut m) = mark.single_mut() {
         *m = if gauges.deathblow {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
+}
+
+/// Updates Wolf's status line and shows the poison bar while poison builds up.
+pub fn update_status(
+    gauges: Res<Gauges>,
+    mut status: Query<&mut Text, With<StatusText>>,
+    mut poison_row: Query<&mut Visibility, With<PoisonRow>>,
+) {
+    if let Ok(mut t) = status.single_mut()
+        && t.0 != gauges.status
+    {
+        t.0.clone_from(&gauges.status);
+    }
+    if let Ok(mut v) = poison_row.single_mut() {
+        *v = if gauges.poison > 0.0 {
             Visibility::Inherited
         } else {
             Visibility::Hidden

@@ -10,6 +10,7 @@ use crate::deathblow::{
 };
 use crate::enemy::EnemySpec;
 use crate::fight::CombatRules;
+use crate::grab::{EnemyThrow, GrabPhase};
 use crate::hits::{Combatant, HitDetector, HitEvent, HitResult};
 use crate::input::{InputFrame, angle_diff};
 use crate::lua_ai::{AiActor, AiBrain, AiWorld, ThinkParams, anim_id_from_clip};
@@ -39,6 +40,10 @@ const THROW_DEF_OFFSET_TYPE: i64 = 15;
 /// queued" and 86 "AI attack queued".
 const COMBO_FLAGS: [i32; 2] = [23, 86];
 
+/// SpEffect `stateInfo` 350: the character cannot be locked on to (SpEffect 200602 "cannot be
+/// locked, seconds given, Ninja Army Chief").
+const STATE_INFO_NO_LOCK: i32 = 350;
+
 /// A deathblow as the duel reports it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DeathblowReport {
@@ -49,6 +54,15 @@ pub struct DeathblowReport {
     pub killed: bool,
 }
 
+/// An enemy throw on Wolf as the duel reports it (see [`crate::grab`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GrabReport {
+    /// ThrowParam row of a throw that caught Wolf this step.
+    pub started: Option<i32>,
+    /// The throw's damage that landed this step: (behaviour judge, HP, posture).
+    pub hits: Vec<(i32, i32, i32)>,
+}
+
 /// One step of the duel.
 #[derive(Debug, Clone, Default)]
 pub struct DuelReport {
@@ -57,6 +71,7 @@ pub struct DuelReport {
     pub hits: Vec<(HitEvent, HitResult)>,
     pub locked_on: bool,
     pub deathblow: DeathblowReport,
+    pub grab: GrabReport,
     /// Both characters were put back at their start this step.
     pub respawned: bool,
 }
@@ -86,6 +101,11 @@ pub struct Duel {
     pub enemy_active: bool,
     /// The deathblow in progress.
     pub deathblow: Option<Deathblow>,
+    /// The enemy's throw on Wolf in progress.
+    pub enemy_throw: Option<EnemyThrow>,
+    /// Testing aid: the enemy requests this action (an animation id such as 3040) whenever it is
+    /// not already playing it, on top of its brain (or alone with the brain off).
+    pub force_act: Option<i32>,
     /// Seconds until the respawn after a death.
     pub respawn_in: Option<f32>,
     throws: Option<Throws>,
@@ -171,6 +191,8 @@ impl Duel {
             rules,
             enemy_active: true,
             deathblow: None,
+            enemy_throw: None,
+            force_act: None,
             respawn_in: None,
             throws,
             cache: cache.to_path_buf(),
@@ -330,6 +352,7 @@ impl Duel {
         self.hit_stop = [HitStop::default(); 2];
         self.knockback = [None; 2];
         self.deathblow = None;
+        self.enemy_throw = None;
         self.respawn_in = None;
         self.defender_dying = 0;
         self.last_throw_def_clip = None;
@@ -342,6 +365,19 @@ impl Duel {
         let pressed = input.buttons.lock_on && !self.lock_button;
         self.lock_button = input.buttons.lock_on;
         let enemy_alive = !self.rules.fighters[1].dead();
+        // SpEffect stateInfo 350 "cannot be locked on" (the Owl's smoke screen adds 200602 for
+        // 1 s) drops the lock and refuses a new one (that it releases a held lock is inferred).
+        let unlockable = self.enemy.tae_frame().sp_effects.iter().any(|id| {
+            self.enemy
+                .tae
+                .sp_effects
+                .get(id)
+                .is_some_and(|e| e.state_info == STATE_INFO_NO_LOCK)
+        });
+        if unlockable {
+            self.player.lock_target = None;
+            return;
+        }
         if !pressed {
             // Follow the target while locked on.
             if self.player.lock_target.is_some() {
@@ -590,9 +626,16 @@ impl Duel {
     /// collision), so the pair keeps its relation without either ending up inside geometry.
     /// That shift of the pair is inferred: the engine's handling is not traced.
     fn absorb(&mut self, a: &AbsorbStep) {
-        let (moved, other) = match a.who {
-            Absorbed::Attacker => (&mut self.player, &mut self.enemy),
-            Absorbed::Defender => (&mut self.enemy, &mut self.player),
+        // Wolf is the deathblow's attacker.
+        self.slide_pair(a.who == Absorbed::Attacker, a);
+    }
+
+    /// [`Self::absorb`] for either character: `player_moves` says whether Wolf is the absorbed one.
+    fn slide_pair(&mut self, player_moves: bool, a: &AbsorbStep) {
+        let (moved, other) = if player_moves {
+            (&mut self.player, &mut self.enemy)
+        } else {
+            (&mut self.enemy, &mut self.player)
         };
         let want = [a.delta[0], a.delta[2]];
         let got = moved.ground.slide(moved.body.position, want);
@@ -607,19 +650,175 @@ impl Duel {
         }
     }
 
+    /// Whether an enemy throw holds Wolf.
+    fn throw_held(&self) -> bool {
+        self.enemy_throw
+            .as_ref()
+            .is_some_and(|t| t.phase == GrabPhase::Held)
+    }
+
+    /// [`Self::force_act`]: asks for the act whenever the enemy is not already in it or in a
+    /// throw, facing Wolf.
+    fn force_enemy_act(&mut self, enemy_alive: bool) {
+        let Some(act) = self.force_act else {
+            return;
+        };
+        let clip = format!("a000_{act:06}");
+        let playing = self
+            .enemy
+            .behavior
+            .runtime
+            .main_clip()
+            .is_some_and(|c| c.animation == clip);
+        if !enemy_alive || playing || self.throw_held() || self.deathblow.is_some() {
+            return;
+        }
+        self.enemy.npc.action = act;
+        self.enemy.npc.combo = false;
+        self.enemy.npc.face_yaw = Some(self.enemy.yaw_to(self.player.body.position));
+    }
+
+    /// Starts the enemy's throw on Wolf from a throw-start contact (AtkParam `throwFlag` 1):
+    /// picks the ThrowParam row, checks its range, fires the throw events into both graphs and
+    /// begins the absorb. Returns the row. A contact the row's range refuses does nothing
+    /// (inferred: the engine's handling of a failed throw check is not traced).
+    fn try_enemy_throw(&mut self, hit: &HitEvent) -> Option<i32> {
+        if self.enemy_throw.is_some()
+            || self.deathblow.is_some()
+            || self.rules.fighters.iter().any(|f| f.dead())
+        {
+            return None;
+        }
+        let throws = self.throws.as_ref()?;
+        let row = throws
+            .table
+            .npc_row(self.spec.throw_chr(), hit.attack.throw_type_id)?
+            .clone();
+        let (attacker, defender) = (placement(&self.enemy), placement(&self.player));
+        if !row.in_range(&attacker, &defender) {
+            return None;
+        }
+        let sorb = if row.atk_sorb_dummy > 0 {
+            DummyFrame::from_flver(throws.enemy_model.as_ref()?, row.atk_sorb_dummy)?
+        } else {
+            // Only Wolf's dummy is named: the enemy stands on it.
+            DummyFrame::from_flver(&throws.model, row.def_sorb_dummy)?.inverse()
+        };
+        let attacker = Placement {
+            yaw: if row.turn_attacker {
+                attacker.yaw_towards(defender.position)
+            } else {
+                attacker.yaw
+            },
+            ..attacker
+        };
+        let throw = EnemyThrow::begin(
+            &row,
+            &self.enemy.tae,
+            &self.player.tae,
+            sorb,
+            &attacker,
+            &defender,
+        )?;
+        self.enemy.body.yaw = attacker.yaw;
+        let rt = &mut self.enemy.behavior.runtime;
+        rt.offsets
+            .by_type
+            .insert(THROW_DEF_OFFSET_TYPE, row.atk_anim_offset as u32);
+        rt.fire_event(&format!("W_ThrowAtk{}", row.atk_anim));
+        self.player
+            .behavior
+            .runtime
+            .fire_event(&format!("W_ThrowDef{}", row.def_anim));
+        // The throw takes over both bodies, as a deathblow does.
+        self.knockback = [None, None];
+        self.enemy_throw = Some(throw);
+        Some(row.id)
+    }
+
+    /// Advances the enemy throw after both characters moved this step: the absorb, the damage at
+    /// the enemy clip's `ThrowAttackBehavior` events, and the death branch.
+    fn step_enemy_throw(&mut self, dt: f32, report: &mut GrabReport) {
+        let Some(mut throw) = self.enemy_throw.take() else {
+            return;
+        };
+        let clip = |c: &Character| {
+            c.behavior
+                .runtime
+                .main_clip()
+                .map(|c| (c.animation.clone(), c.time))
+        };
+        let (enemy_clip, wolf_clip) = (clip(&self.enemy), clip(&self.player));
+        let step = throw.step(
+            dt,
+            enemy_clip.as_ref().map(|(c, t)| (c.as_str(), *t)),
+            wolf_clip.as_ref().map(|(c, t)| (c.as_str(), *t)),
+        );
+        if let Some(a) = step.absorb {
+            // Wolf is the throw's defender.
+            self.slide_pair(a.who == Absorbed::Defender, &a);
+        }
+        for judge in step.hits {
+            let Some(attack) = self.fighters[1].attacks.get(&judge).cloned() else {
+                continue;
+            };
+            let (p, e) = (self.player.body.position, self.enemy.body.position);
+            let (dx, dz) = (p[0] - e[0], p[2] - e[2]);
+            let len = dx.hypot(dz).max(1e-4);
+            let event = HitEvent {
+                attacker: 1,
+                defender: 0,
+                judge,
+                attack,
+                position: p,
+                direction: [dx / len, dz / len],
+            };
+            // HP and posture as a direct hit of the throw's row (`throwFlag` 2); the thrown clip
+            // already shows the impact, so no reaction, knockback or hit stop.
+            let result = self.rules.resolve(
+                &event,
+                [&self.player, &self.enemy],
+                [&self.fighters[0], &self.fighters[1]],
+            );
+            report
+                .hits
+                .push((judge, result.hp_damage, result.posture_damage));
+            throw.lethal |= self.rules.fighters[0].dead();
+        }
+        if step.death {
+            self.player
+                .behavior
+                .runtime
+                .fire_event(&format!("W_ThrowDefDeathStart{}", throw.row.def_anim));
+        }
+        if throw.phase != GrabPhase::Done {
+            self.enemy_throw = Some(throw);
+        }
+    }
+
     /// Passes HP and posture to both scripts (env 1000, 1001, 2010). While a deathblow holds the
     /// enemy its script still sees it alive, so the throw animations (with their own death
     /// branch) play out instead of the script's ordinary death.
     fn publish_vitals(&mut self) {
         // The script sees HP 0 one step after the death event, once its graph is in the death state.
         let held = self.deathblow.is_some() && self.defender_dying < 2;
+        // Wolf's script sees him alive until a lethal throw has his graph in its death state, so
+        // the thrown clip's own death branch plays instead of the ordinary death.
+        let thrown = self.enemy_throw.as_ref().is_some_and(|t| {
+            t.phase == GrabPhase::Held
+                && (!t.branched || !self.player.state().starts_with("ThrowDefDeath"))
+        });
         for (i, (c, f)) in [&mut self.player, &mut self.enemy]
             .into_iter()
             .zip(&self.rules.fighters)
             .enumerate()
         {
             let hp = f.vitality.hp as f32;
-            c.behavior.env.hp = if held && i == 1 { hp.max(1.0) } else { hp };
+            c.behavior.env.hp = if (held && i == 1) || (thrown && i == 0) {
+                hp.max(1.0)
+            } else {
+                hp
+            };
             c.behavior.env.posture = f.posture.remaining as f32;
             c.behavior.env.max_posture = f.posture.max as f32;
         }
@@ -681,6 +880,20 @@ impl Duel {
         let [mx, mz] = c.ground.slide(c.body.position, delta);
         c.body.position[0] += mx;
         c.body.position[2] += mz;
+    }
+
+    /// Leaves a bullet's SpEffects on character `i`: build-up and timed effects in its status
+    /// ([`crate::status`]), the timed ones also in its TAE runtime so its scripts and AI see them.
+    fn apply_status(&mut self, i: usize, ids: &[i32]) {
+        let applied = self.rules.apply_hit_effects(i, ids);
+        let c = if i == 0 {
+            &mut self.player
+        } else {
+            &mut self.enemy
+        };
+        for (id, seconds) in applied.timed {
+            c.tae_runtime.add_timed(id, seconds);
+        }
     }
 
     /// Puts a character that fell [`Duel::fall_respawn_depth`] below its start back at its
@@ -749,6 +962,7 @@ impl Duel {
         } else {
             self.enemy.npc = Default::default();
         }
+        self.force_enemy_act(enemy_alive);
         self.publish_vitals();
         // Who each side aims at: auto-aim candidates for Wolf, Wolf for the soldier.
         self.player.aim_candidates = if enemy_alive {
@@ -762,7 +976,7 @@ impl Duel {
         let dts = [self.hit_stop[0].split(dt), self.hit_stop[1].split(dt)];
         let player = self.advance_character(0, &input, dt, dts[0]);
         let enemy = self.advance_character(1, &InputFrame::default(), dt, dts[1]);
-        if self.deathblow.is_none() {
+        if self.deathblow.is_none() && !self.throw_held() {
             self.push(0, dts[0]);
             self.push(1, dts[1]);
         }
@@ -770,7 +984,9 @@ impl Duel {
             self.defender_dying = self.defender_dying.saturating_add(1);
         }
         self.step_deathblow(dt, &mut deathblow);
-        if self.deathblow.is_none() && enemy_alive {
+        let mut grab = GrabReport::default();
+        self.step_enemy_throw(dt, &mut grab);
+        if self.deathblow.is_none() && !self.throw_held() && enemy_alive {
             self.separate();
         }
         self.respawn_fallen();
@@ -787,14 +1003,29 @@ impl Duel {
         let chars = [&self.player, &self.enemy];
         let fighters = [&self.fighters[0], &self.fighters[1]];
         self.bullets.spawn(&chars, &fighters);
-        let bullet_hits = self.bullets.advance(dt, &chars, &fighters);
+        let bullet_hits = self
+            .bullets
+            .advance(dt, &chars, &fighters, &*self.player.ground);
         let first_bullet_hit = found.len();
-        found.extend(bullet_hits);
+        // Contacts that only carry SpEffects (the poison floor) skip the hit rules (ours).
+        let (effect_hits, bullet_hits): (Vec<_>, Vec<_>) =
+            bullet_hits.into_iter().partition(|b| b.effects_only);
+        let bullet_effects: Vec<Vec<i32>> =
+            bullet_hits.iter().map(|b| b.sp_effects.clone()).collect();
+        found.extend(bullet_hits.into_iter().map(|b| b.hit));
         let mut hits = Vec::new();
         self.enemy_damaged = false;
         for (k, hit) in found.into_iter().enumerate() {
-            if self.deathblow.is_some() || self.rules.fighters.iter().any(|f| f.dead()) {
+            if self.deathblow.is_some()
+                || self.throw_held()
+                || self.rules.fighters.iter().any(|f| f.dead())
+            {
                 break;
+            }
+            // A throw start grabs instead of hitting (guarding does not stop it).
+            if hit.attacker == 1 && hit.attack.throw_flag == 1 {
+                grab.started = self.try_enemy_throw(&hit);
+                continue;
             }
             let from_bullet = k >= first_bullet_hit;
             let result = self.rules.resolve(
@@ -818,8 +1049,19 @@ impl Duel {
             }
             self.hit_stop[hit.defender].start(result.hit_stop[1]);
             self.enemy_damaged |= hit.defender == 1 && !result.guarded;
+            // A bullet's SpEffects stay on a guarded hit's guard (inferred).
+            if from_bullet && !result.guarded {
+                self.apply_status(hit.defender, &bullet_effects[k - first_bullet_hit]);
+            }
             hits.push((hit, result));
         }
+        for b in effect_hits {
+            if !self.rules.fighters.iter().any(|f| f.dead()) {
+                self.apply_status(b.hit.defender, &b.sp_effects);
+            }
+        }
+        self.rules.tick_status(0, dt);
+        self.rules.tick_status(1, dt);
         self.rules.apply_effect_hp(0, self.player.tae_frame());
         self.rules.apply_effect_hp(1, self.enemy.tae_frame());
         if self.god {
@@ -840,6 +1082,7 @@ impl Duel {
             enemy,
             hits,
             deathblow,
+            grab,
             respawned,
         };
         if let Some(mut d) = self.boss_brain.take() {

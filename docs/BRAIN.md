@@ -103,7 +103,8 @@ The plan vocabulary for the Owl (`brain::actions::OWL`); approach distances and 
 | 5202 | Side step (his act picks it with Wolf on his right) | | Step |
 | 5203 | Side step (his act picks it with Wolf on his left) | | Step |
 
-Left out on purpose: warps (3035 to 3047; the transparency is not rendered), grabs (3037, 3040, 3041; NPC-on-player throws are not modelled), firecrackers and poison (3010, 3030, 3064; their effects come from child bullets not modelled yet), phase-2 acts and the perilous sweeps of Act32 and Act33, and the deflect counters (3060 to 3069, 3090, 3091), which stay reactions.
+The tool acts 3010 (firecrackers), 3017 (explosive slash), 3030 (poison balls) and 3069 (smoke screen) are in the vocabulary since their bullets work (`docs/OWL.md`, "Tools"); their approach distances are ours, from where their bullets land, and their pressure is 0 until their acts are read.
+Left out on purpose: warps (3035 to 3047; the transparency is not rendered), grabs (3037, 3040, 3041; they now throw Wolf, `docs/OWL.md` "Grabs", but are not in the vocabulary yet), phase-2 acts other than the poison balls 3030, the perilous sweeps of Act32 and Act33, and the deflect counters (3060 to 3066 with the firecracker counter 3064, 3090, 3091), which stay reactions; the smoke screen 3069 is offered as an act.
 A plan with an unknown id, more than 3 actions or none is refused and logged, and the Lua AI picks that act.
 
 ## The tally

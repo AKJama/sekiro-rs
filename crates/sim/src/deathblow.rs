@@ -163,6 +163,27 @@ impl ThrowTable {
                 && (r.id / 1000).rem_euclid(10) == variation
         })
     }
+
+    /// The row an NPC's throw start begins against the player: `AtkChrId` is the NPC's model
+    /// number, `DefChrId` 0, and the id is `20000000 + chr * 1000 + throwTypeId * 100` (AtkParam
+    /// `throwTypeId`: the Owl's 800 has 0 and begins 25060000, his 810 has 1 and begins 25060100).
+    /// That id rule is inferred from those rows; when no row has the id, the NPC's rows against
+    /// the player are taken in id order.
+    pub fn npc_row(&self, atk_chr: i32, throw_type_id: i32) -> Option<&ThrowRow> {
+        let id = 20_000_000 + atk_chr * 1000 + throw_type_id * 100;
+        self.rows
+            .iter()
+            .find(|r| r.id == id && r.atk_chr == atk_chr && r.def_chr == 0)
+            .or_else(|| {
+                let mut rows: Vec<&ThrowRow> = self
+                    .rows
+                    .iter()
+                    .filter(|r| r.atk_chr == atk_chr && r.def_chr == 0)
+                    .collect();
+                rows.sort_by_key(|r| r.id);
+                rows.get(usize::try_from(throw_type_id).ok()?).copied()
+            })
+    }
 }
 
 /// Why the enemy can be deathblown.
@@ -464,6 +485,69 @@ pub struct AbsorbStep {
     pub yaw: f32,
 }
 
+/// The absorb of a throw pair: the correction that puts the absorbed character on the other's
+/// sorb dummy, worked out once from where the pair stands when the paired clips start (their
+/// frame 0), handed out over `adsrobModelPosInterpolationTime`. Deathblows and enemy throws on
+/// Wolf ([`crate::grab`]) share it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AbsorbSlide {
+    pub who: Absorbed,
+    offset: [f32; 3],
+    yaw: f32,
+    duration: f32,
+    time: f32,
+    applied: f32,
+}
+
+impl AbsorbSlide {
+    /// `sorb` is the dummy of the attacker the defender stands on (for [`Absorbed::Attacker`],
+    /// the defender's frame in the attacker's space, as [`DummyFrame::inverse`] gives it).
+    pub fn new(
+        who: Absorbed,
+        sorb: &DummyFrame,
+        attacker: &Placement,
+        defender: &Placement,
+        duration: f32,
+    ) -> Self {
+        let (from, target) = match who {
+            Absorbed::Defender => (defender, sorb.placement(attacker)),
+            Absorbed::Attacker => (attacker, sorb.inverse().placement(defender)),
+        };
+        Self {
+            who,
+            offset: [
+                target.position[0] - from.position[0],
+                0.0,
+                target.position[2] - from.position[2],
+            ],
+            yaw: angle_diff(target.yaw, from.yaw),
+            duration,
+            time: 0.0,
+            applied: 0.0,
+        }
+    }
+
+    /// This step's share, or `None` once it is all handed out.
+    pub fn advance(&mut self, dt: f32) -> Option<AbsorbStep> {
+        self.time += dt;
+        let w = if self.duration > 0.0 {
+            (self.time / self.duration).min(1.0)
+        } else {
+            1.0
+        };
+        if w <= self.applied {
+            return None;
+        }
+        let share = w - self.applied;
+        self.applied = w;
+        Some(AbsorbStep {
+            who: self.who,
+            delta: self.offset.map(|v| v * share),
+            yaw: self.yaw * share,
+        })
+    }
+}
+
 /// What changed this step.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DeathblowStep {
@@ -507,9 +591,8 @@ pub struct Deathblow {
     pub death_clip: bool,
     /// Which character the absorb moves.
     pub absorbed: Absorbed,
-    /// Total absorb correction (position, yaw) and the share of it handed out so far.
-    absorb: Option<([f32; 3], f32)>,
-    absorb_applied: f32,
+    /// The absorb, from the body's start.
+    slide: Option<AbsorbSlide>,
     hit: bool,
     branched: bool,
 }
@@ -535,8 +618,7 @@ impl Deathblow {
             lethal: marks_left <= 1,
             death_clip: true,
             absorbed: Absorbed::Defender,
-            absorb: None,
-            absorb_applied: 0.0,
+            slide: None,
             hit: false,
             branched: false,
         };
@@ -564,23 +646,6 @@ impl Deathblow {
         }
     }
 
-    /// Where the absorbed character must end up relative to where it stands, with the pair
-    /// where it is now: position offset and yaw turn.
-    fn absorb_correction(&self, attacker: &Placement, defender: &Placement) -> ([f32; 3], f32) {
-        let (from, target) = match self.absorbed {
-            Absorbed::Defender => (defender, self.sorb.placement(attacker)),
-            Absorbed::Attacker => (attacker, self.sorb.inverse().placement(defender)),
-        };
-        (
-            [
-                target.position[0] - from.position[0],
-                0.0,
-                target.position[2] - from.position[2],
-            ],
-            angle_diff(target.yaw, from.yaw),
-        )
-    }
-
     /// Ends the pairing early: the attacker left its body clip (its TAE allowed a move or
     /// another action). The defender plays on under its own root motion.
     pub fn release(&mut self) {
@@ -600,8 +665,13 @@ impl Deathblow {
                     if self.body.in_range(attacker, defender) {
                         self.phase = Phase::Body;
                         self.time = 0.0;
-                        self.absorb = Some(self.absorb_correction(attacker, defender));
-                        self.absorb_applied = 0.0;
+                        self.slide = Some(AbsorbSlide::new(
+                            self.absorbed,
+                            &self.sorb,
+                            attacker,
+                            defender,
+                            self.body.interpolation_time,
+                        ));
                         out.attacker_clip = Some(self.body.attacker_anim());
                         out.defender_clip = self.defender_clip();
                     } else if self.time > self.times.grab.1 {
@@ -611,22 +681,7 @@ impl Deathblow {
             }
             Phase::Body => {
                 self.time += dt;
-                let w = if self.body.interpolation_time > 0.0 {
-                    (self.time / self.body.interpolation_time).min(1.0)
-                } else {
-                    1.0
-                };
-                if let Some((offset, yaw)) = self.absorb
-                    && w > self.absorb_applied
-                {
-                    let share = w - self.absorb_applied;
-                    self.absorb_applied = w;
-                    out.absorb = Some(AbsorbStep {
-                        who: self.absorbed,
-                        delta: offset.map(|v| v * share),
-                        yaw: yaw * share,
-                    });
-                }
+                out.absorb = self.slide.as_mut().and_then(|s| s.advance(dt));
                 if !self.hit && self.time >= self.times.damage {
                     self.hit = true;
                     out.hit = true;

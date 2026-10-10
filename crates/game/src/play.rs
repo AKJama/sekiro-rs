@@ -70,6 +70,9 @@ pub struct Options {
     /// Testing aid (`--god`): Wolf takes no HP or posture damage; hits, reactions and hit stop
     /// are otherwise unchanged.
     pub god: bool,
+    /// Testing aid (`--force-act <id>`): the enemy requests this action (an animation id such
+    /// as 3040, the Owl's grab) whenever it is free, on top of its AI (or alone with `--passive`).
+    pub force_act: Option<i32>,
     /// Testing aid (`--break-posture`): the enemy's posture is held at 1 point outside
     /// deathblows, so Wolf's next landed hit breaks it and opens a deathblow.
     pub break_posture: bool,
@@ -130,12 +133,6 @@ struct Actor(usize);
 #[derive(Component)]
 struct Hud;
 
-/// One of a small pool of markers that show bullets in flight (shuriken), by index.
-#[derive(Component)]
-struct BulletMarker(usize);
-
-const BULLET_MARKERS: usize = 12;
-
 #[derive(Component)]
 struct FollowCamera;
 
@@ -193,6 +190,7 @@ pub fn run(options: Options) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("loading the simulation: {e}"))?;
     duel.enemy_active = options.enemy;
     duel.god = options.god;
+    duel.force_act = options.force_act;
     if options.simple_ai {
         duel.use_simple_ai();
     } else if options.brain != sekiro_sim::brain::BrainKind::Lua || options.brain_log {
@@ -377,6 +375,7 @@ pub fn run(options: Options) -> Result<()> {
         clock: [0.0; 2],
     })
     .init_resource::<combat_hud::Gauges>()
+    .init_resource::<crate::bullet_fx::BulletFx>()
     .add_plugins(crate::audio::GameAudioPlugin {
         cache: cache.clone(),
         map: on_map.as_ref().map(|(_, id, _)| id.clone()),
@@ -399,6 +398,7 @@ pub fn run(options: Options) -> Result<()> {
             follow_camera,
             hud,
             combat_hud::update,
+            combat_hud::update_status,
             capture,
             log_camera,
         )
@@ -466,23 +466,9 @@ fn setup(
         Transform::from_xyz(0.0, 2.0, 4.0).looking_at(Vec3::new(0.0, 1.2, 0.0), Vec3::Y),
     ));
     combat_hud::spawn(&mut commands);
-    // Bullets have no model yet (their look is an effect, FXR, not extracted): small spheres.
-    let marker_mesh = meshes.add(Sphere::new(0.06).mesh().ico(2).unwrap());
-    let marker_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.75, 0.78, 0.82),
-        emissive: LinearRgba::rgb(0.6, 0.6, 0.65),
-        metallic: 0.8,
-        ..default()
-    });
-    for i in 0..BULLET_MARKERS {
-        commands.spawn((
-            BulletMarker(i),
-            Mesh3d(marker_mesh.clone()),
-            MeshMaterial3d(marker_material.clone()),
-            Transform::IDENTITY,
-            Visibility::Hidden,
-        ));
-    }
+    // Bullets have no model yet (their look is an effect, FXR, not extracted): simple shapes.
+    let fx = crate::bullet_fx::spawn(&mut commands, &mut meshes, &mut materials);
+    commands.insert_resource(fx);
     let on_map = on_map.is_some();
     if !on_map {
         spawn_floor_stage(&mut commands, &mut meshes, &mut materials);
@@ -913,18 +899,21 @@ fn shown(sim: &Sim, i: usize, alpha: f32) -> (Vec3, f32) {
     (before.lerp(now, alpha), yaw_before + turn * alpha)
 }
 
-/// Puts a marker on each bullet in flight and hides the rest.
-fn sync_bullets(sim: NonSend<Sim>, mut q: Query<(&BulletMarker, &mut Transform, &mut Visibility)>) {
-    let live = &sim.duel.bullets.live;
-    for (m, mut tf, mut vis) in &mut q {
-        match live.get(m.0) {
-            Some(b) => {
-                tf.translation = b.position;
-                *vis = Visibility::Visible;
-            }
-            None => *vis = Visibility::Hidden,
-        }
-    }
+/// Draws the bullets in flight and their areas (see [`crate::bullet_fx`]).
+fn sync_bullets(
+    sim: NonSend<Sim>,
+    time: Res<Time>,
+    mut fx: ResMut<crate::bullet_fx::BulletFx>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut q: Query<(&crate::bullet_fx::Marker, &mut Transform, &mut Visibility)>,
+) {
+    crate::bullet_fx::sync(
+        &sim.duel.bullets.live,
+        time.delta_secs(),
+        &mut fx,
+        &mut materials,
+        &mut q,
+    );
 }
 
 fn follow_camera(
@@ -960,6 +949,25 @@ fn follow_camera(
     *tf = Transform::from_translation(eye).looking_at(target, Vec3::Y);
 }
 
+/// Names of the status effects the Owl's tools leave on Wolf, for the HUD.
+const STATUS_NAMES: [(i32, &str); 3] = [
+    (9050, "Poisoned"),
+    (3506090, "Recovery sealed"),
+    (113000, "Posture recovery slowed"),
+];
+
+/// Wolf's status line: each named effect with its seconds left, and blinding while it plays.
+fn status_line(status: &sekiro_sim::status::Status, states: &[String]) -> String {
+    let mut parts: Vec<String> = STATUS_NAMES
+        .iter()
+        .filter_map(|(id, name)| status.remaining(*id).map(|s| format!("{name} {s:.0} s")))
+        .collect();
+    if states.iter().any(|s| s.contains("Blinding")) {
+        parts.push("Blinded".into());
+    }
+    parts.join("   ")
+}
+
 fn hud(
     sim: NonSend<Sim>,
     mut text: Query<&mut Text, With<Hud>>,
@@ -978,6 +986,8 @@ fn hud(
         deathblow: sim.duel.deathblow_available(),
         enemy_name: sim.duel.spec.display_name(),
         enemy_marks: sekiro_sim::deathblow::deathblow_marks(f[1].vitality.deathblows_left),
+        poison: f[0].status.poison.fraction(),
+        status: status_line(&f[0].status, &sim.last.player.behavior.state_path),
     };
     let Ok(mut text) = text.single_mut() else {
         return;

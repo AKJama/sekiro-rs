@@ -66,9 +66,11 @@ const fn step(id: i32, label: &'static str) -> BossAction {
 
 /// The Great Shinobi Owl (c5060) in phase 1. Approach distances and pressure from the act that
 /// uses each id in `506001_battle.lua` (Act01 to Act15, Act30); descriptions from his TAE and
-/// AtkParam rows (`docs/OWL.md`). Left out: warps, grabs (NPC-on-player throws are not
-/// modelled), firecrackers and poison (their effects come from child bullets not modelled yet),
-/// phase-2 acts and the deflect counters, which stay reactions.
+/// AtkParam rows (`docs/OWL.md`). The tool acts (3010 firecracker, 3017 explosive slash, 3030
+/// poison balls, 3069 smoke screen) were added with their bullets; their approach distances are
+/// ours, read from where their bullets land (the reach of each in `docs/OWL.md`, "Tools"), and
+/// their pressure is 0 until the acts that use them are read. Left out: warps, grabs, phase-2
+/// acts other than the poison and the deflect counters, which stay reactions.
 pub const OWL: BossActions = BossActions {
     chr: "c5060",
     actions: &[
@@ -78,13 +80,27 @@ pub const OWL: BossActions = BossActions {
         attack(3003, "jumping forward roll, slash down", 10.7, 9.0),
         attack(3005, "front kick (posture only)", 2.8, 1.0),
         attack(3009, "shuriken", 9.7, 1.0),
+        attack(
+            3010,
+            "firecrackers scattered in front (unblockable bangs)",
+            4.0,
+            0.0,
+        ),
         attack(3011, "rushing slash", 11.0, 1.0),
         attack(3014, "second shuriken", 9.7, 2.0),
         attack(3015, "rushing slash curving left", 9.0, 5.0),
+        attack(3017, "explosive slash (fire)", 5.0, 0.0),
         attack(3018, "shuriken then dash slash", 11.0, 9.0),
+        attack(
+            3030,
+            "poison balls, three rows of poison floor (phase 2)",
+            5.0,
+            0.0,
+        ),
         attack(3031, "recovery-sealing throw", 5.5, 6.0),
         attack(3032, "recovery-sealing throw follow-up", 9.0, 8.0),
         attack(3063, "rushing follow-up, two hits", 4.8, 10.0),
+        attack(3069, "smoke screen (blinds, breaks lock-on)", 5.5, 0.0),
         step(5201, "back step"),
         step(5202, "side step (his act picks it with Wolf on his right)"),
         step(5203, "side step (his act picks it with Wolf on his left)"),

@@ -77,6 +77,14 @@ pub struct AttackProfile {
     /// `isArrowAtk`: a bow or bullet attack; TAE action flag 41 on the defender does not force a
     /// hit stop for it (code `b60ec0`, `b60f10`).
     pub is_arrow: bool,
+    /// `spAttribute`: the hit's special attribute, which the player script reads as env 285
+    /// (`DAMAGE_ELEMENT_*` in `c0000_define.hks`: 1 none, 2 fire, 6 lightning, 10 blue
+    /// lightning; the Owl's firecracker is 2).
+    pub sp_attribute: u8,
+    /// `atkBehaviorId`: "behaviour identification value" the player script tests with env 334
+    /// (`BEHAVIOR_IDENTIFICATION_VALUE_*`: 17 blinding, 18 blast, 19 storm back jump, 20 to 23
+    /// special guard reactions). The Owl's smoke screen dazzle is 17.
+    pub behavior_id: u8,
 }
 
 impl AttackProfile {
@@ -127,6 +135,8 @@ impl AttackProfile {
             hit_stop_time: row.f32("hitStopTime")?,
             hit_stop_time_defender: row.f32("hitStopTime_Defencer")?,
             is_arrow: row.bool("isArrowAtk")?,
+            sp_attribute: row.u8("spAttribute")?,
+            behavior_id: row.u8("atkBehaviorId")?,
         })
     }
 }

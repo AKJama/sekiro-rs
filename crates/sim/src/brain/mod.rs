@@ -162,12 +162,14 @@ impl BossBrain for ScriptedBrain {
     }
 }
 
-/// Which controller a fight uses (`--brain lua|scripted`).
+/// Which controller a fight uses (`--brain lua|scripted`, or `--force-act <id>`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum BrainKind {
     #[default]
     Lua,
     Scripted,
+    /// Testing aid: plans the one action over and over (`--force-act`), answering at once.
+    Repeat(i32),
 }
 
 impl BrainKind {
@@ -183,6 +185,10 @@ impl BrainKind {
         match self {
             Self::Lua => Box::new(LuaBrain),
             Self::Scripted => Box::new(ScriptedBrain::default()),
+            Self::Repeat(id) => {
+                let plan = Plan::new(&[id]);
+                Box::new(ScriptedBrain::new(plan.clone(), plan, u32::MAX, 0.0))
+            }
         }
     }
 }

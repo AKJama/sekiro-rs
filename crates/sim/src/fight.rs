@@ -56,6 +56,7 @@ use crate::combat::recovery::{
 };
 use crate::hits::{AttackData, Combatant, HitEvent, HitResult, load_table};
 use crate::player::IncomingDamage;
+use crate::status::{Applied, Status, StatusBook};
 use crate::tae::TaeFrame;
 use sekiro_formats::param::Table;
 use std::collections::HashMap;
@@ -69,6 +70,8 @@ pub const PLAYER_GROWTH_LEVEL: f32 = 1.0;
 const GRAPH_MAX_HP: i32 = 500;
 const GRAPH_MAX_POSTURE: i32 = 501;
 const GRAPH_RECOVERY: i32 = 504;
+/// CalcCorrectGraph "poison resistance (soul level dependent)": 200 at every stage.
+const GRAPH_POISON_RESIST: i32 = 110;
 
 /// ReinforceParamWeapon multipliers of the equipped weapon level.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -123,6 +126,8 @@ pub struct Fighter {
     start: (Vitality, PostureMeter),
     /// TAE SpEffects active on the last step, to find the ones that just started.
     last_tae_effects: Vec<i32>,
+    /// Build-up meters and the effects hits left (see [`crate::status`]).
+    pub status: Status,
 }
 
 impl Fighter {
@@ -131,6 +136,7 @@ impl Fighter {
         (self.vitality, self.posture) = self.start;
         self.recovery = RecoveryAccumulator::default();
         self.last_tae_effects.clear();
+        self.status.clear();
     }
 
     /// HP left as a fraction of max.
@@ -165,6 +171,8 @@ pub struct CombatRules {
     pub fighters: Vec<Fighter>,
     effects: HashMap<i32, ActiveEffect>,
     knockback: KnockbackTable,
+    /// Status fields of every SpEffect (build-up, periodic HP change).
+    pub statuses: StatusBook,
 }
 
 fn param_dirs(cache: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -218,6 +226,14 @@ impl CombatRules {
                 .find(id)
                 .and_then(|r| CalcCorrectGraph::from_row(&r).ok())
         };
+        let statuses = sp.as_ref().map(StatusBook::from_table).unwrap_or_default();
+        let tentative_f = |f: &str| row_f32(tentative.as_ref(), 0, f).unwrap_or(0.0);
+        let wolf_status = Status::new(
+            graph(GRAPH_POISON_RESIST).map_or(0.0, |g| g.eval(PLAYER_GROWTH_LEVEL).trunc())
+                + player_poison_resist(&pd, &dd),
+            tentative_f("ResistRecoverPoint_Poision_Player"),
+        );
+        let npc_poison_recover = tentative_f("ResistRecoverPoint_Poision_Enemy");
 
         let fighters = combatants
             .iter()
@@ -228,6 +244,7 @@ impl CombatRules {
                                recovery_base,
                                control,
                                resident,
+                               status: Status,
                                kind: FighterKind| Fighter {
                     vitality: vit,
                     posture,
@@ -243,6 +260,7 @@ impl CombatRules {
                     resident,
                     start: (vit, posture),
                     last_tae_effects: Vec::new(),
+                    status,
                 };
                 if i == 0 {
                     let w = weapons.as_ref().and_then(|t| t.find(c.param_id));
@@ -287,6 +305,7 @@ impl CombatRules {
                         recovery,
                         control_row(0),
                         Vec::new(),
+                        wolf_status.clone(),
                         FighterKind::Player {
                             weapon: Box::new(weapon),
                             attack_base,
@@ -294,11 +313,15 @@ impl CombatRules {
                         },
                     )
                 } else {
-                    let npc = npcs
+                    let row = npcs.as_ref().and_then(|t| t.find(c.param_id));
+                    let npc = row
                         .as_ref()
-                        .and_then(|t| t.find(c.param_id))
-                        .and_then(|r| NpcCombat::from_row(&r).ok())
+                        .and_then(|r| NpcCombat::from_row(r).ok())
                         .expect("NpcParam row");
+                    let resist = row
+                        .as_ref()
+                        .and_then(|r| r.int("resist_poison").ok())
+                        .unwrap_or(0) as f32;
                     fighter(
                         Vitality::new(npc.hp, npc.deathblows),
                         PostureMeter::full(npc.max_posture, npc.max_debt_stamina),
@@ -309,6 +332,7 @@ impl CombatRules {
                             .copied()
                             .filter(|&id| id > 0)
                             .collect(),
+                        Status::new(resist, npc_poison_recover),
                         FighterKind::Npc(Box::new(npc)),
                     )
                 }
@@ -318,6 +342,7 @@ impl CombatRules {
             fighters,
             effects,
             knockback,
+            statuses,
         }
     }
 
@@ -348,6 +373,8 @@ impl CombatRules {
             .sp_effects
             .iter()
             .filter(|id| !self.fighters[i].last_tae_effects.contains(id))
+            // Periodic effects (poison) change HP once per interval instead (`crate::status`).
+            .filter(|id| !self.statuses.periodic(**id))
             .filter_map(|id| self.effects.get(id))
             .map(|e| e.change_hp_rate)
             .filter(|&r| r != 0.0)
@@ -539,7 +566,14 @@ impl CombatRules {
         let hit_stop = self.hit_stop(d, &atk, frame_d);
 
         let (direction, front_back) = hit_direction(defender, hit.direction);
-        let level = hit.attack.damage_level.max(1);
+        // A hit with no damage level that carries a behaviour identification value (the smoke
+        // screen's blinding, 17) reaches the script as DAMAGE_LEVEL_NONE, the level its
+        // blinding branch tests (`c0000_transition.hks`); other hits keep at least level 1.
+        let level = if hit.attack.damage_level <= 0 && atk.behavior_id != 0 {
+            0
+        } else {
+            hit.attack.damage_level.max(1)
+        };
         HitResult {
             defender: IncomingDamage {
                 damage_type: defender_code,
@@ -553,6 +587,8 @@ impl CombatRules {
                     FighterKind::Player { .. } => 0,
                 },
                 repel_dir: if outcome.guarded() { 2 } else { 0 },
+                element: atk.sp_attribute as i32,
+                behavior_id: atk.behavior_id as i32,
                 ..IncomingDamage::default()
             },
             attacker: attacker_code.map(|c| IncomingDamage {
@@ -704,6 +740,48 @@ impl CombatRules {
             f.reset();
         }
     }
+
+    /// Applies the SpEffects a hit leaves on fighter `d` (a bullet's `spEffectId0..4`): poison
+    /// build-up and timed effects (see [`crate::status`]). The returned timed effects belong in
+    /// the character's TAE runtime so its scripts, AI and posture rules see them.
+    pub fn apply_hit_effects(&mut self, d: usize, ids: &[i32]) -> Applied {
+        if self.fighters[d].dead() {
+            return Applied::default();
+        }
+        let book = &self.statuses;
+        self.fighters[d].status.apply(book, ids)
+    }
+
+    /// Advances fighter `i`'s status by `dt` seconds and applies the HP its periodic effects take
+    /// (poison). Returns that HP.
+    pub fn tick_status(&mut self, i: usize, dt: f32) -> i32 {
+        let f = &mut self.fighters[i];
+        let hp = f.status.tick(&self.statuses, f.vitality.max_hp, dt);
+        if hp != 0 && !f.dead() {
+            let left = f.vitality.hp - hp;
+            f.vitality.set_hp(left.min(f.vitality.max_hp));
+        }
+        hp
+    }
+}
+
+/// Wolf's armour poison resistance: the sum of `resistPoison` over the pieces of CharaInitParam
+/// 10010 (all 0; which pieces the engine sums is not traced).
+fn player_poison_resist(pd: &Path, dd: &Path) -> f32 {
+    let init = load_table(pd, dd, "CharaInitParam", "CharaInitParam");
+    let armour = load_table(pd, dd, "EquipParamProtector", "EquipParamProtector");
+    let (Some(init), Some(armour)) = (init, armour) else {
+        return 0.0;
+    };
+    let Some(row) = init.find(10010) else {
+        return 0.0;
+    };
+    ["equip_Helm", "equip_Armer", "equip_Gaunt", "equip_Leg"]
+        .iter()
+        .filter_map(|f| row.int(f).ok())
+        .filter_map(|id| armour.find(id as i32))
+        .filter_map(|p| p.int("resistPoison").ok())
+        .sum::<i64>() as f32
 }
 
 /// Wolf's KnockBackParam row: the highest EquipParamProtector `knockbackParamId` among the

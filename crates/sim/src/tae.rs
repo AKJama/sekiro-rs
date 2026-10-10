@@ -68,6 +68,9 @@ pub enum TaeKind {
     IFrames(i32),
     /// `IFrames_MistRaven` (950) and `IFrames_DuringAction` (951): full invulnerability. 950 sits
     /// on Wolf's knock-down, launch, death and revival animations, 951 on the deathblow throws.
+    /// `IFrames_ThrowAtkStillHurts` (952) sits only on Wolf's being-thrown clips (`a2xx_600xxx`):
+    /// no other attack lands while the throw holds him, and the throw's own damage still does
+    /// (it is applied by the throw, not by hit detection; see [`crate::grab`]).
     Invulnerable,
     /// `BoostRootMotionToReachTarget` (760): scales root motion so an attack reaches its target.
     ReachTarget(ReachTarget),
@@ -383,7 +386,7 @@ fn decode(template: &Template, e: &tae::TaeEvent) -> Option<TimedEvent> {
         304 => TaeKind::ThrowAttack {
             judge: int("BehaviorJudgeID")?,
         },
-        950 | 951 => TaeKind::Invulnerable,
+        950..=952 => TaeKind::Invulnerable,
         760 if int("IsEnable").unwrap_or(1) != 0 => {
             let f = |name: &str| d.field(name).and_then(|v| v.as_f32()).unwrap_or(0.0);
             TaeKind::ReachTarget(ReachTarget {
@@ -443,7 +446,7 @@ pub struct TaeFrame {
     pub restricted: bool,
     /// Sound events that started this tick: (sound type, sound id).
     pub sounds: Vec<(i32, i32)>,
-    /// TAE 950 / 951: no hit lands at all.
+    /// TAE 950 / 951 / 952: no hit lands at all.
     pub invulnerable: bool,
     /// TAE 760 of the first playing clip that has one.
     pub reach_target: Option<ReachTarget>,
@@ -472,6 +475,13 @@ pub struct TaeRuntime {
 }
 
 impl TaeRuntime {
+    /// Starts (or refreshes) a timed SpEffect from outside the animation, such as one a bullet
+    /// left on the character ([`crate::status`]). It shows in the frame from the next update on.
+    pub fn add_timed(&mut self, id: i32, seconds: f32) {
+        let r = self.timed.entry(id).or_insert(0.0);
+        *r = r.max(seconds);
+    }
+
     /// Computes the frame for `clips` (the main clip first) after they advanced by `dt`.
     pub fn update(&mut self, db: &TaeDb, clips: &[PlayingClip], dt: f32) {
         for remaining in self.timed.values_mut() {

@@ -202,6 +202,12 @@ pub struct AttackData {
     pub category: u8,
     /// BehaviorParam `stamina`: for a guard judge, posture added to every guarded hit.
     pub behavior_stamina: i32,
+    /// AtkParam `throwFlag`: 0 an ordinary attack, 1 a throw start (its contact grabs instead of
+    /// hitting; see [`crate::grab`]), 2 a throw's own damage (`ThrowAttackBehavior` judges).
+    pub throw_flag: u8,
+    /// AtkParam `throwTypeId`: which of the attacker's ThrowParam rows a throw start begins
+    /// ([`crate::deathblow::ThrowTable::npc_row`]).
+    pub throw_type_id: i32,
 }
 
 impl AttackData {
@@ -242,6 +248,8 @@ impl AttackData {
             profile: AttackProfile::from_row(row).ok(),
             category: 0,
             behavior_stamina: 0,
+            throw_flag: int("throwFlag") as u8,
+            throw_type_id: int("throwTypeId"),
         }
     }
 }
@@ -271,8 +279,8 @@ pub struct Combatant {
     /// The row the combat rules read: EquipParamWeapon of the player's right-hand weapon, or
     /// the NPC's NpcParam.
     pub param_id: i32,
-    /// Bullets by behaviour judge id (BehaviorParam rows with `refType` 1).
-    pub bullets: HashMap<i32, crate::bullets::BulletDef>,
+    /// Bullets by behaviour judge id (BehaviorParam rows with `refType` 1), with their children.
+    pub bullets: HashMap<i32, Arc<crate::bullets::BulletDef>>,
 }
 
 impl Combatant {
@@ -373,7 +381,20 @@ impl Combatant {
             load_table(&pd, &dd, "Bullet", "BulletParam"),
             load_table(&pd, &dd, "AtkParam_Npc", "AtkParam"),
         ) {
-            c.bullets = crate::bullets::load_bullets(&b, &bullets, &a, 200_000_000, c.variation);
+            let sp = load_table(&pd, &dd, "SpEffectParam", "SpEffect");
+            let effects = |id: i32| {
+                let Some(row) = sp.as_ref().and_then(|t| t.find(id)) else {
+                    return crate::bullets::EffectKind::default();
+                };
+                let num = |f: &str| row.f32(f).unwrap_or(0.0);
+                crate::bullets::EffectKind {
+                    poison: row.int("poizonAttackPower").unwrap_or(0) > 0,
+                    timed_state: num("effectEndurance") > 0.0
+                        && row.int("stateInfo").unwrap_or(0) != 0,
+                }
+            };
+            c.bullets =
+                crate::bullets::load_bullets(&b, &bullets, &a, &effects, 200_000_000, c.variation);
         }
         c
     }
@@ -507,6 +528,17 @@ pub fn can_be_hit(frame: &TaeFrame) -> bool {
     !frame.invulnerable
 }
 
+/// TAE 954 `IFrameType` 7: Wolf's steps carry it (with type 2, general) for their first 0.27 s;
+/// FwLo's RustSekiro lists it as the grab type (`docs/kb/guard-deflect.md`).
+pub const IFRAME_GRAB: i32 = 7;
+
+/// Whether a throw start (AtkParam `throwFlag` 1) can catch a character this step: not while it
+/// is invulnerable, airborne (a jump gets out of a grab, as in FwLo's RustSekiro), or in a step's
+/// grab i-frames. As with [`can_be_hit`], a grab that passes through is not spent.
+pub fn can_be_grabbed(frame: &TaeFrame, grounded: bool) -> bool {
+    can_be_hit(frame) && grounded && !frame.iframes.contains(&IFRAME_GRAB)
+}
+
 /// Tracks attack windows across steps and finds contacts.
 #[derive(Debug, Default)]
 pub struct HitDetector {
@@ -560,8 +592,13 @@ impl HitDetector {
                     live_shapes.insert(key);
                     let (pa, pb) = self.last.insert(key, (a, b)).unwrap_or((a, b));
                     for (di, defender) in chars.iter().enumerate() {
+                        let reachable = if attack.throw_flag == 1 {
+                            can_be_grabbed(defender.tae_frame(), defender.body.grounded)
+                        } else {
+                            can_be_hit(defender.tae_frame())
+                        };
                         if di == ai
-                            || !can_be_hit(defender.tae_frame())
+                            || !reachable
                             || self.done.contains(&(ai, judge, w.start.to_bits(), di))
                         {
                             continue;

@@ -14,6 +14,7 @@
 
 mod arena;
 mod audio;
+mod bullet_fx;
 mod character;
 mod combat_hud;
 mod deathblow_demo;
@@ -119,6 +120,10 @@ fn main() -> anyhow::Result<()> {
             lock_on: args.iter().any(|a| a == "--lock-on"),
             simple_ai: args.iter().any(|a| a == "--simple-ai"),
             god: args.iter().any(|a| a == "--god"),
+            force_act: arg_value(&args, "--force-act")
+                .map(|v| v.parse())
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("--force-act wants an action id: {e}"))?,
             break_posture: args.iter().any(|a| a == "--break-posture"),
             brain: match arg_value(&args, "--brain") {
                 Some(name) => sekiro_sim::brain::BrainKind::by_name(&name)
@@ -148,7 +153,7 @@ fn main() -> anyhow::Result<()> {
         "                 [--map <id> [--start <n> | --spawn x,y,z,yaw,0]] [--no-enemy] [--lock-on]"
     );
     eprintln!(
-        "                 [--simple-ai] [--passive] [--god] [--enemy c1010|c5060] [--brain lua|scripted] [--brain-log]"
+        "                 [--simple-ai] [--passive] [--god] [--force-act <id>] [--enemy c1010|c5060] [--brain lua|scripted] [--brain-log]"
     );
     eprintln!("       sekiro-rs --arena owl [--full-map] [--play options] (a boss on his own map)");
     eprintln!("usage: sekiro-rs --arena [--deathblow] [--screenshot <out.png> --at <seconds>]");
