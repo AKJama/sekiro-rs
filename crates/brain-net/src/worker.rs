@@ -134,6 +134,8 @@ impl HostedBrain {
         let worker_stopping = stopping.clone();
         let worker = thread::Builder::new()
             .name(format!("boss-{}", backend.name()))
+            // TLS setup and the handshake use large stack frames; 2 MB overflows on Windows.
+            .stack_size(8 * 1024 * 1024)
             .spawn(move || {
                 run(
                     config,
