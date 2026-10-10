@@ -201,7 +201,8 @@ Layouts were reimplemented from SoulsFormatsNEXT (`MSBS`, `BXF4`) and DSMapStudi
 
 ### Area
 
-`m11_00_00_00` holds both Ashina Outskirts and Ashina Castle (place names 1100 and 1110 in the English `item.msgbnd` place-name FMG).
+All ten mapstudio MSBs in the install archive now extract and load; the complete inventory, start audit and screenshots are in [MAP-BASELINE.md](MAP-BASELINE.md).
+`m11_00_00_00` uses Ashina Outskirts (place name 1100); `m11_01_00_00` uses Ashina Castle (1110), and `m11_02_00_00` uses Ashina Reservoir (1120).
 It places 43 Ashina soldiers (`c1010`) among 144 enemies, 4498 map pieces of 535 models, 1509 objects, 166 hit collision parts and 10 player start points.
 
 ### MSB (`map/mapstudio/<id>.msb`)
@@ -252,6 +253,23 @@ The map viewer finds the collision part under the camera and shows pieces whose 
 Using the collision's display groups instead (`--groups display`) looked the same from the starts compared, but 49 of 166 collision parts, including the ones under player starts 5 and 7, have no display groups, while the collision under every player start tested (0 to 5 and 7) has draw groups.
 Which block the engine really uses is not confirmed.
 Eleven map pieces have no draw groups at all and are left out of the layout.
+This suppression applies only to maps containing collision parts.
+`m89_00_00_99` has no collision parts and has zero-group sky-dome pieces, so those pieces must be retained.
+Its 26 visible pieces are co-located sky variants, not walkable terrain; choosing their event state and sky shader remains unimplemented.
+
+### Findings across all maps
+
+The English place-name FMG uses version 2, 16-byte groups (`offset index`, first ID, last ID, padding), and 64-bit string offsets.
+MSB collision map-name IDs identify Hirata Estate (1000), Ashina Outskirts (1100), Ashina Castle (1110), Ashina Reservoir (1120), Abandoned Dungeon (1300), Mibu Village (1500), Ashina Depths (1510), Sunken Valley (1700), Sunken Valley Passage (1710), Senpou Temple, Mt. Kongo (2000), and Fountainhead Palace (2500).
+Boundary collision parts can name adjoining areas, so these IDs do not imply a one-name-per-MSB correspondence.
+
+An object binder need not have render geometry.
+`o115923.objbnd` contains only HKX physics and no FLVER; the extractor identifies this membership pattern and counts it as nothing visible rather than a failed model.
+An unrelated binder with neither HKX nor FLVER still reports a missing model.
+
+Ordinary map GPARAM lookup uses `mAA_BB_0000.gparam`.
+If that file is absent, cinematic map `mAA_BB_CC_DD` tries `sAA_BB_CCDD.gparam`; m89 therefore uses `s89_00_0099.gparam`.
+Explicit GPARAM overrides take precedence.
 
 ### Cache layout
 
@@ -288,7 +306,7 @@ C toggles the collision wireframe, G cycles draw-group modes, M toggles enemy (r
   The normal map is the one named like the albedo, else the one named after the material, else the first; detail normals of other layers are ignored.
 - Single albedo layer: moss, snow and blend-mask layers, vertex-colour blending, detail maps and the multi-layer shaders are ignored.
 - Objects are off by default: many are event-state props (siege barricades, a 400 m dome around the castle gate) that the game enables from its event scripts.
-- Lighting is a single sun, ambient light and distance fog, not the map's GPARAM light sets.
+- Sun, ambient light and distance fog come from the map's GPARAM; local light sets and full shader/exposure fidelity remain approximate.
 - Bevy's IO threads overflow the default 2 MiB stack while loading all map GLBs and DDS files at once (still at 4 MiB), so `--map` raises `RUST_MIN_STACK` to 16 MiB before Bevy starts; the root cause inside Bevy's loaders was not tracked down.
 
 ### Walking on the map

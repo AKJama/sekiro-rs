@@ -13,7 +13,7 @@ This is a high-level view of how much of Sekiro is reimplemented.
 | Deathblows and death | Partial | `######----` 60% |
 | Enemies and bosses | Partial | `#---------` ~5% |
 | Enemy AI | Partial | `#####-----` 50% |
-| Maps and world | Partial | `#---------` ~10% |
+| Maps and world | Partial | All 10 maps extracted; 9 gameplay maps walkable at baseline |
 | Audio | Partial | `###-------` 30% |
 | Interface and game flow | Partial | `#---------` 10% |
 
@@ -99,16 +99,26 @@ Docs: [AI.md](AI.md).
 
 ## Maps and world
 
-1 of 10 maps is extracted (~10%).
+All ten archive maps extract and load; all 69 player starts across the nine gameplay maps have collision floors.
+The tenth map is a sky-dome library without terrain.
+Detailed measurements, reviewed screenshots, visual limitations and verification are in [MAP-BASELINE.md](MAP-BASELINE.md).
 
 | Item | Status | Notes |
 | --- | --- | --- |
-| m11_00_00_00 (Ashina Outskirts and Castle) | Partial | Pieces, textures, collision, walking work. |
-| Map lighting from draw params, foliage, fog | Partial | |
-| The other 9 maps | Not started | Same extractor. |
-| Placed enemies, objects, doors, ladders, events (EMEVD) | Started | EMEVD reader and a small event interpreter run the Owl fight's own events (phase 2, boss bar, defeat); see [OWL.md (Phase 2)](OWL.md#phase-2). |
+| m10_00_00_00 (Hirata Estate) | Baseline | Walkable; water, foliage and material layers approximate. |
+| m11_00_00_00 (Ashina Outskirts) | Baseline | Walkable; material layers approximate. |
+| m11_01_00_00 (Ashina Castle) | Baseline | Walkable; initial viewer camera obstruction fixed and verified. |
+| m11_02_00_00 (Ashina Reservoir) | Baseline | Walkable; material layers approximate. |
+| m13_00_00_00 (Abandoned Dungeon) | Baseline | Walkable; pale flat water. |
+| m15_00_00_00 (Mibu Village / Ashina Depths) | Baseline | Walkable; water and foliage approximate. |
+| m17_00_00_00 (Sunken Valley / Sunken Valley Passage) | Baseline | Walkable; conspicuous snow/foliage layers. |
+| m20_00_00_00 (Senpou Temple, Mt. Kongo) | Baseline | Walkable; foliage and material layers approximate. |
+| m25_00_00_00 (Fountainhead Palace) | Baseline | Walkable; use start 1, lake shader approximate. |
+| m89_00_00_99 (sky-dome library) | Inspection only | Loads after GPARAM/group fixes; no authored collision, cannot be walked. |
+| Map lighting from draw params, foliage, fog | Partial | GPARAM sun, ambient and fog load per map; local lights and shader fidelity remain. |
+| Placed enemies, objects, doors, ladders, events (EMEVD) | Started | Objects extracted, event visibility incomplete; Owl fight events run. |
 
-Docs: [FORMATS.md (Maps)](FORMATS.md#maps).
+Docs: [FORMATS.md (Maps)](FORMATS.md#maps-msb-layouts-map-pieces-and-hit-collision).
 
 ## Audio
 

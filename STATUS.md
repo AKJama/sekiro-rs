@@ -21,7 +21,30 @@ How much of the game is done overall: `docs/PROGRESS.md`.
 | Owl's tools | Bullets with child bullets, flight from the Bullet params, area and lingering hits, shared hit records; poison build-up and damage over time, recovery seal, blinding, lock-on break; warp clips fade him out, unhittable, when forced (his castle AI never warps); simple stand-in looks and a HUD status line | `docs/OWL.md` (Tools) |
 | Boss brain | The Owl's and the Ashina soldier's act choices can come from an outside controller (`--brain lua\|scripted\|decisions\|responses`, `--brain-log`): plans of his own action ids run through his battle goal, reflexes stay with his Lua AI, mirrored observation, this fight's outcome tally, and a memory of every fight with Wolf's habits kept in `logs/memory/<chr>.json` (`--brain-memory`) | `docs/BRAIN.md` |
 | Audio | The game's own FMOD Ex runtime from the install plays the game's event projects (`main`, the enemy's `cXXXX`, the map area's): TAE sounds with floor-material footsteps and armour rustle, hit, block and deflect clangs from the hit-effect params, listener on the camera with the events' own 3D rolloff; decoded samples only as a fallback | `docs/AUDIO.md` |
-| Map | m11_00_00_00 (Ashina Outskirts and Castle) and m11_01_00_00 (the invaded castle): pieces, textures, normal maps, collision; boss arenas load the pieces and collision within a radius | `docs/FORMATS.md` (Maps) |
+| Map | All ten archive maps extracted and loadable; 69 starts across nine gameplay maps walk; m89 is sky-only | `docs/MAP-BASELINE.md`, `docs/FORMATS.md` |
+
+## Map baseline commands
+
+Use `target/alt/release/sekiro-rs.exe --map <id>` for the viewer and add `--play` to walk.
+The alternate build leaves the user's default release executable alone.
+
+| `--map` ID | Area | Suggested `--start` |
+| --- | --- | ---: |
+| m10_00_00_00 | Hirata Estate | 0 |
+| m11_00_00_00 | Ashina Outskirts | 3 |
+| m11_01_00_00 | Ashina Castle | 2 |
+| m11_02_00_00 | Ashina Reservoir | 0 |
+| m13_00_00_00 | Abandoned Dungeon | 0 |
+| m15_00_00_00 | Mibu Village / Ashina Depths | 3 |
+| m17_00_00_00 | Sunken Valley / Sunken Valley Passage | 0 |
+| m20_00_00_00 | Senpou Temple, Mt. Kongo | 0 |
+| m25_00_00_00 | Fountainhead Palace | 1 |
+| m89_00_00_99 | Sky-dome library, no floor | Viewer only |
+
+Map extraction has zero failed models after handling the castle's HKX-only object binder.
+The sky library now retains its collisionless zero-group pieces and resolves its cinematic GPARAM.
+Initial viewer cameras now clip against nearby collision; the castle and Mibu obstructed starts were verified after rebuilding.
+Final alternate release build, workspace Clippy, workspace formatting, formats/extractor release tests and both map regressions passed; details and screenshots are in `docs/MAP-BASELINE.md`.
 
 ## How to run
 
@@ -61,7 +84,7 @@ Uncommitted files in the working tree belong to these tasks; check `git status` 
 
 ## Known issues
 
-- Done 2026-10-10, to be confirmed in play: three features after FwLo's RustSekiro video (his code adapted under MIT, `CREDITS.md`). (1) The deathblow camera: Wolf's deathblow clips drive it through TAE 155 (CameraSetParam slot 41, CameraParam 4000), 153 (distance, 1.5 m at the soldier's blow) and 151 (focus on dummy 142 of his animated camera bone, with look limits; the Owl's deathblow), and it hands back on the params' own chase rates (`docs/DEATHBLOW.md`, "Camera"). (2) The perilous kanji: the warning dummy bullet (judge 980 to 989) is made at Wolf within 5 m (soldier) or 9 m (Owl), its SpEffect 211000 shows VFX 48100 "危" at Wolf's dummy 220, and the HUD draws a red 危 over Wolf with a Windows Japanese font (the game's FXR is not decoded; no sound found). (3) The jump counter: Wolf's jumps carry sweep i-frames (TAE 954 type 1), his air kick (PCBehavior 901, anti-ground) is now a real attack, the sweeps' SpEffect 400200 multiplies its posture damage by 8 (the soldier's posture breaks), and env 2004 lets his script kick off the enemy (`docs/COMBAT-RULES.md`, "Perilous attacks"). Tests `crates/sim/tests/perilous.rs`, `deathblow_camera.rs`; scripts `crates/game/scripts/soldier_deathblow.txt`, `soldier_jump_counter.txt`; screenshots `cache/screens/dbcam_soldier_*.png`, `dbcam_owl2_*.png`, `kanji_soldier_*.png`.
+- Done 2026-10-10, to be confirmed in play: three features after FwLo's RustSekiro video (his code adapted under MIT, `CREDITS.md`). (1) The deathblow camera: Wolf's deathblow clips drive it through TAE 155 (CameraSetParam slot 41, CameraParam 4000), 153 (distance, 1.5 m at the soldier's blow) and 151 (focus on dummy 142 of his animated camera bone, with look limits; the Owl's deathblow), and it hands back on the params' own chase rates (`docs/DEATHBLOW.md`, "Camera"). (2) The perilous kanji: the warning dummy bullet (judge 980 to 989) is made at Wolf within 5 m (soldier) or 9 m (Owl), its SpEffect 211000 shows VFX 48100 "å±" at Wolf's dummy 220, and the HUD draws a red å± over Wolf with a Windows Japanese font (the game's FXR is not decoded; no sound found). (3) The jump counter: Wolf's jumps carry sweep i-frames (TAE 954 type 1), his air kick (PCBehavior 901, anti-ground) is now a real attack, the sweeps' SpEffect 400200 multiplies its posture damage by 8 (the soldier's posture breaks), and env 2004 lets his script kick off the enemy (`docs/COMBAT-RULES.md`, "Perilous attacks"). Tests `crates/sim/tests/perilous.rs`, `deathblow_camera.rs`; scripts `crates/game/scripts/soldier_deathblow.txt`, `soldier_jump_counter.txt`; screenshots `cache/screens/dbcam_soldier_*.png`, `dbcam_owl2_*.png`, `kanji_soldier_*.png`.
 
 - Done 2026-10-10, to be tried in play: the Ashina soldier (c1010) can be driven by the boss brain, as a testbed for whether a hosted model plays better than the game's AI. His action table (`brain::actions::SOLDIER`, from `101000_battle.lua`, his BehaviorParam and AtkParam rows) has 13 attacks and 2 back steps with his acts' approach distances, his rushes' AI number, combos `3000+3001` and `3005+3007`, and reflex acts 23, 25 and 27; his script also names 3004, 3006, 5202 and 5203, which his TAE has no clips for, so they are refused. The driver, observation (`boss`, `boss_bearing`, `since_boss_hit`), tally and hosted requests are generic now (question `boss_action`, instructions naming the enemy). Memory: each fight's tally and Wolf's habits (attack distance, range, his response after deflects, guards and back steps, his answer to and punish speed for each boss action, heals, jumps) go into `logs/memory/<chr>.json` (version 1) at each death, respawn, every 15 s and on exit; requests carry this fight and all fights within 1200 bytes. Try: `.\target\release\sekiro-rs.exe --play --enemy soldier --brain scripted --brain-memory on --brain-log`. `docs/BRAIN.md`, tests `crates/sim/tests/soldier_brain.rs`, `crates/sim/src/brain/tests.rs`, `crates/brain-net`.
 - Fixed and checked in play 2026-10-10: the soldier's missing sword was a stale combat draw mask exported before `anims`, leaving group 0 hidden.

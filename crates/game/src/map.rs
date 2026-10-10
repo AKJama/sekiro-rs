@@ -272,6 +272,22 @@ fn default_gparam(id: &str) -> String {
     format!("{}_0000", id.get(..6).unwrap_or(id))
 }
 
+/// Cinematic layouts use the full map suffix in an `s` draw parameter stem.
+fn cinematic_gparam(id: &str) -> Option<String> {
+    let fields: Vec<_> = id.strip_prefix('m')?.split('_').collect();
+    if fields.len() != 4
+        || fields
+            .iter()
+            .any(|f| f.len() != 2 || !f.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return None;
+    }
+    Some(format!(
+        "s{}_{}_{}{}",
+        fields[0], fields[1], fields[2], fields[3]
+    ))
+}
+
 /// The entity whose position picks the draw groups (the free camera, or the player).
 #[derive(Component)]
 pub struct MapFocus;
@@ -352,12 +368,28 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
         .and_then(|f| f.to_str())
         .unwrap_or_default()
         .to_string();
-    let stem = scene.gparam.clone().unwrap_or_else(|| default_gparam(&id));
     // `dir` is canonical (verbatim on Windows), so walk up instead of joining "..".
     let cache = dir
         .parent()
         .and_then(Path::parent)
         .context("map folder has no cache above it")?;
+    let stem = scene.gparam.clone().unwrap_or_else(|| {
+        let standard = default_gparam(&id);
+        if cache
+            .join(format!("raw/param/drawparam/{standard}.gparam"))
+            .is_file()
+        {
+            standard
+        } else {
+            cinematic_gparam(&id)
+                .filter(|s| {
+                    cache
+                        .join(format!("raw/param/drawparam/{s}.gparam"))
+                        .is_file()
+                })
+                .unwrap_or(standard)
+        }
+    });
     let gparam_path = cache.join(format!("raw/param/drawparam/{stem}.gparam"));
     let gparam = sekiro_formats::gparam::parse(
         &std::fs::read(&gparam_path)
@@ -435,11 +467,28 @@ fn camera_environment(
     }
 }
 
+/// Keep a player's initial inspection camera on the near side of surrounding collision.
+fn viewer_eye(pos: Vec3, eye: Vec3, collision: &sekiro_formats::hknp::CollisionMesh) -> Vec3 {
+    let focus = pos + Vec3::Y * 1.4;
+    let delta = eye - focus;
+    let distance = delta.length();
+    if distance <= f32::EPSILON {
+        return eye;
+    }
+    let direction = delta / distance;
+    let nearby = sekiro_sim::arena::crop(collision, focus, distance + 1.0);
+    let world = sekiro_sim::collision::CollisionWorld::from_mesh(&nearby);
+    match world.raycast(focus, direction, distance) {
+        Some(hit) => focus + direction * (hit - 0.2).max(0.0),
+        None => eye,
+    }
+}
+
 pub fn run(options: Options) -> Result<()> {
     let dir = map_dir(&options.cache, &options.id)?;
 
     // Start pose: --camera, else over the shoulder of a player start point.
-    let (start, yaw, pitch) = match options.camera {
+    let (mut start, yaw, pitch) = match options.camera {
         Some([x, y, z, yaw, pitch]) => (Vec3::new(x, y, z), yaw, pitch),
         None => {
             let (pos, yaw) = player_start(&dir, options.start).unwrap_or((Vec3::ZERO, 0.0));
@@ -493,6 +542,12 @@ pub fn run(options: Options) -> Result<()> {
             within: None,
         },
     )?;
+    if options.camera.is_none()
+        && let Ok((pos, _)) = player_start(&dir, options.start)
+        && let Some(collision) = &app.world().resource::<Layout>().collision
+    {
+        start = viewer_eye(pos, start, collision);
+    }
     app.insert_resource(Fly {
         yaw: yaw.to_radians(),
         pitch: pitch.to_radians(),
@@ -1062,5 +1117,37 @@ pub fn parse_camera(arg: Option<&str>) -> Result<Option<[f32; 5]>> {
         [x, y, z, yaw, pitch] => Ok(Some([x, y, z, yaw, pitch])),
         [x, y, z] => Ok(Some([x, y, z, 0.0, 0.0])),
         _ => anyhow::bail!("--camera wants x,y,z,yaw,pitch"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cinematic_gparam, default_gparam, viewer_eye};
+    use bevy::prelude::Vec3;
+
+    #[test]
+    fn draw_param_stems_preserve_cinematic_suffix() {
+        assert_eq!(default_gparam("m11_02_00_00"), "m11_02_0000");
+        assert_eq!(
+            cinematic_gparam("m89_00_00_99").as_deref(),
+            Some("s89_00_0099")
+        );
+        assert_eq!(cinematic_gparam("invalid"), None);
+        assert_eq!(cinematic_gparam("m89_00_0x_99"), None);
+    }
+
+    #[test]
+    fn initial_viewer_camera_stays_in_front_of_wall() {
+        let wall = sekiro_formats::hknp::CollisionMesh {
+            vertices: vec![[-10.0, -10.0, 1.0], [10.0, -10.0, 1.0], [0.0, 10.0, 1.0]],
+            indices: vec![0, 1, 2],
+            materials: vec![0],
+        };
+        let eye = viewer_eye(Vec3::ZERO, Vec3::new(0.0, 2.2, 3.5), &wall);
+        assert!(eye.z > 0.0 && eye.z < 1.0);
+        assert!(eye.y >= 1.4);
+        let clear = sekiro_formats::hknp::CollisionMesh::default();
+        let requested = Vec3::new(0.0, 2.2, 3.5);
+        assert_eq!(viewer_eye(Vec3::ZERO, requested, &clear), requested);
     }
 }

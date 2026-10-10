@@ -125,6 +125,24 @@ fn object_flver(raw: &Path, model: &str) -> PathBuf {
     raw.join(format!("obj/{model}.objbnd.d/{model}.flver"))
 }
 
+/// Collisionless cinematic layouts have no collision-driven visibility groups.
+fn exclude_ungrouped(has_collision: bool, masks: &[u32]) -> bool {
+    has_collision && masks.get(8..16).is_some_and(|g| g.iter().all(|&w| w == 0))
+}
+
+/// An authored physics-only object binder is valid even though it has no render model.
+fn physics_only_members<'a>(names: impl IntoIterator<Item = &'a str>) -> bool {
+    let mut physics = false;
+    for name in names {
+        let name = name.to_ascii_lowercase();
+        if name.ends_with(".flver") || name.ends_with(".flver.dcx") {
+            return false;
+        }
+        physics |= name.ends_with(".hkx") || name.ends_with(".hkx.dcx");
+    }
+    physics
+}
+
 pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
     let raw = cache.join("raw");
     let out = cache.join("maps").join(id);
@@ -240,6 +258,19 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
         .par_iter()
         .filter_map(|(model, path)| {
             let result = (|| -> Result<_> {
+                if model.starts_with('o') && !path.is_file() {
+                    let binder = path
+                        .parent()
+                        .context("object model has no parent")?
+                        .with_extension("");
+                    if binder.is_file() {
+                        let bytes = std::fs::read(&binder)?;
+                        let files = sekiro_formats::bnd4::parse(&bytes)?;
+                        if physics_only_members(files.iter().map(|f| f.file_name())) {
+                            return Ok(None);
+                        }
+                    }
+                }
                 let data =
                     std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
                 let f = flver::parse(&data)?;
@@ -281,6 +312,7 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
     let mut never_drawn = 0;
     let mut bmin = Vec3::splat(f32::MAX);
     let mut bmax = Vec3::splat(f32::MIN);
+    let has_collision = msb.parts.iter().any(|p| p.kind == msb::PartKind::Collision);
     for p in msb
         .parts
         .iter()
@@ -290,10 +322,7 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
         let Some(m) = models.get(&model) else {
             continue;
         };
-        if p.masks
-            .get(8..16)
-            .is_some_and(|g| g.iter().all(|&w| w == 0))
-        {
+        if exclude_ungrouped(has_collision, &p.masks) {
             // No draw groups: the piece never draws.
             never_drawn += 1;
             continue;
@@ -530,4 +559,29 @@ fn export_collision(
         start_gap,
     );
     Ok((mesh, ranges, note))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{exclude_ungrouped, physics_only_members};
+
+    #[test]
+    fn cinematic_pieces_do_not_need_collision_draw_groups() {
+        assert!(!exclude_ungrouped(false, &[0; 48]));
+        assert!(exclude_ungrouped(true, &[0; 48]));
+        let mut masks = [0; 48];
+        masks[8] = 1;
+        assert!(!exclude_ungrouped(true, &masks));
+        assert!(!exclude_ungrouped(true, &[]));
+    }
+
+    #[test]
+    fn physics_only_object_is_not_a_missing_render_model() {
+        assert!(physics_only_members(["o115923.hkx"]));
+        assert!(physics_only_members(["O115923.HKX.DCX"]));
+        assert!(!physics_only_members(["o115923.hkx", "o115923.flver"]));
+        assert!(!physics_only_members(["o115923.hkx", "o115923.flver.dcx"]));
+        assert!(!physics_only_members(["o115923.tpf"]));
+        assert!(!physics_only_members([]));
+    }
 }
