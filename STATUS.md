@@ -2,6 +2,7 @@
 
 Last updated 9 October 2026.
 Read this first in a new session, then `AGENTS.md` and `docs/DESIGN.md`.
+How much of the game is done overall: `docs/PROGRESS.md`.
 
 ## Where things stand
 
@@ -53,6 +54,8 @@ Uncommitted files in the working tree belong to these tasks; check `git status` 
 
 ## Known issues
 
+- Mouse look is far too sensitive (play.rs `MOUSE_SENSITIVITY`), reported 2026-10-10.
+- Free camera: after spinning the camera, movement feels inverted or tank-like (stick direction vs camera yaw vs Wolf facing); reproduce with a scripted run that turns the camera 180 degrees and logs stick yaw, MoveAngle and facing.
 - Wolf's max HP/posture come from CalcCorrectGraph at progression level 1; the real progression input is not yet traced.
 - Player HP damage formula is inferred (weapon attack power x correction), not traced.
 - Single-clip rendering: layered upper/lower-body states show one clip (FwLo's RustSekiro plays them with the graph's bone weights; next to port).
