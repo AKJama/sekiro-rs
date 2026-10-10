@@ -17,8 +17,8 @@ How much of the game is done overall: `docs/PROGRESS.md`.
 | Combat | Engine rules for hit/block/deflect, posture both ways, breaks, recovery; HP/posture HUD | `docs/COMBAT-RULES.md` |
 | Deathblows | Real ThrowParam pairs; posture break -> deathblow -> death; Wolf death and respawn | `docs/DEATHBLOW.md` |
 | Enemy | Soldier runs its own HKS script, behaviour graph and real Lua AI (Lua 5.0 VM + goal runtime); real combo cancels | `docs/AI.md` |
-| Great Shinobi Owl | c5060 (not c5070, his bird) with his own HKS, graph, TAE, params and Lua AI on the flat floor; shuriken bullets; two deathblows with the get-up and finishing pairs | `docs/OWL.md` |
-| Map | m11_00_00_00 (Ashina Outskirts and Castle): pieces, textures, normal maps, collision | `docs/FORMATS.md` (Maps) |
+| Great Shinobi Owl | c5060 (not c5070, his bird) with his own HKS, graph, TAE, params and Lua AI on the flat floor and on the Ashina Castle top where the game places him (`--arena owl`); shuriken bullets; two deathblows with the get-up and finishing pairs | `docs/OWL.md` |
+| Map | m11_00_00_00 (Ashina Outskirts and Castle) and m11_01_00_00 (the invaded castle): pieces, textures, normal maps, collision; boss arenas load the pieces and collision within a radius | `docs/FORMATS.md` (Maps) |
 
 ## How to run
 
@@ -29,10 +29,12 @@ cargo run --release -p sekiro-extract -- models
 cargo run --release -p sekiro-extract -- anims c0000 c1010 c5060
 cargo run --release -p sekiro-extract -- params
 cargo run --release -p sekiro-extract -- map m11_00_00_00
+cargo run --release -p sekiro-extract -- map m11_01_00_00
 cargo run --release -p sekiro-game -- --play --map m11_00_00_00 --start 3
+cargo run --release -p sekiro-game -- --arena owl
 ```
 
-Useful flags: `--play` alone uses a flat floor; `--enemy owl` (or `c5060`) fights the Great Shinobi Owl instead of the soldier; `--lock-on`, `--no-enemy`, `--simple-ai`, `--script FILE --shots step:path --exit` for scripted runs with screenshots; `--arena --deathblow` for the deathblow demo; `--viewer <glb>` and `--map <id>` for inspection.
+Useful flags: `--play` alone uses a flat floor; `--enemy owl` (or `c5060`) fights the Great Shinobi Owl instead of the soldier; `--arena owl` fights him on the castle top where the game places him (only the map within 60 m; `--full-map` loads all of it; `docs/OWL.md`, "The castle top"); in play, `--hide <model prefixes>` skips map piece models and `--objects` adds MSB objects; `--lock-on`, `--no-enemy`, `--simple-ai`, `--script FILE --shots step:path --exit` for scripted runs with screenshots; `--arena --deathblow` for the deathblow demo; `--viewer <glb>` and `--map <id>` for inspection.
 
 ## In progress when the session paused
 
@@ -55,7 +57,7 @@ Uncommitted files in the working tree belong to these tasks; check `git status` 
 
 ## Known issues
 
-- Mouse look is far too sensitive (play.rs `MOUSE_SENSITIVITY`), reported 2026-10-10.
+- Mouse look was far too sensitive (reported 2026-10-10); `MOUSE_SENSITIVITY` in play.rs is now 0.0012 radians per mouse count (was 0.0035), not yet confirmed by the user.
 - Free camera: after spinning the camera, movement feels inverted or tank-like (stick direction vs camera yaw vs Wolf facing); reproduce with a scripted run that turns the camera 180 degrees and logs stick yaw, MoveAngle and facing.
 - Wolf's max HP/posture come from CalcCorrectGraph at progression level 1; the real progression input is not yet traced.
 - Player HP damage formula is inferred (weapon attack power x correction), not traced.
@@ -66,7 +68,7 @@ Uncommitted files in the working tree belong to these tasks; check `git status` 
 
 ## Next steps
 
-1. Owl on the castle roof (`docs/OWL.md`, "Toward the castle roof"): export `m11_01_00_00`, place both from the layout, decode the map event script for his phase 2, NPC-on-player throws, firecracker and poison bullets.
+1. Owl on the castle top (`docs/OWL.md`, "Next steps"): the fight runs there (`--arena owl`); next decode the map event script (`event/m11_01_00_00.emevd`) for his phase 2 and for which top floor variant shows, then NPC-on-player throws, firecracker and poison bullets.
 2. Finish the three in-progress tasks above.
 3. Validation against the real game: record posture/HP/animation traces in a real fight (read-only) and compare with `duel-sim` output.
 4. More enemies from the m11 layout (43 soldiers placed in the MSB).

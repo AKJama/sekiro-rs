@@ -103,6 +103,9 @@ pub struct Duel {
     last_steps: [StepReport; 2],
     /// Thrown and shot attacks in flight.
     pub bullets: crate::bullets::Bullets,
+    /// A character that falls this far below its start is put back there (a stand-in for
+    /// fall death, which is not modelled yet). `None` on the flat floor, where nobody falls.
+    pub fall_respawn_depth: Option<f32>,
 }
 
 fn placement(c: &Character) -> Placement {
@@ -169,6 +172,7 @@ impl Duel {
             knockback: [None; 2],
             last_steps: Default::default(),
             bullets: Default::default(),
+            fall_respawn_depth: None,
         })
     }
 
@@ -558,6 +562,23 @@ impl Duel {
         c.body.position[2] += mz;
     }
 
+    /// Puts a character that fell [`Duel::fall_respawn_depth`] below its start back at its
+    /// start, standing still.
+    fn respawn_fallen(&mut self) {
+        let (Some(depth), Some(spawn)) = (self.fall_respawn_depth, self.spawn) else {
+            return;
+        };
+        for (c, start) in [&mut self.player, &mut self.enemy].into_iter().zip(spawn) {
+            if c.body.position[1] < start.position[1] - depth {
+                c.body.position = start.position;
+                c.body.yaw = start.yaw;
+                c.body.velocity = [0.0; 3];
+                c.body.grounded = true;
+                c.body.fall_top = start.position[1];
+            }
+        }
+    }
+
     pub fn step(&mut self, input: &InputFrame, dt: f32) -> DuelReport {
         if self.spawn.is_none() {
             self.spawn = Some([placement(&self.player), placement(&self.enemy)]);
@@ -619,6 +640,7 @@ impl Duel {
         if self.deathblow.is_none() && enemy_alive {
             self.separate();
         }
+        self.respawn_fallen();
 
         let mut found = self.detector.detect(
             &[&self.player, &self.enemy],

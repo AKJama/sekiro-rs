@@ -18,6 +18,11 @@
 //! Wolf stands at the player start, the enemy 5 m in front of him, both bodies walk on the
 //! map's hit collision (`sekiro_sim::collision`), the map renders as in `--map` (see
 //! [`crate::map::add_map`]) and the camera is pulled in when a wall is between it and Wolf.
+//!
+//! With `--arena <name>` (`sekiro_sim::arena`) the fight happens where the game places the
+//! boss: his MSB part's transform, Wolf at the arena's player start facing him, and only the
+//! map pieces and collision within the arena radius (`--full-map` loads all of it). A
+//! character that falls far below its start is put back there.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,6 +44,7 @@ use crate::character::{AnimLibrary, Animator, Rig, animate, bind_rigs};
 use crate::combat_hud;
 use crate::draw_mask::{DrawMask, MaskSource, apply_draw_masks};
 use crate::map::{self, MapFocus, MapScene};
+use sekiro_sim::arena::{Arena, ArenaSpec};
 use sekiro_sim::collision::CollisionWorld;
 
 pub struct Options {
@@ -67,6 +73,16 @@ pub struct Options {
     /// Time of day (hours) and draw param override for the map lighting.
     pub hour: f32,
     pub gparam: Option<String>,
+    /// A boss arena (`--arena owl`): the boss's map, his MSB placement and Wolf's start;
+    /// replaces `map`, `start` and `spawn`.
+    pub arena: Option<&'static ArenaSpec>,
+    /// With `arena`, load the whole map instead of the pieces and collision within its radius.
+    pub full_map: bool,
+    /// On a map, skip map piece models whose name starts with any of these (as `--map --hide`).
+    pub hide: Vec<String>,
+    /// On a map, also spawn MSB objects (off by default, as in `--map`: many are event-state
+    /// props).
+    pub objects: bool,
 }
 
 /// The map's collision, for the camera; absent on the flat floor.
@@ -78,7 +94,8 @@ struct MapCollision(Arc<CollisionWorld>);
 struct ModelPath(&'static str);
 
 const STEP_HZ: f64 = 60.0;
-const MOUSE_SENSITIVITY: f32 = 0.0035;
+/// Radians of camera turn per mouse count (0.0035 was reported as far too sensitive).
+const MOUSE_SENSITIVITY: f32 = 0.0012;
 const WOLF: usize = 0;
 const ENEMY: usize = 1;
 
@@ -150,7 +167,44 @@ pub fn run(options: Options) -> Result<()> {
     }
     let mut on_map = None;
     let mut start_yaw = 0.0;
-    if let Some(id) = &options.map {
+    let mut within = None;
+    if let Some(spec) = options.arena {
+        let t = std::time::Instant::now();
+        let arena = Arena::load(&cache, spec, options.full_map).map_err(|e| {
+            anyhow::anyhow!(
+                "arena {}: {e} (run `sekiro-extract map {}`)",
+                spec.name,
+                spec.map
+            )
+        })?;
+        arena.place(&mut duel);
+        start_yaw = arena.layout.wolf.yaw;
+        if !options.full_map {
+            within = Some((arena.layout.center(), spec.radius));
+        }
+        eprintln!(
+            "arena {} on {}: {} at {:?}, Wolf ({}) at {:?}; {} collision triangles{} in {:.2} s",
+            spec.name,
+            spec.map,
+            spec.boss_part,
+            duel.enemy.body.position,
+            arena.layout.wolf_source,
+            duel.player.body.position,
+            arena.world.triangle_count(),
+            if options.full_map {
+                " (full map)".to_string()
+            } else {
+                format!(" within {} m", spec.radius)
+            },
+            t.elapsed().as_secs_f32()
+        );
+        on_map = Some((
+            map::map_dir(&cache, spec.map)?,
+            spec.map.to_string(),
+            arena.world.clone(),
+        ));
+        map::raise_io_stack();
+    } else if let Some(id) = &options.map {
         let dir = map::map_dir(&cache, id)?;
         let world =
             Arc::new(CollisionWorld::load(&dir.join("collision.bin")).map_err(anyhow::Error::msg)?);
@@ -292,12 +346,23 @@ pub fn run(options: Options) -> Result<()> {
                 prefix: format!("maps/{id}/"),
                 collision: false,
                 no_pieces: false,
-                hide: Vec::new(),
-                objects: false,
+                hide: options
+                    .hide
+                    .iter()
+                    .cloned()
+                    .chain(
+                        options
+                            .arena
+                            .into_iter()
+                            .flat_map(|a| a.hidden_models.iter().map(|m| m.to_string())),
+                    )
+                    .collect(),
+                objects: options.objects,
                 groups: map::GroupMode::Draw,
                 markers: false,
                 hour: options.hour,
                 gparam: options.gparam.clone(),
+                within,
             },
         )?;
         app.insert_resource(MapCollision(world));
@@ -548,9 +613,12 @@ fn simulate(
     rigs: Query<&Rig, With<Actor>>,
     sounds: Res<crate::audio::SoundLibrary>,
     mut cues: MessageWriter<crate::audio::SoundCue>,
+    map_pending: Option<Res<map::Pending>>,
 ) {
-    // Hold the simulation until the models are on screen, so scripted runs line up with frames.
-    if rigs.is_empty() || !rigs.iter().all(|r| r.bound) {
+    // Hold the simulation until the models (and the map) are on screen, so scripted runs line
+    // up with frames.
+    if rigs.is_empty() || !rigs.iter().all(|r| r.bound) || map_pending.is_some_and(|p| !p.loaded())
+    {
         return;
     }
     let dt = 1.0 / STEP_HZ as f32;

@@ -1,6 +1,6 @@
 # The Great Shinobi Owl
 
-Notes for milestone 1 of the Owl fight: Wolf against the Great Shinobi Owl on the flat floor, with the Owl running his own HKS script, behaviour graph, TAE, params and Lua battle AI.
+Notes for the Owl fight: Wolf against the Great Shinobi Owl, with the Owl running his own HKS script, behaviour graph, TAE, params and Lua battle AI, on the flat floor (milestone 1) and on the Ashina Castle top where the game places him (milestone 2, "The castle top" below).
 Run it with `cargo run --release -p sekiro-game -- --play --enemy owl` (or `--enemy c5060`); `duel-sim --enemy c5060` and `cargo test -p sekiro-sim --test owl` run it headless.
 
 ## Which character he is
@@ -171,9 +171,66 @@ The rows use `defSorbDmyId` (dummy 230 sits 1.3 m in front of him, facing back) 
 - Owl warp transparency (3506030) and the smoke vanish are not rendered; bullets are drawn as small spheres.
 - After the finishing blow the duel respawns both characters 6 s after the death, before his 12 s death clip ends.
 
-## Toward the castle roof
+## The castle top (`--arena owl`)
 
-1. `sekiro-extract map m11_01_00_00` and check what the invaded castle layout references (its pieces may be shared with `m11_00_00_00`).
-2. Place Wolf and the Owl from the layout: Owl at part `c5060_0000`, Wolf at the roof's player start or a point a few metres in front; the duel already accepts map collision.
-3. Decode the EMEVD bank used around entity 1110850 (boss health bar 905060, the phase-2 SpEffect 200051, the heat-up check on 3506080) and run his phase change from it.
-4. NPC-on-player throws, firecracker and poison bullets, then the decision-model brain that replaces his Lua AI with mirrored information.
+Milestone 2: the same fight where the game places him, on the top floor of the Ashina Castle keep in `m11_01_00_00` (the invaded castle).
+The fight floor is the keep's open top room with its tatami and broken shutters, not the outer roof tiles; Wolf falls onto the roof below if he goes over the railing.
+
+```powershell
+cargo run --release -p sekiro-extract -- map m11_01_00_00
+cargo run --release -p sekiro-game -- --arena owl
+cargo run --release -p sekiro-game -- --arena owl --full-map
+cargo run --release -p sekiro-game -- --arena owl --script crates/game/scripts/owl_arena.txt --shots 25:cache/screens/arena_owl_start.png,120:cache/screens/arena_owl_approach.png,400:cache/screens/arena_owl_fight.png --exit
+cargo test -p sekiro-sim --test owl_arena
+```
+
+`--arena owl` implies `--play` and `--enemy owl`; the other play flags (`--lock-on`, `--script`, `--hide`, `--objects`, ...) work as usual.
+
+### How an arena is described
+
+An arena is one row of `ARENAS` in `crates/sim/src/arena.rs`: map id, the boss's MSB enemy part, the enemy, a radius, Wolf's player start and map piece models to hide.
+`ArenaLayout::resolve` reads the boss's transform and the start from the map's `layout.json`; `Arena::load` crops the hit collision to the triangles whose horizontal bounding box reaches within the radius of the boss, and `Arena::place` puts both characters on it.
+The game crate spawns only the map pieces whose placed bounding box reaches inside the same circle (`MapScene::within`); `--full-map` loads the whole map with the same placements.
+The next boss (Genichiro on the castle roof, for example) is one new row.
+
+| Field | Owl |
+|---|---|
+| Map | `m11_01_00_00` (its own 3636 pieces of 791 models; nothing is shared with `m11_00_00_00`) |
+| Boss | part `c5060_0000` at game (-104.50, 54.01, 244.06), Y rotation 46 degrees; Bevy (104.50, 54.01, 244.06), yaw -46 degrees (x and yaw negate, `docs/FORMATS.md`) |
+| Radius | 60 m: the top room is about 25 m across, so the room, its railings and the roofs around and below it are all inside; 1553 of 3622 piece instances and 470 455 of 1 656 384 collision triangles |
+| Wolf | player start `c0000_0003`, game (-120.34, 54.05, 234.23), 18.9 m from the Owl on the same floor, turned to face him |
+| Hidden | `m015072`, the burnt version of the top floor (see below) |
+
+### What the layout says, and what is inferred
+
+- The MSB has two player starts on that floor: `c0000_0003` (18.9 m away, beside the Sculptor's Idol object, so most likely the idol's rest point) and `c0000_0010` (1 m from the Owl, likely an event warp).
+  `c0000_0003` is the arena start; which one the game uses after the fight's cutscene is not traced.
+- Wolf is turned to face the Owl instead of taking the start's MSB yaw (-46.8 degrees in game space), which points him away from the Owl under our yaw convention.
+  The Owl keeps his MSB yaw, which faces Wolf's start within about 12 degrees.
+  Our convention (yaw 0 faces -Z, the X mirror negates the angle) is consistent for geometry, but whether a character placed with an MSB yaw really faces that way in the game is not checked against a capture.
+- Two map pieces at the same transform hold the castle top floor: `m015070` (entity 1114550, intact tatami with fallen shutters) and `m015072` (entity 1114551, burnt and dark).
+  Shown together they z-fight in polygon-shaped patches.
+  They are the only event-controlled map pieces in the layout; the map event script picks one.
+  The arena hides `m015072`; that the Owl fight uses the intact floor is inferred (the burnt one fits a later story state), and decoding `event/m11_01_00_00.emevd` would settle it.
+- Objects stay off as in `--play --map` (`--objects` adds those within the radius; on this floor that adds the Sculptor's Idol behind Wolf's start).
+- Fall death is not modelled: a character that falls 30 m below its start is put back there (`Duel::fall_respawn_depth`), which only happens off the cropped collision.
+
+### Checks
+
+- `crates/sim/tests/owl_arena.rs` loads the arena collision (skips when the map or the Owl is not extracted), places both, and runs his real AI for 30 s against a passive Wolf: neither drops more than 2 m below his start, and the Owl attacks at least 5 times (13 attacks and 11 hits on Wolf with seed 7).
+  A second test drops Wolf off the cropped collision and checks that he comes back to his start.
+- Scripted runs (`crates/game/scripts/owl_arena.txt`) show both standing on the tatami, the Owl's shuriken and slashes, Wolf's blocks and deflects, and the camera under the room's ceiling; `--full-map` renders the same frames.
+- Load time from launch to the first simulated frame (warm file cache, release build): about 4 s for the arena and 6 s for the full map; the map assets themselves load in 1.5 s and 3 s.
+  The collision crop takes 0.1 s.
+
+### Not done yet on the castle top
+
+- The floor shows a single albedo layer like every map (`docs/FORMATS.md`, Known approximations); lighting is the default sun, not the castle top's draw params.
+- The object `o115923` (entity 1111723) has no model in the archives and is skipped by the map export.
+- Phase 2, throws on Wolf and firecrackers: see "Not done yet" above, and the steps below.
+
+## Next steps
+
+1. Decode the EMEVD bank used around entity 1110850 (boss health bar 905060, the phase-2 SpEffect 200051, the heat-up check on 3506080) and run his phase change from it; it also says which castle top floor (`m015070` or `m015072`) the fight shows.
+2. NPC-on-player throws (his grabs 3037, 3040, 3041), firecracker and poison bullets.
+3. The decision-model brain that replaces his Lua AI with mirrored information.

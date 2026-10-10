@@ -144,13 +144,53 @@ struct Marker;
 struct Hud;
 
 /// Every GLB handle the map needs, to know when loading is done.
-#[derive(Resource, Default)]
-struct Pending {
+#[derive(Resource)]
+pub struct Pending {
     handles: Vec<UntypedHandle>,
     /// Map piece scene instances spawned, and how many have finished spawning.
     instances: usize,
     ready: usize,
+    /// When [`add_map`] was called, for the load time in the log.
+    added_at: Instant,
     loaded_at: Option<Instant>,
+}
+
+impl Default for Pending {
+    fn default() -> Self {
+        Self {
+            handles: Vec::new(),
+            instances: 0,
+            ready: 0,
+            added_at: Instant::now(),
+            loaded_at: None,
+        }
+    }
+}
+
+impl Pending {
+    /// Every map piece and texture has loaded.
+    pub fn loaded(&self) -> bool {
+        self.loaded_at.is_some()
+    }
+}
+
+/// The world-space horizontal bounding box of a model row placed at `p` (from the `min` and
+/// `max` its `models` entry records).
+fn placed_box(model: &Value, p: &Pose) -> Option<(Vec2, Vec2)> {
+    let (min, max) = (vec3(&model["min"])?, vec3(&model["max"])?);
+    let mut lo = Vec2::splat(f32::MAX);
+    let mut hi = Vec2::splat(f32::MIN);
+    for i in 0..8 {
+        let corner = Vec3::new(
+            if i & 1 == 0 { min.x } else { max.x },
+            if i & 2 == 0 { min.y } else { max.y },
+            if i & 4 == 0 { min.z } else { max.z },
+        );
+        let w = p.translation + p.rotation * (p.scale * corner);
+        lo = lo.min(Vec2::new(w.x, w.z));
+        hi = hi.max(Vec2::new(w.x, w.z));
+    }
+    Some((lo, hi))
 }
 
 #[derive(Resource)]
@@ -217,6 +257,9 @@ pub struct MapScene {
     pub hour: f32,
     /// Draw param file stem (`param/drawparam/<stem>.gparam`); default `<mXX>_<YY>_0000`.
     pub gparam: Option<String>,
+    /// Only spawn pieces, objects and collision that reach within this horizontal radius of
+    /// this point (a boss arena); `None` spawns the whole map.
+    pub within: Option<(Vec3, f32)>,
 }
 
 /// Default draw param of a map: `m11_00_00_00` -> `m11_00_0000`.
@@ -442,6 +485,7 @@ pub fn run(options: Options) -> Result<()> {
             markers: true,
             hour: options.hour,
             gparam: options.gparam,
+            within: None,
         },
     )?;
     app.insert_resource(Fly {
@@ -532,6 +576,14 @@ fn spawn_map(
             };
             let glb = format!("{}{glb}", scene.prefix);
             let Some(p) = pose(row) else { continue };
+            if let Some((center, radius)) = scene.within {
+                let inside = placed_box(&models[model], &p).is_some_and(|(lo, hi)| {
+                    sekiro_sim::arena::box_within(lo, hi, center.xz(), radius)
+                });
+                if !inside {
+                    continue;
+                }
+            }
             if seen.insert(glb.clone()) {
                 pending
                     .handles
@@ -600,7 +652,11 @@ fn spawn_map(
         }
     }
 
-    if let Some(c) = &layout.collision {
+    let cropped = match (&layout.collision, scene.within) {
+        (Some(c), Some((center, radius))) => Some(sekiro_sim::arena::crop(c, center, radius)),
+        _ => None,
+    };
+    if let Some(c) = cropped.as_ref().or(layout.collision.as_ref()) {
         let visibility = if scene.collision {
             Visibility::Visible
         } else {
@@ -909,7 +965,11 @@ fn track_loading(assets: Res<AssetServer>, mut pending: ResMut<Pending>) {
             || matches!(assets.get_load_state(id), Some(LoadState::Failed(_)))
     });
     if done {
-        info!("all map assets loaded");
+        info!(
+            "all map assets loaded ({} instances) {:.1} s after the map was added",
+            pending.instances,
+            pending.added_at.elapsed().as_secs_f32()
+        );
         pending.loaded_at = Some(Instant::now());
     }
 }

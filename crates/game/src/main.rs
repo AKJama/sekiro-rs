@@ -5,6 +5,8 @@
 //!   [--distance <m>] [--height <m>] [--hide m12,hair] [--only m68,m69]`: inspect an exported
 //!   model in bind pose; `--hide`/`--only` filter primitives by material name, `--combat` shows
 //!   enemies with weapons drawn.
+//! - `sekiro-rs --arena owl [--full-map] [--script FILE ...]`: Wolf against a boss where the
+//!   game places him (`sekiro_sim::arena`); a play mode, see `play.rs`.
 //! - `sekiro-rs --map <id> [--screenshot <out.png>] [--at <s>] [--camera x,y,z,yaw,pitch]
 //!   [--start <n>] [--collision] [--no-pieces] [--objects] [--hide m9,m8]
 //!   [--groups draw|display|off] [--uncapped]`: fly through an area exported by
@@ -76,7 +78,16 @@ fn main() -> anyhow::Result<()> {
             gparam: arg_value(&args, "--gparam"),
         });
     }
-    if args.iter().any(|a| a == "--play") {
+    // `--arena <name>` (a boss arena, see `sekiro_sim::arena`) is a play mode; a bare `--arena`
+    // is the presentation demo below.
+    let boss_arena = match arg_value(&args, "--arena").filter(|v| !v.starts_with("--")) {
+        Some(name) => Some(
+            sekiro_sim::arena::ArenaSpec::by_name(&name)
+                .map_err(|e| anyhow::anyhow!("--arena: {e}"))?,
+        ),
+        None => None,
+    };
+    if args.iter().any(|a| a == "--play") || boss_arena.is_some() {
         let screenshots = arg_list(&args, "--shots")
             .into_iter()
             .map(|s| {
@@ -92,11 +103,16 @@ fn main() -> anyhow::Result<()> {
             screenshots,
             exit_after_script: args.iter().any(|a| a == "--exit"),
             enemy: !args.iter().any(|a| a == "--no-enemy"),
-            opponent: match arg_value(&args, "--enemy") {
-                Some(name) => sekiro_sim::enemy::EnemySpec::by_name(&name)
+            opponent: match (arg_value(&args, "--enemy"), boss_arena) {
+                (Some(name), _) => sekiro_sim::enemy::EnemySpec::by_name(&name)
                     .map_err(|e| anyhow::anyhow!("--enemy: {e}"))?,
-                None => sekiro_sim::enemy::EnemySpec::soldier(),
+                (None, Some(arena)) => arena.enemy_spec(),
+                (None, None) => sekiro_sim::enemy::EnemySpec::soldier(),
             },
+            arena: boss_arena,
+            full_map: args.iter().any(|a| a == "--full-map"),
+            hide: arg_list(&args, "--hide"),
+            objects: args.iter().any(|a| a == "--objects"),
             lock_on: args.iter().any(|a| a == "--lock-on"),
             simple_ai: args.iter().any(|a| a == "--simple-ai"),
             map: arg_value(&args, "--map"),
@@ -120,6 +136,7 @@ fn main() -> anyhow::Result<()> {
         "                 [--map <id> [--start <n> | --spawn x,y,z,yaw,0]] [--no-enemy] [--lock-on]"
     );
     eprintln!("                 [--simple-ai] [--enemy c1010|c5060]");
+    eprintln!("       sekiro-rs --arena owl [--full-map] [--play options] (a boss on his own map)");
     eprintln!("usage: sekiro-rs --arena [--deathblow] [--screenshot <out.png> --at <seconds>]");
     eprintln!("       sekiro-rs --map <id> [--start <n>] [--camera x,y,z,yaw,pitch] [--collision]");
     eprintln!("                 [--screenshot <out.png> --at <seconds>] (see src/map.rs)");

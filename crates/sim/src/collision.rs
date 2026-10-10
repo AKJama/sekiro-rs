@@ -56,6 +56,14 @@ impl CollisionWorld {
         Ok(Self::from_mesh(&mesh))
     }
 
+    /// Like [`CollisionWorld::load`], keeping only the triangles that reach within `radius`
+    /// of `center` on the horizontal plane ([`crate::arena::crop`]).
+    pub fn load_within(path: &Path, center: Vec3, radius: f32) -> Result<Self, String> {
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mesh = CollisionMesh::from_bytes(&bytes).map_err(|e| e.to_string())?;
+        Ok(Self::from_mesh(&crate::arena::crop(&mesh, center, radius)))
+    }
+
     pub fn from_mesh(mesh: &CollisionMesh) -> Self {
         let vertices: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from(*v)).collect();
         let mut triangles = Vec::with_capacity(mesh.indices.len() / 3);
