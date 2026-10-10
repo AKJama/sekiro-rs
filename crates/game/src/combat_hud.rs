@@ -16,6 +16,8 @@ pub struct Gauges {
     pub posture: [(i32, i32); 2],
     /// Where the enemy's head is, for its floating bars.
     pub enemy_head: Option<Vec3>,
+    /// The enemy's bars are shown: it is alive and, in a boss fight run by the map events,
+    /// the events show its health bar (the Owl's is hidden during his heat-up).
     pub enemy_alive: bool,
     pub deathblow: bool,
     /// The enemy's name over its bars.

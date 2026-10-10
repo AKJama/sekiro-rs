@@ -2,6 +2,7 @@
 //! HP and posture rules, deathblows, and a respawn after a death.
 
 use crate::ai::SimpleBrain;
+use crate::arena::BossEvents;
 use crate::character::{Character, StepReport};
 use crate::combat::knockback::{HitStop, Knockback};
 use crate::deathblow::{
@@ -9,6 +10,7 @@ use crate::deathblow::{
     ThrowTimes, deathblow_marks, select,
 };
 use crate::enemy::EnemySpec;
+use crate::events::{EventCommand, EventHost, EventScripts, PLAYER_ENTITY};
 use crate::fight::CombatRules;
 use crate::grab::{EnemyThrow, GrabPhase};
 use crate::hits::{Combatant, HitDetector, HitEvent, HitResult};
@@ -139,6 +141,117 @@ pub struct Duel {
     /// Testing aid: the player takes no HP or posture damage (hits, reactions, hit stop and
     /// knockback are unchanged).
     pub god: bool,
+    /// The fight's map events (phase changes, boss bar, defeat), when the enemy has any
+    /// ([`crate::arena::boss_events`]).
+    pub events: Option<FightEvents>,
+}
+
+/// The state the map events keep for a fight (see [`crate::events`]).
+#[derive(Debug, Clone)]
+pub struct FightEvents {
+    pub scripts: EventScripts,
+    /// The boss's entity id in the events.
+    pub boss_entity: i32,
+    /// NpcName text id of the boss health bar, while it is shown.
+    pub boss_bar: Option<i32>,
+    /// The small HP bar over the boss's head is shown.
+    pub hp_bar: bool,
+    /// `HandleBossDefeat` ran.
+    pub defeated: bool,
+    /// An event command waiting for the boss's script (`env(105, slot)`): (slot, command).
+    pub ezstate: Option<(u8, i32)>,
+}
+
+impl FightEvents {
+    pub fn load(cache: &Path, spec: &BossEvents) -> Result<Self, String> {
+        let mut scripts = EventScripts::load(cache, spec.map, spec.events)?;
+        scripts.flags.extend(spec.flags.iter().copied());
+        Ok(Self {
+            scripts,
+            boss_entity: spec.boss_entity,
+            boss_bar: None,
+            hp_bar: true,
+            defeated: false,
+            ezstate: None,
+        })
+    }
+
+    /// The fight reloads: the events start over, their flags stay.
+    fn restart(&mut self) {
+        self.scripts.restart();
+        self.boss_bar = None;
+        self.hp_bar = true;
+        self.defeated = false;
+        self.ezstate = None;
+    }
+}
+
+/// The env id of the event command a character's script reads (`env(105, slot)`, "command id
+/// from the event" in the community env list).
+const ENV_EVENT_COMMAND: i32 = 105;
+
+/// The env id the NPC script asks "in a throw?" (`env(206)`): its `ThrowCommonFunction` accepts
+/// event commands only then and skips damage and death. Ours: true for the enemy while a
+/// deathblow holds him or he still plays its defender clip (inferred; not traced in the exe).
+const ENV_IN_THROW: i32 = 206;
+
+/// The env id of the AI's endure-cancel action (`env(123)`, "AI endure cancel type" in the
+/// community env list): an `EndureAttack` goal's request, which the NPC script's
+/// `ExecAIAction` takes before every other cancel.
+const ENV_AI_ENDURE_ACTION: i32 = 123;
+
+/// TAE action flag 78, "End If AI Move Queued": an NPC clip's move window.
+const AI_MOVE_FLAG: i32 = 78;
+
+/// How long an effect with no duration (`effectEndurance` 0, applied once) stays visible to the
+/// scripts and the AI's SpEffect observers, in steps (ours).
+const INSTANT_EFFECT_STEPS: f32 = 2.0;
+
+/// The world as the map events see it: Wolf is entity 10000, the enemy the boss's entity id.
+struct EventView<'a> {
+    duel: &'a Duel,
+    boss: i32,
+}
+
+impl EventView<'_> {
+    fn who(&self, entity: i32) -> Option<usize> {
+        match entity {
+            PLAYER_ENTITY => Some(0),
+            e if e == self.boss => Some(1),
+            _ => None,
+        }
+    }
+
+    fn character(&self, i: usize) -> &Character {
+        if i == 0 {
+            &self.duel.player
+        } else {
+            &self.duel.enemy
+        }
+    }
+}
+
+impl EventHost for EventView<'_> {
+    fn has_sp_effect(&self, entity: i32, id: i32) -> Option<bool> {
+        let i = self.who(entity)?;
+        Some(
+            self.character(i).tae_frame().sp_effects.contains(&id)
+                || self.duel.rules.fighters[i].resident().contains(&id),
+        )
+    }
+
+    fn has_event_message(&self, entity: i32, id: i32) -> Option<bool> {
+        let i = self.who(entity)?;
+        Some(self.character(i).tae_frame().ezstate_requests.contains(&id))
+    }
+
+    fn is_dead(&self, entity: i32) -> Option<bool> {
+        Some(self.duel.rules.fighters[self.who(entity)?].dead())
+    }
+
+    fn hp(&self, entity: i32) -> Option<i32> {
+        Some(self.duel.rules.fighters[self.who(entity)?].vitality.hp)
+    }
 }
 
 fn placement(c: &Character) -> Placement {
@@ -210,6 +323,15 @@ impl Duel {
             fall_respawn_depth: None,
             boss_brain: None,
             god: false,
+            events: None,
+        })
+        .map(|mut duel| {
+            duel.events = crate::arena::boss_events(&duel.spec.chr).and_then(|spec| {
+                FightEvents::load(cache, spec)
+                    .map_err(|e| eprintln!("{}: map events not loaded: {e}", duel.spec.chr))
+                    .ok()
+            });
+            duel
         })
     }
 
@@ -357,6 +479,9 @@ impl Duel {
         self.defender_dying = 0;
         self.last_throw_def_clip = None;
         self.bullets.clear();
+        if let Some(ev) = self.events.as_mut() {
+            ev.restart();
+        }
         Ok(())
     }
 
@@ -896,6 +1021,153 @@ impl Duel {
         }
     }
 
+    /// Leaves a melee hit's AtkParam SpEffects on character `i`: as [`Self::apply_status`], and
+    /// effects with no duration (applied once, such as the Owl's kick marker 3506000 on Wolf)
+    /// stay visible for [`INSTANT_EFFECT_STEPS`] steps so the AI's observers see them.
+    fn apply_hit_effects(&mut self, i: usize, ids: &[i32], dt: f32) {
+        self.apply_status(i, ids);
+        for &id in ids {
+            let c = if i == 0 { &self.player } else { &self.enemy };
+            if c.tae.sp_effects.get(&id).is_some_and(|e| e.duration == 0.0) {
+                let c = if i == 0 {
+                    &mut self.player
+                } else {
+                    &mut self.enemy
+                };
+                c.tae_runtime.add_timed(id, INSTANT_EFFECT_STEPS * dt);
+            }
+        }
+    }
+
+    /// Whether the enemy's health bar is up: always without map events; with them, while the
+    /// events show the boss bar or the overhead bar.
+    pub fn enemy_bar_shown(&self) -> bool {
+        self.events
+            .as_ref()
+            .is_none_or(|e| e.boss_bar.is_some() || e.hp_bar)
+    }
+
+    /// What the enemy's script reads from the engine about events, throws and endure requests,
+    /// before it runs: the waiting event command (`env(105, slot)`), "in a throw" (`env(206)`),
+    /// the AI's endure-cancel action (`env(123)`), and, in an event animation, the move cancel
+    /// and standby states without the clip-end stand-in (see below).
+    fn publish_event_envs(&mut self, endure_action: Option<i32>) {
+        let in_throw = self.deathblow.is_some() || self.enemy_in_throw_clip();
+        let command = self.events.as_ref().and_then(|e| e.ezstate);
+        // Event animations (the graph's `Event*` states, such as the Owl's heat-up) end through
+        // their own state's end branch (`env(339)`, `W_Event21003` after `a000_020005`); their
+        // TAE opens no move window. Our clip-end stand-in for env 2000 / 1105 would hand them to
+        // the AI's turn or move at the end instead (ours).
+        let frame = self.enemy.tae_frame();
+        let event_anim = self.enemy.state().starts_with("Event")
+            && frame.restricted
+            && !frame.flag(crate::tae::cancel::MOVE)
+            && !frame.flag(AI_MOVE_FLAG);
+        let env = &mut self.enemy.behavior.env;
+        env.overrides.retain(|(id, _, _)| {
+            ![
+                ENV_IN_THROW,
+                ENV_EVENT_COMMAND,
+                ENV_AI_ENDURE_ACTION,
+                crate::player::ENV_MOVE_CANCEL,
+                crate::player::ENV_STANDBY_STATE,
+            ]
+            .contains(id)
+        });
+        if in_throw {
+            env.overrides.push((ENV_IN_THROW, None, 1.0));
+        }
+        if let Some(a) = endure_action.filter(|&a| a > 0) {
+            env.overrides.push((ENV_AI_ENDURE_ACTION, None, a as f32));
+        }
+        if event_anim {
+            env.overrides
+                .push((crate::player::ENV_MOVE_CANCEL, None, 0.0));
+            env.overrides
+                .push((crate::player::ENV_STANDBY_STATE, None, 0.0));
+        }
+        if let Some((slot, command)) = command {
+            env.overrides
+                .push((ENV_EVENT_COMMAND, Some(slot as i32), command as f32));
+        }
+    }
+
+    /// Runs the map events for this step and applies what they ask.
+    fn step_events(&mut self, dt: f32) {
+        let Some(mut ev) = self.events.take() else {
+            return;
+        };
+        // A waiting command is used up once the script played an event animation for it.
+        if ev.ezstate.is_some()
+            && self.last_steps[1]
+                .behavior
+                .events
+                .iter()
+                .any(|e| e.starts_with("W_Event"))
+        {
+            ev.ezstate = None;
+        }
+        let commands = ev.scripts.step(
+            dt,
+            &EventView {
+                duel: self,
+                boss: ev.boss_entity,
+            },
+        );
+        let who = |entity: i32| match entity {
+            PLAYER_ENTITY => Some(0),
+            e if e == ev.boss_entity => Some(1),
+            _ => None,
+        };
+        for c in commands {
+            match c {
+                EventCommand::SetSpEffect { entity, id } => {
+                    if let Some(i) = who(entity) {
+                        let c = if i == 0 {
+                            &mut self.player
+                        } else {
+                            &mut self.enemy
+                        };
+                        // `effectEndurance` -1 lasts until cleared (200051), 0 is applied once.
+                        let seconds = match c.tae.sp_effects.get(&id).map(|e| e.duration) {
+                            Some(d) if d < 0.0 => f32::INFINITY,
+                            Some(d) if d > 0.0 => d,
+                            _ => INSTANT_EFFECT_STEPS * dt,
+                        };
+                        c.tae_runtime.add_timed(id, seconds);
+                    }
+                }
+                EventCommand::EzStateRequest {
+                    entity,
+                    command,
+                    slot,
+                } if who(entity) == Some(1) => ev.ezstate = Some((slot, command)),
+                EventCommand::BossBar {
+                    shown,
+                    entity,
+                    name,
+                    ..
+                } if who(entity) == Some(1) => {
+                    ev.boss_bar = shown.then_some(name);
+                }
+                EventCommand::HpBarDisplay { entity, on } if who(entity) == Some(1) => {
+                    ev.hp_bar = on;
+                }
+                EventCommand::Immortality { entity, on } => {
+                    if let Some(i) = who(entity) {
+                        self.rules.fighters[i].vitality.cannot_die = on;
+                    }
+                }
+                EventCommand::BossDefeat { entity } if who(entity) == Some(1) => {
+                    ev.defeated = true;
+                }
+                // Clearing a SpEffect and invincibility are not used by the events we run.
+                _ => {}
+            }
+        }
+        self.events = Some(ev);
+    }
+
     /// Puts a character that fell [`Duel::fall_respawn_depth`] below its start back at its
     /// start, standing still.
     fn respawn_fallen(&mut self) {
@@ -940,6 +1212,7 @@ impl Duel {
             d.tick(dt);
         }
         let enemy_alive = !self.rules.fighters[1].dead();
+        let mut endure_action = None;
         if self.enemy_active && enemy_alive && self.deathblow.is_none() {
             if self.ai.is_some() {
                 let world = self.ai_world(dt);
@@ -949,6 +1222,7 @@ impl Duel {
                         d.before_think(&mut ai, self.fighters[1].radius);
                     }
                     self.enemy.npc = ai.think(world);
+                    endure_action = ai.state.request.endure.then_some(self.enemy.npc.action);
                     if let Some(d) = driver.as_mut() {
                         d.after_think(&mut ai, self);
                     }
@@ -963,6 +1237,7 @@ impl Duel {
             self.enemy.npc = Default::default();
         }
         self.force_enemy_act(enemy_alive);
+        self.publish_event_envs(endure_action);
         self.publish_vitals();
         // Who each side aims at: auto-aim candidates for Wolf, Wolf for the soldier.
         self.player.aim_candidates = if enemy_alive {
@@ -1039,6 +1314,13 @@ impl Duel {
                 (&mut self.enemy, &mut self.player)
             };
             def.pending_damage = Some(result.defender);
+            // The AtkParam's SpEffects stay on a landed melee hit's defender (bullets carry
+            // their own, below).
+            let melee_effects = if !from_bullet && !result.guarded {
+                hit.attack.sp_effects.clone()
+            } else {
+                Vec::new()
+            };
             if let Some(back) = result.attacker {
                 att.pending_damage = Some(back);
             }
@@ -1052,6 +1334,9 @@ impl Duel {
             // A bullet's SpEffects stay on a guarded hit's guard (inferred).
             if from_bullet && !result.guarded {
                 self.apply_status(hit.defender, &bullet_effects[k - first_bullet_hit]);
+            }
+            if !melee_effects.is_empty() {
+                self.apply_hit_effects(hit.defender, &melee_effects, dt);
             }
             hits.push((hit, result));
         }
@@ -1076,6 +1361,7 @@ impl Duel {
         {
             self.respawn_in = Some(RESPAWN_DELAY);
         }
+        self.step_events(dt);
         let report = DuelReport {
             locked_on: self.player.lock_target.is_some(),
             player,

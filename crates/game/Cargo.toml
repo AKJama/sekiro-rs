@@ -15,5 +15,6 @@ bevy = { version = "=0.19.1", default-features = false, features = ["3d", "png",
 anyhow.workspace = true
 sekiro-formats.workspace = true
 sekiro-sim.workspace = true
+sekiro-brain-net.workspace = true
 sekiro-fmod.workspace = true
 serde_json.workspace = true

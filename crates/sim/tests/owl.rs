@@ -193,6 +193,9 @@ fn break_and_deathblow(duel: &mut Duel) -> (Option<(i32, i32)>, bool, Vec<String
 fn owl_takes_two_deathblows() {
     let Some(mut duel) = load(1.6) else { return };
     duel.enemy_active = false;
+    // The animation data alone, without his map events: with them the first get-up hands over
+    // to his phase-2 heat-up at 2.83 s, before the clip's own HP reset (`owl_phase2.rs`).
+    duel.events = None;
     let owl = &duel.rules.fighters[1];
     assert_eq!(owl.vitality.max_hp, 1916);
     assert_eq!(owl.vitality.deathblows_left, 2);

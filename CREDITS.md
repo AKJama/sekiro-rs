@@ -5,7 +5,7 @@ No code from these projects is vendored; their documentation and source were rea
 
 ## Formats and data
 
-- [soulsmods/SoulsFormatsNEXT](https://github.com/soulsmods/SoulsFormatsNEXT) and [JKAnderson/SoulsFormats](https://github.com/JKAnderson/SoulsFormats): BND4, BXF4, DCX, FLVER, TPF, MTD, MSB, TAE and PARAM layouts.
+- [soulsmods/SoulsFormatsNEXT](https://github.com/soulsmods/SoulsFormatsNEXT) and [JKAnderson/SoulsFormats](https://github.com/JKAnderson/SoulsFormats): BND4, BXF4, DCX, FLVER, TPF, MTD, MSB, TAE, PARAM and EMEVD layouts.
 - [soulsmods/Paramdex](https://github.com/soulsmods/Paramdex): param definitions and row names (fetched at setup, not vendored).
 - [vawser/Smithbox](https://github.com/vawser/Smithbox): param field descriptions and enums.
 - [Meowmaritus/DSAnimStudio](https://github.com/Meowmaritus/DSAnimStudio): Sekiro TAE event templates (fetched at setup).
@@ -15,13 +15,14 @@ No code from these projects is vendored; their documentation and source were rea
 
 ## Scripts
 
+- [AinTunez/DarkScript3](https://github.com/AinTunez/DarkScript3) (`sekiro-common.emedf.json`, after the soulsmods EMEDF tables): names and argument layouts of the event script instructions and their enums, read as facts for `crates/formats/src/emedf.rs`.
 - [katalash/DSLuaDecompiler](https://github.com/katalash/DSLuaDecompiler), [Surasia/hksc-disassembler](https://github.com/Surasia/hksc-disassembler): Havok Script references, used locally for study.
 - [iitsigor/SekiroHKS](https://github.com/iitsigor/SekiroHKS): names for engine functions used by the player script.
 
 ## Engine research
 
 - [borgCode/SekiroTool](https://github.com/borgCode/SekiroTool), [Xu060113/SekiroCraft-Passthrough](https://github.com/Xu060113/SekiroCraft-Passthrough), [thisguymartin/sekiro-deflect-observer](https://github.com/thisguymartin/sekiro-deflect-observer), [ElaDiDu/Sekiro-Practice-CT](https://github.com/ElaDiDu/Sekiro-Practice-CT): memory layout and posture research used to cross-check our own findings.
-- [FFwLo/RustSekiro](https://github.com/FFwLo/RustSekiro) (MIT): its knowledge base (`docs/kb`) supplied traced engine values we use: gravity, turn speed, body radius, the input accept/execute flags, camera and lock-on rules, the locked-on walk twist (WalkTwist cones, its rate and the graph's Master and spine twist), lunge, auto-aim, knockback timing and invulnerability events, the AtkParam hit stop fields, and which NPC TAE flags accept a queued AI request, and the sound runtime: playing events through the install's own FMOD Ex DLLs, the init flag, the master volume of 0.7, event naming, and the floor, armour and hit-sound material rules, the deathblow absorb (the defender placed once at the throw clip's frame 0, then both clips' own root motion), and the enemy grab pattern (a `throwFlag` 1 contact starts the throw, the `ThrowAttackBehavior` events carry its damage, Wolf's thrown clips live in `chr/c0000_cXXXX.anibnd`, step i-frame type 7 is the grab type, no grab on an airborne Wolf), and bullet flight past `dist` (`accelOutRange` and `gravityOutRange`) with the `lockShootLimitAng` aim. Each use is credited where it appears.
+- [FFwLo/RustSekiro](https://github.com/FFwLo/RustSekiro) (MIT): its knowledge base (`docs/kb`) supplied traced engine values we use: gravity, turn speed, body radius, the input accept/execute flags, camera and lock-on rules, the locked-on walk twist (WalkTwist cones, its rate and the graph's Master and spine twist), lunge, auto-aim, knockback timing and invulnerability events (whose action-module bit also identifies the Owl's warp flag, ChrActionFlag 94, as invulnerability), the AtkParam hit stop fields, and which NPC TAE flags accept a queued AI request, and the sound runtime: playing events through the install's own FMOD Ex DLLs, the init flag, the master volume of 0.7, event naming, and the floor, armour and hit-sound material rules, the deathblow absorb (the defender placed once at the throw clip's frame 0, then both clips' own root motion), and the enemy grab pattern (a `throwFlag` 1 contact starts the throw, the `ThrowAttackBehavior` events carry its damage, Wolf's thrown clips live in `chr/c0000_cXXXX.anibnd`, step i-frame type 7 is the grab type, no grab on an airborne Wolf), and bullet flight past `dist` (`accelOutRange` and `gravityOutRange`) with the `lockShootLimitAng` aim. Each use is credited where it appears.
 
 ## Inspiration
 

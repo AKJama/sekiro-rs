@@ -52,6 +52,9 @@ pub struct StepReport {
     /// Seconds this character's own clock advanced in the step: the step's length, less while a
     /// hit stop holds or eases it (0 while held). The renderer draws between steps with it.
     pub advanced: f32,
+    /// How far the model is faded out by the playing clips' TAE 193 events: 0 fully drawn (the
+    /// default), 1 not drawn at all (the Owl's warps; 1 minus [`crate::tae::TaeFrame::opacity`]).
+    pub fade: f32,
 }
 
 /// What an NPC's brain asks of its body this step. The NPC script reads these as the engine's
@@ -713,6 +716,7 @@ impl Character {
             clip_started,
             blend_in,
             advanced: dt,
+            fade: 1.0 - tae.opacity(),
         }
     }
 

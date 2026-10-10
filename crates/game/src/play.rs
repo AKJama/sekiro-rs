@@ -76,9 +76,9 @@ pub struct Options {
     /// Testing aid (`--break-posture`): the enemy's posture is held at 1 point outside
     /// deathblows, so Wolf's next landed hit breaks it and opens a deathblow.
     pub break_posture: bool,
-    /// Who chooses a boss's acts (`--brain lua|scripted`) and whether its decisions are logged
+    /// Who chooses a boss's acts (`--brain`) and whether its decisions are logged
     /// to `cache/brain_logs/` (`--brain-log`); see `docs/BRAIN.md`.
-    pub brain: sekiro_sim::brain::BrainKind,
+    pub brain: Box<dyn sekiro_sim::brain::BossBrain>,
     pub brain_log: bool,
     /// Play on this exported map (`cache/maps/<id>`) instead of the flat floor.
     pub map: Option<String>,
@@ -157,6 +157,8 @@ struct Sim {
     /// Each actor's own clock after the last step: the sum of the time it advanced, which stops
     /// while a hit stop holds it.
     clock: [f32; 2],
+    /// Whether each actor is drawn hidden: faded out by its clip's TAE 193 (the Owl's warps).
+    faded: [bool; 2],
 }
 
 /// Live input gathered every rendered frame, consumed by the fixed steps.
@@ -193,13 +195,14 @@ pub fn run(options: Options) -> Result<()> {
     duel.force_act = options.force_act;
     if options.simple_ai {
         duel.use_simple_ai();
-    } else if options.brain != sekiro_sim::brain::BrainKind::Lua || options.brain_log {
+    } else if options.brain.plans() || options.brain_log {
+        let brain_name = options.brain.name();
         let log = duel
-            .set_brain(options.brain.build(), options.brain_log)
+            .set_brain(options.brain, options.brain_log)
             .map_err(|e| anyhow::anyhow!("--brain: {e}"))?;
         eprintln!(
-            "boss brain {:?}{}",
-            options.brain,
+            "boss brain {}{}",
+            brain_name,
             log.map(|p| format!(", log {}", p.display()))
                 .unwrap_or_default()
         );
@@ -373,6 +376,7 @@ pub fn run(options: Options) -> Result<()> {
         break_posture: options.break_posture,
         previous: [([0.0; 3], 0.0); 2],
         clock: [0.0; 2],
+        faded: [false; 2],
     })
     .init_resource::<combat_hud::Gauges>()
     .init_resource::<crate::bullet_fx::BulletFx>()
@@ -489,6 +493,7 @@ fn setup(
             Actor(actor),
             WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(models[actor].clone()))),
             Transform::IDENTITY,
+            Visibility::Inherited,
             Rig::new(Arc::new(lib.skeleton.clone())),
             idle,
         ));
@@ -820,13 +825,32 @@ fn sync_actors(
     mut sim: NonSendMut<Sim>,
     fixed: Res<Time<Fixed>>,
     mut libraries: ResMut<Libraries>,
-    mut q: Query<(&Actor, &mut Animator, &mut Transform)>,
+    mut fx: ResMut<crate::bullet_fx::BulletFx>,
+    mut q: Query<(&Actor, &mut Animator, &mut Transform, &mut Visibility)>,
 ) {
-    for (actor, mut anim, mut tf) in &mut q {
+    for (actor, mut anim, mut tf, mut vis) in &mut q {
         let i = actor.0;
         let (position, yaw) = shown(&sim, i, fixed.overstep_fraction());
         tf.translation = position;
         tf.rotation = Quat::from_rotation_y(yaw);
+        // TAE 193 fades the model (and the weapon in it) out and back in; drawn hidden past
+        // half, with a puff where it goes and where it comes back (stand-ins for the game's
+        // warp effects, FFX 650680 / 650682).
+        let fade = if i == WOLF {
+            sim.last.player.fade
+        } else {
+            sim.last.enemy.fade
+        };
+        let faded = fade >= 0.5;
+        if faded != sim.faded[i] {
+            sim.faded[i] = faded;
+            fx.puff(position + Vec3::Y * 1.0);
+        }
+        *vis = if faded {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
         anim.walk_twist = if i == WOLF {
             sim.duel.player.walk_twist
         } else {
@@ -982,7 +1006,8 @@ fn hud(
             Vec3::from_array(sim.duel.enemy.body.position)
                 + Vec3::Y * (sim.duel.fighters[1].height + 0.2),
         ),
-        enemy_alive: !f[1].dead(),
+        // Hidden with him while a warp fades him out.
+        enemy_alive: !f[1].dead() && sim.duel.enemy_bar_shown() && !sim.faded[1],
         deathblow: sim.duel.deathblow_available(),
         enemy_name: sim.duel.spec.display_name(),
         enemy_marks: sekiro_sim::deathblow::deathblow_marks(f[1].vitality.deathblows_left),

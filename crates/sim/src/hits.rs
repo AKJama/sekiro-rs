@@ -208,6 +208,9 @@ pub struct AttackData {
     /// AtkParam `throwTypeId`: which of the attacker's ThrowParam rows a throw start begins
     /// ([`crate::deathblow::ThrowTable::npc_row`]).
     pub throw_type_id: i32,
+    /// AtkParam `spEffectId0..4` (positive ids): SpEffects a landed hit leaves on the defender
+    /// (the Owl's front kick puts 3506000 on Wolf, which his AI observes).
+    pub sp_effects: Vec<i32>,
 }
 
 impl AttackData {
@@ -250,6 +253,10 @@ impl AttackData {
             behavior_stamina: 0,
             throw_flag: int("throwFlag") as u8,
             throw_type_id: int("throwTypeId"),
+            sp_effects: (0..5)
+                .map(|k| int(&format!("spEffectId{k}")))
+                .filter(|&id| id > 0)
+                .collect(),
         }
     }
 }
@@ -518,7 +525,8 @@ pub fn segment_distance(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) -> f32 {
 
 /// Whether any attack can land on a character this step. TAE 950 (`IFrames_MistRaven`) and 951
 /// (`IFrames_DuringAction`) make it fully invulnerable: they set bits 1 and 0 of the action
-/// module's flag word +0x70 (traced by FwLo's RustSekiro, `docs/kb/damage.md`). An attack that
+/// module's flag word +0x70 (traced by FwLo's RustSekiro, `docs/kb/damage.md`); ChrActionFlag 94
+/// sets bit 0 as well (the Owl's warps, [`crate::tae::cancel::WARP_INVULNERABLE`]). An attack that
 /// passes through an invulnerable character is not spent: the window can still hit it once the
 /// invulnerability ends, as FwLo's notes say for dodges.
 ///

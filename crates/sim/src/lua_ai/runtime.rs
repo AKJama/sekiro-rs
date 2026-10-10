@@ -151,7 +151,14 @@ pub struct Request {
     pub face_yaw: Option<f32>,
     /// The action comes from a goal registered with `ENABLE_COMBO_ATK_CANCEL`.
     pub combo: bool,
+    /// The action comes from an `EndureAttack` goal, whose `Activate` turns on the endure
+    /// cancel (`SetEnableEndureCancel_forGoal`, `attack_endure.lua`): the NPC script reads it as
+    /// `env(123)` and takes it in any state that offers AI cancels.
+    pub endure: bool,
 }
+
+/// `GOAL_COMMON_EndureAttack` (`goal_list.lua`).
+const GOAL_ENDURE_ATTACK: i32 = 2260;
 
 /// The global the scripts' own `Common_Battle_Activate` is kept under while the act hook
 /// (see [`ActHook`]) stands in for it.
@@ -254,6 +261,9 @@ pub struct AiState {
     pub effect_interrupt: Option<i32>,
     /// External act choices (the boss brain); `None` runs the scripts unchanged.
     pub act_hook: Option<ActHook>,
+    /// Areas the scripts watch (`AddObserveArea(slot, observer, target, dir, angle, dist)`):
+    /// slot to (target, direction type, angle, distance).
+    pub observe_areas: HashMap<i32, (i32, i32, f32, f32)>,
 }
 
 impl AiState {
@@ -284,6 +294,7 @@ impl AiState {
             observed_effects: Vec::new(),
             effect_interrupt: None,
             act_hook: None,
+            observe_areas: HashMap::new(),
         };
         s.top = s.new_goal(0, -1.0, Vec::new(), None);
         s
@@ -402,6 +413,17 @@ impl AiState {
 
     /// Whether `target` lies inside a cone of `angle` degrees centred on direction `dir`
     /// (AI_DIR_TYPE: 1 front, 2 back, 3 left, 4 right; 0 counts as front).
+    /// Whether the target of watched area `slot` is inside it.
+    fn inside_observe(&self, slot: i32) -> bool {
+        self.observe_areas
+            .get(&slot)
+            .is_some_and(|&(target, dir, angle, dist)| {
+                self.position(target).is_some()
+                    && self.inside(target, dir, angle)
+                    && self.dist(target) <= dist
+            })
+    }
+
     fn inside(&self, target: i32, dir: i32, angle: f32) -> bool {
         let centre = match dir {
             2 | 6 => 180.0,
@@ -905,9 +927,19 @@ impl AiState {
             "GetSpecialEffectActivateInterruptType" | "GetSpecialEffectInactivateInterruptType" => {
                 num(self.effect_interrupt.unwrap_or(0) as f64)
             }
+            "AddObserveArea" => {
+                // The observer is always the AI itself in the scripts (TARGET_SELF).
+                self.observe_areas
+                    .insert(t(0), (t(2), t(3), n(4) as f32, n(5) as f32));
+                vec![]
+            }
+            "IsInsideObserve" => boolean(self.inside_observe(t(0))),
+            "DeleteObserve" => {
+                self.observe_areas.remove(&t(0));
+                vec![]
+            }
             "AddObserveRegion"
             | "AddObserveChrDmyArea"
-            | "DeleteObserve"
             | "SetEventFlag"
             | "PrintText"
             | "SetEventMoveTarget"
@@ -980,6 +1012,14 @@ pub fn tick(vm: &mut Vm, st: &mut AiState, world: AiWorld) {
         dispatch_interrupt(vm, st, kind);
     }
     st.effect_interrupt = None;
+    // Watched areas: INTERUPT_Inside_ObserveArea (16) on every step a target is inside one
+    // (ours: the Owl's heat-up checks a timer in the handler, so a target already inside when
+    // the timer runs out must still raise it).
+    let mut slots: Vec<i32> = st.observe_areas.keys().copied().collect();
+    slots.sort_unstable();
+    if slots.iter().any(|&s| st.inside_observe(s)) {
+        dispatch_interrupt(vm, st, 16);
+    }
     let top = st.top;
     if st.replan || st.goal(top).subgoals.is_empty() {
         st.replan = false;
@@ -1330,10 +1370,9 @@ fn action_update(st: &mut AiState, id: u32, g: &Goal) -> i32 {
             st.goal_mut(id).phase = 1;
         }
         st.request.action = action;
-        st.request.combo = g
-            .parent
-            .and_then(|p| st.goals.get(p as usize)?.as_ref())
-            .is_some_and(|p| st.combo_cancel.contains(&p.kind));
+        let parent = g.parent.and_then(|p| st.goals.get(p as usize)?.as_ref());
+        st.request.combo = parent.is_some_and(|p| st.combo_cancel.contains(&p.kind));
+        st.request.endure = parent.is_some_and(|p| p.kind == GOAL_ENDURE_ATTACK);
         return RESULT_CONTINUE;
     }
     if !playing {

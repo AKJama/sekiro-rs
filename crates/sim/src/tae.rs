@@ -41,6 +41,12 @@ pub mod cancel {
     pub const JUMP: i32 = 119;
     /// Prosthetic (R2 in the DS3 naming) allowed.
     pub const PROSTHETIC: i32 = 137;
+    /// Full invulnerability while active, like TAE 951: the exe's ChrActionFlag handler
+    /// (`FUN_140b51b70`, case 0x5e) sets bit 0 of the action module's flag word +0x70, the bit
+    /// FwLo's RustSekiro traced for 951 (`docs/kb/damage.md`). In the data only the Great
+    /// Shinobi Owl's warp clips carry it, over each window in which he is faded out
+    /// (`docs/OWL.md`, "Warp and vanish"). The DSAnimStudio label is `SetStartbit0`.
+    pub const WARP_INVULNERABLE: i32 = 94;
     /// Item use allowed.
     pub const ITEM: i32 = 31;
     /// Weapon or prosthetic switch allowed.
@@ -105,6 +111,16 @@ pub enum TaeKind {
         kind: i32,
         id: i32,
     },
+    /// `SetOpacityKeyframe` (193): the model's opacity goes linearly from `from` at the event's
+    /// start to `to` at its end (the Owl's warps fade him out and back in with three of these).
+    Opacity {
+        from: f32,
+        to: f32,
+    },
+    /// `SetEzStateRequestID` (231): a message to the map's event scripts while the event is
+    /// active. The scripts wait for it with `IfCharacterHasEventMessage` (EMEVD 4[8]); the Owl's
+    /// first deathblow get-up raises 20, which starts his phase 2 (`docs/OWL.md`).
+    EzStateRequest(i32),
 }
 
 /// The sound event name for a TAE sound type and id: the type letter followed by the id padded
@@ -405,6 +421,14 @@ fn decode(template: &Template, e: &tae::TaeEvent) -> Option<TimedEvent> {
             kind: int("SoundType")?,
             id: int("SoundID")?,
         },
+        193 => {
+            let f = |name: &str| d.field(name).and_then(|v| v.as_f32()).unwrap_or(1.0);
+            TaeKind::Opacity {
+                from: f("OpacityAtEventStart"),
+                to: f("OpacityAtEventEnd"),
+            }
+        }
+        231 => TaeKind::EzStateRequest(int("EzStateRequestID")?),
         _ => return None,
     };
     Some(TimedEvent {
@@ -446,8 +470,14 @@ pub struct TaeFrame {
     pub restricted: bool,
     /// Sound events that started this tick: (sound type, sound id).
     pub sounds: Vec<(i32, i32)>,
-    /// TAE 950 / 951 / 952: no hit lands at all.
+    /// TAE 950 / 951 / 952, or ChrActionFlag 94 ([`cancel::WARP_INVULNERABLE`]): no hit lands
+    /// at all.
     pub invulnerable: bool,
+    /// Model opacity from TAE 193 (the lowest of the active events); `None` is fully opaque.
+    /// See [`TaeFrame::opacity`].
+    pub opacity: Option<f32>,
+    /// TAE 231 messages to the event scripts, active or started this tick.
+    pub ezstate_requests: Vec<i32>,
     /// TAE 760 of the first playing clip that has one.
     pub reach_target: Option<ReachTarget>,
     /// TAE 226 as a fraction (0.3 for 30 %); `None` is full knockback.
@@ -461,6 +491,11 @@ pub struct TaeFrame {
 impl TaeFrame {
     pub fn flag(&self, f: i32) -> bool {
         self.flags.contains(&f)
+    }
+
+    /// Model opacity, 0 (not drawn) to 1 (fully drawn).
+    pub fn opacity(&self) -> f32 {
+        self.opacity.unwrap_or(1.0)
     }
 }
 
@@ -511,6 +546,9 @@ impl TaeRuntime {
                 match &e.kind {
                     TaeKind::ActionFlag(flag) => {
                         f.flags.insert(*flag);
+                        if *flag == cancel::WARP_INVULNERABLE && e.active_at(t) {
+                            f.invulnerable = true;
+                        }
                     }
                     TaeKind::SpEffect(id) => {
                         f.sp_effects.push(*id);
@@ -564,6 +602,15 @@ impl TaeRuntime {
                             f.stamina_type.get_or_insert(*kind);
                         }
                     }
+                    TaeKind::Opacity { from, to } => {
+                        if e.active_at(t) {
+                            let span = (e.end - e.start).max(1e-6);
+                            let k = ((t - e.start) / span).clamp(0.0, 1.0);
+                            let o = from + (to - from) * k;
+                            f.opacity = Some(f.opacity.map_or(o, |c: f32| c.min(o)));
+                        }
+                    }
+                    TaeKind::EzStateRequest(id) => f.ezstate_requests.push(*id),
                 }
             }
         }

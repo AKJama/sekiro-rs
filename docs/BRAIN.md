@@ -1,6 +1,6 @@
 # The boss brain
 
-A pluggable "boss brain" for the Great Shinobi Owl (c5060): his high-level choices can come from his real Lua AI (the default) or from an outside controller, later a fast hosted model.
+A pluggable "boss brain" for the Great Shinobi Owl (c5060): his high-level choices can come from his real Lua AI (the default) or from an outside controller, including a hosted model.
 The code is in `crates/sim/src/brain/`, with a small hook in the Lua goal runtime (`crates/sim/src/lua_ai/runtime.rs`, `ActHook`).
 
 ```powershell
@@ -187,23 +187,179 @@ pub trait BossBrain {
 
 Another boss needs its own `BossActions` table (action ids, approach distances, pressure changes, reflex acts) and a `BossActions::for_chr` entry.
 
-## Hosted model controller (next)
+## Hosted model controller
 
-Not implemented yet; this is the request shape to build, offline-checked only.
-Model names, parameters and endpoints change quickly: verify them against the provider's documentation (dated October 2026 here) before building.
+`sekiro-brain-net` implements `HostedBrain` with Decisions and Responses backends.
+The game CLI builds a boxed `BossBrain` directly, keeping `sekiro-sim` independent of HTTP and credentials.
+Only the worker sends HTTP: `submit` serializes compact request JSON and uses an unbounded channel, while `poll` uses `try_recv` and returns the original request id.
+One rustls `ureq` agent and its connection pool live for the fight.
+Redirects and environment proxies are disabled.
+The global per-request deadline defaults to 1.5 s and covers connection setup, headers and the response body.
+On drop, the channel closes, queued work is discarded, and the worker finishes its in-flight call under that deadline before joining.
 
-The system instructions say who the model is (the Owl), the rules (choose the next action; reflexes are automatic), and the action list with labels; the user message is the request JSON (observation plus tally, about 1 to 2 KB).
-The answer is one action id, so a hosted plan has one action; named combos can be added to the enum as strings such as `"3000+3001+3002"`, which the controller splits.
-An extra `"lua"` value lets the model leave an act to his own AI.
+### Flags and configuration
 
-### OpenAI Responses API with structured output
+```powershell
+$env:CARGO_TARGET_DIR = 'target/codex'
+cargo run --release -p sekiro-game -- --arena owl --brain decisions
+cargo run --release -p sekiro-game -- --arena owl --brain responses --brain-model gpt-6-luna
+```
+
+These commands authorize real calls when the player runs them; development tests make no provider API calls.
+`lua`, `scripted`, `--force-act`, and the independent simulation `--brain-log` remain available.
+`--simple-ai` retains precedence over the boss controller.
+`HostedConfig::from_env` checks `OPENAI_API_KEY` in the environment first, then only the `OPENAI_API_KEY=` setting in the working directory `.env`.
+Surrounding single or double quotes on the dotenv value are accepted.
+No real key or `.env` was inspected during implementation or tests.
+`ApiKey` prints `***` in Debug; configuration diagnostics redact the key, and errors never include HTTP headers, bodies or transport details.
+Authorization headers are marked sensitive.
+The `log` dependency caps its macros at Debug at compile time because `ureq-proto` Trace dumps raw wire bytes, including credentials.
+This disables Trace from libraries using `log`; the game's separate `tracing` macros are unaffected.
+A missing key or controller startup failure prints a fixed diagnostic and falls back to the Lua brain without panicking.
+Library callers can override `backend`, `model`, `base_url` (default `https://api.openai.com`), `timeout`, `log_path`, and `api_key`.
+The default model is `gpt-6-luna` for both backends.
+
+### Verified API contract (2026-10-10)
+
+Sources: [Decisions create reference](https://developers.openai.com/api/reference/resources/decisions/methods/create), [Decisions guide](https://developers.openai.com/api/docs/guides/decisions), and [Responses create reference](https://developers.openai.com/api/reference/resources/responses/methods/create).
+Decisions uses text `input` and a `questions` array; a choice question has 2 to 255 unique `choices[].value` values with optional descriptions.
+Its response contains `model`, `answers` and `usage`; the named answer has type `choice` with a `choice` value, or type `refusal`.
+Responses structured output is under `text.format`; its assistant message content contains `output_text` or `refusal` parts.
+Both backends extract `usage.input_tokens` and `usage.output_tokens` when supplied, including usage on failed answers.
+The docs establish these field names; account access and this model's acceptance of `none`, strict structured output, and a 16-token cap on Responses have not been live-verified.
+
+Both requests use the same instructions, action ids and labels from `BossActions`, the three-slash combo when its ids are available, and `lua` to leave an act to his own AI.
+Below are the complete request bodies with placeholder observation and tally objects; actual `input` contains the compact serialization of `BrainRequest`.
+Bodies are emitted as compact JSON; indentation here is for reading.
+
+### Decisions request
+
+`POST {base_url}/v1/decisions`
 
 ```json
 {
-  "model": "<a fast model>",
-  "reasoning": { "effort": "none" },
-  "instructions": "You are the Great Shinobi Owl ... Pick your next action.",
-  "input": [{ "role": "user", "content": "<the request JSON>" }],
+  "model": "gpt-6-luna",
+  "input": "{\"id\":1,\"obs\":{},\"tally\":{}}",
+  "questions": [
+    {
+      "type": "choice",
+      "name": "owl_action",
+      "instructions": "You are the Great Shinobi Owl fighting Wolf. Pick the next action using only the fair observation and outcome tally. Reflexes (guarding, deflecting, counters and reactions) are automatic. Choose lua to leave this act to your own AI. Actions:\n3000: kesa slash, combo opener\n3001: second slash\n3002: third slash, combo finisher\n3003: jumping forward roll, slash down\n3005: front kick (posture only)\n3009: shuriken\n3010: firecrackers scattered in front (unblockable bangs)\n3011: rushing slash\n3014: second shuriken\n3015: rushing slash curving left\n3017: explosive slash (fire)\n3018: shuriken then dash slash\n3030: poison balls, three rows of poison floor (phase 2)\n3031: recovery-sealing throw\n3032: recovery-sealing throw follow-up\n3063: rushing follow-up, two hits\n3069: smoke screen (blinds, breaks lock-on)\n5201: back step\n5202: side step (his act picks it with Wolf on his right)\n5203: side step (his act picks it with Wolf on his left)\n3000+3001+3002: three-slash combo",
+      "choices": [
+        {
+          "value": "3000",
+          "description": "kesa slash, combo opener"
+        },
+        {
+          "value": "3001",
+          "description": "second slash"
+        },
+        {
+          "value": "3002",
+          "description": "third slash, combo finisher"
+        },
+        {
+          "value": "3003",
+          "description": "jumping forward roll, slash down"
+        },
+        {
+          "value": "3005",
+          "description": "front kick (posture only)"
+        },
+        {
+          "value": "3009",
+          "description": "shuriken"
+        },
+        {
+          "value": "3010",
+          "description": "firecrackers scattered in front (unblockable bangs)"
+        },
+        {
+          "value": "3011",
+          "description": "rushing slash"
+        },
+        {
+          "value": "3014",
+          "description": "second shuriken"
+        },
+        {
+          "value": "3015",
+          "description": "rushing slash curving left"
+        },
+        {
+          "value": "3017",
+          "description": "explosive slash (fire)"
+        },
+        {
+          "value": "3018",
+          "description": "shuriken then dash slash"
+        },
+        {
+          "value": "3030",
+          "description": "poison balls, three rows of poison floor (phase 2)"
+        },
+        {
+          "value": "3031",
+          "description": "recovery-sealing throw"
+        },
+        {
+          "value": "3032",
+          "description": "recovery-sealing throw follow-up"
+        },
+        {
+          "value": "3063",
+          "description": "rushing follow-up, two hits"
+        },
+        {
+          "value": "3069",
+          "description": "smoke screen (blinds, breaks lock-on)"
+        },
+        {
+          "value": "5201",
+          "description": "back step"
+        },
+        {
+          "value": "5202",
+          "description": "side step (his act picks it with Wolf on his right)"
+        },
+        {
+          "value": "5203",
+          "description": "side step (his act picks it with Wolf on his left)"
+        },
+        {
+          "value": "3000+3001+3002",
+          "description": "three-slash combo"
+        },
+        {
+          "value": "lua",
+          "description": "leave it to his own AI"
+        }
+      ]
+    }
+  ]
+}
+```
+
+The client reads the one answer named `owl_action` and accepts `answers[0].choice`, such as `"3005"`.
+A typed refusal is a failure, rather than an intentional `lua` choice.
+
+### Responses request
+
+`POST {base_url}/v1/responses`
+
+```json
+{
+  "model": "gpt-6-luna",
+  "reasoning": {
+    "effort": "none"
+  },
+  "instructions": "You are the Great Shinobi Owl fighting Wolf. Pick the next action using only the fair observation and outcome tally. Reflexes (guarding, deflecting, counters and reactions) are automatic. Choose lua to leave this act to your own AI. Actions:\n3000: kesa slash, combo opener\n3001: second slash\n3002: third slash, combo finisher\n3003: jumping forward roll, slash down\n3005: front kick (posture only)\n3009: shuriken\n3010: firecrackers scattered in front (unblockable bangs)\n3011: rushing slash\n3014: second shuriken\n3015: rushing slash curving left\n3017: explosive slash (fire)\n3018: shuriken then dash slash\n3030: poison balls, three rows of poison floor (phase 2)\n3031: recovery-sealing throw\n3032: recovery-sealing throw follow-up\n3063: rushing follow-up, two hits\n3069: smoke screen (blinds, breaks lock-on)\n5201: back step\n5202: side step (his act picks it with Wolf on his right)\n5203: side step (his act picks it with Wolf on his left)\n3000+3001+3002: three-slash combo",
+  "input": [
+    {
+      "role": "user",
+      "content": "{\"id\":1,\"obs\":{},\"tally\":{}}"
+    }
+  ],
   "text": {
     "format": {
       "type": "json_schema",
@@ -214,12 +370,35 @@ An extra `"lua"` value lets the model leave an act to his own AI.
         "properties": {
           "action": {
             "type": "string",
-            "enum": ["3000", "3001", "3002", "3003", "3005", "3009", "3011", "3014",
-                     "3015", "3018", "3031", "3032", "3063", "5201", "5202", "5203",
-                     "3000+3001+3002", "lua"]
+            "enum": [
+              "3000",
+              "3001",
+              "3002",
+              "3003",
+              "3005",
+              "3009",
+              "3010",
+              "3011",
+              "3014",
+              "3015",
+              "3017",
+              "3018",
+              "3030",
+              "3031",
+              "3032",
+              "3063",
+              "3069",
+              "5201",
+              "5202",
+              "5203",
+              "3000+3001+3002",
+              "lua"
+            ]
           }
         },
-        "required": ["action"],
+        "required": [
+          "action"
+        ],
         "additionalProperties": false
       }
     }
@@ -229,28 +408,36 @@ An extra `"lua"` value lets the model leave an act to his own AI.
 }
 ```
 
-The reply's output text is `{"action":"3005"}`; anything that fails to parse becomes `plan: None` (the Lua AI picks).
+The client requires a completed response with one assistant output text object, such as `{"action":"3000+3001+3002"}`.
+Every numeric component is checked against the boss action table, and plans longer than `max_plan` are refused.
+`lua` returns `plan: None` and counts as answered.
+Timeouts, HTTP failures, transport failures, refusals, malformed JSON, incomplete responses, invalid answers and invalid actions return `plan: None` and count by failure reason.
+An unknown value is never copied into diagnostics or logs.
+When an answer has not arrived at an act slot, `BrainDriver` runs the Lua choice without waiting; its existing staleness and reflex rules continue to apply.
 
-### Decisions API
+### Hosted telemetry log
 
-One question of kind `choice` whose options are the action ids (with their labels as descriptions), and the request JSON as the context:
+The game enables one separate JSONL file at `logs/brain-<unix nanoseconds>.jsonl` for either hosted backend.
+The root whitelist `.gitignore` ignores `logs/`.
+Each completed call appends and flushes one line:
 
 ```json
-{
-  "question": {
-    "kind": "choice",
-    "prompt": "You are the Great Shinobi Owl. Pick your next action.",
-    "options": [
-      { "id": "3000", "label": "kesa slash, combo opener" },
-      { "id": "3005", "label": "front kick (posture only)" },
-      { "id": "5201", "label": "back step" }
-    ]
-  },
-  "context": "<the request JSON>"
-}
+{"id":1,"backend":"decisions","model":"gpt-6-luna","round_trip_ms":42.5,"status":"answered","failure":null,"chosen":"3005","usage":{"input_tokens":450,"output_tokens":0}}
 ```
 
-The field names above are placeholders for that API's own; the chosen option's id becomes the plan.
+Failed calls have `status: "failed"`, `chosen: null`, and a failure such as `"timeout"`, `"refusal"`, `"unknown_action"`, or `{"http":429}`.
+Logs contain no key, headers, raw provider payloads or observation; the separate simulation log remains available with `--brain-log`.
+`HostedBrain::stats()` returns requests, answered calls, failures by reason, mean/max round-trip milliseconds, summed input/output tokens and log write errors.
+Keep `stats_handle()` before boxing the controller to inspect the same stats later on the game thread.
+Log write failures stop further logging and increment `log_errors` without discarding a valid plan.
+
+### Offline verification
+
+All HTTP tests bind a mock to `127.0.0.1:0` and supply a fake key.
+They check both request bodies, action labels, ids, combo parsing, Lua answers, refusals, HTTP 429/500, malformed JSON, unknown ids, incomplete/invalid answers, usage totals, timing, redaction, nonblocking submit and bounded drop.
+Two sequential Decisions requests are checked to reuse exactly one accepted TCP connection.
+A unit test compares both complete request examples above against the actual request builder.
+Credential-source tests use in-memory dotenv text and never read the real environment key or `.env`.
 
 ## Inferred and ours
 

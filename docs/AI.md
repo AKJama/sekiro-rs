@@ -100,6 +100,9 @@ An effect already active when it is first observed raises nothing.
 This is what drives the consecutive-guard count of `Common_Parry` and the Owl's `Parry`: the weak guard reactions `a000_008500`/`8501` add SpEffect 200250, and the shared table-logic interrupt (`table_ai_common.lua`) counts it.
 The guard is an `EndureAttack` goal that requests action 3100, not the generic guard action 9910.
 
+Watched areas: `AddObserveArea(slot, observer, target, dir, angle, dist)` keeps an area around the AI (the observer is always `TARGET_SELF` in the scripts); `IsInsideObserve(slot)` answers whether the target is in its cone and distance, `DeleteObserve(slot)` drops it.
+Ours: `INTERUPT_Inside_ObserveArea` (16) is dispatched on every step a target is inside a watched area, not only on entering; the Owl's heat-up handler checks a timer when it fires, so a Wolf already standing next to him must still raise it once the timer allows (`docs/OWL.md`, "Phase 2").
+
 ## Native goals as implemented
 
 | Goal | Ours |
@@ -147,7 +150,9 @@ The returned `NpcControl` carries the requested action (attack codes 3000 and up
 ### How a request reaches the NPC script
 
 The shared NPC script (`c9997.hks`) reads the request as `env(106)` when it is free (idle, moving).
-Inside an attack or step it calls `ExecAIAction` with its cancel flag set, which reads a different env per kind of cancel instead: 107 combo action, 120 attack-cancel action, 118 step action, plus 123, 124 and 125 (endure, anti-backstab, immediate reaction) that nothing sets yet (env names from the community env list in `re/ext/meow_env.txt`).
+Inside an attack or step it calls `ExecAIAction` with its cancel flag set, which reads a different env per kind of cancel instead: 107 combo action, 120 attack-cancel action, 118 step action, plus 123, 124 and 125 (endure, anti-backstab, immediate reaction; env names from the community env list in `re/ext/meow_env.txt`).
+Env 123 is the request of an `EndureAttack` goal, whose `Activate` calls `SetEnableEndureCancel_forGoal` (`attack_endure.lua`); `ExecAIAction` takes it before every other cancel, and no TAE flag gates it in the template, so ours offers it in any state that asks (set by the duel as an env override; the Owl's heat-up escapes 20006 to 20008, guards and deflects are endure requests).
+124 and 125 are still never set.
 The NPC TAEs mark where an animation may be cut for a queued request with action flags 23 ("end if AI combo attack queued"), 86 (attack), 79 (step) and 78 (move).
 Ours (`Character::fill_env`): env 107 is the request while flag 23 is on and the request comes from a goal registered with `ENABLE_COMBO_ATK_CANCEL` (`ComboRepeat`, `ComboFinal`); env 120 is any non-step request while flag 86 is on; env 118 a step (`5xxx`) while flag 79 is on.
 The pairing of flags and requests follows FwLo's RustSekiro notes (`docs/kb/enemy.md`).
@@ -161,8 +166,9 @@ Interrupts, the deflect counters and everything before the act pick still run in
 
 ## Not done yet
 
-- Interrupts other than parry timing, FindAttack, damage and observed SpEffects (shoot impact, guard results, item use, observe areas).
-- Envs 123, 124 and 125 (endure, anti-backstab and immediate cancels).
+- Interrupts other than parry timing, FindAttack, damage, observed SpEffects and watched areas (shoot impact, guard results, item use, observe regions and dummy areas).
+- Envs 124 and 125 (anti-backstab and immediate cancels).
+- `GetEventRequest` answers -1 (the map events' requests to the AI are not wired).
 - Kengeki (sword clash) acts, platoon and team behaviour, navigation, sound targets, non-battle behaviour, home return.
 - The engine's exact goal update order, lifetime rules and interrupt order are ours; checking them against the native goal classes in the executable is the next step.
 - The scripts use the engine's random numbers; ours are a seeded xorshift, so act choices differ from the game run for run.

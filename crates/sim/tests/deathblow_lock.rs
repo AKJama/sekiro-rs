@@ -21,6 +21,9 @@ fn load(map: bool) -> Option<(Duel, Option<Arena>)> {
     }
     let mut duel = Duel::load_with(&cache, 1.6, EnemySpec::owl()).unwrap();
     duel.enemy_active = false;
+    // Without his map events: the first deathblow would start his phase-2 heat-up partway
+    // through the get-up clip (`owl_phase2.rs`), and these tests follow the whole throw pair.
+    duel.events = None;
     let arena =
         map.then(|| Arena::load(&cache, ArenaSpec::by_name("owl").unwrap(), false).unwrap());
     if let Some(arena) = &arena {

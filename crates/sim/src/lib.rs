@@ -21,6 +21,7 @@ pub mod deathblow;
 pub mod demo;
 pub mod duel;
 pub mod enemy;
+pub mod events;
 pub mod fight;
 pub mod grab;
 pub mod hits;

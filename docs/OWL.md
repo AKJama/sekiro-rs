@@ -71,7 +71,8 @@ Damage is AtkParam `atkPhys`, posture `atkStam`.
 | 3035, 3036, 3038 | 220, 230, 260 | Owl warp: falling slash, low falling slash, charged slash |
 | 3037, 3040 | 800 | Grab ("collapse throw"): ThrowParam 25060000, `a000_004100` on him, `a221_600110` on Wolf, 192 HP (see "Grabs") |
 | 3041 | 810 | "See-through" counter grab, unblockable and undeflectable by AtkParam (no warning in the data): ThrowParam 25060100, `a000_004110` / `a221_600120`, 32 + 208 HP |
-| 3044, 3046, 3047, 3093 | 350 to 353, 230, 260, 360, 220 | Warp sequences |
+| 3039, 3044, 3092, 3093 | 350 to 353, 230, 360, 370, 220, bullet 131 | Warp sequences: he fades out and back in, unhittable while gone; his castle AI never uses them ("Warp and vanish") |
+| 3046, 3047 | 230, 260 | Sideways run or leap into the "owl warp" falling and charged slashes, no fade |
 | 3060, 3061, 3065, 3066 | 101, 500, 520, 510 | Counters after being deflected (the "Kengeki" acts) |
 | 3069 | bullet 720 | Smoke screen: blinds Wolf within 5 m, drops the lock-on ("Tools") |
 | 3090 | 300 | Turn into a low sweep after a strong deflect, **perilous, no deflect** |
@@ -227,6 +228,69 @@ The Owl's fire hits (firecracker, explosive slash) add no burn SpEffect (the 91x
 - Stand-in looks (`crates/game/src/bullet_fx.rs`): shuriken small silver balls; carriers (thrown or lit firecrackers, balls, powder) small orange balls; the bang a bright sphere of 1.8 m; flames faint orange spheres; poison floor a purple disc of 2 m; smoke a grey 5 m sphere that fades over 1.2 s; the recovery cloud a violet sphere growing to 3.2 m.
   Screenshots: `cache/screens/tool_*.png`.
 
+## Warp and vanish
+
+Short version: **the Great Shinobi Owl on the castle top never vanishes or teleports in the data.**
+The vanishing Owl is Owl (Father) at Hirata, whose map event script swaps him with his bird.
+His model and TAE do carry warp clips, and those now work when forced (`--force-act 3044`, ...), but nothing in the castle fight asks for them.
+
+### What the castle data does after the firecrackers and the smoke
+
+- 3010 and 3064 (firecrackers) add SpEffect 3506021 "Ninja Army Chief, attacking warp" (3010 at 0.967 to 1.133 s, 3064 at 0.633 to 0.8 s).
+  It is a marker: no duration, no behaviour ref, no state info.
+- His castle battle goal (`506001_battle.lua`) registers 3506021 on himself with `AddObserveSpecialEffectAttribute`, but its `Interrupt` only answers 3506080 (heat-up), 3506000 and 3506082; 3506021 falls through and does nothing (read from the compiled script's instructions, not decompiled).
+  The unused `506000_battle.lua` also never tests it.
+- Only the Hirata event scripts use it: `m10_00_00_00.emevd` (and its `m10_00_50_6x` variants) event 11005930 waits for Owl (Father), entity 1000900, to have 3506020 "warp away after being hit" or 3506021 while his bird c5070 (entity 1000901) is in battle and he is not in his heat-up, then gives him 3506030 "transparent during warp" (VFX 3506000), shoots Bullet 250600990 "warp effect" from dummy 220 and moves the bird; event 11005931 then swaps the two and forces his `a000_003035` "owl warp, falling slash".
+  `m11_01_00_00.emevd` has no 3506020, 3506021 or 3506030 at all (searched as 32-bit integers in every castle event file).
+- 3069 (smoke screen) adds 200602 (cannot be locked on, 1 s) at 1.167 s and 5033 "logic judgment 14" for its whole length; while 5033 is on, the battle goal's next pick favours act 11 (recovery-sealing powder, 3031, weight 300) and acts 8 and 9 (combo into kick or rushing slash, 100 each).
+  So in the castle the smoke is a blind, then powder or a rush, not a vanish.
+  It also requests EzState 40 at 1.167 s (TAE 231, also in his heat-up clips 20006 to 20008); map event 11115873 waits for that message and spawns map effect 1114833 (most likely the smoke cloud) for 6 s ("Phase 2").
+- His battle goal never asks for 3037, 3039, 3044, 3092 or 3093 (the clips that fade him out); Act49, which cycles 3035, 3036 and 3038 through AI number 2, is registered but never given a weight.
+  3046 and 3047 (Act10, picked by free space to his left and right) use the "owl warp" attacks 230 and 260 but have no fade: they are a sideways run or leap into the slash.
+
+### How a warp clip works in the data
+
+Five of his clips fade him out (TAE 193 `SetOpacityKeyframe`): each fade is three events, opacity 1 to 0 over 0.1 s, held at 0, then 0 to 1 over 0.1 s.
+
+| Clip | Gone (opacity 0) | Flag 94 (no hits) | TAE 760 (reference, range, arrive) | Then |
+|---|---|---|---|---|
+| `a000_003037` | 0.267 to 0.7 s | none | | the warp grab, judge 800 at 1.0 s |
+| `a000_003039` | 0.367 to 0.767 s | 0 to 0.767 s | 0.367 to 0.767 s: 10 m, 2 to 15 m, 4 m | slashes 350, 351 |
+| `a000_003044` | 0.367 to 0.9, 1.567 to 2.1, 3.4 to 3.933 s | 0 to 0.9, 1.467 to 2.1, 3.3 to 3.933 s | 0.667 to 0.9 s (8 m, 0 to 16 m, 4 m), 1.867 to 2.1 s (5 m, 0 to 10 m, 4 m), 3.7 to 3.933 s (7 m, 0 to 14 m, 4 m) | slashes 350 to 353, then the falling slash 230 |
+| `a000_003092` | 0.4 to 0.9 s | 0 to 0.9 s | 0.4 to 0.9 s: 15 m, 5 to 25 m, 4 m | slash 370 |
+| `a000_003093` | 0.367 to 0.8, 2.0 to 2.367, 2.867 to 3.267 s (each doubled, 0.03 to 0.07 s apart) | 0 to 0.767, 2.033 to 2.333, 2.867 to 3.3 s | 1.033 to 1.633 s (5 m, 3 to 8 m, 1.5 m), 2.867 to 3.3 s (7.5 m, 2 to 40 m, 1.5 m) | leaps back out of sight, slash 360, a fan of five shuriken (bullet 131) at 2.467 s, the falling slash 220 |
+
+- **Where he reappears** is the clip's own root motion, scaled toward Wolf by TAE 760 (`BoostRootMotionToReachTarget`, already in `crates/sim/src/homing.rs`).
+  There is no teleport event, no destination chosen by Lua and no SpEffect that moves him.
+- **No hits while gone**: ChrActionFlag 94 (DSAnimStudio label `SetStartbit0`) sits only on these clips, over each fade.
+  In the exe's ChrActionFlag handler (`FUN_140b51b70`, case 0x5e) it sets bit 0 of the action module's flag word +0x70, the bit FwLo's RustSekiro traced for TAE 951 `IFrames_DuringAction` (`docs/kb/damage.md`): full invulnerability.
+  3037 has no flag 94 and no 951, so in the data he can be hit while faded out in it.
+- **Lock-on**: no warp clip adds an SpEffect with `stateInfo` 350 (cannot be locked on), so the data does not drop Wolf's lock.
+- **Effects**: FFX 650680 on dummy 90 as each fade starts and FFX 650682 on dummies 1 to 4, 7 and 90 while gone (the warp trail); not extracted.
+- SpEffect 3506030 "transparent during warp" (VFX 3506000, `addBehaviorJudgeId` 900) and 3506031 "warp SFX" (VFX 3506010, 0.5 s) are only given by the Hirata event script.
+
+### What the reimplementation does
+
+- TAE 193 is decoded (`TaeKind::Opacity`); the frame's opacity is the lowest active event's value, linear over each event (`TaeFrame::opacity`), and `StepReport::fade` reports 1 minus it.
+- ChrActionFlag 94 counts as full invulnerability (`cancel::WARP_INVULNERABLE`), like TAE 950 to 952: no attack or bullet lands, and a window that passes through him is not spent.
+- The renderer hides his model, weapon included, while the fade is past half and shows a grey 0.9 m puff where he goes and where he comes back (`crates/game/src/bullet_fx.rs`, `BulletFx::puff`); no particles.
+- Root motion, TAE 760, lock-on, collision and his AI are unchanged.
+
+```powershell
+cargo test -p sekiro-sim --release --test owl_warp
+cargo run --release -p sekiro-game -- --arena owl --passive --god --force-act 3044 --spawn 104.5,54.0,244.06,135,0 --enemy-distance 8 --script crates/game/scripts/owl_tools.txt --shots 30:cache/screens/warp_3044_030.png,60:cache/screens/warp_3044_060.png,95:cache/screens/warp_3044_095.png --exit
+```
+
+Measured (`crates/sim/tests/owl_warp.rs`): forced 3044 from 8 m, he is gone three times at the TAE's times and unhittable in each, drawn and hittable between them, and comes back 4.3 m from Wolf after the last.
+Wolf slashing from 1.4 m lands nothing on 3093 while he is gone.
+3092 from 5, 12 and 16 m brings him 4.3, 6.0 and 7.8 m closer (TAE 760 scales by distance), and the lock-on holds; back under his own AI he attacks again within 10 s.
+
+### Inferred
+
+- The TAE 760 scale is applied every frame (as traced, `docs/HKS-COMBAT.md`), so a long warp undershoots its arrival distance (from 12 m, 3092 ends 6 m from Wolf rather than 4 m); whether the exe fixes the scale at the event start is not checked.
+- That a hidden Owl keeps his body collision and stays a lock-on target follows from the data having nothing that turns them off; the exe was not checked for an opacity rule.
+- Hidden past half opacity is our drawing choice (models have no fade path yet).
+
 ## His Lua AI
 
 `506000_logic.lua` observes SpEffects 107710 (on himself), 110060 and 110015 (on Wolf), runs `COMMON_HiPrioritySetup` and `COMMON_EzSetup` with the boss flag, and queues battle goal 506001.
@@ -308,17 +372,112 @@ The rows use `defSorbDmyId` (dummy 230 sits 1.3 m in front of him, facing back) 
 
 ## Not done yet
 
-- **Phase 2.**
-  After the first deathblow the game's map event script plays his heat-up (SpEffect 3506080 "action judgment, HU animation", acts with `EndureAttack` 20006 to 20008) and gives him SpEffect 200051 "behaviour pattern change 1", which switches some acts (for example 3030 poison instead of 3007).
-  `event/m11_01_00_00.emevd` references 200051 and 3506080 next to his entity 1110850; it needs an EMEVD reader.
-- Tools: healing items do not exist yet, so the recovery seal blocks nothing; the warp after the firecrackers (3506021) and the smoke vanish are not done; bullets do not hit walls ("Tools").
+- Phase 2 runs from the map's event script ("Phase 2" below); its open points are listed there.
+- Tools: healing items do not exist yet, so the recovery seal blocks nothing; bullets do not hit walls ("Tools").
+  In the data the castle Owl has no warp after the firecrackers and no vanish after the smoke ("Warp and vanish").
 - Perilous-attack warning (the 211000 "dangerous attack" VFX from the dummy bullets) and Mikiri / jump counters on Wolf's side.
 - The Owl rarely guards or deflects Wolf's slashes in our runs (2 blocks in a minute of slashing).
   His `Parry` deflects with a chance of 50 % per consecutive guard; the count rises on SpEffect 200250, which his weak guard reactions (`a000_008500`, `8501`, `8504`) add, through the shared table-logic interrupt now that observed SpEffects raise interrupts.
   Why he guards so seldom is not checked yet (his `Parry` also needs Wolf inside `GetDist_Parry` and both front cones).
   Until 2026-10-10 his blocks also played the hit flinch `a000_008010` instead of a guard reaction: his script indexes `guard_damage_table` by env 258, his NpcParam `guardLevel` (4; "which guard motion receives the enemy's attack"), which we answered 0. That env meaning is inferred from the param description and the table's shape, not traced in the exe.
-- Owl warp transparency (3506030) is not rendered; bullets and their areas are simple stand-in shapes, not the game's FXR effects.
+- Bullets, their areas and the warp puffs are simple stand-in shapes, not the game's FXR effects; a faded Owl is drawn hidden, not see-through.
 - After the finishing blow the duel respawns both characters 6 s after the death, before his 12 s death clip ends.
+
+## Phase 2
+
+His phase change is not in his own files: the map's event script `event/m11_01_00_00.emevd` runs it, reacting to messages his animations raise.
+Read with our EMEVD reader (`crates/formats/src/emevd.rs`, instruction names and argument layouts from DarkScript3's Sekiro EMEDF in `emedf.rs`):
+
+```powershell
+cargo run -p sekiro-formats --example emevd_dump -- cache/raw/event/m11_01_00_00.emevd --find 1110850 200051 3506080 905060
+cargo run -p sekiro-formats --example emevd_dump -- cache/raw/event/m11_01_00_00.emevd 11115860 11115870 11115872 11115850 11115873 11115861
+```
+
+The script has 162 events and links `common_func.emevd`.
+"Event message" (EMEDF 4[8] `IfCharacterHasEventMessage`) is the TAE event 231 `SetEzStateRequestID` on the character's playing clip; every message the events wait for sits in one of his clips at the time the events need it.
+
+### What triggers it
+
+The first deathblow, not an HP threshold.
+His posture-break get-up `a000_012000` raises message **20** at 2.833 to 2.933 s.
+Event 11115870 waits for exactly that (no HP, posture or flag condition), so the trigger is the first deathblow mark.
+The finishing clip `a000_013700` raises message 50 instead (at 8.867 s), which event 11115850 takes as his defeat.
+
+### The events
+
+| Event | Started by | What it does |
+|---|---|---|
+| 11115860 | event 50, with X0 = 1110850 (the fighting Owl, `c5060_0000`) and X4 = 1110722 (his conversation copy, `c5060_0001`) | The fight's start: needs flags 8301 and 9303 and not 9308 (his defeat) or 9316; plays the conversation copy's anims 21004 / 21006, the cutscene 11010050, swaps in the fighting Owl, sets team 6 and his target to Wolf; then (after `Label6`) sets flags 11115851 / 11115859, **immortality on**, his overhead HP bar off, AI on and a replan, camera set 520, map effects 1114837 / 1114838, waits 2 s and shows the **boss bar** in slot 0 with NpcName **905060** |
+| 11115870 | event 0 | **Phase 2**: ends at once if 9308; waits for message 20 on him; sets 11115853. If flag 11110860 is already on (a retry after seeing it), only sets 11115852 and gives **SpEffect 200051** "behaviour pattern change 1". Otherwise: **hides the boss bar**, sends EzState command **506000** to him in slot 1, gives 200051, waits **3 s**, then waits for message **60** on him OR for him **not** to have **3506080** "action judgment, HU animation"; sets 11115852 and 11110860 and **shows the boss bar again** (same name, 905060) |
+| 11115871 | event 0 | Waits for message 10 on Wolf, flag 11115852, 8301 and the Owl down to 0 health bars; then EzState 20200 on him and 710201 on Wolf (a paired special case; not run, its trigger is not understood) |
+| 11115872 | event 0 | When he has 3506050 "immortality release" (his finishing clip `a000_013700` adds it from 0 s), **immortality off** |
+| 11115850 | event 0 | Dead or SpEffect 201000 "boss BGM stop" (also from `a000_013700` at 0 s): flag 11110850 (ends the music). Dead or message 50: **HandleBossDefeat**, achievement 26, flags 9308 and 6808, his anim state off, camera and gparam back, network flags |
+| 11115873 | event 0 | Message 40 (his smoke throws: 3069, 20006 to 20008): spawns map effect 1114833 for 6 s |
+| 11115861 | event 0 | Boss music through `common_func` events 20005830 / 20005831: map sound 1112871 from 11115851 (fight start), switched to **1112872** on 11115852 (phase 2); on a retry (11110860 on) one two-part event does both |
+
+What 506000 does: his HKS (shared `c9997.hks`, `ExecEventTrandition`) reads it as `env(105, 1)` while it answers `env(206)` ("in a throw") true, which is during the deathblow's defender state, and fires `W_Event20005`.
+So the heat-up cuts into the get-up clip at 2.83 s, **before** that clip's own HP reset (300610 at 4.4 s); the HP reset comes with his escape instead.
+On a retry the get-up plays out and resets his HP itself.
+
+His heat-up, from his TAE and his castle AI (`506001_battle.lua`):
+
+| Clip | Length | What it does |
+|---|---|---|
+| `a000_020005` | 10.27 s | The heat-up ("begging for life"): 3506080 throughout, 220500 (no reactions), StaminaControl type 5, an attack at 3.4 s (judge 910, AtkParam 50601910: no damage, a large blow that throws Wolf several metres away), from 5.2 s 3506221 "deathblow marker when begging for life, for judgment"; at its end his script fires `W_Event21003` |
+| `a000_021003` | 4.2 s, loops | Kneeling: 3506080, 3506221, and 3506082 "HU animation (loop)" from 2.533 s each loop |
+| `a000_020006`, `20007`, `20008` | 1.53 s | The escape: message 60 at 0 s (ends event 11115870's wait), smoke bomb (bullet 720) and message 40 at 0.767 s, **300610 HP reset**, StaminaControl type 7 (posture refill), 951 invulnerability, 275061 ("HP and posture total change, old Owl, after HU": rates 1.0, so no change) |
+
+His AI picks the escape (all three through `EndureAttack`):
+
+- the heat-up's 3506080 activation sets AI timer 1 to 20 s and watches a 2 m area all around him; Wolf inside it once the timer is at 17.5 s or less (2.5 s in) gives **20006**;
+- Wolf's attack (parry timing) or a shuriken impact during 3506080 gives **20007**;
+- each 3506082 activation counts AI number 3; at 5 or more, **20008** (he waits out about five kneeling loops).
+
+### What phase 2 changes in his AI
+
+His castle battle goal tests 200051 twice (read from `506001_battle.lua`):
+
+- When Wolf gets SpEffect 3506000 (his front kick 3005's AtkParam 50601130 leaves it), the interrupt answers with **3030 poison** if he has 200051, else **3007** (kick into shuriken fan).
+- His deflect counters (`Kengeki`) weight the smoke screen 3069 (act slot 8) only with 200051.
+
+He reads no HP ratio for phases.
+
+### Which castle top floor
+
+The floors are switched through their entity groups: `m015070` (entity 1114550, group 1117550, tatami) and `m015072` (entity 1114551, group 1117551, burnt).
+Event 11115943 shows the tatami and hides the burnt floor when flag 11110100 is on; otherwise it hides the burnt floor, waits for 8301 and then for flag **11115921**, and only then shows the burnt floor (and lighting 4); with 11110100 it switches back.
+11115921 is set at the end of cutscene 11010080 (event 11115930), which starts the later fight on this roof against c5430 (entity 1110920, boss bar 905401), or by event 11115945 once 9316 is set.
+During the Owl fight neither has happened, so the event script keeps **`m015070`, the intact tatami floor**, and the burnt `m015072` hidden.
+
+### What the reimplementation does
+
+- `crates/sim/src/events.rs` is a small EMEVD interpreter: condition groups (MAIN blocks, AND / OR groups, `IfConditionGroup`), skips, labels and gotos, ends and restarts, waits, event flags, and commands on the two fighters (SpEffects, EzState commands, boss bar, immortality, HP bar, boss defeat).
+  Instructions it does not run are listed once in its log; conditions on unknown entities are false.
+- `crates/sim/src/arena.rs` names the events of a fight (`OWL_EVENTS`): 11115860 from `Label6` (we join after the intro), 11115870, 11115872, 11115850 and 11115873, with flags 8301 and 9303 on and the boss as entity 1110850; `Duel::load_with` loads them for the Owl on any floor.
+- The duel maps entity 10000 to Wolf and 1110850 to the Owl; event messages come from the new TAE kind `EzStateRequest` (231); an event SpEffect with `effectEndurance` -1 (200051) lasts until cleared.
+- The engine answers what his script and AI read: `env(105, slot)` the waiting EzState command (used up once his script fires a `W_Event*`), `env(206)` true while a deathblow holds him or he plays its defender clip, `env(123)` the AI's `EndureAttack` request, and observe areas (`AddObserveArea`, `IsInsideObserve`, interrupt 16).
+  In an event animation (`Event*` states) env 2000 / 1105 follow the TAE only, so the heat-up ends through its own end branch.
+- Melee hits now leave their AtkParam's SpEffects on the defender (that is how 3506000 reaches Wolf).
+- Flags survive a death and respawn, so a retry skips the heat-up as in the game.
+- The HUD hides his bars while the events hide the boss bar.
+
+Tests: `crates/sim/tests/owl_phase2.rs` (the first deathblow starts the heat-up from message 20 with 200051 and the bar hidden; walking up gives 20006 and an HP reset; his AI uses 3030 and never 3007 in phase 2, and 3007 but not 3030 in phase 1; the second deathblow kills and the event handles the defeat), `crates/formats/tests/emevd_owl.rs` (the events read back from the real file).
+Screenshots: `cache/screens/phase2_420.png` (heat-up pose, no boss bar), `phase2_1100.png` (kneeling loop on the tatami), `phase2_2200.png` (after the escape: 1916 HP, bar back).
+
+```powershell
+cargo test -p sekiro-sim --test owl_phase2
+cargo run --release -p sekiro-game -- --arena owl --god --break-posture --spawn 101.23,53.95,247.33,135,0 --enemy-distance 1.6 --script <lock on, attack every 20 steps> --shots ... --exit
+```
+
+### Inferred or not known
+
+- `env(206)` "in a throw" as the deathblow pair plus the defender clip; the request in `env(105)` staying until a `W_Event*` fires; `env(123)` as any `EndureAttack` request with no TAE gate; the observe-area interrupt raised on every step the target is inside.
+- Our clip-end stand-in for env 2000 / 1105 is switched off only in `Event*` states.
+- A 0-duration SpEffect (3506000) stays visible for two steps so his observer sees it.
+- While he begs at 1 HP with a mark left, our duel allows a deathblow (HP 1 opens it); whether the game does (3506221 is "for judgment") is not known.
+- Not run: the intro part of 11115860 (cutscene, conversation copy, warps), 11115861 (music: the boss music is in the encrypted banks), 11115871, map effects, camera and gparam changes, network flags.
+- The per-frame order of the engine's event loop against characters and AI is ours (events run after the step's hits).
+- What judge 910's blow-away in the heat-up is for in the game (it keeps Wolf off him while he begs) is a guess.
 
 ## The castle top (`--arena owl`)
 
@@ -360,7 +519,7 @@ The next boss (Genichiro on the castle roof, for example) is one new row.
 - Two map pieces at the same transform hold the castle top floor: `m015070` (entity 1114550, intact tatami with fallen shutters) and `m015072` (entity 1114551, burnt and dark).
   Shown together they z-fight in polygon-shaped patches.
   They are the only event-controlled map pieces in the layout; the map event script picks one.
-  The arena hides `m015072`; that the Owl fight uses the intact floor is inferred (the burnt one fits a later story state), and decoding `event/m11_01_00_00.emevd` would settle it.
+  The arena hides `m015072`, and the event script agrees: the Owl fight shows the intact floor ("Phase 2", "Which castle top floor").
 - Objects stay off as in `--play --map` (`--objects` adds those within the radius; on this floor that adds the Sculptor's Idol behind Wolf's start).
 - Fall death is not modelled: a character that falls 30 m below its start is put back there (`Duel::fall_respawn_depth`), which only happens off the cropped collision.
 
@@ -376,10 +535,9 @@ The next boss (Genichiro on the castle roof, for example) is one new row.
 
 - The floor shows a single albedo layer like every map (`docs/FORMATS.md`, Known approximations); lighting is the default sun, not the castle top's draw params.
 - The object `o115923` (entity 1111723) has no model in the archives and is skipped by the map export.
-- Phase 2: see "Not done yet" above, and the steps below.
 
 ## Next steps
 
-1. Decode the EMEVD bank used around entity 1110850 (boss health bar 905060, the phase-2 SpEffect 200051, the heat-up check on 3506080) and run his phase change from it; it also says which castle top floor (`m015070` or `m015072`) the fight shows.
+1. Phase 2 runs from the map's event script ("Phase 2"); next there: the boss music switch (the music is in the encrypted banks), the smoke map effect, and checking the heat-up against a capture.
 2. His tools work ("Tools"); his grabs throw Wolf ("Grabs"), the boss brain's action list does not offer the grabs yet.
 3. The boss brain is in place (`docs/BRAIN.md`, `--brain scripted`): next, a hosted decision-model controller behind the same `BossBrain` trait.

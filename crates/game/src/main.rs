@@ -125,11 +125,11 @@ fn main() -> anyhow::Result<()> {
                 .transpose()
                 .map_err(|e| anyhow::anyhow!("--force-act wants an action id: {e}"))?,
             break_posture: args.iter().any(|a| a == "--break-posture"),
-            brain: match arg_value(&args, "--brain") {
-                Some(name) => sekiro_sim::brain::BrainKind::by_name(&name)
-                    .map_err(|e| anyhow::anyhow!("--brain: {e}"))?,
-                None => sekiro_sim::brain::BrainKind::Lua,
-            },
+            brain: sekiro_brain_net::from_cli(
+                &arg_value(&args, "--brain").unwrap_or_else(|| "lua".into()),
+                arg_value(&args, "--brain-model"),
+            )
+            .map_err(|e| anyhow::anyhow!("--brain: {e}"))?,
             brain_log: args.iter().any(|a| a == "--brain-log"),
             map: arg_value(&args, "--map"),
             start: arg_f32(&args, "--start", 0.0)? as usize,
@@ -153,7 +153,7 @@ fn main() -> anyhow::Result<()> {
         "                 [--map <id> [--start <n> | --spawn x,y,z,yaw,0]] [--no-enemy] [--lock-on]"
     );
     eprintln!(
-        "                 [--simple-ai] [--passive] [--god] [--force-act <id>] [--enemy c1010|c5060] [--brain lua|scripted] [--brain-log]"
+        "                 [--simple-ai] [--passive] [--god] [--force-act <id>] [--enemy c1010|c5060] [--brain lua|scripted|decisions|responses] [--brain-model <name>] [--brain-log]"
     );
     eprintln!("       sekiro-rs --arena owl [--full-map] [--play options] (a boss on his own map)");
     eprintln!("usage: sekiro-rs --arena [--deathblow] [--screenshot <out.png> --at <seconds>]");

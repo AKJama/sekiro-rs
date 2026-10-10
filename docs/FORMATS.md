@@ -310,3 +310,17 @@ cargo run --release -p sekiro-game -- --play --map m11_00_00_00 --spawn -142.6,-
 ```
 
 `--spawn x,y,z,yaw,0` puts Wolf on the floor at or below `y + 1` instead of at a player start; `PLAY_LOG_ALL=1` logs every simulation step of a script instead of every 30th.
+
+## Event scripts: EMEVD
+
+`event/<map>.emevd` (and `common.emevd`, `common_func.emevd`) arrive already decompressed in `cache/raw/event/`.
+`crates/formats/src/emevd.rs` reads them (layout from SoulsFormats `EMEVD`, the 64-bit DS3 / Sekiro form, version 0xCD): a header of 64-bit counts and offsets, 0x30-byte events (id, instruction range, parameter range, rest behaviour), 0x20-byte instructions (bank, id, argument length and offset into one argument blob, layer offset), 0x20-byte parameters (instruction index, target byte, source byte, byte count) and the linked-file names.
+`InitializeEvent` (2000[0]: slot, event id, arguments) and `InitializeCommonEvent` (2000[6]: event id, arguments, for `common_func.emevd`) start events; `Event::resolve` copies a start's arguments into the instructions as the parameters say.
+`crates/formats/src/emedf.rs` names the instructions the boss events use and decodes their arguments (packed with natural alignment, padded to 4 bytes), after DarkScript3's Sekiro EMEDF.
+
+```powershell
+cargo run -p sekiro-formats --example emevd_dump -- cache/raw/event/m11_01_00_00.emevd --find 1110850
+cargo run -p sekiro-formats --example emevd_dump -- cache/raw/event/m11_01_00_00.emevd 11115870
+```
+
+The interpreter that runs them in a fight is `crates/sim/src/events.rs` (`docs/OWL.md`, "Phase 2").

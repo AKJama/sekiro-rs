@@ -13,6 +13,9 @@
 //!
 //! Areas that end are faded out over a short time so a one-frame bang can still be seen; the
 //! rules only ever use the simulation's sizes and times.
+//!
+//! The same pool draws the puff of a warp ([`BulletFx::puff`]): a grey ball where a character
+//! fades out and where it comes back (the game's FFX 650680 / 650682).
 
 use std::collections::HashMap;
 
@@ -45,6 +48,23 @@ pub struct BulletFx {
     /// Last frame's bullets: serial -> (look, position, radius).
     last: HashMap<u64, (BulletLook, Vec3, f32)>,
     fading: Vec<Fading>,
+}
+
+/// Radius of a warp puff, metres, and how long it takes to fade, seconds (our choice).
+const PUFF_RADIUS: f32 = 0.9;
+const PUFF_SECONDS: f32 = 0.6;
+
+impl BulletFx {
+    /// Shows a warp puff at `at`, fading out over [`PUFF_SECONDS`].
+    pub fn puff(&mut self, at: Vec3) {
+        self.fading.push(Fading {
+            look: BulletLook::Smoke,
+            position: at,
+            radius: PUFF_RADIUS,
+            t: 0.0,
+            length: PUFF_SECONDS,
+        });
+    }
 }
 
 /// How long an area stays visible after its bullet ended, seconds.

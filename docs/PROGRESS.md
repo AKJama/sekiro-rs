@@ -106,7 +106,7 @@ Docs: [AI.md](AI.md).
 | m11_00_00_00 (Ashina Outskirts and Castle) | Partial | Pieces, textures, collision, walking work. |
 | Map lighting from draw params, foliage, fog | Partial | |
 | The other 9 maps | Not started | Same extractor. |
-| Placed enemies, objects, doors, ladders, events (EMEVD) | Not started | |
+| Placed enemies, objects, doors, ladders, events (EMEVD) | Started | EMEVD reader and a small event interpreter run the Owl fight's own events (phase 2, boss bar, defeat); see [OWL.md (Phase 2)](OWL.md#phase-2). |
 
 Docs: [FORMATS.md (Maps)](FORMATS.md#maps).
 

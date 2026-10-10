@@ -91,8 +91,9 @@ fn lua_brain_leaves_his_choices_unchanged() {
 #[test]
 fn owl_performs_the_planned_actions_in_order() {
     let Some(mut duel) = load(4.0) else { return };
-    // An order his own acts never use.
-    let plan = [3005, 3002, 3001];
+    // An order his own acts never use. Not the kick (3005): when it lands it leaves SpEffect
+    // 3506000 on Wolf, and his AI's interrupt answers with its own follow-up (3007).
+    let plan = [3003, 3002, 3001];
     duel.set_brain(scripted(&plan, 0.1), false).unwrap();
     let mut runs: Vec<Vec<i32>> = Vec::new();
     let mut seen = 0;
