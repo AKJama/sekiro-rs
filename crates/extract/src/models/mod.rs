@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use glam::{Mat4, Vec3};
-use sekiro_formats::{flver, mtd, param, paramdef};
+use sekiro_formats::{flver, mtd, param, paramdef, tae};
 use serde_json::{Value, json};
 
 pub use info::info;
@@ -129,28 +129,21 @@ fn npc_row(id: &str) -> Result<i32> {
 }
 
 /// The draw-mask change made by the enemy's weapon-draw animation (`a000_001040`, which
-/// switches the soldier from sheathed to katana in hand), from `cache/anim/<id>/tae.json`.
+/// switches the soldier from sheathed to katana in hand), from the unpacked TAE.
+/// Models can be exported before animations, so never depend on `anim/<id>/tae.json` here.
 /// Values per group: 0 off, 1 on, 255 unchanged.
 fn combat_draw_mask_event(cache: &Path, id: &str) -> Option<Vec<u8>> {
     const DRAW_WEAPON_ANIM: i64 = 1040;
-    let text = std::fs::read_to_string(cache.join(format!("anim/{id}/tae.json"))).ok()?;
-    let tae: Value = serde_json::from_str(&text).ok()?;
-    let anims = tae["files"]
-        .as_array()?
-        .iter()
-        .flat_map(|f| f["animations"].as_array().into_iter().flatten());
-    for anim in anims {
-        if anim["id"].as_i64() != Some(DRAW_WEAPON_ANIM) {
+    let bytes = std::fs::read(cache.join(format!("raw/chr/{id}.anibnd.d/{id}.tae"))).ok()?;
+    let tae = tae::parse(&bytes).ok()?;
+    for anim in &tae.animations {
+        if anim.id != DRAW_WEAPON_ANIM {
             continue;
         }
-        for event in anim["events"].as_array()? {
-            let decoded = &event["decoded"];
-            if decoded["name"] == "ChangeChrDrawMask" {
-                return decoded["fields"]
-                    .as_array()?
-                    .iter()
-                    .map(|f| f["value"].as_u64().map(|v| v as u8))
-                    .collect();
+        for event in &anim.events {
+            // ChangeChrDrawMask (233): one byte per display group, then padding.
+            if event.event_type == 233 {
+                return Some(event.params.get(..32)?.to_vec());
             }
         }
     }
@@ -198,7 +191,7 @@ fn npc(raw: &Path, params: &Params, id: &str) -> Result<Model> {
             notes.push(format!("combat draw mask groups on: {:?}", on(&combat)));
         }
         None => notes.push(format!(
-            "no weapon-draw TAE event in cache/anim/{id}/tae.json; combat mask = default"
+            "no weapon-draw TAE event in cache/raw/chr/{id}.anibnd.d/{id}.tae; combat mask = default"
         )),
     }
     let visible = vec![true; flver.meshes.len()];
@@ -915,4 +908,28 @@ fn blade_dummy_matrix(d: &flver::Dummy) -> Mat4 {
         z.extend(0.0),
         Vec3::from(d.position).extend(1.0),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn soldier_combat_mask_does_not_require_extracted_animations() {
+        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let source = cache.join("raw/chr/c1010.anibnd.d/c1010.tae");
+        if !source.is_file() {
+            eprintln!("skipping: c1010 TAE is not unpacked");
+            return;
+        }
+        // Only the unpacked TAE exists, as after `unpack` followed by `models`.
+        let fixture = cache.join(format!("tests/sword-mask-{}", std::process::id()));
+        let raw = fixture.join("raw/chr/c1010.anibnd.d");
+        std::fs::create_dir_all(&raw).unwrap();
+        std::fs::copy(source, raw.join("c1010.tae")).unwrap();
+        assert!(!fixture.join("anim/c1010/tae.json").exists());
+        let event = combat_draw_mask_event(&fixture, "c1010").unwrap();
+        assert_eq!(&event[..4], &[1, 0, 0, 1]);
+        assert!(event[4..].iter().all(|&v| v == 255));
+    }
 }
