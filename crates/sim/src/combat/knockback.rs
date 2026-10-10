@@ -18,10 +18,14 @@
 //! the defender away from the attacker on the ground plane, through its body collision, so walls
 //! stop it.
 //!
-//! Hit stop: when an attack hits, the attacker's clock stops for AtkParam `hitStopTime` seconds
-//! and the defender's for `hitStopTime_Defencer` (def; 0.1 s on Wolf's sword attacks, 0 on every
-//! NPC attack but four, as FwLo's notes say). Frozen characters do not advance their animations,
-//! scripts, pushes or posture recovery.
+//! Hit stop (code, `b9cd90`, `b9cfb0`, `b9d1b0`; see `docs/COMBAT-RULES.md`, "Hit stop"): when
+//! an attack connects, each side may get a hit stop that scales its whole update clock. The
+//! attacker's length is AtkParam `hitStopTime` times a scale from the defender's NpcParam
+//! `hitStopType` (0 none, 1 half, 2 full; a player defender counts as full); the defender's is
+//! `hitStopTime_Defencer` when its NpcParam `hitStopType_Defencer` is 1 (a player defender always
+//! takes it). A hit stop holds the clock at zero for the engine's fixed 0.06 s, then eases it back
+//! to full speed over the hit stop length, quadratically. Wolf's sword rows have 0.1 s for both,
+//! but the soldier and the Owl have type 0 and 0, so neither side stops in those fights.
 
 use super::hit::HitOutcome;
 use sekiro_formats::param::Table;
@@ -242,34 +246,107 @@ impl Knockback {
     }
 }
 
-/// A character's remaining hit stop.
+/// The full stop at the start of every hit stop, seconds (the engine's default at `a51800`
+/// +0x130; only a debug menu changes it).
+pub const HIT_STOP_HOLD: f32 = 0.06;
+/// TAE `ChrActionFlag` 41 ("HasSpace_Hks305" in the community template): on the defender it
+/// forces both full hit stops for non-arrow attacks (the TAE handler `b51b70` sets ActionFlag
+/// +0x70 bit 7, read by `b60f10`). Wolf, the soldier and the Owl never set it.
+pub const FLAG_FORCE_HIT_STOP: i32 = 41;
+/// The attacker scale for an NPC defender with `hitStopType` 1 (`a51800` +0x124).
+pub const HIT_STOP_WEAK_RATE: f32 = 0.5;
+
+/// A character's hit stop: a clock scale that holds at zero for [`HIT_STOP_HOLD`], then rises
+/// back to one as `(elapsed / length)^2` over the hit stop's length (`b9d1b0`; its ease-in phase
+/// has length 0 by default and is left out).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct HitStop {
-    pub remaining: f32,
+    phase: HitStopPhase,
+    /// Seconds left in the current phase.
+    left: f32,
+    /// The ease-out length: the scaled AtkParam time.
+    length: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum HitStopPhase {
+    #[default]
+    Idle,
+    Hold,
+    Ease,
 }
 
 impl HitStop {
-    /// Leftovers below this are float noise from summing steps (0.1 s is six 1/60 s steps).
-    const EPSILON: f32 = 1e-4;
+    /// Leftovers below this are float noise from summing steps.
+    const EPSILON: f32 = 1e-5;
 
-    /// Starts a hit stop of `seconds`, keeping a longer one already running.
+    /// Starts a hit stop easing out over `seconds`. A new one replaces one already running, as the
+    /// engine's start (`b9dad0`) resets the state; zero or less starts nothing.
     pub fn start(&mut self, seconds: f32) {
-        self.remaining = self.remaining.max(seconds);
+        if seconds > 0.0 {
+            *self = Self {
+                phase: HitStopPhase::Hold,
+                left: HIT_STOP_HOLD,
+                length: seconds,
+            };
+        }
     }
 
-    /// Spends up to `dt` of the hit stop and returns the time the character really advances.
+    /// Runs `dt` of real time and returns how far the character's own clock advances.
     pub fn split(&mut self, dt: f32) -> f32 {
-        let frozen = self.remaining.min(dt).max(0.0);
-        self.remaining -= frozen;
-        if self.remaining < Self::EPSILON {
-            self.remaining = 0.0;
+        match self.phase {
+            HitStopPhase::Idle => dt,
+            HitStopPhase::Hold => {
+                self.left -= dt;
+                if self.left <= Self::EPSILON {
+                    self.phase = HitStopPhase::Ease;
+                    self.left = self.length;
+                }
+                0.0
+            }
+            HitStopPhase::Ease => {
+                self.left -= dt;
+                let eased = (1.0 - self.left / self.length).clamp(0.0, 1.0);
+                if self.left <= Self::EPSILON {
+                    *self = Self::default();
+                    return dt;
+                }
+                eased * eased * dt
+            }
         }
-        let left = dt - frozen;
-        if left < Self::EPSILON { 0.0 } else { left }
     }
 
     pub fn active(&self) -> bool {
-        self.remaining > 0.0
+        self.phase != HitStopPhase::Idle
+    }
+
+    /// Real seconds until the clock runs at full speed again.
+    pub fn remaining(&self) -> f32 {
+        match self.phase {
+            HitStopPhase::Idle => 0.0,
+            HitStopPhase::Hold => self.left + self.length,
+            HitStopPhase::Ease => self.left,
+        }
+    }
+}
+
+/// The attacker's hit stop scale against a defender with NpcParam `hitStopType` `kind` (`None`
+/// for the player, whom the engine treats as type 2). Type 3 depends on an attacker action state
+/// that is not traced (no NpcParam row uses it) and is treated as none.
+pub fn attacker_hit_stop_scale(kind: Option<u8>) -> f32 {
+    match kind {
+        None | Some(2) => 1.0,
+        Some(1) => HIT_STOP_WEAK_RATE,
+        _ => 0.0,
+    }
+}
+
+/// The defender's hit stop scale for NpcParam `hitStopType_Defencer` `kind` (`None` for the
+/// player, who always takes it).
+pub fn defender_hit_stop_scale(kind: Option<u8>) -> f32 {
+    match kind {
+        None | Some(1) => 1.0,
+        _ => 0.0,
     }
 }
 
@@ -325,16 +402,47 @@ mod tests {
     }
 
     #[test]
-    fn hit_stop_freezes_for_its_time() {
+    fn hit_stop_holds_then_eases_out() {
         let dt = 1.0 / 60.0;
         let mut stop = HitStop::default();
         stop.start(0.1);
-        let advanced: Vec<f32> = (0..8).map(|_| stop.split(dt)).collect();
-        assert!(advanced[..6].iter().all(|&a| a == 0.0), "{advanced:?}");
-        assert!(advanced[6..].iter().all(|&a| a == dt), "{advanced:?}");
-        // A stop that ends mid-step lets the rest of the step run.
+        assert!((stop.remaining() - 0.16).abs() < 1e-6);
+        let advanced: Vec<f32> = (0..12).map(|_| stop.split(dt)).collect();
+        // 0.06 s held: the step that crosses it is still held (four steps at 60 Hz).
+        assert!(advanced[..4].iter().all(|&a| a == 0.0), "{advanced:?}");
+        // Then (elapsed / 0.1)^2 of each step over six steps, then full speed.
+        for (k, &a) in advanced[4..10].iter().enumerate() {
+            let e = (k + 1) as f32 / 6.0;
+            assert!((a - e * e * dt).abs() < 1e-5, "step {k}: {advanced:?}");
+        }
+        assert!(advanced[10..].iter().all(|&a| a == dt), "{advanced:?}");
+        assert!(!stop.active());
+    }
+
+    #[test]
+    fn a_new_hit_stop_restarts_and_zero_starts_nothing() {
+        let dt = 1.0 / 60.0;
         let mut stop = HitStop::default();
-        stop.start(0.01);
-        assert!((stop.split(dt) - (dt - 0.01)).abs() < 1e-6);
+        stop.start(0.0);
+        assert!(!stop.active());
+        stop.start(0.1);
+        for _ in 0..6 {
+            stop.split(dt);
+        }
+        stop.start(0.1);
+        assert_eq!(stop.split(dt), 0.0);
+        assert!((stop.remaining() - (0.16 - dt)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn hit_stop_scales_by_type() {
+        assert_eq!(attacker_hit_stop_scale(None), 1.0);
+        assert_eq!(attacker_hit_stop_scale(Some(0)), 0.0);
+        assert_eq!(attacker_hit_stop_scale(Some(1)), 0.5);
+        assert_eq!(attacker_hit_stop_scale(Some(2)), 1.0);
+        assert_eq!(attacker_hit_stop_scale(Some(3)), 0.0);
+        assert_eq!(defender_hit_stop_scale(None), 1.0);
+        assert_eq!(defender_hit_stop_scale(Some(0)), 0.0);
+        assert_eq!(defender_hit_stop_scale(Some(1)), 1.0);
     }
 }

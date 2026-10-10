@@ -172,6 +172,11 @@ impl Pending {
     pub fn loaded(&self) -> bool {
         self.loaded_at.is_some()
     }
+
+    /// Seconds since every map piece and texture loaded (0 before).
+    pub fn loaded_for(&self) -> f32 {
+        self.loaded_at.map_or(0.0, |t| t.elapsed().as_secs_f32())
+    }
 }
 
 /// The world-space horizontal bounding box of a model row placed at `p` (from the `min` and

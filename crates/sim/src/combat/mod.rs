@@ -37,7 +37,10 @@ pub use hit::{
     resolve_hit_with_repel, resolve_part_hit,
 };
 pub use hp::Vitality;
-pub use knockback::{HitStop, Knockback, KnockbackClass, KnockbackTable, KnockbackTiming};
+pub use knockback::{
+    HIT_STOP_HOLD, HitStop, Knockback, KnockbackClass, KnockbackTable, KnockbackTiming,
+    attacker_hit_stop_scale, defender_hit_stop_scale,
+};
 pub use posture::{ControlRange, PostureMeter};
 pub use recovery::{RecoveryAccumulator, RecoveryInputs, posture_recovery_per_second};
 

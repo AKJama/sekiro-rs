@@ -10,6 +10,7 @@ No decompiled code is reproduced here or in the source; dumps stay under `re/`.
 - **inferred**: the shape was read from code, but which param field feeds a value was inferred, usually by matching record offsets to Paramdex offsets or by matching values.
 - **def**: from the Paramdex Japanese description.
 - **community**: from a community source; not checked in the executable.
+- **data**: counted in the extracted params.
 
 RVAs are relative to image base 0x140000000.
 
@@ -266,14 +267,30 @@ Not modelled: Wolf's armour `knockBackCutRate_*` and weapon `knockBackCutRate_*_
 
 ## Hit stop
 
+Each character has a hit stop module (`SprjChrHitStopModule`, ChrIns module bag +0x90).
+Its update (`b9d1b0`) turns the frame time into the character's own time, and the character update (`9f78a0`) runs every module on that scaled time, so a stopped character's animation, script, TAE, root motion and pushes all wait together.
+FwLo's RustSekiro (`docs/kb/guard-deflect.md`, `src/combat.rs`) pointed at the two AtkParam fields; it freezes both sides fully for the field's seconds on direct hits, which the code below refines.
+
 | Rule | Source | Confidence |
 |---|---|---|
-| When an attack hits, the attacker freezes for AtkParam `hitStopTime` seconds and the defender for `hitStopTime_Defencer`. Wolf's sword attacks have 0.1 s for both; all NPC attack rows but four have 0. | def; FwLo's RustSekiro, `docs/kb/guard-deflect.md` | def |
-| Only direct hits start a hit stop. | FwLo's RustSekiro applies it on hits only | inferred |
-| A frozen character advances nothing: animation, script, TAE, root motion, knockback and posture recovery all wait. Button presses are still buffered. | | inferred |
+| A contact starts the hit stops from the defender's damage module (`b6f690` calls `b6e5a0` after the damage and posture stages), with no test of the outcome, so blocked and deflected contacts count as well as hits. | `b6f690`, `b6e5a0` | code; that every guarded contact reaches `b6f690` is inferred |
+| Nothing starts when all five attack powers of the hit record (+0x00 to +0x10) are 0 or less. | `b9cd90`, `b9cfb0` | code; not modelled, the attacks we resolve always carry attack power |
+| The attacker's length is AtkParam `hitStopTime` (+0x1C) times a scale from the defender's NpcParam `hitStopType` (+0x14A): 0 none, 1 the engine's weak rate 0.5, 2 full, 3 full only while an attacker action state is set (ActionFlag +0x54 bit 3, not identified; no NpcParam row uses 3, we treat it as none). A player defender counts as type 2. | `b9cd90`, `b9d850`, defaults in `a51800` (+0x124 = 0.5) | code, fields matched by Paramdex offset |
+| The defender's length is AtkParam `hitStopTime_Defencer` (+0x1CC) when its own NpcParam `hitStopType_Defencer` (+0x125) is 1, else none. A player defender always takes it. | `b9cfb0`, `b9d8c0` | code, fields matched by Paramdex offset |
+| TAE `ChrActionFlag` 41 on the defender (community name "HasSpace_Hks305") forces both scales to full unless the attack is `isArrowAtk`. Wolf, the soldier and the Owl never set it. | `b51b70` (sets ActionFlag +0x70 bit 7), `b60ec0`, `b60f10` | code |
+| Units are seconds; no cap. Wolf's sword rows have 0.1 s for both; NPC rows have 0 for both except 50000980/50001980 (1.2 s) and 50000981/50001981 (0.5 s) for the attacker. | AtkParam_Pc, AtkParam_Npc | data |
+| NpcParam types: 1258 rows 0 and 0 (the soldier 10100000 and the Owl 50600000 among them), type 1 on the Yasha Ape, Okiryu and a "hit stop test, a little" Samurai General row, type 2 on the Great Serpent rows and a "do it properly" test row; `hitStopType_Defencer` is 0 on every row. So Wolf's hits on the soldier and the Owl stop nobody, and NPC hits on Wolf stop nobody either. | NpcParam | data |
+| A start holds the character's clock at zero for 0.06 s, then eases it back over the hit stop's length: each frame advances `dt * (elapsed / length)^2`, so 0.1 s costs about 0.127 s of the character's time. The frame that ends the hold advances nothing. An ease-in phase before the hold has length 0. | `b9d1b0`, `b9dad0`; defaults in `a51800` (+0x12C = 0, +0x130 = 0.06) | code; the defaults change only through a debug menu (inferred) |
+| A new start replaces a hit stop already running. | `b9dad0` | code |
+| A debug flag (+0x11D of the same global) forces the attacker's stop for type 0 and replaces the ease length with +0x134 (0.04); the module's own debug byte (+0x2D) 2 disables it and 1 forces it. Off in a normal game. | `b9cd90`, `b9d1b0`, `b9d3b0` | code |
+| A player's hit stop can also start a pad rumble (AtkParam `HitRumbleId*`). | `b9d930` | code, not modelled |
 
-The sim runs hit stop in the fixed-step duel (`Duel::step`), so it is deterministic.
-NpcParam `hitStopType` and `hitStopType_Defencer` ("whether hit stop happens" for the attacker and defender of hits on this NPC) are 0 on the soldier and not read yet; their value meanings are not in the Paramdex.
+The sim runs hit stop in the fixed-step duel (`Duel::step`, `HitStop` in `crates/sim/src/combat/knockback.rs`), so it is deterministic.
+Button presses are still buffered while a character is stopped (ours).
+A bullet's hit does not stop its distant shooter (ours; every NPC bullet row has 0 anyway).
+Tests: `hit_stop_holds_then_eases_out`, `a_new_hit_stop_restarts_and_zero_starts_nothing` and `hit_stop_scales_by_type` in the sim crate; `no_hit_stop_against_the_soldier` and `hit_stop_holds_both_clocks_then_eases_back` (the soldier's row set to type 2 and 1) in `crates/sim/tests/combat_rules.rs`; `drawn_clip_time_holds_through_hit_stop` in `crates/game/src/play.rs` for the drawn frames.
+
+Before 2026-10-10 every direct hit by Wolf froze both characters fully for 0.1 s, which in the Owl fight gave about nine 100 ms freezes per combo the real game does not have.
 
 ## Third-party claims
 

@@ -655,6 +655,7 @@ impl Duel {
         let mut report = self.last_steps[i].clone();
         report.clip_started = false;
         report.blend_in = 0.0;
+        report.advanced = 0.0;
         report.requested.clear();
         report.behavior.events.clear();
         report.behavior.hooks.clear();

@@ -49,6 +49,9 @@ pub struct StepReport {
     pub clip_started: bool,
     /// Crossfade into the full-body clip in seconds (TAE `Blend`), when it just started.
     pub blend_in: f32,
+    /// Seconds this character's own clock advanced in the step: the step's length, less while a
+    /// hit stop holds or eases it (0 while held). The renderer draws between steps with it.
+    pub advanced: f32,
 }
 
 /// What an NPC's brain asks of its body this step. The NPC script reads these as the engine's
@@ -709,6 +712,7 @@ impl Character {
             requested,
             clip_started,
             blend_in,
+            advanced: dt,
         }
     }
 

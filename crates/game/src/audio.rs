@@ -145,8 +145,9 @@ pub struct FmodAudio {
 }
 
 impl FmodAudio {
-    /// Starts FMOD from the install and loads the projects of [`start_projects`].
-    fn open(cache: &Path, map: Option<&str>) -> Result<Self, String> {
+    /// Starts FMOD from the install and loads the projects of [`start_projects`] and the
+    /// enemy's own (`enemy`), so no project loads mid-fight.
+    fn open(cache: &Path, map: Option<&str>, enemy: Option<&str>) -> Result<Self, String> {
         let game = sekiro_fmod::game_dir();
         let mut system = EventSystem::open(&game, false)
             .map_err(|e| format!("{e} (install {})", game.display()))?;
@@ -160,6 +161,9 @@ impl FmodAudio {
         };
         for p in start_projects(map) {
             audio.load(&p);
+        }
+        if let Some(chr) = enemy {
+            audio.load(chr);
         }
         if audio.system.projects().iter().all(|p| p.name != "main") {
             return Err("main.fev did not load (run `sekiro-extract unpack`)".into());
@@ -200,6 +204,9 @@ pub struct GameAudioPlugin {
     pub cache: PathBuf,
     /// The map being played (`m11_01_00_00`), for its area's sound projects.
     pub map: Option<String>,
+    /// The enemy's character id (`c5060`) and NpcParam row: its sound project and the hit-sound
+    /// tables load at start too, not on the fight's first step (about 90 ms, measured).
+    pub enemy: Option<(String, i32)>,
 }
 
 impl Plugin for GameAudioPlugin {
@@ -207,7 +214,11 @@ impl Plugin for GameAudioPlugin {
         let fmod = if std::env::var_os("SEKIRO_NO_FMOD").is_some() {
             Err("SEKIRO_NO_FMOD is set".to_string())
         } else {
-            FmodAudio::open(&self.cache, self.map.as_deref())
+            FmodAudio::open(
+                &self.cache,
+                self.map.as_deref(),
+                self.enemy.as_ref().map(|(chr, _)| chr.as_str()),
+            )
         };
         let use_fmod = fmod.is_ok();
         match fmod {
@@ -224,7 +235,11 @@ impl Plugin for GameAudioPlugin {
             }
         }
         let level = volume_arg(&std::env::args().collect::<Vec<_>>());
-        app.insert_resource(SoundLibrary::load(&self.cache, !use_fmod))
+        let mut library = SoundLibrary::load(&self.cache, !use_fmod);
+        if let Some((_, npc_param)) = &self.enemy {
+            library.hit_sounds(*npc_param);
+        }
+        app.insert_resource(library)
             .insert_resource(MasterVolume {
                 level,
                 shown_until: 0.0,

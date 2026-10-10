@@ -68,10 +68,15 @@ pub struct AttackProfile {
     /// `knockbackDist_DirectHit`, `knockbackDist_Guard`, `knockbackDist_JustGuard`: metres the
     /// defender is pushed on a hit, a block and a deflect (def).
     pub knockback_dist: [f32; 3],
-    /// `hitStopTime`: seconds the attacker freezes when this attack hits (def).
+    /// `hitStopTime`: the attacker's hit stop when this attack connects, seconds, before the
+    /// defender's NpcParam `hitStopType` scale (see [`crate::combat::knockback::HitStop`]).
     pub hit_stop_time: f32,
-    /// `hitStopTime_Defencer`: seconds the defender freezes when this attack hits (def).
+    /// `hitStopTime_Defencer`: the defender's hit stop, seconds, before its NpcParam
+    /// `hitStopType_Defencer` gate.
     pub hit_stop_time_defender: f32,
+    /// `isArrowAtk`: a bow or bullet attack; TAE action flag 41 on the defender does not force a
+    /// hit stop for it (code `b60ec0`, `b60f10`).
+    pub is_arrow: bool,
 }
 
 impl AttackProfile {
@@ -121,6 +126,7 @@ impl AttackProfile {
             ],
             hit_stop_time: row.f32("hitStopTime")?,
             hit_stop_time_defender: row.f32("hitStopTime_Defencer")?,
+            is_arrow: row.bool("isArrowAtk")?,
         })
     }
 }
@@ -160,6 +166,12 @@ pub struct NpcCombat {
     pub knockback_cut_vs_player: [u8; 3],
     /// `knockbackRate_vsEnemy_*`: the same against other characters' attacks.
     pub knockback_cut_vs_enemy: [u8; 3],
+    /// `hitStopType`: whether a character that hits this NPC gets its hit stop: 0 none, 1 half
+    /// (the engine's weak rate 0.5), 2 full (code `b9cd90`; 0 on the soldier and the Owl).
+    pub hit_stop_type: u8,
+    /// `hitStopType_Defencer`: 1 when this NPC takes the defender's hit stop of attacks that hit
+    /// it, else none (code `b9cfb0`; 0 on every NPC row).
+    pub hit_stop_type_defender: u8,
 }
 
 impl NpcCombat {
@@ -231,6 +243,8 @@ impl NpcCombat {
                 row.u8("knockbackRate_vsEnemy_Guard")?,
                 row.u8("knockbackRate_vsEnemy_JustGuard")?,
             ],
+            hit_stop_type: row.u8("hitStopType")?,
+            hit_stop_type_defender: row.u8("hitStopType_Defencer")?,
         })
     }
 }

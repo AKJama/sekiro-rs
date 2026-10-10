@@ -86,7 +86,7 @@ fn run(distance: f32) -> Option<Run> {
             clip: r.player.animation.unwrap_or_default(),
             clip_time: r.player.anim_time,
             hit: r.hits.iter().any(|(h, _)| h.attacker == 0),
-            stop: duel.hit_stop.map(|s| s.remaining),
+            stop: duel.hit_stop.map(|s| s.remaining()),
             owl_state: r
                 .enemy
                 .behavior

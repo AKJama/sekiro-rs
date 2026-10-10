@@ -60,6 +60,7 @@ Uncommitted files in the working tree belong to these tasks; check `git status` 
 
 ## Known issues
 
+- Fixed 2026-10-10, to be confirmed in play: combos on the Owl froze and jittered. Every direct hit froze both characters for 0.1 s, which the game does not do against the Owl (his NpcParam hit stop types are 0), and the drawn animation slid backwards during the freeze; the fight also hitched about 2 s in, on its first step and on first-shown clips. See "Frame pacing" below.
 - Fixed 2026-10-10, to be confirmed in play: during the Owl's deathblow the stick turned Wolf and the Owl's body followed; near walls the pair clipped in; the game froze for about half a second as a deathblow started. Causes: Wolf's throw states pick their clip by animation offset type 17, which was never set to ThrowParam `atkAnimOffset` (221 for the Owl), so Wolf played the soldier's 2.0 s `a200_510000` and was free after 2 s while the Owl (6.6 s clip) was still held on him; the defender was held on the dummy of Wolf's live pose every step, teleported and through walls; a knockback left from the breaking hit resumed when the pair ended; the push-apart ignored collision; and every deathblow start parsed c0000's 23 MB `tae.json` (0.45 s). Now the offset types are set from the row, the absorb places one character once at the body clip's frame 0 and both play their own root motion (after FwLo's RustSekiro), all of it moves through collision (a blocked absorb shifts the other character instead, inferred), and throw times come from the decoded TAE (deathblow-start frames now 16 to 18 ms, were a 250 ms clamped frame). Wolf can walk out from 4.0 s, where his clip's TAE opens the move cancel. `docs/DEATHBLOW.md`, tests `crates/sim/tests/deathblow_lock.rs`, screenshots `cache/screens/deathblow_{steer,owlwall,wolfwall,owlrail,wolfrail}_*.png`.
 - Fixed 2026-10-10, to be confirmed by ear: nearly no sounds in the Owl fight and volume that jumped near walls and corners. The Owl's bank was never decoded and Bevy's spatial audio scaled every sound by the camera's distance with no minimum. Sounds now play through the game's own FMOD (`crates/fmod`, `crates/game/src/audio.rs`): all 55 of the Owl's TAE sound keys play, and the events' own rolloff is flat out to about 5 m. The hit-sound lookup also used the wrong param fields and letter; fixed from FwLo's exe trace. `docs/AUDIO.md`.
 
@@ -92,12 +93,29 @@ The repo is public at github.com/AKJama/sekiro-rs.
 Local git hooks (`.git/hooks/pre-commit`, `commit-msg`) reject personal paths, emails, co-author lines and anything under `cache/` or `re/`; they are not part of the repo, so re-create them on a new clone.
 Write commands in docs as plain `cargo`, never a full user path.
 
-## Combat jitter measurement (2026-10-10)
+## Frame pacing (2026-10-10)
 
-Added opt-in `PLAY_LOG_PERF=1` frame logging without changing gameplay.
-Six raw-input Owl arena captures and analysis live in `cache/perf/REPORT.md`, with the CSV manifest in `cache/perf/runs.csv`.
-Initial controls that accidentally reached Owl are retained separately and excluded from the comparison.
-Hit stop produces repeated roughly 100 ms contact pauses, with render clip time moving backward during some pauses because interpolation continues against frozen simulation time.
-Outside hit stop, backward clip times coincide with same-clip restarts and forward jumps coincide with multiple fixed steps; no stationary-draw/moving-sim frames were found.
-Frame-time spikes also occur without hits, and the repeats vary enough that loading versus rendering or concurrent machine load cannot be assigned confidently from this instrumentation.
-No commits were made.
+`PLAY_LOG_PERF=1` writes one CSV row per rendered frame to `cache/perf/` (`crates/game/src/perf_log.rs`: wall time, steps, drawn and simulated clip times, hit stops, hits, sounds, and where a slow frame went: main schedule, fixed steps, clip loads, render-world time per render set, pipeline counts).
+`tools/perf/owl-replays.ps1 -Exe <exe> -Tag <tag>` replays the same raw input against the Owl (passive, real AI, and a no-contact control with the Owl 1000 m away, each run twice: cold, then warm); `uv run tools/perf/summary.py -v --fail-over 50 cache/perf/<tag>-*warm.csv` prints median, p95, p99, max and every frame over 25 ms with what happened in it, and exits 1 if a frame without a hit takes over 50 ms.
+That warm-run check is manual (it needs the game window on a desktop); run it after renderer, loading or audio changes.
+
+Clean runs on an idle machine (RTX 5070 Ti, Vulkan, vsync 60 Hz; gameplay frames only):
+
+| Run | Before (c1782f8): median / p95 / p99 / max ms, frames over 25 ms | After |
+|---|---|---|
+| passive cold | 16.67 / 17.77 / 18.96 / 57.19, 4 | 16.68 / 17.39 / 17.97 / 20.06, 0 |
+| passive warm | 16.66 / 17.72 / 18.80 / 52.54, 3 | 16.67 / 17.43 / 18.32 / 21.16, 0 |
+| AI cold | 16.67 / 17.56 / 18.60 / 57.05, 2 | 16.68 / 17.25 / 17.79 / 18.15, 0 |
+| AI warm | 16.68 / 17.47 / 18.12 / 52.16, 4 | 16.69 / 17.34 / 18.66 / 30.09, 1 |
+| control cold | 16.68 / 17.23 / 17.89 / 52.37, 3 | 16.67 / 17.15 / 18.12 / 30.11, 1 |
+| control warm | 16.69 / 17.19 / 18.18 / 55.63, 4 | 16.69 / 17.13 / 17.65 / 18.63, 0 |
+
+The earlier 42 to 52 ms medians in `cache/perf/REPORT.md` were another agent compiling on the same machine.
+What the slow frames were, and what changed:
+
+- The contact freezes were hit stop, which the game does not apply in this fight: the defender's NpcParam `hitStopType` scales the attacker's stop and is 0 on the Owl and the soldier, and `hitStopType_Defencer` is 0 on every NPC. Hit stop now follows the exe (a 0.06 s hold, then a quadratic ease over the AtkParam time, scaled per NpcParam type; `docs/COMBAT-RULES.md`, "Hit stop"), so Wolf's hits on the Owl stop nobody.
+- Drawn clip time ran backwards during hit stop (by up to 11 ms) because the frames between steps trailed the last step by a fixed step length even when the character's clock had stopped. They now trail by the character's own advance in that step (`StepReport::advanced`), and crossfades advance on the character's clock, so a stopped character holds exactly still and resumes without a jump (test `drawn_clip_time_holds_through_hit_stop`). The backward frames outside clip restarts went from 25 and 10 (passive and AI warm) to 0.
+- Every run had a 35 ms and a 52 to 57 ms frame about 1.9 s after the map finished loading, also with no input and with sound off: the render world waits that long for the next swapchain image, with no CPU work, pipeline compile, clip or sound load in it; with map pieces hidden or on the flat floor it does not happen, and with the start held 3 s it still came 1.9 s after loading (cause in the driver or presentation, not found). The fight now starts 2.5 s after the map has loaded (`MAP_SETTLE_SECS` in `play.rs`), so the stall falls in the loading time.
+- The fight's first step took 95 ms: the hit-sound tables were read on first use. They and the enemy's FMOD project (c5060.fev, which loaded a few frames into the fight) now load at start.
+- Clips shown for the first time were read and decoded on that frame (26 to 55 ms on cold runs, for the Owl's damage and attack clips). Once the fight runs, a background thread decodes all of both characters' clips (0.4 s for Wolf's 1433, no measurable memory change).
+- Left: one 30 ms frame in some runs with 16 ms in the main schedule and nothing else in it; the replay writes a stderr line per frame and step into a PowerShell redirect, which likely blocks now and then (not seen without the replay logs, not proven).

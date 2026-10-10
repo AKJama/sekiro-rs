@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use bevy::prelude::*;
@@ -20,6 +20,12 @@ pub struct AnimLibrary {
     clips: HashMap<String, Arc<AnimClip>>,
     /// Animations that play another's HKX (`aliases.json` from the extractor).
     aliases: HashMap<String, String>,
+    /// Clips read from disk by [`AnimLibrary::clip`] since the last
+    /// [`AnimLibrary::take_load_stats`], and the milliseconds spent (for the perf log).
+    loads: (usize, f64),
+    /// Clips decoded ahead by [`AnimLibrary::prefetch_all`]'s thread, by file name.
+    prefetched: Arc<Mutex<HashMap<String, Arc<AnimClip>>>>,
+    prefetching: bool,
 }
 
 impl AnimLibrary {
@@ -37,6 +43,9 @@ impl AnimLibrary {
             skeleton,
             clips: HashMap::new(),
             aliases,
+            loads: (0, 0.0),
+            prefetched: Arc::default(),
+            prefetching: false,
         })
     }
 
@@ -45,11 +54,85 @@ impl AnimLibrary {
             return Ok(c.clone());
         }
         let file = self.aliases.get(name).map_or(name, String::as_str);
+        let ready = self
+            .prefetched
+            .lock()
+            .ok()
+            .and_then(|m| m.get(file).cloned());
+        if let Some(clip) = ready {
+            self.clips.insert(name.to_string(), clip.clone());
+            return Ok(clip);
+        }
+        let started = std::time::Instant::now();
         let path = self.dir.join(format!("{file}.bin"));
         let bytes = std::fs::read(&path).with_context(|| format!("{}", path.display()))?;
         let clip = Arc::new(to_bevy::clip(&AnimClip::from_bytes(&bytes)?));
         self.clips.insert(name.to_string(), clip.clone());
+        self.loads.0 += 1;
+        self.loads.1 += started.elapsed().as_secs_f64() * 1000.0;
         Ok(clip)
+    }
+
+    /// Decodes every clip of the character on a background thread, so a clip shown for the
+    /// first time mid-fight does not wait for the disk and the decode on the frame it starts
+    /// (25 to 55 ms each, measured). Clips already asked for are skipped; runs once.
+    pub fn prefetch_all(&mut self) {
+        if self.prefetching {
+            return;
+        }
+        self.prefetching = true;
+        let dir = self.dir.clone();
+        let done: Vec<String> = self.clips.keys().cloned().collect();
+        let shared = self.prefetched.clone();
+        let spawned = std::thread::Builder::new()
+            .name("clip-prefetch".into())
+            .spawn(move || {
+                let Ok(entries) = std::fs::read_dir(&dir) else {
+                    return;
+                };
+                let mut files: Vec<PathBuf> = entries
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| {
+                        p.extension().is_some_and(|x| x == "bin")
+                            && p.file_stem().is_some_and(|s| s != "skeleton")
+                    })
+                    .collect();
+                files.sort();
+                let started = std::time::Instant::now();
+                let mut count = 0;
+                for path in files {
+                    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                        continue;
+                    };
+                    if done.iter().any(|d| d == stem) {
+                        continue;
+                    }
+                    let Ok(bytes) = std::fs::read(&path) else {
+                        continue;
+                    };
+                    let Ok(clip) = AnimClip::from_bytes(&bytes) else {
+                        continue;
+                    };
+                    let clip = Arc::new(to_bevy::clip(&clip));
+                    if let Ok(mut m) = shared.lock() {
+                        m.insert(stem.to_string(), clip);
+                    }
+                    count += 1;
+                }
+                info!(
+                    "prefetched {count} clips of {} in {:.1} s",
+                    dir.display(),
+                    started.elapsed().as_secs_f32()
+                );
+            });
+        if let Err(e) = spawned {
+            warn!("clip prefetch thread: {e}");
+        }
+    }
+
+    /// Clips read from disk and milliseconds spent since the last call.
+    pub fn take_load_stats(&mut self) -> (usize, f64) {
+        std::mem::take(&mut self.loads)
     }
 }
 
@@ -70,6 +153,12 @@ pub struct Animator {
     /// The locked-on walk twist in degrees, positive with the legs turned right
     /// (`sekiro_sim::Character::walk_twist`), applied to the pose by [`apply_walk_twist`].
     pub walk_twist: f32,
+    /// The clock of the character this animator draws, when the simulation drives it: the
+    /// crossfade advances with it rather than with real time, so a character held in hit stop
+    /// holds its whole pose. `None` uses the frame time.
+    pub clock: Option<f32>,
+    /// `clock` at the previous frame.
+    last_clock: Option<f32>,
 }
 
 impl Animator {
@@ -83,6 +172,8 @@ impl Animator {
             name: clip_name_of(&clip),
             blend: None,
             walk_twist: 0.0,
+            clock: None,
+            last_clock: None,
             clip,
         }
     }
@@ -204,6 +295,14 @@ pub fn animate(
         }
         let prev = anim.time;
         anim.time += dt * anim.speed;
+        let clock_dt = match anim.clock {
+            Some(clock) => {
+                let step = anim.last_clock.map_or(0.0, |last| (clock - last).max(0.0));
+                anim.last_clock = Some(clock);
+                step
+            }
+            None => dt,
+        };
         let clip = anim.clip.clone();
         let t = if anim.looping && clip.duration > 0.0 {
             anim.time.rem_euclid(clip.duration)
@@ -242,7 +341,7 @@ pub fn animate(
         let mut pose = clip.sample(t, &rig.skeleton);
         // Crossfade from the previous clip's pose, frozen where it was replaced.
         if let Some((from, from_t, dur, elapsed)) = anim.blend.as_mut() {
-            *elapsed += dt;
+            *elapsed += clock_dt;
             let w = (1.0 - *elapsed / *dur).clamp(0.0, 1.0);
             if w > 0.0 {
                 let from_t = from_t.min(from.duration);

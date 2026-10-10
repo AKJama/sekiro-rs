@@ -4,6 +4,7 @@
 
 use sekiro_sim::combat::knockback::{KnockbackClass, knockback_distance};
 use sekiro_sim::duel::{Duel, DuelReport};
+use sekiro_sim::fight::FighterKind;
 use sekiro_sim::hits::can_be_hit;
 use sekiro_sim::tae::{PlayingClip, TaeDb, TaeFrame, TaeRuntime};
 use sekiro_sim::{Buttons, InputFrame};
@@ -66,6 +67,14 @@ fn until_wolf_hit(duel: &mut Duel) -> (usize, DuelReport) {
         }
     }
     panic!("Wolf's slash never connected");
+}
+
+fn main_clip_name(duel: &Duel, enemy: bool) -> String {
+    let c = if enemy { &duel.enemy } else { &duel.player };
+    c.behavior
+        .runtime
+        .main_clip()
+        .map_or(String::new(), |c| c.animation.clone())
 }
 
 fn main_clip_time(duel: &Duel, enemy: bool) -> f32 {
@@ -177,40 +186,76 @@ fn wolf_hit_pushes_the_soldier_by_the_attack_distance() {
 }
 
 #[test]
-fn hit_stop_freezes_both_clocks() {
+fn no_hit_stop_against_the_soldier() {
     let Some(cache) = cache() else { return };
     let mut duel = idle_duel(&cache);
+    let FighterKind::Npc(npc) = &duel.rules.fighters[1].kind else {
+        panic!("the enemy is an NPC")
+    };
+    // NpcParam 10100000: hitStopType 0 and hitStopType_Defencer 0 (the Owl's 50600000 too).
+    assert_eq!((npc.hit_stop_type, npc.hit_stop_type_defender), (0, 0));
     let (hit_at, report) = until_wolf_hit(&mut duel);
-    let (hit, result) = report
-        .hits
-        .iter()
-        .find(|(h, _)| h.attacker == 0)
-        .unwrap()
-        .clone();
+    let (hit, result) = report.hits.iter().find(|(h, _)| h.attacker == 0).unwrap();
     let atk = hit.attack.profile.as_ref().unwrap();
-    // Wolf's sword attacks: 0.1 s for both sides.
-    assert_eq!(atk.hit_stop_time, 0.1);
-    assert_eq!(
-        result.hit_stop,
-        [atk.hit_stop_time, atk.hit_stop_time_defender]
-    );
+    // Wolf's sword attacks carry 0.1 s for both sides, but the soldier's types scale it to 0.
+    assert_eq!((atk.hit_stop_time, atk.hit_stop_time_defender), (0.1, 0.1));
+    assert_eq!(result.hit_stop, [0.0, 0.0]);
+    let before = main_clip_time(&duel, false);
+    duel.step(&slash_input(hit_at + 1), DT);
+    assert!((main_clip_time(&duel, false) - before - DT).abs() < 1e-5);
+}
 
-    let frozen = [main_clip_time(&duel, false), main_clip_time(&duel, true)];
-    let pos = duel.enemy.body.position;
-    let freeze_steps = (atk.hit_stop_time / DT).round() as usize;
-    for i in 1..=freeze_steps {
-        duel.step(&slash_input(hit_at + i), DT);
-        assert_eq!(main_clip_time(&duel, false), frozen[0], "Wolf moved at {i}");
-        assert_eq!(
-            main_clip_time(&duel, true),
-            frozen[1],
-            "soldier moved at {i}"
-        );
-        assert_eq!(duel.enemy.body.position, pos, "pushed during the freeze");
+/// With the soldier's row set to the full types (as the Great Serpent's attacker type 2), both
+/// clocks hold exactly still for 0.06 s, then ease back to full speed over 0.1 s.
+#[test]
+fn hit_stop_holds_both_clocks_then_eases_back() {
+    let Some(cache) = cache() else { return };
+    let mut duel = idle_duel(&cache);
+    let FighterKind::Npc(npc) = &mut duel.rules.fighters[1].kind else {
+        panic!("the enemy is an NPC")
+    };
+    npc.hit_stop_type = 2;
+    npc.hit_stop_type_defender = 1;
+    let (hit_at, report) = until_wolf_hit(&mut duel);
+    let (_, result) = report.hits.iter().find(|(h, _)| h.attacker == 0).unwrap();
+    assert_eq!(result.hit_stop, [0.1, 0.1]);
+
+    let held = [main_clip_time(&duel, false), main_clip_time(&duel, true)];
+    let pos = [duel.player.body.position, duel.enemy.body.position];
+    let mut step = hit_at;
+    // 0.06 s at 60 Hz: the step that crosses it is still held, four steps.
+    for i in 1..=4 {
+        step += 1;
+        duel.step(&slash_input(step), DT);
+        assert_eq!(main_clip_time(&duel, false), held[0], "Wolf moved at {i}");
+        assert_eq!(main_clip_time(&duel, true), held[1], "soldier moved at {i}");
+        assert_eq!(duel.player.body.position, pos[0], "Wolf moved at {i}");
+        assert_eq!(duel.enemy.body.position, pos[1], "pushed during the hold");
     }
-    duel.step(&slash_input(hit_at + freeze_steps + 1), DT);
-    assert!(main_clip_time(&duel, false) > frozen[0]);
-    assert!(main_clip_time(&duel, true) > frozen[1] || duel.enemy.body.position != pos);
+    // The ease: each step advances (k / 6)^2 of a step, then full steps.
+    let mut last = held;
+    let mut names = [main_clip_name(&duel, false), main_clip_name(&duel, true)];
+    for k in 1..=8 {
+        step += 1;
+        duel.step(&slash_input(step), DT);
+        let now = [main_clip_time(&duel, false), main_clip_time(&duel, true)];
+        let now_names = [main_clip_name(&duel, false), main_clip_name(&duel, true)];
+        let e = (k as f32 / 6.0).min(1.0);
+        for side in 0..2 {
+            let advanced = now[side] - last[side];
+            // The soldier's reaction starts on his first running step; only check same-clip steps.
+            if now_names[side] == names[side] && advanced >= 0.0 {
+                assert!(
+                    (advanced - e * e * DT).abs() < 1e-4,
+                    "side {side} ease step {k}: advanced {advanced}, expected {}",
+                    e * e * DT
+                );
+            }
+        }
+        last = now;
+        names = now_names;
+    }
+    assert!(!duel.hit_stop[0].active() && !duel.hit_stop[1].active());
 }
 
 #[test]

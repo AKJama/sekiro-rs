@@ -111,6 +111,13 @@ struct MapCollision(Arc<CollisionWorld>);
 struct ModelPath(&'static str);
 
 const STEP_HZ: f64 = 60.0;
+/// Seconds the fight waits after the map has loaded. About 1.9 s after the map's textures and
+/// meshes are uploaded, presentation stalls once for 50 to 70 ms: the render world waits that
+/// long for the next swapchain image (measured on an RTX 5070 Ti with Vulkan, 2026-10-10, in
+/// every run with map pieces drawn, in none without, and at the same time when the start was
+/// held longer; no CPU work, pipeline compile, sound or clip load lines up with it; STATUS.md,
+/// "Frame pacing"). Starting after it keeps that stall out of the fight.
+const MAP_SETTLE_SECS: f32 = 2.5;
 /// Radians of camera turn per mouse count (0.0035 was reported as far too sensitive).
 const MOUSE_SENSITIVITY: f32 = 0.0012;
 const WOLF: usize = 0;
@@ -150,6 +157,9 @@ struct Sim {
     break_posture: bool,
     /// Each actor's position and drawn yaw before the last step, to draw between steps.
     previous: [([f32; 3], f32); 2],
+    /// Each actor's own clock after the last step: the sum of the time it advanced, which stops
+    /// while a hit stop holds it.
+    clock: [f32; 2],
 }
 
 /// Live input gathered every rendered frame, consumed by the fixed steps.
@@ -364,11 +374,13 @@ pub fn run(options: Options) -> Result<()> {
         lock_requested: options.lock_on,
         break_posture: options.break_posture,
         previous: [([0.0; 3], 0.0); 2],
+        clock: [0.0; 2],
     })
     .init_resource::<combat_hud::Gauges>()
     .add_plugins(crate::audio::GameAudioPlugin {
         cache: cache.clone(),
         map: on_map.as_ref().map(|(_, id, _)| id.clone()),
+        enemy: Some((options.opponent.chr.clone(), options.opponent.npc_param)),
     })
     .add_systems(Startup, setup)
     .add_systems(FixedUpdate, simulate)
@@ -718,7 +730,13 @@ fn simulate(
 ) {
     // Hold the simulation until the models (and the map) are on screen, so scripted runs line
     // up with frames.
-    if rigs.is_empty() || !rigs.iter().all(|r| r.bound) || map_pending.is_some_and(|p| !p.loaded())
+    // The start also waits until the map has been drawn for MAP_SETTLE_SECS, past the one-off
+    // presentation stall that follows the map's upload.
+    if rigs.is_empty()
+        || !rigs.iter().all(|r| r.bound)
+        || map_pending
+            .as_ref()
+            .is_some_and(|p| !p.loaded() || (sim.step == 0 && p.loaded_for() < MAP_SETTLE_SECS))
     {
         return;
     }
@@ -752,6 +770,8 @@ fn simulate(
     }
     let before = sim.duel.player.body.position;
     let report = sim.duel.step(&frame, dt);
+    sim.clock[0] += report.player.advanced;
+    sim.clock[1] += report.enemy.advanced;
     if log_enabled() {
         log_move(sim.step, &frame, before, &sim.duel, &report.player);
     }
@@ -834,8 +854,13 @@ fn sync_actors(
         let Some(name) = report.animation.clone() else {
             continue;
         };
-        let time = report.anim_time;
-        let just_started = report.clip_started;
+        if sim.step > 0 {
+            // The fight runs: decode the rest of the clips in the background.
+            libraries.0[i].prefetch_all();
+        }
+        let alpha = fixed.overstep_fraction();
+        anim.clock = Some(sim.clock[i] - behind(report, alpha));
+        let time = drawn_clip_time(report, alpha);
         let started = sim.started[i].take();
         let restart = started.as_ref().is_some_and(|(n, _)| *n == name);
         if anim.clip_name() != name || restart {
@@ -850,14 +875,22 @@ fn sync_actors(
                 Err(_) => continue,
             }
         }
-        // The clip time between steps too, matching the drawn position.
-        let behind = (1.0 - fixed.overstep_fraction()) / STEP_HZ as f32;
-        anim.time = if just_started {
-            time
-        } else {
-            (time - behind).max(0.0)
-        };
+        anim.time = time;
     }
+}
+
+/// How far a frame drawn `alpha` of the way into the next step trails the last step on the
+/// actor's own clock: the part of the step's advance not yet reached. A frozen actor advanced
+/// nothing, so it holds exactly still; while a hit stop eases out the advance is short, and so
+/// is this.
+fn behind(report: &StepReport, alpha: f32) -> f32 {
+    (1.0 - alpha) * report.advanced
+}
+
+/// The full-body clip time drawn `alpha` of the way into the next step, matching the drawn
+/// position. A clip that started in the last step is drawn from its start.
+fn drawn_clip_time(report: &StepReport, alpha: f32) -> f32 {
+    (report.anim_time - behind(report, alpha)).max(0.0)
 }
 
 /// Where actor `i` is drawn: between its position and yaw before and after the last step, by
@@ -1076,8 +1109,8 @@ fn log_combo(step: usize, frame: &InputFrame, duel: &Duel, r: &DuelReport) {
         last(&r.player),
         r.player.animation.as_deref().unwrap_or("-"),
         r.player.anim_time,
-        duel.hit_stop[0].remaining,
-        duel.hit_stop[1].remaining,
+        duel.hit_stop[0].remaining(),
+        duel.hit_stop[1].remaining(),
         hits.join(" "),
         last(&r.enemy),
         r.enemy.animation.as_deref().unwrap_or("-"),
@@ -1134,4 +1167,81 @@ fn log_camera(
         wolf.x,
         wolf.z,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sekiro_sim::fight::FighterKind;
+
+    /// Drawn frames between steps never run a clip backwards, hold exactly still while a hit stop
+    /// holds the character, and resume from where they stopped. The soldier's row is set to the
+    /// full hit stop types (his own are 0, as the Owl's), so Wolf's slash freezes both.
+    #[test]
+    fn drawn_clip_time_holds_through_hit_stop() {
+        let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        if !cache.join("raw/chr/c1010.behbnd.d/c9997.hkx").exists() {
+            eprintln!("skipping: cache not extracted");
+            return;
+        }
+        let mut duel = Duel::load(&cache, 4.0).unwrap();
+        duel.use_simple_ai();
+        duel.enemy_active = false;
+        let FighterKind::Npc(npc) = &mut duel.rules.fighters[1].kind else {
+            panic!("the enemy is an NPC")
+        };
+        npc.hit_stop_type = 2;
+        npc.hit_stop_type_defender = 1;
+        let dt = 1.0 / STEP_HZ as f32;
+        let input = |i: usize| match i {
+            0..=90 => InputFrame {
+                move_stick: [0.0, 1.0],
+                ..InputFrame::default()
+            },
+            120 => InputFrame {
+                buttons: Buttons {
+                    attack: true,
+                    ..Buttons::default()
+                },
+                ..InputFrame::default()
+            },
+            _ => InputFrame::default(),
+        };
+        let mut last: [Option<(String, f32)>; 2] = [None, None];
+        let mut held_frames = [0; 2];
+        let mut hit = false;
+        for i in 0..260 {
+            let report = duel.step(&input(i), dt);
+            hit |= report.hits.iter().any(|(h, _)| h.attacker == 0);
+            for (side, r) in [&report.player, &report.enemy].into_iter().enumerate() {
+                let Some(name) = r.animation.clone() else {
+                    continue;
+                };
+                let held = duel.hit_stop[side].active() && r.advanced == 0.0;
+                for alpha in [0.0, 0.25, 0.5, 0.75, 0.999] {
+                    let t = drawn_clip_time(r, alpha);
+                    if let Some((last_name, last_t)) = &last[side]
+                        && *last_name == name
+                        && !r.clip_started
+                    {
+                        // Float rounding of `time - advanced` aside.
+                        assert!(
+                            t >= *last_t - 1e-6,
+                            "side {side} step {i}: {t} after {last_t}"
+                        );
+                    }
+                    if held {
+                        assert_eq!(t, r.anim_time, "side {side} moved while held at step {i}");
+                    }
+                    last[side] = Some((name.clone(), t));
+                }
+                held_frames[side] += usize::from(held);
+            }
+        }
+        assert!(hit, "Wolf's slash never connected");
+        assert!(
+            held_frames[0] >= 3 && held_frames[1] >= 3,
+            "{held_frames:?}"
+        );
+    }
 }

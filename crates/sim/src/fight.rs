@@ -40,7 +40,8 @@ use crate::combat::hp::{
     player_guard_cut,
 };
 use crate::combat::knockback::{
-    Knockback, KnockbackClass, KnockbackTable, knockback_distance, outcome_index,
+    FLAG_FORCE_HIT_STOP, Knockback, KnockbackClass, KnockbackTable, attacker_hit_stop_scale,
+    defender_hit_stop_scale, knockback_distance, outcome_index,
 };
 use crate::combat::params::{
     AttackProfile, CalcCorrectGraph, NpcCombat, StaminaControl, WeaponGuard,
@@ -535,11 +536,7 @@ impl CombatRules {
 
         // 6. Knockback and hit stop.
         let knockback = self.knockback(a, d, &atk, hit, outcome, frame_d.knockback_scale);
-        let hit_stop = if outcome == HitOutcome::Hit {
-            [atk.hit_stop_time, atk.hit_stop_time_defender]
-        } else {
-            [0.0; 2]
-        };
+        let hit_stop = self.hit_stop(d, &atk, frame_d);
 
         let (direction, front_back) = hit_direction(defender, hit.direction);
         let level = hit.attack.damage_level.max(1);
@@ -574,6 +571,24 @@ impl CombatRules {
             knockback,
             hit_stop,
         }
+    }
+
+    /// The attacker's and the defender's hit stop lengths for a contact of `atk` on fighter `d`
+    /// (`b6e5a0` into `b9cd90` and `b9cfb0`; see [`crate::combat::knockback`]). The engine starts
+    /// them for every contact its damage module takes, blocked and deflected ones too, as long as
+    /// the attack carries any attack power (always, for the attacks we resolve). An active TAE
+    /// action flag 41 on the defender forces both to full for attacks that are not arrows.
+    fn hit_stop(&self, d: usize, atk: &AttackProfile, frame_d: &TaeFrame) -> [f32; 2] {
+        let (attacker_type, defender_type) = match &self.fighters[d].kind {
+            FighterKind::Npc(npc) => (Some(npc.hit_stop_type), Some(npc.hit_stop_type_defender)),
+            FighterKind::Player { .. } => (None, None),
+        };
+        let forced = !atk.is_arrow && frame_d.flag(FLAG_FORCE_HIT_STOP);
+        let scale = |s: f32| if forced { 1.0 } else { s };
+        [
+            atk.hit_stop_time * scale(attacker_hit_stop_scale(attacker_type)),
+            atk.hit_stop_time_defender * scale(defender_hit_stop_scale(defender_type)),
+        ]
     }
 
     /// The push fighter `d` takes from `atk` (see [`crate::combat::knockback`]): the AtkParam
