@@ -8,10 +8,10 @@ Code: `crates/sim/src/deathblow.rs` (rules, Bevy-free), `crates/game/src/deathbl
 1. The soldier's posture breaks: he plays the stagger `a000_008300` (behaviour graph state `TrunkCollapseFront`; `8301` is the back version, `8310` the large one).
 2. Wolf presses attack while within a ThrowParam *start* row's range and angles: he plays a lunge (`a200_500000`, or `a200_502500` when close).
 3. At the lunge's grab event (0.27 s) the matching *body* row is checked; if it holds, both play the paired clips: Wolf `a200_510000`, the soldier `a000_012000`.
-4. The soldier is held on Wolf's dummy poly 267, 1.2 m in front of Wolf and facing him, sliding onto it over 0.5 s.
+4. The soldier is moved onto Wolf's dummy poly 267 (1.2 m in front of Wolf, facing him) as Wolf stands at the body clip's first frame, sliding onto it over 0.5 s; from then on both play their own root motion.
 5. The blade lands at 0.90 s (Wolf's `ThrowAttackBehavior` event); for an ordinary enemy that kills.
 6. A killed soldier leaves `a000_012000` at 1.67 s for the death clip `a000_012001`, which continues the same pose and ends on the ground.
-7. When Wolf's clip ends (2.67 s) the soldier is released and finishes the death clip under his own root motion.
+7. When Wolf's clip ends (2.67 s), or earlier when its TAE lets him move and he does, the pair ends; the soldier finishes his clip either way.
 
 ## ThrowParam
 
@@ -36,6 +36,10 @@ Rows for the standard soldier:
 | 11010111 | Posture-break body, behind | a200_511200 | a000_013200 | 2.0 | 0..180 | 180 | 249 |
 | 11010030 | Plunge (from above) | a200_510300 | a000_012300 | 20 | 0..180 | 180 | - |
 
+The offsets reach the behaviour graphs as animation offset types: Wolf's throw states (`a000_5xxxxx` CMSGs) list candidates `a200_` to `a249_` and pick by offset type 17, the enemy graph's `ThrowDef*` CMSGs by type 15.
+The duel sets type 17 to the row's `atkAnimOffset` and type 15 to `defAnimOffset` before firing the throw events (the mapping is inferred from the candidate lists).
+Until 2026-10-10 type 17 was never set, so the Owl's deathblow played the soldier's 2.0 s `a200_510000` on Wolf against the Owl's 6.6 s `a000_012000`: Wolf was free (and steerable) after 2 s while the Owl was still held on him.
+
 Animation names are `a{atkAnimOffset:03}_{atkAnimId:06}` for the attacker (offset 200, the player's throw category) and `a{defAnimOffset:03}_{defAnimId:06}` for the defender (offset 0).
 Other rows cover deathblows from walls, ledges, after a fall, kicks and so on; they follow the same pattern.
 
@@ -57,9 +61,18 @@ c0000 carries the sorb dummies on a root-level helper node (`投げ＆新ファ�
 - Dummy 249: 0.5 m in front, forward vector pointing away. Back and stealth deathblows put the defender there, back to Wolf.
 - Dummy 293: like 267, used by the deflect-counter rows.
 
-The defender is held on the dummy for the whole body clip rather than playing its own root motion from an aligned start.
-Measured on the data, the soldier's own root motion in `012000`/`012001` drifts up to 0.9 m from Wolf's dummy over the throw (`defender_root_motion_versus_sorb_lock` prints it), so following its root motion would pull the two apart.
-After Wolf's clip ends, the soldier's own root motion takes over.
+The absorb places one character on the other's dummy once, as the pair stands when the body clip starts (its frame 0), spread over `adsrobModelPosInterpolationTime`; after that each plays its own root motion (in the clip's start frame) and nobody is held to anybody.
+This follows FwLo's RustSekiro (`docs/kb/damage.md`), which matched it against live recordings of the soldier's and the General's deathblows.
+Until 2026-10-10 sekiro-rs instead held the defender on the dummy of Wolf's *live* pose every step, which made the defender follow every turn and step of Wolf's (the "Owl spins with Wolf" bug) and teleported it, through walls when Wolf stood near one.
+
+Which side moves: with `atkSorbDmyId` set (the soldier) the defender goes onto Wolf's dummy; with `atkSorbDmyId` 0 and `defSorbDmyId` set (the Owl, dummy 230) Wolf goes onto the Owl's dummy.
+The second is inferred from the fields, not traced.
+
+Walls: every absorb step moves the character through its collision (`Ground::slide`), as root motion, knockback and the push-apart between the two do.
+What a wall stops, the other character gives way instead (through its own collision), so the pair keeps its spacing without either ending up inside geometry.
+That shift is ours; the engine's handling (shifting the pair, or failing the throw check) is not traced.
+While the enemy still plays the throw's defender clip, the push-apart moves only Wolf, so walking into the getting-up Owl does not shove him (ours, after FwLo's "throw pairs skip the push-apart").
+A knockback left over from the breaking hit is dropped when the deathblow starts; it used to resume when the pair ended and slide the defender 0.4 m in one step.
 
 ## The defender's side
 
@@ -89,9 +102,10 @@ The demo takes the deathblow 0.6 s into the stagger.
 `sekiro_sim::deathblow`:
 - `ThrowTable` and `ThrowRow`: the rows above, with `in_range` for distance, height and both angles.
 - `select(table, chr, variation, situation, attacker, defender)`: near front, far front, then back-of-broken for a broken enemy; the stealth pair for an unaware one.
-- `ThrowTimes::load`: the grab window and damage time from Wolf's TAE, and the death branch time from the enemy's TAE (`cache/anim/<chr>/tae.json`).
+- `ThrowTimes::from_tae_db`: the grab window (`CommonBehavior`) and damage time (`ThrowAttackBehavior`) from Wolf's decoded TAE, and the death branch time from the enemy's, with no file reads.
+  `ThrowTimes::load` reads the same from `cache/anim/<chr>/tae.json`; parsing c0000's 23 MB export took about 0.45 s, which the fight used to do at every deathblow start (a visible freeze), so the duel now uses the decoded TAE and a test checks both agree.
 - `DummyFrame::from_flver`: the sorb dummy as a placement in Wolf's frame.
-- `Deathblow`: the timeline (`Start`, `Body`, `Done`, or `Missed`), returning per step the clips to start, the defender's placement, and when the blow lands and kills.
+- `Deathblow`: the timeline (`Start`, `Body`, `Done`, or `Missed`), returning per step the clips to start, the absorb share to apply (`AbsorbStep`), and when the blow lands and kills; `release` ends the pair when Wolf leaves his body clip.
 
 ## Bosses with more than one mark
 
@@ -102,7 +116,9 @@ The Great Shinobi Owl (c5060, `ninsatuNum` 2) shows how the data handles several
   `CombatRules::apply_effect_hp` applies `changeHpRate` once when a TAE SpEffect starts.
 - On the last mark the duel picks the finishing pair (suffixes 180 / 181, "todome") when the enemy has one; its defender clip `a000_013700` is itself the death (the shared script's `ThrowDef13700` sets `STATE_DEATH`), so the duel lets the script see HP 0 from the blow on instead of waiting for a death clip.
   That the last mark selects this pair is inferred.
-- His rows snap Wolf to one of the Owl's dummies (`defSorbDmyId` 230, 1.3 m in front of him) with `atkSorbDmyId` 0; the duel holds the Owl at the inverse frame (`DummyFrame::inverse`).
+- His rows snap Wolf to one of the Owl's dummies (`defSorbDmyId` 230, 1.3 m in front of him) with `atkSorbDmyId` 0; the absorb moves Wolf there (`DummyFrame::inverse` gives the relation from Wolf's side).
+- Wolf's clips are the `a221_` set (ThrowParam `atkAnimOffset` 221): the body clip `a221_510000` is 5.1 s long, turns are disabled (TAE flag 7) to 5.1 s, and its move and action cancels open at 4.0 s, so from 4.0 s the stick may walk Wolf away while the Owl finishes getting up (to 6.6 s) on his own.
+  Neither set (`a200_`, `a221_`) has a kill follow-up clip (`a2xx_5xxxx1`, which FwLo found only in the `a201_` set).
 - A deathblow waits until the enemy has reacted to the breaking hit (not frozen in hit stop, damage read by its script), and does not start again while the enemy still plays the last throw's defender clip.
   Without the first rule, a throw event queued during the hit stop was overridden by the script's stagger.
 
@@ -114,3 +130,11 @@ The Great Shinobi Owl (c5060, `ninsatuNum` 2) shows how the data handles several
 - The arena demo (`--arena --deathblow`) still passes "one mark left"; the duel tracks marks through the combat rules.
 - The soldier's death clip ends in a ragdoll in the game (`RagdollReviveTime` from 3.67 s); here it just plays out.
 - Sound, blood decals (`DecalParamID_DummyPoly`) and the deathblow camera are ignored.
+- The models are not kept apart: near the railing the Owl's arm can rest on or through the top rail while both capsules stay clear of it (`cache/screens/deathblow_owlrail_*.png`).
+
+## Tests
+
+`crates/sim/tests/deathblow_lock.rs` (Owl, castle roof):
+- `deathblow_ignores_player_steering`: stick and camera turning through the whole throw change nothing until Wolf's move cancel at 4.0 s, and nothing on the Owl at all.
+- `deathblow_keeps_owl_attached_to_the_throw`: no jumps in the pair's relative placement.
+- `deathblow_near_a_wall_does_not_clip`, `deathblow_with_wolf_backed_to_a_wall_does_not_clip`: no step crosses map geometry or jumps, both end on a floor, and with Wolf backed to the wall the pair keeps its 1.10 m spacing (the Owl gives way).

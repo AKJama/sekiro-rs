@@ -10,6 +10,9 @@ use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::path::PathBuf;
 
 const DT: f32 = 1.0 / 60.0;
+// Preserve the reported stick components exactly for the reproduction.
+#[allow(clippy::approx_constant)]
+const DIAGONAL: f32 = 0.7071;
 
 fn load() -> Option<Character> {
     let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
@@ -198,6 +201,8 @@ struct LockedStep {
     clip: String,
     facing: f32,
     target_err: f32,
+    move_direction: f32,
+    move_angle: f32,
     /// The clip's TAE disabled turning on this step ("Disable Turning", flag 7).
     turn_disabled: bool,
 }
@@ -231,6 +236,16 @@ fn run_locked(
             target_err: wolf.lock_target.map_or(f32::NAN, |target| {
                 angle_diff(report.yaw, wolf.yaw_to(target)).to_degrees()
             }),
+            move_direction: wolf
+                .behavior
+                .runtime
+                .variable("MoveDirection")
+                .unwrap_or(f32::NAN),
+            move_angle: wolf
+                .behavior
+                .runtime
+                .variable("MoveAngle")
+                .unwrap_or(f32::NAN),
             turn_disabled: wolf.tae_frame().flag(cancel::DISABLE_TURN),
         });
     }
@@ -246,15 +261,18 @@ fn locked_table(steps: &[LockedStep]) -> String {
         .filter(|(_, s)| s.movement.err.is_finite())
         .max_by(|(_, a), (_, b)| a.movement.err.abs().total_cmp(&b.movement.err.abs()))
         .map(|(i, _)| i);
-    let mut table = String::from("time state clip facing stick_err speed target_err\n");
+    let mut table =
+        String::from("time state clip MoveDirection MoveAngle facing stick_err speed target_err\n");
     for (i, s) in steps.iter().enumerate() {
         if i % 10 == 0 || i + 1 == steps.len() || Some(i) == worst {
             writeln!(
                 table,
-                "{:.2} {} {} {:.1} {:.1} {:.2} {:.1}",
+                "{:.2} {} {} {:.1} {:.1} {:.1} {:.1} {:.2} {:.1}",
                 i as f32 * DT,
                 s.state,
                 s.clip,
+                s.move_direction,
+                s.move_angle,
                 s.facing,
                 s.movement.err,
                 s.movement.speed,
@@ -417,4 +435,110 @@ fn locked_sprint_release_returns_to_locked_movement() {
         "sprint release did not return to target-facing left strafe within 1.5 s\n{}",
         locked_table(&steps)
     );
+}
+
+/// Sustained locked movement must twist the legs onto the camera-relative diagonal.
+fn check_locked_diagonal(move_stick: [f32; 2]) {
+    let Some(mut wolf) = locked_wolf(false) else {
+        eprintln!("SKIPPED locked diagonal: extracted player cache is missing");
+        return;
+    };
+    let p = wolf.body.position;
+    // Far enough that the forward runs do not reach it: holding a fixed angle off the target
+    // bearing is an inward spiral that closes at about 3.9 m/s on a run, and this test has no
+    // enemy body to stop Wolf. At 6 m he reached the target after 1.5 s and the facing swung
+    // round as he ran through it.
+    let target = [p[0], p[1], p[2] - 20.0];
+    wolf.lock_target = Some(target);
+    run_locked(&mut wolf, 30, |_, _| InputFrame::default());
+    let steps = run_locked(&mut wolf, 120, |_, wolf| {
+        stick(move_stick[0], move_stick[1], wolf.yaw_to(target))
+    });
+    let distance = steps.iter().map(|s| s.movement.speed * DT).sum::<f32>();
+    let window = &steps[30..];
+    let moving = window.iter().filter(|s| s.movement.speed > 0.5).count();
+    let worst_travel = window
+        .iter()
+        .filter(|s| s.movement.speed > 0.5)
+        .map(|s| s.movement.err.abs())
+        .fold(0.0_f32, f32::max);
+    let worst_facing = window
+        .iter()
+        .map(|s| s.target_err.abs())
+        .fold(0.0_f32, f32::max);
+    let follows = window.iter().all(|s| {
+        s.movement.speed <= 0.5 || (s.movement.err.is_finite() && s.movement.err.abs() <= 20.0)
+    });
+    let faces = window
+        .iter()
+        .all(|s| s.target_err.is_finite() && s.target_err.abs() <= 30.0);
+    // Every diagonal is 45 degrees off the clip it plays (forward or back), so the legs end up
+    // turned by 45 degrees one way or the other.
+    let twist = wolf.walk_twist;
+    let legs_twisted = (twist.abs() - 45.0).abs() <= 5.0;
+    let summary = format!(
+        "locked diagonal {move_stick:?}: distance {distance:.2} m, moving {moving}/90, \
+         worst travel {worst_travel:.1} deg, worst facing {worst_facing:.1} deg, \
+         walk twist {twist:.1} deg"
+    );
+    eprintln!("{summary}\n{}", locked_table(&steps));
+    assert!(
+        follows && faces && legs_twisted && distance >= 1.0,
+        "{summary}\n{}",
+        locked_table(&steps)
+    );
+}
+
+#[test]
+fn locked_diagonal_forward_left_run() {
+    check_locked_diagonal([-DIAGONAL, DIAGONAL]);
+}
+
+#[test]
+fn locked_diagonal_forward_right_run() {
+    check_locked_diagonal([DIAGONAL, DIAGONAL]);
+}
+
+#[test]
+fn locked_diagonal_back_left_run() {
+    check_locked_diagonal([-DIAGONAL, -DIAGONAL]);
+}
+
+#[test]
+fn locked_diagonal_back_right_run() {
+    check_locked_diagonal([DIAGONAL, -DIAGONAL]);
+}
+
+#[test]
+fn locked_diagonal_forward_left_walk() {
+    check_locked_diagonal([-DIAGONAL * 0.4, DIAGONAL * 0.4]);
+}
+
+#[test]
+fn locked_diagonal_forward_right_walk() {
+    check_locked_diagonal([DIAGONAL * 0.4, DIAGONAL * 0.4]);
+}
+
+#[test]
+fn locked_diagonal_back_left_walk() {
+    check_locked_diagonal([-DIAGONAL * 0.4, -DIAGONAL * 0.4]);
+}
+
+#[test]
+fn locked_diagonal_back_right_walk() {
+    check_locked_diagonal([DIAGONAL * 0.4, -DIAGONAL * 0.4]);
+}
+
+#[test]
+fn locked_diagonal_keyboard_w_a() {
+    // play.rs gather_input subtracts opposing WASD keys, then normalizes lengths > 1.
+    // With no gamepad override, W+A therefore produces a unit diagonal, not [-1, 1].
+    let (w, a, s, d) = (true, true, false, false);
+    let mut keyboard = [(d as i32 - a as i32) as f32, (w as i32 - s as i32) as f32];
+    let length = keyboard[0].hypot(keyboard[1]);
+    if length > 1.0 {
+        keyboard[0] /= length;
+        keyboard[1] /= length;
+    }
+    check_locked_diagonal(keyboard);
 }

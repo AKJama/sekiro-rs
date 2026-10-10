@@ -21,6 +21,7 @@ mod draw_mask;
 mod input_replay;
 mod lighting;
 mod map;
+mod perf_log;
 mod play;
 mod viewer;
 
@@ -118,6 +119,7 @@ fn main() -> anyhow::Result<()> {
             lock_on: args.iter().any(|a| a == "--lock-on"),
             simple_ai: args.iter().any(|a| a == "--simple-ai"),
             god: args.iter().any(|a| a == "--god"),
+            break_posture: args.iter().any(|a| a == "--break-posture"),
             brain: match arg_value(&args, "--brain") {
                 Some(name) => sekiro_sim::brain::BrainKind::by_name(&name)
                     .map_err(|e| anyhow::anyhow!("--brain: {e}"))?,
@@ -128,6 +130,7 @@ fn main() -> anyhow::Result<()> {
             start: arg_f32(&args, "--start", 0.0)? as usize,
             spawn: map::parse_camera(arg_value(&args, "--spawn").as_deref())?
                 .map(|[x, y, z, yaw, _]| [x, y, z, yaw]),
+            enemy_distance: arg_f32(&args, "--enemy-distance", 5.0)?,
             hour: arg_f32(&args, "--hour", 16.0)?,
             gparam: arg_value(&args, "--gparam"),
         });

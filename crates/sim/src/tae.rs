@@ -87,6 +87,15 @@ pub enum TaeKind {
     },
     /// `StaminaControlParam` (960): which `staminaRecoverRatio_forTypeNNN` posture recovery uses.
     StaminaControl(i32),
+    /// `CommonBehavior` (5): a behaviour without a hitbox; in a deathblow start clip, the grab
+    /// check.
+    CommonBehavior {
+        judge: i32,
+    },
+    /// `ThrowAttackBehavior` (304): where a throw's damage lands.
+    ThrowAttack {
+        judge: i32,
+    },
     /// `PlaySound_*` (128 to 132): a sound of type `kind` (0 a, 1 c, ...; see
     /// [`sound_name`]) and number `id`.
     Sound {
@@ -368,6 +377,12 @@ fn decode(template: &Template, e: &tae::TaeEvent) -> Option<TimedEvent> {
             judge: int("BehaviorJudgeID")?,
         },
         954 => TaeKind::IFrames(int("IFrameType").unwrap_or(0)),
+        5 => TaeKind::CommonBehavior {
+            judge: int("BehaviorJudgeID")?,
+        },
+        304 => TaeKind::ThrowAttack {
+            judge: int("BehaviorJudgeID")?,
+        },
         950 | 951 => TaeKind::Invulnerable,
         760 if int("IsEnable").unwrap_or(1) != 0 => {
             let f = |name: &str| d.field(name).and_then(|v| v.as_f32()).unwrap_or(0.0);
@@ -521,7 +536,10 @@ impl TaeRuntime {
                     TaeKind::PostureRegenPercent(p) => {
                         f.posture_regen_scale.get_or_insert(p / 100.0);
                     }
-                    TaeKind::Blend => {}
+                    // Read by the deathblow timeline (`deathblow::ThrowTimes`), not per frame.
+                    TaeKind::Blend
+                    | TaeKind::CommonBehavior { .. }
+                    | TaeKind::ThrowAttack { .. } => {}
                     TaeKind::Guard { judge } => {
                         f.flags.insert(3);
                         f.guard_judge.get_or_insert(*judge);

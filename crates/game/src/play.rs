@@ -70,6 +70,9 @@ pub struct Options {
     /// Testing aid (`--god`): Wolf takes no HP or posture damage; hits, reactions and hit stop
     /// are otherwise unchanged.
     pub god: bool,
+    /// Testing aid (`--break-posture`): the enemy's posture is held at 1 point outside
+    /// deathblows, so Wolf's next landed hit breaks it and opens a deathblow.
+    pub break_posture: bool,
     /// Who chooses a boss's acts (`--brain lua|scripted`) and whether its decisions are logged
     /// to `cache/brain_logs/` (`--brain-log`); see `docs/BRAIN.md`.
     pub brain: sekiro_sim::brain::BrainKind,
@@ -79,13 +82,16 @@ pub struct Options {
     /// Player start point on the map.
     pub start: usize,
     /// Place Wolf at `x, y, z` (on the floor at or below `y + 1`) facing `yaw` degrees,
-    /// instead of at a start point.
+    /// instead of at a start point, with the enemy `enemy_distance` in front of him, facing
+    /// him. Also works in an arena (a testing aid: put the pair next to a railing).
     pub spawn: Option<[f32; 4]>,
+    /// Metres between Wolf and the enemy at a `spawn` or map start (`--enemy-distance`).
+    pub enemy_distance: f32,
     /// Time of day (hours) and draw param override for the map lighting.
     pub hour: f32,
     pub gparam: Option<String>,
     /// A boss arena (`--arena owl`): the boss's map, his MSB placement and Wolf's start;
-    /// replaces `map`, `start` and `spawn`.
+    /// replaces `map` and `start`.
     pub arena: Option<&'static ArenaSpec>,
     /// With `arena`, load the whole map instead of the pieces and collision within its radius.
     pub full_map: bool,
@@ -141,6 +147,7 @@ struct Sim {
     script: Option<Vec<InputFrame>>,
     step: usize,
     lock_requested: bool,
+    break_posture: bool,
     /// Each actor's position and drawn yaw before the last step, to draw between steps.
     previous: [([f32; 3], f32); 2],
 }
@@ -203,6 +210,16 @@ pub fn run(options: Options) -> Result<()> {
         })?;
         arena.place(&mut duel);
         start_yaw = arena.layout.wolf.yaw;
+        if let Some([x, y, z, yaw_degrees]) = options.spawn {
+            start_yaw = yaw_degrees.to_radians();
+            place_pair(
+                &mut duel,
+                Vec3::new(x, y, z),
+                start_yaw,
+                options.enemy_distance,
+                |x, z, near| arena.world.floor(x, z, near + 1.0).unwrap_or(near),
+            );
+        }
         if !options.full_map {
             within = Some((arena.layout.center(), spec.radius));
         }
@@ -241,16 +258,13 @@ pub fn run(options: Options) -> Result<()> {
         };
         let yaw = yaw_degrees.to_radians();
         start_yaw = yaw;
-        let floor_at = |x: f32, z: f32, near: f32| world.floor(x, z, near + 1.0).unwrap_or(near);
-        let wolf = &mut duel.player.body;
-        wolf.position = [start.x, floor_at(start.x, start.z, start.y), start.z];
-        wolf.yaw = yaw;
-        // The enemy 5 m in front of Wolf, facing him.
-        let ahead = Quat::from_rotation_y(yaw) * Vec3::NEG_Z * 5.0;
-        let (ex, ez) = (start.x + ahead.x, start.z + ahead.z);
-        let enemy = &mut duel.enemy.body;
-        enemy.position = [ex, floor_at(ex, ez, start.y), ez];
-        enemy.yaw = yaw + std::f32::consts::PI;
+        place_pair(
+            &mut duel,
+            start,
+            yaw,
+            options.enemy_distance,
+            |x, z, near| world.floor(x, z, near + 1.0).unwrap_or(near),
+        );
         duel.player.ground = Box::new(world.clone());
         duel.enemy.ground = Box::new(world.clone());
         eprintln!(
@@ -348,6 +362,7 @@ pub fn run(options: Options) -> Result<()> {
         script,
         step: 0,
         lock_requested: options.lock_on,
+        break_posture: options.break_posture,
         previous: [([0.0; 3], 0.0); 2],
     })
     .init_resource::<combat_hud::Gauges>()
@@ -377,6 +392,7 @@ pub fn run(options: Options) -> Result<()> {
         )
             .chain(),
     );
+    crate::perf_log::register!(app);
     if let Some(replay) = replay {
         app.insert_resource(replay).add_systems(
             PreUpdate,
@@ -503,6 +519,27 @@ fn setup(
 }
 
 /// Two lights and a checkered floor, so movement and speed are visible off the map.
+/// Puts Wolf at `start` facing `yaw` and the enemy `distance` metres in front of him, facing
+/// him, both on the floor `floor_at(x, z, near_y)` finds.
+fn place_pair(
+    duel: &mut Duel,
+    start: Vec3,
+    yaw: f32,
+    distance: f32,
+    floor_at: impl Fn(f32, f32, f32) -> f32,
+) {
+    let wolf = &mut duel.player.body;
+    wolf.position = [start.x, floor_at(start.x, start.z, start.y), start.z];
+    wolf.yaw = yaw;
+    wolf.fall_top = wolf.position[1];
+    let ahead = Quat::from_rotation_y(yaw) * Vec3::NEG_Z * distance;
+    let (ex, ez) = (start.x + ahead.x, start.z + ahead.z);
+    let enemy = &mut duel.enemy.body;
+    enemy.position = [ex, floor_at(ex, ez, start.y), ez];
+    enemy.yaw = yaw + std::f32::consts::PI;
+    enemy.fall_top = enemy.position[1];
+}
+
 fn spawn_floor_stage(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -709,6 +746,10 @@ fn simulate(
         (sim.duel.player.body.position, sim.duel.player.visual_yaw()),
         (sim.duel.enemy.body.position, sim.duel.enemy.visual_yaw()),
     ];
+    if sim.break_posture && sim.duel.deathblow.is_none() {
+        let posture = &mut sim.duel.rules.fighters[1].posture;
+        posture.remaining = posture.remaining.min(1);
+    }
     let before = sim.duel.player.body.position;
     let report = sim.duel.step(&frame, dt);
     if log_enabled() {
@@ -780,6 +821,11 @@ fn sync_actors(
         let (position, yaw) = shown(&sim, i, fixed.overstep_fraction());
         tf.translation = position;
         tf.rotation = Quat::from_rotation_y(yaw);
+        anim.walk_twist = if i == WOLF {
+            sim.duel.player.walk_twist
+        } else {
+            sim.duel.enemy.walk_twist
+        };
         let report: &StepReport = if i == WOLF {
             &sim.last.player
         } else {
@@ -985,7 +1031,7 @@ fn log_move(step: usize, frame: &InputFrame, before: [f32; 3], duel: &Duel, r: &
     };
     let var = |n: &str| wolf.behavior.runtime.variable(n).unwrap_or(f32::NAN);
     eprintln!(
-        "move {step} cam {:.1} stick {:.2},{:.2} stick_yaw {:.1} face {:.1} travel {:.1} speed {:.2} err {:.1} MoveAngle {:.1} lock {} {} {}",
+        "move {step} cam {:.1} stick {:.2},{:.2} stick_yaw {:.1} face {:.1} travel {:.1} speed {:.2} err {:.1} MoveAngle {:.1} walk_twist {:.1} lock {} {} {}",
         frame.camera_yaw.to_degrees(),
         frame.move_stick[0],
         frame.move_stick[1],
@@ -995,6 +1041,7 @@ fn log_move(step: usize, frame: &InputFrame, before: [f32; 3], duel: &Duel, r: &
         speed,
         err,
         var("MoveAngle"),
+        wolf.walk_twist,
         wolf.lock_target.is_some(),
         r.behavior.state_path.last().map_or("-", String::as_str),
         r.animation.as_deref().unwrap_or("-"),

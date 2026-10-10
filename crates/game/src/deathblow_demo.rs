@@ -67,11 +67,6 @@ fn placement(t: &Transform) -> Placement {
     }
 }
 
-fn apply(t: &mut Transform, p: &Placement) {
-    t.translation = Vec3::from_array(p.position);
-    t.rotation = Quat::from_rotation_y(p.yaw);
-}
-
 /// Runs after `animate`, so Wolf has moved by this frame's root motion.
 #[allow(clippy::type_complexity)]
 pub fn drive(
@@ -151,18 +146,19 @@ pub fn drive(
             }
             if let Some(c) = &step.defender_clip {
                 s_anim.play(libs.soldier.clip(c).unwrap(), false);
-                s_anim.apply_root_motion = false;
+                s_anim.apply_root_motion = true;
             }
-            if let Some(p) = &step.defender_placement {
-                apply(&mut s_tf, p);
+            // The soldier's rows absorb the defender onto Wolf's dummy; both then play their
+            // own root motion (flat floor, no collision here).
+            if let Some(a) = &step.absorb {
+                s_tf.translation += Vec3::from_array(a.delta);
+                s_tf.rotate_y(a.yaw);
             }
             if step.killed {
                 demo.status = "deathblow landed: soldier killed".into();
             }
             match phase {
                 Phase::Done => {
-                    // Released from the dummy: the soldier finishes its death clip on its own.
-                    s_anim.resume_root_motion();
                     demo.stage = Stage::Finished;
                 }
                 Phase::Missed => {

@@ -67,6 +67,9 @@ pub struct Animator {
     name: String,
     /// Crossfade from the previous pose: (clip, its time when replaced, duration, elapsed).
     blend: Option<(Arc<AnimClip>, f32, f32, f32)>,
+    /// The locked-on walk twist in degrees, positive with the legs turned right
+    /// (`sekiro_sim::Character::walk_twist`), applied to the pose by [`apply_walk_twist`].
+    pub walk_twist: f32,
 }
 
 impl Animator {
@@ -79,6 +82,7 @@ impl Animator {
             last_root: [0.0; 4],
             name: clip_name_of(&clip),
             blend: None,
+            walk_twist: 0.0,
             clip,
         }
     }
@@ -90,17 +94,6 @@ impl Animator {
         self.time = 0.0;
         self.looping = looping;
         self.last_root = [0.0; 4];
-    }
-
-    /// Turns root motion on from the current clip time, without replaying the motion so far.
-    pub fn resume_root_motion(&mut self) {
-        let t = self.time.min(self.clip.duration);
-        self.last_root = self
-            .clip
-            .root_motion
-            .as_ref()
-            .map_or([0.0; 4], |rm| rm.sample(t));
-        self.apply_root_motion = true;
     }
 
     pub fn finished(&self) -> bool {
@@ -262,7 +255,8 @@ pub fn animate(
         if anim.blend.as_ref().is_some_and(|(_, _, d, e)| e >= d) {
             anim.blend = None;
         }
-        let model = rig.skeleton.model_space(&pose);
+        let mut model = rig.skeleton.model_space(&pose);
+        apply_walk_twist(&rig.skeleton, &mut model, anim.walk_twist);
         for (i, joint) in rig.joints.iter().enumerate() {
             let Some((entity, parent)) = joint else {
                 continue;
@@ -279,6 +273,92 @@ pub fn animate(
     }
 }
 
+/// The locked-on walk twist on a model-space pose, as Wolf's behaviour graph does it (its
+/// `TwistMaster` and `TwistRootRotYCancel` twist modifiers, bound to `TwistMasterAngle`; facts
+/// from FwLo's RustSekiro, `docs/kb/movement.md`): the Master bone, and so the whole body, turns
+/// by `degrees` about the vertical (positive turns the legs right), then Spine, Spine1 and
+/// Spine2 each turn back by a third about their own joints, so the legs step along the move
+/// while the chest, arms and head keep facing the lock-on target.
+fn apply_walk_twist(skeleton: &Skeleton, model: &mut [Mat4], degrees: f32) {
+    if degrees.abs() < 0.01 {
+        return;
+    }
+    let find = |name: &str| skeleton.bones.iter().position(|b| b.name == name);
+    let Some(master) = find("Master") else {
+        return;
+    };
+    // Bevy model space: forward is -Z and a positive turn about +Y goes left.
+    let angle = degrees.to_radians();
+    turn_subtree(skeleton, model, master, Mat4::from_rotation_y(-angle));
+    let spine = ["Spine", "Spine1", "Spine2"].map(find);
+    let share = angle / spine.len() as f32;
+    for bone in spine.into_iter().flatten() {
+        let pivot = model[bone].w_axis.truncate();
+        let back = Mat4::from_translation(pivot)
+            * Mat4::from_rotation_y(share)
+            * Mat4::from_translation(-pivot);
+        turn_subtree(skeleton, model, bone, back);
+    }
+}
+
+/// Applies the model-space transform `by` to bone `root` and everything under it (parents
+/// always precede their children in the skeleton).
+fn turn_subtree(skeleton: &Skeleton, model: &mut [Mat4], root: usize, by: Mat4) {
+    let mut inside = vec![false; skeleton.bones.len()];
+    for (i, bone) in skeleton.bones.iter().enumerate().skip(root) {
+        inside[i] = i == root || bone.parent.is_some_and(|p| inside[p as usize]);
+        if inside[i]
+            && let Some(m) = model.get_mut(i)
+        {
+            *m = by * *m;
+        }
+    }
+}
+
 fn clip_name_of(clip: &AnimClip) -> String {
     clip.name.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// With the legs twisted 45 degrees right, the hips turn right with them while the
+    /// shoulders still face where they did.
+    #[test]
+    fn walk_twist_turns_the_hips_and_keeps_the_shoulders() {
+        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let Ok(lib) = AnimLibrary::load(&cache, "c0000") else {
+            eprintln!("skipping: c0000 animations are not extracted");
+            return;
+        };
+        let skeleton = &lib.skeleton;
+        let at = |model: &[Mat4], name: &str| {
+            let i = skeleton.bones.iter().position(|b| b.name == name).unwrap();
+            model[i].w_axis.truncate()
+        };
+        let across = |model: &[Mat4], left: &str, right: &str| {
+            let v = at(model, right) - at(model, left);
+            Vec3::new(v.x, 0.0, v.z).normalize()
+        };
+        let still = skeleton.model_space(&[]);
+        let mut twisted = still.clone();
+        apply_walk_twist(skeleton, &mut twisted, 45.0);
+        // Facing -Z, the right side is +X; turning right by 45 degrees is -45 about +Y.
+        let side = across(&still, "L_Thigh", "R_Thigh");
+        assert!(
+            side.x > 0.9,
+            "the model does not face -Z: right thigh is {side:?} of the left"
+        );
+        let right = Quat::from_rotation_y(-45f32.to_radians());
+        let hips = across(&twisted, "L_Thigh", "R_Thigh");
+        let want = right * across(&still, "L_Thigh", "R_Thigh");
+        assert!(hips.dot(want) > 0.99, "hips {hips:?}, want {want:?}");
+        let shoulders = across(&twisted, "L_UpperArm", "R_UpperArm");
+        let before = across(&still, "L_UpperArm", "R_UpperArm");
+        assert!(
+            shoulders.dot(before) > 0.99,
+            "shoulders {shoulders:?}, were {before:?}"
+        );
+    }
 }

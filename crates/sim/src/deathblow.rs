@@ -21,6 +21,7 @@ use sekiro_formats::paramdef::ParamDef;
 use sekiro_formats::{Result, flver};
 
 use crate::input::angle_diff;
+use crate::tae::{TaeDb, TaeKind};
 
 /// One ThrowParam row, with the fields the deathblow needs.
 #[derive(Debug, Clone, PartialEq)]
@@ -235,14 +236,6 @@ impl Placement {
         let dz = target[2] - self.position[2];
         (-dx).atan2(-dz)
     }
-
-    fn lerp(&self, to: &Placement, t: f32) -> Placement {
-        let p = |i: usize| self.position[i] + (to.position[i] - self.position[i]) * t;
-        Placement {
-            position: [p(0), p(1), p(2)],
-            yaw: self.yaw + angle_diff(to.yaw, self.yaw) * t,
-        }
-    }
 }
 
 /// A dummy poly as a frame in its character's local space (world convention, mirrored from
@@ -353,8 +346,46 @@ impl ThrowTimes {
         })
     }
 
+    /// The same times from the characters' already decoded TAE (no file reads): the attacker's
+    /// start and body clips and, given the defender's survive clip, its death branch.
+    pub fn from_tae_db(
+        attacker: &TaeDb,
+        start: &str,
+        body: &str,
+        defender: Option<(&TaeDb, &str)>,
+    ) -> Option<Self> {
+        let grab = attacker
+            .anim(start)?
+            .events
+            .iter()
+            .filter(|e| matches!(e.kind, TaeKind::CommonBehavior { .. }))
+            .map(|e| (e.start, e.end))
+            .reduce(|a, b| if b.0 < a.0 { b } else { a })?;
+        let damage = attacker
+            .anim(body)?
+            .events
+            .iter()
+            .filter(|e| matches!(e.kind, TaeKind::ThrowAttack { .. }))
+            .map(|e| e.start)
+            .reduce(f32::min)?;
+        let death_branch = defender.and_then(|(db, clip)| {
+            db.anim(clip)?
+                .events
+                .iter()
+                .filter(|e| e.kind == TaeKind::ActionFlag(69))
+                .map(|e| e.start)
+                .reduce(f32::min)
+        });
+        Some(Self {
+            grab,
+            damage,
+            death_branch,
+        })
+    }
+
     /// Loads the attacker's throw events and, given the defender's survive clip, its death
-    /// branch time.
+    /// branch time. Parses whole `tae.json` exports (about half a second for c0000); a running
+    /// fight uses [`Self::from_tae_db`].
     pub fn load(
         cache: &Path,
         attacker_chr: &str,
@@ -413,6 +444,26 @@ pub enum Phase {
     Missed,
 }
 
+/// Which of the pair the throw absorb moves onto the other's sorb dummy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Absorbed {
+    /// The attacker stands on the defender's dummy (`atkSorbDmyId` 0, `defSorbDmyId` set: the
+    /// Owl's rows). Which side moves in that case is inferred, not traced.
+    Attacker,
+    /// The defender stands on the attacker's dummy (`atkSorbDmyId` set: the soldier's rows).
+    #[default]
+    Defender,
+}
+
+/// This step's share of the absorb: how far to move the absorbed character (world metres, Y
+/// ignored) and turn it (radians). The world moves it through its collision.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AbsorbStep {
+    pub who: Absorbed,
+    pub delta: [f32; 3],
+    pub yaw: f32,
+}
+
 /// What changed this step.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DeathblowStep {
@@ -420,8 +471,9 @@ pub struct DeathblowStep {
     pub attacker_clip: Option<String>,
     /// Start this clip on the defender.
     pub defender_clip: Option<String>,
-    /// Where the defender must stand this frame (Body phase only).
-    pub defender_placement: Option<Placement>,
+    /// Absorb motion to apply this step (Body phase, first `adsrobModelPosInterpolationTime`
+    /// seconds only).
+    pub absorb: Option<AbsorbStep>,
     /// The blow landed this step.
     pub hit: bool,
     /// The defender died this step.
@@ -429,6 +481,14 @@ pub struct DeathblowStep {
 }
 
 /// One deathblow in progress.
+///
+/// Both characters play their paired clips under their own root motion. When the body starts,
+/// the absorbed character (see [`Absorbed`]) is moved onto the other's sorb dummy as it stands
+/// at the body clip's first frame, spread over `adsrobModelPosInterpolationTime`; after that
+/// nobody is held to anybody, so the attacker's later motion (or input once its clip allows
+/// moving) never drags the defender. From FwLo's RustSekiro (`docs/kb/damage.md`, matched
+/// against live recordings): the absorb places the defender at the throw clip's frame 0, and
+/// root motion runs in each clip's start frame.
 #[derive(Debug, Clone)]
 pub struct Deathblow {
     pub start: ThrowRow,
@@ -445,7 +505,11 @@ pub struct Deathblow {
     /// The defender has a separate death clip (`defAnimId + 1`) to branch to. Without one the
     /// body row's own defender clip is the death (the Owl's final blow `a000_013700`).
     pub death_clip: bool,
-    defender_from: Option<Placement>,
+    /// Which character the absorb moves.
+    pub absorbed: Absorbed,
+    /// Total absorb correction (position, yaw) and the share of it handed out so far.
+    absorb: Option<([f32; 3], f32)>,
+    absorb_applied: f32,
     hit: bool,
     branched: bool,
 }
@@ -470,7 +534,9 @@ impl Deathblow {
             body_duration,
             lethal: marks_left <= 1,
             death_clip: true,
-            defender_from: None,
+            absorbed: Absorbed::Defender,
+            absorb: None,
+            absorb_applied: 0.0,
             hit: false,
             branched: false,
         };
@@ -498,6 +564,31 @@ impl Deathblow {
         }
     }
 
+    /// Where the absorbed character must end up relative to where it stands, with the pair
+    /// where it is now: position offset and yaw turn.
+    fn absorb_correction(&self, attacker: &Placement, defender: &Placement) -> ([f32; 3], f32) {
+        let (from, target) = match self.absorbed {
+            Absorbed::Defender => (defender, self.sorb.placement(attacker)),
+            Absorbed::Attacker => (attacker, self.sorb.inverse().placement(defender)),
+        };
+        (
+            [
+                target.position[0] - from.position[0],
+                0.0,
+                target.position[2] - from.position[2],
+            ],
+            angle_diff(target.yaw, from.yaw),
+        )
+    }
+
+    /// Ends the pairing early: the attacker left its body clip (its TAE allowed a move or
+    /// another action). The defender plays on under its own root motion.
+    pub fn release(&mut self) {
+        if self.phase == Phase::Body {
+            self.phase = Phase::Done;
+        }
+    }
+
     /// Advances by `dt` with the characters where they are now (the attacker already moved by
     /// its own root motion this frame).
     pub fn step(&mut self, dt: f32, attacker: &Placement, defender: &Placement) -> DeathblowStep {
@@ -509,10 +600,10 @@ impl Deathblow {
                     if self.body.in_range(attacker, defender) {
                         self.phase = Phase::Body;
                         self.time = 0.0;
-                        self.defender_from = Some(*defender);
+                        self.absorb = Some(self.absorb_correction(attacker, defender));
+                        self.absorb_applied = 0.0;
                         out.attacker_clip = Some(self.body.attacker_anim());
                         out.defender_clip = self.defender_clip();
-                        out.defender_placement = Some(*defender);
                     } else if self.time > self.times.grab.1 {
                         self.phase = Phase::Missed;
                     }
@@ -520,14 +611,22 @@ impl Deathblow {
             }
             Phase::Body => {
                 self.time += dt;
-                let target = self.sorb.placement(attacker);
-                let from = self.defender_from.unwrap_or(target);
                 let w = if self.body.interpolation_time > 0.0 {
                     (self.time / self.body.interpolation_time).min(1.0)
                 } else {
                     1.0
                 };
-                out.defender_placement = Some(from.lerp(&target, w));
+                if let Some((offset, yaw)) = self.absorb
+                    && w > self.absorb_applied
+                {
+                    let share = w - self.absorb_applied;
+                    self.absorb_applied = w;
+                    out.absorb = Some(AbsorbStep {
+                        who: self.absorbed,
+                        delta: offset.map(|v| v * share),
+                        yaw: yaw * share,
+                    });
+                }
                 if !self.hit && self.time >= self.times.damage {
                     self.hit = true;
                     out.hit = true;
@@ -631,16 +730,27 @@ mod tests {
         let (mut db, first) = Deathblow::begin((&start, &body), times, sorb, 2.67, 1);
         assert_eq!(first.attacker_clip.as_deref(), Some("a200_500000"));
         let mut attacker = Placement::default();
-        let defender = Placement {
+        let mut defender = Placement {
             position: [0.0, 0.0, -1.8],
-            yaw: std::f32::consts::PI,
+            yaw: 3.0,
         };
         let dt = 1.0 / 30.0;
         let mut log = Vec::new();
+        let mut body_start_z = None;
         for _ in 0..120 {
             attacker.position[2] -= 0.5 * dt; // the attacker's root motion
             let s = db.step(dt, &attacker, &defender);
-            log.push((db.phase, s, attacker.position[2]));
+            if s.attacker_clip.as_deref() == Some("a200_510000") {
+                body_start_z = Some(attacker.position[2]);
+            }
+            if let Some(a) = s.absorb {
+                assert_eq!(a.who, Absorbed::Defender);
+                for i in 0..3 {
+                    defender.position[i] += a.delta[i];
+                }
+                defender.yaw += a.yaw;
+            }
+            log.push((db.phase, s, defender));
         }
         let body_start = log
             .iter()
@@ -659,14 +769,19 @@ mod tests {
             .iter()
             .find_map(|(_, s, _)| s.defender_clip.clone().filter(|c| c.ends_with("012001")));
         assert!(branch.is_some());
-        // After the slide-in the defender stands on the dummy, 1.2 m ahead, facing the attacker.
-        let (_, last, z) = log
+        // After the slide-in the defender stands on the dummy of the attacker as it was when the
+        // body began, 1.2 m ahead and facing it; the attacker's later motion does not drag it.
+        let z = body_start_z.unwrap();
+        let (_, _, p) = log
             .iter()
             .rev()
             .find(|(p, _, _)| *p == Phase::Body)
             .unwrap();
-        let p = last.defender_placement.unwrap();
-        assert!((p.position[2] - (z - 1.2)).abs() < 0.05, "{p:?}");
+        assert!((p.position[2] - (z - 1.2)).abs() < 1e-4, "{p:?}");
+        assert!(
+            angle_diff(p.yaw, std::f32::consts::PI).abs() < 1e-4,
+            "{p:?}"
+        );
         assert!(log.iter().any(|(p, _, _)| *p == Phase::Done));
     }
     #[test]

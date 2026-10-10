@@ -117,7 +117,9 @@ fn death_variant_branches_from_the_survive_clip() {
 }
 
 /// How far the defender's own root motion drifts from the attacker's sorb dummy over the body
-/// clip, which is why the defender is held on the dummy instead.
+/// clip (a rough forward-only comparison; it prints, it does not assert). The duel no longer
+/// holds the defender on the dummy: both play their own root motion after the absorb, as FwLo's
+/// RustSekiro matched against live recordings.
 #[test]
 fn defender_root_motion_versus_sorb_lock() {
     let Some(cache) = cache() else { return };
@@ -144,5 +146,27 @@ fn defender_root_motion_versus_sorb_lock() {
             "t={t}: attacker z {:.3}, defender z {:.3}, gap {gap:.3}",
             a[2], d[2]
         );
+    }
+}
+
+/// The running fight reads throw times from the characters' decoded TAE (reading the half-second
+/// `tae.json` parse at the deathblow start froze the game); both sources must agree.
+#[test]
+fn throw_times_from_tae_db_match_the_json_export() {
+    let Some(cache) = cache() else { return };
+    if !cache.join("anim/c5060/tae.json").is_file() {
+        return;
+    }
+    let wolf = sekiro_sim::tae::TaeDb::load_from_cache(&cache, "c0000");
+    for (chr, start, body, def) in [
+        ("c1010", "a200_500000", "a200_510000", "a000_012000"),
+        ("c5060", "a221_500000", "a221_510000", "a000_012000"),
+        ("c5060", "a221_501700", "a221_511700", "a000_013700"),
+    ] {
+        let enemy = sekiro_sim::tae::TaeDb::load_from_cache(&cache, chr);
+        let json = ThrowTimes::load(&cache, "c0000", start, body, Some((chr, def)));
+        let db = ThrowTimes::from_tae_db(&wolf, start, body, Some((&enemy, def)));
+        assert!(json.is_some(), "{start}");
+        assert_eq!(json, db, "{chr} {start} {body} {def}");
     }
 }

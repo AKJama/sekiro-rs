@@ -123,6 +123,15 @@ pub struct Character {
     /// turn to the left): how far the visible body still lags behind [`Body::yaw`] after a
     /// free move start turned the character to the stick. Unwinds at the default turn speed.
     pub twist: f32,
+    /// The locked-on walk twist in degrees, positive with the legs turned to the right (the
+    /// exe's WalkTwist output, the graph's `TwistMasterAngle`): how far the legs and the
+    /// travel turn off the directional walk or run clip playing so the move goes along the
+    /// stick. Eases toward [`Self::walk_twist_target`] at [`WALK_TWIST_RATE`]. The renderer turns
+    /// the Master bone by it and turns Spine..Spine2 back, so the chest keeps facing the target.
+    pub walk_twist: f32,
+    /// What the walk twist eases toward: the stick's angle from the clip's direction while a
+    /// locked-on walk or run plays with the stick pushed, else 0. Root motion is turned by it.
+    pub walk_twist_target: f32,
     /// World yaw of the last step's root-motion travel, when the clip carried the body faster
     /// than [`HEADING_MIN_SPEED`]; `TurnAngle` is measured from it (else from the facing).
     heading: Option<f32>,
@@ -150,6 +159,15 @@ fn strafe_direction(current: i32, angle: f32) -> i32 {
         3
     }
 }
+
+/// The clip direction of each locked-on strafe class (`MoveDirection` 0 forward, 1 back, 2
+/// left, 3 right), degrees from the facing, positive right.
+const STRAFE_CLIP_ANGLE: [f32; 4] = [0.0, 180.0, -90.0, 90.0];
+
+/// How fast the walk twist eases toward its target, degrees per second: 0.1 rad per 1/30 s,
+/// the exe's SpinJointBehavior on the Master joint in constant-rate mode (traced by FwLo's
+/// RustSekiro, `docs/kb/movement.md`).
+pub const WALK_TWIST_RATE: f32 = 0.1 * 30.0 * (180.0 / std::f32::consts::PI);
 
 /// SpEffect behaviour reference ids the TAE puts on walk, run and sprint animations
 /// (`SP_EF_REF_TAE_MOVING_WALK/RUN/SPRINT`; the script's `GetLocomotionType`).
@@ -221,6 +239,8 @@ impl Character {
             skeleton: load_skeleton(cache, chr),
             ground: Box::new(FlatGround::default()),
             twist: 0.0,
+            walk_twist: 0.0,
+            walk_twist_target: 0.0,
             heading: None,
             last_times: HashMap::new(),
             last_main: None,
@@ -351,12 +371,50 @@ impl Character {
         self.twist = angle_diff((self.twist.to_radians()) + turn, 0.0).to_degrees();
     }
 
+    /// The locked-on walk twist (exe WalkTwist, facts from FwLo's RustSekiro,
+    /// `docs/kb/movement.md`): while a locked-on walk or run plays with the stick pushed, the
+    /// script's directional clip covers only its 60 degree cone (`MoveDirection`), so the exe
+    /// sets `TwistMasterAngle` to the stick's angle minus the clip's direction. The graph's
+    /// twist modifiers turn the Master bone (the legs and the travel) by it and turn the spine
+    /// back, so a diagonal runs along the stick with the chest on the target. Anything else
+    /// (stick released, sprinting, attacking) lets it return to 0. Called after the TAE update,
+    /// so the walk and run behaviour refs are this step's.
+    fn update_walk_twist(&mut self, lock_angle_released: bool, dt: f32) {
+        let tae = &self.tae_runtime.frame;
+        let walking = tae.behavior_refs.contains(&MOVING_REFS[0])
+            || tae.behavior_refs.contains(&MOVING_REFS[1]);
+        let stick = self.input.stick_world_yaw();
+        self.walk_twist_target = match stick {
+            Some(stick)
+                if self.kind == ControlKind::Player
+                    && self.lock_target.is_some()
+                    && !lock_angle_released
+                    && self.body.grounded
+                    && walking =>
+            {
+                let angle = -angle_diff(stick, self.body.yaw).to_degrees();
+                let class = self
+                    .behavior
+                    .runtime
+                    .variable("MoveDirection")
+                    .unwrap_or(0.0) as usize;
+                let clip = STRAFE_CLIP_ANGLE.get(class).copied().unwrap_or(0.0);
+                angle_diff((angle - clip).to_radians(), 0.0).to_degrees()
+            }
+            _ => 0.0,
+        };
+        let step = WALK_TWIST_RATE * dt;
+        self.walk_twist += (self.walk_twist_target - self.walk_twist).clamp(-step, step);
+    }
+
     fn set_engine_variables(&mut self) {
         let lock_yaw = self.lock_target.map(|t| self.yaw_to(t));
         let rt = &mut self.behavior.runtime;
         match self.kind {
             ControlKind::Player => {
                 rt.set_variable("TwistLowerRootAngle", self.twist);
+                // Radians, positive with the legs turned right (FwLo's RustSekiro, actor.rs).
+                rt.set_variable("TwistMasterAngle", self.walk_twist.to_radians());
                 let level = self.input.stick_level();
                 // Stick direction relative to `from` in degrees, positive to the RIGHT: the script
                 // quick-turns right for TurnAngle > 0 and picks the right strafe for MoveAngle > 0.
@@ -565,6 +623,20 @@ impl Character {
                 ])
             })
             .unwrap_or_default();
+        // Locked-on walks and runs travel along the clip's motion turned by the walk twist, so
+        // a diagonal goes along the stick, not along the nearest of the four strafe clips.
+        // Turned by the target (the stick's angle off the clip) rather than the eased value:
+        // when the class changes, the clip switches at once, and the eased twist would carry
+        // the new clip off the stick until it caught up.
+        self.update_walk_twist(lock_angle_released, dt);
+        if self.walk_twist_target != 0.0 {
+            // Source X is mirrored (as in `Body::step`), so a turn to the right is a positive
+            // turn about source Y: x' = x cos + z sin, z' = -x sin + z cos.
+            let (sin, cos) = self.walk_twist_target.to_radians().sin_cos();
+            let [x, _, z, _] = root_motion;
+            root_motion[0] = cos * x + sin * z;
+            root_motion[2] = -sin * x + cos * z;
+        }
         let tae = &self.tae_runtime.frame;
         // TAE 760: lengthen or shorten the attack's travel so it arrives at its target.
         let target = self.attack_target();

@@ -5,13 +5,13 @@ use crate::ai::SimpleBrain;
 use crate::character::{Character, StepReport};
 use crate::combat::knockback::{HitStop, Knockback};
 use crate::deathblow::{
-    Deathblow, DummyFrame, Phase, Placement, Situation, ThrowTable, ThrowTimes, deathblow_marks,
-    select,
+    AbsorbStep, Absorbed, Deathblow, DummyFrame, Phase, Placement, Situation, ThrowTable,
+    ThrowTimes, deathblow_marks, select,
 };
 use crate::enemy::EnemySpec;
 use crate::fight::CombatRules;
 use crate::hits::{Combatant, HitDetector, HitEvent, HitResult};
-use crate::input::InputFrame;
+use crate::input::{InputFrame, angle_diff};
 use crate::lua_ai::{AiActor, AiBrain, AiWorld, ThinkParams, anim_id_from_clip};
 use crate::player::LoadError;
 use sekiro_formats::flver::{self, Flver};
@@ -27,6 +27,13 @@ const AI_SEED: u64 = 7;
 /// TAE action flag on the player's attacks that tells the enemy AI to parry
 /// (`INTERUPT_ParryTiming`), traced by FwLo's RustSekiro (`docs/kb/guard-deflect.md`).
 pub const FLAG_PARRY_TIMING: i32 = 63;
+
+/// Animation offset types that pick a throw clip by its ThrowParam offset: the player graph's
+/// throw CMSGs (`a000_5xxxxx`, candidates `a200_` to `a249_`) use type 17 for `atkAnimOffset`
+/// (200 for the soldier, 221 for the Owl), the NPC graph's `ThrowDef*` CMSGs type 15 for
+/// `defAnimOffset`. The mapping is inferred from the graphs' candidate lists.
+const THROW_ATK_OFFSET_TYPE: i64 = 17;
+const THROW_DEF_OFFSET_TYPE: i64 = 15;
 
 /// TAE action flags of NPC attacks that accept the next combo attack: 23 "AI combo attack
 /// queued" and 86 "AI attack queued".
@@ -354,8 +361,12 @@ impl Duel {
         }
     }
 
-    /// Keeps the two bodies from overlapping: pushes both apart along the line between them.
+    /// Keeps the two bodies from overlapping: pushes both apart along the line between them,
+    /// each through its own collision so the push never carries one into a wall.
     /// (Character-character collision; the engine uses the Havok character proxies.)
+    /// While the enemy still plays the last throw's defender clip (getting up after a deathblow)
+    /// only Wolf gives way, so walking into him does not shove him out of his animation (ours,
+    /// after FwLo's RustSekiro, where throw pairs skip the push-apart).
     fn separate(&mut self) {
         let min = self.fighters[0].radius + self.fighters[1].radius;
         let (p, e) = (self.player.body.position, self.enemy.body.position);
@@ -369,11 +380,34 @@ impl Duel {
         } else {
             (0.0, -1.0)
         };
-        let push = (min - d) * 0.5;
-        self.player.body.position[0] -= nx * push;
-        self.player.body.position[2] -= nz * push;
-        self.enemy.body.position[0] += nx * push;
-        self.enemy.body.position[2] += nz * push;
+        let enemy_share = if self.enemy_in_throw_clip() { 0.0 } else { 0.5 };
+        let overlap = min - d;
+        for (c, share, sign) in [
+            (&mut self.player, 1.0 - enemy_share, -1.0),
+            (&mut self.enemy, enemy_share, 1.0),
+        ] {
+            if share <= 0.0 {
+                continue;
+            }
+            let push = overlap * share * sign;
+            let [mx, mz] = c.ground.slide(c.body.position, [nx * push, nz * push]);
+            c.body.position[0] += mx;
+            c.body.position[2] += mz;
+        }
+    }
+
+    /// Whether the enemy still plays the last deathblow's defender clip (or its death clip).
+    fn enemy_in_throw_clip(&self) -> bool {
+        let Some(clip) = self.enemy.behavior.runtime.main_clip() else {
+            return false;
+        };
+        let Some(def) = &self.last_throw_def_clip else {
+            return false;
+        };
+        clip.animation == *def
+            || anim_id(def)
+                .zip(anim_id(&clip.animation))
+                .is_some_and(|(d, c)| c == d + 1)
     }
 
     /// Whether pressing attack now would start a deathblow.
@@ -435,14 +469,12 @@ impl Duel {
         let row = |id: i32| throws.table.rows.iter().find(|r| r.id == id);
         let (start, body) = (row(rows.0)?, row(rows.1)?);
         let (attacker, defender) = (placement(&self.player), placement(&self.enemy));
-        let times = ThrowTimes::load(
-            &self.cache,
-            "c0000",
+        let defender_clip = body.defender_anim();
+        let times = ThrowTimes::from_tae_db(
+            &self.player.tae,
             &start.attacker_anim(),
             &body.attacker_anim(),
-            body.defender_anim()
-                .as_deref()
-                .map(|d| (self.spec.chr.as_str(), d)),
+            defender_clip.as_deref().map(|d| (&*self.enemy.tae, d)),
         )?;
         let sorb = if body.atk_sorb_dummy <= 0 && body.def_sorb_dummy > 0 {
             // Wolf is snapped to the enemy's dummy; hold the enemy where that puts it.
@@ -466,17 +498,24 @@ impl Duel {
             deathblow_marks(marks),
         );
         db.death_clip = death_clip;
+        if body.atk_sorb_dummy <= 0 && body.def_sorb_dummy > 0 {
+            db.absorbed = Absorbed::Attacker;
+        }
         self.last_throw_def_clip = body.defender_anim();
         if let Some(yaw) = db.start_facing(&attacker, &defender) {
             self.player.body.yaw = yaw;
         }
         if let Some(clip) = first.attacker_clip.as_deref().and_then(anim_id) {
-            self.player
-                .behavior
-                .runtime
-                .fire_event(&format!("W_ThrowAtk{clip}"));
+            let rt = &mut self.player.behavior.runtime;
+            rt.offsets
+                .by_type
+                .insert(THROW_ATK_OFFSET_TYPE, start.atk_anim_offset as u32);
+            rt.fire_event(&format!("W_ThrowAtk{clip}"));
         }
         self.player.lock_target = None;
+        // The throw takes over both bodies: a knockback left from the breaking hit must not
+        // resume (and shove the enemy) once the pair ends.
+        self.knockback = [None, None];
         self.deathblow = Some(db);
         self.defender_dying = 0;
         Some(rows)
@@ -489,10 +528,11 @@ impl Duel {
         };
         let step = db.step(dt, &placement(&self.player), &placement(&self.enemy));
         if let Some(clip) = step.attacker_clip.as_deref().and_then(anim_id) {
-            self.player
-                .behavior
-                .runtime
-                .fire_event(&format!("W_ThrowAtk{clip}"));
+            let rt = &mut self.player.behavior.runtime;
+            rt.offsets
+                .by_type
+                .insert(THROW_ATK_OFFSET_TYPE, db.body.atk_anim_offset as u32);
+            rt.fire_event(&format!("W_ThrowAtk{clip}"));
         }
         if let Some(clip) = &step.defender_clip {
             let death = db.body.defender_death_anim().as_deref() == Some(clip.as_str());
@@ -500,6 +540,12 @@ impl Duel {
                 if death {
                     self.defender_dying = 1;
                 }
+                self.enemy
+                    .behavior
+                    .runtime
+                    .offsets
+                    .by_type
+                    .insert(THROW_DEF_OFFSET_TYPE, db.body.def_anim_offset as u32);
                 let event = if death {
                     format!("W_ThrowDefDeath{id}")
                 } else {
@@ -508,9 +554,19 @@ impl Duel {
                 self.enemy.behavior.runtime.fire_event(&event);
             }
         }
-        if let Some(p) = step.defender_placement {
-            self.enemy.body.position = p.position;
-            self.enemy.body.yaw = p.yaw;
+        let left_clip = db.phase == Phase::Body
+            && step.attacker_clip.is_none()
+            && db.time > dt
+            && self
+                .player
+                .behavior
+                .runtime
+                .main_clip()
+                .is_none_or(|c| c.animation != db.body.attacker_anim());
+        if left_clip {
+            // The pair ends when Wolf leaves his body clip (its TAE opens move and action
+            // cancels before the end); the enemy plays its own clip out.
+            db.release();
         }
         if step.hit {
             self.rules.deathblow(1);
@@ -523,6 +579,31 @@ impl Duel {
         }
         if matches!(db.phase, Phase::Done | Phase::Missed) {
             self.deathblow = None;
+        }
+        if let Some(a) = step.absorb {
+            self.absorb(&a);
+        }
+    }
+
+    /// Moves the absorbed character its share of the way onto the other's sorb dummy, through
+    /// its collision. What a wall stops, the other character gives way instead (through its own
+    /// collision), so the pair keeps its relation without either ending up inside geometry.
+    /// That shift of the pair is inferred: the engine's handling is not traced.
+    fn absorb(&mut self, a: &AbsorbStep) {
+        let (moved, other) = match a.who {
+            Absorbed::Attacker => (&mut self.player, &mut self.enemy),
+            Absorbed::Defender => (&mut self.enemy, &mut self.player),
+        };
+        let want = [a.delta[0], a.delta[2]];
+        let got = moved.ground.slide(moved.body.position, want);
+        moved.body.position[0] += got[0];
+        moved.body.position[2] += got[1];
+        moved.body.yaw = angle_diff(moved.body.yaw + a.yaw, 0.0);
+        let rest = [got[0] - want[0], got[1] - want[1]];
+        if rest[0].hypot(rest[1]) > 1e-5 {
+            let back = other.ground.slide(other.body.position, rest);
+            other.body.position[0] += back[0];
+            other.body.position[2] += back[1];
         }
     }
 
