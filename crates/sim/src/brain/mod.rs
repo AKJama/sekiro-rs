@@ -18,37 +18,28 @@ pub mod actions;
 pub mod driver;
 pub mod habits;
 pub mod memory;
+pub mod metrics;
 pub mod observation;
+pub mod plan;
+pub mod sampler;
 pub mod tally;
 
 #[cfg(test)]
 mod tests;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 pub use actions::{BossAction, BossActions, Combo, OWL, SOLDIER};
 pub use driver::{BrainDriver, BrainStats};
 pub use habits::{HabitSummary, HabitTracker, Habits, WolfFrame};
 pub use memory::{FightEnd, Loaded, Memory, MemorySummary};
+pub use metrics::{FightMetrics, FightRecord, Trend};
 pub use observation::{FighterView, Observation};
+pub use plan::{Plan, Step, Tactic, Weighted};
 pub use tally::{Counts, Exchange, Outcome, Side, Tally, TallyEvent, TallySummary, TopMap};
 
 /// The most bytes of JSON a request should take; [`BrainRequest::fit`] trims to it.
-pub const REQUEST_BUDGET: usize = 1200;
-
-/// What the boss does next: his own action ids, run in order as one act.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Plan {
-    pub actions: Vec<i32>,
-}
-
-impl Plan {
-    pub fn new(actions: &[i32]) -> Self {
-        Self {
-            actions: actions.to_vec(),
-        }
-    }
-}
+pub const REQUEST_BUDGET: usize = 1400;
 
 /// One question to a controller: the observation, this fight's tally and the memory of every
 /// fight.
@@ -60,6 +51,14 @@ pub struct BrainRequest {
     pub tally: TallySummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemorySummary>,
+    /// Why this request is sent now (checkpoint mode: `start`, `half_hp`, `mark_lost`,
+    /// `punished_twice`, `deflected_thrice`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub why: Option<&'static str>,
+    /// Plan texts a hosted controller must not offer this time (deflected or guarded three
+    /// times in a row); the request body leaves them out of the choices (not sent as input).
+    #[serde(skip)]
+    pub excluded: Vec<String>,
 }
 
 impl BrainRequest {
@@ -103,13 +102,63 @@ impl BrainRequest {
     }
 }
 
-/// A controller's answer.
-#[derive(Debug, Clone, PartialEq)]
+/// A controller's answer: a plan, and optionally the whole plan set behind it.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct BrainReply {
     /// The request answered.
     pub id: u64,
-    /// The plan, or `None` to leave this act to the Lua AI.
+    /// The plan (the controller's best choice), or `None` to leave this act to the Lua AI.
     pub plan: Option<Plan>,
+    /// The whole answer as a weighted set of plans (a hosted model's probability per choice).
+    /// Empty means the set is just `plan`. The driver samples from it locally, with its
+    /// penalties, so one answer can serve many acts.
+    pub set: Vec<Weighted>,
+}
+
+impl BrainReply {
+    /// An answer that is one plan (or `None`: leave it to the Lua AI).
+    pub fn single(id: u64, plan: Option<Plan>) -> Self {
+        Self {
+            id,
+            plan,
+            set: Vec::new(),
+        }
+    }
+}
+
+/// When the driver asks the controller for a decision.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RequestMode {
+    /// After every act slot; the answer's plan runs once, at the next slot.
+    #[default]
+    Slot,
+    /// When the last step of the running plan starts, so the answer is ready as it ends (and
+    /// at slots with nothing waiting).
+    PlanEnd,
+    /// Only at events, each at most once per fight (fight start, the boss at half HP, a lost
+    /// deathblow mark, Wolf punishing twice in a row, Wolf deflecting three times in a row; a
+    /// mark can be lost more than once). An answer is a plan set the boss cycles through
+    /// until the next one.
+    Checkpoints,
+}
+
+impl RequestMode {
+    pub fn by_name(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "slot" => Some(Self::Slot),
+            "plan_end" | "plan-end" | "planend" => Some(Self::PlanEnd),
+            "checkpoints" | "checkpoint" => Some(Self::Checkpoints),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Slot => "slot",
+            Self::PlanEnd => "plan_end",
+            Self::Checkpoints => "checkpoints",
+        }
+    }
 }
 
 /// A boss controller. Calls never block: a controller that needs time (a hosted model) works
@@ -120,6 +169,14 @@ pub trait BossBrain {
     /// Whether it ever plans; `false` leaves every act to the Lua AI and sends no requests.
     fn plans(&self) -> bool {
         true
+    }
+    /// The request mode the driver uses unless told otherwise.
+    fn default_mode(&self) -> RequestMode {
+        RequestMode::Slot
+    }
+    /// Input and output tokens used so far (0 for a controller that has none).
+    fn usage(&self) -> (u64, u64) {
+        (0, 0)
     }
     /// Takes a request. The driver keeps at most one in flight.
     fn submit(&mut self, request: &BrainRequest);
@@ -188,7 +245,7 @@ impl ScriptedBrain {
     pub fn choose(&self, tally: &TallySummary) -> Plan {
         let deflected = self
             .opener
-            .actions
+            .actions()
             .first()
             .and_then(|a| tally.boss.get(&a.to_string()))
             .map_or(0, |c| c.deflected);
@@ -215,10 +272,7 @@ impl BossBrain for ScriptedBrain {
         }
         let id = *id;
         let (_, _, plan) = self.pending.take()?;
-        Some(BrainReply {
-            id,
-            plan: Some(plan),
-        })
+        Some(BrainReply::single(id, Some(plan)))
     }
 }
 

@@ -58,7 +58,7 @@ fn main() {
     if simple {
         duel.use_simple_ai();
     }
-    if brain.is_some() || brain_log {
+    if brain.is_some() || brain_log || brain_memory.is_some() {
         let kind = brain.unwrap_or_default();
         let chr = duel.spec.chr.clone();
         match duel.set_brain(kind.build(&chr), brain_log) {
@@ -67,7 +67,12 @@ fn main() {
             Err(e) => panic!("--brain: {e}"),
         }
         if let (Some(path), Some(d)) = (
-            sekiro_sim::brain::memory::resolve(brain_memory.as_deref(), &chr, false),
+            sekiro_sim::brain::memory::resolve_for(
+                brain_memory.as_deref(),
+                &chr,
+                &format!("{:?}", brain.unwrap_or_default()).to_ascii_lowercase(),
+                false,
+            ),
             duel.boss_brain.as_mut(),
         ) {
             d.use_memory(path);

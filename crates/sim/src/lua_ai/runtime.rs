@@ -97,6 +97,14 @@ pub struct Goal {
     /// AI numbers and timers to set when this goal activates or succeeds
     /// (`TimingSetNumber`, `TimingSetTimer`).
     pub timing_sets: Vec<TimingSet>,
+    /// Ours, set for goals an outside plan queues: the goal succeeds when its lifetime ends (a
+    /// move or leave that times out is not a failure that drops the rest of the plan) and
+    /// `KeepDist` keeps holding its range until then instead of succeeding inside it.
+    pub timed: bool,
+    /// Ours, for `LeaveTarget` run by a plan: face the way he runs instead of the target.
+    pub away: bool,
+    /// Ours: the index of the plan step this goal belongs to (see [`ActGoal::step`]).
+    pub plan_step: Option<usize>,
 }
 
 /// When a [`TimingSet`] applies (`AI_TIMING_SET__*` in `ai_define.lua`).
@@ -177,6 +185,16 @@ pub enum NumberOnActivate {
 /// One subgoal of an act chosen outside the scripts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActGoal {
+    /// Approach first with the scripts' `Approach_Act_Flex` until within this many metres
+    /// (already less the hit radius, as the acts pass it), before queuing this goal.
+    pub approach: Option<f64>,
+    /// Succeed when the lifetime ends (see [`Goal::timed`]).
+    pub timed: bool,
+    /// Face the way he runs (see [`Goal::away`]).
+    pub away: bool,
+    /// Index of the plan step this goal (and its approach) belongs to; the hook reports each
+    /// first activation in [`ActHook::started`].
+    pub step: Option<usize>,
     /// The goal id's global name in `goal_list.lua`, such as `GOAL_COMMON_ComboFinal`.
     pub goal: &'static str,
     /// Lifetime in seconds.
@@ -190,9 +208,6 @@ pub struct ActGoal {
 /// `Common_Battle_Activate` would pick.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActChoice {
-    /// Approach first with the scripts' `Approach_Act_Flex` until within this many metres
-    /// (already less the hit radius, as the acts pass it).
-    pub approach: Option<f64>,
     pub goals: Vec<ActGoal>,
 }
 
@@ -221,6 +236,9 @@ pub struct ActHook {
     pub choice: Option<ActChoice>,
     /// Every activation since the last drain, with the AI clock.
     pub slots: Vec<(f32, ActSlot)>,
+    /// Plan steps whose goals activated since the last drain, with the AI clock (the first
+    /// activation of each goal that carries a [`ActGoal::step`]).
+    pub started: Vec<(f32, usize)>,
 }
 
 /// Registered goal and logic information plus all per-character AI state. Implements the
@@ -340,6 +358,9 @@ impl AiState {
             elapsed: 0.0,
             started_anim: false,
             timing_sets: Vec::new(),
+            timed: false,
+            away: false,
+            plan_step: None,
         };
         if let Some(i) = self.goals.iter().position(Option::is_none) {
             self.goals[i] = Some(g);
@@ -660,28 +681,34 @@ impl AiState {
     /// then the attack goals with their AI-number settings.
     fn queue_act(&mut self, vm: &mut Vm, g: u32, choice: &ActChoice) -> LuaResult<()> {
         let n = Value::Num;
-        if let Some(d) = choice.approach {
-            // Approach_Act_Flex(ai, goal, dist, walkDist, runDist, walkChance, guardChance,
-            // walkLife, runLife). The Owl's acts pass (d, d, 999, 30, 0, 1.5, 3), but his script
-            // only picks an act at a distance that suits it; an outside plan may start from
-            // anywhere, so it runs beyond 3 m more and gets longer lifetimes (ours).
-            vm.call_global(
-                self,
-                "Approach_Act_Flex",
-                &[
-                    ai_obj(),
-                    goal_obj(g),
-                    n(d),
-                    n(d),
-                    n(d + 3.0),
-                    n(30.0),
-                    n(0.0),
-                    n(3.0),
-                    n(5.0),
-                ],
-            )?;
-        }
         for step in &choice.goals {
+            if let Some(d) = step.approach {
+                // Approach_Act_Flex(ai, goal, dist, walkDist, runDist, walkChance, guardChance,
+                // walkLife, runLife). The Owl's acts pass (d, d, 999, 30, 0, 1.5, 3), but his
+                // script only picks an act at a distance that suits it; an outside plan may
+                // start from anywhere, so it runs beyond 3 m more and gets longer lifetimes
+                // (ours).
+                let before = self.goal(g).subgoals.len();
+                vm.call_global(
+                    self,
+                    "Approach_Act_Flex",
+                    &[
+                        ai_obj(),
+                        goal_obj(g),
+                        n(d),
+                        n(d),
+                        n(d + 3.0),
+                        n(30.0),
+                        n(0.0),
+                        n(3.0),
+                        n(5.0),
+                    ],
+                )?;
+                let added: Vec<u32> = self.goal(g).subgoals.iter().skip(before).copied().collect();
+                for id in added {
+                    self.goal_mut(id).plan_step = step.step;
+                }
+            }
             let Some(kind) = vm.get_global(step.goal).num() else {
                 self.log(AiEvent::Error(format!(
                     "act goal {} is not defined",
@@ -694,6 +721,12 @@ impl AiState {
             let Some(Value::Obj(sub)) = self.add_goal(g, false, &a).into_iter().next() else {
                 continue;
             };
+            {
+                let goal = self.goal_mut(sub.id);
+                goal.timed = step.timed;
+                goal.away = step.away;
+                goal.plan_step = step.step;
+            }
             if let Some(set) = step.number {
                 let (slot, value) = match set {
                     NumberOnActivate::Add(slot, v) => {
@@ -1175,6 +1208,12 @@ fn update(vm: &mut Vm, st: &mut AiState, id: u32, depth: usize) -> i32 {
         let kind = st.goal(id).kind;
         let name = st.name(kind);
         st.log(AiEvent::GoalStart { depth, kind, name });
+        if let Some(step) = st.goal(id).plan_step {
+            let time = st.time;
+            if let Some(hook) = st.act_hook.as_mut() {
+                hook.started.push((time, step));
+            }
+        }
         apply_timing_sets(st, id, TIMING_ACTIVATE);
         call_cb(vm, st, id, "Activate");
         if st.goals.get(id as usize).is_none_or(Option::is_none) {
@@ -1257,7 +1296,7 @@ fn update(vm: &mut Vm, st: &mut AiState, id: u32, depth: usize) -> i32 {
             let ok = matches!(
                 g.imp,
                 GoalImpl::Native(NativeGoal::Wait | NativeGoal::Guard | NativeGoal::Sideway)
-            );
+            ) || g.timed;
             return if ok { RESULT_SUCCESS } else { RESULT_FAILED };
         }
     }
@@ -1322,6 +1361,9 @@ fn native_update(st: &mut AiState, id: u32, n: NativeGoal) -> i32 {
                 st.request.move_yaw = Some(y + PI);
             } else if d > hi {
                 st.request.move_yaw = Some(y);
+            } else if g.timed {
+                // A plan's keep-range holds its range until the lifetime ends.
+                st.request.move_level = 0.0;
             } else {
                 return RESULT_SUCCESS;
             }
@@ -1335,7 +1377,7 @@ fn native_update(st: &mut AiState, id: u32, n: NativeGoal) -> i32 {
             }
             if let Some(y) = st.yaw_to(target) {
                 st.request.move_yaw = Some(y + PI);
-                st.request.face_yaw = Some(y);
+                st.request.face_yaw = Some(if g.away { y + PI } else { y });
                 st.request.move_level = if g.param_bool(3) { 0.5 } else { 1.0 };
             }
             RESULT_CONTINUE

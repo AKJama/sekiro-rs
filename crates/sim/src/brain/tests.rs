@@ -1,6 +1,7 @@
 use super::actions::{OWL, PlanError, SOLDIER};
 use super::habits::{HabitTracker, WolfFrame};
 use super::memory::{FightEnd, Loaded, Memory};
+use super::metrics::{self, FightMetrics, FightRecord, Trend};
 use super::*;
 use crate::lua_ai::NumberOnActivate;
 
@@ -104,7 +105,7 @@ fn exchanges_wait_out_the_punish_window() {
 #[test]
 fn plans_become_acts() {
     let act = OWL.act_for(&[3000, 3001, 3002], 0.7).unwrap();
-    assert_eq!(act.approach, Some(f64::from(4.8f32 - 0.7)));
+    assert_eq!(act.goals[0].approach, Some(f64::from(4.8f32 - 0.7)));
     let goals: Vec<_> = act.goals.iter().map(|g| (g.goal, g.params[0])).collect();
     assert_eq!(
         goals,
@@ -118,7 +119,7 @@ fn plans_become_acts() {
     let single = OWL.act_for(&[3031], 0.7).unwrap();
     assert_eq!(single.goals[0].goal, "GOAL_COMMON_AttackTunableSpin");
     let step = OWL.act_for(&[5201, 3005], 0.7).unwrap();
-    assert_eq!(step.approach, None);
+    assert_eq!(step.goals[0].approach, None);
     assert_eq!(step.goals[0].goal, "GOAL_COMMON_SpinStep");
     assert_eq!(step.goals[0].number, Some(NumberOnActivate::Set(5, 0.0)));
     assert_eq!(OWL.act_for(&[], 0.7), Err(PlanError::Empty));
@@ -138,6 +139,7 @@ fn request(id: u64, t: f32, tally: TallySummary) -> BrainRequest {
         },
         tally,
         memory: None,
+        ..BrainRequest::default()
     }
 }
 
@@ -193,7 +195,7 @@ fn widest_observation() -> Observation {
         locked_on: true,
         since_boss_hit: Some(12.34),
         since_wolf_hit: Some(0.5),
-        plan: vec![3000, 3001, 3002],
+        plan: "walk_in2.5>3000+3001+3002".into(),
     }
 }
 
@@ -211,7 +213,7 @@ fn soldier_plans_become_his_acts() {
     assert!(BossActions::for_chr("c9999").is_none());
     // Act01: approach to 2.5 m less his radius, then the combo; no AI number.
     let act = SOLDIER.act_for(&[3000, 3001], 0.5).unwrap();
-    assert_eq!(act.approach, Some(2.0));
+    assert_eq!(act.goals[0].approach, Some(2.0));
     let goals: Vec<_> = act.goals.iter().map(|g| (g.goal, g.params[0])).collect();
     assert_eq!(
         goals,
@@ -224,7 +226,10 @@ fn soldier_plans_become_his_acts() {
     // Act09's rush sets AI number 5 to 1; the stone throw (Act07) never approaches.
     let rush = SOLDIER.act_for(&[3011], 0.5).unwrap();
     assert_eq!(rush.goals[0].number, Some(NumberOnActivate::Set(5, 1.0)));
-    assert_eq!(SOLDIER.act_for(&[3009], 0.5).unwrap().approach, None);
+    assert_eq!(
+        SOLDIER.act_for(&[3009], 0.5).unwrap().goals[0].approach,
+        None
+    );
     let step = SOLDIER.act_for(&[5211], 0.5).unwrap();
     assert_eq!(step.goals[0].goal, "GOAL_COMMON_SpinStep");
     assert_eq!(step.goals[0].number, None);
@@ -513,7 +518,7 @@ fn memory_round_trips_and_merges_fights() {
     assert_eq!(again.wolf["AttackCombo1"].hit, 3);
     assert_eq!(again.habits.answers["3000"].to["deflect"], 3);
     let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.contains("\"version\": 1"), "{text}");
+    assert!(text.contains("\"version\": 2"), "{text}");
     assert!(!path.with_extension("json.tmp").exists());
     let _ = std::fs::remove_file(&path);
 }
@@ -640,6 +645,7 @@ fn requests_fit_the_budget() {
         obs: widest_observation(),
         tally: tally.summary(),
         memory: Some(full_memory().summary()),
+        ..BrainRequest::default()
     };
     let untrimmed = req.json_len();
     let len = req.fit(REQUEST_BUDGET);
@@ -664,6 +670,7 @@ fn requests_fit_the_budget() {
         obs: widest_observation(),
         tally: t1.summary(),
         memory: Some(small.summary()),
+        ..BrainRequest::default()
     };
     let before = typical.json_len();
     eprintln!(
@@ -672,4 +679,387 @@ fn requests_fit_the_budget() {
     );
     assert_eq!(typical.fit(REQUEST_BUDGET), before);
     assert!(before < 900, "{before}");
+}
+
+// ---- tactics, plans, sampling, metrics ----
+
+#[test]
+fn plan_text_forms_round_trip() {
+    for table in [&OWL, &SOLDIER] {
+        for c in table.choices() {
+            let plan = table.parse(&c.value).unwrap();
+            assert_eq!(plan.value(), c.value);
+            assert!(plan.len() <= table.max_plan);
+        }
+    }
+    let p = SOLDIER.parse("walk_in4>hold2>3013").unwrap();
+    assert_eq!(
+        p.steps,
+        [
+            Step::Tactic(Tactic::WalkIn(4.0)),
+            Step::Tactic(Tactic::Hold(2.0)),
+            Step::Act(3013)
+        ]
+    );
+    // Consecutive attacks are one chain in the text form.
+    assert_eq!(SOLDIER.parse("3000>3001").unwrap().value(), "3000+3001");
+    assert_eq!(
+        SOLDIER.parse("walk_in4>hold2>3013>3000"),
+        Err(PlanError::TooLong(4))
+    );
+    assert_eq!(
+        SOLDIER.parse("fly3"),
+        Err(PlanError::UnknownToken("fly3".into()))
+    );
+}
+
+#[test]
+fn tactics_run_through_the_engines_own_goals() {
+    let expect = [
+        ("hold2", "GOAL_COMMON_Wait", 2.0),
+        ("guard2.5", "GOAL_COMMON_Guard", 2.5),
+        ("walk_in4", "GOAL_COMMON_MoveToSomewhere", 5.0),
+        ("run_in3", "GOAL_COMMON_MoveToSomewhere", 4.0),
+        ("strafe_left", "GOAL_COMMON_SidewayMove", 2.0),
+        ("back_off9", "GOAL_COMMON_LeaveTarget", 4.0),
+        ("retreat12", "GOAL_COMMON_LeaveTarget", 5.0),
+        ("keep_range", "GOAL_COMMON_KeepDist", 2.5),
+    ];
+    let act = |text: &str| {
+        SOLDIER
+            .act_for_plan(&SOLDIER.parse(text).unwrap(), 0.5)
+            .unwrap()
+    };
+    for (token, goal, life) in expect {
+        let act = act(token);
+        let g = &act.goals[0];
+        assert_eq!((g.goal, g.life), (goal, life), "{token}");
+        assert!(
+            g.timed && g.approach.is_none() && g.number.is_none(),
+            "{token}"
+        );
+        assert_eq!(g.step, Some(0));
+    }
+    // Distance bands are the goal's distance parameter; running is walk = false.
+    assert_eq!(act("walk_in2.5").goals[0].params, [0.0, 0.0, 2.5, 0.0, 1.0]);
+    assert_eq!(act("run_in3").goals[0].params, [0.0, 0.0, 3.0, 0.0, 0.0]);
+    let retreat = act("retreat12");
+    assert!(retreat.goals[0].away);
+    assert_eq!(retreat.goals[0].params, [0.0, 12.0, 0.0, 0.0]);
+    // A mixed plan: the tactic, then the attack with its own approach (a tactic can leave him
+    // far away); steps count from 0 across both.
+    let shape: Vec<_> = act("back_off6>3000+3001")
+        .goals
+        .iter()
+        .map(|g| (g.goal, g.step, g.approach.is_some()))
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            ("GOAL_COMMON_LeaveTarget", Some(0), false),
+            ("GOAL_COMMON_ComboAttackTunableSpin", Some(1), true),
+            ("GOAL_COMMON_ComboFinal", Some(2), false),
+        ]
+    );
+    // An attack then a tactic: the tactic comes last.
+    let after = act("3008>back_off6");
+    assert_eq!(after.goals[0].goal, "GOAL_COMMON_AttackTunableSpin");
+    assert_eq!(after.goals[1].goal, "GOAL_COMMON_LeaveTarget");
+}
+
+use sampler::{Context, EXCLUDE_STREAK, Pick, Rng, Streaks};
+use std::collections::HashSet;
+
+fn set_of(plans: &[(&str, f32)]) -> Vec<Weighted> {
+    plans
+        .iter()
+        .map(|(v, w)| Weighted {
+            plan: (*v != "lua").then(|| SOLDIER.parse(v).unwrap()),
+            weight: *w,
+        })
+        .collect()
+}
+
+fn counts(picks: &[Pick], n: usize) -> Vec<usize> {
+    (0..n)
+        .map(|i| picks.iter().filter(|p| **p == Pick::Plan(i)).count())
+        .collect()
+}
+
+fn sample(
+    set: &[Weighted],
+    streaks: &Streaks,
+    tried: &HashSet<String>,
+    temperature: f32,
+    seed: u64,
+    n: usize,
+) -> Vec<Pick> {
+    let mut rng = Rng::new(seed);
+    let ctx = Context {
+        streaks,
+        tried,
+        temperature,
+    };
+    (0..n).map(|_| sampler::pick(set, &ctx, &mut rng)).collect()
+}
+
+fn tried_all(values: &[&str]) -> HashSet<String> {
+    values.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn sampling_follows_the_probabilities_and_is_seeded() {
+    let set = set_of(&[("3000", 0.6), ("3005", 0.3), ("hold2", 0.1)]);
+    // Everything already tried: no bonus, so the weights are the probabilities.
+    let tried = tried_all(&["3000", "3005", "hold2"]);
+    let none = Streaks::default();
+    let picks = sample(&set, &none, &tried, 1.0, 7, 20_000);
+    let c = counts(&picks, 3);
+    for (c, want) in c.iter().zip([0.6, 0.3, 0.1]) {
+        let got = *c as f32 / 20_000.0;
+        assert!((got - want).abs() < 0.02, "{c:?}");
+    }
+    // The same seed gives the same sequence; another seed another.
+    assert_eq!(sample(&set, &none, &tried, 1.0, 7, 200)[..], picks[..200]);
+    assert_ne!(sample(&set, &none, &tried, 1.0, 8, 200)[..], picks[..200]);
+    // Temperature: low sharpens, zero is greedy, high flattens.
+    let sharp = counts(&sample(&set, &none, &tried, 0.25, 7, 5000), 3);
+    assert!(sharp[0] > 4500, "{sharp:?}");
+    let greedy = sample(&set, &none, &tried, 0.0, 7, 50);
+    assert!(greedy.iter().all(|p| *p == Pick::Plan(0)));
+    let flat = counts(&sample(&set, &none, &tried, 8.0, 7, 9000), 3);
+    assert!(flat.iter().all(|c| *c > 2400), "{flat:?}");
+}
+
+#[test]
+fn repeated_deflects_push_an_option_down_and_untried_ones_get_chosen() {
+    let set = set_of(&[("3003", 0.5), ("3000", 0.25), ("hold1", 0.25)]);
+    let tried = tried_all(&["3003", "3000", "hold1"]);
+    let share = |streaks: &Streaks| {
+        let c = counts(&sample(&set, streaks, &tried, 1.0, 3, 10_000), 3);
+        c[0] as f32 / 10_000.0
+    };
+    let mut s = Streaks::default();
+    let fresh = share(&s);
+    s.record("3003", true);
+    let once = share(&s);
+    s.record("3003", true);
+    s.record("3003", true);
+    let thrice = share(&s);
+    assert!((fresh - 0.5).abs() < 0.03, "{fresh}");
+    assert!(
+        once < fresh - 0.1 && thrice < once - 0.1,
+        "{fresh} {once} {thrice}"
+    );
+    // A landed hit (or any other outcome) resets it.
+    s.record("3003", false);
+    assert!((share(&s) - fresh).abs() < 0.03);
+    // Untried options carry a bonus and, over enough acts, all get run: a boss that has only
+    // tried 3003 so far picks 3000 and hold1 more often than their probability says.
+    let only = tried_all(&["3003"]);
+    let none = Streaks::default();
+    let c = counts(&sample(&set, &none, &only, 1.0, 5, 10_000), 3);
+    assert!(c[1] > 2500 && c[2] > 2500, "{c:?}");
+    let mut seen = [false; 3];
+    for p in sample(&set, &none, &only, 1.0, 11, 60) {
+        if let Pick::Plan(i) = p {
+            seen[i] = true;
+        }
+    }
+    assert!(seen.iter().all(|s| *s), "{seen:?}");
+    // A set of one (no probabilities) is not sampled, and gives way to the Lua AI once
+    // repelled `EXCLUDE_STREAK` times in a row.
+    let one = set_of(&[("3003", 1.0)]);
+    let mut s = Streaks::default();
+    for _ in 0..EXCLUDE_STREAK - 1 {
+        s.record("3003", true);
+    }
+    assert_eq!(sample(&one, &s, &tried, 1.0, 1, 1), [Pick::Plan(0)]);
+    s.record("3003", true);
+    assert_eq!(sample(&one, &s, &tried, 1.0, 1, 1), [Pick::Lua]);
+    assert_eq!(sample(&[], &s, &tried, 1.0, 1, 1), [Pick::Nothing]);
+}
+
+#[test]
+fn a_plan_is_as_worn_as_its_most_repelled_step() {
+    // Streak keys: action ids for attacks, tokens for tactics.
+    let mut s = Streaks::default();
+    s.record("walk_in4", true);
+    s.record("3013", true);
+    let plan = SOLDIER.parse("walk_in4>3013").unwrap();
+    assert_eq!(s.worst(&plan), 1);
+    s.record("3013", true);
+    assert_eq!(s.worst(&plan), 2);
+}
+
+#[test]
+fn metrics_from_a_scripted_fight() {
+    use metrics::MetricsTracker;
+    let mut m = MetricsTracker::new(10.0);
+    // The boss's hits: two deflected, one guarded, one landed.
+    m.boss_hit(true, true);
+    m.boss_hit(true, true);
+    m.boss_hit(true, false);
+    m.boss_hit(false, false);
+    // Wolf's HP: 1.0 -> 0.9 -> 0.95 (a heal) -> 0.7; posture 0 -> 0.2 -> 0.1 -> 0.4.
+    for (hp, posture) in [(1.0, 0.0), (0.9, 0.2), (0.95, 0.1), (0.7, 0.4)] {
+        m.wolf(hp, posture);
+    }
+    let lost = m.finish(25.0, 3, true);
+    assert_eq!(
+        (lost.deflected, lost.guarded, lost.hits_taken, lost.punishes),
+        (2, 1, 1, 3)
+    );
+    assert_eq!(lost.deflect_rate(), Some(0.5));
+    assert_eq!(lost.guard_rate(), Some(0.25));
+    assert!((lost.hp_lost - 0.35).abs() < 1e-5, "{}", lost.hp_lost);
+    assert!(
+        (lost.posture_gained - 0.5).abs() < 1e-5,
+        "{}",
+        lost.posture_gained
+    );
+    assert_eq!((lost.duration, lost.kill_time), (15.0, Some(15.0)));
+    // The boss wins: no kill time.
+    assert_eq!(m.finish(25.0, 0, false).kill_time, None);
+    // No resolved hits: no rate.
+    assert_eq!(FightMetrics::default().deflect_rate(), None);
+}
+
+fn record(defl: u32, hits: u32, kill: Option<f32>) -> FightRecord {
+    FightRecord {
+        winner: "wolf".into(),
+        metrics: FightMetrics {
+            deflected: defl,
+            hits_taken: hits,
+            kill_time: kill,
+            ..FightMetrics::default()
+        },
+        ..FightRecord::default()
+    }
+}
+
+#[test]
+fn trend_shows_the_last_three_fights() {
+    let history = [
+        record(9, 1, Some(40.0)),
+        record(5, 5, Some(30.0)),
+        record(10, 0, Some(20.0)),
+        record(8, 2, None),
+    ];
+    let now = FightMetrics {
+        deflected: 1,
+        hits_taken: 1,
+        ..FightMetrics::default()
+    };
+    let t = Trend::new(&history, Some(&now));
+    assert_eq!(t.defl, [50, 100, 80]);
+    assert_eq!(t.hits, [5, 0, 2]);
+    assert_eq!(t.kill_s, [Some(30), Some(20), None]);
+    assert_eq!(t.now, Some([50, 1]));
+    assert_eq!(
+        serde_json::to_string(&t).unwrap(),
+        r#"{"defl":[50,100,80],"guard":[0,0,0],"hits":[5,0,2],"hp":[0,0,0],"kill_s":[30,20,null],"now":[50,1]}"#
+    );
+}
+
+#[test]
+fn memory_v1_migrates_and_keeps_ten_fights() {
+    let path = temp_file("c1010.json");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"chr":"c1010","fights":2,"boss_wins":1,"wolf_wins":1,
+            "boss":{"3000":[5,1,1,1,2,0]},"wolf":{},"habits":{}}"#,
+    )
+    .unwrap();
+    let (mut m, how) = Memory::load(&path, "c1010");
+    assert_eq!(how, Loaded::Read);
+    assert_eq!((m.version, m.fights, m.history.len()), (2, 2, 0));
+    assert_eq!(m.boss["3000"].n, 5);
+    for i in 0..13 {
+        m.push_record(record(i, 0, None));
+    }
+    assert_eq!(m.history.len(), metrics::HISTORY);
+    assert_eq!(m.history[0].metrics.deflected, 3);
+    m.save(&path).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("\"version\": 2"), "{text}");
+    let (back, _) = Memory::load(&path, "c1010");
+    assert_eq!(back, m);
+    assert_eq!(back.summary().trend.defl.len(), 3);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn the_request_with_a_trend_and_tactics_stays_under_the_budget() {
+    let mut memory = full_memory();
+    for i in 0..10 {
+        memory.push_record(record(3 + i, i, Some(30.0 + i as f32)));
+    }
+    let mut tally = Tally::default();
+    for (i, a) in SOLDIER.actions.iter().enumerate() {
+        for k in 0..=i {
+            tally.record(k as f32, boss_start(&a.id.to_string()));
+            tally.record(k as f32 + 0.5, TallyEvent::End { side: Side::Boss });
+        }
+    }
+    for t in ["walk_in4", "hold2", "strafe_left", "retreat12", "back_off9"] {
+        tally.record(0.0, boss_start(t));
+        tally.record(0.5, TallyEvent::End { side: Side::Boss });
+    }
+    tally.flush(100.0);
+    let now = FightMetrics::default();
+    let mut req = BrainRequest {
+        id: 123456,
+        obs: widest_observation(),
+        tally: tally.summary(),
+        memory: Some(memory.summary_with(Some(&now))),
+        why: Some("deflected_thrice"),
+        ..BrainRequest::default()
+    };
+    let len = req.fit(REQUEST_BUDGET);
+    let json = serde_json::to_string(&req).unwrap();
+    eprintln!("{len} bytes: {json}");
+    assert!(len <= REQUEST_BUDGET && len == json.len());
+    assert!(json.contains("\"trend\":{\"defl\""), "{json}");
+    assert!(json.contains("\"why\":\"deflected_thrice\""));
+    // `excluded` is for the request body, never part of the input text.
+    req.excluded = vec!["3003".into()];
+    assert!(!serde_json::to_string(&req).unwrap().contains("excluded"));
+}
+
+#[test]
+fn request_modes_have_names() {
+    assert_eq!(
+        RequestMode::by_name("Checkpoints"),
+        Some(RequestMode::Checkpoints)
+    );
+    assert_eq!(RequestMode::by_name("plan_end"), Some(RequestMode::PlanEnd));
+    assert_eq!(RequestMode::by_name("slot"), Some(RequestMode::Slot));
+    assert_eq!(RequestMode::by_name("often"), None);
+    assert_eq!(RequestMode::default(), RequestMode::Slot);
+}
+
+#[test]
+fn memory_files_of_different_brains_do_not_mix() {
+    use std::path::PathBuf;
+    let p = |arg, brain, hosted| memory::resolve_for(arg, "c1010", brain, hosted);
+    let dir = PathBuf::from("logs/memory");
+    assert_eq!(
+        p(Some("on"), "lua", false),
+        Some(dir.join("c1010.lua.json"))
+    );
+    assert_eq!(
+        p(Some("on"), "decisions", true),
+        Some(dir.join("c1010.json"))
+    );
+    assert_eq!(p(None, "decisions", true), Some(dir.join("c1010.json")));
+    assert_eq!(p(None, "lua", false), None);
+    assert_eq!(
+        p(Some("m"), "lua", false),
+        Some(PathBuf::from("m").join("c1010.lua.json"))
+    );
+    assert_eq!(
+        p(Some("m/x.json"), "lua", false),
+        Some(PathBuf::from("m/x.json"))
+    );
 }

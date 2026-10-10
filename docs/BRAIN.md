@@ -8,21 +8,27 @@ The code is in `crates/sim/src/brain/`, with a small hook in the Lua goal runtim
 cargo run --release -p sekiro-game -- --arena owl --brain scripted --brain-log
 cargo run --release -p sekiro-game -- --play --enemy soldier --brain scripted --brain-memory on
 cargo run --release -p sekiro-sim --bin duel-sim -- --enemy soldier --brain scripted --brain-log --steps 1800
-cargo test -p sekiro-sim --test owl_brain --test soldier_brain
+cargo test -p sekiro-sim --test owl_brain --test soldier_brain --test brain_tactics
 ```
 
 `--brain lua` (the default) leaves his Lua AI unchanged; `--brain scripted` runs the deterministic test controller with that enemy's own test plans; `--brain-log` writes a JSONL log to `cache/brain_logs/`; `--brain-memory off|on|<path>` keeps the memory of every fight (on by default for hosted brains, see "Memory across fights").
 `--force-act <id>` (the enemy requests that act whenever he is free) works for either enemy.
 
+Three environment variables tune the driver (no flags): `SEKIRO_BRAIN_MODE=slot|plan_end|checkpoints` (when requests go out, see "Timing model"; the default is `checkpoints` for hosted brains and `slot` for the others), `SEKIRO_BRAIN_TEMPERATURE` (sampling temperature, default 1.0) and `SEKIRO_BRAIN_SEED` (seeds the sampler; random otherwise).
+
+The baseline to compare a model against is the Lua brain with memory on: `--brain lua --brain-memory on` keeps `logs/memory/<chr>.lua.json` with the same per-fight metrics ("The score to beat"), apart from the model's `logs/memory/<chr>.json`.
+
 ## Design
 
 The controller sets the **plan**, the game keeps the **reflexes**.
 
-- A plan is 1 to 3 of the boss's own action ids (the animation ids his Lua acts request), run in order as one act.
+- A plan is 1 to 3 steps run in order as one act. A step is one of the boss's own action ids (the animation ids his Lua acts request) or a *tactic*: a movement run through the engine's own native goals (waiting, guarding, walking or running to a distance from Wolf, strafing, backing off, keeping a range; see "Tactics").
+  A reply can be a *plan set*, a weighted list of plans the boss samples from locally, so one answer serves many acts.
 - Reflexes stay with the Lua goal runtime and keep working while a plan runs. For the Owl: his `Goal.Parry` (guard 3100, deflect 3101, special deflect 3102, back step 5201), shuriken reactions, the deflect counters (`Kengeki_Activate`), punishing a heal, turning to a Wolf behind him. For the soldier: `Common_Parry` (guard, deflect, back step), his deflect counters (`Kengeki_Activate`, 3050 to 3076) and his answers to Wolf lying down. For both, everything their HKS script does (staggers, getting up).
 - The observation is fair and mirrored: only what the player can see of the boss, and the same about Wolf.
 - Outcome memory lives in our code, because hosted models keep nothing between calls: every request carries this fight's tally and the memory of every fight with Wolf's habits, which is also kept on disk across sessions.
-- One request is always in flight while the current act runs; if no answer is ready when the next act starts, the Lua AI's own choice runs (the boss never waits).
+- At most one request is in flight, sent when the request mode says so (every slot, the end of a plan, or only at checkpoints); if no answer is ready when an act starts, the Lua AI's own choice runs (the boss never waits).
+- Once either fighter is dead nothing is requested or logged until the next fight starts.
 
 ### Where a plan enters his AI
 
@@ -69,7 +75,7 @@ Numbers are rounded to two decimals, angles to whole degrees.
 | `locked_on` | Wolf is locked on to the boss |
 | `since_boss_hit` | Seconds since the boss last landed an unguarded hit on Wolf (`null`: never, this fight) |
 | `since_wolf_hit` | Seconds since Wolf last landed an unguarded hit on the boss |
-| `plan` | The plan running now (empty while the Lua AI's own act runs) |
+| `plan` | The plan running now, in its text form such as `walk_in4>3013` (left out while the Lua AI's own act runs) |
 
 Each side:
 
@@ -150,7 +156,38 @@ Approach distances are the base distance of the act that uses each id (his acts 
 - Combos: `3000+3001` (both sweeping slashes, his Act01) and `3005+3007` (kick, then rising slash, his Act05).
 - Scripted test plans: both sweeping slashes, then the kick and rising slash once two openers were deflected.
 
-A plan with an unknown id (for the soldier also an id his script names without a clip, such as 3004), more than 3 actions or none is refused and logged, and the Lua AI picks that act.
+A plan with an unknown id (for the soldier also an id his script names without a clip, such as 3004), an unknown tactic, more than 3 steps or none is refused and logged, and the Lua AI picks that act.
+
+## Tactics
+
+A tactic is a plan step that is not one of his animations: it runs through one of the engine's own native goals (`NativeGoal` in `lua_ai/runtime.rs`), the same goals his Lua acts use for approaching, waiting and backing away, so there is no movement code of ours.
+Distances are metres from Wolf, centre to centre (the observation's `dist`), never map coordinates.
+Each tactic's goal has a lifetime cap, and a goal queued by a plan *succeeds* when that lifetime ends (`Goal::timed`), so a tactic that cannot reach its distance in time ends anyway and the rest of the plan runs; a tactic already satisfied (he is already inside the band) ends at once.
+
+| Token | What | Native goal (id) | Parameters | Cap |
+|---|---|---|---|---:|
+| `hold1`, `hold2`, `hold3.5` | Stand still facing Wolf | Wait (2000) | target Wolf | 1, 2, 3.5 s |
+| `guard1`, `guard2.5` | Hold his guard | Guard (2101) | action 3100, target Wolf | 1, 2.5 s |
+| `walk_in6`, `walk_in4`, `walk_in2.5` | Walk toward Wolf until within that distance | MoveToSomewhere (2019), walking | distance | 5 s |
+| `run_in3` | Run at Wolf until within 3 m | MoveToSomewhere (2019), running | distance | 4 s |
+| `strafe_left`, `strafe_right` | Walk around Wolf, facing him (left and right are the boss's own) | SidewayMove (2017) | 1 left, 0 right | 2 s |
+| `back_off6`, `back_off9` | Walk backwards, facing Wolf, until that far away | LeaveTarget (2016), walking | distance | 4 s |
+| `retreat12` | Turn away and run until 12 m away | LeaveTarget (2016), running, facing away | distance | 5 s |
+| `keep_range` | Hold 4 to 6 m from Wolf, moving as needed | KeepDist (2018), walking | 4 to 6 m | 2.5 s |
+
+- Walking is move level 0.5 and running 1.0 (the NPC script runs above 0.75).
+- Two things the native goals did not do and now do for a plan only: `KeepDist` holds its range until the lifetime ends instead of succeeding the moment it is inside it, and `LeaveTarget` can face the way he runs (`retreat12`; his other leaves face Wolf). Both are flags on the goal (`Goal::timed`, `Goal::away`) set by `queue_act`; his own acts are unchanged (`lua_brain_leaves_his_choices_unchanged`).
+- An attack that follows a tactic gets its own approach (`Approach_Act_Flex`) when its action has an approach distance, since a tactic can leave him far away; one that opens the plan gets it as before.
+- Tactics are exchanges in the tally under their token (see "The tally"): `n`, and `punished` when Wolf hit him during one. The sampler penalises a tactic Wolf keeps punishing.
+- Both tables offer all fifteen tactics. They are the same for the soldier and the Owl; the speeds come from each one's own clips (the Owl backs off and strafes slowly, the soldier walks about 1 m/s and runs only a little faster over a short distance).
+
+### The choice list
+
+`BossActions::choices()` is what a hosted model is offered, and what `BossActions::parse` accepts: his actions, his named combos, each tactic, and a curated list of two and three step plans (`BossActions::chains`, validated by the tests), then `lua`.
+The text form joins steps with `>` and consecutive attacks with `+` (they run as one combo chain), for example `walk_in4>hold2>3013`, `3005+3007`, `strafe_left>3005+3007`.
+The soldier has 15 actions, 2 combos, 15 tactics and 40 chains, 73 choices with `lua`; the Owl 20 actions, 1 combo, 15 tactics and 38 chains, 75 with `lua` (the Decisions API takes up to 255).
+The chains are, for both bosses, variations of: walk in slowly to a band, then an attack; hold still, then a running or leaping attack; back off or retreat, then a ranged attack or a rush (stone throw, shuriken); strafe, then a combo or a kick and rising slash; guard, then a combo; run in, then a combo; keep range, then a perilous attack; an attack, then a back off or strafe; and a few three step baits (retreat, run in, leaping slash; walk in, hold, perilous thrust; strafe left, strafe right, thrust).
+Run `cargo test -p sekiro-brain-net both_bosses_offer_tactics -- --nocapture` to print the counts.
 
 ## The tally
 
@@ -187,11 +224,11 @@ Saves go through a temporary file, so a crash never leaves half a file.
 Without the flag, hosted brains (`decisions`, `responses`) use the default file and `lua` and `scripted` keep session memory only.
 The same flag works in `duel-sim`.
 
-The file format, version 1 (an example after two short soldier fights in `soldier_brain.rs`, rounded):
+The file format, version 2 (an example after two short soldier fights in `soldier_brain.rs`, rounded; `history` is new in version 2):
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "chr": "c1010",
   "fights": 2,
   "boss_wins": 1,
@@ -211,6 +248,8 @@ The file format, version 1 (an example after two short soldier fights in `soldie
 }
 ```
 
+A version 1 file loads (its `history` is empty) and is saved as version 2 from then on (`memory_v1_migrates_and_keeps_ten_fights`).
+`history` holds the last 10 finished fights, oldest first, each as `{"winner", "metrics", "decisions", "lua_acts", "requests", "choices", "tokens", "latency_ms", "brain"}` (see "The score to beat"); `boss` also holds tactic tokens next to action ids.
 A missing file starts fresh with a note on stderr.
 An unusable file (bad JSON, another `version`, or another enemy's `chr`) starts fresh with a warning and is moved aside to `<name>.json.corrupt`, so the next save does not destroy it.
 Every field but `version` and `chr` has a default, so a file from a build with fewer fields still loads.
@@ -245,31 +284,82 @@ The request carries a compact summary (`HabitSummary`): only entries with at lea
 ## The request and its size
 
 ```json
-{"id":12,"obs":{...},"tally":{"boss":{...},"wolf":{...}},
- "memory":{"fights":2,"boss_wins":1,"wolf_wins":0,"boss":{...},"wolf":{...},"habits":{...}}}
+{"id":12,"why":"half_hp","obs":{...},"tally":{"boss":{...},"wolf":{...}},
+ "memory":{"fights":2,"boss_wins":1,"wolf_wins":0,"boss":{...},"wolf":{...},"habits":{...},
+           "trend":{"defl":[100,100,80],"guard":[0,0,10],"hits":[0,1,2],"hp":[0,7,12],"kill_s":[38,31,null],"now":[67,1]}}}
 ```
 
+`why` is the checkpoint that made the request (`start`, `half_hp`, `mark_lost`, `punished_twice`, `deflected_thrice`); it is left out in the other modes.
 `memory` counts the earlier fights (`fights`, `boss_wins`, `wolf_wins`; the rest were unfinished) and sums the counts and habits over every fight, this one included.
-The whole request is kept within 1200 bytes of compact JSON (`REQUEST_BUDGET`): `BrainRequest::fit` drops the least telling entries (fewest samples) until it fits, in this order, each map down to 4, 3, 2, 1 and 0 entries: `memory.boss`, `memory.wolf`, the habits' `punish_s`, `vs` and `after`, then `tally.wolf` and `tally.boss`; last the single habit values and the memory itself.
-Measured (`requests_fit_the_budget`, `memory_survives_a_death_and_a_new_session`): a typical request with one or two earlier fights is 750 to 940 bytes and needs no trimming; a worst case (123 fights, every soldier action and habit filled, the widest observation) is 2818 bytes before and 1172 after, keeping two entries per map and every single value.
+`memory.trend` is Wolf's play over the last 3 finished fights, oldest first (see "The score to beat"): perfect-deflect percent (`defl`), guard percent, hits the boss landed, his HP lost in percent of max, and seconds he took to kill the boss (`null`: the boss won); `now` is this fight so far, `[deflect percent, hits landed]`.
+The whole request is kept within 1400 bytes of compact JSON (`REQUEST_BUDGET`): `BrainRequest::fit` drops the least telling entries (fewest samples) until it fits, in this order, each map down to 4, 3, 2, 1 and 0 entries: `memory.boss`, `memory.wolf`, the habits' `punish_s`, `vs` and `after`, then `tally.wolf` and `tally.boss`; last the single habit values, the older fights of the trend and the memory itself.
+Measured (`the_request_with_a_trend_and_tactics_stays_under_the_budget`, `requests_fit_the_budget`, `memory_survives_a_death_and_a_new_session`): a typical request with one or two earlier fights is 760 to 970 bytes and needs no trimming; a worst case (123 fights, every soldier action, five tactics and every habit filled, ten recorded fights, the widest observation) is 2829 bytes before and 1392 after, keeping the trend and the habits' single values.
+`BrainRequest::excluded` (the plans repelled three times in a row) is not part of the input: the Responses request leaves them out of its choices.
 
 ## Timing model
 
 Per duel step (`BrainDriver`):
 
 1. Poll the controller.
-   A plan that arrives is checked against the action list and handed to the act hook, where it waits for the next slot.
+   An answer is a plan set (one plan is a set of one).
+   The driver samples the next plan from it (see "Choosing plans"), checks it against the table and hands it to the act hook, where it waits for the next slot.
 2. The Lua AI thinks.
    At a slot the waiting plan is queued, unless the moment is a reaction (then it keeps waiting); with no plan waiting, the Lua AI's own pick runs.
-3. After any slot the next request goes out at once, so the controller thinks while the current act runs.
-   At most one request is in flight; a new one is sent only when nothing is in flight and no plan is waiting.
-4. After the step, action changes and hits feed the tally and the habits; a death ends the fight, a respawn starts the next.
+3. A request goes out according to the **request mode** (`BrainDriver::mode`, `SEKIRO_BRAIN_MODE`).
+   At most one is in flight, and an event that arrives while one is out waits for it:
+   - `slot` (the default for `scripted` and other brains; today's behaviour): after any slot, so the controller thinks while the current act runs. The answer is used for one plan.
+   - `plan_end`: when the last step of the running plan starts, so a fresh answer is ready as the plan ends; also at slots where the Lua AI acted. The answer is used for one plan.
+   - `checkpoints` (the default for hosted brains): only at events, each at most once per fight, except a lost mark. `start` (the fight begins or restarts), `half_hp` (the boss at half HP), `mark_lost` (he loses a deathblow mark: a phase change; once per mark), `punished_twice` (Wolf lands two hits in a row on him without his landing one), `deflected_thrice` (Wolf deflects three of his hits in a row). Between requests the boss keeps cycling through the last answer: its plan set stays and a plan is sampled from it at every slot, so a fight takes 1 to 5 requests (`a_checkpoints_fight_makes_only_a_handful_of_requests`: the soldier ran 4 plans and the Owl 24 on the one `start` request each; `checkpoint_events_ask_once_each` covers the others).
+4. After the step, action changes and hits feed the tally, the habits and the metrics; a death ends the fight, a respawn starts the next.
 
-A plan whose observation is older than `max_staleness` (6 s) when it would run is dropped and a fresh request goes out.
-A 3-action plan with an approach can take 5 s, so the observation behind the next plan is naturally one act old.
-A controller that answers `None` leaves the next act to the Lua AI.
+A single-shot plan (`slot`, `plan_end`) whose answer is older than `max_staleness` (6 s) when it would run is dropped and a fresh request goes out; a set's plan is picked when its slot nears, so it does not go stale.
+A reply that is `lua`, a failure or a timeout leaves the act to the Lua AI; in `checkpoints` nothing is retried until the next event.
+Before the first answer arrives (the start request takes a fraction of a second), his own AI acts (`lua_acts_while_no_answer_comes_in_checkpoints_mode`).
+A reply to a request of an earlier fight is dropped.
 
 `ScriptedBrain` models its latency on the fight clock, so tests are deterministic: with a 4 s delay (longer than his acts) most slots fall back to the Lua AI, and the Owl is never idle longer than his own AI makes him (`slow_brain_falls_back_to_his_lua_ai_without_freezing`); a controller that never answers leaves every act to the soldier's AI (`lua_picks_when_no_answer_comes`).
+
+## Choosing plans
+
+The driver samples every plan locally, from the controller's plan set, so variety does not need network calls (`brain/sampler.rs`).
+A Decisions answer lists a probability for each choice; the set is those probabilities (values that are not a valid plan are dropped, `lua` stays as the option to leave the act to his AI).
+Each act, one plan is drawn with weight
+
+`probability ^ (1 / temperature) * 0.5 ^ streak * 1.5 if untried`
+
+- `temperature` is `BrainDriver::temperature` (`SEKIRO_BRAIN_TEMPERATURE`, default 1.0; below 1 sharpens, above flattens, 0 or less always takes the heaviest).
+- `streak` sums over the plan's steps how many times in a row this fight that step was *repelled*: an attack was deflected or guarded and never landed (a landed hit, or any other end, resets it); a tactic was repelled when Wolf hit him during it. Keys are action ids and tactic tokens, counted per fight.
+- *untried*: the plan's text was not run yet this fight.
+- The generator is a seeded xorshift (`SEKIRO_BRAIN_SEED`, `BrainDriver::seed`), so tests are deterministic.
+- A set of one (the Responses backend, or an answer without probabilities) is not sampled: it is dropped for the Lua AI's act once any of its steps was repelled 3 times in a row. The Responses request also leaves such plans out of its choices (`BrainRequest::excluded`), so the model picks another; its answer stays the argmax.
+
+Tests: `sampling_follows_the_probabilities_and_is_seeded`, `repeated_deflects_push_an_option_down_and_untried_ones_get_chosen`.
+
+## The score to beat
+
+Per fight (from its start or a respawn until a death) the driver computes how well Wolf did, as numbers the controller is asked to make worse (`brain/metrics.rs`):
+
+| Metric | Meaning |
+|---|---|
+| `deflected`, `guarded`, `hits_taken` | How each of the boss's hits on Wolf was resolved: a deflect, a guard that was not a deflect, an unguarded hit that landed |
+| perfect-deflect rate | `deflected / (deflected + guarded + hits_taken)` |
+| guard rate | `guarded` over the same total |
+| `hp_lost` | The boss's damage to Wolf as a fraction of his max HP, summed over drops (healing does not take it back) |
+| `posture_gained` | His posture damage to Wolf as a fraction of the bar, summed over rises |
+| `punishes` | The boss's actions (attacks and tactics) Wolf hit during or within a second after them (the tally's `punished`) |
+| `kill_time` | Seconds Wolf took to kill the boss, when he did |
+
+The last 10 fights are kept in the memory file (`history`, below) with the choices made, so the Lua baseline and a model can be compared by reading two files.
+Every request carries the trend of the last 3 fights and this fight so far, and the instructions tell the controller its goal: lower Wolf's deflect and guard rates, land more hits, survive longer; probe with untried options, drop what keeps being deflected or guarded, bait his habits.
+The same metrics are computed and saved when the Lua brain fights (`--brain lua --brain-memory on`, file `<chr>.lua.json`; `a_fight_summary_and_the_baseline_are_saved_with_the_metrics`).
+
+At the end of each fight the driver prints one line to the console and writes the same record to the log (`fight_summary`):
+
+```
+fight over: boss won in 38.2s (decisions/checkpoints); 14 plans, 3 lua acts, 3 requests [walk_in4>3013x4 hold2>3002x3 ...]; wolf deflect 62% guard 8% hits taken 4 hp lost 61% posture 35% punishes 2; tokens 2310/9; latency p50 420 ms p90 610 ms
+```
+
+(winner, duration, brain and mode, plans run and Lua acts, requests, the six most run choices, Wolf's metrics, tokens and the request-to-answer latency in fight time.)
 
 ## The log
 
@@ -277,14 +367,17 @@ With `--brain-log`, one file per session: `cache/brain_logs/<unix ms>-<chr>-<bra
 
 | `ev` | Fields |
 |---|---|
-| `start` | `brain`, `chr`, `max_plan`, `actions` (id and label) |
-| `request` | `t`, `request` (`id`, `obs`, `tally`, `memory`): exactly what the controller saw |
-| `reply` | `t`, `id`, `plan` (or `null`), `latency` |
-| `slot` | `t`, `by` (`plan`, `lua`, `reflex`), `plan` |
-| `outcome` | `t`, `side`, `key`, `start`, `end`, `hit`, `blocked`, `deflected`, `punished`, `whiffed` |
-| `fight_end` | `t`, `winner` (`boss`, `wolf`, `none`), `fights` (in the memory now) |
+| `start` | `brain`, `mode`, `chr`, `max_plan`, `choices` (value and label of every offered plan) |
+| `request` | `t`, `request` (`id`, `why`, `obs`, `tally`, `memory`): exactly what the controller saw |
+| `reply` | `t`, `id`, `plan` (the best choice, or `null`), `options` (size of the plan set), `latency` |
+| `slot` | `t`, `by` (`plan`, `lua`, `reflex`), `plan` (text form) |
+| `outcome` | `t`, `side`, `key` (an action id, a tactic token or a Wolf attack), `start`, `end`, `hit`, `blocked`, `deflected`, `punished`, `whiffed` |
+| `fight_end` | `t`, `winner` (`boss`, `wolf`, `none`), `fights` (in the memory now), `summary` (the console line) |
+| `fight_summary` | `t`, `record` (the fight's record: metrics, choices histogram, tokens, latency p50 and p90) |
 | `fight_start` | `t` (after a respawn) |
-| `stale`, `invalid`, `late` | `t`, `id` (and `error` for `invalid`) |
+| `stale`, `invalid`, `late` | `t`, `id` or `plan` (and `error` for `invalid`) |
+
+After `fight_end` and `fight_summary` nothing is logged (no request, reply, slot or outcome) until `fight_start`: once a fighter is dead there is nothing to decide, and the boss's idle moves are not recorded (test `nothing_is_requested_or_logged_once_a_fighter_is_dead`).
 
 Requests and replies are enough to replay a controller's decisions offline; the slots and outcomes show what each decision led to.
 
@@ -296,13 +389,15 @@ Implement `brain::BossBrain`:
 pub trait BossBrain {
     fn name(&self) -> &'static str;
     fn plans(&self) -> bool { true }
+    fn default_mode(&self) -> RequestMode { RequestMode::Slot } // hosted brains: Checkpoints
+    fn usage(&self) -> (u64, u64) { (0, 0) }                    // tokens in and out, for the fight summary
     fn submit(&mut self, request: &BrainRequest);
     fn poll(&mut self, now: f32) -> Option<BrainReply>;
 }
 ```
 
 - `submit` must not block; `poll` returns the answer to the request in flight once it is ready (with the request's `id`).
-- A controller that needs time (a network call) owns a worker thread: `submit` sends the serialized request down a `std::sync::mpsc` channel, the worker does the call and sends back `(id, Option<Plan>)`, and `poll` does `try_recv`.
+- A controller that needs time (a network call) owns a worker thread: `submit` sends the serialized request down a `std::sync::mpsc` channel, the worker does the call and sends back a `BrainReply` (`id`, the best `plan`, and optionally the whole weighted plan `set`), and `poll` does `try_recv`.
   The duel is not `Send` (the script VMs use `Rc`), but the controller's channel ends are, so the worker never touches the simulation.
 - Add it to `BrainKind` and its `by_name` / `build(chr)` so `--brain <name>` picks it.
 
@@ -315,7 +410,9 @@ The game CLI builds a boxed `BossBrain` directly (`sekiro_brain_net::from_cli(na
 Only the worker sends HTTP: `submit` serializes compact request JSON and uses an unbounded channel, while `poll` uses `try_recv` and returns the original request id.
 One rustls `ureq` agent and its connection pool live for the fight.
 Redirects and environment proxies are disabled.
-The global per-request deadline defaults to 1.5 s and covers connection setup, headers and the response body.
+The global per-request deadline defaults to 3 s (it was 1.5 s while every act waited for an answer; at checkpoints a late answer only delays the plan set, and the larger request, about 6 KB of instructions and 4 KB of choice descriptions plus the input, and the first TLS handshake make 1.5 s tight) and covers connection setup, headers and the response body; the live latency of the model is not verified.
+When the worker starts it warms the route (`HostedConfig::warm_up`, on by default): it resolves the host and opens a TCP connection to it, then closes it, sending nothing, so no API request is made and the first decision skips the DNS lookup.
+ureq 3 has no public way to pool a connection it did not open itself, so the TLS handshake still happens on the first real request.
 On drop, the channel closes, queued work is discarded, and the worker finishes its in-flight call under that deadline before joining.
 
 ### Flags and configuration
@@ -346,14 +443,16 @@ The default model is `gpt-6-luna` for both backends.
 
 Sources: [Decisions create reference](https://developers.openai.com/api/reference/resources/decisions/methods/create), [Decisions guide](https://developers.openai.com/api/docs/guides/decisions), and [Responses create reference](https://developers.openai.com/api/reference/resources/responses/methods/create).
 Decisions uses text `input` and a `questions` array; a choice question has 2 to 255 unique `choices[].value` values with optional descriptions.
-Its response contains `model`, `answers` and `usage`; the named answer has type `choice` with a `choice` value, or type `refusal`.
+Its response contains `model`, `answers` and `usage`; the named answer has type `choice` with a `choice` value and `probabilities` (one `{value, probability}` for every choice, plus a `confidence`), or type `refusal`.
+The client keeps the probabilities as the plan set the driver samples from (`plan_set` in `protocol.rs`; values that are not a valid plan are dropped); the guide documents no temperature or log-probability option, so the temperature is applied locally to the probabilities.
 Responses structured output is under `text.format`; its assistant message content contains `output_text` or `refusal` parts.
 Both backends extract `usage.input_tokens` and `usage.output_tokens` when supplied, including usage on failed answers.
 The docs establish these field names; account access and this model's acceptance of `none`, strict structured output, and a 16-token cap on Responses have not been live-verified.
 
-Both requests use the same instructions, action ids and labels from the enemy's `BossActions`, his named combos (`3000+3001+3002` for the Owl; `3000+3001` and `3005+3007` for the soldier), and `lua` to leave an act to his own AI.
-The instructions name the enemy (`BossActions::name`), explain the input in two sentences (the observation, this fight's tally arrays, and the memory of every fight with Wolf's habits) and invite baiting and punishing his habits.
-Below are the complete request bodies for the Owl with placeholder observation, tally and memory objects; actual `input` contains the compact serialization of `BrainRequest`.
+Both requests use the same instructions and choices from the enemy's `BossActions::choices()` (his actions, named combos, the fifteen tactics and his curated chains, see "The choice list"), and `lua` to leave an act to his own AI.
+The instructions name the enemy (`BossActions::name`), state the goal (make Wolf play worse: fewer perfect deflects and guards, more hits on him, a slower kill), tell the model to probe untried options, drop what keeps being deflected or guarded and bait habits, explain the input (observation, this fight's tally arrays, memory with the trend, `why`), say it is asked only a few times a fight and that the boss samples from its probabilities all fight (so spread them), and list every choice with its description.
+Below are the complete request bodies for a tiny example boss (one attack, a back step, two tactics and one chain; the doc test builds it from the real request builder, `DOC_BOSS` in `protocol.rs`); a real boss lists 73 or 75 choices.
+Actual `input` contains the compact serialization of `BrainRequest`.
 Bodies are emitted as compact JSON; indentation here is for reading.
 
 ### Decisions request
@@ -362,103 +461,39 @@ Bodies are emitted as compact JSON; indentation here is for reading.
 
 ```json
 {
-  "model": "gpt-6-luna",
   "input": "{\"id\":1,\"obs\":{},\"tally\":{},\"memory\":{}}",
+  "model": "gpt-6-luna",
   "questions": [
     {
-      "type": "choice",
-      "name": "boss_action",
-      "instructions": "You are the Great Shinobi Owl fighting Wolf. Pick your next action. Input: obs is a fair view of both fighters; tally counts this fight per action as [n, hit, blocked, deflected, whiffed, punished]; memory holds every fight so far (earlier fights and wins, the same counts, and Wolf's habits: his attack distance, time at each range, what he does after deflects, guards and your back steps, how he answers and how fast he punishes each of your actions). Bait his habits and punish them. Reflexes (guarding, deflecting, counters and reactions) are automatic. Choose lua to leave this act to your own AI. Actions:\n3000: kesa slash, combo opener\n3001: second slash\n3002: third slash, combo finisher\n3003: jumping forward roll, slash down\n3005: front kick (posture only)\n3009: shuriken\n3010: firecrackers scattered in front (unblockable bangs)\n3011: rushing slash\n3014: second shuriken\n3015: rushing slash curving left\n3017: explosive slash (fire)\n3018: shuriken then dash slash\n3030: poison balls, three rows of poison floor (phase 2)\n3031: recovery-sealing throw\n3032: recovery-sealing throw follow-up\n3063: rushing follow-up, two hits\n3069: smoke screen (blinds, breaks lock-on)\n5201: back step\n5202: side step (his act picks it with Wolf on his right)\n5203: side step (his act picks it with Wolf on his left)\n3000+3001+3002: three-slash combo",
       "choices": [
         {
-          "value": "3000",
-          "description": "kesa slash, combo opener"
+          "description": "front kick",
+          "value": "3005"
         },
         {
-          "value": "3001",
-          "description": "second slash"
+          "description": "back step",
+          "value": "5201"
         },
         {
-          "value": "3002",
-          "description": "third slash, combo finisher"
+          "description": "stand still facing Wolf for 2 s",
+          "value": "hold2"
         },
         {
-          "value": "3003",
-          "description": "jumping forward roll, slash down"
+          "description": "walk slowly toward Wolf until 4 m away",
+          "value": "walk_in4"
         },
         {
-          "value": "3005",
-          "description": "front kick (posture only)"
+          "description": "walk slowly toward Wolf until 4 m away, then front kick",
+          "value": "walk_in4>3005"
         },
         {
-          "value": "3009",
-          "description": "shuriken"
-        },
-        {
-          "value": "3010",
-          "description": "firecrackers scattered in front (unblockable bangs)"
-        },
-        {
-          "value": "3011",
-          "description": "rushing slash"
-        },
-        {
-          "value": "3014",
-          "description": "second shuriken"
-        },
-        {
-          "value": "3015",
-          "description": "rushing slash curving left"
-        },
-        {
-          "value": "3017",
-          "description": "explosive slash (fire)"
-        },
-        {
-          "value": "3018",
-          "description": "shuriken then dash slash"
-        },
-        {
-          "value": "3030",
-          "description": "poison balls, three rows of poison floor (phase 2)"
-        },
-        {
-          "value": "3031",
-          "description": "recovery-sealing throw"
-        },
-        {
-          "value": "3032",
-          "description": "recovery-sealing throw follow-up"
-        },
-        {
-          "value": "3063",
-          "description": "rushing follow-up, two hits"
-        },
-        {
-          "value": "3069",
-          "description": "smoke screen (blinds, breaks lock-on)"
-        },
-        {
-          "value": "5201",
-          "description": "back step"
-        },
-        {
-          "value": "5202",
-          "description": "side step (his act picks it with Wolf on his right)"
-        },
-        {
-          "value": "5203",
-          "description": "side step (his act picks it with Wolf on his left)"
-        },
-        {
-          "value": "3000+3001+3002",
-          "description": "three-slash combo"
-        },
-        {
-          "value": "lua",
-          "description": "leave it to his own AI"
+          "description": "leave it to his own AI",
+          "value": "lua"
         }
-      ]
+      ],
+      "instructions": "You are a doc example boss fighting Wolf. Your goal: make Wolf play worse. Wolf's score is his perfect-deflect rate, his guard rate, the hits you land on him, his damage and posture taken and how fast he kills you; you win by lowering his deflects and guards, landing more hits and surviving longer. Probe instead of repeating: try untried options, drop what keeps being deflected or guarded, bait his habits (stand still, walk in slowly, strafe, back off, run away so he chases, mix timings) and punish them. Input: obs is a fair view of both fighters (plan is what runs now); tally counts this fight per action or tactic as [n, hit, blocked, deflected, whiffed, punished]; memory holds every fight so far (the same counts, Wolf's habits, and trend: his deflect%, guard%, hits you landed, hp% lost and kill seconds over the last fights, now = this fight so far); why is what triggered this question. You are asked only a few times a fight. The boss samples from your probabilities all fight, so spread them over several good options. Reflexes (guarding, deflecting, counters and reactions) are automatic. Choose lua to leave an act to your own AI. Options are single actions, movement tactics (distances from Wolf, left and right are yours) and plans of up to 3 steps joined with > (consecutive attacks joined with +):\n3005: front kick\n5201: back step\nhold2: stand still facing Wolf for 2 s\nwalk_in4: walk slowly toward Wolf until 4 m away\nwalk_in4>3005: walk slowly toward Wolf until 4 m away, then front kick",
+      "name": "boss_action",
+      "type": "choice"
     }
   ]
 }
@@ -466,6 +501,7 @@ Bodies are emitted as compact JSON; indentation here is for reading.
 
 The client reads the one answer named `boss_action` and accepts `answers[0].choice`, such as `"3005"`.
 A typed refusal is a failure, rather than an intentional `lua` choice.
+The reply carries the chosen plan and the whole set (`BrainReply::set`, from `answers[0].probabilities`).
 
 ### Responses request
 
@@ -473,67 +509,52 @@ A typed refusal is a failure, rather than an intentional `lua` choice.
 
 ```json
 {
+  "input": [
+    {
+      "content": "{\"id\":1,\"obs\":{},\"tally\":{},\"memory\":{}}",
+      "role": "user"
+    }
+  ],
+  "instructions": "You are a doc example boss fighting Wolf. Your goal: make Wolf play worse. Wolf's score is his perfect-deflect rate, his guard rate, the hits you land on him, his damage and posture taken and how fast he kills you; you win by lowering his deflects and guards, landing more hits and surviving longer. Probe instead of repeating: try untried options, drop what keeps being deflected or guarded, bait his habits (stand still, walk in slowly, strafe, back off, run away so he chases, mix timings) and punish them. Input: obs is a fair view of both fighters (plan is what runs now); tally counts this fight per action or tactic as [n, hit, blocked, deflected, whiffed, punished]; memory holds every fight so far (the same counts, Wolf's habits, and trend: his deflect%, guard%, hits you landed, hp% lost and kill seconds over the last fights, now = this fight so far); why is what triggered this question. You are asked only a few times a fight. The boss samples from your probabilities all fight, so spread them over several good options. Reflexes (guarding, deflecting, counters and reactions) are automatic. Choose lua to leave an act to your own AI. Options are single actions, movement tactics (distances from Wolf, left and right are yours) and plans of up to 3 steps joined with > (consecutive attacks joined with +):\n3005: front kick\n5201: back step\nhold2: stand still facing Wolf for 2 s\nwalk_in4: walk slowly toward Wolf until 4 m away\nwalk_in4>3005: walk slowly toward Wolf until 4 m away, then front kick",
+  "max_output_tokens": 16,
   "model": "gpt-6-luna",
   "reasoning": {
     "effort": "none"
   },
-  "instructions": "You are the Great Shinobi Owl fighting Wolf. Pick your next action. Input: obs is a fair view of both fighters; tally counts this fight per action as [n, hit, blocked, deflected, whiffed, punished]; memory holds every fight so far (earlier fights and wins, the same counts, and Wolf's habits: his attack distance, time at each range, what he does after deflects, guards and your back steps, how he answers and how fast he punishes each of your actions). Bait his habits and punish them. Reflexes (guarding, deflecting, counters and reactions) are automatic. Choose lua to leave this act to your own AI. Actions:\n3000: kesa slash, combo opener\n3001: second slash\n3002: third slash, combo finisher\n3003: jumping forward roll, slash down\n3005: front kick (posture only)\n3009: shuriken\n3010: firecrackers scattered in front (unblockable bangs)\n3011: rushing slash\n3014: second shuriken\n3015: rushing slash curving left\n3017: explosive slash (fire)\n3018: shuriken then dash slash\n3030: poison balls, three rows of poison floor (phase 2)\n3031: recovery-sealing throw\n3032: recovery-sealing throw follow-up\n3063: rushing follow-up, two hits\n3069: smoke screen (blinds, breaks lock-on)\n5201: back step\n5202: side step (his act picks it with Wolf on his right)\n5203: side step (his act picks it with Wolf on his left)\n3000+3001+3002: three-slash combo",
-  "input": [
-    {
-      "role": "user",
-      "content": "{\"id\":1,\"obs\":{},\"tally\":{},\"memory\":{}}"
-    }
-  ],
+  "store": false,
   "text": {
     "format": {
-      "type": "json_schema",
       "name": "boss_action",
-      "strict": true,
       "schema": {
-        "type": "object",
+        "additionalProperties": false,
         "properties": {
           "action": {
-            "type": "string",
             "enum": [
-              "3000",
-              "3001",
-              "3002",
-              "3003",
               "3005",
-              "3009",
-              "3010",
-              "3011",
-              "3014",
-              "3015",
-              "3017",
-              "3018",
-              "3030",
-              "3031",
-              "3032",
-              "3063",
-              "3069",
               "5201",
-              "5202",
-              "5203",
-              "3000+3001+3002",
+              "hold2",
+              "walk_in4",
+              "walk_in4>3005",
               "lua"
-            ]
+            ],
+            "type": "string"
           }
         },
         "required": [
           "action"
         ],
-        "additionalProperties": false
-      }
+        "type": "object"
+      },
+      "strict": true,
+      "type": "json_schema"
     }
-  },
-  "max_output_tokens": 16,
-  "store": false
+  }
 }
 ```
 
 The client requires a completed response with one assistant output text object, such as `{"action":"3000+3001+3002"}`.
-Every numeric component is checked against the boss action table, and plans longer than `max_plan` are refused.
+Every step is checked against the boss's table (actions and tactic tokens), and plans longer than `max_plan` are refused.
+The Responses request leaves out the plans the driver says were repelled three times in a row this fight (`BrainRequest::excluded`); the answer is a single plan with no probabilities.
 `lua` returns `plan: None` and counts as answered.
 Timeouts, HTTP failures, transport failures, refusals, malformed JSON, incomplete responses, invalid answers and invalid actions return `plan: None` and count by failure reason.
 An unknown value is never copied into diagnostics or logs.
@@ -559,8 +580,9 @@ Log write failures stop further logging and increment `log_errors` without disca
 
 All HTTP tests bind a mock to `127.0.0.1:0` and supply a fake key.
 They check both request bodies, action labels, ids, combo parsing, Lua answers, refusals, HTTP 429/500, malformed JSON, unknown ids, incomplete/invalid answers, usage totals, timing, redaction, nonblocking submit and bounded drop.
-Two sequential Decisions requests are checked to reuse exactly one accepted TCP connection.
-A unit test compares both complete request examples above against the actual request builder.
+Two sequential Decisions requests are checked to reuse exactly one accepted TCP connection (with the warm-up off; `warm_up_connects_without_sending_anything` checks the warm-up connects and sends zero bytes).
+A Decisions answer with `probabilities` becomes the reply's plan set (`a_decisions_answer_carries_its_probabilities_as_a_plan_set`), and a Responses request leaves out the plans the driver excluded (`a_responses_request_leaves_out_what_was_repelled_and_has_no_set`).
+A unit test compares both complete request examples above against the actual request builder (for the small example boss).
 Credential-source tests use in-memory dotenv text and never read the real environment key or `.env`.
 
 ## Inferred and ours
@@ -572,4 +594,7 @@ Credential-source tests use in-memory dotenv text and never read the real enviro
 - `staggered` from the behaviour state group name, and Wolf's attacks from TAE flag 63, are ours.
 - The soldier's reflex acts (Act23, Act25, Act27) are our reading of `101000_battle.lua`: they are the acts his script weighs only as reactions, before any distance band.
 - The habit rules (the windows, the range bands, `back` at 1.5 m, the state-name rules for dodges, jumps and heals, the first hit of an exchange as its answer) are ours.
-- A fight ends when the duel schedules its respawn; an unfinished fight (the game closed) counts as a fight with no winner.
+- A fight ends when the duel schedules its respawn; an unfinished fight (the game closed) counts as a fight with no winner and no `history` record.
+- The tactic distances, caps and speeds, the checkpoint events, the sampling weights (0.5 per repelled exchange in a row, 1.5 for untried, exclusion at 3), what counts as a repelled tactic, and the metric definitions are ours.
+- Move levels: a plan walks at 0.5 and runs at 1.0, as the AI runtime does for his acts (the NPC script runs above 0.75); the soldier covers only about 1 m/s over a short run, so `run_in3` from 9 m does not reach 3 m within its cap.
+- The warm-up opens a TCP connection only; the TLS handshake cost is not removed.

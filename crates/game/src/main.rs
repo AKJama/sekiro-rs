@@ -133,9 +133,10 @@ fn main() -> anyhow::Result<()> {
             )
             .map_err(|e| anyhow::anyhow!("--brain: {e}"))?,
             brain_log: args.iter().any(|a| a == "--brain-log"),
-            brain_memory: sekiro_sim::brain::memory::resolve(
+            brain_memory: sekiro_sim::brain::memory::resolve_for(
                 arg_value(&args, "--brain-memory").as_deref(),
                 &opponent.chr,
+                &brain_name.to_ascii_lowercase(),
                 sekiro_brain_net::is_hosted(&brain_name),
             ),
             opponent,

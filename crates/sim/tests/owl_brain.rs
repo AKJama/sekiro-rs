@@ -105,7 +105,7 @@ fn owl_performs_the_planned_actions_in_order() {
         if driver.history.len() > seen {
             seen = driver.history.len();
             runs.push(Vec::new());
-            let obs = observe(&duel, driver.time, [None, Some(1.0)], &plan);
+            let obs = observe(&duel, driver.time, [None, Some(1.0)], "3000+3001+3002");
             largest_obs = largest_obs.max(serde_json::to_string(&obs).unwrap().len());
         }
         let acted = actions(&mut duel);

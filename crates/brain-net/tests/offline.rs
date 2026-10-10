@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 
 use sekiro_brain_net::{ApiKey, Backend, ConfigError, Failure, HostedBrain, HostedConfig};
 use sekiro_sim::brain::{
-    BossBrain, BrainReply, BrainRequest, Memory, OWL, Observation, SOLDIER, TallySummary,
+    BossBrain, BrainReply, BrainRequest, Memory, OWL, Observation, RequestMode, SOLDIER,
+    TallySummary,
 };
 use serde_json::{Value, json};
 
@@ -161,6 +162,8 @@ impl Mock {
     fn config(&self, backend: Backend) -> HostedConfig {
         let mut config = HostedConfig::new(backend, ApiKey::new(KEY));
         config.base_url = self.base.clone();
+        // Tests count accepted connections; the warm-up has a test of its own.
+        config.warm_up = false;
         config
     }
 
@@ -175,6 +178,7 @@ fn request(id: u64) -> BrainRequest {
         obs: Observation::default(),
         tally: TallySummary::default(),
         memory: None,
+        ..BrainRequest::default()
     }
 }
 
@@ -203,9 +207,21 @@ fn responses(value: &str) -> Value {
 }
 
 fn check_vocabulary(values: &[String]) {
-    let mut expected: Vec<_> = OWL.actions.iter().map(|a| a.id.to_string()).collect();
-    expected.extend(["3000+3001+3002".into(), "lua".into()]);
+    // His actions, his combo, the tactics and his curated chains, then `lua`.
+    let mut expected: Vec<_> = OWL.choices().into_iter().map(|c| c.value).collect();
+    expected.push("lua".into());
     assert_eq!(values, expected);
+    assert!(values.len() <= 255);
+    for want in [
+        "3005",
+        "3000+3001+3002",
+        "hold2",
+        "walk_in4",
+        "retreat12",
+        "walk_in4>3005",
+    ] {
+        assert!(values.iter().any(|v| v == want), "{want}");
+    }
 }
 
 #[test]
@@ -236,7 +252,7 @@ fn decisions_happy_path_lua_usage_log_and_keep_alive() {
     brain.submit(&request(41));
     let reply = poll(&mut brain);
     assert_eq!(reply.id, 41);
-    assert_eq!(reply.plan.unwrap().actions, [3005]);
+    assert_eq!(reply.plan.unwrap().actions(), [3005]);
     assert!(brain.poll(0.0).is_none());
     brain.submit(&request(42));
     let reply = poll(&mut brain);
@@ -319,7 +335,7 @@ fn responses_happy_path_combo_and_exact_schema() {
     brain.submit(&request(9));
     let reply = poll(&mut brain);
     assert_eq!(reply.id, 9);
-    assert_eq!(reply.plan.unwrap().actions, [3000, 3001, 3002]);
+    assert_eq!(reply.plan.unwrap().actions(), [3000, 3001, 3002]);
     mock.finish();
     let body = mock.requests.recv().unwrap();
     assert_eq!(body["model"], "test-model-override");
@@ -590,7 +606,7 @@ fn the_soldier_plays_his_own_combos_and_sends_his_memory() {
     brain.submit(&req);
     let reply = poll(&mut brain);
     assert_eq!(reply.id, 7);
-    assert_eq!(reply.plan.unwrap().actions, [3005, 3007]);
+    assert_eq!(reply.plan.unwrap().actions(), [3005, 3007]);
     let body = mock.requests.recv().unwrap();
     let input = body["input"].as_str().unwrap();
     assert!(
@@ -607,4 +623,86 @@ fn the_soldier_plays_his_own_combos_and_sends_his_memory() {
     );
     drop(brain);
     mock.finish();
+}
+
+#[test]
+fn a_decisions_answer_carries_its_probabilities_as_a_plan_set() {
+    let body = json!({"model": "gpt-6-luna", "answers": [{"name": "boss_action", "type": "choice",
+        "choice": "3005", "confidence": 0.5, "probabilities": [
+            {"value": "3005", "probability": 0.5},
+            {"value": "walk_in4>3005", "probability": 0.25},
+            {"value": "hold2", "probability": 0.15},
+            {"value": "lua", "probability": 0.08},
+            {"value": "9999", "probability": 0.02}]}],
+        "usage": {"input_tokens": 700, "output_tokens": 3}});
+    let mut mock = Mock::new(Backend::Decisions, vec![Response::json(body)]);
+    let mut brain = HostedBrain::new(mock.config(Backend::Decisions), &OWL).unwrap();
+    assert_eq!(brain.default_mode(), RequestMode::Checkpoints);
+    brain.submit(&request(7));
+    let reply = poll(&mut brain);
+    mock.finish();
+    assert_eq!(reply.plan.as_ref().unwrap().actions(), [3005]);
+    let set: Vec<_> = reply
+        .set
+        .iter()
+        .map(|w| (w.plan.as_ref().map(|p| p.value()), w.weight))
+        .collect();
+    // The unknown value is dropped; `lua` is an option that leaves the act to his AI.
+    assert_eq!(
+        set,
+        [
+            (Some("3005".to_string()), 0.5),
+            (Some("walk_in4>3005".to_string()), 0.25),
+            (Some("hold2".to_string()), 0.15),
+            (None, 0.08),
+        ]
+    );
+    assert_eq!(brain.usage(), (700, 3));
+}
+
+#[test]
+fn a_responses_request_leaves_out_what_was_repelled_and_has_no_set() {
+    let mut mock = Mock::new(Backend::Responses, vec![Response::json(responses("3005"))]);
+    let mut brain = HostedBrain::new(mock.config(Backend::Responses), &OWL).unwrap();
+    let mut req = request(3);
+    req.excluded = vec!["3003".into(), "walk_in4>3005".into()];
+    brain.submit(&req);
+    let reply = poll(&mut brain);
+    let body = mock.requests.recv().unwrap();
+    mock.finish();
+    let values = body["text"]["format"]["schema"]["properties"]["action"]["enum"]
+        .as_array()
+        .unwrap();
+    assert!(!values.iter().any(|v| v == "3003" || v == "walk_in4>3005"));
+    assert!(values.iter().any(|v| v == "3005"));
+    assert!(reply.set.is_empty(), "Responses has no probabilities");
+    assert_eq!(reply.plan.unwrap().actions(), [3005]);
+}
+
+#[test]
+fn warm_up_connects_without_sending_anything() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        listener.set_nonblocking(false).expect("blocking listener");
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut bytes = Vec::new();
+        // Reads until the client closes: an empty read means no request was ever sent.
+        let _ = stream.read_to_end(&mut bytes);
+        tx.send(bytes.len()).unwrap();
+    });
+    let mut config = HostedConfig::new(Backend::Decisions, ApiKey::new(KEY));
+    config.base_url = format!("http://{addr}");
+    assert!(config.warm_up, "on by default");
+    let brain = HostedBrain::new(config, &OWL).unwrap();
+    let sent = rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("a connection");
+    assert_eq!(sent, 0, "the warm-up sends no bytes, so no API request");
+    drop(brain);
+    server.join().unwrap();
 }

@@ -8,6 +8,7 @@
 //! `ComboFinal` (a chain), so animations, TAE cancels, combo windows and reactions go through
 //! the same goals as his own choices.
 
+use super::plan::{Plan, Step, Tactic};
 use crate::lua_ai::{ActChoice, ActGoal, NumberOnActivate};
 
 /// What kind of action an id is.
@@ -71,6 +72,12 @@ pub struct BossActions {
     /// The scripted test controller's opener, and the plan it switches to once the opener's
     /// first action has been deflected twice (`ScriptedBrain::for_actions`).
     pub scripted: [&'static [i32]; 2],
+    /// Curated two and three step plans offered to hosted controllers as single choices, in
+    /// the text form of [`Plan::value`]; tactics and attacks mixed. Each must parse (checked by
+    /// a test).
+    pub chains: &'static [&'static str],
+    /// The tactics offered as single choices (all of [`Tactic::ALL`] for both bosses).
+    pub tactics: &'static [Tactic],
 }
 
 const fn attack(id: i32, label: &'static str, approach: f32, pressure: f64) -> BossAction {
@@ -172,6 +179,47 @@ pub const OWL: BossActions = BossActions {
     back_steps: &[5201],
     // Kick (3005); after two deflected kicks, the recovery-sealing throw (3031).
     scripted: [&[3005], &[3031]],
+    tactics: &Tactic::ALL,
+    chains: &[
+        "walk_in4>3005",
+        "walk_in2.5>3005",
+        "walk_in4>3000+3001",
+        "hold2>3011",
+        "hold1>3003",
+        "hold3.5>3018",
+        "back_off6>3009",
+        "back_off9>3009",
+        "retreat12>3009",
+        "retreat12>3014",
+        "back_off9>3011",
+        "strafe_left>3000+3001",
+        "strafe_right>3000+3001",
+        "strafe_left>3005",
+        "strafe_right>3015",
+        "strafe_left>3009",
+        "walk_in2.5>3031",
+        "hold2>3031",
+        "back_off6>3010",
+        "guard1>3000+3001",
+        "guard2.5>3005",
+        "run_in3>3000+3001",
+        "run_in3>3005",
+        "keep_range>3009",
+        "keep_range>3017",
+        "retreat12>run_in3>3003",
+        "retreat12>hold2>3011",
+        "walk_in6>walk_in2.5>3005",
+        "hold2>walk_in2.5>3031",
+        "3009>back_off6",
+        "3005>back_off6",
+        "3000+3001>retreat12",
+        "3005>strafe_left",
+        "strafe_left>strafe_right>3003",
+        "back_off6>hold2>3017",
+        "walk_in4>hold1>3005",
+        "3069>retreat12",
+        "3010>back_off6",
+    ],
 };
 
 /// The Ashina soldier with a one-handed sword (c1010, NpcThinkParam 10100000, battle goal
@@ -242,6 +290,49 @@ pub const SOLDIER: BossActions = BossActions {
     back_steps: &[5201, 5211],
     // Both sweeping slashes; after two deflected openers, the kick and rising slash.
     scripted: [&[3000, 3001], &[3005, 3007]],
+    tactics: &Tactic::ALL,
+    chains: &[
+        "walk_in4>3013",
+        "walk_in2.5>3013",
+        "walk_in6>3013",
+        "hold2>3002",
+        "hold1>3002",
+        "hold3.5>3013",
+        "back_off6>3009",
+        "back_off9>3009",
+        "retreat12>3009",
+        "strafe_left>3005+3007",
+        "strafe_right>3005+3007",
+        "strafe_left>3000+3001",
+        "strafe_right>3008",
+        "walk_in4>3000+3001",
+        "walk_in2.5>3008",
+        "walk_in2.5>3014",
+        "hold2>3014",
+        "hold1>3008",
+        "guard1>3000+3001",
+        "guard2.5>3012",
+        "back_off6>3002",
+        "back_off6>3003",
+        "retreat12>run_in3>3003",
+        "retreat12>hold2>3002",
+        "run_in3>3000+3001",
+        "run_in3>3008",
+        "keep_range>3009",
+        "keep_range>3013",
+        "hold1>3003",
+        "3000+3001>back_off6",
+        "3008>back_off6",
+        "3005+3007>strafe_left",
+        "3013>back_off6",
+        "walk_in4>hold1>3013",
+        "strafe_left>strafe_right>3013",
+        "back_off6>hold2>3013",
+        "walk_in6>walk_in2.5>3008",
+        "hold2>walk_in2.5>3013",
+        "strafe_right>hold1>3008",
+        "back_off9>run_in3>3011",
+    ],
 };
 
 /// Why a plan was refused.
@@ -250,16 +341,27 @@ pub enum PlanError {
     Empty,
     TooLong(usize),
     Unknown(i32),
+    /// A token that is neither an action id nor a tactic.
+    UnknownToken(String),
 }
 
 impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PlanError::Empty => write!(f, "empty plan"),
-            PlanError::TooLong(n) => write!(f, "plan of {n} actions is too long"),
+            PlanError::TooLong(n) => write!(f, "plan of {n} steps is too long"),
             PlanError::Unknown(id) => write!(f, "unknown action {id}"),
+            PlanError::UnknownToken(_) => write!(f, "unknown step"),
         }
     }
+}
+
+/// One entry of the choice list offered to a hosted controller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Choice {
+    /// The text form of a plan (`3005`, `3000+3001`, `walk_in4>3013`).
+    pub value: String,
+    pub label: String,
 }
 
 impl BossActions {
@@ -276,27 +378,129 @@ impl BossActions {
         [&OWL, &SOLDIER].into_iter().find(|a| a.chr == chr)
     }
 
+    /// Reads a plan's text form (`walk_in4>hold2>3013`, `3000+3001`) against this table.
+    /// Every action id must be in the table and written plainly (`03000` is refused).
+    pub fn parse(&self, value: &str) -> Result<Plan, PlanError> {
+        let mut steps = Vec::new();
+        for part in value.split('>') {
+            if let Some(t) = Tactic::from_token(part) {
+                steps.push(Step::Tactic(t));
+                continue;
+            }
+            for id in part.split('+') {
+                let n: i32 = id
+                    .parse()
+                    .map_err(|_| PlanError::UnknownToken(id.to_string()))?;
+                if id != n.to_string() {
+                    return Err(PlanError::UnknownToken(id.to_string()));
+                }
+                if self.get(n).is_none() {
+                    return Err(PlanError::Unknown(n));
+                }
+                steps.push(Step::Act(n));
+            }
+        }
+        if steps.len() > self.max_plan {
+            return Err(PlanError::TooLong(steps.len()));
+        }
+        Ok(Plan::from_steps(steps))
+    }
+
+    /// A step's label for a multi-step choice: an action's label up to its first bracket or
+    /// comma, a tactic's own.
+    fn step_label(&self, step: &Step) -> String {
+        match step {
+            Step::Act(id) => self.get(*id).map_or_else(String::new, |a| {
+                a.label
+                    .split([',', '('])
+                    .next()
+                    .unwrap_or(a.label)
+                    .trim()
+                    .to_string()
+            }),
+            Step::Tactic(t) => t.label(),
+        }
+    }
+
+    /// Every choice offered to a hosted controller, without `lua`: each of his actions, his
+    /// named combos, each single tactic and his curated chains. At most 253 (the Decisions
+    /// API takes 2 to 255 values, one of which is `lua`).
+    pub fn choices(&self) -> Vec<Choice> {
+        let mut out: Vec<Choice> = self
+            .actions
+            .iter()
+            .map(|a| Choice {
+                value: a.id.to_string(),
+                label: a.label.to_string(),
+            })
+            .collect();
+        out.extend(
+            self.combos
+                .iter()
+                .filter(|c| c.ids.len() <= self.max_plan)
+                .map(|c| Choice {
+                    value: c.value(),
+                    label: c.label.to_string(),
+                }),
+        );
+        out.extend(self.tactics.iter().map(|t| Choice {
+            value: t.token(),
+            label: t.label(),
+        }));
+        out.extend(self.chains.iter().filter_map(|value| {
+            let plan = self.parse(value).ok()?;
+            let label = plan
+                .steps
+                .iter()
+                .map(|s| self.step_label(s))
+                .collect::<Vec<_>>()
+                .join(", then ");
+            Some(Choice {
+                value: (*value).to_string(),
+                label,
+            })
+        }));
+        out
+    }
+
+    /// Turns a plan of action ids into an act on the battle goal (see [`Self::act_for_plan`]).
+    pub fn act_for(&self, plan: &[i32], hit_radius: f32) -> Result<ActChoice, PlanError> {
+        self.act_for_plan(&Plan::new(plan), hit_radius)
+    }
+
     /// Turns a plan into an act on the battle goal. `hit_radius` is the boss's NpcParam
     /// `hitRadius`, which his acts subtract from every distance.
-    pub fn act_for(&self, plan: &[i32], hit_radius: f32) -> Result<ActChoice, PlanError> {
+    ///
+    /// Each run of consecutive action ids is one act: an approach when it opens with an attack
+    /// that has an approach distance, then a single attack (`AttackTunableSpin`) or a chain
+    /// (`ComboAttackTunableSpin`, `ComboRepeat`, ..., `ComboFinal`); a tactic is one native
+    /// goal, not asked to approach.
+    pub fn act_for_plan(&self, plan: &Plan, hit_radius: f32) -> Result<ActChoice, PlanError> {
         if plan.is_empty() {
             return Err(PlanError::Empty);
         }
         if plan.len() > self.max_plan {
             return Err(PlanError::TooLong(plan.len()));
         }
-        let actions = plan
-            .iter()
-            .map(|&id| self.get(id).copied().ok_or(PlanError::Unknown(id)))
-            .collect::<Result<Vec<_>, _>>()?;
-        let first = actions[0];
-        let approach = (first.kind == ActionKind::Attack && first.approach > 0.0)
-            .then(|| f64::from(first.approach - hit_radius).max(0.5));
-        let last = actions.len() - 1;
-        let goals = actions
-            .iter()
-            .enumerate()
-            .map(|(i, a)| {
+        let mut goals = Vec::new();
+        let mut i = 0;
+        while i < plan.steps.len() {
+            if let Step::Tactic(t) = plan.steps[i] {
+                goals.push(t.goal(i));
+                i += 1;
+                continue;
+            }
+            let start = i;
+            let mut run = Vec::new();
+            while let Some(Step::Act(id)) = plan.steps.get(i) {
+                run.push(self.get(*id).copied().ok_or(PlanError::Unknown(*id))?);
+                i += 1;
+            }
+            let first = run[0];
+            let approach = (first.kind == ActionKind::Attack && first.approach > 0.0)
+                .then(|| f64::from(first.approach - hit_radius).max(0.5));
+            let last = run.len() - 1;
+            for (k, a) in run.iter().enumerate() {
                 let id = f64::from(a.id);
                 // TARGET_ENE_0 = 0, AI_DIR_TYPE_B = 2 (ai_define.lua); 9999 is the scripts'
                 // "any distance" success range.
@@ -306,16 +510,16 @@ impl BossActions {
                         "GOAL_COMMON_AttackTunableSpin",
                         vec![id, 0.0, 9999.0, 0.0, 0.0, 0.0, 0.0],
                     ),
-                    ActionKind::Attack if i == 0 => (
+                    ActionKind::Attack if k == 0 => (
                         "GOAL_COMMON_ComboAttackTunableSpin",
                         vec![id, 0.0, 9999.0, 0.0, 0.0, 0.0, 0.0],
                     ),
-                    ActionKind::Attack if i == last => {
+                    ActionKind::Attack if k == last => {
                         ("GOAL_COMMON_ComboFinal", vec![id, 0.0, 9999.0, 0.0, 0.0])
                     }
                     ActionKind::Attack => ("GOAL_COMMON_ComboRepeat", vec![id, 0.0, 9999.0, 0.0]),
                 };
-                ActGoal {
+                goals.push(ActGoal {
                     goal,
                     life: if a.kind == ActionKind::Step {
                         3.0
@@ -324,9 +528,13 @@ impl BossActions {
                     },
                     params,
                     number: a.pressure,
-                }
-            })
-            .collect();
-        Ok(ActChoice { approach, goals })
+                    approach: if k == 0 { approach } else { None },
+                    timed: false,
+                    away: false,
+                    step: Some(start + k),
+                });
+            }
+        }
+        Ok(ActChoice { goals })
     }
 }

@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
-use sekiro_sim::brain::{BossActions, BossBrain, BrainReply, BrainRequest};
+use sekiro_sim::brain::{
+    BossActions, BossBrain, BrainReply, BrainRequest, Plan, RequestMode, Weighted,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -80,6 +82,7 @@ impl StatsHandle {
 struct Work {
     id: u64,
     input: Result<String, Failure>,
+    excluded: Vec<String>,
 }
 
 pub struct HostedBrain {
@@ -173,6 +176,16 @@ impl BossBrain for HostedBrain {
         self.backend.name()
     }
 
+    /// A hosted model is asked at checkpoints and its answer, a plan set, is sampled locally.
+    fn default_mode(&self) -> RequestMode {
+        RequestMode::Checkpoints
+    }
+
+    fn usage(&self) -> (u64, u64) {
+        let stats = self.stats.snapshot();
+        (stats.input_tokens, stats.output_tokens)
+    }
+
     fn submit(&mut self, request: &BrainRequest) {
         // Unbounded mpsc send never waits for the HTTP worker. No worker-held locks here.
         let input = serde_json::to_string(request).map_err(|_| Failure::Serialization);
@@ -181,6 +194,7 @@ impl BossBrain for HostedBrain {
             let _ = tx.send(Work {
                 id: request.id,
                 input,
+                excluded: request.excluded.clone(),
             });
         }
     }
@@ -221,8 +235,9 @@ fn call(
     config: &HostedConfig,
     actions: &BossActions,
     input: &str,
+    excluded: &[String],
     usage: &mut TokenUsage,
-) -> Result<(Option<sekiro_sim::brain::Plan>, String), Failure> {
+) -> Result<(Option<Plan>, Vec<Weighted>, String), Failure> {
     let url = format!(
         "{}/v1/{}",
         config.base_url.trim_end_matches('/'),
@@ -232,7 +247,7 @@ fn call(
     let mut response = agent
         .post(&url)
         .header("Authorization", authorization(&config.api_key)?)
-        .send_json(protocol::body(config, actions, input))
+        .send_json(protocol::body(config, actions, input, excluded))
         .map_err(http_failure)?;
     let raw = response
         .body_mut()
@@ -244,7 +259,32 @@ fn call(
     *usage = TokenUsage::from_response(&response);
     let value = protocol::choice(config.backend, &response)?;
     let plan = protocol::plan(&value, actions)?;
-    Ok((plan, value))
+    let set = protocol::plan_set(config.backend, &response, actions);
+    Ok((plan, set, value))
+}
+
+/// Warms the route to the host before the first decision: resolves its name and opens a TCP
+/// connection, then closes it. Nothing is sent, so no API request is made and no key leaves the
+/// machine. (ureq has no public way to pool a connection it did not open itself, so the TLS
+/// handshake still happens on the first real request; this takes the DNS lookup and the first
+/// route set-up out of it.)
+fn warm_up(base_url: &str, timeout: std::time::Duration) {
+    use std::net::ToSocketAddrs;
+    let rest = base_url.split_once("//").map_or(base_url, |(_, r)| r);
+    let authority = rest.split(['/', '?']).next().unwrap_or(rest);
+    let port = if base_url.starts_with("https://") {
+        443
+    } else {
+        80
+    };
+    let target = if authority.contains(':') {
+        authority.to_string()
+    } else {
+        format!("{authority}:{port}")
+    };
+    if let Some(addr) = target.to_socket_addrs().ok().and_then(|mut a| a.next()) {
+        let _ = std::net::TcpStream::connect_timeout(&addr, timeout);
+    }
 }
 
 fn run(
@@ -258,6 +298,9 @@ fn run(
 ) {
     // Keep one pooled rustls agent for the entire fight. Disable redirects (no credential
     // forwarding or extra provider calls) and environment proxies (loopback tests stay local).
+    if config.warm_up {
+        warm_up(&config.base_url, config.timeout);
+    }
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(config.timeout))
         .max_redirects(0)
@@ -274,11 +317,11 @@ fn run(
         let mut usage = TokenUsage::default();
         let result = work
             .input
-            .and_then(|input| call(&agent, &config, actions, &input, &mut usage));
+            .and_then(|input| call(&agent, &config, actions, &input, &work.excluded, &mut usage));
         let round_trip_ms = start.elapsed().as_secs_f64() * 1000.0;
-        let (plan, chosen, failure) = match result {
-            Ok((plan, value)) => (plan, Some(value), None),
-            Err(reason) => (None, None, Some(reason)),
+        let (plan, set, chosen, failure) = match result {
+            Ok((plan, set, value)) => (plan, set, Some(value), None),
+            Err(reason) => (None, Vec::new(), None, Some(reason)),
         };
         let line = json!({
             "id": work.id, "backend": config.backend.name(), "model": config.redact(&config.model),
@@ -308,7 +351,14 @@ fn run(
             stats.output_tokens += usage.output_tokens;
             stats.log_errors += u64::from(log_failed);
         }
-        if reply.send(BrainReply { id: work.id, plan }).is_err() {
+        if reply
+            .send(BrainReply {
+                id: work.id,
+                plan,
+                set,
+            })
+            .is_err()
+        {
             break;
         }
     }

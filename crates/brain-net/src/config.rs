@@ -45,6 +45,9 @@ pub struct HostedConfig {
     pub base_url: String,
     pub timeout: Duration,
     pub log_path: Option<PathBuf>,
+    /// Resolve the host and open (then close) a TCP connection when the worker starts, so the
+    /// first decision does not pay for the DNS lookup. Sends nothing.
+    pub warm_up: bool,
     pub api_key: ApiKey,
 }
 
@@ -95,8 +98,9 @@ impl HostedConfig {
             backend,
             model: "gpt-6-luna".into(),
             base_url: "https://api.openai.com".into(),
-            timeout: Duration::from_millis(1500),
+            timeout: Duration::from_millis(3000),
             log_path: None,
+            warm_up: true,
             api_key,
         }
     }

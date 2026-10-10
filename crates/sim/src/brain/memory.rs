@@ -13,10 +13,14 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::habits::{HabitSummary, Habits};
+use super::metrics::{FightMetrics, FightRecord, HISTORY, Trend};
 use super::tally::{CountMap, Counts, Side, Tally, TopMap, merge_counts, ranked_counts};
 
 /// The memory file format version.
-pub const MEMORY_VERSION: u32 = 1;
+pub const MEMORY_VERSION: u32 = 2;
+
+/// The oldest format this build still reads (version 1 had no fight history).
+pub const OLDEST_VERSION: u32 = 1;
 
 /// Where memory lives by default.
 pub const MEMORY_DIR: &str = "logs/memory";
@@ -52,6 +56,9 @@ pub struct Memory {
     pub wolf: CountMap,
     #[serde(default)]
     pub habits: Habits,
+    /// The last fights, oldest first (the score to beat: `metrics`).
+    #[serde(default)]
+    pub history: Vec<FightRecord>,
 }
 
 /// How a load went.
@@ -76,12 +83,15 @@ pub struct MemorySummary {
     pub boss: TopMap<Counts>,
     pub wolf: TopMap<Counts>,
     pub habits: HabitSummary,
+    /// Wolf's play over the last fights and this one so far.
+    #[serde(skip_serializing_if = "Trend::is_empty")]
+    pub trend: Trend,
 }
 
 impl MemorySummary {
     /// Drops one item to shrink a request (see `BrainRequest::fit`); true if something went.
     pub fn trim(&mut self, keep: usize) -> bool {
-        self.boss.pop(keep) || self.wolf.pop(keep) || self.habits.trim(keep)
+        self.boss.pop(keep) || self.wolf.pop(keep) || self.habits.trim(keep) || self.trend.trim()
     }
 }
 
@@ -96,6 +106,7 @@ impl Memory {
             boss: CountMap::new(),
             wolf: CountMap::new(),
             habits: Habits::default(),
+            history: Vec::new(),
         }
     }
 
@@ -110,12 +121,16 @@ impl Memory {
             Err(e) => return (Self::new(chr), Loaded::Corrupt(e.to_string())),
         };
         let problem = match serde_json::from_str::<Memory>(&text) {
-            Ok(m) if m.version != MEMORY_VERSION => format!(
-                "format version {} (this build reads {MEMORY_VERSION})",
+            Ok(m) if !(OLDEST_VERSION..=MEMORY_VERSION).contains(&m.version) => format!(
+                "format version {} (this build reads {OLDEST_VERSION} to {MEMORY_VERSION})",
                 m.version
             ),
             Ok(m) if m.chr != chr => format!("memory of {} (wanted {chr})", m.chr),
-            Ok(m) => return (m, Loaded::Read),
+            Ok(mut m) => {
+                // Version 1 files have no history; they are saved as version 2 from now on.
+                m.version = MEMORY_VERSION;
+                return (m, Loaded::Read);
+            }
             Err(e) => format!("bad JSON: {e}"),
         };
         let mut aside = path.as_os_str().to_owned();
@@ -159,7 +174,19 @@ impl Memory {
         self.habits.merge(habits);
     }
 
+    /// Adds a finished fight's record, keeping the last [`HISTORY`].
+    pub fn push_record(&mut self, record: FightRecord) {
+        self.history.push(record);
+        let extra = self.history.len().saturating_sub(HISTORY);
+        self.history.drain(..extra);
+    }
+
     pub fn summary(&self) -> MemorySummary {
+        self.summary_with(None)
+    }
+
+    /// The summary with this fight's numbers so far in the trend.
+    pub fn summary_with(&self, now: Option<&FightMetrics>) -> MemorySummary {
         MemorySummary {
             fights: self.fights,
             boss_wins: self.boss_wins,
@@ -167,6 +194,7 @@ impl Memory {
             boss: ranked_counts(&self.boss),
             wolf: ranked_counts(&self.wolf),
             habits: self.habits.summary(),
+            trend: Trend::new(&self.history, now),
         }
     }
 }
@@ -180,11 +208,23 @@ pub fn default_path(chr: &str) -> PathBuf {
 /// `.json` that file, any other path a folder holding `<chr>.json`. Without the flag, hosted
 /// brains remember (`hosted`) and the others do not.
 pub fn resolve(arg: Option<&str>, chr: &str, hosted: bool) -> Option<PathBuf> {
+    resolve_for(arg, chr, "", hosted)
+}
+
+/// Like [`resolve`], knowing the brain: a hosted brain keeps `<chr>.json`; any other brain
+/// (`lua`, `scripted`) keeps its own `<chr>.<brain>.json`, so baselines and model runs never
+/// mix, and remembers only when asked.
+pub fn resolve_for(arg: Option<&str>, chr: &str, brain: &str, hosted: bool) -> Option<PathBuf> {
+    let file = if hosted || brain.is_empty() {
+        format!("{chr}.json")
+    } else {
+        format!("{chr}.{brain}.json")
+    };
     match arg {
-        None => hosted.then(|| default_path(chr)),
+        None => hosted.then(|| Path::new(MEMORY_DIR).join(&file)),
         Some(a) if a.eq_ignore_ascii_case("off") => None,
-        Some(a) if a.eq_ignore_ascii_case("on") => Some(default_path(chr)),
+        Some(a) if a.eq_ignore_ascii_case("on") => Some(Path::new(MEMORY_DIR).join(&file)),
         Some(a) if a.to_ascii_lowercase().ends_with(".json") => Some(PathBuf::from(a)),
-        Some(a) => Some(Path::new(a).join(format!("{chr}.json"))),
+        Some(a) => Some(Path::new(a).join(&file)),
     }
 }

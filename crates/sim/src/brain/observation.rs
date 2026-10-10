@@ -60,7 +60,8 @@ pub struct Observation {
     /// Seconds since Wolf last landed an unguarded hit on the boss.
     pub since_wolf_hit: Option<f32>,
     /// The plan running now (empty while the Lua AI's own act runs).
-    pub plan: Vec<i32>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub plan: String,
 }
 
 /// Rounds to two decimals.
@@ -122,7 +123,7 @@ fn view(duel: &Duel, c: &Character, f: &Fighter, i: usize) -> FighterView {
 
 /// The observation for the duel now. `t` is the fight clock; `since` the seconds since each
 /// side's last landed hit `[boss, wolf]`; `plan` the plan running.
-pub fn observe(duel: &Duel, t: f32, since: [Option<f32>; 2], plan: &[i32]) -> Observation {
+pub fn observe(duel: &Duel, t: f32, since: [Option<f32>; 2], plan: &str) -> Observation {
     let (p, e) = (&duel.player, &duel.enemy);
     let (pp, ep) = (p.body.position, e.body.position);
     Observation {
@@ -137,6 +138,6 @@ pub fn observe(duel: &Duel, t: f32, since: [Option<f32>; 2], plan: &[i32]) -> Ob
         locked_on: p.lock_target.is_some(),
         since_boss_hit: since[0].map(r2),
         since_wolf_hit: since[1].map(r2),
-        plan: plan.to_vec(),
+        plan: plan.to_string(),
     }
 }

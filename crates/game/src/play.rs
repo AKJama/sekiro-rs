@@ -202,7 +202,7 @@ pub fn run(options: Options) -> Result<()> {
     duel.force_act = options.force_act;
     if options.simple_ai {
         duel.use_simple_ai();
-    } else if options.brain.plans() || options.brain_log {
+    } else if options.brain.plans() || options.brain_log || options.brain_memory.is_some() {
         let brain_name = options.brain.name();
         let log = duel
             .set_brain(options.brain, options.brain_log)
