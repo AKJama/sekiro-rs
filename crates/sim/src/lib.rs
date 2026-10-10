@@ -19,6 +19,7 @@ pub mod demo;
 pub mod duel;
 pub mod fight;
 pub mod hits;
+pub mod homing;
 pub mod input;
 pub mod lua_ai;
 pub mod player;

@@ -18,9 +18,10 @@
 //! damage and the reaction codes both scripts read, on the engine rules in [`crate::combat`].
 
 use crate::character::Character;
+use crate::combat::knockback::Knockback;
 use crate::combat::params::AttackProfile;
 use crate::player::IncomingDamage;
-use crate::tae::{TaeKind, TimedEvent};
+use crate::tae::{TaeFrame, TaeKind, TimedEvent};
 use glam::{Mat4, Vec3};
 use sekiro_formats::anim::Skeleton;
 use sekiro_formats::flver::{self, Flver};
@@ -431,6 +432,10 @@ pub struct HitResult {
     pub guarded: bool,
     /// The defender (direct hit) or the attacker (deflected or blocked) had its posture broken.
     pub posture_broke: bool,
+    /// The push the defender takes (see [`crate::combat::knockback`]).
+    pub knockback: Option<Knockback>,
+    /// Hit stop in seconds for the attacker and the defender.
+    pub hit_stop: [f32; 2],
 }
 
 /// ChrActionFlag type for "guarding" (`ShieldBlock`). Its ArgB is the behaviour judge of the
@@ -479,6 +484,18 @@ pub fn segment_distance(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) -> f32 {
         }
     }
     ((p1 + d1 * s) - (p2 + d2 * t)).length()
+}
+
+/// Whether any attack can land on a character this step. TAE 950 (`IFrames_MistRaven`) and 951
+/// (`IFrames_DuringAction`) make it fully invulnerable: they set bits 1 and 0 of the action
+/// module's flag word +0x70 (traced by FwLo's RustSekiro, `docs/kb/damage.md`). An attack that
+/// passes through an invulnerable character is not spent: the window can still hit it once the
+/// invulnerability ends, as FwLo's notes say for dodges.
+///
+/// The typed i-frames of TAE 954 (`IFrameType` general, thrust, grab, sweep) are not applied yet:
+/// which attacks each type ignores is not traced.
+pub fn can_be_hit(frame: &TaeFrame) -> bool {
+    !frame.invulnerable
 }
 
 /// Tracks attack windows across steps and finds contacts.
@@ -534,7 +551,10 @@ impl HitDetector {
                     live_shapes.insert(key);
                     let (pa, pb) = self.last.insert(key, (a, b)).unwrap_or((a, b));
                     for (di, defender) in chars.iter().enumerate() {
-                        if di == ai || self.done.contains(&(ai, judge, w.start.to_bits(), di)) {
+                        if di == ai
+                            || !can_be_hit(defender.tae_frame())
+                            || self.done.contains(&(ai, judge, w.start.to_bits(), di))
+                        {
                             continue;
                         }
                         let f = fighters[di];

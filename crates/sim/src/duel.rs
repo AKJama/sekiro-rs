@@ -3,6 +3,7 @@
 
 use crate::ai::SimpleBrain;
 use crate::character::{Character, StepReport};
+use crate::combat::knockback::{HitStop, Knockback};
 use crate::deathblow::{
     Deathblow, DummyFrame, Phase, Placement, Situation, ThrowTable, ThrowTimes, deathblow_marks,
     select,
@@ -28,10 +29,9 @@ const SOLDIER_AI_BUNDLE: &str = "m11_00_00_00.luabnd.d";
 /// Seed for the AI's random numbers (fixed, so runs repeat).
 const AI_SEED: u64 = 7;
 
-/// How long before Wolf's TAE attack window opens the AI is told an attack is coming (the
-/// engine's parry-timing signal), seconds, and within what distance (assumed values).
-const PARRY_LEAD: f32 = 0.3;
-const PARRY_RANGE: f32 = 3.5;
+/// TAE action flag on the player's attacks that tells the enemy AI to parry
+/// (`INTERUPT_ParryTiming`), traced by FwLo's RustSekiro (`docs/kb/guard-deflect.md`).
+pub const FLAG_PARRY_TIMING: i32 = 63;
 
 /// TAE action flags of NPC attacks that accept the next combo attack: 23 "AI combo attack
 /// queued" and 86 "AI attack queued".
@@ -93,6 +93,12 @@ pub struct Duel {
     attack_button: bool,
     /// The enemy took a hit last step (the AI's damage interrupt).
     enemy_damaged: bool,
+    /// Hit stop of the player and the enemy: a frozen character does not advance.
+    pub hit_stop: [HitStop; 2],
+    /// Pushes in progress on the player and the enemy.
+    pub knockback: [Option<Knockback>; 2],
+    /// Each character's last real step, reported again while it is frozen.
+    last_steps: [StepReport; 2],
 }
 
 fn placement(c: &Character) -> Placement {
@@ -144,6 +150,9 @@ impl Duel {
             lock_button: false,
             attack_button: false,
             enemy_damaged: false,
+            hit_stop: [HitStop::default(); 2],
+            knockback: [None; 2],
+            last_steps: Default::default(),
         })
     }
 
@@ -172,25 +181,11 @@ impl Duel {
         self.ai = None;
     }
 
-    /// Whether Wolf's attack is about to land on the soldier: a TAE attack window of his clip
-    /// is open or opens within [`PARRY_LEAD`], and the soldier is within [`PARRY_RANGE`].
+    /// Whether Wolf's current attack carries the parry-timing flag ([`FLAG_PARRY_TIMING`]).
+    /// Range and facing are the AI script's own checks: `Common_Parry` tests the parry
+    /// distance (`GetDist_Parry`) and a front cone itself.
     fn parry_timing(&self) -> bool {
-        let (p, e) = (self.player.body.position, self.enemy.body.position);
-        if ((p[0] - e[0]).powi(2) + (p[2] - e[2]).powi(2)).sqrt() > PARRY_RANGE {
-            return false;
-        }
-        let Some(clip) = self.player.behavior.runtime.main_clip() else {
-            return false;
-        };
-        let Some(anim) = self.player.tae.anim(&clip.animation) else {
-            return false;
-        };
-        let t = clip.time;
-        anim.events.iter().any(|ev| {
-            matches!(ev.kind, crate::tae::TaeKind::Attack { .. })
-                && ev.end > t
-                && ev.start <= t + PARRY_LEAD
-        })
+        self.player.tae_frame().flag(FLAG_PARRY_TIMING)
     }
 
     /// What the soldier's AI sees this step.
@@ -257,6 +252,8 @@ impl Duel {
             self.ai = Self::load_ai(&self.cache);
         }
         self.enemy_damaged = false;
+        self.hit_stop = [HitStop::default(); 2];
+        self.knockback = [None; 2];
         self.deathblow = None;
         self.respawn_in = None;
         self.defender_dying = 0;
@@ -436,6 +433,63 @@ impl Duel {
         }
     }
 
+    /// Steps character `i` by `dt` seconds of its own time, or holds it frozen (hit stop) when
+    /// `dt` is 0: no animation, script, TAE or body update, and no TAE one-shots (sounds,
+    /// velocity changes) repeated. The player's buttons are still read, so a press during the
+    /// freeze is buffered like any other.
+    fn advance_character(
+        &mut self,
+        i: usize,
+        input: &InputFrame,
+        real_dt: f32,
+        dt: f32,
+    ) -> StepReport {
+        let c = if i == 0 {
+            &mut self.player
+        } else {
+            &mut self.enemy
+        };
+        if dt > 0.0 {
+            let report = c.tick(input, dt);
+            self.last_steps[i] = report.clone();
+            return report;
+        }
+        if i == 0 {
+            c.input.update(input, real_dt, &c.tae_runtime.frame);
+        }
+        let frame = &mut c.tae_runtime.frame;
+        frame.sounds.clear();
+        frame.velocity_changes.clear();
+        let mut report = self.last_steps[i].clone();
+        report.clip_started = false;
+        report.blend_in = 0.0;
+        report.requested.clear();
+        report.behavior.events.clear();
+        report.behavior.hooks.clear();
+        report.behavior.script_errors.clear();
+        report
+    }
+
+    /// Moves character `i` along its knockback for `dt` seconds of its own time, through its
+    /// collision so walls stop the push.
+    fn push(&mut self, i: usize, dt: f32) {
+        let Some(kb) = self.knockback[i].as_mut() else {
+            return;
+        };
+        let delta = kb.advance(dt);
+        if kb.finished() {
+            self.knockback[i] = None;
+        }
+        let c = if i == 0 {
+            &mut self.player
+        } else {
+            &mut self.enemy
+        };
+        let [mx, mz] = c.ground.slide(c.body.position, delta);
+        c.body.position[0] += mx;
+        c.body.position[2] += mz;
+    }
+
     pub fn step(&mut self, input: &InputFrame, dt: f32) -> DuelReport {
         if self.spawn.is_none() {
             self.spawn = Some([placement(&self.player), placement(&self.enemy)]);
@@ -474,8 +528,22 @@ impl Duel {
             self.enemy.npc = Default::default();
         }
         self.publish_vitals();
-        let player = self.player.tick(&input, dt);
-        let enemy = self.enemy.tick(&InputFrame::default(), dt);
+        // Who each side aims at: auto-aim candidates for Wolf, Wolf for the soldier.
+        self.player.aim_candidates = if enemy_alive {
+            vec![self.enemy.body.position]
+        } else {
+            Vec::new()
+        };
+        self.enemy.npc_target =
+            (!self.rules.fighters[0].dead()).then_some(self.player.body.position);
+        // Hit stop: each character advances only by what is left of the step after its freeze.
+        let dts = [self.hit_stop[0].split(dt), self.hit_stop[1].split(dt)];
+        let player = self.advance_character(0, &input, dt, dts[0]);
+        let enemy = self.advance_character(1, &InputFrame::default(), dt, dts[1]);
+        if self.deathblow.is_none() {
+            self.push(0, dts[0]);
+            self.push(1, dts[1]);
+        }
         if self.defender_dying > 0 {
             self.defender_dying = self.defender_dying.saturating_add(1);
         }
@@ -508,11 +576,14 @@ impl Duel {
             if let Some(back) = result.attacker {
                 att.pending_damage = Some(back);
             }
+            self.knockback[hit.defender] = result.knockback;
+            self.hit_stop[hit.attacker].start(result.hit_stop[0]);
+            self.hit_stop[hit.defender].start(result.hit_stop[1]);
             self.enemy_damaged |= hit.defender == 1 && !result.guarded;
             hits.push((hit, result));
         }
-        self.rules.recover(0, &self.player, dt);
-        self.rules.recover(1, &self.enemy, dt);
+        self.rules.recover(0, &self.player, dts[0]);
+        self.rules.recover(1, &self.enemy, dts[1]);
         if self.respawn_in.is_none()
             && self.deathblow.is_none()
             && self.rules.fighters.iter().any(|f| f.dead())

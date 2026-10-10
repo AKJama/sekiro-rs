@@ -124,6 +124,40 @@ fn guard_outcomes_against_the_soldier_slash() {
 }
 
 #[test]
+fn a_deflect_facing_away_is_still_a_hit() {
+    let Some(set) = set() else { return };
+    let atk = soldier_attack(set);
+    let window = [effect(set, 105010)];
+    // Wolf inside the deflect window, the attack arriving `deg` off his facing (+X). The
+    // Kusabimaru's guardAngle 0 is a 90 degree half-angle: the front half.
+    let outcome = |deg: f32| {
+        let a = deg.to_radians();
+        let incoming = [-a.cos(), -a.sin()];
+        resolve_hit(&atk, incoming, &wolf_guard(set, &window), &window).outcome
+    };
+    assert_eq!(outcome(0.0), HitOutcome::Deflect);
+    assert_eq!(outcome(89.0), HitOutcome::Deflect);
+    assert_eq!(outcome(-89.0), HitOutcome::Deflect);
+    assert_eq!(outcome(91.0), HitOutcome::Hit);
+    assert_eq!(outcome(180.0), HitOutcome::Hit);
+    // The soldier deflecting with its 60 degree guardAngle: a wider attack lands.
+    let npc = soldier(set);
+    let guard = |deg: f32| {
+        let a = deg.to_radians();
+        let g = GuardInput {
+            guarding: true,
+            forward: [1.0, 0.0],
+            guard_angle: npc.guard_angle,
+            base_repel: 40,
+            guard_attribute: 0,
+        };
+        resolve_hit(&atk, [-a.cos(), -a.sin()], &g, &[]).outcome
+    };
+    assert_eq!(guard(50.0), HitOutcome::Deflect);
+    assert_eq!(guard(70.0), HitOutcome::Hit);
+}
+
+#[test]
 fn soldier_guard_arc_is_sixty_degrees() {
     let Some(set) = set() else { return };
     let npc = soldier(set);

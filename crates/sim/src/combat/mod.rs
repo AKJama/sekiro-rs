@@ -22,6 +22,7 @@ pub mod damage_type;
 pub mod effects;
 pub mod hit;
 pub mod hp;
+pub mod knockback;
 pub mod params;
 pub mod posture;
 pub mod recovery;
@@ -36,6 +37,7 @@ pub use hit::{
     resolve_hit_with_repel, resolve_part_hit,
 };
 pub use hp::Vitality;
+pub use knockback::{HitStop, Knockback, KnockbackClass, KnockbackTable, KnockbackTiming};
 pub use posture::{ControlRange, PostureMeter};
 pub use recovery::{RecoveryAccumulator, RecoveryInputs, posture_recovery_per_second};
 

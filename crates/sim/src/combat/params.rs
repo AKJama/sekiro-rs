@@ -65,6 +65,13 @@ pub struct AttackProfile {
     pub guard_rate: i16,
     /// `guardAttribute`: guard type of this row when it is a guard action (0 katana, 1 umbrella).
     pub guard_attribute: u8,
+    /// `knockbackDist_DirectHit`, `knockbackDist_Guard`, `knockbackDist_JustGuard`: metres the
+    /// defender is pushed on a hit, a block and a deflect (def).
+    pub knockback_dist: [f32; 3],
+    /// `hitStopTime`: seconds the attacker freezes when this attack hits (def).
+    pub hit_stop_time: f32,
+    /// `hitStopTime_Defencer`: seconds the defender freezes when this attack hits (def).
+    pub hit_stop_time_defender: f32,
 }
 
 impl AttackProfile {
@@ -107,6 +114,13 @@ impl AttackProfile {
             guard_stamina_cut_rate: row.i16("guardStaminaCutRate")?,
             guard_rate: row.i16("guardRate")?,
             guard_attribute: row.u8("guardAttribute")?,
+            knockback_dist: [
+                row.f32("knockbackDist_DirectHit")?,
+                row.f32("knockbackDist_Guard")?,
+                row.f32("knockbackDist_JustGuard")?,
+            ],
+            hit_stop_time: row.f32("hitStopTime")?,
+            hit_stop_time_defender: row.f32("hitStopTime_Defencer")?,
         })
     }
 }
@@ -135,6 +149,14 @@ pub struct NpcCombat {
     pub stamina_dmg_rates: StaminaRates,
     /// Resident SpEffects `spEffectID0..31` (unused slots are -1).
     pub sp_effect_ids: Vec<i32>,
+    /// `knockbackParamId`: the KnockBackParam row that times this NPC's pushes (0 on every row).
+    pub knockback_param_id: u8,
+    /// `knockbackRate_vsPlayer_DirectHit` / `_Guard` / `_JustGuard`: percent of the push cut when
+    /// the player's attack hits, is blocked or is deflected (a cut rate per its description,
+    /// def; 0 on the soldier).
+    pub knockback_cut_vs_player: [u8; 3],
+    /// `knockbackRate_vsEnemy_*`: the same against other characters' attacks.
+    pub knockback_cut_vs_enemy: [u8; 3],
 }
 
 impl NpcCombat {
@@ -194,6 +216,17 @@ impl NpcCombat {
             guard_cut_attribute_rates,
             stamina_dmg_rates: StaminaRates(rates),
             sp_effect_ids,
+            knockback_param_id: row.u8("knockbackParamId")?,
+            knockback_cut_vs_player: [
+                row.u8("knockbackRate_vsPlayer_DirectHit")?,
+                row.u8("knockbackRate_vsPlayer_Guard")?,
+                row.u8("knockbackRate_vsPlayer_JustGuard")?,
+            ],
+            knockback_cut_vs_enemy: [
+                row.u8("knockbackRate_vsEnemy_DirectHit")?,
+                row.u8("knockbackRate_vsEnemy_Guard")?,
+                row.u8("knockbackRate_vsEnemy_JustGuard")?,
+            ],
         })
     }
 }

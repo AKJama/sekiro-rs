@@ -16,6 +16,7 @@
 use crate::behavior::{AnimOffsets, ClipDurations};
 use crate::body::{Body, BodyInput, FlatGround, Ground};
 use crate::clips::ClipLibrary;
+use crate::homing::{ACT_STOP_AUTO_AIM, ACT_UPDATE_AUTO_AIM, AutoAimLimits, reach_scale};
 use crate::input::{InputFrame, InputState, angle_diff};
 use crate::player::{IncomingDamage, LoadError, PlayerBehavior, TickReport};
 use crate::tae::{PlayingClip, TaeDb, TaeFrame, TaeRuntime, cancel};
@@ -88,6 +89,15 @@ pub struct Character {
     pub npc: NpcControl,
     /// Lock-on target position, set by the world (player only).
     pub lock_target: Option<[f32; 3]>,
+    /// Living enemies the attack auto-aim may pick, set by the world before each step
+    /// (player only).
+    pub aim_candidates: Vec<[f32; 3]>,
+    /// The attack auto-aim target, an index into [`Self::aim_candidates`] (player only).
+    pub homing: Option<usize>,
+    /// LockCamParam limits of the auto-aim.
+    pub auto_aim: AutoAimLimits,
+    /// The character an NPC fights (Wolf), set by the world; its attacks aim at it.
+    pub npc_target: Option<[f32; 3]>,
     /// A hit to react to on the next step; cleared after it.
     pub pending_damage: Option<IncomingDamage>,
     /// The Havok skeleton the clips animate (source space).
@@ -152,6 +162,10 @@ impl Character {
             input: InputState::default(),
             npc: NpcControl::default(),
             lock_target: None,
+            aim_candidates: Vec::new(),
+            homing: None,
+            auto_aim: AutoAimLimits::load(cache),
+            npc_target: None,
             pending_damage: None,
             skeleton: load_skeleton(cache, chr),
             ground: Box::new(FlatGround::default()),
@@ -190,6 +204,48 @@ impl Character {
     /// The TAE state computed by the last step.
     pub fn tae_frame(&self) -> &TaeFrame {
         &self.tae_runtime.frame
+    }
+
+    /// Where this character's attacks aim (the exe's attack target point): Wolf's lock-on
+    /// target, else his attack auto-aim target; an NPC's combat target.
+    pub fn attack_target(&self) -> Option<[f32; 3]> {
+        match self.kind {
+            ControlKind::Player => self.lock_target.or_else(|| {
+                self.homing
+                    .and_then(|i| self.aim_candidates.get(i).copied())
+            }),
+            ControlKind::Npc => self.npc_target,
+        }
+    }
+
+    /// Runs the script and behaviour graph for one step, watching the script's auto-aim
+    /// calls (`act(156)` refresh, `act(157)` stop) for the player.
+    fn tick_behavior(&mut self, dt: f32) -> TickReport {
+        if self.kind != ControlKind::Player {
+            return self.behavior.tick(dt);
+        }
+        // Reuse the engine-call log to see the script's act calls, keeping any outer log.
+        let outer = self.behavior.call_log.replace(Vec::new());
+        let report = self.behavior.tick(dt);
+        let calls = std::mem::replace(&mut self.behavior.call_log, outer).unwrap_or_default();
+        let act = |id: i32| {
+            calls.iter().any(|c| {
+                c.function == "act" && c.args.first().and_then(|v| v.as_number()) == Some(id as f32)
+            })
+        };
+        if act(ACT_STOP_AUTO_AIM) {
+            self.homing = None;
+        }
+        if act(ACT_UPDATE_AUTO_AIM) && self.lock_target.is_none() {
+            let aim = self.input.stick_world_yaw().unwrap_or(self.body.yaw);
+            self.homing = self
+                .auto_aim
+                .pick(self.body.position, aim, &self.aim_candidates);
+        }
+        if let Some(log) = self.behavior.call_log.as_mut() {
+            log.extend(calls);
+        }
+        report
     }
 
     /// World yaw from this character toward `p`.
@@ -290,7 +346,7 @@ impl Character {
         let requested: Vec<i32> = self.behavior.env.requested.iter().copied().collect();
         let resets_before = self.behavior.env.input_resets.get();
 
-        let behavior = self.behavior.tick(dt);
+        let behavior = self.tick_behavior(dt);
         self.behavior.env.damage = None;
 
         if self.behavior.env.input_resets.get() != resets_before {
@@ -342,7 +398,7 @@ impl Character {
             .iter()
             .find(|(n, _)| Some(*n) == main_node)
             .map(|(_, c)| c.clone());
-        let root_motion = main
+        let mut root_motion = main
             .as_ref()
             .and_then(|c| {
                 let clip = self.clips.clip(&c.animation)?;
@@ -354,6 +410,13 @@ impl Character {
             })
             .unwrap_or_default();
         let tae = &self.tae_runtime.frame;
+        // TAE 760: lengthen or shorten the attack's travel so it arrives at its target.
+        let target = self.attack_target();
+        if let (Some(r), Some(t)) = (tae.reach_target.as_ref(), target) {
+            let scale = reach_scale(r, self.body.position, t);
+            root_motion[0] *= scale;
+            root_motion[2] *= scale;
+        }
         let turn_speed = if tae.flag(cancel::DISABLE_TURN) {
             0.0
         } else {
@@ -364,8 +427,11 @@ impl Character {
             .iter()
             .find_map(|id| self.tae.velocity_changes.get(id).copied());
         let steer_to = match self.kind {
-            // Locked on, the character keeps facing the target and strafes.
-            ControlKind::Player => match self.lock_target {
+            // TAE 703: the swing keeps its direction (what makes side-steps work).
+            _ if tae.fixed_rotation => None,
+            // Locked on, the character keeps facing the target and strafes; an attack with an
+            // auto-aim target turns toward it the same way.
+            ControlKind::Player => match target {
                 Some(t) => Some(self.yaw_to(t)),
                 None => self.input.stick_world_yaw(),
             },

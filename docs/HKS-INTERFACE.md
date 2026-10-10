@@ -140,7 +140,7 @@ Every id below has a name in the engine table, so none is fully unknown; "meanin
 | 276 | 1 | 0 | Self died from throw | |
 | 277 | 1 | 0 | Throw escape succeeded | |
 | 285 | 25 | 0 | Special attribute of the hit | Element: fire, lightning, blue lightning |
-| 333 | 3 | 0 | Delta time | |
+| 333 | 3 | 0 | Delta time | Milliseconds: both arithmetic uses scale it by 0.001 (the third only compares with 0) |
 | 334 | 14 | identification value | Behaviour identification value present | Special guard reactions 1 to 4, blinding, blast, storm back jump |
 | 337 | 18 | 0 | Throw alignment in progress | |
 | 339 | 6 | layer | Animation ended | |
@@ -209,7 +209,7 @@ Every id below has a name in the engine table, so none is fully unknown; "meanin
 | 150 | 3 | 0 | Set item animation in progress | |
 | 154 | 150 | hand | Weapon parameter source hand | Called before every weapon action and guard reaction |
 | 155 | 5 | interrupt type | Notify AI of attack type | |
-| 156, 157 | 1 each | 0 | Set, clear auto-aim target | |
+| 156, 157 | 1 each | 0 | Set, clear auto-aim target | `_UpdateAutoAim` / `_StopAutoAim`; the engine side is in `crates/sim/src/homing.rs`, see HKS-COMBAT.md |
 | 159 | 22 | angle | Turn to face attacker | Front (0) or back (180) |
 | 160, 161 | 17, 16 | throwable state | Set throwable state, attacker side and defender side | |
 | 2002 | 17 | SpEffect id | Apply SpEffect | |

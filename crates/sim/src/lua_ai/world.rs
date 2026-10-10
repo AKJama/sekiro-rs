@@ -36,8 +36,9 @@ pub struct AiWorld {
     pub combo_window: bool,
     /// Where the character spawned (POINT_INITIAL).
     pub home: [f32; 3],
-    /// The target's attack is about to land (the engine's parry-timing signal to the AI);
-    /// its rising edge fires INTERUPT_FindAttack and INTERUPT_ParryTiming.
+    /// The target's current attack has its parry-timing TAE action flag (63) active (the
+    /// engine's parry-timing signal to the AI); its rising edge fires INTERUPT_FindAttack and
+    /// INTERUPT_ParryTiming.
     pub parry_timing: bool,
     /// I took damage this step (INTERUPT_Damaged).
     pub damaged: bool,

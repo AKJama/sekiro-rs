@@ -55,8 +55,8 @@ Uncommitted files in the working tree belong to these tasks; check `git status` 
 
 - Wolf's max HP/posture come from CalcCorrectGraph at progression level 1; the real progression input is not yet traced.
 - Player HP damage formula is inferred (weapon attack power x correction), not traced.
-- Single-clip rendering: layered upper/lower-body states show one clip.
-- Lock-on range (15 m) and parry-timing input to the AI are approximations.
+- Single-clip rendering: layered upper/lower-body states show one clip (FwLo's RustSekiro plays them with the graph's bone weights; next to port).
+- Auto-aim has no line-of-sight check; knockback column choice per damage level is matched by name, not traced.
 - Shading is plain PBR; map lighting is hand-picked; 3 map textures from other areas are missing.
 - Deathblow needs lock-on to meet the angle limit.
 

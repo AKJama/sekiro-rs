@@ -96,6 +96,46 @@ The player scripts never mention Mikiri Counter by name, and no step, guard or d
 The most likely path is the native throw system: the counter is a paired animation like a deathblow, started by the engine (throw request env 1112, throw animation id env 273) and played through the many throw-attack states, whose hooks only do throw bookkeeping.
 This is unverified and needs the Ghidra and ThrowParam passes.
 
+## Where an attack goes: auto-aim, lunge and fixed rotation
+
+These engine rules were traced from the executable by FwLo's RustSekiro (`docs/kb/attacks.md` and `docs/kb/guard-deflect.md`, 2026-10-07 entries); `crates/sim/src/homing.rs` and `crates/sim/src/character.rs` are our implementation.
+
+### Attack auto-aim (not locked on)
+
+The script starts the auto-aim on attack transitions (`_StartAutoAim` in `c0000_transition.hks` sets `g_autoAimTime` to 0).
+`_UpdateAutoAim` then calls `act(156)` every frame while `g_autoAimTime` is below 1/6 s and env 1118 (locked on) is false, adding `env(333) * 0.001` each frame.
+`_StopAutoAim` calls `act(157)` when the script leaves an attack, including just before the next attack transition starts the auto-aim again.
+The engine side is the character's `CSChrAutoHomingModule`: on each `act(156)` it picks the nearest living enemy that passes all of these (LockCamParam row 0):
+
+- 3D distance from Wolf's feet plus 1.5 m to the enemy at most `closeMaxRadius` (3.0 m);
+- height difference within `-closeMinHeight` (3.0 m) to `+closeMaxHeight` (1.0 m);
+- angle between the stick direction (Wolf's facing without stick input) and the direction to the enemy at most `closeAngRange` (30 degrees).
+
+`act(157)` drops the target.
+While Wolf has an auto-aim target he steers toward it as he does toward a lock-on target, at the TAE turn speed.
+The attack target point the engine uses for the lunge below is the lock-on target, else this auto-aim target.
+
+Ours: `Character` sees the script's `act(156)` and `act(157)` through the engine-call log, and the world (`Duel`) lists the candidates each step in `Character::aim_candidates`.
+The enemy point is its feet raised by the same 1.5 m (inferred by RustSekiro, not traced).
+Gaps: the line-of-sight ray and the darkness radii (`closeMaxRadius_forD`, `_forPD`) are not modelled.
+The script treats env 333 as milliseconds (both of its uses multiply or divide by 1000), so `player.rs` answers it as dt x 1000; auto-aim re-picks its target only for the first 1/6 s of an attack.
+
+### Lunge (TAE 760 `BoostRootMotionToReachTarget`)
+
+While a 760 event is active, the root motion of the clip is scaled every frame by `clamp(|arrive - self|, EnableRangeMin, EnableRangeMax) / ReferenceDist`.
+The arrival point is `target + rotY(ArriveAngleFromTarget) * normalize(self - target) * ArriveDistFromTarget` on the ground plane.
+Already inside `ArriveDistFromTarget` the scale is `EnableRangeMin / ReferenceDist`; without the event, without a target, or with `ReferenceDist` 0 it is 1.
+The target is Wolf's attack target point (above) and, for an enemy, Wolf.
+So a slash lengthens its step toward a far target and shortens it on a close one: Wolf's held first slash (`a050_300000`, 760 at 0.6 to 0.8 s, reference 1.58 m, range 0.8 to 2.4 m) travels about 3.1 m at a soldier 4 m away and 1.2 m at one 1.5 m away.
+Every 760 event in Wolf's and the soldier's TAE has arrive angle and distance 0, so the direction convention of a non-zero arrive angle is unverified.
+We scale the horizontal translation only, not the root-motion turn.
+
+### Fixed rotation (TAE 703 `FixedRotationDirection`)
+
+While a 703 event is active the character does not steer toward its target: only the clip's root-motion turn applies.
+The soldier's swings carry it on their active frames (for example `a000_003000` from 0.77 to 1.33 s), which is what lets a side-step get out of a committed swing.
+Wolf's own 703 events are on deathblow animations only.
+
 ## What a simulation must supply for this to run
 
 - env 202, 236, 237, 285 and 334 at the moment a hit is resolved, so the reaction selector sees the hit.

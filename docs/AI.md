@@ -82,7 +82,12 @@ With that, the soldier plays its notice animation 401040 once and then fights.
 Events (target attacking, damage, guard results, ...) are offered to the logic's and goals' `Interrupt` functions while `IsInterupt(type)` reports the event (scripts).
 Ours: the logic is offered first (`InterruptTableLogic_Common`), then the active goals from the deepest up, until one returns true.
 Two sources are wired: the rising edge of `AiWorld::parry_timing` fires `INTERUPT_FindAttack` (1) and `INTERUPT_ParryTiming` (24), and `AiWorld::damaged` fires `INTERUPT_Damaged` (2).
-The soldier's battle goal answers parry timing through `Common_Parry`: with SpEffect 221002 (parry rank C) it guards with action 3100, or deflects with 3101 as its consecutive-guard count rises.
+Parry timing is the game's own signal: the player's attack animations carry TAE action flag 63 (for Wolf's first slash `a050_300000` at 0.6 s, the frames before the blade arrives), and the duel raises `parry_timing` while that flag is active on Wolf's current clip (traced by FwLo's RustSekiro, `docs/kb/guard-deflect.md`).
+The AI reads the world before Wolf steps, so it hears the flag one step after it opens.
+There is no range or facing check on the engine side: the script makes them itself.
+The soldier's battle goal answers parry timing through `Common_Parry(ai, goal, 50, 25, 0, 3102)` (`common_func_NTC.lua`): it needs the player in its front 90 degree cone, itself in the player's front 90 degree cone and within `GetDist_Parry` (the player's weapon reach constant, `PC_ATTACK_DIST_*` by weapon SpEffect) to guard or deflect; one metre further out it may back-step instead.
+With SpEffect 221002 (parry rank C) it guards with action 3100, or deflects with 3101 as its consecutive-guard count rises.
+`FindAttack` firing together with `ParryTiming` is ours; its own source in the engine is not traced.
 The guard is an `EndureAttack` goal that requests action 3100, not the generic guard action 9910.
 
 ## Native goals as implemented
@@ -125,7 +130,7 @@ for event in brain.drain_log() { /* goal starts and ends, actions, interrupts */
 - position, yaw, HP, posture and active SpEffects of the soldier and of the player, and whether the player guards;
 - `current_anim`: the playing full-body clip's id (`anim_id_from_clip("a000_003000")` gives 3000);
 - `combo_window`: the clip has reached the TAE window where the next attack is accepted;
-- `parry_timing`: the player's attack is about to land on the soldier (a TAE attack window with the soldier in range), and `damaged`.
+- `parry_timing`: the player's current clip has TAE action flag 63 active, and `damaged`.
 
 The returned `NpcControl` carries the requested action (attack codes 3000 and up, guard 3100, deflect 3101, notice 401040), the move level and direction, the facing, and the battle behaviour reference 1000003.
 

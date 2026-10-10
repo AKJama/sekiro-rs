@@ -74,6 +74,7 @@ The attacker's damage module runs `b698d0` for the same contact, which picks the
 | `guardAngle` 0 means a threshold of 0, a 90 degree half-angle. The Kusabimaru has 0, the soldier 60. | `b6c880` | code |
 | NPCs read `guardAngle` from NpcParam, the player from the weapon. | `a13820`, `a295c0` | code |
 | `isAllDirGuard` skips the arc test. | `b6c880` | code |
+| The arc test runs before the block or deflect decision, so it gates deflects too: a press inside the deflect window while facing away is a direct hit. | `b6c880`; also traced by FwLo's RustSekiro, `docs/kb/guard-deflect.md` | code |
 | Repel defence of a guarding NPC is the guard row's `guardBreakRate` times the product of `guardDefFlickPowerRate` over active SpEffects with `stateInfo` 158 or 204, truncated. | `a137a0`, `84cd80`, `bfccc0` | code |
 | Repel defence of the guarding player is `guardBreakCorrection / 100` times the weapon's `guardBaseRepel` times a guard effect rate, plus a stat bonus capped at 10 that Sekiro does not use. | `a28da0`, `84ce20` | code, stat term inferred unused |
 | Repel defence of a non-guarding NPC is NpcParam `defFlickPower`. | `a137e0` | code |
@@ -91,6 +92,11 @@ Outside the window the Kusabimaru's `guardBaseRepel` is 20, so the guard blocks.
 Rows with `guardAtkRate` 100 (213 rows) can never be deflected by the 40 override.
 Every AtkParam_Pc row has `guardAtkRate` 0, but player weapon attacks use the weapon formula (30 for the Kusabimaru), so a guarding NPC deflects the player when its guard row's `guardBreakRate` times its effect rate reaches 30.
 Armoured parts compare the raw `guardAtkRate`, so any part with a positive `guardBreakRate` guards against the player.
+
+The arc rule in one line: guarded only when `dot(defender facing, direction to the attacker) > cos(half-angle)`; Wolf's half-angle is 90 degrees (the front half), the soldier's 60.
+FwLo's RustSekiro (`docs/kb/guard-deflect.md`) reads Wolf's half-angle from the `ShieldBlock` TAE flag's ArgB (90 in every Wolf guard animation).
+Our trace of the player's virtual (`a295c0`) reads it from the weapon's `guardAngle` instead, and ArgB is the guard judge here (the soldier's ArgB is 900, which cannot be an angle), so the sim keeps the weapon value.
+Both give 90 degrees for Wolf.
 
 Perilous attacks are the unblockable flags, not a separate system.
 In AtkParam_Npc, 238 rows block both guard types for both block and deflect (grabs), 60 rows block only the katana (guard type 0) for both (the Loaded Umbrella still blocks them), and 111 rows forbid only blocking with the katana, so they must be deflected.
@@ -220,6 +226,7 @@ The Kusabimaru (`physGuardCutRate` and `physJustGuardCutRate` 100) lets none thr
 | The type comes from the current animation (TAE event 960). | Smithbox annotation | community |
 | No separate post-damage delay timer exists in this path; pauses come from the animation's type (type 0 is 0% in rows 0 and 1000100). | `a04850` | code for the absence in this function |
 | HP lowers recovery only through `conditionHp` SpEffects, which all multiply when active. | `bfe360`, def of `conditionHp` | code for the product, def for the gate |
+| TAE 225 `SetSPRegenRatePercent` on the playing animation multiplies recovery by its percent; the sim feeds it in as the anim percent above. Soldier (c1010): 25% in its guard `a100_003100`, 0% in several attacks and reactions; FwLo reports 33% on the Samurai General's guard and deflect animations. | event and effect traced by FwLo's RustSekiro, `docs/kb/guard-deflect.md` | community; that it is the anim percent byte is inferred |
 
 Player row 0: type 1 is 67%, type 5 pins posture full (min 100%), type 10 is 200%.
 Soldier row 1000100: type 2 is 33%, type 4 200%, type 6 pins posture at 30%, type 7 keeps it full, type 10 200%.
@@ -232,6 +239,41 @@ Soldier numbers (base 20, resident effects 300600, 300601, 300602 gated at 80%, 
 | 150 (77%) | 300600 | 12 |
 | 110 (56%) | 300600, 300601 | 6 |
 | 60 (31%) | all three | 2 |
+
+## Invulnerability
+
+| Rule | Source | Confidence |
+|---|---|---|
+| TAE 950 (`IFrames_MistRaven`, flag word +0x70 bit 1) and 951 (`IFrames_DuringAction`, bit 0) make the character fully invulnerable while active: no attack lands. 950 covers all of Wolf's knock-down, launch, death and revival animations (for example `a000_100400` frames 0 to 18), 951 the deathblow throws. | traced by FwLo's RustSekiro, `docs/kb/damage.md` | community |
+| An attack window that passes through an invulnerable character is not spent: it can still hit once the invulnerability ends. | FwLo's RustSekiro, `docs/kb/guard-deflect.md` (said of dodges) | community, inferred for 950/951 |
+
+The check is `hits::can_be_hit`, run for both characters in `HitDetector::detect` before the capsule test.
+TAE 954 typed i-frames (`IFrameType` general, thrust, grab, sweep) are decoded but not applied yet.
+
+## Knockback
+
+| Rule | Source | Confidence |
+|---|---|---|
+| The push distance is AtkParam `knockbackDist_DirectHit`, `knockbackDist_Guard` or `knockbackDist_JustGuard` (metres) for a hit, block or deflect. | def; FwLo's RustSekiro, `docs/kb/damage.md` | def |
+| An NPC defender cuts it by NpcParam `knockbackRate_vsPlayer_*` percent against the player's attacks (`knockbackRate_vsEnemy_*` against other characters): `dist * (1 - rate / 100)`. The description calls these cut rates; the soldier's are all 0. | def; FwLo's RustSekiro | def |
+| TAE 226 `SetKnockbackPercent` on the defender's own animation multiplies the distance at the start of the push (module +0x40 = percent / 100). Wolf: Combo1 (`a050_300000`) 0% at its hit frames, Combo2 50%, Combo3 to 5 30%. | traced by FwLo's RustSekiro (`ba34a0`, `ba37e0`), `docs/kb/damage.md` | community |
+| Timing comes from the defender's KnockBackParam row: hold speed `v` for `<class>_ContTime`, then fall linearly to 0 over `<class>_DecTime`, with `v = dist / (cont + dec / 2)`. | FwLo's RustSekiro, `docs/kb/damage.md` | community |
+| The row is NpcParam `knockbackParamId` for NPCs (0 on every row) and EquipParamProtector `knockbackParamId` for Wolf (1, "For PC", on every outfit piece). The sim takes the highest over CharaInitParam 10010's four armour pieces; which piece the engine reads is not traced. | found in the data by FwLo's RustSekiro | inferred |
+| The class comes from the outcome and `dmgLevel`. Direct hits: 1 small `damage_S`, 2 middle `damage_M`, 3 large `damage_L`, 4 ex-large and 10 ex-blast `damage_BlowM`, 5 push `damage_Push`, 6 fling `damage_Strike`, 7 small blow `damage_BlowS`, 8 minimum `damage_Min`, 9 upper `damage_Uppercut`, 11 breath `damage_Breath`. Blocks and deflects use the size of the player's guard reaction: `guard_L` for levels 3, 4, 6, 7 and 9, `guard_LL` for 10 and 11, `guard_S` otherwise. | matched by name, guard sizes as in FwLo's RustSekiro | inferred; the engine's choice in `b6bfe0` is not read |
+| The push moves the defender away from the attacker on the ground plane, through its collision (`Ground::slide`), so walls stop it. | | inferred |
+
+Not modelled: Wolf's armour `knockBackCutRate_*` and weapon `knockBackCutRate_*_Guard` (0 for Wolf), the leftover push handed to the other character when the pushed one is blocked (`ba34b0`, from FwLo's notes), and `guardBrake` timing on guard breaks.
+
+## Hit stop
+
+| Rule | Source | Confidence |
+|---|---|---|
+| When an attack hits, the attacker freezes for AtkParam `hitStopTime` seconds and the defender for `hitStopTime_Defencer`. Wolf's sword attacks have 0.1 s for both; all NPC attack rows but four have 0. | def; FwLo's RustSekiro, `docs/kb/guard-deflect.md` | def |
+| Only direct hits start a hit stop. | FwLo's RustSekiro applies it on hits only | inferred |
+| A frozen character advances nothing: animation, script, TAE, root motion, knockback and posture recovery all wait. Button presses are still buffered. | | inferred |
+
+The sim runs hit stop in the fixed-step duel (`Duel::step`), so it is deterministic.
+NpcParam `hitStopType` and `hitStopType_Defencer` ("whether hit stop happens" for the attacker and defender of hits on this NPC) are 0 on the soldier and not read yet; their value meanings are not in the Paramdex.
 
 ## Third-party claims
 

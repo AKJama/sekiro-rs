@@ -98,7 +98,7 @@ pub struct PlayerEnv {
     pub falling: bool,
     /// Height of the last fall in metres (env 224).
     pub fall_height: f32,
-    /// Frame time in seconds (env 333).
+    /// Frame time in seconds; env 333 reports it in milliseconds (the script divides by 1000).
     pub dt: f32,
     /// Lock-on active (env 1118).
     pub locked_on: bool,
@@ -215,7 +215,7 @@ impl Adapter<'_> {
             ENV_FALLING => truth(env.falling),
             ENV_LANDED | ENV_REALLY_LANDED => truth(env.landed),
             ENV_FALL_HEIGHT => env.fall_height,
-            ENV_DT => env.dt,
+            ENV_DT => env.dt * 1000.0,
             ENV_LOCKED_ON => truth(env.locked_on),
             ENV_ARM_STYLE => env.arm_style as f32,
             ENV_WEAPON_CATEGORY => match arg {

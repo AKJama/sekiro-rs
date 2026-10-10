@@ -12,6 +12,8 @@
 //! 3. HP damage through the element sum and the guard cuts.
 //! 4. The damage codes (99999, 3, 1001, 1027, 1028, 2 for the defender; 1000, 1008, 1017,
 //!    1019, 1033 for the attacker).
+//! 5. The defender's knockback and both sides' hit stop (see [`crate::combat::knockback`]),
+//!    which the duel applies.
 //!
 //! Every frame [`CombatRules::recover`] regains posture at the character's speed, scaled by the
 //! StaminaControlParam type of its current animation (TAE 960) and its HP-gated SpEffects.
@@ -37,6 +39,9 @@ use crate::combat::hp::{
     Vitality, attribute_guard_factor, element_damage, final_hp_damage, keep_hp, npc_guard_cut,
     player_guard_cut,
 };
+use crate::combat::knockback::{
+    Knockback, KnockbackClass, KnockbackTable, knockback_distance, outcome_index,
+};
 use crate::combat::params::{
     AttackProfile, CalcCorrectGraph, NpcCombat, StaminaControl, WeaponGuard,
 };
@@ -50,6 +55,7 @@ use crate::combat::recovery::{
 };
 use crate::hits::{AttackData, Combatant, HitEvent, HitResult, load_table};
 use crate::player::IncomingDamage;
+use crate::tae::TaeFrame;
 use sekiro_formats::param::Table;
 use std::collections::HashMap;
 use std::path::Path;
@@ -111,6 +117,8 @@ pub struct Fighter {
     control: Option<StaminaControl>,
     /// Always-on SpEffects (NpcParam `spEffectID0..`), still subject to their HP gates.
     resident: Vec<i32>,
+    /// KnockBackParam row timing this character's pushes.
+    pub knockback_row: i32,
     start: (Vitality, PostureMeter),
 }
 
@@ -152,6 +160,7 @@ impl Fighter {
 pub struct CombatRules {
     pub fighters: Vec<Fighter>,
     effects: HashMap<i32, ActiveEffect>,
+    knockback: KnockbackTable,
 }
 
 fn param_dirs(cache: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -180,6 +189,10 @@ impl CombatRules {
         let control = load_table(&pd, &dd, "StaminaControlParam", "StaminaControlParam");
         let graphs = load_table(&pd, &dd, "CalcCorrectGraph", "CalcCorrectGraph");
         let tentative = load_table(&pd, &dd, "TentativePlayerParam", "TentativePlayerParam");
+        let knockback = load_table(&pd, &dd, "KnockBackParam", "KnockBackParam")
+            .map(|t| KnockbackTable::from_table(&t))
+            .unwrap_or_default();
+        let wolf_knockback_row = player_knockback_row(&pd, &dd);
 
         let effects = sp
             .as_ref()
@@ -211,10 +224,14 @@ impl CombatRules {
                                recovery_base,
                                control,
                                resident,
-                               kind| Fighter {
+                               kind: FighterKind| Fighter {
                     vitality: vit,
                     posture,
                     recovery_rate: 0.0,
+                    knockback_row: match &kind {
+                        FighterKind::Player { .. } => wolf_knockback_row,
+                        FighterKind::Npc(npc) => npc.knockback_param_id as i32,
+                    },
                     kind,
                     recovery: RecoveryAccumulator::default(),
                     recovery_base,
@@ -292,15 +309,22 @@ impl CombatRules {
                 }
             })
             .collect();
-        Self { fighters, effects }
+        Self {
+            fighters,
+            effects,
+            knockback,
+        }
     }
 
     /// The SpEffects acting on fighter `i`: its animation's plus its resident ones, each only
     /// while its HP gates are open.
     pub fn active_effects(&self, i: usize, character: &Character) -> Vec<ActiveEffect> {
+        self.effects_for(i, character.tae_frame())
+    }
+
+    fn effects_for(&self, i: usize, frame: &TaeFrame) -> Vec<ActiveEffect> {
         let f = &self.fighters[i];
-        character
-            .tae_frame()
+        frame
             .sp_effects
             .iter()
             .chain(f.resident.iter())
@@ -314,10 +338,22 @@ impl CombatRules {
     /// [`crate::combat::recovery`]). The animation's control type also clamps the meter, which
     /// is how a posture break ends at a fixed value.
     pub fn recover(&mut self, i: usize, character: &Character, dt: f32) {
-        let effects = self.active_effects(i, character);
-        let stamina_type = character.tae_frame().stamina_type;
+        self.recover_with_frame(i, character.tae_frame(), dt);
+    }
+
+    /// [`Self::recover`] for a character whose TAE state is `frame`. TAE 225
+    /// (`SetSPRegenRatePercent`) fills the animation percent of the recovery speed: the
+    /// soldier's guard and deflect animations carry 33 %, its burn reactions 0 % (the event and
+    /// its effect traced by FwLo's RustSekiro, `docs/kb/guard-deflect.md`; that it is the
+    /// percent byte `a04850` reads is inferred).
+    pub fn recover_with_frame(&mut self, i: usize, frame: &TaeFrame, dt: f32) {
+        let effects = self.effects_for(i, frame);
+        let stamina_type = frame.stamina_type;
         let f = &mut self.fighters[i];
         let mut inputs = RecoveryInputs::base(f.recovery_base);
+        if let Some(scale) = frame.posture_regen_scale {
+            inputs.anim_percent = (scale * 100.0).round().clamp(0.0, 255.0) as u8;
+        }
         inputs.control_ratio = stamina_type
             .zip(f.control.as_ref())
             .map(|(t, c)| c.recover_ratio(t.max(0) as usize));
@@ -468,6 +504,14 @@ impl CombatRules {
             atk.does_break_repel_stam_damage,
         );
 
+        // 6. Knockback and hit stop.
+        let knockback = self.knockback(a, d, &atk, hit, outcome, frame_d.knockback_scale);
+        let hit_stop = if outcome == HitOutcome::Hit {
+            [atk.hit_stop_time, atk.hit_stop_time_defender]
+        } else {
+            [0.0; 2]
+        };
+
         let (direction, front_back) = hit_direction(defender, hit.direction);
         let level = hit.attack.damage_level.max(1);
         HitResult {
@@ -493,7 +537,37 @@ impl CombatRules {
             deflected: deflect,
             guarded: outcome.guarded(),
             posture_broke: broke || attacker_broke,
+            knockback,
+            hit_stop,
         }
+    }
+
+    /// The push fighter `d` takes from `atk` (see [`crate::combat::knockback`]): the AtkParam
+    /// distance for the outcome, cut by an NPC defender's NpcParam rate against the attacker's
+    /// side, scaled by the defender's TAE 226, timed by its KnockBackParam row, along the hit.
+    fn knockback(
+        &self,
+        a: usize,
+        d: usize,
+        atk: &AttackProfile,
+        hit: &HitEvent,
+        outcome: HitOutcome,
+        tae_scale: Option<f32>,
+    ) -> Option<Knockback> {
+        let idx = outcome_index(outcome);
+        let cut = match &self.fighters[d].kind {
+            FighterKind::Npc(npc) => match self.fighters[a].kind {
+                FighterKind::Player { .. } => npc.knockback_cut_vs_player[idx],
+                FighterKind::Npc(_) => npc.knockback_cut_vs_enemy[idx],
+            },
+            FighterKind::Player { .. } => 0,
+        };
+        let distance = knockback_distance(atk.knockback_dist[idx], cut, tae_scale);
+        let class = KnockbackClass::for_hit(outcome, hit.attack.damage_level);
+        let timing = self
+            .knockback
+            .timing(self.fighters[d].knockback_row, class)?;
+        Knockback::start(hit.direction, distance, timing)
     }
 
     /// HP damage of `atk` from fighter `a` on fighter `d` for `outcome`.
@@ -581,6 +655,27 @@ impl CombatRules {
             f.reset();
         }
     }
+}
+
+/// Wolf's KnockBackParam row: the highest EquipParamProtector `knockbackParamId` among the
+/// armour of CharaInitParam 10010 (every outfit piece has 1, "For PC"; found in the data by
+/// FwLo's RustSekiro, `docs/kb/damage.md`; which piece the engine reads is not traced).
+fn player_knockback_row(pd: &Path, dd: &Path) -> i32 {
+    let init = load_table(pd, dd, "CharaInitParam", "CharaInitParam");
+    let armour = load_table(pd, dd, "EquipParamProtector", "EquipParamProtector");
+    let (Some(init), Some(armour)) = (init, armour) else {
+        return 0;
+    };
+    let Some(row) = init.find(10010) else {
+        return 0;
+    };
+    ["equip_Helm", "equip_Armer", "equip_Gaunt", "equip_Leg"]
+        .iter()
+        .filter_map(|f| row.int(f).ok())
+        .filter_map(|id| armour.find(id as i32))
+        .filter_map(|p| p.int("knockbackParamId").ok())
+        .max()
+        .unwrap_or(0) as i32
 }
 
 /// Hit direction codes for the defender's script: `(direction, front_back)`. Direction is 0
