@@ -1,6 +1,6 @@
 # Status
 
-Last updated 9 October 2026.
+Last updated 10 October 2026.
 Read this first in a new session, then `AGENTS.md` and `docs/DESIGN.md`.
 How much of the game is done overall: `docs/PROGRESS.md`.
 
@@ -16,7 +16,8 @@ How much of the game is done overall: `docs/PROGRESS.md`.
 | Movement | Run, sprint, jump (running jump fixed), step, crouch; root motion; walks the real m11 map with floor/wall collision | `docs/FORMATS.md` (Walking on the map) |
 | Combat | Engine rules for hit/block/deflect, posture both ways, breaks, recovery; HP/posture HUD | `docs/COMBAT-RULES.md` |
 | Deathblows | Real ThrowParam pairs; posture break -> deathblow -> death; Wolf death and respawn | `docs/DEATHBLOW.md` |
-| Enemy | Soldier runs its own HKS script, behaviour graph and real Lua AI (Lua 5.0 VM + goal runtime) | `docs/AI.md` |
+| Enemy | Soldier runs its own HKS script, behaviour graph and real Lua AI (Lua 5.0 VM + goal runtime); real combo cancels | `docs/AI.md` |
+| Great Shinobi Owl | c5060 (not c5070, his bird) with his own HKS, graph, TAE, params and Lua AI on the flat floor; shuriken bullets; two deathblows with the get-up and finishing pairs | `docs/OWL.md` |
 | Map | m11_00_00_00 (Ashina Outskirts and Castle): pieces, textures, normal maps, collision | `docs/FORMATS.md` (Maps) |
 
 ## How to run
@@ -25,13 +26,13 @@ How much of the game is done overall: `docs/PROGRESS.md`.
 ./tools/fetch-refs.ps1
 cargo run --release -p sekiro-extract -- unpack
 cargo run --release -p sekiro-extract -- models
-cargo run --release -p sekiro-extract -- anims c0000 c1010
+cargo run --release -p sekiro-extract -- anims c0000 c1010 c5060
 cargo run --release -p sekiro-extract -- params
 cargo run --release -p sekiro-extract -- map m11_00_00_00
 cargo run --release -p sekiro-game -- --play --map m11_00_00_00 --start 3
 ```
 
-Useful flags: `--play` alone uses a flat floor; `--lock-on`, `--no-enemy`, `--simple-ai`, `--script FILE --shots step:path --exit` for scripted runs with screenshots; `--arena --deathblow` for the deathblow demo; `--viewer <glb>` and `--map <id>` for inspection.
+Useful flags: `--play` alone uses a flat floor; `--enemy owl` (or `c5060`) fights the Great Shinobi Owl instead of the soldier; `--lock-on`, `--no-enemy`, `--simple-ai`, `--script FILE --shots step:path --exit` for scripted runs with screenshots; `--arena --deathblow` for the deathblow demo; `--viewer <glb>` and `--map <id>` for inspection.
 
 ## In progress when the session paused
 
@@ -65,10 +66,11 @@ Uncommitted files in the working tree belong to these tasks; check `git status` 
 
 ## Next steps
 
-1. Finish the three in-progress tasks above.
-2. Validation against the real game: record posture/HP/animation traces in a real fight (read-only) and compare with `duel-sim` output.
-3. More enemies from the m11 layout (43 soldiers placed in the MSB), then a boss-style enemy with perilous attacks.
-4. Combat arts, prosthetics and items only after the core loop is solid.
+1. Owl on the castle roof (`docs/OWL.md`, "Toward the castle roof"): export `m11_01_00_00`, place both from the layout, decode the map event script for his phase 2, NPC-on-player throws, firecracker and poison bullets.
+2. Finish the three in-progress tasks above.
+3. Validation against the real game: record posture/HP/animation traces in a real fight (read-only) and compare with `duel-sim` output.
+4. More enemies from the m11 layout (43 soldiers placed in the MSB).
+5. Combat arts, prosthetics and items only after the core loop is solid.
 
 ## Publishing
 

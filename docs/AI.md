@@ -59,6 +59,10 @@ Our goal update (ours, shaped by the scripts):
 4. If the last subgoal just succeeded and the update returned "continue", the goal succeeds. The script goals (`Attack_Update`, `ComboFinal_Update`, ...) always return "continue" and rely on this.
 5. When the lifetime runs out, waiting-style native goals (Wait, Guard, SidewayMove) succeed and everything else fails.
 
+`goal:TimingSetNumber(slot, value, timing)` and `goal:TimingSetTimer(...)` attach a deferred `SetNumber` / `SetTimer` on the AI to a goal; `timing` is `AI_TIMING_SET__ACTIVATE` (0) or `AI_TIMING_SET__UPDATE_SUCCESS` (1) (`ai_define.lua`).
+The value is the one the script computed when it attached it (scripts); ours applies it just before the goal's `Activate`, or when the goal ends with success.
+The Owl's acts use it to keep a pressure score in AI number 5 (`docs/OWL.md`).
+
 ### Logic and the top goal
 
 Every AI has a top goal (kind 0).
@@ -76,6 +80,7 @@ The engine keeps a target state on the AI: 0 none, 1 caution, 2 find, 3 battle (
 The engine also marks the state with SpEffects 200001 (non-combat caution), 200002 (combat caution) and 200004 (find or battle) (SpEffectParam names), which the scripts test with `HasSpecialEffectId`.
 Ours: a visible target moves the state to find on the next logic run and to battle on the one after; the previous state is updated after each logic run, and 200004 counts as active from find on.
 With that, the soldier plays its notice animation 401040 once and then fights.
+An enemy whose `EnemySpec::starts_in_battle` is set (the Owl, after his opening cutscene) starts in the battle state (ours, `AiBrain::start_in_battle`).
 
 ### Interrupts
 
@@ -88,6 +93,11 @@ There is no range or facing check on the engine side: the script makes them itse
 The soldier's battle goal answers parry timing through `Common_Parry(ai, goal, 50, 25, 0, 3102)` (`common_func_NTC.lua`): it needs the player in its front 90 degree cone, itself in the player's front 90 degree cone and within `GetDist_Parry` (the player's weapon reach constant, `PC_ATTACK_DIST_*` by weapon SpEffect) to guard or deflect; one metre further out it may back-step instead.
 With SpEffect 221002 (parry rank C) it guards with action 3100, or deflects with 3101 as its consecutive-guard count rises.
 `FindAttack` firing together with `ParryTiming` is ours; its own source in the engine is not traced.
+
+The scripts also ask to be told about SpEffects: `AddObserveSpecialEffectAttribute(target, id)`.
+Ours: on the step an observed SpEffect turns on, `INTERUPT_ActivateSpecialEffect` (43) is dispatched with `GetSpecialEffectActivateInterruptType` answering its id; on the step it turns off, `INTERUPT_InactivateSpecialEffect` (44) with `GetSpecialEffectInactivateInterruptType`.
+An effect already active when it is first observed raises nothing.
+This is what drives the consecutive-guard count of `Common_Parry` and the Owl's `Parry`: the weak guard reactions `a000_008500`/`8501` add SpEffect 200250, and the shared table-logic interrupt (`table_ai_common.lua`) counts it.
 The guard is an `EndureAttack` goal that requests action 3100, not the generic guard action 9910.
 
 ## Native goals as implemented
@@ -132,11 +142,21 @@ for event in brain.drain_log() { /* goal starts and ends, actions, interrupts */
 - `combo_window`: the clip has reached the TAE window where the next attack is accepted;
 - `parry_timing`: the player's current clip has TAE action flag 63 active, and `damaged`.
 
-The returned `NpcControl` carries the requested action (attack codes 3000 and up, guard 3100, deflect 3101, notice 401040), the move level and direction, the facing, and the battle behaviour reference 1000003.
+The returned `NpcControl` carries the requested action (attack codes 3000 and up, guard 3100, deflect 3101, notice 401040), the move level and direction, the facing, whether the request comes from a combo goal, and the battle behaviour reference 1000003.
+
+### How a request reaches the NPC script
+
+The shared NPC script (`c9997.hks`) reads the request as `env(106)` when it is free (idle, moving).
+Inside an attack or step it calls `ExecAIAction` with its cancel flag set, which reads a different env per kind of cancel instead: 107 combo action, 120 attack-cancel action, 118 step action, plus 123, 124 and 125 (endure, anti-backstab, immediate reaction) that nothing sets yet (env names from the community env list in `re/ext/meow_env.txt`).
+The NPC TAEs mark where an animation may be cut for a queued request with action flags 23 ("end if AI combo attack queued"), 86 (attack), 79 (step) and 78 (move).
+Ours (`Character::fill_env`): env 107 is the request while flag 23 is on and the request comes from a goal registered with `ENABLE_COMBO_ATK_CANCEL` (`ComboRepeat`, `ComboFinal`); env 120 is any non-step request while flag 86 is on; env 118 a step (`5xxx`) while flag 79 is on.
+The pairing of flags and requests follows FwLo's RustSekiro notes (`docs/kb/enemy.md`).
+Before this, every NPC combo waited for the previous animation to end and stood in idle for a step between attacks.
 
 ## Not done yet
 
-- Interrupts other than parry timing, FindAttack and damage; observed SpEffect activation interrupts (`AddObserveSpecialEffectAttribute`) are not raised.
+- Interrupts other than parry timing, FindAttack, damage and observed SpEffects (shoot impact, guard results, item use, observe areas).
+- Envs 123, 124 and 125 (endure, anti-backstab and immediate cancels).
 - Kengeki (sword clash) acts, platoon and team behaviour, navigation, sound targets, non-battle behaviour, home return.
 - The engine's exact goal update order, lifetime rules and interrupt order are ours; checking them against the native goal classes in the executable is the next step.
 - The scripts use the engine's random numbers; ours are a seeded xorshift, so act choices differ from the game run for run.

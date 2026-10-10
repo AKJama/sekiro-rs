@@ -120,6 +120,8 @@ pub struct Fighter {
     /// KnockBackParam row timing this character's pushes.
     pub knockback_row: i32,
     start: (Vitality, PostureMeter),
+    /// TAE SpEffects active on the last step, to find the ones that just started.
+    last_tae_effects: Vec<i32>,
 }
 
 impl Fighter {
@@ -127,6 +129,7 @@ impl Fighter {
     pub fn reset(&mut self) {
         (self.vitality, self.posture) = self.start;
         self.recovery = RecoveryAccumulator::default();
+        self.last_tae_effects.clear();
     }
 
     /// HP left as a fraction of max.
@@ -238,6 +241,7 @@ impl CombatRules {
                     control,
                     resident,
                     start: (vit, posture),
+                    last_tae_effects: Vec::new(),
                 };
                 if i == 0 {
                     let w = weapons.as_ref().and_then(|t| t.find(c.param_id));
@@ -332,6 +336,31 @@ impl CombatRules {
             .filter(|e| e.hp_gate_open(f.vitality.hp, f.vitality.max_hp))
             .cloned()
             .collect()
+    }
+
+    /// Applies the HP change (`changeHpRate`) of every TAE SpEffect that started on fighter `i`
+    /// this step, once. Multi-life enemies get their HP back this way: the get-up part of a
+    /// non-lethal deathblow (`a000_012000` of c5060 at 4.4 s) adds SpEffect 300610 "HP reset"
+    /// with -100 %. That the rate applies once at the start of a timed effect is inferred.
+    pub fn apply_effect_hp(&mut self, i: usize, frame: &TaeFrame) {
+        let started: Vec<f32> = frame
+            .sp_effects
+            .iter()
+            .filter(|id| !self.fighters[i].last_tae_effects.contains(id))
+            .filter_map(|id| self.effects.get(id))
+            .map(|e| e.change_hp_rate)
+            .filter(|&r| r != 0.0)
+            .collect();
+        let f = &mut self.fighters[i];
+        f.last_tae_effects.clone_from(&frame.sp_effects);
+        if f.dead() {
+            return;
+        }
+        for rate in started {
+            let change = (f.vitality.max_hp as f32 * rate / 100.0).round() as i32;
+            let hp = f.vitality.hp - change;
+            f.vitality.set_hp(hp);
+        }
     }
 
     /// Regains posture for fighter `i` over `dt` seconds (read from code, see

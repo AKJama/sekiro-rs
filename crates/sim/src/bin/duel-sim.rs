@@ -1,7 +1,11 @@
-//! `duel-sim [--script FILE] [--steps N] [--passive]`: Wolf (input script, default: guard on and
-//! off) against an Ashina soldier with the stand-in brain. Prints state changes and every hit.
+//! `duel-sim [--script FILE] [--steps N] [--passive] [--enemy c1010|c5060] [--simple-ai]`: Wolf
+//! (input script, default: guard on and off) against an enemy (default the Ashina soldier) and
+//! its own AI. Prints state changes, AI actions, unknown AI calls and every hit; `--goals` adds
+//! goal starts and interrupts.
 
 use sekiro_sim::duel::Duel;
+use sekiro_sim::enemy::EnemySpec;
+use sekiro_sim::lua_ai::AiEvent;
 use sekiro_sim::{InputFrame, demo};
 use std::path::Path;
 
@@ -23,18 +27,27 @@ fn main() {
     let mut script = None;
     let mut steps = None;
     let mut passive = false;
+    let mut spec = EnemySpec::soldier();
+    let mut simple = false;
+    let mut goals = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--script" => script = Some(std::fs::read_to_string(args.next().unwrap()).unwrap()),
             "--steps" => steps = args.next().and_then(|s| s.parse().ok()),
             "--passive" => passive = true,
+            "--simple-ai" => simple = true,
+            "--goals" => goals = true,
+            "--enemy" => spec = EnemySpec::by_name(&args.next().unwrap()).unwrap(),
             other => panic!("unknown argument {other}"),
         }
     }
     let frames = demo::parse(script.as_deref().unwrap_or(DEFAULT)).unwrap();
-    let mut duel = Duel::load(Path::new("cache"), 4.0).expect("load");
+    let mut duel = Duel::load_with(Path::new("cache"), 4.0, spec).expect("load");
     duel.enemy_active = !passive;
+    if simple {
+        duel.use_simple_ai();
+    }
     println!(
         "player rig {} dummies, {} attacks; enemy rig {} dummies, {} attacks",
         duel.fighters[0].rig.len(),
@@ -63,14 +76,14 @@ fn main() {
             lp = kp;
         }
         if ke != le {
-            println!("{i:5} SOLDIER {ke}");
+            println!("{i:5} ENEMY   {ke}");
             le = ke;
         }
         for (h, res) in &r.hits {
             println!(
                 "{i:5} HIT {} -> {} judge {} atk {} guarded={} deflected={} defender type {} level {} hp {:?}",
-                ["wolf", "soldier"][h.attacker],
-                ["wolf", "soldier"][h.defender],
+                ["wolf", "enemy"][h.attacker],
+                ["wolf", "enemy"][h.defender],
                 h.judge,
                 h.attack.atk_id,
                 res.guarded,
@@ -91,6 +104,18 @@ fn main() {
             .chain(&r.enemy.behavior.script_errors)
         {
             println!("{i:5} SCRIPT ERROR {e}");
+        }
+        if let Some(ai) = duel.ai.as_mut() {
+            for e in ai.drain_log() {
+                match e {
+                    AiEvent::Action(a) => println!("{i:5} AI action {a}"),
+                    AiEvent::Unknown(_) | AiEvent::Error(_) => println!("{i:5} AI {e:?}"),
+                    AiEvent::GoalStart { .. } | AiEvent::Interrupt(_) if goals => {
+                        println!("{i:5} AI {e:?}")
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 }

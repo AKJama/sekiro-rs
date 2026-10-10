@@ -205,7 +205,7 @@ pub struct AttackData {
 }
 
 impl AttackData {
-    fn from_rows(row: &Row, behavior: &Row) -> Self {
+    pub(crate) fn from_rows(row: &Row, behavior: &Row) -> Self {
         let mut me = Self::from_row(row);
         me.category = behavior.int("category").unwrap_or(0) as u8;
         me.behavior_stamina = behavior.int("stamina").unwrap_or(0) as i32;
@@ -271,6 +271,8 @@ pub struct Combatant {
     /// The row the combat rules read: EquipParamWeapon of the player's right-hand weapon, or
     /// the NPC's NpcParam.
     pub param_id: i32,
+    /// Bullets by behaviour judge id (BehaviorParam rows with `refType` 1).
+    pub bullets: HashMap<i32, crate::bullets::BulletDef>,
 }
 
 impl Combatant {
@@ -366,6 +368,13 @@ impl Combatant {
             200_000_000,
             c.variation,
         );
+        if let (Some(b), Some(bullets), Some(a)) = (
+            load_table(&pd, &dd, "BehaviorParam", "BehaviorParam"),
+            load_table(&pd, &dd, "Bullet", "BulletParam"),
+            load_table(&pd, &dd, "AtkParam_Npc", "AtkParam"),
+        ) {
+            c.bullets = crate::bullets::load_bullets(&b, &bullets, &a, 200_000_000, c.variation);
+        }
         c
     }
 }

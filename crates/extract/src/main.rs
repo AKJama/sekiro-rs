@@ -63,7 +63,7 @@ enum Command {
     Params,
     /// Decode Havok skeletons, animation clips and TAE events into cache/anim/<chr>/.
     Anims {
-        /// Character ids (e.g. c0000 c1010). Defaults to c0000 and c1010.
+        /// Character ids (e.g. c0000 c1010). Defaults to c0000, c1010 and c5060 (the Owl).
         chrs: Vec<String>,
     },
     /// Export one map area (e.g. m11_00_00_00) to cache/maps/<id>: map piece GLBs, layout JSON

@@ -265,6 +265,7 @@ impl ActiveEffect {
             condition_hp: row.f32("conditionHp")?,
             condition_hp_rate: row.f32("conditionHpRate")?,
             max_stamina_rate: row.f32("maxStaminaRate")?,
+            change_hp_rate: row.f32("changeHpRate")?,
         })
     }
 }

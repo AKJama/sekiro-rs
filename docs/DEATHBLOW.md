@@ -93,11 +93,24 @@ The demo takes the deathblow 0.6 s into the stagger.
 - `DummyFrame::from_flver`: the sorb dummy as a placement in Wolf's frame.
 - `Deathblow`: the timeline (`Start`, `Body`, `Done`, or `Missed`), returning per step the clips to start, the defender's placement, and when the blow lands and kills.
 
+## Bosses with more than one mark
+
+The Great Shinobi Owl (c5060, `ninsatuNum` 2) shows how the data handles several deathblows; details and rows in `docs/OWL.md`.
+
+- While marks remain, HP stops at 1 (`Vitality::set_hp`), so the first deathblow leaves him at 1 HP with one mark.
+- His ordinary front deathblow clip `a000_012000` gets him back up: at 4.4 s its TAE adds SpEffect 300610 "HP reset" (`changeHpRate` -100) and switches to StaminaControlParam type 7, whose row pins posture at 100 %.
+  `CombatRules::apply_effect_hp` applies `changeHpRate` once when a TAE SpEffect starts.
+- On the last mark the duel picks the finishing pair (suffixes 180 / 181, "todome") when the enemy has one; its defender clip `a000_013700` is itself the death (the shared script's `ThrowDef13700` sets `STATE_DEATH`), so the duel lets the script see HP 0 from the blow on instead of waiting for a death clip.
+  That the last mark selects this pair is inferred.
+- His rows snap Wolf to one of the Owl's dummies (`defSorbDmyId` 230, 1.3 m in front of him) with `atkSorbDmyId` 0; the duel holds the Owl at the inverse frame (`DummyFrame::inverse`).
+- A deathblow waits until the enemy has reacted to the breaking hit (not frozen in hit stop, damage read by its script), and does not start again while the enemy still plays the last throw's defender clip.
+  Without the first rule, a throw event queued during the hit stop was overridden by the script's stagger.
+
 ## Gaps
 
 - The engine's own throw search (which candidates it considers each frame, priorities between rows) is not reproduced; `select` tries a fixed order.
 - The posture-break eligibility (SpEffect 220420 window) is not checked yet; the demo triggers inside it.
 - Stealth, plunge, ledge and wall rows are selected by `select` only for the stealth case; their extra conditions (crouching, falling, wall dummies) are not modelled.
-- Deathblow marks and HP are not tracked by a combat model yet; the demo passes "one mark left".
+- The arena demo (`--arena --deathblow`) still passes "one mark left"; the duel tracks marks through the combat rules.
 - The soldier's death clip ends in a ragdoll in the game (`RagdollReviveTime` from 3.67 s); here it just plays out.
 - Sound, blood decals (`DecalParamID_DummyPoly`) and the deathblow camera are ignored.

@@ -94,6 +94,23 @@ pub struct Goal {
     pub phase: u8,
     pub elapsed: f32,
     pub started_anim: bool,
+    /// AI numbers and timers to set when this goal activates or succeeds
+    /// (`TimingSetNumber`, `TimingSetTimer`).
+    pub timing_sets: Vec<TimingSet>,
+}
+
+/// When a [`TimingSet`] applies (`AI_TIMING_SET__*` in `ai_define.lua`).
+pub const TIMING_ACTIVATE: i32 = 0;
+pub const TIMING_UPDATE_SUCCESS: i32 = 1;
+
+/// A deferred `SetNumber` or `SetTimer` on the AI, attached to a goal: `goal:TimingSetNumber(slot,
+/// value, timing)`. The value is the one computed when the script attached it (scripts).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TimingSet {
+    pub timer: bool,
+    pub slot: i32,
+    pub value: f64,
+    pub timing: i32,
 }
 
 impl Goal {
@@ -132,6 +149,8 @@ pub struct Request {
     pub move_level: f32,
     pub move_yaw: Option<f32>,
     pub face_yaw: Option<f32>,
+    /// The action comes from a goal registered with `ENABLE_COMBO_ATK_CANCEL`.
+    pub combo: bool,
 }
 
 /// Registered goal and logic information plus all per-character AI state. Implements the
@@ -164,6 +183,12 @@ pub struct AiState {
     pub interrupt: Option<i32>,
     /// Edge detection for the world's interrupt sources.
     last_parry_timing: bool,
+    /// SpEffects the scripts observe (`AddObserveSpecialEffectAttribute(target, id)`), with
+    /// whether each was active on the last tick.
+    pub observed_effects: Vec<(i32, i32, bool)>,
+    /// The SpEffect whose activation or end is being dispatched
+    /// (`GetSpecialEffectActivateInterruptType`, `GetSpecialEffectInactivateInterruptType`).
+    pub effect_interrupt: Option<i32>,
 }
 
 impl AiState {
@@ -191,6 +216,8 @@ impl AiState {
             prev_target_state: 0,
             interrupt: None,
             last_parry_timing: false,
+            observed_effects: Vec::new(),
+            effect_interrupt: None,
         };
         s.top = s.new_goal(0, -1.0, Vec::new(), None);
         s
@@ -235,6 +262,7 @@ impl AiState {
             phase: 0,
             elapsed: 0.0,
             started_anim: false,
+            timing_sets: Vec::new(),
         };
         if let Some(i) = self.goals.iter().position(Option::is_none) {
             self.goals[i] = Some(g);
@@ -537,6 +565,16 @@ impl AiState {
             "GetBattleGoalId" => num(self.think.battle_goal_id as f64),
             "GetId" => num(self.goal(id).kind as f64),
             "IsInterruptSubGoalChanged" => boolean(false),
+            "TimingSetNumber" | "TimingSetTimer" => {
+                let set = TimingSet {
+                    timer: name == "TimingSetTimer",
+                    slot: n(0) as i32,
+                    value: n(1),
+                    timing: n(2) as i32,
+                };
+                self.goal_mut(id).timing_sets.push(set);
+                vec![goal_obj(id)]
+            }
             "SetLifeEndSuccess" | "SetTargetRange" | "SetFailedEndOption" | "SetNoUpdate"
             | "SetManagementGoal" | "SetTableGoal" | "SetNormalGoal" => vec![],
             _ => self.default_method(&format!("goal:{name}")),
@@ -662,8 +700,6 @@ impl AiState {
             | "GetCurrTargetType"
             | "GetMovePointEffectRange"
             | "GetLatestSoundTargetID"
-            | "GetSpecialEffectActivateInterruptType"
-            | "GetSpecialEffectInactivateInterruptType"
             | "GetOddsParamIdOffset" => num(0.0),
             "TurnTo" => {
                 self.request.face_yaw = self.yaw_to(t(0));
@@ -675,8 +711,23 @@ impl AiState {
                 }
                 vec![]
             }
-            "AddObserveSpecialEffectAttribute"
-            | "AddObserveRegion"
+            "AddObserveSpecialEffectAttribute" => {
+                let (target, id) = (t(0), t(1));
+                if !self
+                    .observed_effects
+                    .iter()
+                    .any(|&(o, e, _)| o == target && e == id)
+                {
+                    // Already active when first observed: no activation edge (ours).
+                    let active = self.has_effect(target, id);
+                    self.observed_effects.push((target, id, active));
+                }
+                vec![]
+            }
+            "GetSpecialEffectActivateInterruptType" | "GetSpecialEffectInactivateInterruptType" => {
+                num(self.effect_interrupt.unwrap_or(0) as f64)
+            }
+            "AddObserveRegion"
             | "AddObserveChrDmyArea"
             | "DeleteObserve"
             | "SetEventFlag"
@@ -735,6 +786,22 @@ pub fn tick(vm: &mut Vm, st: &mut AiState, world: AiWorld) {
     for kind in fired {
         dispatch_interrupt(vm, st, kind);
     }
+    // Observed SpEffects: INTERUPT_ActivateSpecialEffect (43) on the step one turns on,
+    // INTERUPT_InactivateSpecialEffect (44) on the step it turns off.
+    let mut edges = Vec::new();
+    for i in 0..st.observed_effects.len() {
+        let (target, id, was) = st.observed_effects[i];
+        let now = st.has_effect(target, id);
+        if now != was {
+            edges.push((if now { 43 } else { 44 }, id));
+        }
+        st.observed_effects[i].2 = now;
+    }
+    for (kind, id) in edges {
+        st.effect_interrupt = Some(id);
+        dispatch_interrupt(vm, st, kind);
+    }
+    st.effect_interrupt = None;
     let top = st.top;
     if st.replan || st.goal(top).subgoals.is_empty() {
         st.replan = false;
@@ -847,6 +914,24 @@ fn call_cb(vm: &mut Vm, st: &mut AiState, id: u32, which: &str) -> Option<Value>
     }
 }
 
+/// Applies goal `id`'s timing sets for `timing` to the AI's numbers and timers.
+fn apply_timing_sets(st: &mut AiState, id: u32, timing: i32) {
+    let sets: Vec<TimingSet> = st
+        .goal(id)
+        .timing_sets
+        .iter()
+        .filter(|t| t.timing == timing)
+        .copied()
+        .collect();
+    for t in sets {
+        if t.timer {
+            st.timers.insert(t.slot, t.value as f32);
+        } else {
+            st.numbers.insert(t.slot, t.value);
+        }
+    }
+}
+
 fn terminate(vm: &mut Vm, st: &mut AiState, id: u32) {
     if st.goals.get(id as usize).is_none_or(Option::is_none) {
         return;
@@ -872,6 +957,7 @@ fn update(vm: &mut Vm, st: &mut AiState, id: u32, depth: usize) -> i32 {
         let kind = st.goal(id).kind;
         let name = st.name(kind);
         st.log(AiEvent::GoalStart { depth, kind, name });
+        apply_timing_sets(st, id, TIMING_ACTIVATE);
         call_cb(vm, st, id, "Activate");
         if st.goals.get(id as usize).is_none_or(Option::is_none) {
             return RESULT_FAILED;
@@ -897,6 +983,9 @@ fn update(vm: &mut Vm, st: &mut AiState, id: u32, depth: usize) -> i32 {
                 name,
                 result: r,
             });
+            if r == RESULT_SUCCESS && st.goals[front as usize].is_some() {
+                apply_timing_sets(st, front, TIMING_UPDATE_SUCCESS);
+            }
             terminate(vm, st, front);
             if r == RESULT_FAILED {
                 let subs: Vec<u32> = st.goal_mut(id).subgoals.drain(..).collect();
@@ -1063,6 +1152,10 @@ fn action_update(st: &mut AiState, id: u32, g: &Goal) -> i32 {
             st.goal_mut(id).phase = 1;
         }
         st.request.action = action;
+        st.request.combo = g
+            .parent
+            .and_then(|p| st.goals.get(p as usize)?.as_ref())
+            .is_some_and(|p| st.combo_cancel.contains(&p.kind));
         return RESULT_CONTINUE;
     }
     if !playing {

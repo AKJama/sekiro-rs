@@ -58,6 +58,11 @@ pub const ENV_GUARD_LEVEL: i32 = 237;
 pub const ENV_TOOK_DAMAGE: i32 = 256;
 pub const ENV_DAMAGE_ELEMENT: i32 = 285;
 pub const ENV_AI_ACTION: i32 = 106;
+/// The AI's queued action as the script's cancel windows read it ("AI combo action type",
+/// "AI attack cancel type", "AI step type"; env names from the community env list).
+pub const ENV_AI_COMBO_ACTION: i32 = 107;
+pub const ENV_AI_STEP_ACTION: i32 = 118;
+pub const ENV_AI_CANCEL_ACTION: i32 = 120;
 pub const ENV_ANIM_EXISTS: i32 = 1114;
 pub const ENV_GUARD_REPELLED: i32 = 3018;
 pub const ENV_JUST_GUARD_REPELLED: i32 = 3019;
@@ -118,6 +123,9 @@ pub struct PlayerEnv {
     pub damage: Option<IncomingDamage>,
     /// NPC only: the action the AI requests (env 106), an animation-id-like code.
     pub ai_action: i32,
+    /// NPC only: the action offered to an attack's cancel window: env 107 (combo), 120 (attack
+    /// cancel) and 118 (step), 0 when the window is closed.
+    pub ai_cancel_actions: [i32; 3],
     /// Full animation ids this character has (env 1114, "does the animation exist").
     pub existing_anims: std::rc::Rc<HashSet<i64>>,
     /// Fixed answers for any other `(id, first argument)`; `None` matches any argument.
@@ -149,6 +157,7 @@ impl Default for PlayerEnv {
             face_lock_target: std::cell::Cell::new(false),
             damage: None,
             ai_action: 0,
+            ai_cancel_actions: [0; 3],
             existing_anims: std::rc::Rc::default(),
             overrides: Vec::new(),
         }
@@ -243,6 +252,9 @@ impl Adapter<'_> {
                 .unwrap_or(0.0),
             ENV_ACTION_UNLOCKED => truth(arg.is_some_and(|a| env.unlocked.contains(&a))),
             ENV_AI_ACTION => env.ai_action as f32,
+            ENV_AI_COMBO_ACTION => env.ai_cancel_actions[0] as f32,
+            ENV_AI_CANCEL_ACTION => env.ai_cancel_actions[1] as f32,
+            ENV_AI_STEP_ACTION => env.ai_cancel_actions[2] as f32,
             ENV_ANIM_EXISTS => truth(arg.is_some_and(|a| env.existing_anims.contains(&(a as i64)))),
             ENV_TOOK_DAMAGE => truth(env.damage.is_some()),
             ENV_DAMAGE_TYPE => env.damage.map_or(0.0, |d| d.damage_type as f32),

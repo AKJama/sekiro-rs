@@ -16,6 +16,10 @@ pub struct Gauges {
     pub enemy_head: Option<Vec3>,
     pub enemy_alive: bool,
     pub deathblow: bool,
+    /// The enemy's name over its bars.
+    pub enemy_name: &'static str,
+    /// Deathblow marks the enemy has left (NpcParam `ninsatuNum`, 0 counting as one).
+    pub enemy_marks: i32,
 }
 
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
@@ -187,7 +191,12 @@ pub fn update(
         text.0 = if l.0 == 0 {
             format!("Wolf   {hp} / {max}")
         } else {
-            format!("Ashina Soldier   {hp}")
+            let marks = if gauges.enemy_marks > 1 {
+                format!("   {} deathblows", gauges.enemy_marks)
+            } else {
+                String::new()
+            };
+            format!("{}   {hp}{marks}", gauges.enemy_name)
         };
     }
     let Ok((mut node, mut vis)) = panel.single_mut() else {

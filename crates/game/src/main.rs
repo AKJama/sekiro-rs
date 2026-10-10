@@ -92,6 +92,11 @@ fn main() -> anyhow::Result<()> {
             screenshots,
             exit_after_script: args.iter().any(|a| a == "--exit"),
             enemy: !args.iter().any(|a| a == "--no-enemy"),
+            opponent: match arg_value(&args, "--enemy") {
+                Some(name) => sekiro_sim::enemy::EnemySpec::by_name(&name)
+                    .map_err(|e| anyhow::anyhow!("--enemy: {e}"))?,
+                None => sekiro_sim::enemy::EnemySpec::soldier(),
+            },
             lock_on: args.iter().any(|a| a == "--lock-on"),
             simple_ai: args.iter().any(|a| a == "--simple-ai"),
             map: arg_value(&args, "--map"),
@@ -114,7 +119,7 @@ fn main() -> anyhow::Result<()> {
     eprintln!(
         "                 [--map <id> [--start <n> | --spawn x,y,z,yaw,0]] [--no-enemy] [--lock-on]"
     );
-    eprintln!("                 [--simple-ai]");
+    eprintln!("                 [--simple-ai] [--enemy c1010|c5060]");
     eprintln!("usage: sekiro-rs --arena [--deathblow] [--screenshot <out.png> --at <seconds>]");
     eprintln!("       sekiro-rs --map <id> [--start <n>] [--camera x,y,z,yaw,pitch] [--collision]");
     eprintln!("                 [--screenshot <out.png> --at <seconds>] (see src/map.rs)");

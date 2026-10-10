@@ -8,7 +8,8 @@ use crate::deathblow::{
     Deathblow, DummyFrame, Phase, Placement, Situation, ThrowTable, ThrowTimes, deathblow_marks,
     select,
 };
-use crate::fight::{CombatRules, FighterKind};
+use crate::enemy::EnemySpec;
+use crate::fight::CombatRules;
 use crate::hits::{Combatant, HitDetector, HitEvent, HitResult};
 use crate::input::InputFrame;
 use crate::lua_ai::{AiActor, AiBrain, AiWorld, ThinkParams, anim_id_from_clip};
@@ -20,12 +21,6 @@ use std::path::{Path, PathBuf};
 /// for the game's death screen and reload).
 pub const RESPAWN_DELAY: f32 = 6.0;
 
-/// The soldier's character id in ThrowParam (`defChrId`).
-const SOLDIER_THROW_CHR: i32 = 1010;
-
-/// The soldier's NpcThinkParam row and the map script bundle its battle goal lives in.
-const SOLDIER_THINK: i32 = 10_100_000;
-const SOLDIER_AI_BUNDLE: &str = "m11_00_00_00.luabnd.d";
 /// Seed for the AI's random numbers (fixed, so runs repeat).
 const AI_SEED: u64 = 7;
 
@@ -59,10 +54,12 @@ pub struct DuelReport {
     pub respawned: bool,
 }
 
-/// ThrowParam and the player model's sorb dummies, for deathblows.
+/// ThrowParam and both models' sorb dummies, for deathblows.
 struct Throws {
     table: ThrowTable,
     model: Flver,
+    /// The enemy's model, for rows that snap Wolf to one of its dummies (`defSorbDmyId`).
+    enemy_model: Option<Flver>,
 }
 
 pub struct Duel {
@@ -86,6 +83,8 @@ pub struct Duel {
     pub respawn_in: Option<f32>,
     throws: Option<Throws>,
     cache: PathBuf,
+    /// Which enemy this duel loaded.
+    pub spec: EnemySpec,
     /// Steps since the deathblow switched the enemy to its death animation (0: not yet).
     defender_dying: u8,
     spawn: Option<[Placement; 2]>,
@@ -93,12 +92,17 @@ pub struct Duel {
     attack_button: bool,
     /// The enemy took a hit last step (the AI's damage interrupt).
     enemy_damaged: bool,
+    /// The defender clip of the last deathblow; no new deathblow starts while it plays (the
+    /// enemy is in its throw-defence state, getting up from a non-lethal blow).
+    last_throw_def_clip: Option<String>,
     /// Hit stop of the player and the enemy: a frozen character does not advance.
     pub hit_stop: [HitStop; 2],
     /// Pushes in progress on the player and the enemy.
     pub knockback: [Option<Knockback>; 2],
     /// Each character's last real step, reported again while it is frozen.
     last_steps: [StepReport; 2],
+    /// Thrown and shot attacks in flight.
+    pub bullets: crate::bullets::Bullets,
 }
 
 fn placement(c: &Character) -> Placement {
@@ -117,18 +121,27 @@ impl Duel {
     /// Wolf at the origin facing -Z and an Ashina soldier (`c1010`, NpcParam 10100000) `distance`
     /// metres in front of him, facing him.
     pub fn load(cache: &Path, distance: f32) -> Result<Self, LoadError> {
-        let (player, enemy) = Self::load_characters(cache, distance)?;
+        Self::load_with(cache, distance, EnemySpec::soldier())
+    }
+
+    /// Like [`Duel::load`], against the enemy `spec`.
+    pub fn load_with(cache: &Path, distance: f32, spec: EnemySpec) -> Result<Self, LoadError> {
+        let (player, enemy) = Self::load_characters(cache, distance, &spec)?;
         let fighters = [
             Combatant::player(cache, &player.skeleton),
-            Combatant::npc(cache, "c1010", 10_100_000, &enemy.skeleton),
+            Combatant::npc(cache, &spec.chr, spec.npc_param, &enemy.skeleton),
         ];
         let rules = CombatRules::load(cache, &[&fighters[0], &fighters[1]]);
-        let ai = Self::load_ai(cache);
+        let ai = Self::load_ai(cache, &spec);
+        let read_model = |chr: &str| {
+            let bytes = std::fs::read(cache.join(format!("raw/chr/{chr}.chrbnd.d/{chr}.flver")));
+            flver::parse(&bytes.ok()?).ok()
+        };
         let throws = ThrowTable::load_from_cache(cache).ok().and_then(|table| {
-            let bytes = std::fs::read(cache.join("raw/chr/c0000.chrbnd.d/c0000.flver")).ok()?;
             Some(Throws {
                 table,
-                model: flver::parse(&bytes).ok()?,
+                model: read_model("c0000")?,
+                enemy_model: read_model(&spec.chr),
             })
         });
         Ok(Self {
@@ -145,31 +158,39 @@ impl Duel {
             respawn_in: None,
             throws,
             cache: cache.to_path_buf(),
+            spec,
             defender_dying: 0,
             spawn: None,
             lock_button: false,
             attack_button: false,
             enemy_damaged: false,
+            last_throw_def_clip: None,
             hit_stop: [HitStop::default(); 2],
             knockback: [None; 2],
             last_steps: Default::default(),
+            bullets: Default::default(),
         })
     }
 
-    /// The soldier's own AI from the extracted scripts, or `None` (with a warning) when they
+    /// The enemy's own AI from the extracted scripts, or `None` (with a warning) when they
     /// are missing or fail to load.
-    fn load_ai(cache: &Path) -> Option<AiBrain> {
+    fn load_ai(cache: &Path, spec: &EnemySpec) -> Option<AiBrain> {
         let (pd, dd) = (
             cache.join("raw/param/gameparam/gameparam.parambnd.d"),
             cache.join("refs/paramdex/Defs"),
         );
         let think = crate::hits::load_table(&pd, &dd, "NpcThinkParam", "NpcThinkParam")?
-            .find(SOLDIER_THINK)
+            .find(spec.think)
             .and_then(|r| ThinkParams::from_row(&r).ok())?;
-        match AiBrain::load(cache, SOLDIER_AI_BUNDLE, think, AI_SEED) {
-            Ok(brain) => Some(brain),
+        match AiBrain::load(cache, &spec.ai_bundle, think, AI_SEED) {
+            Ok(mut brain) => {
+                if spec.starts_in_battle {
+                    brain.start_in_battle();
+                }
+                Some(brain)
+            }
             Err(e) => {
-                eprintln!("soldier AI not loaded, using the stand-in brain: {e}");
+                eprintln!("{} AI not loaded, using the stand-in brain: {e}", spec.chr);
                 None
             }
         }
@@ -223,9 +244,13 @@ impl Duel {
         }
     }
 
-    fn load_characters(cache: &Path, distance: f32) -> Result<(Character, Character), LoadError> {
+    fn load_characters(
+        cache: &Path,
+        distance: f32,
+        spec: &EnemySpec,
+    ) -> Result<(Character, Character), LoadError> {
         let mut player = Character::load_from_cache(cache)?;
-        let mut enemy = Character::load_npc(cache, "c1010")?;
+        let mut enemy = Character::load_npc(cache, &spec.chr)?;
         enemy.body.position = [0.0, 0.0, -distance];
         enemy.body.yaw = std::f32::consts::PI;
         let dt = 1.0 / 60.0;
@@ -237,7 +262,7 @@ impl Duel {
     /// Puts both characters back where they stood on the first step, with fresh scripts, full
     /// HP and posture. Each keeps its ground.
     pub fn reset(&mut self) -> Result<(), LoadError> {
-        let (mut player, mut enemy) = Self::load_characters(&self.cache, 4.0)?;
+        let (mut player, mut enemy) = Self::load_characters(&self.cache, 4.0, &self.spec)?;
         std::mem::swap(&mut player.ground, &mut self.player.ground);
         std::mem::swap(&mut enemy.ground, &mut self.enemy.ground);
         if let Some([p, e]) = self.spawn {
@@ -249,7 +274,7 @@ impl Duel {
         self.rules.reset();
         self.detector = HitDetector::default();
         if self.ai.is_some() {
-            self.ai = Self::load_ai(&self.cache);
+            self.ai = Self::load_ai(&self.cache, &self.spec);
         }
         self.enemy_damaged = false;
         self.hit_stop = [HitStop::default(); 2];
@@ -257,6 +282,8 @@ impl Duel {
         self.deathblow = None;
         self.respawn_in = None;
         self.defender_dying = 0;
+        self.last_throw_def_clip = None;
+        self.bullets.clear();
         Ok(())
     }
 
@@ -312,22 +339,48 @@ impl Duel {
     }
 
     fn deathblow_rows(&self) -> Option<(i32, i32)> {
+        // The enemy must have reacted to the hit that broke it first: while it is frozen in hit
+        // stop or has not read the damage yet, its script would still send it into the stagger
+        // after the throw event (ours; the engine checks the throwable state the stagger sets).
         if self.deathblow.is_some()
             || self.rules.fighters[0].dead()
             || !self.rules.deathblow_open(1)
+            || self.hit_stop[1].active()
+            || self.enemy.pending_damage.is_some()
+        {
+            return None;
+        }
+        if let Some(clip) = &self.last_throw_def_clip
+            && self
+                .enemy
+                .behavior
+                .runtime
+                .main_clip()
+                .is_some_and(|c| &c.animation == clip)
         {
             return None;
         }
         let throws = self.throws.as_ref()?;
+        let situation = if self.lethal_deathblow() {
+            Situation::Final
+        } else {
+            Situation::PostureBroken
+        };
         select(
             &throws.table,
-            SOLDIER_THROW_CHR,
+            self.spec.throw_chr(),
             0,
-            Situation::PostureBroken,
+            situation,
             &placement(&self.player),
             &placement(&self.enemy),
         )
         .map(|(s, b)| (s.id, b.id))
+    }
+
+    /// Whether a deathblow now would spend the enemy's last mark (NpcParam `ninsatuNum`, 0
+    /// counting as one).
+    fn lethal_deathblow(&self) -> bool {
+        deathblow_marks(self.rules.fighters[1].vitality.deathblows_left) <= 1
     }
 
     /// Starts a deathblow on the enemy if one is open and Wolf stands in a ThrowParam range.
@@ -344,22 +397,33 @@ impl Duel {
             "c0000",
             &start.attacker_anim(),
             &body.attacker_anim(),
-            body.defender_anim().as_deref().map(|d| ("c1010", d)),
+            body.defender_anim()
+                .as_deref()
+                .map(|d| (self.spec.chr.as_str(), d)),
         )?;
-        let sorb = DummyFrame::from_flver(&throws.model, body.atk_sorb_dummy)?;
+        let sorb = if body.atk_sorb_dummy <= 0 && body.def_sorb_dummy > 0 {
+            // Wolf is snapped to the enemy's dummy; hold the enemy where that puts it.
+            DummyFrame::from_flver(throws.enemy_model.as_ref()?, body.def_sorb_dummy)?.inverse()
+        } else {
+            DummyFrame::from_flver(&throws.model, body.atk_sorb_dummy)?
+        };
         let (start, body) = (start.clone(), body.clone());
         let body_duration = self.player.clip_duration(&body.attacker_anim())?;
-        let marks = match &self.rules.fighters[1].kind {
-            FighterKind::Npc(npc) => npc.deathblows,
-            FighterKind::Player { .. } => 0,
-        };
-        let (db, first) = Deathblow::begin(
+        let marks = self.rules.fighters[1].vitality.deathblows_left;
+        // Whether the enemy's TAE has the death clip (env 1114's "does the animation exist").
+        let death_clip = body
+            .defender_death_anim()
+            .and_then(|clip| sekiro_formats::tae::anim_id(&clip))
+            .is_some_and(|id| self.enemy.behavior.env.existing_anims.contains(&id));
+        let (mut db, first) = Deathblow::begin(
             (&start, &body),
             times,
             sorb,
             body_duration,
             deathblow_marks(marks),
         );
+        db.death_clip = death_clip;
+        self.last_throw_def_clip = body.defender_anim();
         if let Some(yaw) = db.start_facing(&attacker, &defender) {
             self.player.body.yaw = yaw;
         }
@@ -409,6 +473,10 @@ impl Duel {
             self.rules.deathblow(1);
             report.hit = true;
             report.killed = step.killed;
+            if step.killed && !db.death_clip {
+                // The defender clip is itself the death: the script may see HP 0 from now on.
+                self.defender_dying = self.defender_dying.max(1);
+            }
         }
         if matches!(db.phase, Phase::Done | Phase::Missed) {
             self.deathblow = None;
@@ -552,16 +620,23 @@ impl Duel {
             self.separate();
         }
 
-        let found = self.detector.detect(
+        let mut found = self.detector.detect(
             &[&self.player, &self.enemy],
             &[&self.fighters[0], &self.fighters[1]],
         );
+        let chars = [&self.player, &self.enemy];
+        let fighters = [&self.fighters[0], &self.fighters[1]];
+        self.bullets.spawn(&chars, &fighters);
+        let bullet_hits = self.bullets.advance(dt, &chars, &fighters);
+        let first_bullet_hit = found.len();
+        found.extend(bullet_hits);
         let mut hits = Vec::new();
         self.enemy_damaged = false;
-        for hit in found {
+        for (k, hit) in found.into_iter().enumerate() {
             if self.deathblow.is_some() || self.rules.fighters.iter().any(|f| f.dead()) {
                 break;
             }
+            let from_bullet = k >= first_bullet_hit;
             let result = self.rules.resolve(
                 &hit,
                 [&self.player, &self.enemy],
@@ -577,11 +652,16 @@ impl Duel {
                 att.pending_damage = Some(back);
             }
             self.knockback[hit.defender] = result.knockback;
-            self.hit_stop[hit.attacker].start(result.hit_stop[0]);
+            // A bullet's hit does not freeze its distant shooter (ours).
+            if !from_bullet {
+                self.hit_stop[hit.attacker].start(result.hit_stop[0]);
+            }
             self.hit_stop[hit.defender].start(result.hit_stop[1]);
             self.enemy_damaged |= hit.defender == 1 && !result.guarded;
             hits.push((hit, result));
         }
+        self.rules.apply_effect_hp(0, self.player.tae_frame());
+        self.rules.apply_effect_hp(1, self.enemy.tae_frame());
         self.rules.recover(0, &self.player, dts[0]);
         self.rules.recover(1, &self.enemy, dts[1]);
         if self.respawn_in.is_none()

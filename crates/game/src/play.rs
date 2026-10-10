@@ -1,5 +1,6 @@
-//! `--play`: Wolf against an Ashina soldier on a floor, both driven by the game's own scripts,
-//! behaviour graphs and TAE (`sekiro_sim::duel::Duel`).
+//! `--play`: Wolf against an enemy (`--enemy`, default the Ashina soldier c1010; `c5060` is the
+//! Great Shinobi Owl) on a floor, both driven by the game's own scripts, behaviour graphs and TAE
+//! (`sekiro_sim::duel::Duel`).
 //!
 //! The simulation runs at a fixed 60 steps per second. Each step it receives an [`InputFrame`]
 //! built from keyboard, mouse and gamepad (or from an input script) and reports, per character,
@@ -14,7 +15,7 @@
 //! B step/sprint, L3 crouch, L2 grapple, R2 prosthetic, X item, R3 lock-on. Esc frees the mouse.
 //!
 //! With `--map <id> [--start <n>]` the fight happens on an exported map instead of the floor:
-//! Wolf stands at the player start, the soldier 5 m in front of him, both bodies walk on the
+//! Wolf stands at the player start, the enemy 5 m in front of him, both bodies walk on the
 //! map's hit collision (`sekiro_sim::collision`), the map renders as in `--map` (see
 //! [`crate::map::add_map`]) and the camera is pulled in when a wall is between it and Wolf.
 
@@ -31,6 +32,7 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::window::{CursorGrabMode, CursorOptions};
 use sekiro_sim::duel::{Duel, DuelReport};
+use sekiro_sim::enemy::EnemySpec;
 use sekiro_sim::{Buttons, InputFrame, StepReport, demo};
 
 use crate::character::{AnimLibrary, Animator, Rig, animate, bind_rigs};
@@ -47,11 +49,13 @@ pub struct Options {
     pub screenshots: Vec<(usize, PathBuf)>,
     /// Exit when the script ends and every screenshot is saved.
     pub exit_after_script: bool,
-    /// Let the soldier fight (it always stands there; without this it stays passive).
+    /// Let the enemy fight (it always stands there; without this it stays passive).
     pub enemy: bool,
-    /// Start locked on to the soldier.
+    /// Which enemy (`--enemy`): its model, animations, scripts, params and AI.
+    pub opponent: EnemySpec,
+    /// Start locked on to the enemy.
     pub lock_on: bool,
-    /// Drive the soldier with the stand-in brain instead of its own AI scripts.
+    /// Drive the enemy with the stand-in brain instead of its own AI scripts.
     pub simple_ai: bool,
     /// Play on this exported map (`cache/maps/<id>`) instead of the flat floor.
     pub map: Option<String>,
@@ -76,14 +80,20 @@ struct ModelPath(&'static str);
 const STEP_HZ: f64 = 60.0;
 const MOUSE_SENSITIVITY: f32 = 0.0035;
 const WOLF: usize = 0;
-const SOLDIER: usize = 1;
+const ENEMY: usize = 1;
 
-/// Which simulated character an entity shows (0 Wolf, 1 the soldier).
+/// Which simulated character an entity shows (0 Wolf, 1 the enemy).
 #[derive(Component)]
 struct Actor(usize);
 
 #[derive(Component)]
 struct Hud;
+
+/// One of a small pool of markers that show bullets in flight (shuriken), by index.
+#[derive(Component)]
+struct BulletMarker(usize);
+
+const BULLET_MARKERS: usize = 12;
 
 #[derive(Component)]
 struct FollowCamera;
@@ -130,10 +140,10 @@ pub fn run(options: Options) -> Result<()> {
     let cache = options.cache.canonicalize().context("cache directory")?;
     let libraries = [
         AnimLibrary::load(&cache, "c0000")?,
-        AnimLibrary::load(&cache, "c1010")?,
+        AnimLibrary::load(&cache, &options.opponent.chr)?,
     ];
-    let mut duel =
-        Duel::load(&cache, 6.0).map_err(|e| anyhow::anyhow!("loading the simulation: {e}"))?;
+    let mut duel = Duel::load_with(&cache, 6.0, options.opponent.clone())
+        .map_err(|e| anyhow::anyhow!("loading the simulation: {e}"))?;
     duel.enemy_active = options.enemy;
     if options.simple_ai {
         duel.use_simple_ai();
@@ -157,7 +167,7 @@ pub fn run(options: Options) -> Result<()> {
         let wolf = &mut duel.player.body;
         wolf.position = [start.x, floor_at(start.x, start.z, start.y), start.z];
         wolf.yaw = yaw;
-        // The soldier 5 m in front of Wolf, facing him.
+        // The enemy 5 m in front of Wolf, facing him.
         let ahead = Quat::from_rotation_y(yaw) * Vec3::NEG_Z * 5.0;
         let (ex, ez) = (start.x + ahead.x, start.z + ahead.z);
         let enemy = &mut duel.enemy.body;
@@ -264,6 +274,7 @@ pub fn run(options: Options) -> Result<()> {
             bind_rigs,
             apply_draw_masks,
             sync_actors,
+            sync_bullets,
             animate,
             follow_camera,
             hud,
@@ -316,15 +327,32 @@ fn setup(
         Transform::from_xyz(0.0, 2.0, 4.0).looking_at(Vec3::new(0.0, 1.2, 0.0), Vec3::Y),
     ));
     combat_hud::spawn(&mut commands);
+    // Bullets have no model yet (their look is an effect, FXR, not extracted): small spheres.
+    let marker_mesh = meshes.add(Sphere::new(0.06).mesh().ico(2).unwrap());
+    let marker_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.75, 0.78, 0.82),
+        emissive: LinearRgba::rgb(0.6, 0.6, 0.65),
+        metallic: 0.8,
+        ..default()
+    });
+    for i in 0..BULLET_MARKERS {
+        commands.spawn((
+            BulletMarker(i),
+            Mesh3d(marker_mesh.clone()),
+            MeshMaterial3d(marker_material.clone()),
+            Transform::IDENTITY,
+            Visibility::Hidden,
+        ));
+    }
     let on_map = on_map.is_some();
     if !on_map {
         spawn_floor_stage(&mut commands, &mut meshes, &mut materials);
     }
     let models = [
         format!("{}c0000.glb", model_path.0),
-        format!("{}c1010.glb", model_path.0),
+        format!("{}{}.glb", model_path.0, sim.duel.spec.chr),
     ];
-    for actor in [WOLF, SOLDIER] {
+    for actor in [WOLF, ENEMY] {
         let lib = &mut libraries.0[actor];
         let mut idle = Animator::new(
             lib.clip("a000_000000").expect("idle clip is extracted"),
@@ -339,7 +367,7 @@ fn setup(
             Rig::new(Arc::new(lib.skeleton.clone())),
             idle,
         ));
-        if actor == SOLDIER {
+        if actor == ENEMY {
             e.insert(DrawMask::new(MaskSource::Combat));
         }
         if actor == WOLF && on_map {
@@ -554,8 +582,8 @@ fn simulate(
     for (hit, res) in &report.hits {
         let text = format!(
             "step {step}: {} hit {} ({}), AtkParam {}: HP -{}, posture -{} / attacker -{}",
-            ["Wolf", "soldier"][hit.attacker],
-            ["Wolf", "soldier"][hit.defender],
+            ["Wolf", "enemy"][hit.attacker],
+            ["Wolf", "enemy"][hit.defender],
             if res.deflected {
                 "deflected"
             } else if res.guarded {
@@ -578,7 +606,7 @@ fn simulate(
         && (step.is_multiple_of(30) || std::env::var_os("PLAY_LOG_ALL").is_some())
     {
         info!(
-            "step {step} wolf {} {} at {:.2?}{} | soldier {} {}",
+            "step {step} wolf {} {} at {:.2?}{} | enemy {} {}",
             report.player.behavior.state_path.join("/"),
             report.player.animation.as_deref().unwrap_or("-"),
             report.player.position,
@@ -632,6 +660,20 @@ fn sync_actors(
     }
 }
 
+/// Puts a marker on each bullet in flight and hides the rest.
+fn sync_bullets(sim: NonSend<Sim>, mut q: Query<(&BulletMarker, &mut Transform, &mut Visibility)>) {
+    let live = &sim.duel.bullets.live;
+    for (m, mut tf, mut vis) in &mut q {
+        match live.get(m.0) {
+            Some(b) => {
+                tf.translation = b.position;
+                *vis = Visibility::Visible;
+            }
+            None => *vis = Visibility::Hidden,
+        }
+    }
+}
+
 fn follow_camera(
     sim: NonSend<Sim>,
     time: Res<Time>,
@@ -673,9 +715,15 @@ fn hud(
     *gauges = combat_hud::Gauges {
         hp: [0, 1].map(|i| (f[i].vitality.hp, f[i].vitality.max_hp)),
         posture: [0, 1].map(|i| (f[i].posture.remaining, f[i].posture.max)),
-        enemy_head: Some(Vec3::from_array(sim.duel.enemy.body.position) + Vec3::Y * 2.0),
+        // Just above the enemy's body capsule (NpcParam hitHeight: 1.8 m soldier, 2.5 m Owl).
+        enemy_head: Some(
+            Vec3::from_array(sim.duel.enemy.body.position)
+                + Vec3::Y * (sim.duel.fighters[1].height + 0.2),
+        ),
         enemy_alive: !f[1].dead(),
         deathblow: sim.duel.deathblow_available(),
+        enemy_name: sim.duel.spec.display_name(),
+        enemy_marks: sekiro_sim::deathblow::deathblow_marks(f[1].vitality.deathblows_left),
     };
     let Ok(mut text) = text.single_mut() else {
         return;
@@ -684,7 +732,7 @@ fn hud(
     let mut flags = r.player.action_flags.clone();
     flags.retain(|f| [3, 7, 11, 26, 115, 117, 119].contains(f));
     let mut s = format!(
-        "Wolf  {}  [{} t={:.2}]  HP {}{}\nrefs {:?}  windows {:?}\nSoldier  {}  [{} t={:.2}]  HP {}\n",
+        "Wolf  {}  [{} t={:.2}]  HP {}{}\nrefs {:?}  windows {:?}\nEnemy  {}  [{} t={:.2}]  HP {}\n",
         r.player.behavior.state_path.join(" / "),
         r.player.animation.as_deref().unwrap_or("-"),
         r.player.anim_time,

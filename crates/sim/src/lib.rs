@@ -9,6 +9,7 @@
 pub mod ai;
 pub mod behavior;
 pub mod body;
+pub mod bullets;
 pub mod camera;
 pub mod character;
 pub mod clips;
@@ -17,6 +18,7 @@ pub mod combat;
 pub mod deathblow;
 pub mod demo;
 pub mod duel;
+pub mod enemy;
 pub mod fight;
 pub mod hits;
 pub mod homing;

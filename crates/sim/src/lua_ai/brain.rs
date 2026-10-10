@@ -141,6 +141,14 @@ impl AiBrain {
         })
     }
 
+    /// Puts the AI straight into the battle target state (a boss after its opening cutscene),
+    /// so the first logic run picks the battle goal instead of the find reaction.
+    pub fn start_in_battle(&mut self) {
+        self.state.target_state = 3;
+        self.state.prev_target_state = 3;
+        self.state.battle = true;
+    }
+
     /// Runs one AI tick and returns the control for the character's next step.
     pub fn think(&mut self, world: AiWorld) -> NpcControl {
         tick(&mut self.vm, &mut self.state, world);
@@ -150,6 +158,7 @@ impl AiBrain {
             move_level: r.move_level,
             move_yaw: r.move_yaw,
             face_yaw: r.face_yaw,
+            combo: r.combo,
             ..NpcControl::default()
         };
         if self.state.battle {

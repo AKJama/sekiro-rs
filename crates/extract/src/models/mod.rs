@@ -25,7 +25,7 @@ use glb::Glb;
 use textures::{TextureStore, Usage};
 
 /// Models exported when no ids are given.
-const DEFAULT_IDS: &[&str] = &["c1010", "c0000"];
+const DEFAULT_IDS: &[&str] = &["c1010", "c0000", "c5060"];
 
 pub fn export(cache: &Path, ids: &[String], verbose: bool) -> Result<()> {
     let raw = cache.join("raw");

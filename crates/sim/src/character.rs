@@ -66,6 +66,22 @@ pub struct NpcControl {
     pub face_yaw: Option<f32>,
     /// Behaviour reference ids the AI state contributes (battle, caution, ...).
     pub refs: HashSet<i32>,
+    /// The action comes from a combo goal (one the scripts registered with
+    /// `ENABLE_COMBO_ATK_CANCEL`), so a TAE "AI combo attack queued" window (flag 23) accepts it.
+    pub combo: bool,
+}
+
+/// TAE action flags that end an NPC animation for a queued AI action: 23 combo attack, 86
+/// attack, 79 step ("End If AI ... Queued" in the TAE template).
+pub mod ai_cancel {
+    pub const COMBO: i32 = 23;
+    pub const STEP: i32 = 79;
+    pub const ATTACK: i32 = 86;
+}
+
+/// Step actions of the shared NPC script (`a000_005xxx`).
+fn is_step_action(action: i32) -> bool {
+    (5000..6000).contains(&action)
 }
 
 /// Which brain drives the character.
@@ -317,6 +333,15 @@ impl Character {
         if self.kind == ControlKind::Npc {
             env.sp_effect_refs.extend(self.npc.refs.iter().copied());
             env.ai_action = self.npc.action;
+            // Which cancel window offers the queued action to the attack's update (ours: the
+            // window flag must be on and the request must be of the matching kind).
+            let a = self.npc.action;
+            let open = |flag: i32, ok: bool| if ok && a > 0 && tae.flag(flag) { a } else { 0 };
+            env.ai_cancel_actions = [
+                open(ai_cancel::COMBO, self.npc.combo),
+                open(ai_cancel::ATTACK, !is_step_action(a)),
+                open(ai_cancel::STEP, is_step_action(a)),
+            ];
         }
         // Free animations (no action flags at all) are standby; otherwise the move-cancel window
         // marks both standby and move cancel. Ended clips count as standby too.

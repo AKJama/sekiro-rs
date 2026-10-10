@@ -171,12 +171,19 @@ pub enum Situation {
     PostureBroken,
     /// Not in combat with the player: the stealth deathblow from behind.
     Unaware,
+    /// Posture broken on the last deathblow mark: bosses with a "todome" pair (suffixes 180 and
+    /// 181, such as the Great Shinobi Owl's 15060180/15060181) are finished with it. Which pair
+    /// the engine picks is inferred: the todome defender clip is a death state in the shared NPC
+    /// script (`ThrowDef13700` sets `STATE_DEATH`), the ordinary one gets up again.
+    Final,
 }
 
 /// ThrowParam row suffixes (`id % 1000`) of the standard player-vs-enemy deathblows, as
 /// `(start, body)` pairs in the order they are tried.
 pub fn candidate_pairs(situation: Situation) -> &'static [(i32, i32)] {
     match situation {
+        // The finishing blow (トドメ, "todome") of multi-life bosses, then the ordinary ones.
+        Situation::Final => &[(180, 181), (5, 6), (0, 1), (110, 111)],
         // Near front, far front, then from behind a broken enemy.
         Situation::PostureBroken => &[(5, 6), (0, 1), (110, 111)],
         // Stealth deathblow from behind.
@@ -271,6 +278,19 @@ impl DummyFrame {
             position: [-p[0], p[1], p[2]],
             yaw: (-fx).atan2(-fz),
         })
+    }
+
+    /// The same relation seen from the other side: for a dummy of the defender that the attacker
+    /// is snapped to (ThrowParam `defSorbDmyId` with `atkSorbDmyId` 0), the frame of the defender
+    /// in the attacker's space.
+    pub fn inverse(&self) -> Self {
+        let (s, c) = self.yaw.sin_cos();
+        let [x, y, z] = self.position;
+        // Undo the yaw rotation of `Placement::transform`, then negate.
+        Self {
+            position: [-(x * c - z * s), -y, -(x * s + z * c)],
+            yaw: -self.yaw,
+        }
     }
 
     /// Where a character snapped to this dummy of `owner` stands.
@@ -422,6 +442,9 @@ pub struct Deathblow {
     pub body_duration: f32,
     /// The blow kills (no deathblow marks left after it).
     pub lethal: bool,
+    /// The defender has a separate death clip (`defAnimId + 1`) to branch to. Without one the
+    /// body row's own defender clip is the death (the Owl's final blow `a000_013700`).
+    pub death_clip: bool,
     defender_from: Option<Placement>,
     hit: bool,
     branched: bool,
@@ -446,6 +469,7 @@ impl Deathblow {
             sorb,
             body_duration,
             lethal: marks_left <= 1,
+            death_clip: true,
             defender_from: None,
             hit: false,
             branched: false,
@@ -467,7 +491,7 @@ impl Deathblow {
     /// The defender clip the body starts with: the survive clip, which a lethal blow leaves for
     /// the death clip at [`ThrowTimes::death_branch`] (straight away when that is unknown).
     pub fn defender_clip(&self) -> Option<String> {
-        if self.lethal && self.times.death_branch.is_none() {
+        if self.lethal && self.death_clip && self.times.death_branch.is_none() {
             self.body.defender_death_anim()
         } else {
             self.body.defender_anim()
@@ -510,6 +534,7 @@ impl Deathblow {
                     out.killed = self.lethal;
                 }
                 if self.lethal
+                    && self.death_clip
                     && !self.branched
                     && self.times.death_branch.is_some_and(|b| self.time >= b)
                 {

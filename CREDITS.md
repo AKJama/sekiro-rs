@@ -21,7 +21,7 @@ No code from these projects is vendored; their documentation and source were rea
 ## Engine research
 
 - [borgCode/SekiroTool](https://github.com/borgCode/SekiroTool), [Xu060113/SekiroCraft-Passthrough](https://github.com/Xu060113/SekiroCraft-Passthrough), [thisguymartin/sekiro-deflect-observer](https://github.com/thisguymartin/sekiro-deflect-observer), [ElaDiDu/Sekiro-Practice-CT](https://github.com/ElaDiDu/Sekiro-Practice-CT): memory layout and posture research used to cross-check our own findings.
-- [FFwLo/RustSekiro](https://github.com/FFwLo/RustSekiro) (MIT): its knowledge base (`docs/kb`) supplied traced engine values we use: gravity, turn speed, body radius, the input accept/execute flags, camera and lock-on rules, lunge, auto-aim, knockback timing and invulnerability events. Each use is credited where it appears.
+- [FFwLo/RustSekiro](https://github.com/FFwLo/RustSekiro) (MIT): its knowledge base (`docs/kb`) supplied traced engine values we use: gravity, turn speed, body radius, the input accept/execute flags, camera and lock-on rules, lunge, auto-aim, knockback timing and invulnerability events, and which NPC TAE flags accept a queued AI request. Each use is credited where it appears.
 
 ## Inspiration
 

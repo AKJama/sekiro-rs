@@ -24,7 +24,7 @@ Sekiro is data-driven, so instead of hand-writing its behaviour this project reb
 
 ## Status
 
-- Wolf and Ashina soldiers render, textured and animated with the game's clips.
+- Wolf, Ashina soldiers and the Great Shinobi Owl render, textured and animated with the game's clips.
 - Wolf is playable: run, sprint, jump, step, crouch, attack combos, guard and deflect, all chosen by the game's own player script.
 - Combat rules (hit, block, deflect, posture damage, breaks, recovery) are implemented and unit tested against the real params; wiring them to live hits is in progress.
 - In progress: enemies with their own scripts, hit detection, deathblows, a real map with collision.
@@ -40,9 +40,9 @@ Requires Windows, Rust (stable, MSVC) and Sekiro v1.6.0.0.
 cargo run --release -p sekiro-extract -- unpack
 # 3. Generate models, animations and params
 cargo run --release -p sekiro-extract -- models
-cargo run --release -p sekiro-extract -- anims c0000 c1010
+cargo run --release -p sekiro-extract -- anims c0000 c1010 c5060
 cargo run --release -p sekiro-extract -- params
-# 4. Play
+# 4. Play (against an Ashina soldier; add --enemy owl for the Great Shinobi Owl)
 cargo run --release -p sekiro-game -- --play
 ```
 
