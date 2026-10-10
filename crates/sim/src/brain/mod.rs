@@ -15,8 +15,10 @@
 //! See `docs/BRAIN.md`.
 
 pub mod actions;
+pub mod coach;
 pub mod driver;
 pub mod habits;
+pub mod limits;
 pub mod memory;
 pub mod metrics;
 pub mod observation;
@@ -30,6 +32,10 @@ mod tests;
 use serde::Serialize;
 
 pub use actions::{BossAction, BossActions, Combo, OWL, SOLDIER};
+pub use coach::{
+    CallStats, CoachInput, CoachReply, CoachRequest, GamePlan, PlanSet, ScriptedCoach, SetOffer,
+    Validated,
+};
 pub use driver::{BrainDriver, BrainStats};
 pub use habits::{HabitSummary, HabitTracker, Habits, WolfFrame};
 pub use memory::{FightEnd, Loaded, Memory, MemorySummary};
@@ -55,6 +61,17 @@ pub struct BrainRequest {
     /// `punished_twice`, `deflected_thrice`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub why: Option<&'static str>,
+    /// Coach mode: the plan set being played now (the chooser's `keep`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active: Option<String>,
+    /// Coach mode: the sets the checkpoint chooser picks from (a request body offers them, with
+    /// `keep`; not part of the input text).
+    #[serde(skip)]
+    pub sets: Vec<SetOffer>,
+    /// Coach mode: the whole input text of the checkpoint chooser, a few numbers (about 100
+    /// tokens); a hosted controller sends this instead of the serialized request.
+    #[serde(skip)]
+    pub brief: Option<String>,
     /// Plan texts a hosted controller must not offer this time (deflected or guarded three
     /// times in a row); the request body leaves them out of the choices (not sent as input).
     #[serde(skip)]
@@ -113,6 +130,8 @@ pub struct BrainReply {
     /// Empty means the set is just `plan`. The driver samples from it locally, with its
     /// penalties, so one answer can serve many acts.
     pub set: Vec<Weighted>,
+    /// Coach mode: the plan set the chooser picked (`keep` or `None` leaves the current one).
+    pub choice: Option<String>,
 }
 
 impl BrainReply {
@@ -122,6 +141,7 @@ impl BrainReply {
             id,
             plan,
             set: Vec::new(),
+            choice: None,
         }
     }
 }
@@ -177,6 +197,22 @@ pub trait BossBrain {
     /// Input and output tokens used so far (0 for a controller that has none).
     fn usage(&self) -> (u64, u64) {
         (0, 0)
+    }
+    /// Whether this controller is a coach: the driver then sends the fight summary after each
+    /// fight ([`BossBrain::submit_coach`]) and uses its game plans, and the checkpoint requests
+    /// choose among the plan's sets.
+    fn coaches(&self) -> bool {
+        false
+    }
+    /// Per kind of call, `[checkpoint, coach]` (calls, tokens, latency).
+    fn call_stats(&self) -> [CallStats; 2] {
+        [CallStats::default(); 2]
+    }
+    /// Takes the coach's request (never blocks); `now` is the session clock in seconds.
+    fn submit_coach(&mut self, _request: &CoachRequest, _now: f32) {}
+    /// A coach answer, once ready (any time, also during a respawn).
+    fn poll_coach(&mut self, _now: f32) -> Option<CoachReply> {
+        None
     }
     /// Takes a request. The driver keeps at most one in flight.
     fn submit(&mut self, request: &BrainRequest);

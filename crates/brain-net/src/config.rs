@@ -22,12 +22,24 @@ impl fmt::Debug for ApiKey {
 pub enum Backend {
     Decisions,
     Responses,
+    /// A coach between fights (Responses, reasoning, structured game plan) and the Decisions
+    /// API choosing among the plan's sets at the checkpoints.
+    Coach,
 }
 
 impl Backend {
     pub fn name(self) -> &'static str {
         match self {
             Self::Decisions => "decisions",
+            Self::Responses => "responses",
+            Self::Coach => "coach",
+        }
+    }
+
+    /// The endpoint of the per-request calls (the coach's own call is always Responses).
+    pub fn endpoint(self) -> &'static str {
+        match self {
+            Self::Decisions | Self::Coach => "decisions",
             Self::Responses => "responses",
         }
     }
@@ -49,6 +61,66 @@ pub struct HostedConfig {
     /// first decision does not pay for the DNS lookup. Sends nothing.
     pub warm_up: bool,
     pub api_key: ApiKey,
+    /// Coach backend: the reasoning model, its effort, the deadline of one coach call and the
+    /// output cap (reasoning tokens count against it).
+    pub coach_model: String,
+    pub coach_effort: String,
+    pub coach_timeout: Duration,
+    pub coach_max_output_tokens: u32,
+    /// How the coach is run (`--coach`): through a subscription CLI or the Responses API.
+    pub coach_backend: CoachBackend,
+    /// Overrides the CLI program of the `claude` and `codex` coaches (`SEKIRO_COACH_CMD`; the
+    /// tests point it at a fake).
+    pub coach_cmd: Option<PathBuf>,
+    /// Whether the in-fight checkpoint calls (Decisions API) are made; off when there is no
+    /// API key (the opener and start set still play).
+    pub checkpoints: bool,
+}
+
+/// Who writes the game plan between fights.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoachBackend {
+    /// Claude Code headless (`claude -p`), on the user's subscription.
+    Claude,
+    /// Codex CLI (`codex exec`), on the user's subscription.
+    Codex,
+    /// The Responses API with an API key.
+    Api,
+}
+
+impl CoachBackend {
+    pub fn by_name(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "claude" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            "api" => Some(Self::Api),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Api => "api",
+        }
+    }
+
+    /// The model used when `--coach-model` is not given.
+    pub fn default_model(self) -> &'static str {
+        match self {
+            Self::Claude => "haiku",
+            Self::Codex | Self::Api => "gpt-6-luna",
+        }
+    }
+
+    /// The deadline of one coach call.
+    pub fn timeout(self) -> Duration {
+        match self {
+            Self::Claude | Self::Codex => Duration::from_secs(120),
+            Self::Api => Duration::from_secs(60),
+        }
+    }
 }
 
 impl fmt::Debug for HostedConfig {
@@ -102,6 +174,13 @@ impl HostedConfig {
             log_path: None,
             warm_up: true,
             api_key,
+            coach_model: "gpt-6-luna".into(),
+            coach_effort: "medium".into(),
+            coach_timeout: Duration::from_secs(60),
+            coach_max_output_tokens: 6000,
+            coach_backend: CoachBackend::Api,
+            coach_cmd: None,
+            checkpoints: true,
         }
     }
 

@@ -38,13 +38,20 @@ use serde::Serialize;
 use serde_json::json;
 
 use super::actions::BossActions;
+use super::coach::{
+    CallStats, CoachInput, CoachReply, CoachRequest, FightLine, GamePlan, INPUT_BUDGET, KEEP,
+    SetStat,
+};
 use super::habits::{HabitTracker, WolfFrame};
+use super::limits::{self, Pacing};
 use super::memory::{FightEnd, Loaded, Memory, MemorySummary};
-use super::metrics::{FightRecord, MetricsTracker, percentile};
+use super::metrics::{FightRecord, MetricsTracker, Trend, percentile};
 use super::observation::observe;
 use super::plan::{Plan, Step, Weighted};
 use super::sampler::{self, Context, EXCLUDE_STREAK, Pick, Rng, Streaks};
-use super::tally::{Exchange, Side, Tally, TallyEvent};
+use super::tally::{
+    CountMap, Counts, Exchange, Side, Tally, TallyEvent, merge_counts, ranked_counts,
+};
 use super::{BossBrain, BrainReply, BrainRequest, REQUEST_BUDGET, RequestMode};
 use crate::deathblow::deathblow_marks;
 use crate::duel::{Duel, DuelReport, FLAG_PARRY_TIMING};
@@ -80,6 +87,17 @@ struct Ready {
     /// picked (a set's plan).
     since: f32,
     plan: Plan,
+    /// The game plan's opener (put back if it goes stale).
+    opener: bool,
+    /// Which part of the game plan it came from: `opener`, a set name, or `-`.
+    label: String,
+}
+
+/// A coach request in flight.
+#[derive(Debug, Clone, Copy)]
+struct CoachFlight {
+    id: u64,
+    sent: f32,
 }
 
 /// A request in flight.
@@ -145,6 +163,14 @@ struct FightState {
     /// Request to answer, milliseconds.
     latencies: Vec<f32>,
     tokens_at_start: (u64, u64),
+    stats_at_start: [CallStats; 2],
+    /// Plan runs `(start, plan text, set label)` in order, for attributing exchanges.
+    runs: Vec<(f32, String, String)>,
+    /// Outcomes per plan text and per set label this fight.
+    by_plan: CountMap,
+    by_set: BTreeMap<String, Counts>,
+    /// Seconds each set was the active one.
+    set_secs: BTreeMap<String, f32>,
 }
 
 pub struct BrainDriver {
@@ -208,14 +234,42 @@ pub struct BrainDriver {
     pub last_record: Option<FightRecord>,
     log: Option<BufWriter<File>>,
     log_path: Option<PathBuf>,
+    /// The controller is a coach (see [`super::coach`]).
+    coach_mode: bool,
+    /// Apply the hard limits of [`super::limits`] when sampling plans (on for hosted brains).
+    pub anti_stall: bool,
+    /// Attack and retreat timing for those limits.
+    pub pacing: Pacing,
+    /// The game plan being played (coach mode).
+    pub game_plan: Option<GamePlan>,
+    /// The newest plan that arrived; played from the next fight on.
+    next_plan: Option<GamePlan>,
+    /// Index of the plan set being played.
+    active_set: Option<usize>,
+    /// When the active set became active.
+    set_since: f32,
+    /// The opener still to run this fight.
+    opener: Option<Plan>,
+    coach_flights: Vec<CoachFlight>,
+    next_coach_id: u64,
+    /// The id of the newest coach reply used, so an older one never replaces it.
+    newest_coach: u64,
+    /// Coach calls that completed since the fight began: calls, tokens, milliseconds.
+    coach_done: [u64; 5],
 }
 
 impl BrainDriver {
     pub fn new(brain: Box<dyn BossBrain>, actions: &'static BossActions) -> Self {
         let env = |name: &str| std::env::var(name).ok();
-        let mode = env("SEKIRO_BRAIN_MODE")
-            .and_then(|m| RequestMode::by_name(&m))
-            .unwrap_or_else(|| brain.default_mode());
+        let coach_mode = brain.coaches();
+        let anti_stall = brain.default_mode() == RequestMode::Checkpoints;
+        let mode = if coach_mode {
+            RequestMode::Checkpoints
+        } else {
+            env("SEKIRO_BRAIN_MODE")
+                .and_then(|m| RequestMode::by_name(&m))
+                .unwrap_or_else(|| brain.default_mode())
+        };
         let temperature = env("SEKIRO_BRAIN_TEMPERATURE")
             .and_then(|t| t.parse().ok())
             .unwrap_or(1.0);
@@ -252,7 +306,7 @@ impl BrainDriver {
             ready: None,
             picked: false,
             want_request: true,
-            pending_why: Some("start"),
+            pending_why: (!coach_mode).then_some("start"),
             checkpoints: Checkpoints::default(),
             next_id: 1,
             running: Plan::default(),
@@ -265,6 +319,18 @@ impl BrainDriver {
             last_record: None,
             log: None,
             log_path: None,
+            coach_mode,
+            anti_stall,
+            pacing: Pacing::new(0.0),
+            game_plan: None,
+            next_plan: None,
+            active_set: None,
+            set_since: 0.0,
+            opener: None,
+            coach_flights: Vec::new(),
+            next_coach_id: 1,
+            newest_coach: 0,
+            coach_done: [0; 5],
         }
     }
 
@@ -305,7 +371,87 @@ impl BrainDriver {
         }
         self.memory = memory;
         self.memory_path = Some(path);
+        if self.coach_mode {
+            // The newest plan of an earlier session plays from the first fight (validated
+            // again: the file may be from another build).
+            let saved = self.memory.coach.plan.take();
+            if let Some(saved) = saved {
+                let v = saved.validate(self.actions);
+                for w in &v.warnings {
+                    eprintln!("coach: saved game plan: {w}");
+                }
+                if v.usable() {
+                    self.memory.coach.plan = Some(v.plan.clone());
+                    self.game_plan = Some(v.plan);
+                }
+            }
+            self.install_plan();
+            if self.game_plan.is_some() {
+                eprintln!(
+                    "coach: playing the saved game plan from fight {} on",
+                    self.memory.fights + 1
+                );
+            }
+        }
         how
+    }
+
+    /// Coach mode: sets up the fight that is starting from [`Self::game_plan`]: the opener, the
+    /// start set, and the `start` checkpoint (with no plan nothing is requested and his own AI
+    /// plays).
+    fn install_plan(&mut self) {
+        self.opener = None;
+        self.active_set = None;
+        self.set.clear();
+        self.pending_why = None;
+        let Some(plan) = self.game_plan.clone() else {
+            return;
+        };
+        self.persist = true;
+        self.opener = plan.opener_plan(self.actions);
+        if let Some(i) = plan.start_index() {
+            self.active_set = Some(i);
+            self.set = plan.weighted(i, self.actions);
+            self.set_since = self.time;
+            self.pending_why = Some("start");
+        }
+    }
+
+    /// Name of the plan set being played (coach mode).
+    pub fn active_set_name(&self) -> Option<&str> {
+        let plan = self.game_plan.as_ref()?;
+        Some(plan.sets.get(self.active_set?)?.name.as_str())
+    }
+
+    /// Switches to the named set (coach mode); the next act is sampled from it. An opener
+    /// still waiting stays.
+    fn switch_set(&mut self, name: &str) -> bool {
+        let Some(plan) = self.game_plan.as_ref() else {
+            return false;
+        };
+        let Some(i) = plan.set_index(name) else {
+            return false;
+        };
+        if self.active_set == Some(i) {
+            return true;
+        }
+        let set = plan.weighted(i, self.actions);
+        self.close_set_time();
+        self.active_set = Some(i);
+        self.set = set;
+        if self.ready.as_ref().is_none_or(|r| !r.opener) {
+            self.ready = None;
+            self.picked = false;
+        }
+        true
+    }
+
+    /// Adds the time the active set has been played to this fight's seconds.
+    fn close_set_time(&mut self) {
+        if let Some(name) = self.active_set_name().map(str::to_string) {
+            *self.fight.set_secs.entry(name).or_default() += (self.time - self.set_since).max(0.0);
+        }
+        self.set_since = self.time;
     }
 
     pub fn memory_path(&self) -> Option<&Path> {
@@ -415,6 +561,77 @@ impl BrainDriver {
         for s in self.since_hit.iter_mut().flatten() {
             *s += dt;
         }
+        if self.coach_mode {
+            while let Some(reply) = self.brain.poll_coach(self.time) {
+                self.take_coach_reply(reply);
+            }
+        }
+    }
+
+    /// A coach answer arrived (at any time, also during a respawn): a usable plan waits for the
+    /// next fight to start; a failure or a plan with nothing valid keeps the previous one.
+    fn take_coach_reply(&mut self, reply: CoachReply) {
+        let Some(at) = self.coach_flights.iter().position(|f| f.id == reply.id) else {
+            return;
+        };
+        let flight = self.coach_flights.remove(at);
+        let waited = self.time - flight.sent;
+        self.coach_done[0] += 1;
+        for (i, t) in reply.tokens.iter().enumerate() {
+            self.coach_done[1 + i] += t;
+        }
+        self.coach_done[4] += u64::from(reply.latency_ms);
+        let tokens = format!(
+            "tokens {} in / {} out, {} reasoning, {:.1} s",
+            reply.tokens[0],
+            reply.tokens[1],
+            reply.tokens[2],
+            f64::from(reply.latency_ms) / 1000.0
+        );
+        let Some(raw) = reply.plan else {
+            eprintln!(
+                "coach: no game plan ({}); keeping the previous plan ({tokens})",
+                reply.error.as_deref().unwrap_or("failed")
+            );
+            self.write(
+                json!({"ev": "coach_failed", "t": ms(self.time), "id": reply.id,
+                "error": reply.error, "waited": ms(waited)}),
+            );
+            return;
+        };
+        let v = raw.validate(self.actions);
+        for w in &v.warnings {
+            eprintln!("coach: warning: {w}");
+        }
+        if !v.usable() {
+            eprintln!(
+                "coach: the game plan had nothing valid; keeping the previous plan ({tokens})"
+            );
+            self.write(
+                json!({"ev": "coach_failed", "t": ms(self.time), "id": reply.id,
+                "error": "nothing valid", "warnings": v.warnings}),
+            );
+            return;
+        }
+        if reply.id < self.newest_coach {
+            return;
+        }
+        self.newest_coach = reply.id;
+        eprintln!(
+            "coach: game plan arrived after {waited:.1} s, played from fight {} on ({tokens})",
+            self.fight_no + 1
+        );
+        for line in v.plan.summary_lines() {
+            eprintln!("  {line}");
+        }
+        self.write(
+            json!({"ev": "coach_plan", "t": ms(self.time), "id": reply.id,
+            "waited": ms(waited), "tokens": reply.tokens, "plan": v.plan,
+            "warnings": v.warnings}),
+        );
+        self.memory.coach.plan = Some(v.plan.clone());
+        self.next_plan = Some(v.plan);
+        self.save_memory();
     }
 
     /// Before the Lua AI thinks: installs the act hook, collects an answer, picks the plan for
@@ -441,7 +658,12 @@ impl BrainDriver {
             .as_ref()
             .is_some_and(|r| self.time - r.since > self.max_staleness);
         if stale {
-            let plan = self.ready.take().map(|r| r.plan);
+            let ready = self.ready.take();
+            if let Some(r) = ready.as_ref().filter(|r| r.opener) {
+                // The opener is not lost: it runs at the next slot.
+                self.opener = Some(r.plan.clone());
+            }
+            let plan = ready.map(|r| r.plan);
             if let Some(hook) = ai.state.act_hook.as_mut() {
                 hook.choice = None;
             }
@@ -453,7 +675,7 @@ impl BrainDriver {
                     "plan": plan.map(|p| p.value())}));
             }
         }
-        if !self.picked && !self.set.is_empty() {
+        if !self.picked && (!self.set.is_empty() || self.opener.is_some()) {
             self.pick_next(ai, hit_radius);
         }
     }
@@ -479,6 +701,18 @@ impl BrainDriver {
         self.stats.replies += 1;
         let latency = (self.time - sent.sent) * 1000.0;
         self.fight.latencies.push(latency);
+        if self.coach_mode {
+            // The chooser's answer: a set name, or `keep`. A failed call keeps the set too.
+            let chosen = reply.choice.as_deref().unwrap_or(KEEP);
+            let switched = chosen != KEEP && self.switch_set(chosen);
+            self.write(json!({
+                "ev": "reply", "t": ms(self.time), "id": reply.id, "choice": chosen,
+                "switched": switched, "set": self.active_set_name(),
+                "latency": ms(latency / 1000.0),
+            }));
+            self.want_request = false;
+            return;
+        }
         let set = if reply.set.is_empty() {
             vec![Weighted {
                 plan: reply.plan.clone(),
@@ -502,22 +736,51 @@ impl BrainDriver {
 
     /// Samples the plan for the next slot from the set and hands it to the act hook.
     fn pick_next(&mut self, ai: &mut AiBrain, hit_radius: f32) {
-        let ctx = Context {
-            streaks: &self.streaks,
-            tried: &self.tried,
-            temperature: self.temperature,
+        let opener = self.opener.take();
+        let is_opener = opener.is_some();
+        let plan = if let Some(plan) = opener {
+            Some(plan)
+        } else {
+            let ctx = Context {
+                streaks: &self.streaks,
+                tried: &self.tried,
+                temperature: self.temperature,
+            };
+            // The hard limits (see `limits`): only eligible plans are sampled; with none, his
+            // own AI's act runs.
+            let eligible: Vec<usize> = (0..self.set.len())
+                .filter(|&i| {
+                    !self.anti_stall
+                        || self.set[i]
+                            .plan
+                            .as_ref()
+                            .is_none_or(|p| self.pacing.eligible(p, self.time, self.actions))
+                })
+                .collect();
+            if self.set.is_empty() {
+                return;
+            }
+            let view: Vec<Weighted> = eligible.iter().map(|&i| self.set[i].clone()).collect();
+            if view.is_empty() {
+                None
+            } else {
+                match sampler::pick(&view, &ctx, &mut self.rng) {
+                    Pick::Nothing => return,
+                    Pick::Lua => None,
+                    Pick::Plan(i) => view[i].plan.clone(),
+                }
+            }
         };
-        let pick = sampler::pick(&self.set, &ctx, &mut self.rng);
-        let plan = match pick {
-            Pick::Nothing => return,
-            Pick::Lua => None,
-            Pick::Plan(i) => self.set[i].plan.clone(),
-        };
-        if !self.persist {
+        if !self.persist && !is_opener {
             self.set.clear();
         }
         self.picked = true;
         let Some(plan) = plan else { return };
+        let label = if is_opener {
+            "opener".to_string()
+        } else {
+            self.active_set_name().unwrap_or("-").to_string()
+        };
         match self.actions.act_for_plan(&plan, hit_radius) {
             Ok(choice) => {
                 if let Some(hook) = ai.state.act_hook.as_mut() {
@@ -528,7 +791,12 @@ impl BrainDriver {
                 } else {
                     self.set_time
                 };
-                self.ready = Some(Ready { since, plan });
+                self.ready = Some(Ready {
+                    since,
+                    plan,
+                    opener: is_opener,
+                    label,
+                });
             }
             Err(e) => {
                 self.stats.invalid += 1;
@@ -564,7 +832,11 @@ impl BrainDriver {
             let by = match slot {
                 ActSlot::External => {
                     let ready = self.ready.take();
+                    let label = ready.as_ref().map(|r| r.label.clone()).unwrap_or_default();
                     self.running = ready.map(|r| r.plan).unwrap_or_default();
+                    if limits::is_retreat(&self.running, self.actions) {
+                        self.pacing.last_retreat = Some(self.time);
+                    }
                     self.history.push(self.running.clone());
                     self.stats.planned += 1;
                     self.picked = false;
@@ -572,6 +844,7 @@ impl BrainDriver {
                     self.tried.insert(value.clone());
                     if !quiet {
                         self.fight.decisions += 1;
+                        self.fight.runs.push((self.time, value.clone(), label));
                         *self.fight.choices.entry(value).or_default() += 1;
                     }
                     "plan"
@@ -581,12 +854,22 @@ impl BrainDriver {
                     self.stats.fallback += 1;
                     self.fight.lua_acts += 1;
                     self.picked = false;
+                    if !quiet {
+                        self.fight
+                            .runs
+                            .push((self.time, "lua".into(), "lua".into()));
+                    }
                     "lua"
                 }
                 ActSlot::Reflex => {
                     self.running = Plan::default();
                     self.stats.reflex += 1;
                     self.fight.lua_acts += 1;
+                    if !quiet {
+                        self.fight
+                            .runs
+                            .push((self.time, "lua".into(), "lua".into()));
+                    }
                     "reflex"
                 }
             };
@@ -634,12 +917,36 @@ impl BrainDriver {
         let Some(why) = why else { return };
         self.want_request = false;
         self.pending_why = None;
+        let (active, sets) = if self.coach_mode {
+            // Checkpoints only choose among a game plan's sets: without a plan (the first
+            // fight, or a coach that failed) no call is made and his own AI plays.
+            let plan = self.game_plan.as_ref().filter(|p| p.sets.len() >= 2);
+            let Some(plan) = plan else { return };
+            (self.active_set_name().map(str::to_string), plan.offers())
+        } else {
+            (None, Vec::new())
+        };
+        let obs = observe(duel, self.time, self.since_hit, &self.running.value());
+        let (tally, memory, brief) = if self.coach_mode {
+            // The chooser sees a few numbers and the set names, nothing else (the habits and
+            // the history are the coach's): about 100 tokens.
+            let r2 = |x: f32| (f64::from(x) * 100.0).round() / 100.0;
+            let brief = json!({"why": why, "set": active, "boss_hp": r2(obs.boss.hp),
+                "boss_posture": r2(obs.boss.posture), "wolf_hp": r2(obs.wolf.hp),
+                "wolf_posture": r2(obs.wolf.posture), "dist": r2(obs.dist)});
+            (Default::default(), None, Some(brief.to_string()))
+        } else {
+            (self.tally.summary(), Some(self.memory_summary()), None)
+        };
         let mut request = BrainRequest {
             id: self.next_id,
-            obs: observe(duel, self.time, self.since_hit, &self.running.value()),
-            tally: self.tally.summary(),
-            memory: Some(self.memory_summary()),
+            obs,
+            tally,
+            memory,
             why,
+            active,
+            sets,
+            brief,
             excluded: self.excluded(),
         };
         request.fit(REQUEST_BUDGET);
@@ -704,6 +1011,11 @@ impl BrainDriver {
                 },
                 None => TallyEvent::End { side: Side::Boss },
             });
+            if boss.is_some_and(|a| a < 3100) {
+                // An attack step started (a back step does not count).
+                self.fight.metrics.attack_started(t);
+                self.pacing.last_attack = t;
+            }
             self.boss_open = boss;
             // An attack or step starting closes an open tactic; its end closes nothing more.
             if boss.is_some() {
@@ -768,6 +1080,7 @@ impl BrainDriver {
         self.fight
             .metrics
             .wolf(wolf.hp_fraction(), wolf.posture_fraction());
+        self.fight.metrics.passive_tick(t, self.step_dt);
         let boss_fighter = &duel.rules.fighters[1];
         if !self.checkpoints.half_hp && boss_fighter.hp_fraction() <= 0.5 {
             self.checkpoints.half_hp = true;
@@ -811,6 +1124,7 @@ impl BrainDriver {
     /// Finished boss exchanges update the streaks the sampler penalises: an attack is repelled
     /// when it was deflected or guarded and never landed, a tactic when Wolf hit him during it.
     fn settle(&mut self, done: &[Exchange]) {
+        self.attribute(done);
         for x in done.iter().filter(|x| x.side == Side::Boss) {
             let o = &x.outcome;
             let repelled = if x.key.parse::<i32>().is_ok() {
@@ -822,6 +1136,34 @@ impl BrainDriver {
         }
     }
 
+    /// Counts each finished boss exchange for the plan run it began under (the latest plan or
+    /// Lua act that started at or before it), and that run's set.
+    fn attribute(&mut self, done: &[Exchange]) {
+        for x in done.iter().filter(|x| x.side == Side::Boss) {
+            let Some((_, plan, set)) = self
+                .fight
+                .runs
+                .iter()
+                .rev()
+                .find(|(start, _, _)| *start <= x.start + 1e-3)
+                .cloned()
+            else {
+                continue;
+            };
+            let mut one = Counts::default();
+            one.merge(&Counts {
+                n: 1,
+                hit: u32::from(x.outcome.hit),
+                blocked: u32::from(x.outcome.blocked),
+                deflected: u32::from(x.outcome.deflected),
+                whiffed: u32::from(x.outcome.whiffed()),
+                punished: u32::from(x.outcome.punished),
+            });
+            self.fight.by_plan.entry(plan).or_default().merge(&one);
+            self.fight.by_set.entry(set).or_default().merge(&one);
+        }
+    }
+
     /// Ends the fight: settles it, adds it and its record to the memory and saves.
     pub fn end_fight(&mut self, end: FightEnd) {
         if self.fight_over {
@@ -829,6 +1171,8 @@ impl BrainDriver {
         }
         let t = self.time;
         let done = self.tally.flush(t);
+        self.attribute(&done);
+        self.close_set_time();
         self.log_outcomes(t, &done);
         self.habits.flush(t);
         self.memory.add_fight(&self.tally, &self.habits.habits, end);
@@ -866,14 +1210,103 @@ impl BrainDriver {
                 percentile(&self.fight.latencies, 0.9).round() as u32,
             ],
             brain: format!("{}/{}", self.brain.name(), self.mode.name()),
+            reasoning: self.brain.call_stats()[0]
+                .since(&self.fight.stats_at_start[0])
+                .reasoning,
+            coach: self.coach_done,
+            sets: self.fight.set_secs.clone(),
         };
         eprintln!("{}", record.summary_line());
         self.write(json!({"ev": "fight_end", "t": ms(t), "winner": winner,
             "fights": self.memory.fights, "summary": record.summary_line()}));
         self.write_line(&json!({"ev": "fight_summary", "t": ms(t), "record": record}));
         self.memory.push_record(record.clone());
+        merge_counts(&mut self.memory.coach.plans, &self.fight.by_plan);
+        if self.coach_mode {
+            self.send_coach(&record);
+        }
         self.last_record = Some(record);
         self.save_memory();
+    }
+
+    /// The coach's input for the fight just over (called after its record is in the memory).
+    pub fn coach_input(&self, record: &FightRecord) -> CoachInput {
+        let m = &record.metrics;
+        let pct = |r: Option<f32>| (r.unwrap_or(0.0) * 100.0).round() as u32;
+        let top = |map: &CountMap| ranked_counts(map);
+        let mut sets: BTreeMap<String, SetStat> = BTreeMap::new();
+        for (name, c) in &self.fight.by_set {
+            sets.entry(name.clone()).or_default().c = *c;
+        }
+        for (name, s) in &self.fight.set_secs {
+            sets.entry(name.clone()).or_default().secs = (s * 10.0).round() / 10.0;
+        }
+        let mut input = CoachInput {
+            fight: self.memory.fights,
+            result: FightLine {
+                won: record.winner.clone(),
+                secs: m.duration.round() as u32,
+                defl: pct(m.deflect_rate()),
+                guard: pct(m.guard_rate()),
+                hits: m.hits_taken,
+                hp: (m.hp_lost * 100.0).round() as u32,
+                posture: (m.posture_gained * 100.0).round() as u32,
+                punishes: m.punishes,
+                apm: m.attacks_per_min().round() as u32,
+                dpm: m.damage_per_min().round() as u32,
+                passive: (m.passive_share() * 100.0).round() as u32,
+            },
+            trend: Trend::new(&self.memory.history, None),
+            plans: top(&self.fight.by_plan),
+            sets,
+            wolf: top(self.tally.all(Side::Wolf)),
+            overall: top(&self.memory.coach.plans),
+            habits: self.memory.habits.summary(),
+            played: self.game_plan.clone(),
+            notes: self
+                .memory
+                .coach
+                .plan
+                .as_ref()
+                .map(|p| p.notes.clone())
+                .unwrap_or_default(),
+        };
+        // The notes of the plan played are the notes asked for again: send them once.
+        if let Some(p) = input.played.as_mut()
+            && p.notes == input.notes
+        {
+            p.notes.clear();
+        }
+        input
+    }
+
+    /// Sends the fight summary to the coach; the plan comes back whenever it is ready.
+    fn send_coach(&mut self, record: &FightRecord) {
+        if !self.brain.plans() || self.fight.runs.is_empty() {
+            return;
+        }
+        let mut input = self.coach_input(record);
+        let bytes = input.fit(INPUT_BUDGET);
+        let Ok(text) = serde_json::to_string(&input) else {
+            return;
+        };
+        let request = CoachRequest {
+            id: self.next_coach_id,
+            fight: self.fight_no,
+            input: text,
+        };
+        self.next_coach_id += 1;
+        self.coach_flights.push(CoachFlight {
+            id: request.id,
+            sent: self.time,
+        });
+        eprintln!(
+            "coach: fight {} over, sent the fight summary ({bytes} bytes); the new game plan plays from the next fight if it arrives during the respawn, else the one after",
+            self.fight_no
+        );
+        self.write(json!({"ev": "coach_request", "t": ms(self.time), "id": request.id,
+            "bytes": bytes, "input": serde_json::from_str::<serde_json::Value>(&request.input).ok()}));
+        self.brain.submit_coach(&request, self.time);
     }
 
     /// Starts the next fight (after a respawn): a fresh tally and habits; the memory keeps
@@ -902,8 +1335,36 @@ impl BrainDriver {
         self.fight = FightState {
             metrics: MetricsTracker::new(self.time),
             tokens_at_start: self.brain.usage(),
+            stats_at_start: self.brain.call_stats(),
             ..FightState::default()
         };
+        self.coach_done = [0; 5];
+        self.pacing = Pacing::new(self.time);
+        if self.coach_mode {
+            // The newest plan that has arrived plays; with none, the previous one stays.
+            if let Some(plan) = self.next_plan.take() {
+                self.game_plan = Some(plan);
+            }
+            self.install_plan();
+            match (&self.game_plan, self.active_set_name()) {
+                (Some(_), Some(set)) => {
+                    eprintln!(
+                        "coach: fight {} plays the coach's game plan, start set {set}",
+                        self.fight_no
+                    )
+                }
+                (Some(_), None) => {
+                    eprintln!(
+                        "coach: fight {} plays the coach's opener, then his own AI",
+                        self.fight_no
+                    )
+                }
+                (None, _) => eprintln!(
+                    "coach: no game plan yet, fight {} is his own AI",
+                    self.fight_no
+                ),
+            }
+        }
         self.write(json!({"ev": "fight_start", "t": ms(self.time)}));
     }
 

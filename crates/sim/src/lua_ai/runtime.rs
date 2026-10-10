@@ -22,6 +22,11 @@ use std::rc::Rc;
 use super::lua50::{Host, LuaError, LuaResult, Obj, Value, Vm};
 use super::world::{AiActor, AiWorld, ThinkParams};
 
+/// A plan's attack waits for the target to be within this many degrees of his facing.
+pub const FACE_FIRST_DEG: f32 = 30.0;
+/// The most seconds that wait takes before the attack goes ahead anyway.
+pub const FACE_FIRST_SECS: f32 = 1.5;
+
 pub const RESULT_FAILED: i32 = -1;
 pub const RESULT_CONTINUE: i32 = 0;
 pub const RESULT_SUCCESS: i32 = 1;
@@ -103,6 +108,12 @@ pub struct Goal {
     pub timed: bool,
     /// Ours, for `LeaveTarget` run by a plan: face the way he runs instead of the target.
     pub away: bool,
+    /// Ours, set for the attack steps of an outside plan: the attack is not requested until
+    /// the target is within [`FACE_FIRST_DEG`] of his facing (he turns toward it meanwhile, at
+    /// his own turn speed, as a `Wait` goal does), for at most [`FACE_FIRST_SECS`]. The game's
+    /// own acts approach or stand facing the target, so a plan that follows a tactic that
+    /// leaves him facing away (`retreat12`, a strafe) must turn before it swings.
+    pub face_first: bool,
     /// Ours: the index of the plan step this goal belongs to (see [`ActGoal::step`]).
     pub plan_step: Option<usize>,
 }
@@ -192,6 +203,9 @@ pub struct ActGoal {
     pub timed: bool,
     /// Face the way he runs (see [`Goal::away`]).
     pub away: bool,
+    /// An attack step: turn to face the target first when it is more than
+    /// [`FACE_FIRST_DEG`] off his facing (see [`Goal::face_first`]).
+    pub face_first: bool,
     /// Index of the plan step this goal (and its approach) belongs to; the hook reports each
     /// first activation in [`ActHook::started`].
     pub step: Option<usize>,
@@ -360,6 +374,7 @@ impl AiState {
             timing_sets: Vec::new(),
             timed: false,
             away: false,
+            face_first: false,
             plan_step: None,
         };
         if let Some(i) = self.goals.iter().position(Option::is_none) {
@@ -725,6 +740,7 @@ impl AiState {
                 let goal = self.goal_mut(sub.id);
                 goal.timed = step.timed;
                 goal.away = step.away;
+                goal.face_first = step.face_first;
                 goal.plan_step = step.step;
             }
             if let Some(set) = step.number {
@@ -1387,6 +1403,20 @@ fn native_update(st: &mut AiState, id: u32, n: NativeGoal) -> i32 {
     }
 }
 
+/// Whether the goal or one of its ancestors is an attack step of an outside plan (the script
+/// goals such as `AttackTunableSpin` queue the native attack below the flagged goal).
+fn under_face_first(st: &AiState, g: &Goal) -> bool {
+    let mut at = Some(g);
+    for _ in 0..4 {
+        let Some(goal) = at else { return false };
+        if goal.face_first {
+            return true;
+        }
+        at = goal.parent.and_then(|p| st.goals.get(p as usize)?.as_ref());
+    }
+    false
+}
+
 /// CommonAttack(ezStateId, target, successDist, turnAngle, turnTime, frontAngle, isCombo, ...)
 /// and the other action goals: turn toward the target, request the action until its animation
 /// plays, then wait for it to end (or, for combo steps, for the combo window).
@@ -1403,7 +1433,21 @@ fn action_update(st: &mut AiState, id: u32, g: &Goal) -> i32 {
             st.goal_mut(id).started_anim = true;
             return RESULT_CONTINUE;
         }
-        if g.elapsed > 2.0 {
+        let face_first = under_face_first(st, g);
+        let wait = if face_first { FACE_FIRST_SECS } else { 0.0 };
+        if face_first
+            && target >= 0
+            && g.elapsed < FACE_FIRST_SECS
+            && st.angle_to(target).abs() > FACE_FIRST_DEG
+        {
+            // Turn to the target first; the action is requested once he faces it. His idle
+            // state does not turn (its TAE sets the turn speed to 0), so, as in the game's own
+            // approach goals, he turns while stepping toward the target.
+            st.request.move_yaw = st.yaw_to(target);
+            st.request.move_level = 0.5;
+            return RESULT_CONTINUE;
+        }
+        if g.elapsed > 2.0 + wait {
             return RESULT_FAILED;
         }
         if g.phase == 0 {

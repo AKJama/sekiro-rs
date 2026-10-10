@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::coach::GamePlan;
 use super::habits::{HabitSummary, Habits};
 use super::metrics::{FightMetrics, FightRecord, HISTORY, Trend};
 use super::tally::{CountMap, Counts, Side, Tally, TopMap, merge_counts, ranked_counts};
@@ -59,6 +60,27 @@ pub struct Memory {
     /// The last fights, oldest first (the score to beat: `metrics`).
     #[serde(default)]
     pub history: Vec<FightRecord>,
+    /// The coach's newest game plan and the outcome of every plan text it ran.
+    #[serde(default, skip_serializing_if = "CoachMemory::is_empty")]
+    pub coach: CoachMemory,
+}
+
+/// What the coach mode keeps across sessions (old files lack it).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CoachMemory {
+    /// The newest validated game plan (its `notes` are the coach's hypotheses).
+    #[serde(default)]
+    pub plan: Option<GamePlan>,
+    /// Outcome counts per plan text over every fight: `[exchanges, hit, blocked, deflected,
+    /// whiffed, punished]`.
+    #[serde(default)]
+    pub plans: CountMap,
+}
+
+impl CoachMemory {
+    pub fn is_empty(&self) -> bool {
+        self.plan.is_none() && self.plans.is_empty()
+    }
 }
 
 /// How a load went.
@@ -107,6 +129,7 @@ impl Memory {
             wolf: CountMap::new(),
             habits: Habits::default(),
             history: Vec::new(),
+            coach: CoachMemory::default(),
         }
     }
 

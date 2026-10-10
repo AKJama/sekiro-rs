@@ -740,6 +740,8 @@ fn checkpoint_events_ask_once_each() {
         RequestMode::Checkpoints,
     );
     duel.set_brain(brain, false).unwrap();
+    // This test is about the checkpoints, with plans that have no attack.
+    duel.boss_brain.as_mut().unwrap().anti_stall = false;
     for i in 0..60 * 40 {
         keep_wolf_fresh(&mut duel);
         if i == 60 * 8 {

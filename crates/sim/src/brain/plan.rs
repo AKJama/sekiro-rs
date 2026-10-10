@@ -143,6 +143,7 @@ impl Tactic {
             approach: None,
             timed: true,
             away,
+            face_first: false,
             step: Some(step),
         }
     }

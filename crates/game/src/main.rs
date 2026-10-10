@@ -126,10 +126,15 @@ fn main() -> anyhow::Result<()> {
                 .transpose()
                 .map_err(|e| anyhow::anyhow!("--force-act wants an action id: {e}"))?,
             break_posture: args.iter().any(|a| a == "--break-posture"),
-            brain: sekiro_brain_net::from_cli(
+            brain: sekiro_brain_net::from_cli_with(
                 &brain_name,
                 arg_value(&args, "--brain-model"),
                 &opponent.chr,
+                &sekiro_brain_net::CoachCli {
+                    backend: arg_value(&args, "--coach"),
+                    model: arg_value(&args, "--coach-model"),
+                    effort: arg_value(&args, "--coach-effort"),
+                },
             )
             .map_err(|e| anyhow::anyhow!("--brain: {e}"))?,
             brain_log: args.iter().any(|a| a == "--brain-log"),
@@ -162,7 +167,7 @@ fn main() -> anyhow::Result<()> {
         "                 [--map <id> [--start <n> | --spawn x,y,z,yaw,0]] [--no-enemy] [--lock-on]"
     );
     eprintln!(
-        "                 [--simple-ai] [--passive] [--god] [--force-act <id>] [--enemy c1010|c5060] [--brain lua|scripted|decisions|responses] [--brain-model <name>] [--brain-log] [--brain-memory off|on|<path>]"
+        "                 [--simple-ai] [--passive] [--god] [--force-act <id>] [--enemy c1010|c5060] [--brain lua|scripted|decisions|responses|coach] [--brain-model <name>] [--coach claude|codex|api] [--coach-model <name>] [--coach-effort <level>] [--brain-log] [--brain-memory off|on|<path>]"
     );
     eprintln!("       sekiro-rs --arena owl [--full-map] [--play options] (a boss on his own map)");
     eprintln!("usage: sekiro-rs --arena [--deathblow] [--screenshot <out.png> --at <seconds>]");

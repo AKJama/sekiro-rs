@@ -958,7 +958,7 @@ fn trend_shows_the_last_three_fights() {
     assert_eq!(t.now, Some([50, 1]));
     assert_eq!(
         serde_json::to_string(&t).unwrap(),
-        r#"{"defl":[50,100,80],"guard":[0,0,0],"hits":[5,0,2],"hp":[0,0,0],"kill_s":[30,20,null],"now":[50,1]}"#
+        r#"{"defl":[50,100,80],"guard":[0,0,0],"hits":[5,0,2],"hp":[0,0,0],"kill_s":[30,20,null],"apm":[0,0,0],"dpm":[0,0,0],"passive":[0,0,0],"now":[50,1]}"#
     );
 }
 
@@ -1061,5 +1061,400 @@ fn memory_files_of_different_brains_do_not_mix() {
     assert_eq!(
         p(Some("m/x.json"), "lua", false),
         Some(PathBuf::from("m/x.json"))
+    );
+}
+
+// ---- the coach's game plan, the stalling limits and the new metrics ----
+
+use super::coach::{CoachInput, FightLine, GamePlan, INPUT_BUDGET, NOTES_MAX, PlanSet, SetStat};
+use super::limits::{self, Pacing};
+use super::tally::TopMap;
+
+fn set(name: &str, plans: &[(&str, f32)]) -> PlanSet {
+    PlanSet {
+        name: name.into(),
+        description: format!("the {name} set"),
+        plans: plans
+            .iter()
+            .map(|(p, w)| coach::WeightedChoice {
+                plan: (*p).into(),
+                weight: *w,
+            })
+            .collect(),
+        when: None,
+    }
+}
+
+fn good_plan() -> GamePlan {
+    GamePlan {
+        version: 1,
+        opener: "hold3.5>walk_in4".into(),
+        sets: vec![
+            set("press", &[("3000+3001", 2.0), ("3008", 1.0)]),
+            PlanSet {
+                when: Some("half_hp".into()),
+                ..set("bait", &[("walk_in4>3013", 1.0), ("hold2>3002", 1.0)])
+            },
+        ],
+        start_set: "bait".into(),
+        avoid: vec![coach::Avoid {
+            choice: "3003".into(),
+            reason: "always deflected".into(),
+        }],
+        notes: "he deflects thrusts early".into(),
+    }
+}
+
+#[test]
+fn a_good_game_plan_is_accepted_whole() {
+    let plan = good_plan();
+    let v = plan.validate(&SOLDIER);
+    assert!(v.warnings.is_empty(), "{:?}", v.warnings);
+    assert_eq!(v.plan, plan);
+    assert!(v.usable());
+    // The opener is a plan with tactics, the start set resolves, and sets become weighted plans.
+    assert_eq!(plan.opener_plan(&SOLDIER).unwrap().len(), 2);
+    assert_eq!(plan.start_index(), Some(1));
+    let weighted = plan.weighted(0, &SOLDIER);
+    assert_eq!(weighted.len(), 2);
+    assert_eq!(weighted[0].weight, 2.0);
+    assert_eq!(
+        plan.offers()[1].description,
+        "the bait set (suits: half_hp)"
+    );
+    // The JSON form round-trips, and a missing version reads as the current one.
+    let json = serde_json::to_string(&plan).unwrap();
+    assert_eq!(GamePlan::from_json(&json).unwrap(), plan);
+    let bare = GamePlan::from_json(r#"{"opener":"3000"}"#).unwrap();
+    assert!(bare.validate(&SOLDIER).usable());
+    assert_eq!(plan.summary_lines().len(), 4);
+}
+
+#[test]
+fn unknown_choices_are_dropped_and_a_plan_with_nothing_valid_is_not_usable() {
+    let mut plan = good_plan();
+    plan.opener = "fly9".into();
+    plan.sets[0].plans.push(coach::WeightedChoice {
+        plan: "3031".into(), // the Owl's
+        weight: 1.0,
+    });
+    plan.sets[0].plans.push(coach::WeightedChoice {
+        plan: "3008".into(),
+        weight: -1.0,
+    });
+    plan.sets[1].when = Some("on_tuesday".into());
+    plan.avoid.push(coach::Avoid {
+        choice: "nonsense".into(),
+        reason: String::new(),
+    });
+    let v = plan.validate(&SOLDIER);
+    assert_eq!(v.plan.opener, "");
+    assert_eq!(v.plan.sets[0].plans.len(), 2, "{:?}", v.plan.sets[0]);
+    assert_eq!(v.plan.sets[1].when, None);
+    assert_eq!(v.plan.avoid.len(), 1);
+    assert!(v.warnings.len() >= 5, "{:?}", v.warnings);
+    assert!(v.usable());
+    // Nothing valid at all: falls back to his own AI.
+    let junk = GamePlan {
+        opener: "zzz".into(),
+        sets: vec![
+            set("a", &[("3031", 1.0), ("zzz", 1.0)]),
+            set("keep", &[("3000", 1.0)]),
+        ],
+        start_set: "a".into(),
+        ..GamePlan::default()
+    };
+    let v = junk.validate(&SOLDIER);
+    assert!(!v.usable(), "{:?}", v.plan);
+    assert!(!GamePlan::default().validate(&SOLDIER).usable());
+    // A foreign version is refused whole.
+    let future = GamePlan {
+        version: 9,
+        ..good_plan()
+    };
+    assert!(!future.validate(&SOLDIER).usable());
+}
+
+#[test]
+fn sets_cannot_hold_plans_without_an_attack_or_in_the_avoid_list() {
+    let plan = GamePlan {
+        sets: vec![set(
+            "a",
+            &[
+                ("retreat12", 1.0),
+                ("hold2", 1.0),
+                ("5201", 1.0),
+                ("back_off6>3009", 1.0),
+                ("3003", 1.0),
+            ],
+        )],
+        avoid: vec![coach::Avoid {
+            choice: "3003".into(),
+            reason: "x".into(),
+        }],
+        ..GamePlan::default()
+    };
+    let v = plan.validate(&SOLDIER);
+    let kept: Vec<_> = v.plan.sets[0]
+        .plans
+        .iter()
+        .map(|p| p.plan.as_str())
+        .collect();
+    assert_eq!(kept, ["back_off6>3009"], "{:?}", v.warnings);
+    // The opener is exempt from the attack rule.
+    let open = GamePlan {
+        opener: "retreat12>hold2".into(),
+        ..GamePlan::default()
+    };
+    assert_eq!(open.validate(&SOLDIER).plan.opener, "retreat12>hold2");
+}
+
+#[test]
+fn names_counts_and_notes_are_bounded() {
+    let mut plan = good_plan();
+    plan.notes = "é".repeat(NOTES_MAX + 50);
+    plan.start_set = "nope".into();
+    plan.sets.push(set("bad name!", &[("3000", 1.0)]));
+    plan.sets.push(set("keep", &[("3000", 1.0)]));
+    plan.sets.push(set("press", &[("3000", 1.0)]));
+    for n in ["c", "d", "e"] {
+        plan.sets.push(set(n, &[("3000", 1.0)]));
+    }
+    let v = plan.validate(&SOLDIER);
+    assert_eq!(v.plan.notes.chars().count(), NOTES_MAX);
+    assert_eq!(
+        v.plan.sets.len(),
+        4,
+        "{:?}",
+        v.plan.sets.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+    assert_eq!(v.plan.start_set, "press");
+    assert!(
+        v.plan
+            .sets
+            .iter()
+            .all(|s| s.name != "keep" && s.name != "bad name!")
+    );
+}
+
+fn busy_input() -> CoachInput {
+    let counts = |n: u32| Counts {
+        n,
+        hit: n / 3,
+        blocked: n / 4,
+        deflected: n / 5,
+        whiffed: n / 6,
+        punished: n / 7,
+    };
+    let mut plans = TopMap::default();
+    let mut overall = TopMap::default();
+    for (i, c) in SOLDIER.choices().iter().enumerate() {
+        plans.insert(c.value.clone(), counts(20 + i as u32));
+        overall.insert(c.value.clone(), counts(200 + i as u32));
+    }
+    let mut wolf = TopMap::default();
+    for w in [
+        "AttackCombo1",
+        "AttackCombo2",
+        "SprintAttack",
+        "JumpAttack",
+        "EasyDeflectedAtk",
+    ] {
+        wolf.insert(w, counts(40));
+    }
+    let mut memory = full_memory();
+    for i in 0..10 {
+        memory.push_record(record(3 + i, i, Some(30.0 + i as f32)));
+    }
+    let big_plan = GamePlan {
+        version: 1,
+        opener: "hold3.5>walk_in4".into(),
+        sets: (0..4)
+            .map(|i| {
+                set(
+                    &format!("set{i}"),
+                    &[
+                        ("walk_in4>hold1>3013", 1.0),
+                        ("strafe_left>3005+3007", 1.0),
+                        ("hold2>3002", 1.0),
+                        ("keep_range>3013", 1.0),
+                        ("3000+3001>back_off6", 1.0),
+                        ("run_in3>3008", 1.0),
+                    ],
+                )
+            })
+            .collect(),
+        start_set: "set0".into(),
+        avoid: (0..4)
+            .map(|_| coach::Avoid {
+                choice: "3003".into(),
+                reason: "deflected every time".into(),
+            })
+            .collect(),
+        notes: "n".repeat(NOTES_MAX),
+    };
+    let mut sets = std::collections::BTreeMap::new();
+    for i in 0..4 {
+        sets.insert(
+            format!("set{i}"),
+            SetStat {
+                secs: 12.5,
+                c: counts(30),
+            },
+        );
+    }
+    CoachInput {
+        fight: 123,
+        result: FightLine {
+            won: "boss".into(),
+            secs: 98,
+            defl: 61,
+            guard: 12,
+            hits: 9,
+            hp: 77,
+            posture: 40,
+            punishes: 6,
+            apm: 14,
+            dpm: 55,
+            passive: 12,
+        },
+        trend: Trend::new(&memory.history, None),
+        plans,
+        sets,
+        wolf,
+        overall,
+        habits: memory.habits.summary(),
+        played: Some(big_plan.clone()),
+        notes: big_plan.notes,
+    }
+}
+
+#[test]
+fn the_coach_input_is_trimmed_to_4kb_and_keeps_the_notes_and_the_played_plan() {
+    let mut input = busy_input();
+    let before = input.json_len();
+    let after = input.fit(INPUT_BUDGET);
+    let json = serde_json::to_string(&input).unwrap();
+    eprintln!("coach input: {before} bytes untrimmed, {after} fitted: {json}");
+    assert!(
+        before > INPUT_BUDGET,
+        "the test needs a worst case, got {before}"
+    );
+    assert!(after <= INPUT_BUDGET && after == json.len(), "{after}");
+    assert!(json.contains(&"n".repeat(NOTES_MAX)), "the notes survive");
+    assert!(json.contains("\"played\":{"), "the played plan survives");
+    assert!(json.contains("\"result\":{\"won\":\"boss\""));
+    assert!(json.contains("\"passive\":12"));
+    // A normal input (a few plans, one earlier fight) is far smaller and untouched.
+    let mut small = busy_input();
+    small.overall = TopMap::default();
+    small.plans = TopMap::default();
+    small.wolf = TopMap::default();
+    small.habits = Default::default();
+    small.trend = Trend::default();
+    let len = small.json_len();
+    assert_eq!(small.fit(INPUT_BUDGET), len);
+    assert!(len < 3200, "{len}");
+}
+
+#[test]
+fn passive_share_and_the_rate_metrics_are_computed() {
+    use metrics::MetricsTracker;
+    let mut m = MetricsTracker::new(0.0);
+    m.wolf(1.0, 0.0);
+    // 20 s in 0.1 s steps; attacks start at 1, 2 and 10 s. Passive: more than 4 s since the
+    // last attack, so 6 to 10 s and 14 to 20 s (the start counts as an attack at 0).
+    for i in 1..=200 {
+        let t = i as f32 * 0.1;
+        if matches!(i, 10 | 20 | 100) {
+            m.attack_started(t);
+        }
+        if i == 150 {
+            m.wolf(0.7, 0.2);
+        }
+        m.passive_tick(t, 0.1);
+    }
+    let f = m.finish(20.0, 0, false);
+    assert_eq!(f.boss_attacks, 3);
+    assert!(
+        (f.passive_share() - 0.5).abs() < 0.02,
+        "{}",
+        f.passive_share()
+    );
+    assert!((f.attacks_per_min() - 9.0).abs() < 1e-3);
+    assert!(
+        (f.damage_per_min() - 150.0).abs() < 0.01,
+        "{}",
+        f.damage_per_min()
+    );
+    assert!(f.stalled());
+    // A fighter that attacks every 3 s is never passive.
+    let mut busy = MetricsTracker::new(0.0);
+    for i in 1..=300 {
+        let t = i as f32 * 0.1;
+        if i % 30 == 0 {
+            busy.attack_started(t);
+        }
+        busy.passive_tick(t, 0.1);
+    }
+    let b = busy.finish(30.0, 0, false);
+    assert_eq!((b.passive_share(), b.stalled()), (0.0, false));
+    assert!((b.attacks_per_min() - 20.0).abs() < 1e-3);
+    // The trend and the summary line show them.
+    let t = Trend::new(
+        &[FightRecord {
+            metrics: f,
+            ..FightRecord::default()
+        }],
+        None,
+    );
+    assert_eq!((t.apm[0], t.dpm[0], t.passive[0]), (9, 150, 50));
+    let line = FightRecord {
+        metrics: f,
+        ..FightRecord::default()
+    }
+    .summary_line();
+    assert!(
+        line.contains("attacks/min 9 damage/min 150% passive 50% (STALLED: failed)"),
+        "{line}"
+    );
+}
+
+#[test]
+fn the_limits_force_attacks_and_rate_limit_retreats() {
+    let parse = |t: &str| SOLDIER.parse(t).unwrap();
+    let mut p = Pacing::new(0.0);
+    // Plans without an attack are never eligible.
+    for t in ["retreat12", "hold2", "back_off9", "5201", "strafe_left"] {
+        assert!(!p.eligible(&parse(t), 1.0, &SOLDIER), "{t}");
+    }
+    assert!(!limits::has_attack(&parse("walk_in4"), &SOLDIER));
+    assert!(limits::has_attack(&parse("walk_in4>3013"), &SOLDIER));
+    assert!(limits::is_retreat(&parse("back_off6>3009"), &SOLDIER));
+    assert!(limits::is_retreat(&parse("5201>3000"), &SOLDIER));
+    assert!(!limits::is_retreat(&parse("walk_in4>3013"), &SOLDIER));
+    // One retreating plan per 8 s.
+    let bait = parse("back_off6>3009");
+    assert!(p.eligible(&bait, 1.0, &SOLDIER));
+    p.last_retreat = Some(1.0);
+    p.last_attack = 4.9;
+    assert!(!p.eligible(&bait, 5.0, &SOLDIER));
+    assert!(!p.eligible(&bait, 8.9, &SOLDIER));
+    p.last_attack = 9.0;
+    assert!(p.eligible(&bait, 9.1, &SOLDIER));
+    // A plan that does not retreat is not held back by it.
+    assert!(p.eligible(&parse("3013"), 5.0, &SOLDIER));
+    // Overdue (6 s without an attack): only plans that reach an attack within a second.
+    let p = Pacing::new(0.0);
+    assert!(p.eligible(&parse("walk_in4>3013"), 1.0, &SOLDIER));
+    assert!(!p.eligible(&parse("walk_in4>3013"), 7.0, &SOLDIER));
+    assert!(!p.eligible(&parse("hold2>3008"), 7.0, &SOLDIER));
+    assert!(p.eligible(&parse("hold1>3008"), 7.0, &SOLDIER));
+    assert!(p.eligible(&parse("3013"), 7.0, &SOLDIER));
+    // A chain whose lead-in could take longer than the time left is held back early too.
+    assert!(!p.eligible(&parse("retreat12>run_in3>3003"), 0.0, &SOLDIER));
+    assert_eq!(
+        limits::lead_secs(&parse("retreat12>hold2>3003"), &SOLDIER),
+        7.0
     );
 }

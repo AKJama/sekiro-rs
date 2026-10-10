@@ -531,6 +531,7 @@ impl BossActions {
                     approach: if k == 0 { approach } else { None },
                     timed: false,
                     away: false,
+                    face_first: a.kind == ActionKind::Attack,
                     step: Some(start + k),
                 });
             }

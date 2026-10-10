@@ -36,7 +36,13 @@ pub struct FightMetrics {
     pub hp_lost: f32,
     pub posture_gained: f32,
     pub punishes: u32,
+    /// Seconds Wolf took to kill the boss: informational, never a goal (a boss that stalls
+    /// would "win" it).
     pub kill_time: Option<f32>,
+    /// Attack steps the boss started.
+    pub boss_attacks: u32,
+    /// Seconds with no attack step started in the last `limits::PASSIVE_WINDOW_SECS`.
+    pub passive_secs: f32,
 }
 
 impl FightMetrics {
@@ -57,6 +63,38 @@ impl FightMetrics {
     pub fn guard_rate(&self) -> Option<f32> {
         self.rate(self.guarded)
     }
+
+    /// The boss's attacks started per minute of fight.
+    pub fn attacks_per_min(&self) -> f32 {
+        if self.duration > 0.0 {
+            self.boss_attacks as f32 * 60.0 / self.duration
+        } else {
+            0.0
+        }
+    }
+
+    /// Damage to Wolf per minute, in percent of a bar per minute (HP lost plus posture gained).
+    pub fn damage_per_min(&self) -> f32 {
+        if self.duration > 0.0 {
+            (self.hp_lost + self.posture_gained) * 100.0 * 60.0 / self.duration
+        } else {
+            0.0
+        }
+    }
+
+    /// Fraction of the fight with no attack started in the last 4 s (0 to 1).
+    pub fn passive_share(&self) -> f32 {
+        if self.duration > 0.0 {
+            (self.passive_secs / self.duration).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// Whether the fight failed for passivity (see `limits::PASSIVE_FAIL_SHARE`).
+    pub fn stalled(&self) -> bool {
+        self.passive_share() > super::limits::PASSIVE_FAIL_SHARE
+    }
 }
 
 /// Collects [`FightMetrics`] as a fight goes.
@@ -66,6 +104,7 @@ pub struct MetricsTracker {
     start: f32,
     prev_hp: Option<f32>,
     prev_posture: Option<f32>,
+    last_attack: Option<f32>,
 }
 
 impl MetricsTracker {
@@ -84,6 +123,21 @@ impl MetricsTracker {
             self.metrics.guarded += 1;
         } else {
             self.metrics.hits_taken += 1;
+        }
+    }
+
+    /// The boss started an attack step at `now`.
+    pub fn attack_started(&mut self, now: f32) {
+        self.metrics.boss_attacks += 1;
+        self.last_attack = Some(now);
+    }
+
+    /// One step of `dt` seconds ending at `now`: passive when no attack started in the last
+    /// `PASSIVE_WINDOW_SECS`.
+    pub fn passive_tick(&mut self, now: f32, dt: f32) {
+        let since = now - self.last_attack.unwrap_or(self.start);
+        if since > super::limits::PASSIVE_WINDOW_SECS {
+            self.metrics.passive_secs += dt;
         }
     }
 
@@ -137,6 +191,14 @@ pub struct FightRecord {
     pub latency_ms: [u32; 2],
     /// The brain and request mode of the fight (`decisions/checkpoints`).
     pub brain: String,
+    /// Reasoning tokens of the checkpoint calls in the fight.
+    pub reasoning: u64,
+    /// Coach calls that completed during the fight (usually the previous fight's): calls,
+    /// input, output and reasoning tokens, and their total wall-clock milliseconds.
+    pub coach: [u64; 5],
+    /// Coach mode: seconds each set of the game plan was played (`opener`, `lua` for his own
+    /// AI's acts are counted as plans, not here).
+    pub sets: BTreeMap<String, f32>,
 }
 
 impl FightRecord {
@@ -152,8 +214,28 @@ impl FightRecord {
             .map(|(k, n)| format!("{k}x{n}"))
             .collect::<Vec<_>>()
             .join(" ");
+        let coach = if self.coach[0] > 0 {
+            format!(
+                "; coach {} call(s) tokens {}/{} (reasoning {}) {} ms",
+                self.coach[0], self.coach[1], self.coach[2], self.coach[3], self.coach[4]
+            )
+        } else {
+            String::new()
+        };
+        let sets = if self.sets.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; sets {}",
+                self.sets
+                    .iter()
+                    .map(|(k, s)| format!("{k} {s:.0}s"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        };
         format!(
-            "fight over: {} won in {:.1}s ({}); {} plans, {} lua acts, {} requests [{}]; wolf deflect {} guard {} hits taken {} hp lost {:.0}% posture {:.0}% punishes {}; tokens {}/{}; latency p50 {} ms p90 {} ms",
+            "fight over: {} won in {:.1}s ({}); {} plans, {} lua acts, {} requests [{}]; wolf deflect {} guard {} hits taken {} hp lost {:.0}% posture {:.0}% punishes {}; attacks/min {:.0} damage/min {:.0}% passive {:.0}%{}; tokens {}/{} (reasoning {}); latency p50 {} ms p90 {} ms{}{}",
             match self.winner.as_str() {
                 "boss" => "boss",
                 "wolf" => "Wolf",
@@ -171,10 +253,21 @@ impl FightRecord {
             m.hp_lost * 100.0,
             m.posture_gained * 100.0,
             m.punishes,
+            m.attacks_per_min(),
+            m.damage_per_min(),
+            m.passive_share() * 100.0,
+            if m.stalled() {
+                " (STALLED: failed)"
+            } else {
+                ""
+            },
             self.tokens[0],
             self.tokens[1],
+            self.reasoning,
             self.latency_ms[0],
             self.latency_ms[1],
+            coach,
+            sets,
         )
     }
 }
@@ -203,6 +296,12 @@ pub struct Trend {
     pub hp: Vec<u32>,
     /// Seconds Wolf took to kill the boss (`null`: the boss won or it was unfinished).
     pub kill_s: Vec<Option<u32>>,
+    /// Boss attacks started per minute.
+    pub apm: Vec<u32>,
+    /// Damage to Wolf per minute, percent of a bar (HP plus posture).
+    pub dpm: Vec<u32>,
+    /// Passive share, percent of the fight (above 35 the fight failed).
+    pub passive: Vec<u32>,
     /// This fight so far: deflect percent and hits landed on Wolf.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub now: Option<[u32; 2]>,
@@ -231,6 +330,18 @@ impl Trend {
                 .iter()
                 .map(|r| r.metrics.kill_time.map(|k| k.round() as u32))
                 .collect(),
+            apm: recent
+                .iter()
+                .map(|r| r.metrics.attacks_per_min().round() as u32)
+                .collect(),
+            dpm: recent
+                .iter()
+                .map(|r| r.metrics.damage_per_min().round() as u32)
+                .collect(),
+            passive: recent
+                .iter()
+                .map(|r| (r.metrics.passive_share() * 100.0).round() as u32)
+                .collect(),
             now: now.map(|m| [pct(m.deflect_rate()), m.hits_taken]),
         }
     }
@@ -249,6 +360,9 @@ impl Trend {
         self.hits.remove(0);
         self.hp.remove(0);
         self.kill_s.remove(0);
+        self.apm.remove(0);
+        self.dpm.remove(0);
+        self.passive.remove(0);
         true
     }
 }

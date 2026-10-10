@@ -1,6 +1,6 @@
 # Status
 
-Last updated 10 October 2026.
+Last updated 11 October 2026.
 Read this first in a new session, then `AGENTS.md` and `docs/DESIGN.md`.
 How much of the game is done overall: `docs/PROGRESS.md`.
 
@@ -84,6 +84,8 @@ Uncommitted files in the working tree belong to these tasks; check `git status` 
 
 ## Known issues
 
+- Done 2026-10-11, to be tried in play: the boss **coach** (`--brain coach`, `docs/BRAIN.md` "The coach"). Between fights a reasoning model (`--coach claude|codex|api`, default `claude` = `claude -p --model haiku`, no API key; `api` = Responses, `gpt-6-luna`, `--coach-model`, `--coach-effort`) reads the fight summary (about 4 KB: result, trend, per-plan and per-set outcomes, Wolf's habits, the plan played, its own notes) and writes a versioned game plan (opener, 2 to 4 named plan sets, start set, avoid, notes), validated against the boss's actions. Fight 1 with no memory is his own Lua AI with no model call; the plan arriving during the respawn plays from fight 2 (opener, then the start set), a late one a fight later, a failure keeps the old plan, and the newest plan is saved in `logs/memory/<chr>.json`. In the fight only the Decisions API picks a set at the checkpoints, with a tiny request (about 100 tokens of numbers plus the set names). The console prints the request and a 3 to 5 line summary of each plan. Against reward hacking: kill time is not a goal; new metrics `attacks/min`, `damage/min` and `passive_share` (a fight above 35% passive failed), and hard limits in the driver (an attack at least every 6 s, one retreat per 8 s, plans need an attack). Also fixed: an attack after `retreat12` or a strafe swung at empty air; it now turns to face Wolf first (30 degree rule). Tests `crates/sim/tests/coach.rs`, `crates/sim/src/brain/tests.rs`, `crates/brain-net/tests/offline.rs` (mock servers and a fake CLI only). Not verified: any real API, `claude` or `codex` call (flag names are from `--help` output), that the strict schema with `$defs` is accepted, that 6000 output tokens suffice for `medium` reasoning, how the plans look in play.
+
 - Done 2026-10-10, to be confirmed in play: three features after FwLo's RustSekiro video (his code adapted under MIT, `CREDITS.md`). (1) The deathblow camera: Wolf's deathblow clips drive it through TAE 155 (CameraSetParam slot 41, CameraParam 4000), 153 (distance, 1.5 m at the soldier's blow) and 151 (focus on dummy 142 of his animated camera bone, with look limits; the Owl's deathblow), and it hands back on the params' own chase rates (`docs/DEATHBLOW.md`, "Camera"). (2) The perilous kanji: the warning dummy bullet (judge 980 to 989) is made at Wolf within 5 m (soldier) or 9 m (Owl), its SpEffect 211000 shows VFX 48100 "å±" at Wolf's dummy 220, and the HUD draws a red å± over Wolf with a Windows Japanese font (the game's FXR is not decoded; no sound found). (3) The jump counter: Wolf's jumps carry sweep i-frames (TAE 954 type 1), his air kick (PCBehavior 901, anti-ground) is now a real attack, the sweeps' SpEffect 400200 multiplies its posture damage by 8 (the soldier's posture breaks), and env 2004 lets his script kick off the enemy (`docs/COMBAT-RULES.md`, "Perilous attacks"). Tests `crates/sim/tests/perilous.rs`, `deathblow_camera.rs`; scripts `crates/game/scripts/soldier_deathblow.txt`, `soldier_jump_counter.txt`; screenshots `cache/screens/dbcam_soldier_*.png`, `dbcam_owl2_*.png`, `kanji_soldier_*.png`.
 
 - Done 2026-10-11, to be tried in play (user's first real soldier fight: the model chose the leaping slash 3003 twelve times although Wolf deflected it 5 of 5): the boss brain now probes instead of repeating. (1) Plans are 1 to 3 steps, each an attack or a movement *tactic* run through the engine's own native goals (hold, guard, walk_in, run_in, strafe, back_off, retreat, keep_range, relative to Wolf, each with a lifetime cap); the soldier and the Owl offer 73 and 75 choices (his actions, combos, 15 tactics, about 40 curated chains), text form such as `walk_in4>hold2>3013`. (2) Request modes `slot` (as before), `plan_end` and `checkpoints` (hosted default: only at fight start, half HP, a lost deathblow mark, Wolf punishing twice or deflecting three times in a row; a fight takes 1 to 5 requests); a reply is a plan set (the Decisions probabilities) the boss samples locally at every act, with a penalty for options repelled repeatedly this fight and a bonus for untried ones (temperature, seed by environment variables). (3) Per-fight metrics for Wolf (perfect-deflect and guard rate, hits taken, HP and posture lost, punishes, kill time) are kept in the memory file (version 2, last 10 fights), sent as a trend, and printed as one summary line per fight; `--brain lua --brain-memory on` saves the baseline to `logs/memory/<chr>.lua.json`. (4) Nothing is requested or logged once a fighter is dead; the hosted worker warms the route (DNS and TCP, no request) and its timeout is 3 s. `docs/BRAIN.md`, tests `crates/sim/tests/brain_tactics.rs`, `crates/sim/src/brain/tests.rs`, `crates/brain-net`. Not verified: any live API call (probability field names come from the docs), how the tactics look in play (distances and caps are tested, the animation blends are not).
@@ -160,3 +162,36 @@ What the slow frames were, and what changed:
 - The fight's first step took 95 ms: the hit-sound tables were read on first use. They and the enemy's FMOD project (c5060.fev, which loaded a few frames into the fight) now load at start.
 - Clips shown for the first time were read and decoded on that frame (26 to 55 ms on cold runs, for the Owl's damage and attack clips). Once the fight runs, a background thread decodes all of both characters' clips (0.4 s for Wolf's 1433, no measurable memory change).
 - Left: one 30 ms frame in some runs with 16 ms in the main schedule and nothing else in it; the replay writes a stderr line per frame and step into a PowerShell redirect, which likely blocks now and then (not seen without the replay logs, not proven).
+
+## Collision-hole audit (2026-10-11)
+
+The headless tool is `crates/sim/examples/collision_holes.rs`; results and top-ten lists are in `docs/COLLISION-HOLES.md`.
+All nine walking maps have JSON under `cache/holes/`, with screenshots and review notes under `cache/screens/holes/` and `cache/holes/<map>.review.json`.
+The final audit found 208,241 raw render/collision discrepancies, reproduced 119 with Body, retained 12 after visual review and rejected four visual false positives.
+Unreviewed and inconclusive cases remain unconfirmed; raw counts are not gameplay defect counts.
+There are 360 real-movement checks and 18,432 seeded capsule probes, each with 64 moves and subdivisions no longer than 0.1 m.
+Floor sampling uses 0.5 m cells, slopes up to 50 degrees, a 0.3 m collision tolerance and nearby collision plus line-of-sight filtering.
+Body floor confirmation requires more than five ticks over 5 m below the specific render witness while within 1 m horizontally, preventing unrelated ledge falls from confirming a shallow gap.
+Large unlabelled background meshes required a conservative collision-neighbourhood voxel mask, and render walls use a BVH to keep memory around 2 GB per worker rather than duplicating triangles across a grid.
+The final full scans plus latest cached validation passes total 1,283.46 seconds (21.39 minutes).
+The distributed pipeline ran from 23:17:48 to 23:34:20 UTC on 10 October (16.53 minutes to the last full scan), using three gpt-6-luna workers with two Rayon threads each; screenshot review, tuning pilots and build checks are additional time.
+Mibu review cameras use `--groups display --hide m9,m8` and stable Body eye positions to avoid occluding far/helper pieces; the headless audit still loads all map pieces.
+Confirmed here means a Body reproduction plus a visually retained surface; reachability is a nearby-surface/start-distance proxy, and enclosure parity does not prove watertight solid geometry.
+
+Rerun from the repo root:
+
+```powershell
+$env:CARGO_TARGET_DIR='target/alt'
+$env:CARGO_BUILD_JOBS='6'
+$env:RAYON_NUM_THREADS='6'
+& "$env:USERPROFILE\.cargo\bin\cargo.exe" build --release -p sekiro-sim --example collision_holes -j 6
+.\target\alt\release\examples\collision_holes.exe cache/maps --spacing 0.5 --probes 2048
+.\target\alt\release\examples\collision_holes.exe --report
+```
+
+The six release tool tests pass, including the missing floor patch, solid floor and 100 m thin-wall sweep.
+Final `cargo clippy --workspace --all-targets -j 6 -- -D warnings` and `cargo fmt --all -- --check` pass with the alternate target configuration above; the tool file was formatted separately to avoid altering protected concurrent edits.
+A broader workspace test attempt during concurrent brain edits stopped on a temporary `BrainRequest.brief` compile error; the subsequent workspace Clippy check passes, and no full-workspace test success is claimed.
+The known pre-existing `map_tangents` failure was not changed.
+Tracked task changes are the new example, dev-only Rayon dependency in `crates/sim/Cargo.toml` and Cargo.lock, `docs/COLLISION-HOLES.md`, and this status section.
+No collision engine code, protected brain files, game-install files, links, junctions or commits were changed by this audit.
