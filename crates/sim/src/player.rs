@@ -47,6 +47,7 @@ pub const ACT_SET_VARIABLE: i32 = 148;
 pub const ACT_RESET_INPUT: i32 = 9101;
 pub const ACT_FACE_DIRECTION: i32 = 3025;
 pub const ACT_FACE_LOCK_TARGET: i32 = 2019;
+pub const ACT_RELEASE_LOCK_ANGLE: i32 = 2018;
 pub const ENV_FALLING: i32 = 200;
 pub const ENV_FALL_HEIGHT: i32 = 224;
 pub const ENV_DT: i32 = 333;
@@ -55,6 +56,7 @@ pub const ENV_DAMAGE_TYPE: i32 = 202;
 pub const ENV_DAMAGE_DIRECTION: i32 = 222;
 pub const ENV_DAMAGE_LEVEL: i32 = 236;
 pub const ENV_GUARD_LEVEL: i32 = 237;
+pub const ENV_GUARD_MOTION_LEVEL: i32 = 258;
 pub const ENV_TOOK_DAMAGE: i32 = 256;
 pub const ENV_DAMAGE_ELEMENT: i32 = 285;
 pub const ENV_AI_ACTION: i32 = 106;
@@ -115,10 +117,16 @@ pub struct PlayerEnv {
     /// Counts `act(9101)` (reset input acceptance) calls; the input layer clears its buffer.
     pub input_resets: std::cell::Cell<u32>,
     /// `act(3025, degrees)`: turn to face a direction relative to the current facing
-    /// (positive to the left). The body applies and clears it.
+    /// (positive to the right, like `TurnAngle`: the script passes `TurnAngle` itself to face
+    /// the stick, and `stickAngle - 90` to tilt a right step). The body applies and clears it.
     pub face_turn: std::cell::Cell<Option<f32>>,
     /// `act(2019)`: turn to the lock-on target immediately. The body applies and clears it.
     pub face_lock_target: std::cell::Cell<bool>,
+    /// `act(2018)`: release the lock-on angle lock for this step, so a locked-on character turns
+    /// toward the stick instead of the target. The script asks on every sprinting frame
+    /// (`STYLE_TYPE_SPRINT` in `c0000.hks` `Update`) and as the sprint starts from a step. The
+    /// body reads and clears it.
+    pub release_lock_angle: std::cell::Cell<bool>,
     /// The hit being reacted to this step, if any (env 202, 222, 236, 237, 256, 285, ...).
     pub damage: Option<IncomingDamage>,
     /// NPC only: the action the AI requests (env 106), an animation-id-like code.
@@ -155,6 +163,7 @@ impl Default for PlayerEnv {
             input_resets: std::cell::Cell::new(0),
             face_turn: std::cell::Cell::new(None),
             face_lock_target: std::cell::Cell::new(false),
+            release_lock_angle: std::cell::Cell::new(false),
             damage: None,
             ai_action: 0,
             ai_cancel_actions: [0; 3],
@@ -262,6 +271,7 @@ impl Adapter<'_> {
             ENV_DAMAGE_DIRECTION => env.damage.map_or(0.0, |d| d.direction as f32),
             ENV_DAMAGE_FRONT_BACK => env.damage.map_or(0.0, |d| d.front_back as f32),
             ENV_GUARD_LEVEL => env.damage.map_or(0.0, |d| d.guard_level as f32),
+            ENV_GUARD_MOTION_LEVEL => env.damage.map_or(0.0, |d| d.guard_motion_level as f32),
             ENV_DAMAGE_ELEMENT => env.damage.map_or(0.0, |d| d.element as f32),
             ENV_GUARD_REPELLED => env.damage.map_or(0.0, |d| d.repelled as f32),
             ENV_JUST_GUARD_REPELLED => env.damage.map_or(0.0, |d| d.just_repelled as f32),
@@ -309,6 +319,9 @@ impl Host for Adapter<'_> {
         }
         if id == CommandId::Number(ACT_FACE_LOCK_TARGET) {
             self.env.face_lock_target.set(true);
+        }
+        if id == CommandId::Number(ACT_RELEASE_LOCK_ANGLE) {
+            self.env.release_lock_angle.set(true);
         }
         if id == CommandId::Number(ACT_RESET_INPUT) {
             self.env.input_resets.set(self.env.input_resets.get() + 1);
@@ -541,6 +554,10 @@ pub struct IncomingDamage {
     pub front_back: i32,
     /// env 237: guard level action (above zero lets the full guard reaction play).
     pub guard_level: i32,
+    /// env 258: the defender's guard motion level (NpcParam `guardLevel`), the column of the
+    /// NPC script's `guard_damage_table`. At 0 every blocked hit falls through to a hit
+    /// reaction.
+    pub guard_motion_level: i32,
     /// env 285: special attribute (element), 0 for none.
     pub element: i32,
     /// env 3018 / 3019: how the attacker's own blocked or deflected attack recoils.

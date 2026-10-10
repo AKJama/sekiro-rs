@@ -139,6 +139,9 @@ pub struct NpcCombat {
     /// `ninsatuNum`: deathblows needed.
     pub deathblows: i32,
     pub guard_angle: i16,
+    /// `guardLevel`: which guard reaction takes a blocked hit ("which guard motion receives
+    /// the enemy's attack", def). The NPC script reads it as env 258.
+    pub guard_level: i32,
     /// `defFlickPower`: repel defence while not guarding.
     pub def_flick_power: u16,
     pub stamina_guard_def: u8,
@@ -210,6 +213,7 @@ impl NpcCombat {
             stamina_control_param_id: row.u32("staminaControlParamId")?,
             deathblows: row.int("ninsatuNum")? as i32,
             guard_angle: row.i16("guardAngle")?,
+            guard_level: row.int("guardLevel")? as i32,
             def_flick_power: row.u16("defFlickPower")?,
             stamina_guard_def: row.u8("staminaGuardDef")?,
             phys_guard_cut_rate: row.f32("physGuardCutRate")?,

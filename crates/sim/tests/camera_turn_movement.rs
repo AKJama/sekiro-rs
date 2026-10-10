@@ -4,6 +4,7 @@
 //! the camera". Skips when `cache/` has not been extracted. `--nocapture` prints a per-step log.
 
 use sekiro_sim::input::angle_diff;
+use sekiro_sim::tae::cancel;
 use sekiro_sim::{Character, InputFrame};
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::path::PathBuf;
@@ -189,4 +190,231 @@ fn locked_on_strafes_follow_the_stick() {
         }
         assert_follows(&steps[30..], 20.0, &format!("locked strafe {k}"));
     }
+}
+
+struct LockedStep {
+    movement: Step,
+    state: String,
+    clip: String,
+    facing: f32,
+    target_err: f32,
+    /// The clip's TAE disabled turning on this step ("Disable Turning", flag 7).
+    turn_disabled: bool,
+}
+
+/// Records the real player's root motion without resetting lock-on between ticks.
+fn run_locked(
+    wolf: &mut Character,
+    frames: usize,
+    input: impl Fn(usize, &Character) -> InputFrame,
+) -> Vec<LockedStep> {
+    let mut steps = Vec::new();
+    for i in 0..frames {
+        let frame = input(i, wolf);
+        let before = wolf.body.position;
+        let report = wolf.tick(&frame, DT);
+        let dx = report.position[0] - before[0];
+        let dz = report.position[2] - before[2];
+        let speed = dx.hypot(dz) / DT;
+        let err = wolf.input.stick_world_yaw().map_or(f32::NAN, |yaw| {
+            if speed > 0.05 {
+                angle_diff((-dx).atan2(-dz), yaw).to_degrees()
+            } else {
+                f32::NAN
+            }
+        });
+        steps.push(LockedStep {
+            movement: Step { err, speed },
+            state: report.behavior.state_path.join("/"),
+            clip: report.animation.unwrap_or_default(),
+            facing: report.yaw.to_degrees(),
+            target_err: wolf.lock_target.map_or(f32::NAN, |target| {
+                angle_diff(report.yaw, wolf.yaw_to(target)).to_degrees()
+            }),
+            turn_disabled: wolf.tae_frame().flag(cancel::DISABLE_TURN),
+        });
+    }
+    steps
+}
+
+/// A compact table plus the worst moving frame makes a failed direction easy to diagnose.
+fn locked_table(steps: &[LockedStep]) -> String {
+    use std::fmt::Write;
+    let worst = steps
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.movement.err.is_finite())
+        .max_by(|(_, a), (_, b)| a.movement.err.abs().total_cmp(&b.movement.err.abs()))
+        .map(|(i, _)| i);
+    let mut table = String::from("time state clip facing stick_err speed target_err\n");
+    for (i, s) in steps.iter().enumerate() {
+        if i % 10 == 0 || i + 1 == steps.len() || Some(i) == worst {
+            writeln!(
+                table,
+                "{:.2} {} {} {:.1} {:.1} {:.2} {:.1}",
+                i as f32 * DT,
+                s.state,
+                s.clip,
+                s.facing,
+                s.movement.err,
+                s.movement.speed,
+                s.target_err,
+            )
+            .unwrap();
+        }
+    }
+    table
+}
+
+fn locked_wolf(side_target: bool) -> Option<Character> {
+    let mut wolf = load()?;
+    let p = wolf.body.position;
+    wolf.body.yaw = 0.0;
+    wolf.lock_target = Some(if side_target {
+        [p[0] + 4.0, p[1], p[2]]
+    } else {
+        [p[0], p[1], p[2] - 4.0]
+    });
+    // Let the player script enter locked idle before pressing the stick and dodge.
+    run_locked(&mut wolf, 30, |_, _| InputFrame::default());
+    Some(wolf)
+}
+
+fn check_locked_step(x: f32, y: f32) {
+    let Some(mut wolf) = locked_wolf(false) else {
+        return;
+    };
+    let steps = run_locked(&mut wolf, 60, |i, _| {
+        let mut frame = stick(x, y, 0.0);
+        frame.buttons.dodge = i < 2;
+        frame
+    });
+    let stepping: Vec<_> = steps
+        .iter()
+        .filter(|s| s.state.contains("Step") && !s.state.contains("Sprint"))
+        .collect();
+    let distance: f32 = stepping.iter().map(|s| s.movement.speed * DT).sum();
+    // The step TAE (a000_2133xx) disables turning for its first 0.4 s and after 0.6 s; in
+    // between, the engine turns a locked-on Wolf back to the target. With the target 4 m away,
+    // a 3.5 m side step has carried him 30-40 degrees around it by then, so the travel bends by
+    // that much in the turn window (and the rest of the step follows the new facing). The
+    // direction of the dodge itself is its first, turn-disabled part, which must follow the
+    // stick; then Wolf must face the target again.
+    let worst = stepping
+        .iter()
+        .take_while(|s| s.turn_disabled)
+        .filter(|s| s.movement.err.is_finite())
+        .map(|s| s.movement.err.abs())
+        .fold(0.0_f32, f32::max);
+    let refaced = stepping.last().is_some_and(|s| s.target_err.abs() <= 10.0);
+    assert!(
+        !stepping.is_empty() && distance >= 1.5 && worst <= 30.0 && refaced,
+        "locked step: distance {distance:.2} m, worst travel angle {worst:.1} deg, \
+         refaced the target {refaced}\n{}",
+        locked_table(&steps)
+    );
+}
+
+fn check_locked_sprint(x: f32, y: f32) {
+    // Forward has an open lane; the enemy remains locked on four metres to the side.
+    let Some(mut wolf) = locked_wolf(y > 0.0) else {
+        return;
+    };
+    let target = wolf.lock_target;
+    let steps = run_locked(&mut wolf, 150, |_, _| {
+        let mut frame = stick(x, y, 0.0);
+        frame.buttons.dodge = true;
+        frame
+    });
+    let window = &steps[48..];
+    let average = window.iter().map(|s| s.movement.speed).sum::<f32>() / window.len() as f32;
+    let worst = window
+        .iter()
+        .filter(|s| s.movement.speed > 3.0)
+        .map(|s| s.movement.err.abs())
+        .fold(0.0_f32, f32::max);
+    assert!(
+        average > 5.0 && worst <= 30.0 && wolf.lock_target == target,
+        "locked sprint: average {average:.2} m/s, worst travel angle {worst:.1} deg, lock {:?}\n{}",
+        wolf.lock_target,
+        locked_table(&steps)
+    );
+}
+
+#[test]
+fn locked_step_goes_where_the_stick_points_left() {
+    check_locked_step(-1.0, 0.0);
+}
+
+#[test]
+fn locked_step_goes_where_the_stick_points_right() {
+    check_locked_step(1.0, 0.0);
+}
+
+#[test]
+fn locked_step_goes_where_the_stick_points_back() {
+    check_locked_step(0.0, -1.0);
+}
+
+#[test]
+fn locked_step_goes_where_the_stick_points_forward() {
+    check_locked_step(0.0, 1.0);
+}
+
+/// A diagonal stick picks the nearest of the four steps and tilts it onto the stick
+/// (`_set4DirStepTilt`: `act(3025, angle - quadrant centre)`, positive to the right).
+#[test]
+fn locked_step_tilts_onto_a_diagonal_stick() {
+    let d = std::f32::consts::FRAC_1_SQRT_2;
+    for (x, y) in [(d, d), (-d, d), (d, -d), (-d, -d), (0.9, 0.44)] {
+        check_locked_step(x, y);
+    }
+}
+
+#[test]
+fn locked_sprint_goes_where_the_stick_points_left() {
+    check_locked_sprint(-1.0, 0.0);
+}
+
+#[test]
+fn locked_sprint_goes_where_the_stick_points_right() {
+    check_locked_sprint(1.0, 0.0);
+}
+
+#[test]
+fn locked_sprint_goes_where_the_stick_points_back() {
+    check_locked_sprint(0.0, -1.0);
+}
+
+#[test]
+fn locked_sprint_goes_where_the_stick_points_forward() {
+    check_locked_sprint(0.0, 1.0);
+}
+
+#[test]
+fn locked_sprint_release_returns_to_locked_movement() {
+    let Some(mut wolf) = locked_wolf(false) else {
+        return;
+    };
+    let target = wolf.lock_target;
+    let mut steps = run_locked(&mut wolf, 120, |_, _| {
+        let mut frame = stick(-1.0, 0.0, 0.0);
+        frame.buttons.dodge = true;
+        frame
+    });
+    steps.extend(run_locked(&mut wolf, 90, |_, wolf| {
+        stick(-1.0, 0.0, wolf.yaw_to(target.unwrap()))
+    }));
+    // The final tenth of a second must be sustained target-facing left strafing.
+    let returned = steps[204..].iter().all(|s| {
+        s.target_err.abs() <= 30.0
+            && s.movement.speed > 0.3
+            && s.movement.err.abs() <= 30.0
+            && !s.state.contains("Sprint")
+    });
+    assert!(
+        returned && wolf.lock_target == target,
+        "sprint release did not return to target-facing left strafe within 1.5 s\n{}",
+        locked_table(&steps)
+    );
 }

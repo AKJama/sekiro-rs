@@ -4905,6 +4905,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sekiro-fmod"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "libloading",
+ "sekiro-formats",
+ "sekiro-sim",
+]
+
+[[package]]
 name = "sekiro-formats"
 version = "0.1.0"
 dependencies = [
@@ -4927,6 +4937,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bevy",
+ "sekiro-fmod",
  "sekiro-formats",
  "sekiro-sim",
  "serde_json",

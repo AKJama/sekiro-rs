@@ -111,6 +111,9 @@ pub fn sound_name(kind: i32, id: i32) -> String {
         8 => 'x',
         9 => 'b',
         10 => 'g',
+        // Hit, guard and deflect sounds from HitEffectSeParam (exe sound type 12, traced by
+        // FwLo's RustSekiro, `docs/kb/sound.md`).
+        12 => 'z',
         _ => '?',
     };
     format!("{letter}{id:09}")

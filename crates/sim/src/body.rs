@@ -41,6 +41,14 @@ pub trait Ground {
     fn max_step(&self) -> f32 {
         0.3
     }
+
+    /// The hit material (HitMtrlParam row: 1 cobblestone, 4 wood, 16 tile, 28 tatami, ...) of
+    /// the floor under `(x, z)` no higher than `top`, when the ground knows it. Footstep
+    /// sounds are chosen by it.
+    fn material(&self, x: f32, z: f32, top: f32) -> Option<u32> {
+        let _ = (x, z, top);
+        None
+    }
 }
 
 /// An infinite flat plane.

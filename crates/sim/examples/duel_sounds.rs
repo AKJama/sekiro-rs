@@ -22,7 +22,7 @@ fn main() {
             }
         }
     }
-    let hit_sounds = HitSounds::load_from_cache(&cache).expect("params");
+    let hit_sounds = HitSounds::load_from_cache(&cache, 10_100_000).expect("params");
     let mut duel = Duel::load(&cache, 6.0).expect("duel");
     let frames = demo::parse(demo::DEMO).expect("demo script");
     let dt = 1.0 / 30.0;
@@ -30,24 +30,25 @@ fn main() {
     let mut by_name: BTreeMap<String, (usize, bool)> = BTreeMap::new();
     for (step, frame) in frames.iter().enumerate() {
         let report = duel.step(frame, dt);
-        let mut cues = tae_cues(0, &duel.player);
-        cues.extend(tae_cues(1, &duel.enemy));
+        let mut cues = tae_cues(0, &duel.player, hit_sounds.materials[0]);
+        cues.extend(tae_cues(1, &duel.enemy, hit_sounds.materials[1]));
         for (hit, res) in &report.hits {
-            if let Some(c) = hit_sounds.cue(hit, res) {
+            for c in hit_sounds.cues(hit, res) {
                 cues.push(c);
             }
         }
         for c in cues {
-            let ok = known.contains(&c.name);
+            let name = c.keys[0].clone();
+            let ok = c.keys.iter().any(|k| known.contains(k));
             fired += 1;
             playable += ok as usize;
             println!(
                 "step {step:4} {} {} {}",
                 ["wolf   ", "soldier"][c.actor],
-                c.name,
+                name,
                 if ok { "" } else { "(not in decoded banks)" }
             );
-            let e = by_name.entry(c.name).or_insert((0, ok));
+            let e = by_name.entry(name).or_insert((0, ok));
             e.0 += 1;
         }
     }

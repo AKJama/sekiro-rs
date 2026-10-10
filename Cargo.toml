@@ -11,6 +11,7 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 sekiro-formats = { path = "crates/formats" }
 sekiro-sim = { path = "crates/sim" }
+sekiro-fmod = { path = "crates/fmod" }
 anyhow = "1"
 thiserror = "2"
 byteorder = "1"

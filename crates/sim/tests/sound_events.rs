@@ -77,23 +77,15 @@ fn soldier_and_wolf_sound_events_resolve() {
 
 #[test]
 fn combat_sounds_come_from_the_hit_effect_params() {
-    let Some(sounds) = sekiro_sim::sound::HitSounds::load_from_cache(&cache()) else {
+    let Some(sounds) = sekiro_sim::sound::HitSounds::load_from_cache(&cache(), 10_100_000) else {
         return;
     };
-    // Wolf deflects the soldier's slash (AtkParam_Npc 10100100): HitEffectSeJustGuardParam row
-    // 101 ("weapon iron for PC"), column Iron_Slash_S.
-    assert_eq!(
-        sounds.lookup(1, 10100100, 0, true, false).as_deref(),
-        Some("s999999980")
-    );
-    // Blocked: HitEffectSeParam row 101.
-    assert_eq!(
-        sounds.lookup(1, 10100100, 0, false, true).as_deref(),
-        Some("s100000101")
-    );
-    // A landed slash on Wolf (row 12, flesh and blood).
-    assert_eq!(
-        sounds.lookup(1, 10100100, 0, false, false).as_deref(),
-        Some("s000000118")
-    );
+    assert_eq!(sounds.materials, [[113, 139], [114, 108]]);
+    // Wolf deflects the soldier's slash (AtkParam_Npc 10100100, Iron slash S, defSeMaterial
+    // 100 / 139): HitEffectSeJustGuardParam row 100.
+    assert_eq!(sounds.lookup(1, 10100100, 0, true, false), ["z199999980"]);
+    // Blocked: HitEffectSeParam at the same rows.
+    assert_eq!(sounds.lookup(1, 10100100, 0, false, true), ["z200000101"]);
+    // A landed slash on Wolf: HitEffectSeParam at his armour materials 113 (139 is empty).
+    assert_eq!(sounds.lookup(1, 10100100, 0, false, false), ["z000000013"]);
 }

@@ -1,10 +1,18 @@
-//! Plays the game's own sounds: decoded banks in `cache/sound/<bank>/` (from
-//! `sekiro-extract sound`) looked up by sound event name.
+//! Plays the game's own sounds.
 //!
 //! The simulation names the sounds ([`sekiro_sim::sound`]: TAE sound events and hit, block and
 //! deflect sounds); [`emit`] turns one duel step into [`SoundCue`] messages and [`play_cues`]
-//! plays each as a positional one-shot at the character, choosing a variation by the bank's
-//! weights. A cue whose event is not in the decoded banks is logged once and skipped.
+//! plays them.
+//!
+//! - First choice: the game's own FMOD runtime from the install ([`sekiro_fmod`]), with the
+//!   event projects of the fight (`main`, the enemy's `cXXXX`, the map area's) read from
+//!   `cache/raw/sound`. Every cue is an FMOD event placed at the character, the listener is
+//!   the camera, and FMOD applies the events' own variations, volumes, 3D rolloff and voice
+//!   limits. A key that no project has is silent, as in the game.
+//! - Fallback when the DLLs cannot be loaded: decoded samples in `cache/sound/<bank>/` (from
+//!   `sekiro-extract sound`) as Bevy positional one-shots.
+//!
+//! Set `SEKIRO_NO_FMOD=1` to force the fallback.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -12,38 +20,51 @@ use std::sync::Arc;
 
 use bevy::audio::{AudioPlayer, AudioSource, PlaybackSettings, SpatialListener, Volume};
 use bevy::prelude::*;
+use sekiro_fmod::{EventSystem, Played};
 use sekiro_sim::duel::{Duel, DuelReport};
-use sekiro_sim::sound::{HitSounds, tae_cues};
+use sekiro_sim::sound::{CueSource, HitSounds, tae_cues};
 
-/// One sound to play at a position.
+/// Height above a character's feet where its sounds play (about the chest; the TAE events'
+/// dummy polys are not used yet).
+const EMITTER_HEIGHT: f32 = 1.0;
+
+/// One sound to play at a position: event keys to try in order.
 #[derive(Message, Debug, Clone)]
 pub struct SoundCue {
-    pub name: String,
+    pub keys: Vec<String>,
     pub position: Vec3,
+    pub source: CueSource,
 }
 
-/// Event name to decoded files, loaded lazily into audio assets.
+/// Hit-sound tables and the decoded-sample fallback.
 #[derive(Resource, Default)]
 pub struct SoundLibrary {
     events: HashMap<String, Vec<(PathBuf, u32)>>,
     loaded: HashMap<PathBuf, Handle<AudioSource>>,
     missing: HashSet<String>,
-    pub hit_sounds: Option<HitSounds>,
+    cache: PathBuf,
+    /// Hit sounds for the NpcParam row they were loaded for.
+    hit_sounds: Option<(i32, HitSounds)>,
+    /// The enemy character whose sound project the FMOD path should load.
+    enemy_chr: Option<String>,
     rng: u64,
-    /// Every cue played, in order (for logs and tests).
+    /// Every key played, in order (for logs and tests).
     pub played: Vec<String>,
 }
 
 impl SoundLibrary {
-    /// Reads every `cache/sound/*/events.json`.
-    pub fn load(cache: &Path) -> Self {
+    /// Reads every `cache/sound/*/events.json` (the fallback samples) when `decoded`.
+    pub fn load(cache: &Path, decoded: bool) -> Self {
         let mut lib = SoundLibrary {
-            hit_sounds: HitSounds::load_from_cache(cache),
+            cache: cache.to_path_buf(),
             rng: 0x9e37_79b9_7f4a_7c15,
             ..default()
         };
+        if !decoded {
+            return lib;
+        }
         let Ok(dirs) = std::fs::read_dir(cache.join("sound")) else {
-            warn!("no cache/sound: run `sekiro-extract sound` for audio");
+            warn!("no cache/sound: run `sekiro-extract sound` for the fallback audio");
             return lib;
         };
         for dir in dirs.flatten().map(|d| d.path()) {
@@ -64,8 +85,24 @@ impl SoundLibrary {
                 }
             }
         }
-        info!("sound: {} events from cache/sound", lib.events.len());
+        info!(
+            "sound: {} decoded events from cache/sound",
+            lib.events.len()
+        );
         lib
+    }
+
+    /// The hit sounds for the enemy of NpcParam row `npc_param`, loaded on first use.
+    fn hit_sounds(&mut self, npc_param: i32) -> Option<&HitSounds> {
+        if self
+            .hit_sounds
+            .as_ref()
+            .is_none_or(|(id, _)| *id != npc_param)
+        {
+            self.hit_sounds =
+                HitSounds::load_from_cache(&self.cache, npc_param).map(|h| (npc_param, h));
+        }
+        self.hit_sounds.as_ref().map(|(_, h)| h)
     }
 
     fn pick(&mut self, event: &str) -> Option<PathBuf> {
@@ -85,19 +122,221 @@ impl SoundLibrary {
     }
 }
 
+/// The sound projects a fight on map `map` loads at start, in lookup order: the common
+/// project, the map area's (`m11_01_00_00` gives `m11`, `sm11`, `xm11`, `vm11`, `rm11`), then
+/// the common SFX project. The enemy's own project is added when the fight starts.
+pub fn start_projects(map: Option<&str>) -> Vec<String> {
+    let mut projects = vec!["main".to_string()];
+    if let Some(area) = map.and_then(|m| m.get(..3)).filter(|a| a.starts_with('m')) {
+        for prefix in ["", "s", "x", "v", "r"] {
+            projects.push(format!("{prefix}{area}"));
+        }
+    }
+    projects.push("smain".into());
+    projects
+}
+
+/// The game's FMOD event system and what it has loaded.
+pub struct FmodAudio {
+    system: EventSystem,
+    loaded: HashSet<String>,
+    /// Keys already reported as missing or failing.
+    reported: HashSet<String>,
+}
+
+impl FmodAudio {
+    /// Starts FMOD from the install and loads the projects of [`start_projects`].
+    fn open(cache: &Path, map: Option<&str>) -> Result<Self, String> {
+        let game = sekiro_fmod::game_dir();
+        let mut system = EventSystem::open(&game, false)
+            .map_err(|e| format!("{e} (install {})", game.display()))?;
+        system
+            .set_media_path(&cache.join("raw/sound"))
+            .map_err(|e| e.to_string())?;
+        let mut audio = FmodAudio {
+            system,
+            loaded: HashSet::new(),
+            reported: HashSet::new(),
+        };
+        for p in start_projects(map) {
+            audio.load(&p);
+        }
+        if audio.system.projects().iter().all(|p| p.name != "main") {
+            return Err("main.fev did not load (run `sekiro-extract unpack`)".into());
+        }
+        Ok(audio)
+    }
+
+    /// Loads project `name` once. The samples of the common, enemy and map projects are read
+    /// now, so no sound waits for the disk the first time it plays.
+    fn load(&mut self, name: &str) {
+        if !self.loaded.insert(name.to_string()) {
+            return;
+        }
+        match self.system.load_project(&format!("{name}.fev")) {
+            Ok(n) => {
+                let preload = name == "main" || name.starts_with('c') || name.starts_with('m');
+                let note = match preload.then(|| self.system.preload(name)) {
+                    Some((_, Some(code))) => {
+                        format!(", samples not preloaded (FMOD error {code})")
+                    }
+                    Some(_) => ", samples preloaded".into(),
+                    None => String::new(),
+                };
+                info!("FMOD: {name}.fev, {n} events{note}");
+            }
+            Err(e) => warn!("FMOD: {name}.fev not loaded: {e}"),
+        }
+    }
+
+    /// Plays the first of `keys` that a project has; the key and what FMOD did.
+    fn play(&mut self, keys: &[String], position: Vec3) -> Option<(String, Played)> {
+        let key = keys.iter().find(|k| self.system.has(k))?;
+        Some((key.clone(), self.system.play(key, position.to_array())))
+    }
+}
+
 pub struct GameAudioPlugin {
     pub cache: PathBuf,
+    /// The map being played (`m11_01_00_00`), for its area's sound projects.
+    pub map: Option<String>,
 }
 
 impl Plugin for GameAudioPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(SoundLibrary::load(&self.cache))
+        let fmod = if std::env::var_os("SEKIRO_NO_FMOD").is_some() {
+            Err("SEKIRO_NO_FMOD is set".to_string())
+        } else {
+            FmodAudio::open(&self.cache, self.map.as_deref())
+        };
+        let use_fmod = fmod.is_ok();
+        match fmod {
+            Ok(f) => {
+                info!("sound: the game's FMOD event system");
+                app.insert_non_send(f).add_systems(
+                    PostUpdate,
+                    update_fmod.after(bevy::transform::TransformSystems::Propagate),
+                );
+            }
+            Err(e) => {
+                warn!("sound: FMOD unavailable ({e}); falling back to the decoded samples");
+                app.add_systems(Update, attach_listener);
+            }
+        }
+        let level = volume_arg(&std::env::args().collect::<Vec<_>>());
+        app.insert_resource(SoundLibrary::load(&self.cache, !use_fmod))
+            .insert_resource(MasterVolume {
+                level,
+                shown_until: 0.0,
+                applied: None,
+            })
             .add_message::<SoundCue>()
-            .add_systems(Update, (attach_listener, play_cues));
+            .add_systems(Startup, spawn_volume_readout)
+            .add_systems(Update, (adjust_volume, play_cues).chain());
     }
 }
 
-/// Puts the spatial listener on the 3D camera.
+/// Default master volume (the game at full volume was reported too loud).
+pub const DEFAULT_VOLUME: f32 = 0.5;
+/// One press of a volume key.
+const VOLUME_STEP: f32 = 0.1;
+/// How long the readout stays after a change, in seconds.
+const READOUT_SECONDS: f64 = 1.5;
+
+/// The player's master volume, 0 to 1, on top of the game's own mix.
+#[derive(Resource, Debug)]
+pub struct MasterVolume {
+    pub level: f32,
+    /// Time (seconds since start) until which the readout shows.
+    shown_until: f64,
+    /// The level last handed to the sound system.
+    applied: Option<f32>,
+}
+
+/// `--volume <0..1>` from the command line, else [`DEFAULT_VOLUME`].
+fn volume_arg(args: &[String]) -> f32 {
+    args.windows(2)
+        .find(|w| w[0] == "--volume")
+        .and_then(|w| w[1].parse::<f32>().ok())
+        .filter(|v| v.is_finite())
+        .map_or(DEFAULT_VOLUME, |v| v.clamp(0.0, 1.0))
+}
+
+/// `level` moved by `steps` presses, kept on the 10% grid and within 0 to 1.
+fn step_volume(level: f32, steps: i32) -> f32 {
+    ((level / VOLUME_STEP).round() + steps as f32).clamp(0.0, 1.0 / VOLUME_STEP) * VOLUME_STEP
+}
+
+#[derive(Component)]
+struct VolumeReadout;
+
+fn spawn_volume_readout(mut commands: Commands) {
+    commands.spawn((
+        VolumeReadout,
+        Text::new(""),
+        TextFont {
+            font_size: bevy::text::FontSize::Px(22.0),
+            ..default()
+        },
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(12),
+            right: px(16),
+            ..default()
+        },
+        Visibility::Hidden,
+    ));
+}
+
+/// Minus / `[` lower and equals / `]` raise the volume by 10%; applies it to FMOD's master
+/// category (times the game's own 0.7) or to the fallback's global volume, and shows the level
+/// for a moment.
+fn adjust_volume(
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time<Real>>,
+    mut volume: ResMut<MasterVolume>,
+    mut global: ResMut<bevy::audio::GlobalVolume>,
+    fmod: Option<NonSendMut<FmodAudio>>,
+    mut readout: Query<(&mut Text, &mut Visibility), With<VolumeReadout>>,
+) {
+    let down = [
+        KeyCode::Minus,
+        KeyCode::NumpadSubtract,
+        KeyCode::BracketLeft,
+    ]
+    .iter()
+    .filter(|k| keys.just_pressed(**k))
+    .count() as i32;
+    let up = [KeyCode::Equal, KeyCode::NumpadAdd, KeyCode::BracketRight]
+        .iter()
+        .filter(|k| keys.just_pressed(**k))
+        .count() as i32;
+    let now = time.elapsed_secs_f64();
+    if up != down {
+        volume.level = step_volume(volume.level, up - down);
+        volume.shown_until = now + READOUT_SECONDS;
+    }
+    if volume.applied != Some(volume.level) {
+        let level = volume.level;
+        volume.applied = Some(level);
+        if let Some(mut fmod) = fmod {
+            fmod.system
+                .set_master_volume(sekiro_fmod::MASTER_VOLUME * level);
+        }
+        *global = bevy::audio::GlobalVolume::new(Volume::Linear(level));
+        info!("sound: volume {:.0}%", level * 100.0);
+    }
+    for (mut text, mut vis) in &mut readout {
+        if now < volume.shown_until {
+            text.0 = format!("Volume {:.0}%", volume.level * 100.0);
+            *vis = Visibility::Visible;
+        } else {
+            *vis = Visibility::Hidden;
+        }
+    }
+}
+
+/// Puts the fallback's spatial listener on the 3D camera.
 fn attach_listener(
     mut commands: Commands,
     cameras: Query<Entity, (With<Camera3d>, Without<SpatialListener>)>,
@@ -107,17 +346,59 @@ fn attach_listener(
     }
 }
 
-/// Plays queued cues as positional one-shots.
+/// The listener follows the camera, then FMOD does its frame's work.
+fn update_fmod(mut fmod: NonSendMut<FmodAudio>, camera: Query<&GlobalTransform, With<Camera3d>>) {
+    if let Ok(cam) = camera.single() {
+        let t = cam.compute_transform();
+        fmod.system.set_listener(
+            t.translation.to_array(),
+            t.forward().to_array(),
+            t.up().to_array(),
+        );
+    }
+    fmod.system.update();
+}
+
+/// Plays queued cues: through FMOD when it runs, else as decoded positional one-shots.
 pub fn play_cues(
     mut commands: Commands,
     mut cues: MessageReader<SoundCue>,
     mut lib: ResMut<SoundLibrary>,
     mut sources: ResMut<Assets<AudioSource>>,
+    fmod: Option<NonSendMut<FmodAudio>>,
 ) {
+    if let Some(mut fmod) = fmod {
+        if let Some(chr) = lib.enemy_chr.clone() {
+            fmod.load(&chr);
+        }
+        for cue in cues.read() {
+            let position = cue.position + Vec3::Y * EMITTER_HEIGHT;
+            match fmod.play(&cue.keys, position) {
+                Some((key, Played::Started)) => lib.played.push(key),
+                Some((key, Played::Failed(code))) => {
+                    if fmod.reported.insert(key.clone()) {
+                        info!("sound {key} ({:?}): FMOD error {code}", cue.source);
+                    }
+                }
+                Some((_, Played::Unknown)) | None => {
+                    let key = cue.keys.join("|");
+                    if fmod.reported.insert(key.clone()) {
+                        info!("sound {key} ({:?}): no such event", cue.source);
+                    }
+                }
+            }
+        }
+        return;
+    }
     for cue in cues.read() {
-        let Some(path) = lib.pick(&cue.name) else {
-            if lib.missing.insert(cue.name.clone()) {
-                info!("sound {}: not in the decoded banks", cue.name);
+        let Some((key, path)) = cue
+            .keys
+            .iter()
+            .find_map(|k| Some((k.clone(), lib.pick(k)?)))
+        else {
+            let key = cue.keys.join("|");
+            if lib.missing.insert(key.clone()) {
+                info!("sound {key}: not in the decoded banks");
             }
             continue;
         };
@@ -137,16 +418,13 @@ pub fn play_cues(
                 }
             },
         };
-        if !lib.played.contains(&cue.name) {
-            info!("sound {}: playing {}", cue.name, path.display());
-        }
-        lib.played.push(cue.name.clone());
+        lib.played.push(key);
         commands.spawn((
             AudioPlayer(handle),
             PlaybackSettings::DESPAWN
                 .with_spatial(true)
                 .with_volume(Volume::Linear(0.8)),
-            Transform::from_translation(cue.position + Vec3::Y),
+            Transform::from_translation(cue.position + Vec3::Y * EMITTER_HEIGHT),
         ));
     }
 }
@@ -155,20 +433,55 @@ pub fn play_cues(
 pub fn emit(
     duel: &Duel,
     report: &DuelReport,
-    lib: &SoundLibrary,
+    lib: &mut SoundLibrary,
     out: &mut MessageWriter<SoundCue>,
 ) {
-    let mut cues = tae_cues(0, &duel.player);
-    cues.extend(tae_cues(1, &duel.enemy));
-    if let Some(hs) = &lib.hit_sounds {
-        for (hit, res) in &report.hits {
-            cues.extend(hs.cue(hit, res));
-        }
+    if lib.enemy_chr.as_deref() != Some(duel.spec.chr.as_str()) {
+        lib.enemy_chr = Some(duel.spec.chr.clone());
+    }
+    let Some(hs) = lib.hit_sounds(duel.spec.npc_param) else {
+        return;
+    };
+    let mut cues = tae_cues(0, &duel.player, hs.materials[0]);
+    cues.extend(tae_cues(1, &duel.enemy, hs.materials[1]));
+    for (hit, res) in &report.hits {
+        cues.extend(hs.cues(hit, res));
     }
     for c in cues {
         out.write(SoundCue {
-            name: c.name,
+            keys: c.keys,
             position: Vec3::from_array(c.position),
+            source: c.source,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn projects_follow_the_map_area() {
+        assert_eq!(
+            start_projects(Some("m11_01_00_00")),
+            ["main", "m11", "sm11", "xm11", "vm11", "rm11", "smain"]
+        );
+        assert_eq!(start_projects(None), ["main", "smain"]);
+    }
+
+    #[test]
+    fn volume_flag_and_steps() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(volume_arg(&args(&["sekiro-rs", "--arena", "owl"])), 0.5);
+        assert_eq!(volume_arg(&args(&["x", "--volume", "0.3"])), 0.3);
+        assert_eq!(volume_arg(&args(&["x", "--volume", "7"])), 1.0);
+        assert_eq!(volume_arg(&args(&["x", "--volume", "loud"])), 0.5);
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-6;
+        assert!(near(step_volume(0.5, 1), 0.6));
+        assert!(near(step_volume(0.5, -2), 0.3));
+        assert!(near(step_volume(0.95, 1), 1.0));
+        assert!(near(step_volume(1.0, 1), 1.0));
+        assert!(near(step_volume(0.1, -3), 0.0));
+        assert!(near(step_volume(0.33, 0), 0.3));
     }
 }

@@ -550,6 +550,11 @@ impl CombatRules {
                 direction,
                 front_back,
                 guard_level: if outcome.guarded() { 1 } else { 0 },
+                // Only the NPC script reads env 258; the player's guard reactions use env 237.
+                guard_motion_level: match &self.fighters[d].kind {
+                    FighterKind::Npc(npc) => npc.guard_level,
+                    FighterKind::Player { .. } => 0,
+                },
                 repel_dir: if outcome.guarded() { 2 } else { 0 },
                 ..IncomingDamage::default()
             },

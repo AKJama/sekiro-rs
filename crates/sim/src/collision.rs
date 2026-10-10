@@ -41,6 +41,8 @@ pub struct CollisionWorld {
     vertices: Vec<Vec3>,
     triangles: Vec<[u32; 3]>,
     normals: Vec<Vec3>,
+    /// Hit material per triangle (`u32::MAX` when unknown).
+    materials: Vec<u32>,
     cells: HashMap<(i32, i32), Vec<u32>>,
     min_walk_ny: f32,
 }
@@ -68,8 +70,9 @@ impl CollisionWorld {
         let vertices: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from(*v)).collect();
         let mut triangles = Vec::with_capacity(mesh.indices.len() / 3);
         let mut normals = Vec::with_capacity(mesh.indices.len() / 3);
+        let mut materials = Vec::with_capacity(mesh.indices.len() / 3);
         let mut cells: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
-        for tri in mesh.indices.as_chunks::<3>().0 {
+        for (source, tri) in mesh.indices.as_chunks::<3>().0.iter().enumerate() {
             let [a, b, c] = tri.map(|i| vertices[i as usize]);
             let n = (b - a).cross(c - a);
             if n.length_squared() < 1e-12 {
@@ -78,6 +81,7 @@ impl CollisionWorld {
             let t = triangles.len() as u32;
             triangles.push(*tri);
             normals.push(n.normalize());
+            materials.push(mesh.materials.get(source).copied().unwrap_or(u32::MAX));
             let (x0, z0) = cell_of(a.x.min(b.x).min(c.x), a.z.min(b.z).min(c.z));
             let (x1, z1) = cell_of(a.x.max(b.x).max(c.x), a.z.max(b.z).max(c.z));
             for cx in x0..=x1 {
@@ -90,6 +94,7 @@ impl CollisionWorld {
             vertices,
             triangles,
             normals,
+            materials,
             cells,
             min_walk_ny: MAX_SLOPE_DEGREES.to_radians().cos(),
         }
@@ -123,8 +128,22 @@ impl CollisionWorld {
 
     /// The highest walkable surface under `(x, z)` whose height is at most `top`.
     pub fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
+        self.floor_triangle(x, z, top).map(|(h, _)| h)
+    }
+
+    /// The hit material of the floor [`CollisionWorld::floor`] finds, when known.
+    pub fn floor_material(&self, x: f32, z: f32, top: f32) -> Option<u32> {
+        let (_, t) = self.floor_triangle(x, z, top)?;
+        self.materials
+            .get(t as usize)
+            .copied()
+            .filter(|&m| m != u32::MAX)
+    }
+
+    /// The highest walkable surface under `(x, z)` no higher than `top`: height and triangle.
+    fn floor_triangle(&self, x: f32, z: f32, top: f32) -> Option<(f32, u32)> {
         let cell = self.cells.get(&cell_of(x, z))?;
-        let mut best: Option<f32> = None;
+        let mut best: Option<(f32, u32)> = None;
         for &t in cell {
             if self.normals[t as usize].y.abs() < self.min_walk_ny {
                 continue;
@@ -132,9 +151,9 @@ impl CollisionWorld {
             let [a, b, c] = self.corners(t);
             if let Some(h) = height_on(x, z, a, b, c)
                 && h <= top
-                && best.is_none_or(|b| h > b)
+                && best.is_none_or(|(b, _)| h > b)
             {
-                best = Some(h);
+                best = Some((h, t));
             }
         }
         best
@@ -273,6 +292,10 @@ impl Ground for CollisionWorld {
     fn max_step(&self) -> f32 {
         STEP_HEIGHT
     }
+
+    fn material(&self, x: f32, z: f32, top: f32) -> Option<u32> {
+        self.floor_material(x, z, top)
+    }
 }
 
 impl<T: Ground + ?Sized> Ground for std::sync::Arc<T> {
@@ -290,6 +313,10 @@ impl<T: Ground + ?Sized> Ground for std::sync::Arc<T> {
 
     fn max_step(&self) -> f32 {
         (**self).max_step()
+    }
+
+    fn material(&self, x: f32, z: f32, top: f32) -> Option<u32> {
+        (**self).material(x, z, top)
     }
 }
 
@@ -482,5 +509,28 @@ mod tests {
         let world = test_world();
         let d = world.raycast(Vec3::new(0.0, 1.0, 0.0), Vec3::X, 10.0);
         assert!((d.unwrap() - 3.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn floor_material_is_the_highest_floor_s() {
+        // A cobblestone floor (1) under a wooden one (4) 1 m higher.
+        let mut m = CollisionMesh::default();
+        for (y, material) in [(0.0, 1), (1.0, 4)] {
+            let base = m.vertices.len() as u32;
+            m.vertices.extend_from_slice(&[
+                [-5.0, y, -5.0],
+                [5.0, y, -5.0],
+                [5.0, y, 5.0],
+                [-5.0, y, 5.0],
+            ]);
+            m.indices
+                .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+            m.materials.extend([material, material]);
+        }
+        let world = CollisionWorld::from_mesh(&m);
+        assert_eq!(world.floor_material(0.0, 0.0, 2.0), Some(4));
+        assert_eq!(world.floor_material(0.0, 0.0, 0.5), Some(1));
+        assert_eq!(Ground::material(&world, 0.0, 0.0, 0.5), Some(1));
+        assert_eq!(world.floor_material(9.0, 0.0, 2.0), None);
     }
 }

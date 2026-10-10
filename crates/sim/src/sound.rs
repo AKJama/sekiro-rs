@@ -3,10 +3,15 @@
 //! Two sources, both from the game's data (see `docs/AUDIO.md`):
 //!
 //! - TAE `PlaySound_*` events (types 128 to 132) of the clips playing, collected by
-//!   [`crate::tae`] as (sound type, id) and named with [`crate::tae::sound_name`];
+//!   [`crate::tae`] as (sound type, id) and turned into event keys by [`tae_keys`]: floor
+//!   sounds (`x`) pick the event of the floor material under the character, armour sounds
+//!   (`b`) the event of the wearer's armour material;
 //! - hit, block and deflect sounds from the combat outcome, looked up in `HitEffectSeParam`
-//!   (hits and blocks) and `HitEffectSeJustGuardParam` (deflects): the row is the defender's
-//!   material, the column the attacker's material, attack kind and size. These are `s` sounds.
+//!   and `HitEffectSeJustGuardParam` ([`HitSounds`]). These are `z` sounds.
+//!
+//! The material rules (`x` = id rounded down to 1000 plus the floor material, `b` = id plus the
+//! armour material, the hit-sound rows and columns) were traced in the exe by FwLo's RustSekiro
+//! (`docs/kb/sound.md`, MIT).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -17,17 +22,56 @@ use crate::character::Character;
 use crate::hits::{HitEvent, HitResult};
 use crate::tae::sound_name;
 
+/// Floor material when the ground does not say (the flat test floor): HitMtrlParam 1,
+/// cobblestone.
+pub const DEFAULT_FLOOR_MATERIAL: u32 = 1;
+
+/// Where a cue came from, for logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum CueSource {
+    /// A TAE `PlaySound` event.
+    Tae,
+    /// An attack landing.
+    Hit,
+    /// An attack blocked.
+    Guard,
+    /// An attack deflected.
+    Deflect,
+}
+
 /// One sound to play.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SoundCue {
-    /// Sound event name, such as `c101001001` or `s999999980`.
-    pub name: String,
+    /// Sound event keys to try in order, such as `c101001001` or `z999999980`; the first one
+    /// the sound system has plays.
+    pub keys: Vec<String>,
     /// 0 the player, 1 the enemy.
     pub actor: usize,
     pub position: [f32; 3],
+    pub source: CueSource,
 }
 
-/// Material names of the `<Material>_<Kind>_<Size>` columns, in `atkMaterial_forSe` order.
+/// The event keys of a TAE sound of type `kind` and number `id`, to try in order.
+///
+/// - Floor (`x`, type 8): `c` + (id rounded down to 1000 + `floor` material), so `x` 1000 on
+///   tatami (28) is `c000001028`.
+/// - Armour (`b`, type 9): `c` + (id + material) for each of the wearer's two armour materials
+///   (Wolf's protector `defenseMaterial1/2`, an NPC's `materialSe1/2`); the first one that
+///   exists plays.
+/// - Everything else: the type letter and the id ([`sound_name`]).
+pub fn tae_keys(kind: i32, id: i32, floor: u32, armour: [i32; 2]) -> Vec<String> {
+    match kind {
+        8 => vec![sound_name(1, id / 1000 * 1000 + floor as i32)],
+        9 => armour
+            .iter()
+            .filter(|&&m| m > 0)
+            .map(|&m| sound_name(1, id + m))
+            .collect(),
+        _ => vec![sound_name(kind, id)],
+    }
+}
+
+/// Material group names of the `<Group>_<Kind>_<Size>` columns, in `atkMaterial_forSe` order.
 const MATERIALS: [&str; 15] = [
     "Iron",
     "Fire",
@@ -46,16 +90,16 @@ const MATERIALS: [&str; 15] = [
     "EnergyStrong",
 ];
 
-/// The `<Material>_<Kind>_<Size>` column for an attack.
-fn column(material: u8, attribute: u8, size: u8) -> String {
+/// The `<Group>_<Kind>_<Size>` column for an attack: group from `atkMaterial_forSe`, kind from
+/// `atkType` (0 slash, 1 blow, 2 thrust), size from `atkPow_forSe` (0 S, 1 L, 2 LL).
+fn column(material: u8, kind: u8, pow: u8) -> String {
     let m = MATERIALS.get(material as usize).copied().unwrap_or("Iron");
-    // atkAttribute: 1 slash, 2 blow, 3 thrust (Paramdex); anything else counts as slash.
-    let kind = match attribute {
-        2 => "Blow",
-        3 => "Thrust",
+    let kind = match kind {
+        1 => "Blow",
+        2 => "Thrust",
         _ => "Slash",
     };
-    let size = match size {
+    let size = match pow {
         1 => "L",
         2 => "LL",
         _ => "S",
@@ -64,11 +108,13 @@ fn column(material: u8, attribute: u8, size: u8) -> String {
 }
 
 /// The attack fields the sound lookup needs.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct AttackSe {
     material: u8,
-    attribute: u8,
-    size: u8,
+    kind: u8,
+    pow: u8,
+    /// Rows for this attack's guard and deflect sounds (`defSeMaterial1/2`).
+    guard_rows: [i32; 2],
 }
 
 /// Hit-sound tables and the materials of the two duel characters.
@@ -77,9 +123,11 @@ pub struct HitSounds {
     hit: HashMap<i32, HashMap<String, i64>>,
     just_guard: HashMap<i32, HashMap<String, i64>>,
     attacks: [HashMap<i32, AttackSe>; 2],
-    /// Material rows: [player, enemy] guarding weapon (`defSeMaterial1`) and body.
-    pub guard_material: [i32; 2],
-    pub body_material: [i32; 2],
+    /// Each character's two materials, [player, enemy]: rows of the hit sounds they take and
+    /// the offsets of their armour (`b`) sounds. Wolf: his body armour's
+    /// `defenseMaterial1/2` (113, 139); an NPC: NpcParam `materialSe1/2` (Owl and the soldier
+    /// 114, 108).
+    pub materials: [[i32; 2]; 2],
 }
 
 fn table(set: &ParamSet, name: &str) -> HashMap<i32, HashMap<String, i64>> {
@@ -104,70 +152,96 @@ fn attacks(set: &ParamSet, name: &str) -> HashMap<i32, AttackSe> {
     t.rows()
         .map(|r| {
             let u = |f: &str| r.u8(f).unwrap_or(0);
+            let i = |f: &str| r.int(f).map(|v| v as i32).unwrap_or(-1);
             (
                 r.id(),
                 AttackSe {
                     material: u("atkMaterial_forSe"),
-                    attribute: u("atkAttribute"),
-                    size: u("atkSize"),
+                    kind: u("atkType"),
+                    pow: u("atkPow_forSe"),
+                    guard_rows: [i("defSeMaterial1"), i("defSeMaterial2")],
                 },
             )
         })
         .collect()
 }
 
+/// Two material fields of a param row, -1 where missing.
+fn pair(set: &ParamSet, table: &str, id: i32, fields: [&str; 2]) -> Option<[i32; 2]> {
+    let row = set.table(table).ok()?.find(id)?;
+    Some(fields.map(|f| row.int(f).map(|v| v as i32).unwrap_or(-1)))
+}
+
 impl HitSounds {
-    /// Loads the tables for Wolf with the Kusabimaru (EquipParamWeapon 5000) against the Ashina
-    /// soldier (NpcParam 10100000).
-    pub fn load(param_dir: &Path, defs_dir: &Path) -> Option<Self> {
+    /// Loads the tables for Wolf (CharaInitParam 10010, his body armour's materials) against
+    /// the NPC of NpcParam row `npc_param`.
+    pub fn load(param_dir: &Path, defs_dir: &Path, npc_param: i32) -> Option<Self> {
         let set = ParamSet::load(param_dir, defs_dir).ok()?;
-        let weapon_mat = set
-            .table("EquipParamWeapon")
+        let armour = set
+            .table("CharaInitParam")
             .ok()
-            .and_then(|t| t.find(5000))
-            .and_then(|r| r.int("defSeMaterial1").ok())
-            .unwrap_or(101) as i32;
-        let soldier = set.table("NpcParam").ok().and_then(|t| t.find(10100000));
-        let soldier_body = soldier
-            .as_ref()
-            .and_then(|r| r.int("materialSe1").ok())
-            .unwrap_or(114) as i32;
+            .and_then(|t| t.find(10010))
+            .and_then(|r| r.int("equip_Armer").ok())
+            .unwrap_or(131000) as i32;
+        let wolf = pair(
+            &set,
+            "EquipParamProtector",
+            armour,
+            ["defenseMaterial1", "defenseMaterial2"],
+        )
+        .unwrap_or([113, 139]);
+        let npc =
+            pair(&set, "NpcParam", npc_param, ["materialSe1", "materialSe2"]).unwrap_or([114, 108]);
         Some(Self {
             hit: table(&set, "HitEffectSeParam"),
             just_guard: table(&set, "HitEffectSeJustGuardParam"),
             attacks: [attacks(&set, "AtkParam_Pc"), attacks(&set, "AtkParam_Npc")],
-            // The soldier guards with an iron weapon (row 100, "weapon iron", as its attack
-            // rows' defSeMaterial1); Wolf's body row is 12, "flesh and blood" (ours).
-            guard_material: [weapon_mat, 100],
-            body_material: [12, soldier_body],
+            materials: [wolf, npc],
         })
     }
 
-    pub fn load_from_cache(cache: &Path) -> Option<Self> {
+    /// [`HitSounds::load`] from the extracted params in `cache`.
+    pub fn load_from_cache(cache: &Path, npc_param: i32) -> Option<Self> {
         Self::load(
             &cache.join("raw/param/gameparam/gameparam.parambnd.d"),
             &cache.join("refs/paramdex/Defs"),
+            npc_param,
         )
     }
 
-    /// The `s` sound for one hit, if the tables name one.
-    pub fn cue(&self, hit: &HitEvent, result: &HitResult) -> Option<SoundCue> {
-        let name = self.lookup(
+    /// The sounds of one hit: one cue per sound the tables name.
+    pub fn cues(&self, hit: &HitEvent, result: &HitResult) -> Vec<SoundCue> {
+        let source = if result.deflected {
+            CueSource::Deflect
+        } else if result.guarded {
+            CueSource::Guard
+        } else {
+            CueSource::Hit
+        };
+        self.lookup(
             hit.attacker,
             hit.attack.atk_id,
             hit.defender,
             result.deflected,
             result.guarded,
-        )?;
-        Some(SoundCue {
-            name,
+        )
+        .into_iter()
+        .map(|name| SoundCue {
+            keys: vec![name],
             actor: hit.defender,
             position: hit.position,
+            source,
         })
+        .collect()
     }
 
-    /// The sound event name for an attack (AtkParam row `atk_id` of `attacker`: 0 player,
+    /// The sound event names for an attack (AtkParam row `atk_id` of `attacker`: 0 player,
     /// 1 enemy) meeting `defender`, deflected, blocked or landing.
+    ///
+    /// The exe's rules (traced by FwLo): a landed hit reads `HitEffectSeParam` at each of the
+    /// defender's two materials; a block reads it at the attack's own `defSeMaterial1/2`; a
+    /// deflect reads `HitEffectSeJustGuardParam` at those rows, and `HitEffectSeParam` when that
+    /// names nothing. The column is the attack's group, kind and size; the values are `z` ids.
     pub fn lookup(
         &self,
         attacker: usize,
@@ -175,34 +249,149 @@ impl HitSounds {
         defender: usize,
         deflected: bool,
         guarded: bool,
-    ) -> Option<String> {
+    ) -> Vec<String> {
         let atk = self.attacks[attacker.min(1)]
             .get(&atk_id)
             .copied()
             .unwrap_or_default();
-        let col = column(atk.material, atk.attribute, atk.size);
-        let d = defender.min(1);
-        let (table, row) = if deflected {
-            (&self.just_guard, self.guard_material[d])
-        } else if guarded {
-            (&self.hit, self.guard_material[d])
-        } else {
-            (&self.hit, self.body_material[d])
+        let col = column(atk.material, atk.kind, atk.pow);
+        let read = |table: &HashMap<i32, HashMap<String, i64>>, rows: [i32; 2]| -> Vec<String> {
+            let mut out: Vec<String> = Vec::new();
+            for row in rows.into_iter().filter(|&r| r >= 0) {
+                if let Some(&id) = table.get(&row).and_then(|r| r.get(&col))
+                    && id > 0
+                {
+                    let name = sound_name(12, id as i32);
+                    if !out.contains(&name) {
+                        out.push(name);
+                    }
+                }
+            }
+            out
         };
-        let id = *table.get(&row)?.get(&col)?;
-        (id > 0).then(|| sound_name(5, id as i32))
+        if deflected {
+            let jg = read(&self.just_guard, atk.guard_rows);
+            if !jg.is_empty() {
+                return jg;
+            }
+            read(&self.hit, atk.guard_rows)
+        } else if guarded {
+            read(&self.hit, atk.guard_rows)
+        } else {
+            read(&self.hit, self.materials[defender.min(1)])
+        }
     }
 }
 
-/// The TAE sound cues that started on `ch` this step.
-pub fn tae_cues(actor: usize, ch: &Character) -> Vec<SoundCue> {
-    ch.tae_frame()
-        .sounds
+/// The TAE sound cues that started on `ch` this step; `armour` is its two armour materials
+/// ([`HitSounds::materials`]). Floor sounds use the material of the ground under its feet.
+pub fn tae_cues(actor: usize, ch: &Character, armour: [i32; 2]) -> Vec<SoundCue> {
+    let sounds = &ch.tae_frame().sounds;
+    if sounds.is_empty() {
+        return Vec::new();
+    }
+    let [x, y, z] = ch.body.position;
+    let floor = ch
+        .ground
+        .material(x, z, y + 0.5)
+        .unwrap_or(DEFAULT_FLOOR_MATERIAL);
+    sounds
         .iter()
         .map(|&(kind, id)| SoundCue {
-            name: sound_name(kind, id),
+            keys: tae_keys(kind, id, floor, armour),
             actor,
             position: ch.body.position,
+            source: CueSource::Tae,
         })
+        .filter(|c| !c.keys.is_empty())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn floor_sounds_pick_the_floor_material() {
+        // Wolf's footstep x 1000 on tatami (28), cobblestone (1) and tile (16).
+        assert_eq!(tae_keys(8, 1000, 28, [113, 139]), ["c000001028"]);
+        assert_eq!(tae_keys(8, 1003, 1, [113, 139]), ["c000001001"]);
+        assert_eq!(tae_keys(8, 2000, 16, [-1, -1]), ["c000002016"]);
+    }
+
+    #[test]
+    fn armour_sounds_try_both_materials() {
+        assert_eq!(
+            tae_keys(9, 1000, 1, [113, 139]),
+            ["c000001113", "c000001139"]
+        );
+        assert_eq!(tae_keys(9, 0, 1, [114, -1]), ["c000000114"]);
+        assert!(tae_keys(9, 0, 1, [-1, 0]).is_empty());
+    }
+
+    #[test]
+    fn other_sounds_keep_their_letter() {
+        assert_eq!(tae_keys(1, 4010, 1, [113, 139]), ["c000004010"]);
+        assert_eq!(tae_keys(1, 506001001, 1, [114, 108]), ["c506001001"]);
+        assert_eq!(tae_keys(5, 404000, 1, [0, 0]), ["s000404000"]);
+        assert_eq!(sound_name(12, 999999980), "z999999980");
+    }
+
+    #[test]
+    fn columns_follow_type_and_power() {
+        assert_eq!(column(0, 0, 0), "Iron_Slash_S");
+        assert_eq!(column(3, 1, 1), "Body_Blow_L");
+        assert_eq!(column(0, 2, 2), "Iron_Thrust_LL");
+        assert_eq!(column(99, 7, 9), "Iron_Slash_S");
+    }
+
+    fn sounds() -> HitSounds {
+        let mut s = HitSounds {
+            materials: [[113, 139], [114, 108]],
+            ..Default::default()
+        };
+        let row = |pairs: &[(&str, i64)]| -> HashMap<String, i64> {
+            pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+        };
+        s.hit.insert(100, row(&[("Iron_Slash_S", 200000101)]));
+        s.hit.insert(114, row(&[("Iron_Slash_S", 100000103)]));
+        s.hit.insert(108, row(&[("Iron_Slash_S", 108)]));
+        s.hit.insert(113, row(&[("Iron_Slash_S", 0)]));
+        s.just_guard
+            .insert(100, row(&[("Iron_Slash_S", 199999980)]));
+        s.attacks[0].insert(
+            1,
+            AttackSe {
+                guard_rows: [100, -1],
+                ..Default::default()
+            },
+        );
+        s.attacks[1].insert(
+            2,
+            AttackSe {
+                guard_rows: [139, -1],
+                ..Default::default()
+            },
+        );
+        s
+    }
+
+    #[test]
+    fn hits_read_both_defender_materials() {
+        assert_eq!(
+            sounds().lookup(0, 1, 1, false, false),
+            ["z100000103", "z000000108"]
+        );
+        // A zero entry is silent.
+        assert!(sounds().lookup(1, 2, 0, false, false).is_empty());
+    }
+
+    #[test]
+    fn guards_and_deflects_read_the_attack_rows() {
+        let s = sounds();
+        assert_eq!(s.lookup(0, 1, 1, false, true), ["z200000101"]);
+        assert_eq!(s.lookup(0, 1, 1, true, false), ["z199999980"]);
+        // Nothing in the deflect table: falls back to the block table, here also empty.
+        assert!(s.lookup(1, 2, 0, true, false).is_empty());
+    }
 }

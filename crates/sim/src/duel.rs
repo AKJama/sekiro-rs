@@ -109,6 +109,9 @@ pub struct Duel {
     /// The boss brain choosing the enemy's acts with its Lua AI (see [`crate::brain`]);
     /// `None` leaves the Lua AI alone.
     pub boss_brain: Option<crate::brain::BrainDriver>,
+    /// Testing aid: the player takes no HP or posture damage (hits, reactions, hit stop and
+    /// knockback are unchanged).
+    pub god: bool,
 }
 
 fn placement(c: &Character) -> Placement {
@@ -177,6 +180,7 @@ impl Duel {
             bullets: Default::default(),
             fall_respawn_depth: None,
             boss_brain: None,
+            god: false,
         })
     }
 
@@ -689,6 +693,11 @@ impl Duel {
         }
         self.respawn_fallen();
 
+        if self.god {
+            let f = &mut self.rules.fighters[0];
+            f.vitality.cannot_die = true;
+            f.posture.no_consume = true;
+        }
         let mut found = self.detector.detect(
             &[&self.player, &self.enemy],
             &[&self.fighters[0], &self.fighters[1]],
@@ -731,6 +740,10 @@ impl Duel {
         }
         self.rules.apply_effect_hp(0, self.player.tae_frame());
         self.rules.apply_effect_hp(1, self.enemy.tae_frame());
+        if self.god {
+            let v = &mut self.rules.fighters[0].vitality;
+            v.hp = v.max_hp;
+        }
         self.rules.recover(0, &self.player, dts[0]);
         self.rules.recover(1, &self.enemy, dts[1]);
         if self.respawn_in.is_none()

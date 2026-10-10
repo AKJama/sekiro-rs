@@ -12,7 +12,8 @@
 //! Controls follow Sekiro's PC defaults where possible: WASD move, mouse look, LMB attack, RMB
 //! guard, Space jump, Shift step (hold to sprint), C crouch, F grapple, Ctrl or MMB prosthetic,
 //! R item, Q lock-on. Gamepad: left stick move, right stick camera, R1 attack, L1 guard, A jump,
-//! B step/sprint, L3 crouch, L2 grapple, R2 prosthetic, X item, R3 lock-on. Esc frees the mouse.
+//! B step/sprint, L3 crouch, L2 grapple, R2 prosthetic, X item, R3 lock-on. Esc frees the mouse;
+//! minus and equals (or `[` and `]`) change the volume (`crate::audio`).
 //!
 //! With `--map <id> [--start <n>]` the fight happens on an exported map instead of the floor:
 //! Wolf stands at the player start, the enemy 5 m in front of him, both bodies walk on the
@@ -66,6 +67,9 @@ pub struct Options {
     pub lock_on: bool,
     /// Drive the enemy with the stand-in brain instead of its own AI scripts.
     pub simple_ai: bool,
+    /// Testing aid (`--god`): Wolf takes no HP or posture damage; hits, reactions and hit stop
+    /// are otherwise unchanged.
+    pub god: bool,
     /// Who chooses a boss's acts (`--brain lua|scripted`) and whether its decisions are logged
     /// to `cache/brain_logs/` (`--brain-log`); see `docs/BRAIN.md`.
     pub brain: sekiro_sim::brain::BrainKind,
@@ -171,6 +175,7 @@ pub fn run(options: Options) -> Result<()> {
     let mut duel = Duel::load_with(&cache, 6.0, options.opponent.clone())
         .map_err(|e| anyhow::anyhow!("loading the simulation: {e}"))?;
     duel.enemy_active = options.enemy;
+    duel.god = options.god;
     if options.simple_ai {
         duel.use_simple_ai();
     } else if options.brain != sekiro_sim::brain::BrainKind::Lua || options.brain_log {
@@ -348,6 +353,7 @@ pub fn run(options: Options) -> Result<()> {
     .init_resource::<combat_hud::Gauges>()
     .add_plugins(crate::audio::GameAudioPlugin {
         cache: cache.clone(),
+        map: on_map.as_ref().map(|(_, id, _)| id.clone()),
     })
     .add_systems(Startup, setup)
     .add_systems(FixedUpdate, simulate)
@@ -668,7 +674,7 @@ fn simulate(
     live: Res<LiveInput>,
     orbit: Res<Orbit>,
     rigs: Query<&Rig, With<Actor>>,
-    sounds: Res<crate::audio::SoundLibrary>,
+    mut sounds: ResMut<crate::audio::SoundLibrary>,
     mut cues: MessageWriter<crate::audio::SoundCue>,
     map_pending: Option<Res<map::Pending>>,
     replay: Option<ResMut<crate::input_replay::InputReplay>>,
@@ -708,7 +714,10 @@ fn simulate(
     if log_enabled() {
         log_move(sim.step, &frame, before, &sim.duel, &report.player);
     }
-    crate::audio::emit(&sim.duel, &report, &sounds, &mut cues);
+    if std::env::var_os("PLAY_LOG_COMBO").is_some() {
+        log_combo(sim.step, &frame, &sim.duel, &report);
+    }
+    crate::audio::emit(&sim.duel, &report, &mut sounds, &mut cues);
     for (i, r) in [&report.player, &report.enemy].into_iter().enumerate() {
         if !r.behavior.script_errors.is_empty() {
             warn!("script errors ({i}): {:?}", r.behavior.script_errors);
@@ -915,7 +924,7 @@ fn hud(
         s += line;
         s.push('\n');
     }
-    s += "WASD move, mouse look, LMB attack, RMB guard, Space jump, Shift step/sprint, C crouch, Q lock-on, Esc mouse";
+    s += "WASD move, mouse look, LMB attack, RMB guard, Space jump, Shift step/sprint, C crouch, Q lock-on, Esc mouse, -/= volume";
     text.0 = s;
 }
 
@@ -989,6 +998,44 @@ fn log_move(step: usize, frame: &InputFrame, before: [f32; 3], duel: &Duel, r: &
         wolf.lock_target.is_some(),
         r.behavior.state_path.last().map_or("-", String::as_str),
         r.animation.as_deref().unwrap_or("-"),
+    );
+}
+
+/// One `combo` line per simulation step with `PLAY_LOG_COMBO` set: the attack button, Wolf's
+/// buffered presses, state, clip and clip time, both hit stops, this step's hits and the
+/// enemy's state and clip.
+fn log_combo(step: usize, frame: &InputFrame, duel: &Duel, r: &DuelReport) {
+    let mut pending: Vec<i32> = duel.player.input.pending_actions().collect();
+    pending.sort_unstable();
+    let hits: Vec<String> = r
+        .hits
+        .iter()
+        .map(|(h, res)| {
+            let kind = if res.deflected {
+                "deflect"
+            } else if res.guarded {
+                "guard"
+            } else {
+                "hit"
+            };
+            format!("{}>{}:{}:{kind}", h.attacker, h.defender, h.attack.atk_id)
+        })
+        .collect();
+    let last = |s: &StepReport| s.behavior.state_path.last().cloned().unwrap_or_default();
+    let (a, b) = (r.player.position, r.enemy.position);
+    eprintln!(
+        "combo {step} atk {} pend {pending:?} wolf {} {} {:.3} stop {:.3},{:.3} hits [{}] owl {} {} {:.3} dist {:.2}",
+        frame.buttons.attack as u8,
+        last(&r.player),
+        r.player.animation.as_deref().unwrap_or("-"),
+        r.player.anim_time,
+        duel.hit_stop[0].remaining,
+        duel.hit_stop[1].remaining,
+        hits.join(" "),
+        last(&r.enemy),
+        r.enemy.animation.as_deref().unwrap_or("-"),
+        r.enemy.anim_time,
+        ((a[0] - b[0]).powi(2) + (a[2] - b[2]).powi(2)).sqrt(),
     );
 }
 

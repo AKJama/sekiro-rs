@@ -104,7 +104,7 @@ fn main() -> anyhow::Result<()> {
             input: arg_value(&args, "--input"),
             screenshots,
             exit_after_script: args.iter().any(|a| a == "--exit"),
-            enemy: !args.iter().any(|a| a == "--no-enemy"),
+            enemy: !args.iter().any(|a| a == "--no-enemy" || a == "--passive"),
             opponent: match (arg_value(&args, "--enemy"), boss_arena) {
                 (Some(name), _) => sekiro_sim::enemy::EnemySpec::by_name(&name)
                     .map_err(|e| anyhow::anyhow!("--enemy: {e}"))?,
@@ -117,6 +117,7 @@ fn main() -> anyhow::Result<()> {
             objects: args.iter().any(|a| a == "--objects"),
             lock_on: args.iter().any(|a| a == "--lock-on"),
             simple_ai: args.iter().any(|a| a == "--simple-ai"),
+            god: args.iter().any(|a| a == "--god"),
             brain: match arg_value(&args, "--brain") {
                 Some(name) => sekiro_sim::brain::BrainKind::by_name(&name)
                     .map_err(|e| anyhow::anyhow!("--brain: {e}"))?,
@@ -144,7 +145,7 @@ fn main() -> anyhow::Result<()> {
         "                 [--map <id> [--start <n> | --spawn x,y,z,yaw,0]] [--no-enemy] [--lock-on]"
     );
     eprintln!(
-        "                 [--simple-ai] [--enemy c1010|c5060] [--brain lua|scripted] [--brain-log]"
+        "                 [--simple-ai] [--passive] [--god] [--enemy c1010|c5060] [--brain lua|scripted] [--brain-log]"
     );
     eprintln!("       sekiro-rs --arena owl [--full-map] [--play options] (a boss on his own map)");
     eprintln!("usage: sekiro-rs --arena [--deathblow] [--screenshot <out.png> --at <seconds>]");

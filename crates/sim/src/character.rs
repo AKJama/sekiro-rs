@@ -123,6 +123,9 @@ pub struct Character {
     /// turn to the left): how far the visible body still lags behind [`Body::yaw`] after a
     /// free move start turned the character to the stick. Unwinds at the default turn speed.
     pub twist: f32,
+    /// World yaw of the last step's root-motion travel, when the clip carried the body faster
+    /// than [`HEADING_MIN_SPEED`]; `TurnAngle` is measured from it (else from the facing).
+    heading: Option<f32>,
     /// Clip times before the last step, by clip node.
     last_times: HashMap<NodeId, (String, f32)>,
     last_main: Option<PlayingClip>,
@@ -151,6 +154,10 @@ fn strafe_direction(current: i32, angle: f32) -> i32 {
 /// SpEffect behaviour reference ids the TAE puts on walk, run and sprint animations
 /// (`SP_EF_REF_TAE_MOVING_WALK/RUN/SPRINT`; the script's `GetLocomotionType`).
 const MOVING_REFS: [i32; 3] = [90, 91, 92];
+
+/// Root-motion speed in m/s above which the travel direction, not the facing, is what
+/// `TurnAngle` is measured from (a walk start already moves faster).
+const HEADING_MIN_SPEED: f32 = 1.0;
 
 /// The player.
 pub type PlayerCharacter = Character;
@@ -214,6 +221,7 @@ impl Character {
             skeleton: load_skeleton(cache, chr),
             ground: Box::new(FlatGround::default()),
             twist: 0.0,
+            heading: None,
             last_times: HashMap::new(),
             last_main: None,
         })
@@ -344,31 +352,46 @@ impl Character {
     }
 
     fn set_engine_variables(&mut self) {
+        let lock_yaw = self.lock_target.map(|t| self.yaw_to(t));
         let rt = &mut self.behavior.runtime;
         match self.kind {
             ControlKind::Player => {
                 rt.set_variable("TwistLowerRootAngle", self.twist);
                 let level = self.input.stick_level();
-                // Stick direction relative to facing in degrees, positive to the RIGHT: the script
+                // Stick direction relative to `from` in degrees, positive to the RIGHT: the script
                 // quick-turns right for TurnAngle > 0 and picks the right strafe for MoveAngle > 0.
-                let turn = self
-                    .input
-                    .stick_world_yaw()
-                    .map(|y| -angle_diff(y, self.body.yaw).to_degrees())
-                    .unwrap_or(0.0);
+                let stick_from = |from: f32| {
+                    self.input
+                        .stick_world_yaw()
+                        .map(|y| -angle_diff(y, from).to_degrees())
+                        .unwrap_or(0.0)
+                };
+                let turn = stick_from(self.body.yaw);
+                // `TurnAngle` is measured from where the body is travelling (the facing when it
+                // stands still or walks in place). In free movement they are the same. Locked on
+                // they differ: a back step travels toward the stick while Wolf faces the target,
+                // and the script brakes a locked sprint start when |TurnAngle| >= 135
+                // (`BEH_A_GROUND_MOVE_STOP`, SprintStartFromStep reads TurnAngle). Measured from
+                // the facing, the back sprint start (a000_001152, turning 180 degrees by root
+                // motion) could never play: every locked back sprint braked into the sprint stop
+                // slide toward the enemy. Inferred from the script and clips, not traced in the exe.
+                let turn_from_travel = stick_from(self.heading.unwrap_or(self.body.yaw));
+                // The locked-on action directions (step, jump, attack) are read right after the
+                // script turns Wolf to the target (`act(2019)` in `_fireGroundStep` and the jump
+                // starts), and pick a direction relative to that new facing, so they are measured
+                // from the target. Measured from the old facing, a step out of a locked sprint or
+                // quick turn (Wolf facing away) went the wrong way once he snapped to the target.
+                let action = lock_yaw.map_or(turn, stick_from);
                 // The engine's stick level runs 0..2; full keyboard or stick deflection runs.
                 rt.set_variable("MoveSpeedLevel", level * 2.0);
-                for name in [
-                    "TurnAngle",
-                    "TurnAngleReal",
-                    "MoveAngle",
-                    "MoveAngleReal",
-                    "JumpAngle",
-                    "AttackAngle",
-                    "SubAttackAngle",
-                    "KickAngle",
-                ] {
+                for name in ["TurnAngle", "TurnAngleReal"] {
+                    rt.set_variable(name, turn_from_travel);
+                }
+                for name in ["MoveAngle", "MoveAngleReal"] {
                     rt.set_variable(name, turn);
+                }
+                for name in ["JumpAngle", "AttackAngle", "SubAttackAngle", "KickAngle"] {
+                    rt.set_variable(name, action);
                 }
                 for name in [
                     "JumpStickLevel",
@@ -461,14 +484,17 @@ impl Character {
         if self.behavior.env.input_resets.get() != resets_before {
             self.input.reset_requests();
         }
-        if let Some(deg) = self.behavior.env.face_turn.take() {
-            self.body.yaw = angle_diff(self.body.yaw + deg.to_radians(), 0.0);
-        }
+        // The script always faces the target (act 2019) before tilting off it (act 3025): the
+        // locked step and positioning jump tilts are relative to the target direction.
         if self.behavior.env.face_lock_target.take()
             && let Some(t) = self.lock_target
         {
             self.body.yaw = self.yaw_to(t);
         }
+        if let Some(deg) = self.behavior.env.face_turn.take() {
+            self.body.yaw = angle_diff(self.body.yaw - deg.to_radians(), 0.0);
+        }
+        let lock_angle_released = self.behavior.env.release_lock_angle.take();
 
         // Clips now playing, with the time each had before this step (0 if it just started).
         let main_node = self.behavior.runtime.main_clip().map(|c| c.node);
@@ -524,7 +550,19 @@ impl Character {
                 };
                 let a = rm.sample(c.prev_time.min(end));
                 let b = rm.sample(time.min(end));
-                Some([b[0] - a[0], b[1] - a[1], b[2] - a[2], b[3] - a[3]])
+                // Samples are displacements in the clip's start frame. Turn this step's delta
+                // into the root's own frame (undo the clip's yaw so far); the body then applies
+                // it along its facing. A clip that turns while moving (SprintStartFromStep_L
+                // turns 90 degrees in 0.2 s and travels 5.8 m along its start frame's side) would
+                // otherwise carry Wolf sideways once he has turned.
+                let (dx, dz) = (b[0] - a[0], b[2] - a[2]);
+                let (sin, cos) = (-a[3]).sin_cos();
+                Some([
+                    cos * dx + sin * dz,
+                    b[1] - a[1],
+                    -sin * dx + cos * dz,
+                    b[3] - a[3],
+                ])
             })
             .unwrap_or_default();
         let tae = &self.tae_runtime.frame;
@@ -548,8 +586,12 @@ impl Character {
             // TAE 703: the swing keeps its direction (what makes side-steps work).
             _ if tae.fixed_rotation => None,
             // Locked on, the character keeps facing the target and strafes; an attack with an
-            // auto-aim target turns toward it the same way.
+            // auto-aim target turns toward it the same way. A sprint releases the lock-on angle
+            // lock (act 2018) so Wolf turns to run along the stick, still locked on.
             ControlKind::Player => match target {
+                Some(_) if lock_angle_released && self.lock_target.is_some() => {
+                    self.input.stick_world_yaw()
+                }
                 Some(t) => Some(self.yaw_to(t)),
                 None => self.input.stick_world_yaw(),
             },
@@ -561,6 +603,11 @@ impl Character {
             turn_speed,
             velocity_change,
         };
+        // Where the clip carries the body: the root-motion offset from the facing (source X is
+        // mirrored, as in `Body::step`), turned by the facing it is applied along.
+        let [rx, _, rz, _] = root_motion;
+        self.heading = (rx.hypot(rz) > HEADING_MIN_SPEED * dt && self.body.grounded)
+            .then(|| angle_diff(self.body.yaw + rx.atan2(-rz), 0.0));
         self.body.step(&body_input, dt, self.ground.as_ref());
         // The lower body catches up with the facing at the default turn speed.
         let unwind = DEFAULT_TURN_SPEED * dt;
