@@ -34,6 +34,8 @@ use serde_json::Value;
 
 #[path = "map_material.rs"]
 mod map_material;
+#[path = "sky.rs"]
+pub(crate) mod sky;
 
 use crate::lighting::{
     MapLighting, MapProbes, ProbeRegion, ShadowSettings, apply_lighting, apply_probes,
@@ -427,6 +429,7 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
     )?;
     let hour = scene.hour;
     crate::lighting::install_post_effects(app, dir)?;
+    sky::install(app, cache, &id, hour)?;
     let mut probes = MapProbes {
         prefix: scene.prefix.clone(),
         variant: nearest_variant(hour),
@@ -481,6 +484,7 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
             }
         }
     }
+    crate::lighting::install_irradiance(app, dir, &probes)?;
     app.insert_resource(probes);
     let args: Vec<_> = std::env::args().collect();
     if args

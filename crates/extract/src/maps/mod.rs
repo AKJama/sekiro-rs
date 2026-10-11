@@ -15,6 +15,7 @@ mod edges;
 mod env;
 mod lights;
 mod pieces;
+mod sky;
 mod textures;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -153,12 +154,22 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
     std::fs::create_dir_all(out.join("models"))?;
     std::fs::create_dir_all(out.join("models/tex"))?;
     let oodle = Oodle::load(game).context("the map export needs the game's Oodle DLL")?;
+    if std::env::var_os("SEKIRO_MAP_SKY_ONLY").is_some() {
+        anyhow::ensure!(
+            id == "m89_00_00_99",
+            "sky-only export requires m89_00_00_99"
+        );
+        return sky::export(&raw, &out, oodle);
+    }
     let msb = read_msb(cache, id)?;
     lights::export(&raw, &out, id)?;
     if std::env::var_os("SEKIRO_MAP_LIGHTS_ONLY").is_some() {
         return Ok(());
     }
     env::export(&raw, &out, id, &msb)?;
+    if std::env::var_os("SEKIRO_MAP_ENV_ONLY").is_some() {
+        return Ok(());
+    }
     let edge_header = raw.join(format!("map/{id}/{id}.edgebhd"));
     if edge_header.is_file() || msb.parts.iter().any(|p| p.kind == msb::PartKind::Collision) {
         if edges::export(cache, id, &msb, oodle)? {
@@ -424,6 +435,9 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
         },
     });
     std::fs::write(out.join("layout.json"), serde_json::to_vec_pretty(&layout)?)?;
+    if id == "m89_00_00_99" {
+        sky::export(&raw, &out, oodle)?;
+    }
     eprintln!(
         "  layout: {} pieces ({never_drawn} without draw groups left out), bounds {:?}..{:?}; wrote {}",
         piece_rows.len(),

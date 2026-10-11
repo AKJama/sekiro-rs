@@ -34,6 +34,8 @@ pub struct GameFog {
     extinction: Vec4,
     // NearOffset, slice count, sample offset, analytical continuation enabled.
     slices: Vec4,
+    // Authored sky uses only the native fog continuation near the horizon.
+    sky_blend: Vec4,
 }
 
 #[cfg(test)]
@@ -225,6 +227,7 @@ impl GameFog {
                 get("VolumeSliceSampleOffset", 0.5),
                 get("EnableAnalyticalFog", 1.),
             ),
+            sky_blend: Vec4::ZERO,
         })
     }
 }
@@ -254,17 +257,17 @@ fn configure(
     mut commands: Commands,
     lighting: Res<super::MapLighting>,
     cameras: Query<(Entity, &Camera3d)>,
-    mut last: Local<Option<(i32, f32)>>,
+    mut last: Local<Option<(i32, f32, i32)>>,
     added: Query<(), Added<Camera3d>>,
     selection: Res<FogSelection>,
-    mut last_fog: Local<Option<i32>>,
+    dome: Option<Res<crate::map::sky::SkyEnabled>>,
 ) {
     let key = (lighting.light_set, lighting.hour);
-    if *last == Some(key) && *last_fog == Some(selection.0) && added.is_empty() {
+    let cache_key = (key.0, key.1, selection.0);
+    if *last == Some(cache_key) && added.is_empty() {
         return;
     }
-    *last = Some(key);
-    *last_fog = Some(selection.0);
+    *last = Some(cache_key);
     // Preserve the independent MSB FogParamID. No separate Fog formula was recovered.
     // Inspect selected authored rows rather than silently aliasing this ID to LightSetID.
     let legacy: Vec<_> = lighting
@@ -279,9 +282,14 @@ fn configure(
         selection.0
     );
     let set = super::LightSet::from_gparam(&lighting.gparam, key.0, key.1);
-    let value = (!std::env::args().any(|a| a == "--no-fog"))
+    let mut value = (!std::env::args().any(|a| a == "--no-fog"))
         .then(|| GameFog::from_gparam(&lighting.gparam, key.0, key.1, set.sun_toward))
         .flatten();
+    if dome.is_some()
+        && let Some(value) = &mut value
+    {
+        value.sky_blend = Vec4::new(1., 0., 0.22, 0.);
+    }
     info!("shader fog: {value:?}");
     for (entity, camera) in &cameras {
         let mut camera = camera.clone();

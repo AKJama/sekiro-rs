@@ -3,6 +3,61 @@
 All ten MSB entries in the install's archive were enumerated and extracted.
 All ten load in the viewer and in play mode.
 Nine are gameplay maps; m89 is a library of sky domes with no collision terrain.
+
+## Authored sky selection (2026-10-11)
+
+The local `common.emevd` event 100 disables m89 sky entity groups and activates the selected group with instruction `2012[1]` (`ActivateMapPart`).
+The m89 MSB maps those groups to the following co-located meshes.
+MSB collision GPARAM tuples select lighting/fog/probes independently; the GPARAM `SkyColor` is fog illumination, not a sky material tint.
+The read-only audit is reproducible with `cargo run -p sekiro-formats --example sky_inspect -j 6` and its local output is `target/alt/sky-audit.txt`.
+
+| Map | Selected group / mesh | Source rule |
+| --- | --- | --- |
+| m11_00, m11_01 | 8907000 / m900000 morning; 8907010 / m900010 afternoon; 8907020 / m900020 evening; 8907030 / m900030 night | Event 100 labels 10..13 activate these groups under story time flags 9800..9803, alongside environment variants 1..4. |
+| m11_00, m11_01 | 8907040 / m900040 past night; 8907050 / m900050 dawn | Event 100 labels 1 and 14, with environment variants 0 and 5. |
+| m25 | 8907070 / m900070 | Event 100's m25 map condition selects label 3, a compound Cloud and `M[m25_00]_SkyDome_Night1` mesh. |
+| m10 | 8907060 / m900060 | Event 100's m10 map condition selects label 2, a compound Cloud and `M[m10_00]_SkyDome_Night1` mesh. |
+
+The renderer maps `--hour` to the existing authored probe keys 0/2/6/12/18/22 and chooses the nearest group, wrapping midnight.
+This substitutes continuous CLI time for the game's progression flags; it does not execute event flags.
+The Castle late-story Fire override, debug afternoon group 8907015, weather variants, and Divine Dragon state changes remain separate event-state work.
+The named CloudSea library mesh m900090 is not the ordinary Fountainhead sky selected by event 100.
+
+The existing GLBs are reused without their lit glTF materials.
+`SEKIRO_MAP_SKY_ONLY=1 sekiro-extract map m89_00_00_99` writes `sky.json` and the authored masks under `cache/maps/m89_00_00_99/sky/` without changing raw files or re-exporting geometry.
+An ordinary m89 export also emits these inputs.
+SkyDome and SkyDome_Ver2 use emissive, forward MTDs, authored colour/intensity slots, directional lobes and cloud masks rather than scene PBR lighting.
+The inventory entries are `M[Sky]_SkyDome.shaderbdle`, `M[Sky]_SkyDome_Ver2.shaderbdle` and `M[Sky]_Cloud.shaderbdle`, with their `Fwd` pixel variants and matching vertex shaders.
+m900000/010/020/030/040/050/060 use SkyDome_Ver2; the Fountainhead m900070 dome uses the original SkyDome branch, and m900060/070 also carry the separate Cloud material.
+The shader inventory and local disassembly establish the gradient/mask operators, both Ver2 static branches, native fog composition and `SC_PreExposure` multiplication; MTD CPU colour packing remains calibrated with gamma two.
+The native shipped pre-exposure is one; the dome enters the shared native HDR exposure, bloom and tone pass without an exposure bypass.
+SAT CPU colour packing is unresolved, so gamma two colour/intensity packing and a Ver2 radiance gain of eight calibrate the authored masks/colours to the native-light Bevy scene.
+The original SkyDome and its companion Cloud layer use unit gain, keeping the Fountainhead star/galaxy atlas from becoming an overexposed cyan sheet.
+The Cloud layer retains its authored geometry/masks with an approximate alpha and normal-lighting calculation; time-warped cloud normal reconstruction and galaxy/star mixing are not exact ports.
+
+The vertex shader centres the mesh on each camera and sets reverse-Z clip depth to zero.
+Depth writes, prepass, culling and shadows are disabled for the sky material.
+The existing native fog integration remains the horizon colour source at its 20 km background distance; sky pixels interpolate from that result to the dome over ray Y 0..0.22.
+The sky lobe follows the existing GPARAM sun direction; the Ver2 exponent/width come from authored floats 10/12, not the cloud contrast slot 13.
+This horizon width is a renderer calibration, not a recovered game constant.
+`--no-sky-dome` restores the clear-colour background and its original fog integration.
+
+### Sky capture evidence
+
+All captures use `--simple-ai`, with scripts and stderr retained beside the PNGs under `target/alt/visuals/`.
+Each saved image was inspected, including supplemental views above the roof and over the lake.
+Some distant world silhouettes have a thin bright halo in the open noon capture; the dome itself has no visible geometry outline or seam.
+
+| View | Capture | Judgement |
+| --- | --- | --- |
+| Owl 12 / 18 | [Noon](../target/alt/visuals/v8-sky-owl12.png), [evening](../target/alt/visuals/v8-sky-owl18.png) | Overcast noon, warm evening clouds; pavilion roof limits sky coverage. |
+| Genichiro 18 | [Evening](../target/alt/visuals/v8-sky-genichiro18.png) | Warm horizon joins native fog, with light/shadow direction consistent with the selected sun. |
+| m11_00 start 3, 6 | [Diagnostic](../target/alt/visuals/v8-sky-outskirts6-diagnostic.png) | Morning clouds and warm light; probes disabled because the ordinary run fails on GIIV dimensions. |
+| m11_00 start 3, 12 / 18 / 0 | [Noon](../target/alt/visuals/v8-sky-outskirts12.png), [evening](../target/alt/visuals/v8-sky-outskirts18.png), [midnight](../target/alt/visuals/v8-sky-outskirts0.png) | Distinct cloud skies; midnight dome is dark but native exposure/GI leaves the world bright. |
+| m25 start 1 | [Start](../target/alt/visuals/v8-sky-fountainhead.png), [open lake](../target/alt/visuals/v8-sky-fountainhead-lake.png) | Fixed turquoise night/galaxy sky and stars; smooth blue horizon, with existing white water still conspicuous. |
+| m10 start 0 | [Hirata](../target/alt/visuals/v8-sky-hirata.png) | Fixed grey cloud night sky, without dome geometry or seams. |
+| Open sky controls | [Noon](../target/alt/visuals/v8-sky-outskirts12-up.png), [evening](../target/alt/visuals/v8-sky-outskirts18-up.png), [clear colour](../target/alt/visuals/v8-sky-outskirts12-clear.png) | Authored masks/gradients visible, corrected dusk lobe, and the opt-out restores a flat background. |
+
 This is a baseline inspection, not a claim that materials, event state or lighting match the original game exactly.
 No commits were made, and the install and default release executable were left untouched.
 

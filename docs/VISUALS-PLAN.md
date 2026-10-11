@@ -26,7 +26,8 @@ All were visually inspected against v5/v6: foreground fog no longer washes out t
 The sampled world crops contain no pure-white pixels; the Castle near-white fraction falls from 0.467% to 0.0056%.
 The extra probe-disabled capture `v7-outskirts12-hemi-fixed.png` verifies the directional fallback without black blocks.
 **[I]** Native light-bank routing and BTL units, nearest-byte rounding, renderer dt/quality semantics and the hemisphere axis field remain unresolved.
-Actors/FX retain mean ambient while their StandardMaterial handles support gameplay tint; native GIIV, froxel allocation/local shadows, transparent fog, sky dome, bloom scheduling and exact tone tables remain implementation gaps.
+This historical v7 renderer retained mean ambient on actors/FX; v8 now gives rigged actors the same directional GIIV shader as map surfaces while preserving gameplay tint sources.
+Native GIIV CPU scale/fade/PCC uploads, froxel allocation/local shadows, transparent fog, bloom scheduling and exact tone tables remain gaps; the separate sky work has its own status.
 Formatting, workspace/all-target Clippy, release game/formats/extract tests and the release game build pass offline with six jobs in `target/alt`.
 
 ## 1. Where we are today
@@ -373,11 +374,61 @@ Sky-only colour clustering was tried and rejected because it produced artifacts;
 So the probes drive lighting and reflections only; the sky stays the GPARAM clear colour until the sky dome meshes (step 14), and `--probe-sky` shows the capture as a sky for debugging.
 The X mirror and cube axes are unit tested, DDS loading verifies six layers, and the Outskirts morning/noon brightest direction is within 6.7/8.3 degrees of GPARAM sun direction; brightest pixels in other captures may be walls, so these are supporting evidence rather than exact sun verification.
 
-Specular mip filtering is a box-filter approximation rather than a GGX convolution, diffuse integration uses 256 samples, and probe transitions do not blend.
+This historical step used box-filter specular mips, 256 diffuse integration samples and probe transitions without blending.
+V8 adds receiver-based cubic spatial blending, native GIIV coefficient diffuse and box reflection correction; the approximate specular filtering remains.
 The runtime frame measurements are capped at 60 Hz; `perf-summary.csv` records matched medians of 16.6-16.8 ms, with probe deltas from -0.034 to +0.076 ms, and cannot establish uncapped GPU cost.
 Final formatting, workspace Clippy, release formats/extract tests (64 passed, two ignored), 14 game unit tests and the alternate release game build pass.
 The permitted pre-existing map_tangents failure remains: direction agreement 0.004 and handedness agreement 0.953 across 1,288,976 vertices.
 Unused `sky_*.dds` experiment outputs may remain in the ignored cache but are never loaded by the final implementation.
+
+#### Step 1 GIIV and spatial blend status (2026-10-11, v8)
+
+GIIV BC7 3D X/Y/Z/W coefficients are exported as linear RGBA8 with their signed/exponent encoding intact.
+All four requested maps were re-extracted, including Hirata's separate cube container.
+The runtime uses a hardware-filtered 3D coefficient atlas, cube arrays and small shared region records while retaining bindless material batching.
+Each coefficient keeps its own dimensions; the six mixed-resolution Outskirts variants now load, including the previously blocked 6 h scene.
+`SHADERS.md` records the decoder, directional basis, MSB box placement, capture origins and open upload questions.
+
+Diffuse is evaluated at each receiver's position and normal, with the existing `SCENE_TO_BEVY/pi` bridge, one-voxel normal bias and cubic box-edge fades.
+Larger boxes provide the enclosing light while smaller regions fade over them.
+GILM specular uses the same spatial weights and oriented-box reflection correction toward the matching Env_Point capture origin.
+The camera's enclosing fallback is stable, so movement no longer cuts the entire map to another cube.
+Wolf and rigged enemies use the same fragment shader; material-source proxies preserve gameplay tint updates.
+`--no-giiv` switches back to region-blended Lambert diffuse while retaining reflections and spatial fades.
+
+All six requested before/after pairs were captured and individually inspected at 1600x900 with `--simple-ai`.
+The before side uses `--no-giiv`; both sides contain the concurrent sky implementation and the new region blends/PCC, so these pairs isolate GIIV rather than measuring all changes since v7.
+The arena replays use passive idle for 900 ticks and capture tick 600; viewers capture 10 seconds after loading.
+Arguments and raw logs are in `target/alt/visuals/v8-giiv-captures.ps1` and `v8-giiv-<scene>-<before|after>.*`.
+
+| Scene and capture stem | Visual judgement | Frame before/after, ms | Opaque GPU before/after, ms |
+| --- | --- | ---: | ---: |
+| Genichiro 18 h, `genichiro18` | Subtle warm roof bounce; shaded timber and Wolf's clothing remain readable. | 16.674 / 16.795 | 6.703 / 8.284 |
+| Owl 12 h, `owl12` | Neutral/cool roof shade with retained floor grain; Wolf and Owl fit the surrounding light. | 16.124 / 17.090 | 6.979 / 8.514 |
+| Castle start 1, `interior12` | Darker, spatially varied stone replaces flat bright ambient; timber and floor detail remain. | 16.949 / 16.177 | 7.941 / 5.659 |
+| Outskirts start 3 at 12 h, `outskirts12` | Subtle shade colour changes with retained snow and rock detail. | 16.531 / 16.537 | 11.210 / 8.322 |
+| Outskirts start 3 at 18 h, `outskirts18` | Warm/cool separation improves shaded stairs and eaves without flattening texture. | 16.314 / 16.680 | 7.630 / 7.770 |
+| Hirata start 0, `hirata12` | Clearest lift beneath banks and roots, with plausible green/cool bounce. | 16.728 / 16.716 | 11.824 / 10.247 |
+
+No new volume-edge banding or blotches are visible in these views, and roof characters are dark but consistent with nearby shaded surfaces.
+PNG names are `target/alt/visuals/v8-giiv-<stem>-before.png` and `-after.png`.
+Extra dawn, probe-disabled and Fountainhead smoke runs pass without shader errors; Fountainhead's smoke checks loading rather than establishing complete sky/scene fidelity.
+The machine is a Ryzen 7 5700X3D and RTX 5070 Ti using Vulkan.
+Frame medians use logged seconds 5-15 after loading, and opaque GPU medians use the last eight available pass samples.
+The apparent 60 Hz presentation ceiling and substantial pass-time variation prevent treating these single pairs as a precise isolated GIIV cost.
+The first two arenas briefly overlapped a CPU-only PNG analysis attempt, so repeated roof measurements below are the better cost control.
+Two additional Genichiro 18 h pairs ran without screenshots, builds or PNG analysis.
+Their before/after frame medians are 16.707/16.584 and 16.645/16.697 ms, with opaque GPU medians of 5.559/8.406 and 6.877/9.410 ms.
+The repeat pairs therefore resolve about 2.5-2.8 ms additional opaque GPU work, while total frame medians remain around 16.6-16.7 ms with no resolved increase above presentation pacing/noise.
+This is the GIIV-versus-Lambert cost with blends/PCC enabled on both sides, not the full cost of all v8 lighting changes.
+`v8-giiv-bench.ps1`, `v8-giiv-bench.json` and the paired logs retain the replay and samples.
+`v8-giiv-measurements.txt` retains the raw medians and image differences.
+Castle's coefficient atlas is 14 MiB, Outskirts 104 MiB at noon/evening and Hirata 100 MiB, in addition to the shared cube arrays.
+The hardware atlas replaces an earlier eight-load-per-sample storage-buffer experiment retained only as `*-manual.png` and `v8-giiv-manual-measurements.txt` diagnostics.
+
+Exact CPU binding, independent IV/PCC transforms, padding/physical voxel spacing, authored fade widths/scales, native overlap blend state and time-variant interpolation remain fidelity gaps.
+The current documented approximations are MSB boxes, one-voxel fades, unit source scales, enclosing-to-local compositing and nearest available time variant.
+Formatting, workspace/all-target Clippy, the requested release game/formats/extract tests (117 passed, two existing ignored) and the release game build pass offline with six jobs in `target/alt`.
 
 ### Step 2. HDR camera, tonemapper, GPARAM bloom, colour-grading LUT
 
@@ -495,7 +546,7 @@ The unorm LUT's red-fastest, green-row, blue-slice layout was confirmed against 
 Its exact trilinear input is the ordinary output-power result; storage conversion into Bevy's linear ping-pong buffer is reversed before lookup.
 Display dither runs after grading, or after tone transfer when grading is absent.
 HUD colours stay outside the chain.
-GIIV export, coefficient sampling, region fades and parallax correction remain pending under section 3.2/recommendation 3.
+GIIV export, coefficient sampling, cubic region fades and box parallax correction are implemented by the v8 follow-up under section 3.2/recommendation 3, with CPU upload/placement approximations documented in `SHADERS.md`.
 The v7 follow-up below applies the resolved fog/light CPU transforms.
 
 The seven requested matched scene pairs are `target/alt/visuals/v6-{owl,genichiro,outskirts6,outskirts12,outskirts18,interior,hirata}-{before,final}.png`.
@@ -685,7 +736,8 @@ Only the base mask is bound, and normal layers use our existing BC5 conversion w
 
 Bevy `DistanceFog` is replaced with the recovered global density, directional blend, independent source gates, midpoint integration and analytical far continuation in `fog.rs` and `fog.wgsl`.
 This is an HDR depth-based pass before bloom and tone mapping, using the main depth texture with MSAA preserved.
-Sky/background and map/character scene pixels share the same integration.
+Before step 14, sky/background and map/character scene pixels shared the same integration.
+Authored domes now retain that integration at the horizon and bypass extinction above the calibrated horizon blend.
 `--no-fog` disables the pass, and `--visual-stats` reports frame and fog GPU timing.
 The v7 follow-up replaces the provisional height scale `0.01` and `world_y+offset` with the verified GameScale snapshot and signed raw world height in `SHADER-INPUTS.md`.
 CPU GameScale packing and shipped pre-exposure one are resolved; bank resolution, local fog sources, shadowed fog and independent transparent depth remain gaps.
@@ -821,6 +873,35 @@ No commits, network access or protected-path writes were made by this work, and 
 
 - Files: `map.rs` (variant choice, unlit fog-exempt dome material), a LightShaft pass if the look needs it.
 - Check: m89 viewer captures listed in `MAP-BASELINE.md`.
+
+#### Step 14 status (2026-10-11)
+
+The renderer selects the game's co-located m89 meshes using the entity-group mapping verified in local `common.emevd` event 100 and the m89 MSB.
+Castle/Outskirts use nearest authored 0/2/6/12/18/22 hour keys; Hirata and Fountainhead use the event's fixed compound m900060/m900070 skies with their own map-specific MTDs.
+`MAP-BASELINE.md` records the source groups, labels and remaining progression-state exceptions.
+The existing GLBs are reused; the m89 extractor writes only supplemental material/mask metadata under `cache/maps/` through `SEKIRO_MAP_SKY_ONLY=1` or a normal m89 export.
+The custom `sky.rs`/`sky.wgsl` material is camera-centred, unlit, shadowless, prepass-free and at reverse-Z infinity with no depth writes.
+SkyDome_Ver2 gradient/cloud operators and both static branches follow the local shader inventory/disassembly, with authored colours, intensities, tiling and channel masks.
+SAT CPU colour packing remains unresolved: gamma two and Ver2 radiance gain eight are documented calibrations against the native-light scene, while the original Fountainhead dome and companion Cloud layer use unit gain.
+Sky shares native HDR exposure, bloom and tone mapping with the world.
+Native fog supplies the horizon colour through its existing 20 km background integration; a smooth ray-Y 0..0.22 blend preserves the dome above the horizon.
+`--no-sky-dome` restores the previous clear colour and its fog behavior.
+Cloud-layer alpha/normal lighting, cloud-flow timing, galaxy/star composition, non-hour progression/weather overrides and LightShaft remain approximations or gaps.
+
+The `target/alt/visuals/v8-sky-*.png` captures cover Owl at noon/evening, Genichiro at evening, Outskirts start 3 at noon/evening/midnight, Fountainhead start 1 and Hirata start 0.
+Each saved view was inspected: noon is textured overcast, evening shows warm clouds and a directional bright lobe, midnight is dark/clouded, and Hirata keeps its fixed grey cloud sky.
+The requested arena cameras are under the pavilion roof, so supplemental upward views expose the dome and a lake-facing Fountainhead view checks the open horizon.
+No mesh outline or seam is visible in the inspected views; the native fog hides the horizon edge.
+The bright open-noon control has a thin halo on some distant world silhouettes, so sky/world antialiasing at the post-fog boundary is not pixel-perfect.
+The midnight world remains bright under the existing native exposure/GI settings, despite the dark dome.
+The initial Outskirts 6 h capture stopped because GIIV probes 300/307/323 have different coefficient-volume dimensions; the explicitly named `outskirts6-diagnostic` capture disables environment probes to inspect the morning sky independently.
+The subsequent GIIV atlas implementation preserves each coefficient's dimensions, and `v8-giiv-dawn-smoke.png` validates the same scene with environment probes enabled.
+Earlier Fountainhead/dawn diagnostic runs logged an environment-map shader import failure; the concurrent job's guarded import fixes it in the refreshed captures, without edits to its files here.
+Three final-build paired Owl noon runs with `--simple-ai --uncapped`, measured after 12 s without concurrent Cargo activity, had clear/dome frame medians of 16.374/16.947, 16.508/16.600 and 16.675/16.834 ms.
+Their increases are 0.573, 0.092 and 0.159 ms: median paired cost 0.159 ms, approximately one percent of a 16.7 ms frame, with a 0.092..0.573 ms observed range.
+These are total frame measurements and do not isolate sky GPU time.
+Preliminary trials 1..3 preceded the final shader parameter/channel correction and included concurrent build activity; they are retained but not pooled with the final results.
+Raw samples and replay arguments are retained in `v8-sky-bench.json`, `v8-sky-bench-final.ps1` and `v8-sky-bench-repeat.ps1`, with final results in trials 4..6.
 
 ## 6. Credits and licence notes
 

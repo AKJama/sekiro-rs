@@ -5,6 +5,7 @@ struct Fog {
     density: vec4<f32>, depths: vec4<f32>, sky: vec4<f32>,
     direct: vec4<f32>, opposite: vec4<f32>, direction: vec4<f32>, extinction: vec4<f32>,
     slices: vec4<f32>,
+    sky_blend: vec4<f32>,
 }
 @group(0) @binding(0) var scene: texture_2d<f32>;
 #ifdef MULTISAMPLED_DEPTH
@@ -103,5 +104,10 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         light += exp(-fog.extinction.xyz*tau)*terminal_light*integral;
         tau += delta;
     }
-    return vec4(surface.rgb*exp(-fog.extinction.xyz*tau)+light,surface.a);
+    let fogged=surface.rgb*exp(-fog.extinction.xyz*tau)+light;
+    if depth <= 0.0 && fog.sky_blend.x > 0.5 {
+        // Keep the recovered 20 km background integration at the horizon; sky overhead is unattenuated.
+        return vec4(mix(fogged,surface.rgb,smoothstep(fog.sky_blend.y,fog.sky_blend.z,ray.y)),surface.a);
+    }
+    return vec4(fogged,surface.a);
 }

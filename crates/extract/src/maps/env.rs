@@ -14,6 +14,43 @@ use super::{bc6_hdr, mirror};
 type Pixel = [f32; 4];
 type Cube = [Vec<Pixel>; 6];
 
+/// Retain the native signed/exponent packing, including alpha, without sRGB conversion.
+fn export_volume(texture: &tpf::TpfTexture<'_>, path: &Path) -> Result<()> {
+    let h = texture.header()?;
+    ensure!(
+        texture.kind == 2 && h.format == DdsFormat::Bc7 && !h.srgb,
+        "GIIV must be a linear BC7 volume"
+    );
+    let source = h.top_volume_mip(texture.dds)?;
+    let stride = h.top_mip_len().context("GIIV slice size")?;
+    let mut bytes: Vec<u8> = [h.width, h.height, h.depth]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    let mut pixels = vec![0; h.width as usize * h.height as usize];
+    for slice in source.chunks_exact(stride) {
+        texture2ddecoder::decode_bc7(slice, h.width as usize, h.height as usize, &mut pixels)
+            .map_err(anyhow::Error::msg)?;
+        for pixel in &pixels {
+            let [b, g, r, a] = pixel.to_le_bytes();
+            bytes.extend([r, g, b, a]);
+        }
+    }
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
+fn volume_name(name: &str) -> Option<(u32, u32, char)> {
+    let mut parts = name.strip_prefix("giiv")?.split('_');
+    let probe = parts.next()?.parse().ok()?;
+    let variant = parts.next()?.parse::<u32>().ok()?;
+    let axis = parts.next()?;
+    if variant > 5 || !matches!(axis, "x" | "y" | "z" | "w") || parts.next().is_some() {
+        return None;
+    }
+    Some((probe, variant, axis.chars().next()?))
+}
+
 /// Direct3D/WebGPU cube order: +X, -X, +Y, -Y, +Z, -Z.
 fn direction(face: usize, u: f32, v: f32) -> Vec3 {
     match face {
@@ -259,12 +296,18 @@ pub fn export(raw: &Path, out: &Path, id: &str, msb: &Msb) -> Result<()> {
             let mut count = 0;
             for texture in tpf::parse(&data)? {
                 let name = texture.name.to_ascii_lowercase();
-                let Some(name) = name
-                    .strip_prefix(&format!("{id}_"))
-                    .or_else(|| name.starts_with("gilm").then_some(name.as_str()))
-                else {
+                let Some(name) = name.strip_prefix(&format!("{id}_")).or_else(|| {
+                    (name.starts_with("gilm") || name.starts_with("giiv")).then_some(name.as_str())
+                }) else {
                     continue;
                 };
+                if let Some((probe, variant, axis)) = volume_name(name) {
+                    export_volume(
+                        &texture,
+                        &out.join(format!("env/giiv{probe}_{variant:02}_{axis}.rgba8")),
+                    )?;
+                    continue;
+                }
                 if !name.starts_with("gilm") {
                     continue;
                 }
@@ -320,6 +363,18 @@ pub fn export(raw: &Path, out: &Path, id: &str, msb: &Msb) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn coefficient_names_require_explicit_axis_and_supported_variant() {
+        assert_eq!(volume_name("giiv0346_03_w"), Some((346, 3, 'w')));
+        for name in [
+            "giiv../346_03_x",
+            "giiv346_06_x",
+            "giiv346_03_a",
+            "giiv346_03_x_extra",
+        ] {
+            assert_eq!(volume_name(name), None);
+        }
+    }
     #[test]
     fn cube_axes_and_mirror() {
         let cube: Cube = std::array::from_fn(|f| vec![[f as f32, 0., 0., 1.]; 16]);

@@ -14,7 +14,7 @@ type LayeredMaterial = ExtendedMaterial<StandardMaterial, MapLayers>;
 
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 #[data(50, MapLayersUniform, binding_array(101))]
-#[bindless(index_table(range(50..65), binding(100)))]
+#[bindless(index_table(range(50..72), binding(100)))]
 struct MapLayers {
     // xyz: enabled albedo layers; w: mask present.
     enabled: Vec4,
@@ -45,6 +45,17 @@ struct MapLayers {
     #[texture(63)]
     #[sampler(64)]
     mask: Option<Handle<Image>>,
+    #[storage(65, read_only, binding_array(102))]
+    irradiance: Handle<bevy::render::storage::ShaderBuffer>,
+    #[texture(66, dimension = "cube_array")]
+    #[sampler(67)]
+    specular: Option<Handle<Image>>,
+    #[texture(68, dimension = "cube_array")]
+    #[sampler(69)]
+    diffuse: Option<Handle<Image>>,
+    #[texture(70, dimension = "3d")]
+    #[sampler(71)]
+    voxels: Option<Handle<Image>>,
 }
 
 // Packed once per material; bindless slabs preserve Bevy's multi-draw batching.
@@ -103,7 +114,8 @@ mod tests {
                 debug: false,
                 materials: HashMap::new(),
             })
-            .add_systems(Update, replace_materials);
+            .add_systems(Update, replace_materials)
+            .add_systems(PostUpdate, sync_actor_materials);
         let original = StandardMaterial {
             unlit: true,
             base_color: Color::srgb(0.2, 0.3, 0.4),
@@ -119,6 +131,19 @@ mod tests {
             .spawn((MeshMaterial3d(handle.clone()), ChildOf(root)))
             .id();
         let actor = app.world_mut().spawn(MeshMaterial3d(handle.clone())).id();
+        let rig = app
+            .world_mut()
+            .spawn(crate::character::Rig::new(std::sync::Arc::new(
+                sekiro_formats::anim::Skeleton {
+                    name: String::new(),
+                    bones: vec![],
+                },
+            )))
+            .id();
+        let wolf = app
+            .world_mut()
+            .spawn((MeshMaterial3d(handle.clone()), ChildOf(rig)))
+            .id();
         app.update();
         assert_eq!(
             app.world()
@@ -145,6 +170,33 @@ mod tests {
         assert_eq!(material.base.base_color, original.base_color);
         assert_eq!(material.extension.albedo_enabled, Vec4::ZERO);
         assert_eq!(material.extension.hemi_axis.xyz(), Vec3::Y);
+        assert!(app.world().get::<ActorMaterialSource>(wolf).is_some());
+        app.world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .get_mut(&handle)
+            .unwrap()
+            .emissive = LinearRgba::rgb(0.15, 0.4, 0.9);
+        app.update();
+        let wrapped = &app
+            .world()
+            .get::<MeshMaterial3d<LayeredMaterial>>(wolf)
+            .unwrap()
+            .0;
+        assert_eq!(
+            app.world()
+                .resource::<Assets<LayeredMaterial>>()
+                .get(wrapped)
+                .unwrap()
+                .base
+                .emissive,
+            LinearRgba::rgb(0.15, 0.4, 0.9)
+        );
+        let mut proxies = app
+            .world_mut()
+            .query_filtered::<Entity, With<MaterialTintProxy>>();
+        assert_eq!(proxies.iter(app.world()).count(), 1);
+        app.update();
+        assert_eq!(proxies.iter(app.world()).count(), 1);
     }
 }
 
@@ -174,6 +226,31 @@ struct MapEnvironment<'w, 's> {
     ambient: Res<'w, bevy::light::GlobalAmbientLight>,
     parents: Query<'w, 's, &'static ChildOf>,
     roots: Query<'w, 's, (), With<super::DrawGroups>>,
+    actors: Query<'w, 's, (), With<crate::character::Rig>>,
+    irradiance: Option<Res<'w, crate::lighting::MapIrradiance>>,
+}
+
+/// Retain actor material sources for gameplay tint, while drawing the native ambient wrapper.
+#[derive(Component)]
+struct ActorMaterialSource(Handle<StandardMaterial>);
+
+#[derive(Component)]
+struct MaterialTintProxy;
+
+fn sync_actor_materials(
+    sources: Res<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<LayeredMaterial>>,
+    actors: Query<(&ActorMaterialSource, &MeshMaterial3d<LayeredMaterial>)>,
+) {
+    for (source, target) in &actors {
+        if let Some(base) = sources.get(&source.0)
+            && let Some(mut target) = materials.get_mut(&target.0)
+            && (target.base.base_color != base.base_color || target.base.emissive != base.emissive)
+        {
+            target.base.base_color = base.base_color;
+            target.base.emissive = base.emissive;
+        }
+    }
 }
 
 pub(super) fn install(app: &mut App, prefix: &str, args: &[String]) {
@@ -191,7 +268,8 @@ pub(super) fn install(app: &mut App, prefix: &str, args: &[String]) {
                 .chain()
                 .after(crate::lighting::apply_lighting)
                 .after(crate::lighting::apply_probes),
-        );
+        )
+        .add_systems(PostUpdate, sync_actor_materials);
 }
 
 fn update_hemisphere(
@@ -209,7 +287,8 @@ fn update_hemisphere(
     let set =
         crate::lighting::LightSet::from_gparam(&lighting.gparam, lighting.light_set, lighting.hour);
     let axis = set.hemi_axis.extend(f32::from(ambient.brightness > 0.));
-    let delta = (set.hemi_delta * crate::lighting::ENV_PER_UNIT).extend(0.);
+    let delta =
+        (set.hemi_delta * crate::lighting::ENV_PER_UNIT).extend(crate::lighting::ENV_PER_UNIT);
     for (_, material) in materials.iter_mut() {
         if material.extension.hemi_axis != axis || material.extension.hemi_delta != delta {
             material.extension.hemi_axis = axis;
@@ -218,16 +297,20 @@ fn update_hemisphere(
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn replace_materials(
     mut commands: Commands,
     assets: Res<AssetServer>,
     materials: Res<Assets<StandardMaterial>>,
     mut layered: ResMut<Assets<LayeredMaterial>>,
-    meshes: Query<(
-        Entity,
-        &MeshMaterial3d<StandardMaterial>,
-        Option<&GltfMaterialExtras>,
-    )>,
+    meshes: Query<
+        (
+            Entity,
+            &MeshMaterial3d<StandardMaterial>,
+            Option<&GltfMaterialExtras>,
+        ),
+        Without<MaterialTintProxy>,
+    >,
     mut settings: ResMut<LayerSettings>,
     environment: MapEnvironment,
 ) {
@@ -237,22 +320,26 @@ fn replace_materials(
         ambient,
         parents,
         roots,
+        actors,
+        irradiance,
     } = environment;
     let set =
         crate::lighting::LightSet::from_gparam(&lighting.gparam, lighting.light_set, lighting.hour);
     for (entity, original, extras) in &meshes {
-        // Limit replacement to map descendants. Actor/FX material systems retain
-        // their StandardMaterial handles for animation and gameplay-driven tint.
+        // Map and rig descendants share spatial lighting. Actor tint proxies retain
+        // the StandardMaterial handles used by gameplay; unrelated FX stay untouched.
         let mut ancestor = entity;
         let mut map_surface = roots.contains(ancestor);
-        while !map_surface {
+        let mut actor_surface = actors.contains(ancestor);
+        while !map_surface && !actor_surface {
             let Ok(parent) = parents.get(ancestor) else {
                 break;
             };
             ancestor = parent.parent();
             map_surface = roots.contains(ancestor);
+            actor_surface = actors.contains(ancestor);
         }
-        if !map_surface {
+        if !map_surface && !actor_surface {
             continue;
         }
         // All map surfaces need the hemisphere, even without texture layers.
@@ -314,7 +401,8 @@ fn replace_materials(
                     f32::from(settings.debug),
                 ),
                 hemi_axis: set.hemi_axis.extend(f32::from(ambient.brightness > 0.)),
-                hemi_delta: (set.hemi_delta * crate::lighting::ENV_PER_UNIT).extend(0.),
+                hemi_delta: (set.hemi_delta * crate::lighting::ENV_PER_UNIT)
+                    .extend(crate::lighting::ENV_PER_UNIT),
                 overlay: load("overlay", true),
                 snow: load("snow", true),
                 c: load("c", true),
@@ -322,6 +410,13 @@ fn replace_materials(
                 snow_normal: load("snow_normal", false),
                 c_normal: load("c_normal", false),
                 mask: load("mask", false),
+                irradiance: irradiance
+                    .as_ref()
+                    .map(|i| i.buffer.clone())
+                    .unwrap_or_default(),
+                specular: irradiance.as_ref().map(|i| i.specular.clone()),
+                diffuse: irradiance.as_ref().map(|i| i.diffuse.clone()),
+                voxels: irradiance.as_ref().map(|i| i.voxels.clone()),
             };
             let handle = layered.add(ExtendedMaterial {
                 base: base.clone(),
@@ -334,5 +429,15 @@ fn replace_materials(
             .entity(entity)
             .remove::<MeshMaterial3d<StandardMaterial>>()
             .insert(MeshMaterial3d(handle));
+        if actor_surface {
+            commands
+                .entity(entity)
+                .insert(ActorMaterialSource(original.0.clone()));
+            commands.spawn((
+                MaterialTintProxy,
+                MeshMaterial3d(original.0.clone()),
+                ChildOf(ancestor),
+            ));
+        }
     }
 }

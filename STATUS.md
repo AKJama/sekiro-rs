@@ -4,6 +4,30 @@ Last updated 11 October 2026.
 Read this first in a new session, then `AGENTS.md` and `docs/DESIGN.md`.
 How much of the game is done overall: `docs/PROGRESS.md`.
 
+## GIIV bounce and spatial probe blending (2026-10-11)
+
+Re-extracted all four requested maps with linear BC7 X/Y/Z/W coefficients, preserving independent resolutions and signed/exponent packing in RGBA8 volume exports.
+The shared 3D atlas evaluates native directional diffuse per fragment in matching MSB Env_Box bounds, with cubic fades and GILM box-corrected specular toward Env_Point captures.
+Wolf and enemies use the same shader, with gameplay tint synchronization; `--no-giiv` restores region-blended Lambert diffuse.
+All six requested before/after pairs under `target/alt/visuals/v8-giiv-*` were inspected: subtle warm roof bounce, clearer Hirata banks and spatially varied interior shade, without new visible edge banding/blotches.
+Dawn, probe-disabled and Fountainhead loading controls pass without shader errors, including the previously blocked mixed-resolution Outskirts volumes.
+Two repeated roof comparisons measure about 2.5-2.8 ms additional opaque GPU work; total frame medians remain around 16.6-16.7 ms.
+Formatting, workspace/all-target Clippy, requested release tests (117 passed, two existing ignored) and the release game build pass offline with six jobs in `target/alt`.
+Exact IV/PCC uploads, authored fades/scales, overlap state and time interpolation remain documented approximations in `SHADERS.md` and `VISUALS-PLAN.md`.
+No commits, network, worktrees or protected-path writes.
+
+## Authored sky domes (2026-10-11)
+
+Added camera-centred, unlit m89 meshes with original material masks, reverse-Z infinity, no shadows/depth writes and a native-fog horizon blend over ray Y 0..0.22.
+Local common event 100 and MSB entity groups establish nearest 0/2/6/12/18/22 skies for m11_00/m11_01 and fixed compound m900060/m900070 skies for m10/m25.
+The supplemental sky-only export reuses existing GLBs and writes only under `cache/maps/`; `--no-sky-dome` restores the old clear colour.
+Sky shares HDR exposure/tone mapping; unresolved SAT colour packing uses gamma two, Ver2 gain 8 and original Fountainhead/Cloud gain 1.
+Captured and inspected the requested views plus upward/lake/clear controls under `target/alt/visuals/v8-sky-*`; the initial Outskirts 6 h GIIV dimension mismatch was isolated with a labelled sky-only diagnostic and subsequently fixed by the GIIV session above.
+Three final-build paired Owl runs measure median added frame cost 0.159 ms, range 0.092..0.573 ms; raw samples are in `v8-sky-bench.json`.
+Formatting, workspace/all-target Clippy, requested release tests and the alternate release game build pass with six jobs.
+Selection, capture judgements, calibration and remaining cloud/event/LightShaft gaps are documented in `MAP-BASELINE.md` and `VISUALS-PLAN.md`.
+No commits, network or protected-path edits.
+
 ## Animation blend continuity (2026-10-11)
 
 Wolf and NPC fades now retain the displayed local pose when interrupted, including any unfinished crossfade, with character-clock hit-stop freezing.

@@ -365,6 +365,280 @@ impl ShadowSettings {
 /// Irradiance-to-radiance bridge shared by hemisphere and environment lighting.
 pub const ENV_PER_UNIT: f32 = SCENE_TO_BEVY / std::f32::consts::PI;
 
+/// Native RGBA8 coefficient voxels and spatial records, shared by every map/actor material.
+#[derive(Resource)]
+pub struct MapIrradiance {
+    pub buffer: Handle<bevy::render::storage::ShaderBuffer>,
+    pub specular: Handle<Image>,
+    pub diffuse: Handle<Image>,
+    pub voxels: Handle<Image>,
+}
+
+/// Pack four coefficient planes side-by-side in one hardware-filtered 3D atlas.
+fn irradiance_atlas(records: &mut [[u32; 52]], source: &[u32]) -> anyhow::Result<Image> {
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    let width = records
+        .iter()
+        .map(|r| r[16])
+        .max()
+        .unwrap_or(1)
+        .max(128)
+        .next_power_of_two();
+    let height = records
+        .iter()
+        .map(|r| r[17])
+        .max()
+        .unwrap_or(1)
+        .max(128)
+        .next_power_of_two();
+    let (mut x, mut y, mut z, mut row_height, mut layer_depth) = (0, 0, 0, 0, 0);
+    let mut locations = vec![[0; 3]; records.len()];
+    // Deepest volumes first prevents a shallow box from wasting a deep shelf.
+    let mut order: Vec<_> = (0..records.len()).collect();
+    order.sort_by_key(|i| std::cmp::Reverse(records[*i][18]));
+    for i in order {
+        let r = &records[i];
+        if x + r[16] > width {
+            x = 0;
+            y += row_height;
+            row_height = 0;
+        }
+        if y + r[17] > height {
+            x = 0;
+            y = 0;
+            z += layer_depth;
+            layer_depth = 0;
+            row_height = 0;
+        }
+        locations[i] = [x, y, z];
+        x += r[16];
+        row_height = row_height.max(r[17]);
+        layer_depth = layer_depth.max(r[18]);
+    }
+    let depth = (z + layer_depth).max(1);
+    anyhow::ensure!(
+        width * 4 <= 2048 && height <= 2048 && depth <= 2048,
+        "GIIV atlas exceeds portable 3D texture limits"
+    );
+    let mut data = vec![0u8; (width * 4) as usize * height as usize * depth as usize * 4];
+    for (r, location) in records.iter_mut().zip(locations) {
+        let [ox, oy, oz] = location;
+        for axis in 0..4 {
+            let dims = &r[40 + axis * 3..43 + axis * 3];
+            for slice in 0..dims[2] {
+                for row in 0..dims[1] {
+                    let src = (r[20 + axis] + (slice * dims[1] + row) * dims[0]) as usize;
+                    let dst = (((oz + slice) * height + oy + row) * (width * 4)
+                        + ox
+                        + axis as u32 * width) as usize
+                        * 4;
+                    for (i, pixel) in source[src..src + dims[0] as usize].iter().enumerate() {
+                        data[dst + i * 4..dst + i * 4 + 4].copy_from_slice(&pixel.to_le_bytes());
+                    }
+                }
+            }
+        }
+        r[20..24].copy_from_slice(&[ox, oy, oz, width]);
+    }
+    let mut image = Image::new_uninit(
+        Extent3d {
+            width: width * 4,
+            height,
+            depth_or_array_layers: depth,
+        },
+        TextureDimension::D3,
+        TextureFormat::Rgba8Unorm,
+        default(),
+    );
+    image.data = Some(data);
+    image.sampler = bevy::image::ImageSampler::linear();
+    info!(
+        "GIIV atlas: {}x{height}x{depth}, {:.1} MiB",
+        width * 4,
+        image.data.as_ref().unwrap().len() as f32 / (1024. * 1024.)
+    );
+    Ok(image)
+}
+
+fn probe_array(dir: &std::path::Path, probes: &MapProbes, diffuse: bool) -> anyhow::Result<Image> {
+    use anyhow::ensure;
+    use bevy::render::render_resource::{
+        Extent3d, TextureDataOrder, TextureDimension, TextureFormat, TextureViewDescriptor,
+        TextureViewDimension,
+    };
+    let size: u32 = if diffuse { 16 } else { 128 };
+    let levels = if diffuse { 1 } else { 8 };
+    let suffix = if diffuse { "_diffuse" } else { "" };
+    let count = probes.available.len().max(1) as u32;
+    let mut data = Vec::new();
+    let face_bytes: usize = (0..levels).map(|m| (size >> m).pow(2) as usize * 8).sum();
+    for probe in &probes.available {
+        let bytes =
+            std::fs::read(dir.join(format!("env/gilm{probe}_{:02}{suffix}.dds", probes.variant)))?;
+        ensure!(
+            bytes.len() == 128 + face_bytes * 6 && bytes.starts_with(b"DDS "),
+            "invalid exported GILM cube"
+        );
+        data.extend_from_slice(&bytes[128..]);
+    }
+    if data.is_empty() {
+        data.resize(face_bytes * 6, 0);
+    }
+    let mut image = Image::new_uninit(
+        Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: count * 6,
+        },
+        TextureDimension::D2,
+        TextureFormat::Rgba16Float,
+        default(),
+    );
+    image.texture_descriptor.mip_level_count = levels;
+    image.texture_view_descriptor = Some(TextureViewDescriptor {
+        dimension: Some(TextureViewDimension::CubeArray),
+        ..default()
+    });
+    image.data_order = TextureDataOrder::LayerMajor;
+    image.data = Some(data);
+    image.sampler = bevy::image::ImageSampler::linear();
+    Ok(image)
+}
+
+pub fn install_irradiance(
+    app: &mut App,
+    dir: &std::path::Path,
+    probes: &MapProbes,
+) -> anyhow::Result<()> {
+    use anyhow::{Context, ensure};
+    let mut regions: Vec<_> = probes.regions.iter().filter(|r| r.size.is_some()).collect();
+    regions.sort_by(|a, b| {
+        b.size
+            .unwrap()
+            .element_product()
+            .total_cmp(&a.size.unwrap().element_product())
+    });
+    let enabled = !std::env::args().any(|a| a == "--no-giiv");
+    let indices: std::collections::BTreeMap<_, _> = probes
+        .available
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (*p, i as u32))
+        .collect();
+    let mut records = Vec::<[u32; 52]>::new();
+    let mut voxels = Vec::new();
+    {
+        for region in regions {
+            let Some(cube) = indices.get(&region.probe) else {
+                continue;
+            };
+            let mut dimensions = [0u32; 3];
+            let mut axis_dimensions = [[0u32; 3]; 4];
+            let mut offsets = [0; 4];
+            let mut coefficients = Vec::new();
+            for (index, (axis, offset)) in ['x', 'y', 'z', 'w']
+                .into_iter()
+                .zip(&mut offsets)
+                .enumerate()
+            {
+                let path = dir.join(format!(
+                    "env/giiv{}_{:02}_{axis}.rgba8",
+                    region.probe, probes.variant
+                ));
+                if !path.exists() {
+                    break;
+                }
+                let bytes =
+                    std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+                ensure!(bytes.len() >= 12, "truncated GIIV header");
+                let dims: [u32; 3] = std::array::from_fn(|i| {
+                    u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())
+                });
+                ensure!(
+                    dims.iter().all(|d| *d > 0 && *d <= 2048),
+                    "invalid GIIV dimensions"
+                );
+                ensure!(
+                    bytes.len() == 12 + dims.iter().map(|d| *d as usize).product::<usize>() * 4,
+                    "truncated GIIV voxels"
+                );
+                axis_dimensions[index] = dims;
+                dimensions = std::array::from_fn(|i| dimensions[i].max(dims[i]));
+                *offset = coefficients.len() as u32;
+                coefficients.extend(
+                    bytes[12..]
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|b| u32::from_le_bytes(*b)),
+                );
+            }
+            if axis_dimensions.iter().any(|dims| dims.contains(&0)) {
+                continue;
+            }
+            let size = region.size.unwrap();
+            ensure!(
+                size.is_finite() && size.min_element() > 0.,
+                "invalid GIIV extent"
+            );
+            // UV is native left-handed box space, Y bottom-centred like MSB.
+            let world =
+                Mat4::from_scale_rotation_translation(size, region.rotation, region.position);
+            let uv = Mat4::from_translation(Vec3::new(0.5, 0., 0.5))
+                * Mat4::from_scale(Vec3::new(-1., 1., 1.))
+                * world.inverse();
+            let mut record = [0; 52];
+            record[..16].copy_from_slice(&uv.to_cols_array().map(f32::to_bits));
+            record[16..19].copy_from_slice(&dimensions);
+            for (axis, dims) in axis_dimensions.iter().enumerate() {
+                record[40 + axis * 3..43 + axis * 3].copy_from_slice(dims);
+            }
+            record[19] = *cube;
+            record[20..24].copy_from_slice(&offsets.map(|o| o + voxels.len() as u32));
+            let center = region.position + region.rotation * Vec3::Y * size.y * 0.5;
+            let extent = Mat3::from_quat(region.rotation).abs() * size * 0.5;
+            record[24..27].copy_from_slice(&(center - extent).to_array().map(f32::to_bits));
+            record[28..31].copy_from_slice(&(center + extent).to_array().map(f32::to_bits));
+            record[32..35].copy_from_slice(&size.to_array().map(f32::to_bits));
+            let origin = probes
+                .regions
+                .iter()
+                .find(|r| r.probe == region.probe && r.size.is_none())
+                .map_or(center, |r| r.position);
+            record[36..39].copy_from_slice(&origin.to_array().map(f32::to_bits));
+            records.push(record);
+            voxels.extend(coefficients);
+        }
+    }
+    let count = records.len();
+    let atlas = irradiance_atlas(&mut records, &voxels)?;
+    let mut data = vec![count as u32, u32::from(enabled), 0, 0];
+    for record in records {
+        data.extend(record);
+    }
+    let buffer = app
+        .world_mut()
+        .resource_mut::<Assets<bevy::render::storage::ShaderBuffer>>()
+        .add(bevy::render::storage::ShaderBuffer::from(data));
+    let specular = probe_array(dir, probes, false)?;
+    let diffuse = probe_array(dir, probes, true)?;
+    let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+    let specular = images.add(specular);
+    let diffuse = images.add(diffuse);
+    let voxels = images.add(atlas);
+    info!(
+        "GIIV: {count} complete native coefficient volumes, enabled {enabled}, variant {}",
+        probes.variant
+    );
+    app.insert_resource(MapIrradiance {
+        buffer,
+        specular,
+        diffuse,
+        voxels,
+    });
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct ProbeRegion {
     pub probe: u32,
@@ -435,7 +709,7 @@ impl MapProbes {
     }
 }
 
-/// Cut between authored probes; use hemisphere ambient until both images load successfully.
+/// Spatial reflection probes fade per receiver, so crossing boxes never cuts the whole view.
 #[allow(clippy::type_complexity)]
 pub fn apply_probes(
     mut commands: Commands,
@@ -451,10 +725,24 @@ pub fn apply_probes(
     // scenery blown up behind the world; the real sky is the map's dome meshes. Lighting only,
     // unless `--probe-sky` asks to see the capture for debugging.
     let show_sky = *probe_sky.get_or_insert_with(|| std::env::args().any(|a| a == "--probe-sky"));
-    let selected = focus
+    // Stable enclosing fallback rather than a camera-driven region hard cut.
+    let selected = probes
+        .regions
         .iter()
-        .next()
-        .and_then(|t| probes.choose(t.translation));
+        .filter(|r| probes.available.contains(&r.probe) && r.size.is_some())
+        .max_by(|a, b| {
+            a.size
+                .unwrap()
+                .element_product()
+                .total_cmp(&b.size.unwrap().element_product())
+        })
+        .map(|r| r.probe)
+        .or_else(|| {
+            focus
+                .iter()
+                .next()
+                .and_then(|t| probes.choose(t.translation))
+        });
     let maps = selected.map(|id| {
         if !probes.handles.contains_key(&id) {
             let specular = assets.load(format!(
@@ -688,6 +976,136 @@ pub fn apply_lighting(
 #[cfg(test)]
 mod probe_tests {
     use super::*;
+    #[test]
+    fn atlas_preserves_independent_coefficient_resolutions() {
+        let mut record = [0u32; 52];
+        record[16..19].copy_from_slice(&[4, 3, 2]);
+        let dimensions = [[2, 1, 1], [4, 3, 2], [1, 2, 1], [3, 1, 2]];
+        let mut source = Vec::new();
+        for (axis, dims) in dimensions.iter().enumerate() {
+            record[20 + axis] = source.len() as u32;
+            record[40 + axis * 3..43 + axis * 3].copy_from_slice(dims);
+            source.extend((0..dims.iter().product::<u32>()).map(|i| i + axis as u32 * 100));
+        }
+        let atlas = irradiance_atlas(std::slice::from_mut(&mut record), &source).unwrap();
+        let data = atlas.data.unwrap();
+        let size = atlas.texture_descriptor.size;
+        for (axis, [w, h, d]) in dimensions.into_iter().enumerate() {
+            for z in 0..d {
+                for y in 0..h {
+                    for x in 0..w {
+                        let index = ((z * size.height + y) * size.width
+                            + axis as u32 * record[23]
+                            + x) as usize
+                            * 4;
+                        let actual = u32::from_le_bytes(data[index..index + 4].try_into().unwrap());
+                        assert_eq!(actual, (z * h + y) * w + x + axis as u32 * 100);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cached_volume_upload_matches_native_axes_and_cube_array_layout() {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/maps/m11_01_00_00");
+        if !dir.join("env/giiv0_02_w.rgba8").exists() {
+            return;
+        }
+        let env: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("env.json")).unwrap()).unwrap();
+        let r = env["regions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["probe"] == 0 && !r["size"].is_null())
+            .unwrap();
+        let mut probes = MapProbes {
+            variant: 2,
+            ..default()
+        };
+        probes.available.insert(0);
+        let position = Vec3::from_array(serde_json::from_value(r["position"].clone()).unwrap());
+        let rotation = Quat::from_array(serde_json::from_value(r["rotation"].clone()).unwrap());
+        let size = Vec3::from_array(serde_json::from_value(r["size"].clone()).unwrap());
+        probes.regions.push(ProbeRegion {
+            probe: 0,
+            position,
+            rotation,
+            size: Some(size),
+        });
+        let mut app = App::new();
+        app.insert_resource(Assets::<bevy::render::storage::ShaderBuffer>::default())
+            .insert_resource(Assets::<Image>::default());
+        install_irradiance(&mut app, &dir, &probes).unwrap();
+        let gi = app.world().resource::<MapIrradiance>();
+        let buffer = app
+            .world()
+            .resource::<Assets<bevy::render::storage::ShaderBuffer>>()
+            .get(&gi.buffer)
+            .unwrap();
+        let words: Vec<u32> = buffer
+            .data
+            .as_ref()
+            .unwrap()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| u32::from_le_bytes(*b))
+            .collect();
+        assert_eq!(words[0], 1);
+        assert_eq!(words[23], 0); // First cube array layer, independent of sparse probe IDs.
+        let matrix = Mat4::from_cols_array(&std::array::from_fn(|i| f32::from_bits(words[4 + i])));
+        assert!((matrix.transform_point3(position) - Vec3::new(0.5, 0., 0.5)).length() < 0.0001);
+        assert!(
+            (matrix
+                .transform_point3(position + rotation * Vec3::X * size.x * 0.5)
+                .x)
+                .abs()
+                < 0.0001
+        );
+        assert_eq!(&words[24..27], &[0, 0, 0]);
+        assert!(words[27] >= words[20]);
+        let voxels = app
+            .world()
+            .resource::<Assets<Image>>()
+            .get(&gi.voxels)
+            .unwrap();
+        assert_eq!(
+            voxels.texture_descriptor.dimension,
+            bevy::render::render_resource::TextureDimension::D3
+        );
+        let raw = std::fs::read(dir.join("env/giiv0_02_x.rgba8")).unwrap();
+        assert_eq!(&voxels.data.as_ref().unwrap()[..4], &raw[12..16]);
+        for (axis, name) in ['x', 'y', 'z', 'w'].into_iter().enumerate() {
+            let raw = std::fs::read(dir.join(format!("env/giiv0_02_{name}.rgba8"))).unwrap();
+            let (w, h, d) = (words[20], words[21], words[22]);
+            let image_width = voxels.texture_descriptor.size.width;
+            let image_height = voxels.texture_descriptor.size.height;
+            for (native, atlas) in [
+                (0, axis as u32 * words[27]),
+                (
+                    w * h * d - 1,
+                    ((d - 1) * image_height + h - 1) * image_width + axis as u32 * words[27] + w
+                        - 1,
+                ),
+            ] {
+                assert_eq!(
+                    &voxels.data.as_ref().unwrap()[atlas as usize * 4..atlas as usize * 4 + 4],
+                    &raw[12 + native as usize * 4..16 + native as usize * 4]
+                );
+            }
+        }
+        for handle in [&gi.specular, &gi.diffuse] {
+            let image = app.world().resource::<Assets<Image>>().get(handle).unwrap();
+            assert_eq!(image.texture_descriptor.size.depth_or_array_layers, 6);
+            assert_eq!(
+                image.texture_view_descriptor.as_ref().unwrap().dimension,
+                Some(bevy::render::render_resource::TextureViewDimension::CubeArray)
+            );
+        }
+    }
     #[test]
     fn squared_light_colours_and_hemisphere_endpoints() {
         use sekiro_formats::gparam::{Entry, Group, Param, Value};

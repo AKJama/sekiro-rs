@@ -17,6 +17,39 @@ pub struct TpfTexture<'a> {
     pub dds: &'a [u8],
 }
 
+#[cfg(test)]
+mod volume_tests {
+    use super::*;
+
+    #[test]
+    fn bc7_volume_keeps_all_top_mip_slices_and_rejects_truncation() {
+        let mut bytes = vec![0u8; 148 + 3 * 32];
+        bytes[..4].copy_from_slice(b"DDS ");
+        for (offset, value) in [
+            (4, 124u32),
+            (12, 4),
+            (16, 8),
+            (24, 3),
+            (28, 2),
+            (80, 4),
+            (128, 98),
+            (132, 4),
+            (140, 1),
+        ] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes[84..88].copy_from_slice(b"DX10");
+        bytes[148..180].fill(11);
+        bytes[180..212].fill(22);
+        bytes[212..244].fill(33);
+        let header = Dds::parse(&bytes).unwrap();
+        assert_eq!((header.width, header.height, header.depth), (8, 4, 3));
+        assert_eq!(header.top_volume_mip(&bytes).unwrap().len(), 96);
+        assert_eq!(header.top_volume_mip(&bytes).unwrap()[64], 33);
+        assert!(header.top_volume_mip(&bytes[..243]).is_err());
+    }
+}
+
 impl TpfTexture<'_> {
     pub fn header(&self) -> Result<Dds> {
         Dds::parse(self.dds)
@@ -131,6 +164,8 @@ impl DdsFormat {
 pub struct Dds {
     pub width: u32,
     pub height: u32,
+    /// Number of Z slices for a volume, one for a 2D image.
+    pub depth: u32,
     pub mip_count: u32,
     pub format: DdsFormat,
     pub srgb: bool,
@@ -148,7 +183,7 @@ impl Dds {
         let height = r.u32()?;
         let width = r.u32()?;
         let _pitch = r.u32()?;
-        let _depth = r.u32()?;
+        let depth = r.u32()?.max(1);
         let mip_count = r.u32()?.max(1);
         r.seek(0x50);
         let pf_flags = r.u32()?;
@@ -188,6 +223,7 @@ impl Dds {
         Ok(Self {
             width,
             height,
+            depth,
             mip_count,
             format,
             srgb,
@@ -211,6 +247,17 @@ impl Dds {
     pub fn top_mip<'a>(&self, data: &'a [u8]) -> Result<&'a [u8]> {
         let Some(len) = self.top_mip_len() else {
             return bail(format!("unsupported DDS format {:?}", self.format));
+        };
+        crate::reader::slice(data, self.data_offset, len)
+    }
+
+    /// Contiguous Z slices of mip zero, before the smaller volume mips.
+    pub fn top_volume_mip<'a>(&self, data: &'a [u8]) -> Result<&'a [u8]> {
+        let len = self
+            .top_mip_len()
+            .and_then(|n| n.checked_mul(self.depth as usize));
+        let Some(len) = len else {
+            return bail("unsupported or overflowing DDS volume");
         };
         crate::reader::slice(data, self.data_offset, len)
     }

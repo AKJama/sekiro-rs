@@ -461,7 +461,7 @@ Per-view history is independent, retained across resize and released when its ca
 Remaining post gaps are the exact full-screen reduction/downsample layout, native table interpolation precision, reset-counter timing, frame-delta units, quality scale, full bloom/temporal schedule, colour matrix/vignette, LUT blending and HDR display branch.
 Bevy's existing daylight camera/light-unit calibration remains outside this post replacement.
 The v7 follow-up ports fog and LightSet colour/hemisphere CPU transforms.
-GIIV remains recommendation 3 and is not implemented by this change.
+GIIV was subsequently implemented by the v8 work documented under spatial ambient below.
 
 ## Deferred lighting, ambient and environment
 
@@ -540,9 +540,45 @@ Neither the simple skybox tint nor every map's separate sky-dome shader is mappe
 Fog SkyColor must not automatically be equated to skybox material tint.
 
 Current Bevy selects GILM probes by spatial regions with `ENV_PER_UNIT=SCENE_TO_BEVY/pi` and squared-RGB hemisphere mean fallback; all map materials also evaluate the directional coefficient.
-It approximates diffuse irradiance with an exported Lambert cube, uses approximate specular mips, switches probes without native fades and omits GIIV coefficient sampling and native box parallax correction.
+The v8 renderer samples native GIIV coefficients per fragment, uses cubic spatial region fades and retains GILM for specular with box parallax correction.
+The exported Lambert cube remains the diffuse fallback outside complete volumes and under `--no-giiv`; specular mip filtering remains approximate.
 Sun and fill use squared RGB times W with SCENE_TO_BEVY=4500; hemisphere/probes use that scale divided by pi, while BTL uses the same inferred candela bridge times 4*pi for lumens.
-**Recommendation:** add native GIIV decoding/basis evaluation and region fades/PCC, preserve separate authored diffuse/specular light colours, and implement the recovered BRDF without claiming physical units until the CPU upload scale is established.
+**Implemented portion of recommendation 3:** GIIV decoding/basis evaluation, receiver-based region blending and box reflection correction.
+Preserving independent authored diffuse/specular source scales and replacing Bevy's material BRDF still require further CPU recovery.
+
+#### GIIV implementation (2026-10-11, v8)
+
+The assets explicitly name the four linear BC7 volumes `GIIV<probe>_<variant>_X/Y/Z/W`.
+The DDS reader retains depth and validates all contiguous mip-zero Z slices; extraction writes each decoded RGBA8 volume to `cache/maps/<id>/env/giiv<probe>_<variant>_<axis>.rgba8`.
+The file starts with three little-endian u32 dimensions, followed by native X-fastest RGBA8 texels, with no gamma conversion or coefficient normalization.
+Hirata's first TPF supplies the volumes and its `_00_second.tpf` supplies the cubes.
+All four requested maps were re-extracted using `SEKIRO_MAP_ENV_ONLY=1`, which skips geometry/collision work after environment export.
+
+The runtime packs coefficients into a shared hardware-filtered 3D RGBA8 atlas and GILM diffuse/specular cubes into cube arrays.
+Each coefficient retains its own resolution, including six Outskirts time variants whose X/Y/Z/W dimensions differ.
+Per-region matrices, dimensions, atlas locations, bounds and capture origins use a small shared storage buffer.
+This retains bindless map batching and avoids per-material voxel copies.
+Original WGSL interpolates encoded RGBA first, then applies the documented signed exponential decoder and world-normal directional basis.
+Mirroring X applies both to receiver coordinates and the normal's X coefficient.
+The existing `ENV_PER_UNIT=SCENE_TO_BEVY/pi` bridge is applied once, with Bevy view exposure and diffuse occlusion at the lighting boundary.
+The volume replaces probe diffuse rather than accumulating it twice; GILM specular remains separate.
+
+Probe IDs match numeric `Env_Box` and `Env_Point` names.
+The box's rotation, bottom-centred position and full extent define volume coordinates; the matching point supplies the reflection capture origin.
+Cubic minimum-face-distance fades apply per receiver, with larger enclosing boxes evaluated before smaller local boxes.
+The camera has a stable enclosing fallback instead of changing the entire scene's probe on a boundary crossing.
+Reflection rays intersect the oriented box and sample toward the intersection relative to the capture point; invalid intersections suppress that region's reflection.
+
+Wolf and rigged enemies use the same material shader, world positions and normals as map surfaces.
+Invisible material-source proxies retain the StandardMaterial handles used by gameplay tint, and the wrapper synchronizes colour/emissive changes after gameplay updates.
+Unlit surfaces retain their unlit path.
+`--no-giiv` retains region-blended Lambert diffuse, GILM reflections and hemisphere fallback.
+
+Placement by matching MSB probe IDs is asset evidence; the executable's exact filename resolver and independent irradiance/PCC transforms remain untraced.
+Texture padding versus physical voxel spacing, region upload fade widths, independent diffuse/specular scales and native overlapping-pass blend state remain open.
+The current choices are a one-voxel fade, MSB boxes for both volume and PCC bounds, unit source scales, enclosing-to-local compositing and nearest available time variant.
+These are explicit approximations, not recovered CPU uploads.
+The separate dynamic cascaded GI-volume pass is not implemented.
 
 ## CPU transforms and remaining questions
 
@@ -555,7 +591,7 @@ Still open:
 - BTL native colour/intensity units, LightBankId/LightId routing and the native time-blend factor.
 - Renderer quality scalars for local fog collection distance and bloom, frame-delta units, and confirmation of the shipped CPU versus GPU adaptation path.
 - Scene-composite blend state, native froxel allocation/padding and local/global write scheduling, local fog, directional shadow/reprojection and independent transparent fog depth.
-- GIIV/GILM binding, spatial fades/parallax correction, separate diffuse/specular material response, and directional hemisphere on actor/FX StandardMaterial meshes.
+- Exact GIIV/GILM CPU binding, independent irradiance/PCC transforms, authored fade distances/scales and native overlap blend state; separate diffuse/specular material response and directional hemisphere on FX meshes.
 - LUT ID resolution/blending, colour matrix/vignette producers, exact tone-table/reduction layouts, full bloom/temporal scheduling and HDR display output.
 
 ## How to reproduce
@@ -581,6 +617,7 @@ No Cargo build or tests are required to validate this documentation-only researc
 1. Replace the clamped exponential DistanceFog/glow approximation with native signed-height density, separate source start distances, channel extinction and midpoint integration, then share the volume with forward geometry.
 2. Implemented for the ordinary post arithmetic and resolved CPU controls: biased-log metering/adaptation, native transfer functions, luminance-subtractive bloom and grading after output power.
    Exact reduction, table interpolation, full bloom scheduling and temporal/HDR variants remain open implementation work.
-3. Add native GIIV directional irradiance and environment region blending/PCC, then preserve independent diffuse/specular light inputs and the tuned BRDF.
+3. GIIV directional irradiance and environment region blending/PCC are implemented with the explicit v8 placement/upload approximations above.
+   Recover independent diffuse/specular light inputs and the tuned BRDF next.
 
 These recommendations separate recovered shader behavior from the still-required CPU parameter recovery, so implementation can expose the unknown transforms explicitly instead of hiding them in new calibration constants.
