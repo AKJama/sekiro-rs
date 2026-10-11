@@ -12,6 +12,8 @@
 !/Cargo.lock
 !/rust-toolchain.toml
 !/rustfmt.toml
+!/config/
+!/config/*.toml
 !/docs/
 !/docs/**/
 !/docs/**/*.md
