@@ -21,15 +21,12 @@ use bevy::render::{
 // Native renderer-global quality scale is unresolved; constructor G is one.
 pub const BLOOM_QUALITY_SCALE: f32 = 1.0;
 pub const OUTPUT_GAMMA: f32 = 2.2;
-// Bevy's existing 9000-lux/daylight exposure does not establish native radiance
-// units. A single shared conversion preserves snow detail in v6 comparisons.
-pub const BEVY_HDR_TO_NATIVE_RADIANCE: f32 = 0.5;
 // The native dt unit is presumed seconds; keep the assumption explicit.
 const NATIVE_DELTA_UNITS_PER_SECOND: f32 = 1.0;
 
 #[derive(Component, Clone, ExtractComponent, ShaderType, Debug)]
 pub struct GamePost {
-    // Exposure * radiance conversion, meter radiance conversion, MiddleGray, auto.
+    // Verified 250060: 2^Exposure, shipped inverse PreExposure=1, MiddleGray, auto.
     pub exposure: Vec4,
     // Adaptation min/max EV, bright/dark base-10 rate arguments per frame.
     pub adaptation: Vec4,

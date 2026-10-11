@@ -24,8 +24,19 @@ fn native_post_shaders_compose_and_validate() {
     );
     let id = assets.add(fullscreen.clone()).id();
     cache.set_shader(id, fullscreen);
+    let view = Shader::from_wgsl(
+        "#define_import_path bevy_render::view\nstruct View { world_from_clip: mat4x4<f32>, world_from_view: mat4x4<f32>, world_position: vec3<f32> }",
+        "view_test.wgsl",
+    );
+    let id = assets.add(view.clone()).id();
+    cache.set_shader(id, view);
     for (name, source, variants) in [
         ("exposure", include_str!("../src/exposure.wgsl"), vec![None]),
+        (
+            "fog",
+            include_str!("../src/fog.wgsl"),
+            vec![None, Some("MULTISAMPLED_DEPTH")],
+        ),
         (
             "tonemap",
             include_str!("../src/tonemap.wgsl"),

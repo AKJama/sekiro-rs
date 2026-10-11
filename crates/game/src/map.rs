@@ -507,7 +507,7 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
         .insert_resource(ClearColor(SKY))
         .insert_resource(GlobalAmbientLight {
             color: Color::srgb(0.80, 0.85, 1.0),
-            brightness: 900.0,
+            brightness: crate::lighting::ENV_PER_UNIT,
             ..default()
         })
         .insert_resource(Layout {

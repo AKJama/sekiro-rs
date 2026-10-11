@@ -14,6 +14,21 @@ Sources:
 We write our own code.
 Borrowed facts get a light credit in `CREDITS.md` where used (one FwLo entry already exists).
 
+## Verified CPU upload follow-up (v7, 2026-10-11)
+
+**[V]** `SHADER-INPUTS.md` now drives fog GameScale lengths and inverse densities, raw signed world height, geometric depth slices, source gates, extinction `1+AbsorptionScale`, directional slant and byte/gamma-2.2 colours.
+**[V]** LightSet RGB is squared before multiplying W; map surfaces evaluate the hemisphere mean and directional coefficient, including surfaces without texture layers.
+**[I]** A single `SCENE_TO_BEVY=4500` bridges native light units to Bevy; hemisphere/probes use the derived `/pi` scale and BTL uses the inferred `4*pi` lumen conversion.
+The former sun 9000, ambient 1800, local-light 0.1 multiplier and post-input 0.5 are removed.
+**[V]** The existing native post implementation matches EV soft limits, log2 MiddleGray, dt adaptation, raw bloom threshold, normalized final bloom colour and sensitometric mode 7 with final gamma 1/2.2; no extra post radiance scale remains.
+Seven matched `target/alt/visuals/v7-*-before.png` and `v7-*-final.png` pairs cover Owl noon, Genichiro 18, Outskirts start 3 at 6/12/18, Castle start 1 and Hirata start 0.
+All were visually inspected against v5/v6: foreground fog no longer washes out the gate, distant terrain remains hazy, snowy stairs and ground retain texture, noon shade is cool and dawn/dusk colours remain warmer.
+The sampled world crops contain no pure-white pixels; the Castle near-white fraction falls from 0.467% to 0.0056%.
+The extra probe-disabled capture `v7-outskirts12-hemi-fixed.png` verifies the directional fallback without black blocks.
+**[I]** Native light-bank routing and BTL units, nearest-byte rounding, renderer dt/quality semantics and the hemisphere axis field remain unresolved.
+Actors/FX retain mean ambient while their StandardMaterial handles support gameplay tint; native GIIV, froxel allocation/local shadows, transparent fog, sky dome, bloom scheduling and exact tone tables remain implementation gaps.
+Formatting, workspace/all-target Clippy, release game/formats/extract tests and the release game build pass offline with six jobs in `target/alt`.
+
 ## 1. Where we are today
 
 ### 1.1 What renders now **[V]**
@@ -462,7 +477,7 @@ Metering uses sixteen samples per reduction cell on a 64x64 grid, native biased 
 Adaptation uses authored MiddleGray and `1-10^(-dt*speed)`, then the native soft EV shoulders rather than hard clamps or the old +2 EV ceiling.
 The CPU path's previous-frame adaptation gain is retained entirely on GPU.
 Gain `2^Exposure*2^(-softlimitedEV)` applies to scene and bright extraction; shipped native pre-exposure is one.
-One shared renderer-unit conversion, `BEVY_HDR_TO_NATIVE_RADIANCE=0.5`, applies to meter and scene because the existing Bevy light/daylight camera calibration does not establish native radiance units.
+The v7 follow-up folds the former `BEVY_HDR_TO_NATIVE_RADIANCE=0.5` into a single light bridge `SCENE_TO_BEVY=4500`; post and metering scales are now one.
 It leaves the recovered GPARAM transforms intact and addresses the rejected unconverted noon candidate's 1.03 percent pure-white world pixels.
 Missing rates use traced LightAdapt 1 and DarkAdapt 0.5, and elapsed time is presumed seconds.
 
@@ -481,7 +496,7 @@ Its exact trilinear input is the ordinary output-power result; storage conversio
 Display dither runs after grading, or after tone transfer when grading is absent.
 HUD colours stay outside the chain.
 GIIV export, coefficient sampling, region fades and parallax correction remain pending under section 3.2/recommendation 3.
-Newly resolved fog/light CPU transforms remain for their own follow-up.
+The v7 follow-up below applies the resolved fog/light CPU transforms.
 
 The seven requested matched scene pairs are `target/alt/visuals/v6-{owl,genichiro,outskirts6,outskirts12,outskirts18,interior,hirata}-{before,final}.png`.
 Every before/final view was inspected, along with noon controls for bloom, adaptation, grading, filmic/Reinhard overrides and the extra Castle midnight view.
@@ -664,7 +679,7 @@ Only the base mask is bound, and normal layers use our existing BC5 conversion w
 - Behaviour: `HeightFogDensity Scale`, `HeightFogOffset`, `HeightFogDistribution`, `StartDist`, `OppositeColor`.
   The shader recovery in `SHADERS.md` supersedes the earlier exponential-model proposal.
 - Check: m10_00_00_00 (Hirata, foggy) and m17_00_00_00 start views at 12 h.
-- Risk: `GameScale` and the real distance units are unverified [I], keep a tuning knob.
+- Resolved [V]: `SHADER-INPUTS.md` establishes GameScale length/density conversion and raw metre-based height offset.
 
 #### Step 7 status (2026-10-11)
 
@@ -672,8 +687,8 @@ Bevy `DistanceFog` is replaced with the recovered global density, directional bl
 This is an HDR depth-based pass before bloom and tone mapping, using the main depth texture with MSAA preserved.
 Sky/background and map/character scene pixels share the same integration.
 `--no-fog` disables the pass, and `--visual-stats` reports frame and fog GPU timing.
-The named provisional conversions are documented in `SHADERS.md`, including height scale `0.01` and affine height `world_y+offset`.
-Native CPU GameScale packing, bank resolution, pre-exposure, local fog sources, shadowed fog and independent transparent depth remain gaps.
+The v7 follow-up replaces the provisional height scale `0.01` and `world_y+offset` with the verified GameScale snapshot and signed raw world height in `SHADER-INPUTS.md`.
+CPU GameScale packing and shipped pre-exposure one are resolved; bank resolution, local fog sources, shadowed fog and independent transparent depth remain gaps.
 MSB FogParamID is preserved independently of LightSetID; the tested draw-param files contain no separate Fog group.
 
 Arena collision and objects still use the existing 60 m radius.

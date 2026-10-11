@@ -17,16 +17,6 @@ use bevy::render::{
 };
 use sekiro_formats::gparam::Gparam;
 
-// Provisional CPU upload conversions; see docs/SHADERS.md, Fog open questions.
-// GameScale is retained as authored metadata, not presumed to multiply density.
-const HEIGHT_DENSITY_PER_UNIT: f32 = 0.01;
-const FIXED_DENSITY_PER_METRE: f32 = 1.0;
-const DEPTH_METRES_PER_UNIT: f32 = 1.0;
-const HEIGHT_OFFSET_METRES: f32 = 1.0;
-const HEIGHT_DISTRIBUTION_PER_METRE: f32 = 1.0;
-const SOURCE_RADIANCE_PER_UNIT: f32 = 1.0;
-const DIRECTIONAL_COSINE_FLOOR: f32 = 0.01;
-
 #[derive(Resource, Default)]
 pub(crate) struct FogSelection(pub i32);
 
@@ -40,14 +30,58 @@ pub struct GameFog {
     direct: Vec4,
     opposite: Vec4,
     direction: Vec4,
-    // RGB extinction; w retains authored GameScale for future verified packing.
+    // RGB extinction; w is the signed world-height axis.
     extinction: Vec4,
+    // NearOffset, slice count, sample offset, analytical continuation enabled.
+    slices: Vec4,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use sekiro_formats::gparam::{Entry, Group, Param, Value};
+
+    #[test]
+    fn signed_height_and_scaled_depths_use_executable_units() {
+        let g = Gparam {
+            groups: vec![Group {
+                name: "VolumetricFog".into(),
+                display_name: String::new(),
+                params: [
+                    ("GameScale", 2.),
+                    ("NearDepth", 3.),
+                    ("FarDepth", 1.),
+                    ("NearOffset", 4.),
+                    ("FixedDensity", 0.4),
+                    ("HeightFogDistribution", -0.8),
+                    ("HeightFogDensity Scale", 0.6),
+                    ("HeightFogOffset", 10.),
+                    ("SkyLight StartDist", 5.),
+                    ("DirLight StartDist", 6.),
+                    ("DirLight AngleClip", 0.25),
+                ]
+                .into_iter()
+                .map(|(name, value)| Param {
+                    name: name.into(),
+                    display_name: String::new(),
+                    entries: vec![Entry {
+                        id: 0,
+                        time: 12.,
+                        value: Value::Float(value),
+                    }],
+                })
+                .collect(),
+            }],
+        };
+        let f = GameFog::from_gparam(&g, 0, 12., Vec3::Y).unwrap();
+        assert_eq!(f.depths, Vec4::new(6., 6.2, 10., 12.));
+        assert_eq!(f.density, Vec4::new(0.2, 0.4, 0.15, 10.));
+        assert_eq!(f.extinction.w, -1.);
+        assert_eq!(f.direction.w, 4.);
+        assert_eq!(f.slices.x, 8.);
+        // Raw world Y=14 gives flipped height -4, not a GS-scaled offset.
+        assert_eq!(f.extinction.w * 14. + f.density.w, -4.);
+    }
 
     #[test]
     fn configuring_new_cameras_preserves_msaa_and_enables_depth_sampling() {
@@ -110,7 +144,7 @@ mod tests {
         let f = GameFog::from_gparam(&g, 100, 12., Vec3::Y).unwrap();
         assert_eq!(f.density.x, 0.);
         assert_eq!(f.density.z, 0.);
-        assert_eq!(f.extinction.xyz(), Vec3::new(2., 0., 0.5));
+        assert_eq!(f.extinction.xyz(), Vec3::new(3., 1., 1.5));
         assert_eq!(f.depths.zw(), Vec2::new(30., 70.));
     }
 
@@ -124,10 +158,10 @@ mod tests {
         let g = sekiro_formats::gparam::parse(&bytes).unwrap();
         let noon = GameFog::from_gparam(&g, 0, 12., Vec3::Y).unwrap();
         let dusk = GameFog::from_gparam(&g, 0, 18., Vec3::Y).unwrap();
-        assert_eq!(noon.depths.y, 400.);
-        assert_eq!(noon.extinction.w, 2.5);
-        assert!((noon.density.x - 0.0015).abs() < 0.000001);
-        assert!((noon.density.z - 0.0025).abs() < 0.000001);
+        assert_eq!(noon.depths.y, 1000.);
+        assert_eq!(noon.extinction.w, 1.);
+        assert!((noon.density.x - 0.0006).abs() < 0.000001);
+        assert!((noon.density.z - 0.05).abs() < 0.000001);
         assert_ne!(noon.direct.xyz(), noon.opposite.xyz());
         assert_ne!(noon.direct.xyz(), dusk.direct.xyz());
     }
@@ -151,36 +185,46 @@ impl GameFog {
                 .as_ref()
                 .filter(|v| v.len() >= 3)
                 .map_or(fallback, |v| Vec3::new(v[0], v[1], v[2]));
-            rgb.max(Vec3::ZERO)
-                * v.and_then(|v| v.get(3).copied()).unwrap_or(1.).max(0.)
-                * SOURCE_RADIANCE_PER_UNIT
+            // Verified byte quantization and gamma 2.2 upload (39e3d0).
+            super::fog_colour(rgb, v.and_then(|v| v.get(3).copied()).unwrap_or(1.))
         };
+        // Verified CPU snapshot transforms (39e7e0, 39fa70); raw offset is metres.
+        let gs = get("GameScale", 1.).max(f32::MIN_POSITIVE);
+        let near = get("NearDepth", 0.01);
+        let distribution = get("HeightFogDistribution", 0.1) / gs;
+        let sign = if distribution < 0. { -1. } else { 1. };
         Some(Self {
             density: Vec4::new(
-                get("FixedDensity", 0.0015).max(0.) * FIXED_DENSITY_PER_METRE,
-                get("HeightFogDistribution", 0.1).max(0.) * HEIGHT_DISTRIBUTION_PER_METRE,
-                get("HeightFogDensity Scale", 0.25).max(0.) * HEIGHT_DENSITY_PER_UNIT,
-                get("HeightFogOffset", -150.) * HEIGHT_OFFSET_METRES,
+                get("FixedDensity", 0.0015) / gs,
+                distribution.abs().max(f32::MIN_POSITIVE),
+                0.5 * get("HeightFogDensity Scale", 0.25) / gs,
+                -sign * get("HeightFogOffset", -150.),
             ),
             depths: Vec4::new(
-                get("NearDepth", 0.01).max(0.001) * DEPTH_METRES_PER_UNIT,
-                get("FarDepth", 400.).max(1.) * DEPTH_METRES_PER_UNIT,
-                get("SkyLight StartDist", 0.).max(0.) * DEPTH_METRES_PER_UNIT,
-                get("DirLight StartDist", 0.).max(0.) * DEPTH_METRES_PER_UNIT,
+                gs * near,
+                gs * get("FarDepth", 400.).max(near + 0.1),
+                gs * get("SkyLight StartDist", 0.),
+                gs * get("DirLight StartDist", 0.),
             ),
             sky: color("SkyColor", Vec3::new(0.49, 0.55, 0.65))
                 .extend(get("SkyLight HeightAtten", 0.).max(0.)),
             direct: color("DirectColor", Vec3::splat(0.5))
                 .extend(get("DirLight HeightAtten", 0.).max(0.)),
             opposite: color("OppositeColor", Vec3::splat(0.15)).extend(0.),
-            direction: sun.extend(1. / sun.y.abs().max(DIRECTIONAL_COSINE_FLOOR)),
-            extinction: g
-                .param("VolumetricFog", "AbsorptionScale")
-                .and_then(|p| p.at(id, hour))
-                .filter(|v| v.len() >= 3)
-                .map_or(Vec3::ONE, |v| Vec3::new(v[0], v[1], v[2]))
-                .max(Vec3::ZERO)
-                .extend(get("GameScale", 1.)),
+            // Verified signed slant factor; bank/id resolution still inferred as sun.
+            direction: sun.extend(1. / (sign * sun.y).max(get("AngleClip", 0.01))),
+            extinction: (Vec3::ONE
+                + g.param("VolumetricFog", "AbsorptionScale")
+                    .and_then(|p| p.at(id, hour))
+                    .filter(|v| v.len() >= 3)
+                    .map_or(Vec3::ZERO, |v| Vec3::new(v[0], v[1], v[2])))
+            .extend(sign),
+            slices: Vec4::new(
+                gs * get("NearOffset", 0.),
+                get("VolumeDepth", 48.).clamp(4., 128.),
+                get("VolumeSliceSampleOffset", 0.5),
+                get("EnableAnalyticalFog", 1.),
+            ),
         })
     }
 }

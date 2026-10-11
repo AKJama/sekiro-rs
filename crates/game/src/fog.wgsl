@@ -4,6 +4,7 @@
 struct Fog {
     density: vec4<f32>, depths: vec4<f32>, sky: vec4<f32>,
     direct: vec4<f32>, opposite: vec4<f32>, direction: vec4<f32>, extinction: vec4<f32>,
+    slices: vec4<f32>,
 }
 @group(0) @binding(0) var scene: texture_2d<f32>;
 #ifdef MULTISAMPLED_DEPTH
@@ -15,7 +16,6 @@ struct Fog {
 @group(0) @binding(3) var<uniform> fog: Fog;
 
 // Renderer quality and background distance choices, not recovered CPU uploads.
-const SLICE_COUNT: u32 = 48u;
 const SKY_DISTANCE_METRES: f32 = 20000.0;
 
 fn profile(q: f32) -> f32 {
@@ -26,7 +26,6 @@ fn primitive(h: f32, k: f32) -> f32 {
     return 2.0*h - exp(k*h)/k;
 }
 fn column(h: f32, k: f32) -> f32 {
-    if k <= 0.000001 { return 0.0; }
     if h > 0.0 { return exp(-k*h)/k; }
     return exp(k*h)/k - 2.0*h;
 }
@@ -70,25 +69,32 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let end_depth = distance*ray_cos;
     let cap = min(end_depth,fog.depths.y);
     let near = min(fog.depths.x,cap);
-    let log_range = log(1.0+cap/near);
+    // Verified 39fa70 geometric grid, independent of the surface depth.
+    let offset = fog.slices.x;
+    let base = max(fog.depths.x+offset, 0.000001);
+    let ratio = (fog.depths.y+offset)/base;
+    let count = u32(fog.slices.y);
     var tau = 0.0;
     var light = vec3(0.0);
-    var z0 = 0.0;
-    // Logarithmic boundaries and deterministic midpoint integration avoid stochastic banding.
-    for (var i = 0u; i < SLICE_COUNT; i += 1u) {
-        let z1 = near*(exp(log_range*f32(i+1u)/f32(SLICE_COUNT))-1.0);
+    var z0 = near;
+    // Inferred ray integration replacement for the native padded volume texture.
+    for (var i = 0u; i < count; i += 1u) {
+        let boundary = base*pow(ratio,f32(i+1u)/f32(count))-offset;
+        let z1 = min(cap,boundary);
+        if z1 <= z0 { break; }
         let ds = (z1-z0)/ray_cos;
-        let h = view.world_position.y + ray.y*(z0+z1)*0.5/ray_cos + fog.density.w;
+        let sample_depth = clamp(base*pow(ratio,(f32(i)+fog.slices.z)/f32(count))-offset,z0,z1);
+        let h = fog.extinction.w*(view.world_position.y + ray.y*sample_depth/ray_cos) + fog.density.w;
         let rho = fog.density.x + fog.density.z*profile(fog.density.y*h);
         let dt = rho*ds;
         light += source_at(h,z0,z1,ray)*ds*exp(-fog.extinction.xyz*(tau+0.5*dt));
         tau += dt;
         z0 = z1;
     }
-    if end_depth > fog.depths.y {
+    if end_depth > fog.depths.y && fog.slices.w > 0.5 {
         let start_length = fog.depths.y/ray_cos;
-        let h0 = view.world_position.y + ray.y*start_length + fog.density.w;
-        let h1 = view.world_position.y + ray.y*distance + fog.density.w;
+        let h0 = fog.extinction.w*(view.world_position.y + ray.y*start_length) + fog.density.w;
+        let h1 = fog.extinction.w*(view.world_position.y + ray.y*distance) + fog.density.w;
         let terminal_light = light;
         let delta = optical_segment(h0,h1,distance-start_length)*(1.0-exp(-tau));
         // Zero extinction channels use the continuous delta limit, not a division by zero.

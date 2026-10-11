@@ -7,8 +7,8 @@
 //! volumetric fog group, the sky colour, a fixed fog density and the colour of light scattered
 //! toward the sun (`DirectColor`). Colours are RGB with the intensity in W.
 //!
-//! Light-unit uploads remain approximated; tone arithmetic comes from recovered shaders, so
-//! intensities scale by [`LUX_PER_UNIT`]; ambient light is the average of the hemisphere colours;
+//! Verified colour uploads use squared RGB times W, with one Bevy unit calibration.
+//! Map materials retain the directional hemisphere term;
 //! fog uses the recovered global shader profile in an HDR post pass. Angles are (pitch, yaw) in radians in the
 //! game's space: the vector `Ry(yaw) * Rx(pitch) * +Z` points toward the light, and is mirrored
 //! on X into Bevy space like everything else.
@@ -145,7 +145,7 @@ impl PostSettings {
                 .max(0.) as u32
         });
         let min = get("Tone Map", "Adaption Min", -8.);
-        let max = get("Tone Map", "Adaption Max", 8.).max(min);
+        let max = get("Tone Map", "Adaption Max", 8.);
         let mode = g
             .param("Tone Map", "ToneMapMode")
             .or_else(|| g.param("Tone Map", "ToneMap-Mode"))
@@ -184,7 +184,7 @@ impl PostSettings {
             reinhard: get("Tone Map", "ReinhardContrast", 1.6),
             white_balance: get("Tone Map", "ReinhardWhiteBalance", 1.7),
             bloom_normalizer: (0..(get("Bloom", "GlareNumLevels", 7.) as i32).clamp(1, 16))
-                .map(|i| get("Bloom", "GlareBloom Smooth", 0.8).clamp(0., 1.).powi(i))
+                .map(|i| get("Bloom", "GlareBloom Smooth", 0.8).powi(i))
                 .sum(),
         }
     }
@@ -192,8 +192,8 @@ impl PostSettings {
         use tonemap::*;
         GamePost {
             exposure: Vec4::new(
-                self.exposure.exp2() * BEVY_HDR_TO_NATIVE_RADIANCE,
-                BEVY_HDR_TO_NATIVE_RADIANCE,
+                self.exposure.exp2(),
+                1.,
                 self.middle,
                 f32::from(self.auto && !effects.no_auto),
             ),
@@ -276,13 +276,12 @@ fn apply_post_effects(
     }
 }
 
-/// Bevy illuminance (lux) per unit of gparam light intensity. Tuned by eye so the noon sun of
-/// m11 lands near Bevy's default outdoor exposure.
-const LUX_PER_UNIT: f32 = 9_000.0;
-/// Local-light candela starts from the sun scale, with a provisional 0.1 calibration.
-/// The unscaled mapping flooded Castle's tower cyan; 900 cd/unit retains local detail.
-/// Bevy takes lumens, so an isotropic source emits 4*pi times the candela.
-pub const LOCAL_LUMENS_PER_UNIT: f32 = LUX_PER_UNIT * 0.1 * 4.0 * std::f32::consts::PI;
+/// Inferred engine bridge, not a GPARAM transform: Bevy lux per native scene unit.
+/// 4500 folds the former 9000-lux and 0.5 post calibration into one light scale.
+/// With Bevy's default EV 9.7, diffuse radiance is scale * exposure / pi.
+pub const SCENE_TO_BEVY: f32 = 4_500.0;
+/// Inferred BTL candela mapping shares the bridge; BTL native units remain open.
+pub const LOCAL_LUMENS_PER_UNIT: f32 = SCENE_TO_BEVY * 4.0 * std::f32::consts::PI;
 
 #[derive(Resource, Clone, Debug)]
 pub struct ShadowSettings {
@@ -362,10 +361,8 @@ impl ShadowSettings {
         Ok(settings)
     }
 }
-/// Ambient brightness per unit of hemisphere intensity.
-const AMBIENT_PER_UNIT: f32 = 1_800.0;
-/// FwLo's ENV_PER_UNIT = LUX_PER_UNIT / pi, in cd/m2.
-pub const ENV_PER_UNIT: f32 = LUX_PER_UNIT / std::f32::consts::PI;
+/// Irradiance-to-radiance bridge shared by hemisphere and environment lighting.
+pub const ENV_PER_UNIT: f32 = SCENE_TO_BEVY / std::f32::consts::PI;
 
 #[derive(Debug)]
 pub struct ProbeRegion {
@@ -481,11 +478,7 @@ pub fn apply_probes(
         );
         probes.active = active;
     }
-    let brightness = if ready.is_some() {
-        0.
-    } else {
-        AMBIENT_PER_UNIT
-    };
+    let brightness = if ready.is_some() { 0. } else { ENV_PER_UNIT };
     if ambient.brightness != brightness {
         ambient.brightness = brightness;
     }
@@ -543,15 +536,28 @@ pub struct LightSet {
     pub fill_lux: f32,
     pub ambient: Color,
     pub ambient_brightness: f32,
+    pub hemi_axis: Vec3,
+    pub hemi_delta: Vec3,
     pub sky: Color,
 }
 
 fn colour(v: &[f32]) -> (Color, f32) {
-    let get = |i: usize| v.get(i).copied().unwrap_or(0.0).max(0.0);
+    let get = |i: usize| v.get(i).copied().unwrap_or(0.0);
     (
-        Color::linear_rgb(get(0), get(1), get(2)),
+        // Verified 310630: gamma 2.0; W remains a separate linear multiplier.
+        Color::linear_rgb(get(0).powi(2), get(1).powi(2), get(2).powi(2)),
         v.get(3).copied().unwrap_or(1.0),
     )
+}
+
+/// Verified fog copy quantizes clamped RGB to bytes before gamma 2.2 times W.
+pub(crate) fn fog_colour(rgb: Vec3, w: f32) -> Vec3 {
+    // Inferred nearest-byte rounding; the trace verifies quantization, not its tie rule.
+    Vec3::from_array(
+        rgb.clamp(Vec3::ZERO, Vec3::ONE)
+            .to_array()
+            .map(|c| ((c * 255.).round() / 255.).powf(2.2)),
+    ) * w
 }
 
 /// Direction toward a light from a gparam (pitch, yaw) angle, in Bevy space.
@@ -574,7 +580,12 @@ impl LightSet {
         let (fill_color, fill_w) = colour(&get("DiffColor1").unwrap_or(vec![0.5, 0.6, 0.7, 0.2]));
         let (up, up_w) = colour(&get("Hemi Color Up").unwrap_or(vec![0.6, 0.7, 0.8, 0.5]));
         let (down, down_w) = colour(&get("Hemi Color Down").unwrap_or(vec![0.4, 0.4, 0.4, 0.2]));
-        let (sky, _) = colour(&fog("SkyColor").unwrap_or(vec![0.5, 0.55, 0.65, 1.0]));
+        let sky_raw = fog("SkyColor").unwrap_or(vec![0.5, 0.55, 0.65, 1.0]);
+        let sky_rgb = fog_colour(
+            Vec3::new(sky_raw[0], sky_raw[1], sky_raw[2]),
+            sky_raw.get(3).copied().unwrap_or(1.),
+        );
+        let sky = Color::linear_rgb(sky_rgb.x, sky_rgb.y, sky_rgb.z);
         let up_l = up.to_linear();
         let down_l = down.to_linear();
         let ambient = Color::linear_rgb(
@@ -585,12 +596,21 @@ impl LightSet {
         Self {
             sun_toward: toward(&get("Angle0").unwrap_or_default()),
             sun_color,
-            sun_lux: sun_w * LUX_PER_UNIT,
+            sun_lux: sun_w * SCENE_TO_BEVY,
             fill_toward: toward(&get("Angle1").unwrap_or_default()),
             fill_color,
-            fill_lux: fill_w * LUX_PER_UNIT,
+            fill_lux: fill_w * SCENE_TO_BEVY,
             ambient,
-            ambient_brightness: AMBIENT_PER_UNIT,
+            ambient_brightness: ENV_PER_UNIT,
+            // Verified coefficient packing; default axis is up. Axis field resolution inferred.
+            hemi_axis: get("Hemi Direction")
+                .filter(|v| v.len() >= 3)
+                .map_or(Vec3::Y, |v| Vec3::new(-v[0], v[1], v[2])),
+            hemi_delta: Vec3::new(
+                up_l.red * up_w - down_l.red * down_w,
+                up_l.green * up_w - down_l.green * down_w,
+                up_l.blue * up_w - down_l.blue * down_w,
+            ) * 0.5,
             sky,
         }
     }
@@ -665,6 +685,45 @@ pub fn apply_lighting(
 #[cfg(test)]
 mod probe_tests {
     use super::*;
+    #[test]
+    fn squared_light_colours_and_hemisphere_endpoints() {
+        use sekiro_formats::gparam::{Entry, Group, Param, Value};
+        let g = Gparam {
+            groups: vec![Group {
+                name: "LightSet".into(),
+                display_name: String::new(),
+                params: [
+                    ("DiffColor0", [0.5, 0.25, 1., 2.]),
+                    ("Hemi Color Up", [0.5, 1., 0.25, 2.]),
+                    ("Hemi Color Down", [1., 0.5, 0.5, 0.5]),
+                ]
+                .into_iter()
+                .map(|(name, value)| Param {
+                    name: name.into(),
+                    display_name: String::new(),
+                    entries: vec![Entry {
+                        id: 0,
+                        time: 12.,
+                        value: Value::Vec4(value),
+                    }],
+                })
+                .collect(),
+            }],
+        };
+        let set = LightSet::from_gparam(&g, 0, 12.);
+        let c = set.sun_color.to_linear();
+        assert_eq!(
+            Vec3::new(c.red, c.green, c.blue) * set.sun_lux / SCENE_TO_BEVY,
+            Vec3::new(0.5, 0.125, 2.)
+        );
+        let mean = set.ambient.to_linear();
+        let mean = Vec3::new(mean.red, mean.green, mean.blue);
+        assert_eq!(mean + set.hemi_delta, Vec3::new(0.5, 2., 0.125));
+        assert_eq!(mean - set.hemi_delta, Vec3::new(0.5, 0.125, 0.125));
+        let fog = fog_colour(Vec3::new(0.5, 1., -1.), 2.);
+        assert!((fog.x - 2. * (128_f32 / 255.).powf(2.2)).abs() < 0.000001);
+        assert_eq!(fog.yz(), Vec2::new(2., 0.));
+    }
     #[test]
     fn shadow_options_reject_unbounded_or_unsupported_configurations() {
         let g = Gparam { groups: vec![] };
@@ -777,7 +836,7 @@ mod probe_tests {
         assert_eq!((set.light_adapt, set.dark_adapt, set.center), (1., 0.5, 4.));
         assert!((set.bloom_normalizer - 3.951424).abs() < 0.000001);
         let upload = set.upload(&MapPostEffects::default());
-        assert_eq!(upload.exposure.x, tonemap::BEVY_HDR_TO_NATIVE_RADIANCE);
+        assert_eq!(upload.exposure.x, 1.);
         assert_eq!(upload.exposure.z, -2.);
         assert_eq!(upload.transfer.x, 1.);
         assert_eq!(upload.transfer.y, 1. / 2.2);

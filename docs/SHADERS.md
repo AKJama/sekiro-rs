@@ -193,7 +193,7 @@ The supplied separate `Fog` GPARAM selector is not mapped to a distinct distance
 ### Fog inputs and GPARAM mapping
 
 Offsets below are within `CB_SHADER_COMMON_PARAM`, usually cb0.
-Candidate mappings identify source fields, not confirmed equality with their raw values.
+This table retains the initial shader-only candidate mappings; `SHADER-INPUTS.md` now supplies the verified CPU transforms.
 
 | Input and byte offset | GPARAM candidate or source | Shader-space units and status |
 |---|---|---|
@@ -225,30 +225,31 @@ These numbers do not justify substituting raw metres for every uploaded coordina
 
 `crates/game/src/fog.rs` and original `fog.wgsl` replace Bevy `DistanceFog` with an HDR scene pass before bloom and tone mapping.
 The pass reconstructs camera-relative rays from the main depth buffer, preserving MSAA without an extra depth prepass.
-It applies the recovered bounded height profile, independent sky/directional source gates, linear DirectColor/OppositeColor angular interpolation, optional vertical-column attenuation, RGB extinction and 48 logarithmic midpoint segments.
+It applies the recovered bounded height profile, independent sky/directional source gates, linear DirectColor/OppositeColor angular interpolation, optional vertical-column attenuation, RGB extinction and authored geometric depth segments.
 The far path uses the piecewise height primitive, crossing/near-horizontal cases, the terminal accumulated light and the documented `(1-Tend)` scaling of added optical depth.
 The same pass treats clear-depth background as a 20 km ray, so geometry and horizon use the same source colours.
 Application follows the demonstrated forward `Csurface*T^E+L` expression; the native scene-composite blend state remains open.
 `--no-fog` removes this pass.
 
 GPARAM values come from the active LightSet row and interpolated map/hour keys, including Enable, NearDepth, FarDepth, FixedDensity, height fields, both source StartDist values, SkyColor, DirectColor, OppositeColor and channel AbsorptionScale when present.
-GameScale is retained in the uploaded record but is not arbitrarily multiplied into density or distances.
+GameScale is applied exactly once when preparing metre-based shader inputs.
 The MSB FogParamID is exported independently and selected from the collision under the focus, with read-only MSB fallback for older exports.
 Separate Fog rows are read and reported, but the three tested map draw-param files have no separate Fog group to apply.
 No unproven distance-fog formula is introduced for that selector.
 
-CPU upload calibration remains provisional: fixed density is per metre, height density scale multiplies `0.01`, height distribution multiplies `1.0` per metre, affine height is `world_y + HeightFogOffset*1.0`, and source RGB multiplies authored W and radiance scale `1.0`.
-These conversions are named constants in `fog.rs`, rather than claims about native GameScale or height packing.
-At castle noon the resulting parameters are FixedDensity `0.0015`, height coefficient `0.1`, height density `0.0025`, offset `-150`, FarDepth `400` and retained GameScale `2.5`.
-Near the roof the density is approximately `0.0065/m`, giving transmittance about `0.27` over a horizontal 200 m path.
-The inverse directional cosine uses a provisional `abs(sun.y)` denominator with a `0.01` floor.
-The main sun is the provisional directional bank resolver; native LightBankId-to-bank/light routing remains open.
+Verified CPU uploads now follow `SHADER-INPUTS.md`: GameScale multiplies Near/Far/NearOffset and source starts, and divides fixed/height distribution/density.
+Height is signed `(worldY-raw HeightFogOffset)`, `kH=abs(distribution/GS)`, `sH=0.5*densityScale/GS`, and extinction is `1+AbsorptionScale`.
+Fog colours use clamped byte RGB raised to 2.2 times W, and directional slant is `1/max(sign*sun.y,AngleClip)`; the sun remains an inferred bank resolver.
+Castle noon now uploads near 0.025 m, far 1000 m, fixed density 0.0006/m, height coefficient 0.04/m, height density 0.05/m and raw offset -150 m.
+Geometric boundaries use the scaled NearOffset and authored VolumeDepth clamped to 4..128, independent of the surface endpoint; partial terminal slices clip at the surface.
+Authored sample offset selects density evaluation within each segment and EnableAnalyticalFog gates far continuation.
+Round-to-nearest byte quantization and direct ray integration in place of a padded froxel texture remain implementation assumptions.
 
 This is global shader-derived fog rather than the complete native froxel renderer.
 Local density boxes and point/spot fog sources are currently zero, and shadowed/reprojected source variants, native pre-exposure packing and local/global write ordering are not implemented.
 The cached exporter still omits fog cards.
 Transparent surfaces share the opaque scene depth used by this post pass, so they do not yet receive an independent forward-material fog lookup.
-The fixed 48-slice evaluation is a renderer quality choice, not a recovered native allocation or VolumeDepth mapping.
+The direct ray pass uses authored depth slices but does not allocate the native padded 3D volume.
 The shader-input recovery above remains valid independently of these implementation approximations.
 
 ## Tone mapping and exposure
@@ -430,8 +431,8 @@ For positive EV the limit is `Max*(1-exp(-EV/Max))`; for negative EV it is `abs(
 FreezeAdaptionFade forces this offset to zero, rather than freezing the GPU meter.
 The gain is `2^Exposure * 2^(-limitedEV)`, applied once to scene and bright-pass input.
 Shipped native pre-exposure and its inverse are one; no guessed BASE_EV or METER_EV remains.
-The existing Bevy 9000-lux/daylight camera scale is not native scene radiance, so `BEVY_HDR_TO_NATIVE_RADIANCE=0.5` converts both meter and exposure-scaled scene input consistently.
-This is an explicit renderer-unit calibration, separate from the verified GPARAM exposure transform.
+The v7 light bridge folds the former post-input 0.5 conversion into `SCENE_TO_BEVY=4500`, shared by sun/fill, hemisphere, probes and the inferred BTL mapping.
+Metering and exposure input now use scale one; this engine bridge is separate from the verified GPARAM transforms.
 The unconverted native-tone candidate clipped about 1.03 percent of the noon world crop to pure white and was rejected.
 `--no-auto-exposure` retains only `2^Exposure`.
 
@@ -459,7 +460,7 @@ Per-view history is independent, retained across resize and released when its ca
 
 Remaining post gaps are the exact full-screen reduction/downsample layout, native table interpolation precision, reset-counter timing, frame-delta units, quality scale, full bloom/temporal schedule, colour matrix/vignette, LUT blending and HDR display branch.
 Bevy's existing daylight camera/light-unit calibration remains outside this post replacement.
-The newly traced fog and light colour/scale uploads are not ported in this session.
+The v7 follow-up ports fog and LightSet colour/hemisphere CPU transforms.
 GIIV remains recommendation 3 and is not implemented by this change.
 
 ## Deferred lighting, ambient and environment
@@ -538,31 +539,24 @@ GILM cube assets and GIIV 3D assets match the resource functions, but the game's
 Neither the simple skybox tint nor every map's separate sky-dome shader is mapped to GPARAM here.
 Fog SkyColor must not automatically be equated to skybox material tint.
 
-Current Bevy already selects GILM probes by spatial regions and uses `EnvironmentMapLight` with `ENV_PER_UNIT=9000/pi`, plus a flat averaged Hemi fallback.
+Current Bevy selects GILM probes by spatial regions with `ENV_PER_UNIT=SCENE_TO_BEVY/pi` and squared-RGB hemisphere mean fallback; all map materials also evaluate the directional coefficient.
 It approximates diffuse irradiance with an exported Lambert cube, uses approximate specular mips, switches probes without native fades and omits GIIV coefficient sampling and native box parallax correction.
-Sun diffuse, specular and material response use Bevy's BRDF and the guessed 9000-lux multiplier; local point lights use a provisional 900-candela multiplier.
+Sun and fill use squared RGB times W with SCENE_TO_BEVY=4500; hemisphere/probes use that scale divided by pi, while BTL uses the same inferred candela bridge times 4*pi for lumens.
 **Recommendation:** add native GIIV decoding/basis evaluation and region fades/PCC, preserve separate authored diffuse/specular light colours, and implement the recovered BRDF without claiming physical units until the CPU upload scale is established.
 
 ## CPU transforms and remaining questions
 
-Read-only searches of `re/exports/strings.tsv` find fog names with xrefs to `0x3A5820`, `0x2A1F10` and `0x29C180`.
-ToneMapMode, Gamma, Middle Gray, AdaptionMin/Max and adaptation-speed names reference `0x2A7890`, `0x2A3160` and `0x2566B0`.
-Bloom control strings reference `0x2AD1D0`, `0x228910` and `0x257FF0`.
-The pertinent decompiled function files are absent from `re/exports/decomp`, and searches for the relevant shader-upload names in the available decompiled text did not recover a producer.
-String references identify leads; they do not establish a transform formula.
-This was the state of the initial shader-only research.
-`SHADER-INPUTS.md` now records executable-derived post, fog and light transforms; the post implementation above uses the resolved formulas.
+[SHADER-INPUTS.md](SHADER-INPUTS.md) is the authoritative executable trace for GPARAM-to-shader packing, with verified arithmetic distinguished from inferred library semantics and shipped defaults.
+It resolves GameScale lengths/densities, signed raw world height, depth offsets/geometric slices, byte/gamma fog colours, extinction, directional slant, squared LightSet colours and hemisphere coefficients, exposure/soft EV adaptation, bloom final colour and default sensitometric transfer.
+The renderer now applies these transforms; its remaining Bevy calibration and implementation limits are documented below and in the v7 status in [VISUALS-PLAN.md](VISUALS-PLAN.md).
 
-The transformed values that are demonstrably consumed by shaders include logarithmic depth coefficients, the affine view-to-height vector, derived light vectors, per-light Vec.w, exposure gains and irradiance-box/cascade matrices.
-Their existence is verified; their derivation from GPARAM is not.
+Still open:
 
-The principal open questions are:
-
-- How GameScale, NearDepth/FarDepth and volume dimensions produce segment measures and coordinate transforms, and how HeightFogOffset enters them.
-- Which tone operator and output/HDR branch each runtime mode selects, and where MiddleGray, Exposure, AdaptionMin/Max and freeze/time controls are transformed.
-- Which blend state applies scene fog outputs, including channel-dependent transmittance, and the exact local/global fog write schedule.
-- How GPARAM RGB/W, colour space and Vec.w become uploaded light records, and which fields select physical or arbitrary light units.
-- Which resource resolver binds GILM/GIIV, hemisphere ambient, LUT IDs and LightBankId, and how temporal/spatial blending is configured.
+- BTL native colour/intensity units, LightBankId/LightId routing and the native time-blend factor.
+- Renderer quality scalars for local fog collection distance and bloom, frame-delta units, and confirmation of the shipped CPU versus GPU adaptation path.
+- Scene-composite blend state, native froxel allocation/padding and local/global write scheduling, local fog, directional shadow/reprojection and independent transparent fog depth.
+- GIIV/GILM binding, spatial fades/parallax correction, separate diffuse/specular material response, and directional hemisphere on actor/FX StandardMaterial meshes.
+- LUT ID resolution/blending, colour matrix/vignette producers, exact tone-table/reduction layouts, full bloom/temporal scheduling and HDR display output.
 
 ## How to reproduce
 

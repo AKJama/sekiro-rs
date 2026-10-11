@@ -4,6 +4,16 @@ Last updated 11 October 2026.
 Read this first in a new session, then `AGENTS.md` and `docs/DESIGN.md`.
 How much of the game is done overall: `docs/PROGRESS.md`.
 
+## Exe-traced renderer CPU uploads (2026-10-11)
+
+Fog now uses verified GameScale lengths/inverse densities, raw signed height, geometric slices, byte/gamma colours, extinction and directional slant from `docs/SHADER-INPUTS.md`.
+LightSet colours are squared times W; all map surfaces retain directional hemisphere coefficients with one inferred Bevy calibration `SCENE_TO_BEVY=4500`.
+Separate sun/ambient/local tuning and the post 0.5 multiplier are removed; existing EV adaptation, bloom and sensitometric mode 7 were checked against the trace.
+All seven v7 before/final scenes were inspected against v5/v6: clearer foreground fog, retained snow detail, cool noon shade and warmer dawn/dusk; an extra probe-disabled capture verifies the hemisphere fallback.
+Formatting, workspace/all-target Clippy, requested release game/formats/extract tests and release game build pass offline with six jobs in `target/alt`.
+Artifacts and save backup are under `target/alt/visuals`; no commits, network or protected-path writes.
+BTL/bank routing, actor directional ambient, native GIIV/froxel/local/transparent fog, sky dome and complete bloom/table scheduling remain gaps in `docs/SHADERS.md` and `docs/VISUALS-PLAN.md`.
+
 ## Native ordinary post chain (2026-10-11)
 
 Original GPU passes replace Bevy AutoExposure, Bloom and ACES; the 3D camera uses Tonemapping None and HUD cameras stay outside the chain.

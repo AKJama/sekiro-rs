@@ -1,7 +1,10 @@
 #import bevy_pbr::{
     forward_io::{VertexOutput, FragmentOutput},
     pbr_fragment::pbr_input_from_standard_material,
-    pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing, calculate_tbn_mikktspace},
+    pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing, calculate_tbn_mikktspace, calculate_F0, calculate_diffuse_color},
+    lighting::{EnvBRDFApprox, F_AB},
+    mesh_view_bindings::{lights, view},
+    pbr_types::STANDARD_MATERIAL_FLAGS_UNLIT_BIT,
 }
 
 struct Layers {
@@ -10,6 +13,8 @@ struct Layers {
     albedo_uv: vec4<f32>,
     normal_uv: vec4<f32>,
     normal_enabled: vec4<f32>,
+    hemi_axis: vec4<f32>,
+    hemi_delta: vec4<f32>,
 }
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> layers: Layers;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var overlay: texture_2d<f32>;
@@ -52,9 +57,11 @@ fn fragment(vertex: VertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     var input = vertex;
     var weights = vec3(0.0);
 #ifdef VERTEX_COLORS
-    weights = input.color.rgb;
-    // These colours carry blend weights, never a tint on the base StandardMaterial.
-    input.color = vec4(1.0);
+    if layers.albedo_enabled.w > 0.0 {
+        weights = input.color.rgb;
+        // Exported layer colours carry weights; ordinary vertex tint is preserved.
+        input.color = vec4(1.0);
+    }
 #endif
     var pbr = pbr_input_from_standard_material(input, is_front);
     var height = 0.5;
@@ -76,7 +83,23 @@ fn fragment(vertex: VertexOutput, @builtin(front_facing) is_front: bool) -> Frag
 #endif
     pbr.material.base_color = alpha_discard(pbr.material, pbr.material.base_color);
     var out: FragmentOutput;
-    out.color = apply_pbr_lighting(pbr);
+    let unlit = (pbr.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) != 0u;
+    out.color = pbr.material.base_color;
+    if !unlit { out.color = apply_pbr_lighting(pbr); }
+    if layers.hemi_axis.w > 0.0 && !unlit {
+        // Verified 310630 hemisphere: mean + dot(axis,N)*(up-down)/2.
+        // Inferred bridge retains Bevy's ambient BRDF and replaces its flat colour.
+        let mean = lights.ambient_color.rgb;
+        let delta = layers.hemi_delta.xyz;
+        let n_dot_v = max(dot(pbr.N,pbr.V),0.0001);
+        let diffuse = calculate_diffuse_color(pbr.material.base_color.rgb,pbr.material.metallic,pbr.material.specular_transmission,pbr.material.diffuse_transmission);
+        let f0 = calculate_F0(pbr.material.base_color.rgb,pbr.material.metallic,pbr.material.reflectance);
+        let response = EnvBRDFApprox(diffuse,F_AB(1.0,n_dot_v))
+            + EnvBRDFApprox(f0,F_AB(pbr.material.perceptual_roughness,n_dot_v))*clamp(dot(f0,vec3(50.0*0.33)),0.0,1.0);
+        // Evaluate the colour difference directly, avoiding a division by a dark mean.
+        let irradiance = max(mean+dot(layers.hemi_axis.xyz,pbr.N)*delta,vec3(0.0));
+        out.color = vec4(out.color.rgb + response*(irradiance-mean)*pbr.diffuse_occlusion*view.exposure,out.color.a);
+    }
     if layers.normal_enabled.w > 0.0 { out.color = vec4(weights, 1.0); }
     out.color = main_pass_post_lighting_processing(pbr, out.color);
     return out;
