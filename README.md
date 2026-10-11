@@ -33,6 +33,9 @@ Sekiro is data-driven, so instead of hand-writing its behaviour this project reb
 
 Requires Windows, Rust (stable, MSVC) and Sekiro v1.6.0.0.
 
+Running `sekiro-rs` with no arguments (or `--menu`) opens the start menu to choose a fight.
+Existing launch flags skip the menu.
+
 ```powershell
 # 1. Public community reference files (archive keys, file names, param definitions)
 ./tools/fetch-refs.ps1
@@ -46,7 +49,7 @@ cargo run --release -p sekiro-extract -- params
 cargo run --release -p sekiro-game -- --play
 ```
 
-Controls: WASD move, mouse camera, left mouse attack, right mouse guard and deflect, Space jump, Shift step (hold to sprint), C crouch, Esc releases the mouse.
+Controls: WASD move, mouse camera, left mouse attack, right mouse guard and deflect, Space jump, Shift step (hold to sprint), C crouch, Esc opens the pause menu.
 A gamepad works too.
 
 ## Layout

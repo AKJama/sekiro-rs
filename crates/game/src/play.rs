@@ -12,7 +12,7 @@
 //! Controls follow Sekiro's PC defaults where possible: WASD move, mouse look, LMB attack, RMB
 //! guard, Space jump, Shift step (hold to sprint), C crouch, F grapple, Ctrl or MMB prosthetic,
 //! R item, Q lock-on. Gamepad: left stick move, right stick camera, R1 attack, L1 guard, A jump,
-//! B step/sprint, L3 crouch, L2 grapple, R2 prosthetic, X item, R3 lock-on. Esc frees the mouse;
+//! B step/sprint, L3 crouch, L2 grapple, R2 prosthetic, X item, R3 lock-on. Esc opens the pause menu;
 //! minus and equals (or `[` and `]`) change the volume (`crate::audio`).
 //!
 //! With `--map <id> [--start <n>]` the fight happens on an exported map instead of the floor:
@@ -85,7 +85,7 @@ pub struct Options {
     pub break_posture: bool,
     /// Who chooses a boss's acts (`--brain`) and whether its decisions are logged
     /// to `cache/brain_logs/` (`--brain-log`); see `docs/BRAIN.md`.
-    pub brain: Box<dyn sekiro_sim::brain::BossBrain>,
+    pub brain: crate::BrainOptions,
     pub brain_log: bool,
     /// The boss brain's memory file across fights and sessions (`--brain-memory`; by default
     /// `logs/memory/<chr>.json` for hosted brains, none for the others).
@@ -229,9 +229,10 @@ pub fn run(options: Options) -> Result<()> {
     if options.simple_ai {
         duel.use_simple_ai();
     } else {
-        let brain_name = options.brain.name();
+        let brain = options.brain.build()?;
+        let brain_name = brain.name();
         let log = duel
-            .set_brain(options.brain, options.brain_log)
+            .set_brain(brain, options.brain_log)
             .map_err(|e| anyhow::anyhow!("--brain: {e}"))?;
         eprintln!(
             "boss brain {}{}",
@@ -465,14 +466,14 @@ pub fn run(options: Options) -> Result<()> {
     .add_systems(Startup, setup)
     .insert_resource(rope::RopeCache(cache.clone()))
     .add_systems(Startup, crate::brain_overlay::spawn)
-    .add_systems(FixedUpdate, simulate)
+    .add_systems(FixedUpdate, simulate.run_if(crate::menu::active))
     .add_systems(
         Update,
         (
             // The camera turns first, so the stick read this frame is relative to the camera
             // that is drawn.
-            orbit_camera,
-            gather_input,
+            orbit_camera.run_if(crate::menu::active),
+            gather_input.run_if(crate::menu::active),
             brain_report,
             recording_brain,
             reload_enemy,
@@ -493,6 +494,7 @@ pub fn run(options: Options) -> Result<()> {
         )
             .chain(),
     );
+    crate::menu::install(&mut app);
     crate::perf_log::register!(app);
     if let Some(replay) = replay {
         app.insert_resource(replay).add_systems(
@@ -771,17 +773,6 @@ fn gather_input(
         c.visible = false;
         capture.focus_requested = true;
     }
-    if keys.just_pressed(KeyCode::Escape)
-        && let Ok((_, mut c)) = windows.single_mut()
-    {
-        let locked = c.grab_mode == CursorGrabMode::Locked;
-        c.grab_mode = if locked {
-            CursorGrabMode::None
-        } else {
-            CursorGrabMode::Locked
-        };
-        c.visible = locked;
-    }
     // A click while the cursor is free (after Esc) takes the mouse back for the camera; that
     // click is not an attack.
     if !mouse.pressed(MouseButton::Left) {
@@ -989,10 +980,13 @@ fn simulate(
             .as_ref()
             .or(wolf.docking.candidate.as_ref());
         eprintln!(
-            "DOCK step={} env3044={} env3050={} pos={:?} edge={:?} point={:?} anim={:?} events={:?}",
+            "DOCK step={} env3044={} env3050={} env3043={} end={} blocked={:?} pos={:?} edge={:?} point={:?} anim={:?} events={:?}",
             sim.step,
             wolf.behavior.env.hang_candidate && wolf.behavior.env.docking_searches.get() & 2 != 0,
             wolf.behavior.env.hang_can_climb,
+            wolf.behavior.env.cover_candidate && wolf.behavior.env.docking_searches.get() & 1 != 0,
+            wolf.behavior.env.docking_end,
+            wolf.behavior.env.docking_blocked,
             wolf.body.position,
             target.map(|t| (
                 &wolf.docking.edges[t.edge].source_part,
@@ -1371,6 +1365,8 @@ fn hud(
         s.push('\n');
     }
     match sim.duel.player.behavior.env.action_guide.get() {
+        Some((10, 12)) => s += "E / Y: Hug wall\n",
+        Some((11, 12)) => s += "E / Y: Leave wall\n",
         Some((20, 12)) => s += "E / Y: Hang\n",
         Some((21, 12) | (22, 5)) => {
             if sim.duel.player.behavior.env.hang_can_climb {
@@ -1380,7 +1376,7 @@ fn hud(
         }
         _ => {}
     }
-    s += "WASD move, mouse look, LMB attack, RMB guard, Space jump, Shift step/sprint, C crouch, Q lock-on, Esc mouse, -/= volume";
+    s += "WASD move, mouse look, LMB attack, RMB guard, Space jump, Shift step/sprint, C crouch, Q lock-on, Esc pause, -/= volume";
     text.0 = s;
 }
 

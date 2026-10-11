@@ -28,11 +28,27 @@ mod draw_mask;
 mod input_replay;
 mod lighting;
 mod map;
+mod menu;
 mod perf_log;
 mod play;
 mod viewer;
 
 use std::path::PathBuf;
+
+/// Controller construction is deferred until play, so menu validation and tests
+/// never start workers or open hosted telemetry files.
+pub struct BrainOptions {
+    name: String,
+    model: Option<String>,
+    chr: String,
+    coach: sekiro_brain_net::CoachCli,
+}
+impl BrainOptions {
+    fn build(self) -> anyhow::Result<Box<dyn sekiro_sim::brain::BossBrain>> {
+        sekiro_brain_net::from_cli_with(&self.name, self.model, &self.chr, &self.coach)
+            .map_err(|e| anyhow::anyhow!("--brain: {e}"))
+    }
+}
 
 fn arg_value(args: &[String], name: &str) -> Option<String> {
     args.windows(2).find(|w| w[0] == name).map(|w| w[1].clone())
@@ -51,8 +67,11 @@ fn arg_f32(args: &[String], name: &str, default: f32) -> anyhow::Result<f32> {
     }
 }
 
-fn main() -> anyhow::Result<()> {
+fn dispatch() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() == 1 || args.iter().any(|a| a == "--menu") {
+        return menu::run(&args);
+    }
     for flag in [
         "--attack-power",
         "--progression",
@@ -66,7 +85,7 @@ fn main() -> anyhow::Result<()> {
             anyhow::bail!("{flag} requires a value");
         }
     }
-    let attack_power = sekiro_sim::progression::AttackPower::from_options(
+    let _attack_power = sekiro_sim::progression::AttackPower::from_options(
         arg_value(&args, "--attack-power").as_deref(),
         arg_value(&args, "--progression").as_deref(),
     )
@@ -115,137 +134,7 @@ fn main() -> anyhow::Result<()> {
         None => None,
     };
     if args.iter().any(|a| a == "--play") || boss_arena.is_some() {
-        let screenshots = arg_list(&args, "--shots")
-            .into_iter()
-            .map(|s| {
-                let (step, path) = s
-                    .split_once(':')
-                    .ok_or_else(|| anyhow::anyhow!("--shots wants step:path, got {s}"))?;
-                Ok((step.parse()?, PathBuf::from(path)))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        let opponent = match (arg_value(&args, "--enemy"), boss_arena) {
-            (Some(name), _) => sekiro_sim::enemy::EnemySpec::from_cache(
-                &PathBuf::from(arg_value(&args, "--cache").unwrap_or_else(|| "cache".into())),
-                &name,
-            )
-            .map_err(|e| anyhow::anyhow!("--enemy: {e}"))?,
-            (None, arena) => sekiro_sim::enemy::EnemySpec::from_cache(
-                &PathBuf::from(arg_value(&args, "--cache").unwrap_or_else(|| "cache".into())),
-                arena.map_or("soldier", |arena| arena.enemy),
-            )
-            .map_err(|e| anyhow::anyhow!("--enemy: {e}"))?,
-        };
-        let player = sekiro_sim::brain::memory::player_name(
-            &arg_value(&args, "--player").unwrap_or_else(|| "default".into()),
-        )
-        .map_err(anyhow::Error::msg)?;
-        let stage = arg_value(&args, "--brain-stage")
-            .map(|name| {
-                brain_stage::load(
-                    &name,
-                    &opponent.chr,
-                    &player,
-                    std::path::Path::new("logs/datasets"),
-                )
-            })
-            .transpose()?;
-        let brain_name = stage
-            .as_ref()
-            .map(|s| s.brain.to_string())
-            .unwrap_or_else(|| arg_value(&args, "--brain").unwrap_or_else(|| "lua".into()));
-        let coach_backend = arg_value(&args, "--coach").unwrap_or_else(|| "codex".into());
-        let brain_label = if brain_name.eq_ignore_ascii_case("coach") {
-            let backend = sekiro_brain_net::CoachBackend::by_name(&coach_backend)
-                .ok_or_else(|| anyhow::anyhow!("unknown --coach {coach_backend}"))?;
-            format!(
-                "coach · {}",
-                arg_value(&args, "--coach-model").unwrap_or_else(|| backend.default_model().into())
-            )
-        } else {
-            brain_name.clone()
-        };
-        let window_size = arg_value(&args, "--window-size")
-            .map(|s| -> anyhow::Result<(u32, u32)> {
-                let (w, h) = s
-                    .split_once('x')
-                    .ok_or_else(|| anyhow::anyhow!("--window-size wants WIDTHxHEIGHT"))?;
-                let size = (w.parse()?, h.parse()?);
-                anyhow::ensure!(
-                    size.0 >= 800 && size.1 >= 600,
-                    "--window-size minimum is 800x600"
-                );
-                Ok(size)
-            })
-            .transpose()?
-            .unwrap_or((1600, 900));
-        return play::run(play::Options {
-            brain_overlay: args.iter().any(|a| a == "--brain-overlay"),
-            brain_label,
-            window_size,
-            attack_power,
-            cache: PathBuf::from(arg_value(&args, "--cache").unwrap_or_else(|| "cache".into())),
-            script: arg_value(&args, "--script"),
-            input: arg_value(&args, "--input"),
-            screenshots,
-            exit_after_script: args.iter().any(|a| a == "--exit"),
-            enemy: !args.iter().any(|a| a == "--no-enemy" || a == "--passive"),
-            arena: boss_arena,
-            full_map: args.iter().any(|a| a == "--full-map"),
-            hide: arg_list(&args, "--hide"),
-            objects: args.iter().any(|a| a == "--objects"),
-            lock_on: args.iter().any(|a| a == "--lock-on"),
-            simple_ai: args.iter().any(|a| a == "--simple-ai"),
-            god: args.iter().any(|a| a == "--god"),
-            immortal: args.iter().any(|a| a == "--immortal"),
-            force_act: arg_value(&args, "--force-act")
-                .map(|v| v.parse())
-                .transpose()
-                .map_err(|e| anyhow::anyhow!("--force-act wants an action id: {e}"))?,
-            break_posture: args.iter().any(|a| a == "--break-posture"),
-            brain: sekiro_brain_net::from_cli_with(
-                &brain_name,
-                arg_value(&args, "--brain-model"),
-                &opponent.chr,
-                &sekiro_brain_net::CoachCli {
-                    budget_usd: arg_value(&args, "--brain-budget")
-                        .map(|v| v.parse::<f64>())
-                        .transpose()
-                        .map_err(|e| anyhow::anyhow!("--brain-budget wants USD: {e}"))?,
-                    token_budget: arg_value(&args, "--brain-token-budget")
-                        .map(|v| v.parse::<u64>())
-                        .transpose()
-                        .map_err(|e| {
-                            anyhow::anyhow!("--brain-token-budget wants a token count: {e}")
-                        })?,
-                    backend: arg_value(&args, "--coach"),
-                    model: arg_value(&args, "--coach-model"),
-                    effort: arg_value(&args, "--coach-effort"),
-                },
-            )
-            .map_err(|e| anyhow::anyhow!("--brain: {e}"))?,
-            coach_interval: arg_f32(&args, "--coach-interval", 30.0)?.max(0.0),
-            player,
-            brain_log: args.iter().any(|a| a == "--brain-log"),
-            brain_memory: if let Some(stage) = stage {
-                stage.memory
-            } else {
-                sekiro_sim::brain::memory::resolve_for(
-                    arg_value(&args, "--brain-memory").as_deref(),
-                    &opponent.chr,
-                    &brain_name.to_ascii_lowercase(),
-                    sekiro_brain_net::is_hosted(&brain_name),
-                )
-            },
-            opponent,
-            map: arg_value(&args, "--map"),
-            start: arg_f32(&args, "--start", 0.0)? as usize,
-            spawn: map::parse_camera(arg_value(&args, "--spawn").as_deref())?
-                .map(|[x, y, z, yaw, _]| [x, y, z, yaw]),
-            enemy_distance: arg_f32(&args, "--enemy-distance", 5.0)?,
-            hour: arg_f32(&args, "--hour", 12.0)?,
-            gparam: arg_value(&args, "--gparam"),
-        });
+        return play::run(play_options(&args)?);
     }
     if args.iter().any(|a| a == "--arena") {
         return arena::run(arena::Options {
@@ -276,4 +165,158 @@ fn main() -> anyhow::Result<()> {
     eprintln!("       sekiro-rs --viewer <file.glb> [--screenshot <out.png>] [--yaw <deg>]");
     eprintln!("                 [--pitch <deg>] [--distance <m>] [--height <m>]");
     std::process::exit(2);
+}
+
+fn play_options(args: &[String]) -> anyhow::Result<play::Options> {
+    play_options_with(args, std::path::Path::new("logs/datasets"))
+}
+
+fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Result<play::Options> {
+    let attack_power = sekiro_sim::progression::AttackPower::from_options(
+        arg_value(args, "--attack-power").as_deref(),
+        arg_value(args, "--progression").as_deref(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    let boss_arena = arg_value(args, "--arena")
+        .filter(|v| !v.starts_with("--"))
+        .map(|name| sekiro_sim::arena::ArenaSpec::by_name(&name).map_err(anyhow::Error::msg))
+        .transpose()?;
+    let screenshots = arg_list(args, "--shots")
+        .into_iter()
+        .map(|s| {
+            let (step, path) = s
+                .split_once(':')
+                .ok_or_else(|| anyhow::anyhow!("--shots wants step:path, got {s}"))?;
+            Ok((step.parse()?, PathBuf::from(path)))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let opponent = match (arg_value(args, "--enemy"), boss_arena) {
+        (Some(name), _) => sekiro_sim::enemy::EnemySpec::from_cache(
+            &PathBuf::from(arg_value(args, "--cache").unwrap_or_else(|| "cache".into())),
+            &name,
+        )
+        .map_err(|e| anyhow::anyhow!("--enemy: {e}"))?,
+        (None, arena) => sekiro_sim::enemy::EnemySpec::from_cache(
+            &PathBuf::from(arg_value(args, "--cache").unwrap_or_else(|| "cache".into())),
+            arena.map_or("soldier", |arena| arena.enemy),
+        )
+        .map_err(|e| anyhow::anyhow!("--enemy: {e}"))?,
+    };
+    let player = sekiro_sim::brain::memory::player_name(
+        &arg_value(args, "--player").unwrap_or_else(|| "default".into()),
+    )
+    .map_err(anyhow::Error::msg)?;
+    let stage = arg_value(args, "--brain-stage")
+        .map(|name| brain_stage::load(&name, &opponent.chr, &player, datasets))
+        .transpose()?;
+    let brain_name = stage
+        .as_ref()
+        .map(|s| s.brain.to_string())
+        .unwrap_or_else(|| arg_value(args, "--brain").unwrap_or_else(|| "lua".into()));
+    let coach_backend = arg_value(args, "--coach").unwrap_or_else(|| "codex".into());
+    if sekiro_brain_net::is_hosted(&brain_name) {
+        anyhow::ensure!(
+            sekiro_brain_net::CoachBackend::by_name(&coach_backend).is_some(),
+            "unknown --coach {coach_backend}"
+        );
+    } else {
+        sekiro_sim::brain::BrainKind::by_name(&brain_name)
+            .map_err(|e| anyhow::anyhow!("--brain: {e}"))?;
+    }
+    let brain_label = if brain_name.eq_ignore_ascii_case("coach") {
+        let backend = sekiro_brain_net::CoachBackend::by_name(&coach_backend)
+            .ok_or_else(|| anyhow::anyhow!("unknown --coach {coach_backend}"))?;
+        format!(
+            "coach - {}",
+            arg_value(args, "--coach-model").unwrap_or_else(|| backend.default_model().into())
+        )
+    } else {
+        brain_name.clone()
+    };
+    let window_size = arg_value(args, "--window-size")
+        .map(|s| -> anyhow::Result<(u32, u32)> {
+            let (w, h) = s
+                .split_once('x')
+                .ok_or_else(|| anyhow::anyhow!("--window-size wants WIDTHxHEIGHT"))?;
+            let size = (w.parse()?, h.parse()?);
+            anyhow::ensure!(
+                size.0 >= 800 && size.1 >= 600,
+                "--window-size minimum is 800x600"
+            );
+            Ok(size)
+        })
+        .transpose()?
+        .unwrap_or((1600, 900));
+    Ok(play::Options {
+        brain_overlay: args.iter().any(|a| a == "--brain-overlay"),
+        brain_label,
+        window_size,
+        attack_power,
+        cache: PathBuf::from(arg_value(args, "--cache").unwrap_or_else(|| "cache".into())),
+        script: arg_value(args, "--script"),
+        input: arg_value(args, "--input"),
+        screenshots,
+        exit_after_script: args.iter().any(|a| a == "--exit"),
+        enemy: !args.iter().any(|a| a == "--no-enemy" || a == "--passive"),
+        arena: boss_arena,
+        full_map: args.iter().any(|a| a == "--full-map"),
+        hide: arg_list(args, "--hide"),
+        objects: args.iter().any(|a| a == "--objects"),
+        lock_on: args.iter().any(|a| a == "--lock-on"),
+        simple_ai: args.iter().any(|a| a == "--simple-ai"),
+        god: args.iter().any(|a| a == "--god"),
+        immortal: args.iter().any(|a| a == "--immortal"),
+        force_act: arg_value(args, "--force-act")
+            .map(|v| v.parse())
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("--force-act wants an action id: {e}"))?,
+        break_posture: args.iter().any(|a| a == "--break-posture"),
+        brain: BrainOptions {
+            name: brain_name.clone(),
+            model: arg_value(args, "--brain-model"),
+            chr: opponent.chr.clone(),
+            coach: sekiro_brain_net::CoachCli {
+                budget_usd: arg_value(args, "--brain-budget")
+                    .map(|v| v.parse::<f64>())
+                    .transpose()
+                    .map_err(|e| anyhow::anyhow!("--brain-budget wants USD: {e}"))?,
+                token_budget: arg_value(args, "--brain-token-budget")
+                    .map(|v| v.parse::<u64>())
+                    .transpose()
+                    .map_err(|e| {
+                        anyhow::anyhow!("--brain-token-budget wants a token count: {e}")
+                    })?,
+                backend: arg_value(args, "--coach"),
+                model: arg_value(args, "--coach-model"),
+                effort: arg_value(args, "--coach-effort"),
+            },
+        },
+        coach_interval: arg_f32(args, "--coach-interval", 30.0)?.max(0.0),
+        player,
+        brain_log: args.iter().any(|a| a == "--brain-log"),
+        brain_memory: if let Some(stage) = stage {
+            stage.memory
+        } else {
+            sekiro_sim::brain::memory::resolve_for(
+                arg_value(args, "--brain-memory").as_deref(),
+                &opponent.chr,
+                &brain_name.to_ascii_lowercase(),
+                sekiro_brain_net::is_hosted(&brain_name),
+            )
+        },
+        opponent,
+        map: arg_value(args, "--map"),
+        start: arg_f32(args, "--start", 0.0)? as usize,
+        spawn: map::parse_camera(arg_value(args, "--spawn").as_deref())?
+            .map(|[x, y, z, yaw, _]| [x, y, z, yaw]),
+        enemy_distance: arg_f32(args, "--enemy-distance", 5.0)?,
+        hour: arg_f32(args, "--hour", 12.0)?,
+        gparam: arg_value(args, "--gparam"),
+    })
+}
+
+fn main() -> anyhow::Result<()> {
+    dispatch()?;
+    menu::relaunch()?;
+    Ok(())
 }

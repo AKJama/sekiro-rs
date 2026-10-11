@@ -15,7 +15,7 @@ This is a high-level view of how much of Sekiro is reimplemented.
 | Enemy AI | Partial | `#####-----` 50% |
 | Maps and world | Partial | All 10 maps extracted; 9 gameplay maps walkable at baseline |
 | Audio | Partial | `###-------` 30% |
-| Interface and game flow | Partial | `#---------` 10% |
+| Interface and game flow | Partial | Start/pause menus and combat HUD; inventory, checkpoints and story flow pending |
 
 ## Game data and formats
 
@@ -45,7 +45,8 @@ Docs: [FORMATS.md](FORMATS.md), [PARAMS.md](PARAMS.md).
 | Upper/lower body animation layering | Not started | One clip shown at a time. |
 | Grappling hook | Mobility slice (b) implemented | Solved arrival arc, air shots, two chain shoot states, HKS cancels and landing, no-ride homing offsets, 0.6 m perch, exported rope, line fallback and target ring; native skinned rope placement and search boxes remain gaps. |
 | Ledge hang | Partial | Ground grab, idle, climb up and drop for variation 0; real-data replay and synthetic HKS tests; docking thresholds remain placeholders. |
-| Wall hug, swimming, climbing | Not started | |
+| Wall hug | Mobility step 4 implemented | Kind-3 entry, idle, root-distance sliding, endpoint peek and action/away-stick exit through HKS; docking placement and search thresholds remain approximations. |
+| Swimming, climbing | Not started | |
 
 Docs: [HKS-COMBAT.md](HKS-COMBAT.md), [FORMATS.md](FORMATS.md).
 
@@ -137,9 +138,10 @@ Docs: [AUDIO.md](AUDIO.md).
 | Item | Status | Notes |
 | --- | --- | --- |
 | HP and posture bars | Done | |
-| Menus, inventory, save files, checkpoints (idols), cutscenes, dialogue | Not started | |
+| Start and pause menus | Done | Fight/place/AI/stage/AP/hour/player choices, remembered preferences; restart through the existing CLI setup on Start and Back |
+| Inventory, save files, checkpoints (idols), cutscenes, dialogue | Not started | |
 
-Docs: None yet.
+Docs: `docs/INTERFACE.md`.
 
 ## How to update this file
 

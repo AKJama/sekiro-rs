@@ -595,6 +595,49 @@ Integration edits outside the assigned files are limited to `sim/src/character.r
   Script: walk forward until the wall, press arm 12.
   Expected: env 3043 true at the wall, `StandToCover2*` plays (218103 to 218107), then `CoverIdle` (21000) with `Selector_Environment` normal; a second press plays `CoverEnd` (218490).
 
+**Status (2026-10-11):** Kind-3 cover supports variations 0 to 3 and 10 to 13 through the existing HKS.
+The nearest reachable, faced edge wins the shared action-button search, so E / gamepad Y selects cover or ledge hang by the candidate kind.
+Act 3026 enables env 3043 for the tick; acts 3027 and 3028 retain the existing hang search gates.
+Env 3017 supplies the authored variation and env 3011 supplies the endpoint relative to Wolf's left and right while his back faces the wall.
+Env 3051 and 3052 test capsule sliding toward the respective end for an obstacle rather than treating every cover end as blocked.
+HKS sets `Selector_Environment` to normal or peek movement and `Selector_CoverLookDir` from the permitted endpoint.
+Entry uses `CoverStartEdgeAngle`, plays StandToCover2Back / 218103 for the verified approach, then CoverIdle / 021000.
+Docked movement projects the playing movement clip's root distance onto the selected segment, follows its supporting collision floor and clamps to its endpoints.
+The camera-relative stick supplies `DockingStickAngle`, with the HKS convention of positive right, and ordinary free-movement turning is suspended while docked.
+Sliding accepts only the HKS along-wall input cone, strictly between 30 and 150 degrees from Wolf's facing, so wall-normal input cannot slide through a residual movement clip.
+HKS handles the cover move start/loop/end states and the look restrictions for each variation.
+The real look-out clips are 205010/205011, 205020/205021 and 205030/205031; they retain docking at the endpoint and do not slide along the wall.
+Action plays CoverEnd / 218490 or CoverEndFromCoverLook / 218491 and releases docking to ordinary locomotion.
+Stick away offers the same action request to HKS rather than injecting an exit event.
+
+FwLo's MIT `target/alt/fwlo/docking.md` reports the graph's initial `DockingTranslationOffset_Cover` as (0, 0, 0.7), with its edge-frame sign unresolved.
+`DOCKING_TRANSLATION_OFFSET_COVER` applies that magnitude 0.7 m outward from the authored segment as a documented placeholder frame interpretation.
+Other placeholder thresholds are horizontal reach 1.0 m, facing within 45 degrees toward the wall, supporting-floor height difference at most 0.4 m, edge-to-floor height tolerance 0.8 m, inward wall probe 1.0 m, probe lift 0.6 m above the ordinary capsule, collision displacement tolerance 0.05 m, endpoint/obstacle probe margin 0.2 m and away-stick cone 30 degrees.
+The lifted probe rejects kerbs and floor contacts, and a zero-motion capsule slide rejects placements inside collision.
+Entry anchors immediately rather than reconstructing the docking generator's blend-in/root warp.
+Sliding uses the authored root-distance magnitude along the segment rather than a traced native generator evaluation; peek retains the same anchor and plays the authored pose without a reconstructed camera-dependent docking offset.
+Door activation/object collision, connected-segment corner transfers, cover attacks/items/eavesdrop, native blend/IK and camera-dependent peek displacement remain gaps.
+
+The requested chain-6 approach was also inspected from the outside: collision still makes env 3043 true and it enters cover, but the rendered position is beside a low terrace edge with no full wall behind Wolf, and variation 0 disables look-out.
+`target/alt/mobility/cover-requested-final.png` records this collision/render geometry discrepancy and is not positive visual evidence of a wall hug.
+The verified full-wall route is nearby on `h018700` chain 1, variation 2, from (170.90704, -68.97208, 62.02407) to (173.68359, -68.71230, 61.28944).
+Use `--play --map m11_00_00_00 --spawn 172.70456,-68.85,63.21088,14.819877,0 --no-enemy --simple-ai --script crates/game/scripts/m11_cover.txt --exit`.
+For outside visual inspection, add `--extra hang-view --no-env-probe --enemy-distance 1000`.
+The script walks toward the wall, releases the stick, presses action, waits in idle, slides left to the permitted endpoint, holds the peek and presses action to exit.
+The collision-backed regression enters 218103 at tick 28, idles at tick 51, moves at tick 176, starts the left peek at tick 209, loops in 205020 at tick 232, exits in 218491 at tick 386 and restores Idle at tick 405.
+Its docked displacement is approximately 1.26 m and zero-motion capsule checks stay below 0.05 m throughout.
+Synthetic HKS tests cover all eight variations' look restrictions and environment selectors, action and away-stick exits, retained peek docking and restored locomotion.
+Direct tests cover endpoint clamps, missing walls, bad heights, reach/facing, unsupported variations and independent end obstacles; the ledge-hang tests remain unchanged.
+The final `--simple-ai` replay matches those ticks and restores Idle at (173.58183, -68.71567, 61.57926).
+Reviewed captures are `target/alt/mobility/cover-idle.png`, `cover-slide.png`, `cover-peek.png` and `cover-exit.png`, with the final log in `cover-final.log`.
+They show Wolf's back facing the visible building wall, his body outside it, lateral movement and the endpoint lean pose followed by ordinary standing.
+The boots appear slightly above the rendered snow in parts of the cover pose, and the lean is not proof of the native camera-dependent lookout displacement; floor/render alignment and native foot IK remain visual gaps.
+The existing inactive-enemy HUD label remains visible in the no-enemy replay.
+Final validation passes offline with `CARGO_TARGET_DIR=target/alt`, `CARGO_BUILD_JOBS=6` and `-j 6` where supported: `cargo fmt --all --check`, workspace/all-target Clippy with `-D warnings`, the release game build and the complete release sim/formats suite.
+The suite reports 431 passed and two existing ignored tests, including five cover tests and four unchanged ledge-hang tests.
+Final check logs are `cover-fmt-latest.log`, `cover-clippy-latest.log`, `cover-build-latest.log` and `cover-suite-pass.log` under `target/alt/mobility/`.
+Play integration changes are limited to cover action-guide text and docking diagnostics; existing E / gamepad Y bindings and script `action` input are reused.
+
 ### Step 5. Climbing
 
 - Files: `crates/formats/src/` new `wall.rs` only after the `.wall` layout is decoded; ladders through the object-action path (`ObjActParam`) once a ladder placement is found.

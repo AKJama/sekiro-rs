@@ -4,6 +4,27 @@ Last updated 11 October 2026.
 Read this first in a new session, then `AGENTS.md` and `docs/DESIGN.md`.
 How much of the game is done overall: `docs/PROGRESS.md`.
 
+## Mobility step 4: wall hug (2026-10-11)
+
+Kind-3 cover supports all eight variations, HKS entry/idle, authored-root-distance sliding with endpoint clamps, restricted look-out states and action/away-stick exits, using the existing E / Y action button.
+The verified m11_00 h018700 chain-1 replay moves about 1.26 m, reaches the left peek loop and restores Idle; all four final `target/alt/mobility/cover-{idle,slide,peek,exit}.png` captures were inspected.
+Wolf stays outside the visible wall, but foot/render alignment and the native camera-dependent peek offset remain gaps; the requested variation-0 chain-6 route enters against collision without a matching visible full wall.
+Search, placement and away-stick thresholds, the 0.7 m cover offset frame interpretation, immediate entry anchoring and unsupported doors/corners/IK are documented in `docs/MOBILITY.md`.
+Formatting, workspace/all-target Clippy with `-D warnings`, the release game build and the full release sim/formats suite pass offline with six jobs in `target/alt`: 431 passed, two existing ignored, including five cover and four unchanged ledge-hang tests.
+Validation logs are `target/alt/mobility/cover-{fmt,clippy,build}-latest.log` and `cover-suite-pass.log`; the final scripted log is `cover-final.log`.
+No commits, network access or protected-path writes were made; saves were backed up under `target/alt/mobility/save-backup-20261011-cover` before game runs.
+
+## Start and pause menus (2026-10-11)
+
+No arguments or `--menu` opens a Segoe UI fight picker with soldier, Owl, Genichiro, arbitrary character ids, map/start, AI/stages, overlay, AP, hour, player mode and memory name.
+Menu and CLI use one options builder; Esc pauses, and Start / Back relaunch after the app drops so brain session saving follows the existing Quit path.
+Preferences save best-effort outside the repo, with choices also carried through relaunch; disk persistence was verified using a writable redirected LOCALAPPDATA.
+Reviewed 1600x900 / 1280x720 menus, the loaded soldier fight, pause, returned menu and restored preferences under `target/alt/menu/`; text fits, inactive controls are grey and the pause panel remains readable over combat.
+Formatting, workspace/all-target Clippy with `-D warnings`, the release build, 369 sim tests and the final 26 game tests pass offline with six jobs in `target/alt`.
+Four menu/CLI equivalence tests cover the requested cases and Genichiro's registry selection; three small simulation/extractor lint fixes keep shared workspace checks clean.
+The existing `--no-enemy` behavior still leaves a passive rendered opponent, and physical gamepad input / live coach calls were not exercised.
+See `docs/INTERFACE.md` for the lifecycle rationale, capture driver and verification; no commits, network calls or protected-path writes were made.
+
 ## Visuals steps 4 and 5 (2026-10-11)
 
 Sun shadows now use two cascades over 60 m and exclude map mesh bounds beyond 45 m, with 0.02 depth bias and 0.6-texel normal bias; characters retain shadows.

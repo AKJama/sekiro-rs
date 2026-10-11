@@ -19,6 +19,14 @@ pub const OUTWARD_PROBE: f32 = 0.6;
 pub const MIN_DROP: f32 = 0.5;
 pub const SIDE_TOLERANCE: f32 = 0.1;
 pub const CLIMB_FALLBACK_DURATION: f32 = 0.833;
+// Placeholder edge-frame interpretation of DockingTranslationOffset_Cover.
+// FwLo's MIT docking notes report (0, 0, 0.7); the native frame sign is unknown.
+pub const DOCKING_TRANSLATION_OFFSET_COVER: f32 = 0.7;
+pub const COVER_HEIGHT_TOLERANCE: f32 = 0.8;
+pub const COVER_WALL_PROBE: f32 = 1.0;
+pub const COVER_PROBE_LIFT: f32 = 0.6;
+pub const COVER_BLOCK_TOLERANCE: f32 = 0.05;
+pub const COVER_AWAY_ANGLE: f32 = 30.0;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MapEdge {
@@ -72,6 +80,142 @@ pub struct Docking {
 }
 
 impl Docking {
+    pub fn is_cover(&self, target: &Target) -> bool {
+        self.edges[target.edge].kind == 3
+    }
+
+    fn cover_target(&self, index: usize, position: Vec3, ground: &dyn Ground) -> Option<Target> {
+        let edge = &self.edges[index];
+        if edge.kind != 3 || !matches!(edge.variation, 0..=3 | 10..=13) {
+            return None;
+        }
+        let (point, t) = edge.closest(position);
+        let d = Vec3::from(edge.end) - Vec3::from(edge.start);
+        let side = Vec3::new(-d.z, 0.0, d.x).try_normalize()?;
+        for outward in [side, -side] {
+            if (position - point).dot(outward) < 0.0 {
+                continue;
+            }
+            let feet = point + outward * DOCKING_TRANSLATION_OFFSET_COVER;
+            let y = ground.floor(feet.x, feet.z, position.y + TOP_TOLERANCE)?;
+            if (point.y - y).abs() > COVER_HEIGHT_TOLERANCE
+                || (position.y - y).abs() > TOP_TOLERANCE
+            {
+                continue;
+            }
+            let clearance = ground.slide([feet.x, y, feet.z], [0.0; 2]);
+            if clearance[0].hypot(clearance[1]) > COVER_BLOCK_TOLERANCE {
+                continue;
+            }
+            let delta = -outward * COVER_WALL_PROBE;
+            // Reject kerbs and floor contacts: cover needs a wall above the step zone.
+            let slid = ground.slide([feet.x, y + COVER_PROBE_LIFT, feet.z], [delta.x, delta.z]);
+            if Vec3::new(slid[0] - delta.x, 0.0, slid[1] - delta.z).length() < COVER_BLOCK_TOLERANCE
+            {
+                continue;
+            }
+            let length = Vec3::new(d.x, 0.0, d.z).length();
+            // Endpoint labels are relative to Wolf facing away from the wall.
+            let start_is_left = d.dot(Vec3::new(outward.z, 0.0, -outward.x)) < 0.0;
+            let end = if t * length < END_MARGIN {
+                if start_is_left { 1 } else { 2 }
+            } else if (1.0 - t) * length < END_MARGIN {
+                if start_is_left { 2 } else { 1 }
+            } else {
+                0
+            };
+            return Some(Target {
+                edge: index,
+                point,
+                outward,
+                floor: Vec3::new(feet.x, y, feet.z),
+                end,
+                angle: 0.0,
+            });
+        }
+        None
+    }
+
+    pub fn cover_blocked(&self, target: &Target, ground: &dyn Ground, left: bool) -> bool {
+        let direction =
+            Vec3::new(target.outward.z, 0.0, -target.outward.x) * if left { 1.0 } else { -1.0 };
+        let delta = direction * END_MARGIN;
+        let slid = ground.slide(target.floor.to_array(), [delta.x, delta.z]);
+        Vec3::new(slid[0] - delta.x, 0.0, slid[1] - delta.z).length() > COVER_BLOCK_TOLERANCE
+    }
+
+    /// Cover displacement uses the authored movement clip's root distance.
+    pub fn cover_step(
+        &mut self,
+        body: &mut Body,
+        animation: Option<&str>,
+        stick_yaw: Option<f32>,
+        root_distance: f32,
+        ground: &dyn Ground,
+    ) -> bool {
+        let name = animation.unwrap_or("");
+        let entry = name.starts_with("a000_21810") || matches!(name, "a000_218111" | "a000_218112");
+        if self.active.is_none() && entry {
+            self.active = self.candidate.clone().filter(|t| self.is_cover(t));
+        }
+        let Some(target) = self.active.as_ref().filter(|t| self.is_cover(t)) else {
+            return false;
+        };
+        if matches!(name, "a000_218490" | "a000_218491")
+            || !(entry
+                || name.starts_with("a000_021")
+                || name.starts_with("a000_022")
+                || matches!(
+                    name,
+                    "a000_205010"
+                        | "a000_205011"
+                        | "a000_205020"
+                        | "a000_205021"
+                        | "a000_205030"
+                        | "a000_205031"
+                ))
+        {
+            self.active = None;
+            body.grounded = true;
+            body.velocity = [0.0; 3];
+            return false;
+        }
+        let mut target = target.clone();
+        // Only locomotion clips slide. Look-out stays anchored at the endpoint.
+        let id = name
+            .strip_prefix("a000_")
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
+        if (21100..21700).contains(&id)
+            && let Some(yaw) = stick_yaw
+            // HKS DOCKING_MOVE_INPUT_ANGLE_MIN/MAX: only the along-wall cone moves.
+            && {
+                let angle = angle_diff(yaw, target.yaw() + std::f32::consts::PI).abs().to_degrees();
+                angle > 30.0 && angle < 150.0
+            }
+        {
+            let edge = &self.edges[target.edge];
+            let tangent = (Vec3::from(edge.end) - Vec3::from(edge.start)).normalize();
+            let stick = Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
+            let next = target.point + tangent * root_distance * stick.dot(tangent).signum();
+            let (point, _) = edge.closest(next);
+            if let Some(updated) = self.cover_target(
+                target.edge,
+                Vec3::new(point.x, target.floor.y, point.z)
+                    + target.outward * DOCKING_TRANSLATION_OFFSET_COVER,
+                ground,
+            ) {
+                target = updated;
+            }
+        }
+        body.position = target.floor.to_array();
+        body.yaw = angle_diff(target.yaw() + std::f32::consts::PI, 0.0);
+        body.velocity = [0.0; 3];
+        body.grounded = true;
+        body.last_fall_height = 0.0;
+        self.active = Some(target);
+        true
+    }
     pub fn load(path: &Path) -> Result<Self, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let edges = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
@@ -133,6 +277,20 @@ impl Docking {
         let mut nearest = GROUND_REACH;
         for i in 0..self.edges.len() {
             let edge = &self.edges[i];
+            if edge.kind == 3 {
+                let (point, _) = edge.closest(p);
+                let distance = Vec3::new(p.x - point.x, 0.0, p.z - point.z).length();
+                if distance <= nearest
+                    && let Some(mut target) = self.cover_target(i, p, ground)
+                    && angle_diff(body.yaw, target.yaw()).abs().to_degrees() <= FACING_LIMIT
+                {
+                    target.angle =
+                        angle_diff(target.yaw() + std::f32::consts::PI, body.yaw).to_degrees();
+                    nearest = distance;
+                    self.candidate = Some(target);
+                }
+                continue;
+            }
             if edge.kind != 2 || edge.variation != 0 {
                 continue;
             }
@@ -189,6 +347,9 @@ impl Docking {
         let Some(target) = &self.active else {
             return false;
         };
+        if self.is_cover(target) {
+            return false;
+        }
         if name == "a000_217520" {
             body.grounded = false;
             body.velocity = [0.0; 3];

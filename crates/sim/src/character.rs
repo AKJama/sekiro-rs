@@ -572,18 +572,21 @@ impl Character {
         // HangIdle carries turn/prosthetic flags but no step/jump cancel windows.
         // Docking's idle actions are gated by HKS, not the ground combat buffer.
         let docking_idle = self.docking.active.is_some()
-            && self
-                .behavior
-                .runtime
-                .main_clip()
-                .is_some_and(|c| c.animation == "a000_020000");
+            && self.behavior.runtime.main_clip().is_some_and(|c| {
+                c.animation == "a000_020000"
+                    || c.animation.starts_with("a000_021")
+                    || c.animation.starts_with("a000_022")
+                    || c.animation.starts_with("a000_2050")
+            });
         if self.kind == ControlKind::Player {
             let mut input_tae = self.tae_runtime.frame.clone();
             if docking_idle {
                 input_tae.restricted = false;
             }
             self.input.update(frame, dt, &input_tae);
-            self.free_move_start_turn();
+            if self.docking.active.is_none() {
+                self.free_move_start_turn();
+            }
         }
         self.set_engine_variables();
         self.fill_env(dt);
@@ -619,7 +622,27 @@ impl Character {
         let env = &mut self.behavior.env;
         env.docking_searches.set(0);
         env.action_guide.set(None);
-        env.hang_candidate = self.docking.candidate.is_some();
+        env.hang_candidate = self
+            .docking
+            .candidate
+            .as_ref()
+            .is_some_and(|t| !self.docking.is_cover(t));
+        env.cover_candidate = self
+            .docking
+            .candidate
+            .as_ref()
+            .is_some_and(|t| self.docking.is_cover(t));
+        env.cover_active = self
+            .docking
+            .active
+            .as_ref()
+            .is_some_and(|t| self.docking.is_cover(t));
+        env.docking_blocked = dock.map_or([false; 2], |t| {
+            [
+                self.docking.cover_blocked(t, self.ground.as_ref(), true),
+                self.docking.cover_blocked(t, self.ground.as_ref(), false),
+            ]
+        });
         env.docking_active = self.docking.active.is_some();
         env.docking_variation = dock.map_or(0, |t| self.docking.edges[t.edge].variation);
         env.docking_end = dock.map_or(0, |t| t.end);
@@ -631,7 +654,24 @@ impl Character {
         self.behavior
             .runtime
             .set_variable("HangStartEdgeAngle", dock.map_or(0.0, |t| t.angle));
-        self.behavior.runtime.set_variable("DockingStickAngle", 0.0);
+        self.behavior
+            .runtime
+            .set_variable("CoverStartEdgeAngle", dock.map_or(0.0, |t| t.angle));
+        let docking_angle = self
+            .input
+            .stick_world_yaw()
+            .map_or(0.0, |yaw| -angle_diff(yaw, self.body.yaw).to_degrees());
+        self.behavior
+            .runtime
+            .set_variable("DockingStickAngle", docking_angle);
+        // Placeholder away-stick exit: offer arm 12 to the existing HKS end transition.
+        if env.cover_active
+            && docking_idle
+            && self.input.stick_world_yaw().is_some()
+            && docking_angle.abs() < crate::docking::COVER_AWAY_ANGLE
+        {
+            env.requested.insert(crate::input::arm::ACTION);
+        }
         let requested: Vec<i32> = self.behavior.env.requested.iter().copied().collect();
         let resets_before = self.behavior.env.input_resets.get();
 
@@ -861,6 +901,12 @@ impl Character {
             main.as_ref().and_then(|c| self.tae.anim(&c.animation)),
             travel_window,
             dt,
+            self.ground.as_ref(),
+        ) && !self.docking.cover_step(
+            &mut self.body,
+            main.as_ref().map(|c| c.animation.as_str()),
+            self.input.stick_world_yaw(),
+            root_motion[0].hypot(root_motion[2]),
             self.ground.as_ref(),
         ) && !self.docking.step(
             &mut self.body,

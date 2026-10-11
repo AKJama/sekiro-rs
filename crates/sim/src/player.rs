@@ -95,6 +95,9 @@ pub struct PlayerEnv {
     pub wire_precompute: std::cell::Cell<Option<(i32, i32)>>,
     pub wire_prefer: std::cell::Cell<bool>,
     pub hang_candidate: bool,
+    pub cover_candidate: bool,
+    pub cover_active: bool,
+    pub docking_blocked: [bool; 2],
     pub docking_variation: u8,
     pub docking_end: u8,
     pub docking_active: bool,
@@ -178,6 +181,9 @@ impl Default for PlayerEnv {
             wire_precompute: std::cell::Cell::new(None),
             wire_prefer: std::cell::Cell::new(false),
             hang_candidate: false,
+            cover_candidate: false,
+            cover_active: false,
+            docking_blocked: [false; 2],
             docking_variation: 0,
             docking_end: 0,
             docking_active: false,
@@ -280,11 +286,16 @@ impl Adapter<'_> {
             3017 => env.docking_variation as f32,
             3029 => 0.0,
             3044 => truth(env.hang_candidate && env.docking_searches.get() & 2 != 0),
+            3043 => truth(env.cover_candidate && env.docking_searches.get() & 1 != 0),
             3046 if arg == Some(1) => env.docking_variation as f32,
             3050 => truth(env.hang_can_climb),
             // Shimmy and corners are deferred. Both ends block docking movement.
-            3051 | 3052 => truth(env.docking_active),
-            3043 | 3045 | 3048 | 3049 | 3059 | 3060 => 0.0,
+            3051 | 3052 => truth(if env.cover_active {
+                env.docking_blocked[(id - 3051) as usize]
+            } else {
+                env.docking_active
+            }),
+            3045 | 3048 | 3049 | 3059 | 3060 => 0.0,
             3061 => -1.0,
             ENV_FALLING => truth(env.falling),
             ENV_LANDED => truth(env.landed),
