@@ -59,41 +59,76 @@ cargo run --release -p sekiro-extract -- anims
 cargo run --release -p sekiro-game
 ```
 
-Running the game with no arguments opens the start menu: pick the fight, the place, the AI, the time of day and god mode, then Start.
+### Play the baseline game
+
+No accounts, keys or models are needed: this is the game as FromSoftware wrote it, with every enemy running its own original AI.
+
+Running the game with no arguments opens the start menu: pick the fight, the place, the AI (leave it on "Lua", the game's own AI), the time of day and god mode, then Start.
 Esc in a fight opens the pause menu (resume, back to the start menu, quit).
 
 The same choices work as command-line flags, which skip the menu:
 
 ```powershell
 $game = 'target/release/sekiro-rs.exe'
-& $game --arena owl --progression castle-roof          # Great Shinobi Owl on the castle roof, his own AI
+& $game --arena owl --progression castle-roof          # Great Shinobi Owl on the castle roof
 & $game --arena genichiro --progression castle-roof    # Genichiro on the castle keep roof
 & $game --arena genichiro --genichiro-phase tomoe       # straight to the Way of Tomoe lightning phase
 & $game --play --enemy soldier                          # an Ashina soldier on a flat floor
 & $game --play --map m11_00_00_00 --start 3 --no-enemy  # walk around a map
 ```
 
-Useful flags: `--god` (you cannot die), `--immortal` (you cannot die but posture still breaks), `--hour 0-23` (time of day), `--enemy cXXXX` (any character by id).
+Useful flags: `--progression castle-roof` (Wolf's attack power at that point in the game), `--god` (you cannot die), `--immortal` (you cannot die but posture still breaks), `--hour 0-23` (time of day), `--enemy cXXXX` (any character by id).
 
 Controls: WASD move, mouse camera, left mouse attack, right mouse guard and deflect, Space jump, Shift step (hold to sprint), C crouch, Q lock-on, E grab a ledge or hug a wall, F grappling hook, Esc pause menu.
 A gamepad works too.
 
 ## The boss brain
 
-The boss brain replaces the boss's choice of moves with a model-driven controller that adapts to how you fight, while the boss keeps his own moves, timings and rules.
-A coach model reviews your fights (after each fight and about every 30 seconds mid-fight) and writes a game plan; in the fight a fast local system picks moves from that plan.
-It sees only what a player could see, and it learns across sessions (memory under the gitignored `logs/memory/`).
+The boss brain replaces the boss's choice of moves with a model-driven controller that learns how you fight and adapts, while the boss keeps his own moves, timings and rules.
+It sees only what a player could see, and it remembers you across sessions (memory in the gitignored `logs/memory/`); in our testing it becomes very hard after about 20 fights.
+It currently supports the Great Shinobi Owl, Genichiro and the Ashina soldier.
+
+It has two parts:
+
+- **The coach** reviews your fights (after each fight and about every 30 seconds mid-fight) and writes a game plan. It runs through a command-line agent on your own subscription, so it needs no API key.
+- **The checkpoint chooser** (optional) is a small, fast model that switches between the coach's prepared plans at key moments in a fight. It uses the OpenAI API and needs an API key.
+
+### Recommended setup: Codex coach plus the OpenAI checkpoint chooser
+
+1. Install the [Codex CLI](https://github.com/openai/codex) and sign in with your ChatGPT plan (`codex login`).
+   The game starts it isolated, without your other Codex settings, memories or project files.
+2. Optional, for the checkpoint chooser: copy `.env.example` to `.env` in the repository folder and set `OPENAI_API_KEY`.
+   `.env` is gitignored; never commit it.
+3. Play:
 
 ```powershell
 & $game --arena owl --progression castle-roof --brain coach --coach codex --brain-overlay
 & $game --arena genichiro --progression castle-roof --brain coach --coach codex --brain-overlay
 ```
 
-- The coach runs through the [Codex CLI](https://github.com/openai/codex) on your own ChatGPT plan (install it and sign in first); it is started isolated, without your other Codex settings or project files.
-- Optional: with an `OPENAI_API_KEY` (environment variable or a gitignored `.env`) a small, fast model also switches between the coach's prepared plans at key moments in the fight. This uses paid API calls; without a key the coach still works.
-- `--brain-overlay` (F8 toggles it) shows the current plan and the coach's notes; the overlay footer counts tokens.
-- `--player <name>` keeps a separate profile per player; `--brain-memory off` leaves memory untouched.
-- `--brain-token-budget N` stops model calls after N tokens and falls back to the boss's own AI.
+Or pick "Coach brain" as the AI in the start menu.
+
+### What it costs and how fast it is
+
+Measured on 11 October 2026:
+
+| Part | Runs through | Typical time per call | Typical tokens per call | Paid by |
+|---|---|---:|---:|---|
+| Coach, `--coach codex` (default model `gpt-6.1-sol`) | Codex CLI | about 5 to 25 s | about 11k to 19k | your ChatGPT plan's usage |
+| Coach, `--coach claude` | Claude Code CLI (`claude -p`) | about 60 to 120 s | about 96k to 161k | your Claude plan's usage |
+| Coach, `--coach api` | OpenAI API | depends on model | similar to Codex | API key, billed |
+| Checkpoint chooser (`gpt-6-luna`) | OpenAI Decisions API | fast, about 100-byte requests | about 300 | API key, billed (about $0.002 for a 9-fight session) |
+
+The Codex coach is the recommended one: it was by far the fastest and leanest in our tests.
+The Claude coach works but is slow, because the CLI loads your whole Claude Code setup on every call; if you prefer it, your own coding agent can help you tune it.
+The overlay footer (`--brain-overlay`, F8) counts tokens for the current fight and session.
+
+### Other brain options
+
+- `--player <name>` keeps a separate profile per player (the boss's general knowledge is shared; what it learned about you is yours).
+- `--brain-memory off` plays without reading or writing memory.
+- `--brain-stage lua|early|alive|outsmarted` replays saved stages of the Owl's learning, for comparisons and recordings.
+- `--brain-token-budget N` stops model calls after N tokens and falls back to the boss's own AI; `--brain-budget USD` does the same for billed API spend.
 
 Details, including how the plans, checkpoints and memory work: [docs/BRAIN.md](docs/BRAIN.md).
 

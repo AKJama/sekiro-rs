@@ -2,6 +2,7 @@
 # Game data, extracted assets, decompiled output and analysis databases never enter git.
 *
 !/.gitignore
+!/.env.example
 !/AGENTS.md
 !/README.md
 !/STATUS.md
