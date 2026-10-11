@@ -33,6 +33,9 @@ use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::world_serialization::WorldInstanceReady;
 use serde_json::Value;
 
+#[path = "map_material.rs"]
+mod map_material;
+
 use crate::lighting::{
     MapLighting, MapProbes, ProbeRegion, ShadowSettings, apply_lighting, apply_probes,
     nearest_available_variant, nearest_variant, spawn_lights,
@@ -458,6 +461,7 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
     }
     app.insert_resource(probes);
     let args: Vec<_> = std::env::args().collect();
+    map_material::install(app, &scene.prefix, &args);
     app.insert_resource(ShadowSettings::from_args(&gparam, hour, &args)?);
     app.insert_resource(LocalLights::load(dir, &args)?);
     if args.iter().any(|a| a == "--uncapped") {

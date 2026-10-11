@@ -184,7 +184,7 @@ All statements below are from his notes unless marked.
 - **Us:** single layer GLB (`pieces.rs`), which is the root of the MAP-BASELINE ranked issue 3 (snow, moss, interiors).
 - **Gap:** GLB cannot carry six blend channels and the extra textures as standard glTF material.
   Options: custom vertex attributes in the GLB plus extras and a Bevy `ExtendedMaterial` on load, or a small own binary mesh format next to the GLB.
-  Decision for step 6: keep GLB for plain materials and add a second export only for layered materials, so non-layered assets keep working unchanged.
+  Step 6 retains GLB for all materials and carries additional layered sampler metadata in material extras.
 
 #### Foliage
 
@@ -572,11 +572,27 @@ No commits, network access or protected-path writes were made.
 
 ### Step 6. Multi-layer map materials
 
-Not attempted in this session after completing steps 4 and 5 validation.
-The existing single-layer materials remain in use; no layered-material flag or m17 comparison is claimed.
+Implemented in the 2026-10-11 follow-up with an original `ExtendedMaterial` and WGSL, retaining StandardMaterial lighting, shadows and fog.
+The FLVER reader preserves semantic-5 UByte4Norm blend streams separately from the two texture UV sets, with all four original bytes retained.
+The exporter packs stream 0 red (overlay), stream 4 red (snow) and stream 2 red (layer C) into COLOR_0 RGB and exports additional sampler metadata in material extras.
+The shader neutralizes vertex colour before the StandardMaterial base sample, so blend weights cannot tint the base.
+Unlayered meshes continue using ordinary GLB materials.
+
+Verified families are `M[Multiple]` (base 8/3/9, overlay 5/4, layer C 7/0, snow 12/10) and `M[MultipleGround]` (base 8/3/9, overlay 5/4, snow 11/7).
+Every numeric slot also requires the matching AlbedoMap, NormalMap or Mask semantic.
+Real MTDs such as Outskirts Rock4 put `_3m` into an AlbedoMap slot and `_a` into a NormalMap slot; the runtime branch switches are untraced, so those unsuitable inputs are excluded rather than displayed as coloured patches.
+Normal-only secondary layers remain supported when their albedo is absent.
+Texture UV selection follows the MTD uv_number, clamped to the two actual UV sets; native per-layer UV transforms remain untraced.
+
+Layer DDS albedos load as sRGB, normals and the base height mask as linear, with repeat addressing and anisotropy 8.
+The original GLB sampler already explicitly uses repeat addressing.
+Coverage uses endpoint-preserving smoothstep with a 0.25 half-width against base-mask R; snow reverses the height threshold and multiplies by smoothstep(0.2, 0.7, world-normal Y).
+These coverage rules are approximations following the data interpretation in FwLo's MIT notes, not recovered native shader equations.
+Only the base mask is bound, and normal layers use our existing BC5 conversion without native gloss.
+`--no-layers` disables secondary texture loads and layer sampling; `--show-blend` displays the exported weights.
 
 - Files: `crates/extract/src/maps/pieces.rs` (export layer textures and blend bytes for `M[Multiple]` and `M[MultipleGround]`), a new Bevy `ExtendedMaterial` and WGSL in `crates/game`, `map.rs` (swap material on load for layered meshes).
-- Behaviour: reproduce the layer semantics from FwLo's data findings: byte 0 overlay, byte 4 snow with up-facing, byte 2 layer C, `_3m` R as height for coverage with a softness constant.
+- Behaviour: use the first byte of packed blend streams 0 (overlay), 4 (snow with up-facing) and 2 (layer C), and `_3m` R as height for approximate coverage.
   Treat UV set per layer as a guess and keep the debug view that paints the blend weights as colour.
 - Check: m17_00_00_00 (snow), m11_01 interior wall (flat interior materials), m11_00 start 3 stone walls with moss.
   Before and after pairs at the same camera.
@@ -591,6 +607,56 @@ The existing single-layer materials remain in use; no layered-material flag or m
 - Risk: `GameScale` and the real distance units are unverified [I], keep a tuning knob.
 
 ### Step 8. Foliage and alpha correctness
+
+#### Step 8 diagnosis (2026-10-11)
+
+Sunken Valley's sampled `M[AMSN]_md` ground/snow mesh decals use opaque BC1 albedos and vertex alpha spanning 0..1.
+The old exporter omitted vertex colour entirely, making those blended cards fully opaque.
+The exporter now carries that alpha with neutral RGB, because the sampled RGB bytes are constant (1,0,0) shader data rather than a visible red tint.
+The cache-backed GLB regression checks preserved fractional opacity and neutral RGB.
+The sampled Leaf1_Decal and branch35 materials already resolve real textures and MASK cutoff 128/255.
+Their DDS transparency counts are 764806/1048576 and 1013262/1048576 pixels respectively; missing DDS alpha is not their root cause.
+Cutout meshes are now always two-sided, with MTD double-sided int/bool flags also honoured.
+When no albedo resolves through FLVER sampler names, primary MTD albedo/normal slots provide a fallback for Wind/Gradient naming differences, covered by a synthetic regression.
+This fallback is not claimed as the cause of the sampled Sunken Valley decals.
+
+Hirata's `_envmap_00.tpf` contains GIIV volumes while `_envmap_00_second.tpf` contains 148 GILM cubes.
+Environment extraction discovers suffixed TPFs, exports the cubes and warns for containers without cubes instead of aborting the remaining map export.
+Full Hirata extraction also writes 1243 placed edges, 112 grapple records and 261 lights in five banks.
+
+The remaining triangular snow patch in the start-0 valley view is isolated to opaque `Asset_SnowGround_Multi` meshes, including m000064.
+That MTD has BlendMode 0, AlphaRef (0,0) and DisableDepthWrite false; its snow weights are 255 throughout.
+Its stored/reconstructed tangents agree with generated texture tangents at all 999 vertices.
+Hiding m000064 removes much of that patch, while positive depth-bias experiments at 8 and 32 do not remove it.
+Those unsuccessful bias changes were removed; the native SnowGround shader remains a gap rather than forcing opaque snow geometry into a foliage cutout mode.
+
+#### Steps 6 and 8 captures and verification
+
+All four requested before/after pairs were inspected at hour 12: `target/alt/visuals/v4-{outskirts,valley,hirata,mibu}-{before,after}.png`.
+Outskirts start 3 gains snow on upward-facing wall tops, ledges and ground while vertical stone retains detail.
+Valley start 0 has open branch silhouettes and snowy rock tops, but its near-right opaque SnowGround patch still shows triangular facets.
+Hirata start 0 gains green moss on rocks and preserves open grass/root silhouettes; the newly discovered probes also change its lighting, so this pair does not isolate layers alone.
+Mibu start 3 gains moss patches and cutout foliage, while the pale water remains the separate step-9 gap.
+No obvious tiling seams appeared in these four views; they do not establish full-map or native-game visual equivalence.
+The four additional `v4-perf-{outskirts,castle}-{off,on}.png` captures were inspected: leaf silhouettes stay open in both controls, and layers add snow coverage outdoors without visibly washing out Castle's wood/plaster interior.
+
+Uncapped 600-step idle replays use `--simple-ai`, `--no-enemy`, `--brain-memory off`, and the same camera/start/hour, with `--no-layers` as control.
+Medians exclude waiting pipelines, startup before step 150 and the first series' screenshot neighbourhood; sampled steps are 150..390 and 460..570.
+The first off/on series recorded Outskirts 23.1422/27.07065 ms (+3.92845 ms, +17.0%) and Castle 21.216/19.6005 ms (-1.6155 ms, -7.6%).
+The reversed on/off repeat recorded Outskirts off/on 26.6901/21.8766 ms (-4.8135 ms, -18.0%) and Castle 25.04765/19.75285 ms (-5.2948 ms, -21.1%).
+Other jobs compiled during both series, and the sign reversal prevents attributing those wall-frame changes to layer cost.
+The copied CSVs and sample counts are under `target/alt/visuals/v4-{perf,repeat}-*`, with summary JSONs alongside them.
+FwLo's approximately 10% gate result remains his measurement, not a verified cost of our renderer.
+Matched final-binary Outskirts viewer samples at 15 seconds report opaque GPU 2.25 ms off / 2.20 ms on and 39.4 / 44.8 fps; this single short pair also fails to establish a positive isolated layer cost.
+Both `v4-gpu-{off,on}.png` captures were inspected, confirming that the same view differs in snow coverage while preserving foliage cutouts.
+
+All ten maps were re-extracted sequentially after the final exporter changes; every extraction exited successfully.
+Hirata's `edges.json`, `grapple.json` and `lights.json` were checked after full extraction.
+Valley retains exactly three missing texture names: `m17_rock_92_3m`, `o007282_plant_00_a` and `o007282_plant_00_n`.
+The collisionless m89 map skips edge extraction when no edge archive exists and still exports its display models.
+Workspace formatting, all-target Clippy with `-D warnings`, the requested release game/formats/extract suite (99 passed, two existing ignored, including `map_tangents`) and release game build pass offline in `target/alt` with six jobs.
+Logs are `v4-fmt.txt`, `v4-clippy.txt`, `v4-tests-final.txt` and `v4-build-final.txt` under `target/alt/visuals/`, with zero exit-code sidecars.
+No commits, network access or protected-path writes were made by this work, and saves were backed up under `target/alt/visuals/v4-save-backup` before running the game.
 
 - Files: `crates/extract/src/maps/pieces.rs`, `textures.rs`.
 - Behaviour: diagnose the Sunken Valley white foliage polygons (likely a texture pick or alpha channel handling bug), make cutouts two-sided, and check that 3 missing textures (known) are the only gaps.

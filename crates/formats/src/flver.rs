@@ -280,6 +280,9 @@ pub struct Vertices {
     pub bitangents: Vec<[f32; 4]>,
     /// One array per UV channel.
     pub uvs: Vec<Vec<[f32; 2]>>,
+    /// Packed semantic-5 UByte4Norm streams are material blend data, not texture UVs.
+    /// Keep all four bytes and their stream order independently of the actual UV sets.
+    pub blends: Vec<Vec<[u8; 4]>>,
     /// One array per colour channel, RGBA 0..1.
     pub colors: Vec<Vec<[f32; 4]>>,
     pub bone_weights: Vec<[f32; 4]>,
@@ -673,10 +676,14 @@ fn read_buffer(
                 normal_claimed = true;
                 0
             }
+            S::Uv if m.kind == T::UByte4Norm => {
+                out.blends.push(Vec::with_capacity(bytes.len() / stride));
+                out.blends.len() - 1
+            }
             S::Uv => {
                 let first = out.uvs.len();
                 let n = match m.kind {
-                    T::Float4 | T::UByte4Norm | T::Short4 | T::Half4 => 2,
+                    T::Float4 | T::Short4 | T::Half4 => 2,
                     _ => 1,
                 };
                 for _ in 0..n {
@@ -784,6 +791,9 @@ fn read_buffer(
                         out.extra_normals[slot - 1].push(n);
                     }
                 }
+                S::Uv if m.kind == T::UByte4Norm => {
+                    out.blends[slot].push(c.try_into().expect("four-byte blend member"));
+                }
                 S::Uv => {
                     let s = |i| i16_at(c, i) as f32 / uv_factor;
                     match m.kind {
@@ -795,10 +805,6 @@ fn read_buffer(
                         }
                         T::Color | T::UByte4 | T::Byte4 | T::Short2 | T::Half2 => {
                             out.uvs[slot].push([s(0), s(1)])
-                        }
-                        T::UByte4Norm => {
-                            out.uvs[slot].push([c[0] as f32 / 255.0, c[1] as f32 / 255.0]);
-                            out.uvs[slot + 1].push([c[2] as f32 / 255.0, c[3] as f32 / 255.0]);
                         }
                         T::Short4 | T::Half4 => {
                             out.uvs[slot].push([s(0), s(1)]);
@@ -844,5 +850,34 @@ trait MapN {
 impl MapN for [u8] {
     fn map_n(&self, f: impl Fn(u8) -> f32) -> [f32; 4] {
         [f(self[0]), f(self[1]), f(self[2]), f(self[3])]
+    }
+}
+
+#[cfg(test)]
+mod blend_tests {
+    use super::*;
+
+    #[test]
+    fn packed_blend_stream_keeps_bytes_and_does_not_consume_uv_channels() {
+        let members = [
+            LayoutMember {
+                kind: LayoutType::UByte4Norm,
+                semantic: LayoutSemantic::Uv,
+                index: 1,
+            },
+            LayoutMember {
+                kind: LayoutType::Short4,
+                semantic: LayoutSemantic::Uv,
+                index: 0,
+            },
+        ];
+        let mut bytes = vec![23, 45, 67, 89];
+        for value in [2048i16, -4096, 1024, 6144] {
+            bytes.extend(value.to_le_bytes());
+        }
+        let mut vertices = Vertices::default();
+        read_buffer(&bytes, &members, 12, 2048., &mut vertices).unwrap();
+        assert_eq!(vertices.blends, vec![vec![[23, 45, 67, 89]]]);
+        assert_eq!(vertices.uvs, vec![vec![[1., -2.]], vec![[0.5, 3.]]]);
     }
 }

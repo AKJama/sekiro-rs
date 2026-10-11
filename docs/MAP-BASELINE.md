@@ -158,3 +158,19 @@ The three requested maps now export HDR probe cubes, diffuse cubes and spatial r
 Reviewed before/after captures are in `target/alt/visuals/`; shaded surfaces respond to local radiance and the hour variant.
 The probe Skybox still contains captured architecture, especially through Castle windows, so the sky fidelity check remains open.
 Layered materials and foliage remain the baseline issues listed above.
+
+## Layered materials and alpha follow-up (2026-10-11)
+
+The original layered renderer supports `M[Multiple]` and `M[MultipleGround]`, using the first byte of packed FLVER blend streams 0/4/2 for overlay/snow/layer C.
+Extra albedo, normal and base-mask textures use repeat samplers and authored UV-set selection; native coverage equations, per-layer transforms, secondary masks and gloss remain approximations.
+The four before/after pairs are `target/alt/visuals/v4-{outskirts,valley,hirata,mibu}-{before,after}.png`, at m11_00 start 3, m17_00 start 0, m10_00 start 0 and m15_00 start 3 respectively.
+Outskirts gains snow on upward-facing ground, rock ledges and wall tops while vertical stone retains detail.
+Hirata and Mibu show moss patches and open grass/leaf silhouettes; no obvious repeating texture seams appeared in these views.
+Sunken Valley's leaf/branch cards are cut out, but a conspicuous triangular white terrain patch remains on opaque `Asset_SnowGround_Multi` geometry near start 0.
+Isolation, source MTD alpha flags and 999 matching tangents distinguish that remaining shader gap from the repaired blended mesh decals.
+The old exporter dropped vertex alpha from opaque-BC1 `M[AMSN]_md` decals; their vertex opacity is now retained with neutral RGB.
+MTD sampler fallback handles Wind/Gradient slot-name mismatches, and cutouts are two-sided.
+Valley extraction still reports exactly three missing textures: `m17_rock_92_3m`, `o007282_plant_00_a` and `o007282_plant_00_n`.
+Hirata's probes come from `_envmap_00_second.tpf`, containing 148 GILM cubes; its unsuffixed file contains GIIV volumes.
+All ten maps were regenerated sequentially, and Hirata's `edges.json`, `grapple.json` and `lights.json` exist after a successful complete extraction.
+Water, sky domes and animated foliage remain outside this follow-up.

@@ -3,7 +3,6 @@ use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
 use glam::{Mat4, Quat, Vec3};
-use rayon::prelude::*;
 use sekiro_formats::{
     msb::Msb,
     tpf::{self, DdsFormat},
@@ -239,14 +238,24 @@ pub fn export(raw: &Path, out: &Path, id: &str, msb: &Msb) -> Result<()> {
             "rotation": rotation.to_array(), "size": r.size })
         })
         .collect();
-    let counts: Vec<Result<usize>> = (0..6)
-        .into_par_iter()
-        .map(|variant| {
-            let path = raw.join(format!("map/{id}/{id}_envmap_{variant:02}.tpf"));
-            if !path.exists() {
-                return Ok(0);
-            }
-            let data = std::fs::read(&path)?;
+    // Hirata splits GIIV volumes and GILM cubes into _00.tpf and _00_second.tpf.
+    // Discover all envmap TPFs instead of assuming six unsuffixed containers.
+    let mut paths: Vec<_> = std::fs::read_dir(raw.join(format!("map/{id}")))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|name| {
+                    name.starts_with(&format!("{id}_envmap_")) && name.ends_with(".tpf")
+                })
+        })
+        .collect();
+    paths.sort();
+    // Process containers in order to avoid concurrent writes if a cube is repeated.
+    let counts: Vec<Result<usize>> = paths
+        .iter()
+        .map(|path| {
+            let data = std::fs::read(path)?;
             let mut count = 0;
             for texture in tpf::parse(&data)? {
                 let name = texture.name.to_ascii_lowercase();
@@ -286,7 +295,12 @@ pub fn export(raw: &Path, out: &Path, id: &str, msb: &Msb) -> Result<()> {
                 )?;
                 count += 1;
             }
-            ensure!(count > 0, "no GILM cubes found in {}", path.display());
+            if count == 0 {
+                eprintln!(
+                    "warning: no GILM cubes in {}; retaining hemisphere ambient fallback",
+                    path.display()
+                );
+            }
             Ok(count)
         })
         .collect();

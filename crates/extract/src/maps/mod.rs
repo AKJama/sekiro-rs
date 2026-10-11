@@ -159,8 +159,13 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
         return Ok(());
     }
     env::export(&raw, &out, id, &msb)?;
-    if edges::export(cache, id, &msb, oodle)? {
-        return Ok(());
+    let edge_header = raw.join(format!("map/{id}/{id}.edgebhd"));
+    if edge_header.is_file() || msb.parts.iter().any(|p| p.kind == msb::PartKind::Collision) {
+        if edges::export(cache, id, &msb, oodle)? {
+            return Ok(());
+        }
+    } else {
+        eprintln!("{id}: collisionless layout has no authored edge archive");
     }
     let mtds = load_mtds(&raw)?;
 
