@@ -167,6 +167,8 @@ impl Mock {
         config.base_url = self.base.clone();
         // Tests count accepted connections; the warm-up has a test of its own.
         config.warm_up = false;
+        // The mock server stands in for the Responses API, so its coach is the API backend.
+        config.coach_backend = CoachBackend::Api;
         config
     }
 
@@ -1033,26 +1035,47 @@ fn the_codex_coach_reads_the_last_message_file() {
     assert_eq!(reply.error, None);
     assert_eq!(reply.plan.unwrap().start_set, "a");
     let args = args_of(&fake.calls()[0]);
+    // Isolated: none of the user's config, rules, AGENTS.md, memories, plugins or apps, and our
+    // instructions replace Codex's system prompt.
+    let n = args.len();
     assert_eq!(
-        args,
-        vec![
+        args[..15],
+        [
             "exec",
-            "--ignore-user-config",
-            "-c",
-            "model_reasoning_effort=\"low\"",
             "--skip-git-repo-check",
+            "--ephemeral",
+            "--ignore-user-config",
+            "--ignore-rules",
             "-s",
             "read-only",
             "-m",
             "model-x",
-            "--ephemeral",
-            "--output-schema",
-            &args[11],
-            "-o",
-            &args[13],
-            "-"
+            "-c",
+            "model_reasoning_effort=\"low\"",
+            "-c",
+            "project_doc_max_bytes=0",
+            "-c",
+            &args[14],
         ]
     );
+    assert!(args[14].starts_with("model_instructions_file=\""));
+    for feature in [
+        "memories",
+        "apps",
+        "plugins",
+        "browser_use",
+        "computer_use",
+        "multi_agent",
+    ] {
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--disable" && w[1] == feature),
+            "{feature} disabled"
+        );
+    }
+    assert_eq!(args[n - 5], "--output-schema");
+    assert_eq!(args[n - 3], "-o");
+    assert_eq!(args[n - 1], "-");
     assert_eq!(reply.tokens, [0, 0, 0], "codex reports no usage");
 }
 

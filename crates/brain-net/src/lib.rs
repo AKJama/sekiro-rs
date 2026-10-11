@@ -31,7 +31,7 @@ pub struct CoachCli {
 impl CoachCli {
     fn resolved_backend(&self) -> Result<CoachBackend, String> {
         match self.backend.as_deref() {
-            None => Ok(CoachBackend::Api),
+            None => Ok(CoachBackend::Codex),
             Some(b) => CoachBackend::by_name(b)
                 .ok_or_else(|| format!("unknown --coach {b}: known are claude, codex, api")),
         }
@@ -139,10 +139,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn game_cli_defaults_to_api() {
+    fn game_cli_defaults_to_codex() {
         assert_eq!(
             CoachCli::default().resolved_backend().unwrap(),
-            CoachBackend::Api
+            CoachBackend::Codex
         );
     }
 

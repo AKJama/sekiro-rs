@@ -117,7 +117,8 @@ impl CoachBackend {
     /// The deadline of one coach call.
     pub fn timeout(self) -> Duration {
         match self {
-            Self::Claude | Self::Codex => Duration::from_secs(120),
+            Self::Claude => Duration::from_secs(120),
+            Self::Codex => Duration::from_secs(60),
             Self::Api => Duration::from_secs(45),
         }
     }
@@ -178,7 +179,7 @@ impl HostedConfig {
             coach_effort: "low".into(),
             coach_timeout: Duration::from_secs(45),
             coach_max_output_tokens: 6000,
-            coach_backend: CoachBackend::Api,
+            coach_backend: CoachBackend::Codex,
             coach_cmd: None,
             checkpoints: true,
         }
@@ -235,7 +236,7 @@ mod tests {
     #[test]
     fn coach_defaults_are_small_and_fast() {
         let c = HostedConfig::new(Backend::Coach, ApiKey::new("fake"));
-        assert_eq!(c.coach_backend, CoachBackend::Api);
+        assert_eq!(c.coach_backend, CoachBackend::Codex);
         assert_eq!(c.coach_model, "gpt-6-luna");
         assert_eq!(c.coach_effort, "low");
         assert_eq!(c.coach_timeout, Duration::from_secs(45));

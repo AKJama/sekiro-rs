@@ -2,7 +2,7 @@
 //! so the game plan costs no API key.
 //!
 //! The child runs from its own temporary directory with no tools. Claude uses our instructions
-//! as its replacement system prompt and only the summary on stdin; Codex takes both on stdin.
+//! (Claude by flag, Codex from a file) as the replacement system prompt and only the summary on stdin.
 //! User settings and configured MCP servers are disabled. The answer is read from the
 //! CLI's JSON envelope (`claude`) or its last-message file (`codex`). The child is killed
 //! through its own handle at the deadline and when the game exits. Nothing the child prints is
@@ -128,22 +128,46 @@ pub(crate) fn run(
         CoachBackend::Codex => {
             let schema_file = scratch.0.join("schema.json");
             std::fs::write(&schema_file, schema.to_string()).map_err(|_| Failure::CliFailed)?;
+            // Our instructions replace Codex's coding system prompt, and nothing of the user's
+            // (config, rules, AGENTS.md, memories, plugins, apps) is loaded: measured at ~5 s
+            // and ~11k tokens per call with only game context (2026-10-11).
+            let instructions_file = scratch.0.join("coach.md");
+            std::fs::write(&instructions_file, instructions).map_err(|_| Failure::CliFailed)?;
             args.extend(
                 [
                     "exec",
-                    "--ignore-user-config",
-                    "-c",
-                    "model_reasoning_effort=\"low\"",
                     "--skip-git-repo-check",
+                    "--ephemeral",
+                    "--ignore-user-config",
+                    "--ignore-rules",
                     "-s",
                     "read-only",
                     "-m",
                     model,
-                    "--ephemeral",
-                    "--output-schema",
+                    "-c",
+                    "model_reasoning_effort=\"low\"",
+                    "-c",
+                    "project_doc_max_bytes=0",
                 ]
                 .map(String::from),
             );
+            args.push("-c".into());
+            args.push(format!(
+                "model_instructions_file={}",
+                toml_string(&instructions_file.to_string_lossy())
+            ));
+            for feature in [
+                "memories",
+                "apps",
+                "plugins",
+                "browser_use",
+                "computer_use",
+                "multi_agent",
+            ] {
+                args.push("--disable".into());
+                args.push(feature.into());
+            }
+            args.push("--output-schema".into());
             args.push(schema_file.to_string_lossy().into_owned());
             args.push("-o".into());
             args.push(answer_file.to_string_lossy().into_owned());
@@ -253,4 +277,9 @@ pub(crate) fn parse_claude(out: &[u8]) -> Result<CliAnswer, Failure> {
         ],
         cost_usd: envelope["total_cost_usd"].as_f64(),
     })
+}
+
+/// A TOML basic string, for a `-c key=value` override.
+fn toml_string(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
