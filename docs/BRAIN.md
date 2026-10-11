@@ -1,7 +1,7 @@
 # The boss brain
 
 A pluggable "boss brain" for an enemy with a Lua battle goal: his high-level choices can come from his real Lua AI (the default) or from an outside controller, including a hosted model.
-Two enemies have action tables: the Great Shinobi Owl (c5060) and the Ashina soldier with a one-handed sword (c1010), the testbed for whether a hosted model plays better than the game's AI.
+Three enemies have action tables: the Great Shinobi Owl (c5060), the Ashina soldier with a one-handed sword (c1010), and castle Genichiro Ashina (c7100).
 The code is in `crates/sim/src/brain/`, with a small hook in the Lua goal runtime (`crates/sim/src/lua_ai/runtime.rs`, `ActHook`).
 
 ```powershell
@@ -206,6 +206,84 @@ Approach distances are the base distance of the act that uses each id (his acts 
 - Scripted test plans: both sweeping slashes, then the kick and rising slash once two openers were deflected.
 
 A plan with an unknown id (for the soldier also an id his script names without a clip, such as 3004), an unknown tactic, more than 3 steps or none is refused and logged, and the Lua AI picks that act.
+
+### Genichiro Ashina (c7100)
+
+`brain::actions::GENICHIRO` controls castle row 71001000, think 71000000, using `GOAL_Rival_710000_Battle` in `m11_01_00_00.luabnd.d/710000_battle.lua`.
+Distances and chains were read from that compiled Lua's act instructions; labels and guard restrictions come from `c7100.tae`, BehaviorParam `271000xxx` and AtkParam_Npc `71000xxx`.
+Every offered id has its own TAE and a decoded clip `a000_<six-digit id>`.
+
+| Id | What | Approach (m) | Lua function |
+|---|---|---:|---|
+| 3000 | Right kesa slash, opener | 3.6 | Act01 |
+| 3001 | Left kesa slash | 3.6 | Act01 |
+| 3002 | Left elbow | 3.6 | Act01 |
+| 3003 | Right body slash, finisher | 3.6 | Act01, Act31 |
+| 3010 | Two spinning slashes | 3.6 | Act01 |
+| 3025 | Perilous thrust, deflectable and Mikiri-able | 3.6 | Act01 |
+| 3004 | Right then left body slashes | 3.2 | Act02 |
+| 3005 | Draw slash | 2.2 | Act03 |
+| 3006 | Advancing two slashes after sheathing the bow | 4.8 | Act10 |
+| 3007 | Perilous low sweep from left step, jump it | 5.9 | Act05, Act34 |
+| 3016 | Running draw slash | 5.2 | Act06 |
+| 3009 | Bow shot, bullet judge 500 | none | Act30 |
+| 3044 | Jumping four-arrow volley, bullet judges 530 to 533 | none | Act30, Act24 |
+| 3011 | Bow shot after the sweep, bullet judge 500 | 5.9 | Act34 |
+| 3014 | Braking bow shot, bullet judge 500 | 8.9 | Act15 |
+| 3015 | Diving slash after braking bow shot | 8.9 | Act15 |
+| 3040 | Floating Passage, first four slashes | 4.5 | Act09 |
+| 3041 | Floating Passage, final three slashes | 4.5 | Act09 |
+| 3037 | Circling slash | 3.2 | Act11 |
+| 3045 | Roundhouse kick after body slash | 3.6 | Act31 |
+| 3062 | Perilous back-step thrust, deflectable and Mikiri-able | 3.2 | Act20 |
+| 5201 | Back step | | Act24 |
+| 5202, 5203 | Right / left side step | | Act22 |
+
+Act15 sets AI number 7 to 1, suppressing its forced opening bow sequence; 3014 and 3015 retain that assignment when chosen separately.
+Act24 sets number 2 to 1; the back step retains it.
+Other offered attacks set no AI number.
+Follow-ups offered as independent openers inherit their parent act's approach, as with the other tables.
+Act30 never approaches, so neither 3009 nor its volley follow-up does.
+Plans keep the generic 9999 success range and three-step cap instead of the Lua's distance-dependent branch exits and four-step Act01 branch.
+
+Named combos are `3000+3001+3002`, `3001+3010+3025`, `3014+3015`, `3040+3041`, `3009+3044`, `3003+3045` and `3007+3011`.
+Act01's alternate branch is four actions (`3000+3001+3010+3025`), so the offered thrust chain is its final three actions, respecting the existing cap.
+The first combo chains at TAE flag 23 windows 0.900 and 0.900 seconds, producing nominal hits at 0.667, 1.667 and 2.067 seconds.
+The seven-hit Floating Passage sheet uses the same combo-aware timing and AtkParam posture resolver as Owl.
+Projectile rows retain clip timing/cancels but have no melee hit/reach entries, as with Owl's shuriken.
+There are 24 actions, seven combos, seventeen tactics and fifteen curated chains, 64 choices including `lua`.
+Scripted plans start with the kesa slashes and elbow, then switch to `3009+3044` after two deflected openers.
+
+Excluded from planning:
+
+- 3020 and 3021 are grab starts, not ordinary sword hits; Act11's 3037 opener remains available alone.
+- 3022 (Act16) is the downed-Wolf punish, and Kengeki counters remain Lua reflexes; 3062 is offered because Act20 explicitly selects it outside Kengeki.
+- 3013 (Act48) is the predictive braking arrow variant, using TAE 3013's imported 3014 clip and bullet judge 540; target prediction is not implemented, so the ordinary Act15 variant is offered.
+- Lightning bow 3039 and lightning jump slashes 3042/3043 have TAE clips, but lightning damage, capture and reversal are unavailable.
+  Castle Tomoe's separate `711000_battle.lua` defines 3039 in Act13/Act17 (no approach), 3043 in Act18 (8.3 m), and 3042 in Act19 (3.5 m); those functions are absent from c7100's battle goal.
+  They are unavailable choices, not substitute ordinary attacks.
+- Registered Act07/08/18/19/40/41/42/45/46/47 have no function definition in this castle battle goal, so no attack or approach is inferred from their names.
+  No offered action lacks a TAE clip; missing ids such as 3033 and 3047 are not inferred into the vocabulary.
+
+Act21 turns toward Wolf, Act28 handles Wolf's throw/down effects, and Act16 punishes downed Wolf; those slots stay reflexes.
+`Kengeki_Activate` returns before the planning slot, and `Goal.Parry`, `Damaged`, `ShootReaction` and observed-effect interrupts remain automatic.
+Act23/25/26/27/28 provide strafe, leave, wait and approach goals; his graph and parry callback support guard, deflect readiness and back steps, so all seventeen existing tactics are offered.
+The posture-pressure checkpoints, local posture-break response, plan-set validation and six-second attack pacing policy use the unchanged generic driver.
+
+Hosted memory is `c7100.boss.json` and `c7100.player-<name>.json`; Lua/scripted baselines retain their own suffixes.
+It cannot collide with c5060 or c1010 unless a caller explicitly supplies the same JSON stem, which is a user-selected override.
+At the second deathblow the existing map hand-over drops the driver and loads castle c7110 row 71100000 with its own 711000 Lua battle goal.
+Tomoe therefore runs Lua, with no c7100 plans or brain memory applied to him; resetting after that hand-over currently requires reinstalling the brain through a new game run.
+
+```powershell
+$env:CARGO_TARGET_DIR='target/alt'
+$env:CARGO_BUILD_JOBS='6'
+target/alt/release/sekiro-rs.exe --arena genichiro --brain scripted --brain-memory off --brain-overlay --god
+cargo test --offline --release -p sekiro-sim -j 6 --test genichiro_brain
+```
+
+The same table is selected by `--brain coach|decisions|responses` and the menu's AI choice through the existing character lookup.
+Verification uses scripted controllers, temporary memory and existing offline provider/CLI fakes only.
 
 ## Tactics
 

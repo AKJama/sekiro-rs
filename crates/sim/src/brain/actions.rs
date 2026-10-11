@@ -347,6 +347,122 @@ pub const SOLDIER: BossActions = BossActions {
     ],
 };
 
+/// Castle Genichiro (c7100, row 71001000, think 71000000).
+/// Distances and chains are from GOAL_Rival_710000_Battle in the castle bundle's
+/// `710000_battle.lua`; labels are from c7100.tae judges, BehaviorParam 271000xxx
+/// and AtkParam_Npc 71000xxx. Every entry has a decoded a000_<id> clip and TAE.
+/// Act01's four-hit branch exceeds our three-step plan cap, so its first three
+/// hits and its 3010/3025 alternate finishers are offered separately.
+/// Follow-ups retain their parent act's approach if chosen as openers (ours).
+/// Act15 sets number 7 to 1; Act24 sets number 2 to 1.
+/// Left out: undefined registered Act07/08/18/19/40/41/42/45/46/47,
+/// grabs 3020/3021 (Act11's 3020 is a throw start), and lightning 3039/3042/3043
+/// (TAE exists, but lightning capture/reversal is unavailable).
+/// Kengeki counters and Act16's downed-Wolf punish remain Lua reactions.
+/// c7110 has its own battle goal and receives Lua control at the map hand-over.
+pub const GENICHIRO: BossActions = BossActions {
+    chr: "c7100",
+    name: "Genichiro Ashina",
+    actions: &[
+        // Act01: a000_003000..003003, judges 100..103; 3010 judges 320/321,
+        // 3025 judge 272 (perilous thrust) plus Mikiri dummy 940.
+        plain(3000, "right kesa slash, combo opener", 3.6),
+        plain(3001, "left kesa slash", 3.6),
+        plain(3002, "left elbow", 3.6),
+        plain(3003, "right body slash, combo finisher", 3.6),
+        plain(3010, "two spinning slashes", 3.6),
+        plain(3025, "perilous thrust (deflect or Mikiri)", 3.6),
+        // Act02/03/10/05/06: a000_003004/5/6/7/16, judges 110/111,
+        // 120, 330/331, 140 (unguardable and undeflectable sweep), 120.
+        plain(3004, "right then left body slashes", 3.2),
+        plain(3005, "draw slash", 2.2),
+        plain(3006, "advancing two-slash combo after sheathing bow", 4.8),
+        plain(3007, "perilous low sweep from left step (jump)", 5.9),
+        plain(3016, "running draw slash", 5.2),
+        // Act30 never approaches: a000_003009 bullet judge 500, followed by
+        // a000_003044 bullet judges 530..533 (four arrows); also Act24.
+        plain(3009, "bow shot", 0.0),
+        plain(3044, "jumping four-arrow volley", 0.0),
+        // Act34: sweep then a000_003011, bullet judge 500.
+        plain(3011, "bow shot after sweep", 5.9),
+        // Act15: a000_003014 bullet judge 500, then 003015 judge 150.
+        setting(3014, "braking bow shot", 8.9, 7, 1.0),
+        setting(3015, "diving slash after braking bow shot", 8.9, 7, 1.0),
+        // Act09: a000_003040/41, Floating Passage judges 290..292.
+        plain(3040, "Floating Passage, opening four slashes", 4.5),
+        plain(3041, "Floating Passage, final three slashes", 4.5),
+        // Act11 opener a000_003037 judge 370; Act31's 003045 judge 390.
+        plain(3037, "circling slash", 3.2),
+        plain(3045, "roundhouse kick after body slash", 3.6),
+        // Act20 explicitly offers a000_003062 outside Kengeki: judge 250,
+        // perilous back-step thrust, plus Mikiri dummy 940.
+        plain(3062, "perilous back-step thrust (deflect or Mikiri)", 3.2),
+        // Act22's side steps and Act24's back step have their own TAE clips.
+        BossAction {
+            pressure: Some(NumberOnActivate::Set(2, 1.0)),
+            ..plain_step(5201, "back step")
+        },
+        plain_step(5202, "right side step"),
+        plain_step(5203, "left side step"),
+    ],
+    // Act21 turns when Wolf is behind; Act28 responds to Wolf's throw/down
+    // effects; Act16 punishes downed Wolf. Kengeki returns before the slot.
+    reflex_acts: &[16, 21, 28],
+    max_plan: 3,
+    combos: &[
+        Combo {
+            ids: &[3000, 3001, 3002],
+            label: "kesa slashes then elbow",
+        },
+        Combo {
+            ids: &[3001, 3010, 3025],
+            label: "left slash, spinning slashes, perilous thrust (Act01 suffix)",
+        },
+        Combo {
+            ids: &[3014, 3015],
+            label: "braking bow shot then diving slash",
+        },
+        Combo {
+            ids: &[3040, 3041],
+            label: "Floating Passage",
+        },
+        Combo {
+            ids: &[3009, 3044],
+            label: "bow shot then jumping arrow volley",
+        },
+        Combo {
+            ids: &[3003, 3045],
+            label: "body slash then roundhouse kick",
+        },
+        Combo {
+            ids: &[3007, 3011],
+            label: "perilous sweep then bow shot",
+        },
+    ],
+    back_steps: &[5201],
+    scripted: [&[3000, 3001, 3002], &[3009, 3044]],
+    // Act23/25/26/27/28 supply strafe, leave, wait and approach goals;
+    // Goal.Parry supplies guard/deflect and back steps through his own graph.
+    tactics: &Tactic::ALL,
+    chains: &[
+        "deflect>3000+3001",
+        "guard1>3005",
+        "dodge_back>3016",
+        "walk_in2.5>3000+3001",
+        "run_in3>3040+3041",
+        "hold1>3007",
+        "strafe_left>3004",
+        "strafe_right>3025",
+        "back_off9>3009+3044",
+        "keep_range>3014+3015",
+        "retreat12>3009",
+        "3005>back_off6",
+        "hold2>walk_in4>3016",
+        "3007>strafe_right",
+        "guard1>deflect>3025",
+    ],
+};
+
 /// Why a plan was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanError {
@@ -387,7 +503,9 @@ impl BossActions {
 
     /// The boss's actions for a character id, if a table exists.
     pub fn for_chr(chr: &str) -> Option<&'static BossActions> {
-        [&OWL, &SOLDIER].into_iter().find(|a| a.chr == chr)
+        [&OWL, &SOLDIER, &GENICHIRO]
+            .into_iter()
+            .find(|a| a.chr == chr)
     }
 
     /// Reads a plan's text form (`walk_in4>hold2>3013`, `3000+3001`) against this table.

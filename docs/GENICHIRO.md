@@ -61,12 +61,29 @@ The thirty-second image shows his textured armor and katana clearly, but the cam
 The deathblow images show the throw pair and one remaining mark, then the separately loaded bare-chested c7110 model, bow, katana and named one-mark bar on the same roof.
 Lighting remains dark under the roof, and wall camera framing needs further work.
 
+### Offline brain verification (2026-10-11)
+
+`genichiro_brain.rs` installs the scripted controller with persistence off, except for the isolated `%TEMP%` memory test.
+The sixty-second idle god-mode run starts 52 brain-chosen attacks across 18 plans, with zero invalid plans.
+The bow plan produces Bullet rows 71000500 and 71000530 through 71000533.
+The move sheet includes all 24 actions and the three-hit sword and seven-hit Floating Passage timelines, with real TAE cancels and AtkParam-derived posture costs.
+Other regressions cover unchanged Lua choices, plan-set pacing, posture checkpoint re-arming, character-specific boss/player memory and the c7110 hand-over back to Lua.
+
+The forty-second game replay uses `--arena genichiro --brain scripted --brain-memory off --brain-overlay --god --lock-on`, with its input under `target/alt/genichiro/brain-idle.txt`.
+Reviewed screenshots are `target/alt/genichiro/brain-005.png`, `brain-010.png`, `brain-020.png` and `brain-040.png`.
+The panel is readable and shows the selected combo with its active step and Genichiro's move label; the five-second frame still shows his initial Lua bow follow-up before the scripted slot.
+The twenty- and forty-second captures show the brain's sword chain, but repeated knockback traps Wolf near the roof edge and causes excessive camera proximity.
+The boss armor is dark under the roof; camera framing, lighting and the existing FMOD event-83 diagnostic remain visual/audio gaps outside this brain change.
+No model/API or real coach CLI call was used, and saves were backed up under `target/alt/genichiro/save-backup-20261011-brain` before the replay.
+
 ## Remaining gaps
 
 Lightning damage, airborne lightning capture and Lightning Reversal need dedicated systems.
 Cutscenes are treated as completed boundaries; their playback, region warp and story rewards are not implemented.
 Only one enemy is active at a time, with sequential event hand-over; simultaneous enemies and allies remain future work.
-Genichiro has no planning brain action table; his real Lua AI works without a memory driver.
+Castle c7100 supports the planning brain through `brain::actions::GENICHIRO`, including sword combos, perilous finishers, bow shots, jumping arrow volleys and existing tactics.
+See `docs/BRAIN.md`, "Genichiro Ashina (c7100)", for the data-derived act table and exclusions.
+The second-mark hand-over drops the c7100 driver and returns castle c7110 to its own Lua; lightning is unavailable to the planning vocabulary.
 Lua still reports unimplemented `GetHpLastTarget` and `IsInsideTargetRegion` queries using the existing fallback.
 Boss event discovery and all-boss arena generation remain incomplete; this session adds reviewed event and arena rows.
 

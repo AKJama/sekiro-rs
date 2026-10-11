@@ -33,7 +33,7 @@ mod tests;
 
 use serde::Serialize;
 
-pub use actions::{BossAction, BossActions, Combo, OWL, SOLDIER};
+pub use actions::{BossAction, BossActions, Combo, GENICHIRO, OWL, SOLDIER};
 pub use coach::{
     CallStats, CoachInput, CoachReply, CoachRequest, GamePlan, PlanSet, ScriptedCoach, SetOffer,
     Validated,
