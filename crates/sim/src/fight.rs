@@ -546,6 +546,28 @@ impl CombatRules {
         chars: [&Character; 2],
         combatants: [&Combatant; 2],
     ) -> HitResult {
+        self.resolve_contact(hit, chars, combatants, false)
+    }
+
+    /// A projectile owns the contact; its shooter supplies damage scaling, but does not
+    /// receive character recoil or posture feedback from the projectile's collision.
+    /// Use the actual contact source, not `isArrowAtk` (zero on Owl's shuriken).
+    pub fn resolve_bullet(
+        &mut self,
+        hit: &HitEvent,
+        chars: [&Character; 2],
+        combatants: [&Combatant; 2],
+    ) -> HitResult {
+        self.resolve_contact(hit, chars, combatants, true)
+    }
+
+    fn resolve_contact(
+        &mut self,
+        hit: &HitEvent,
+        chars: [&Character; 2],
+        combatants: [&Combatant; 2],
+        from_bullet: bool,
+    ) -> HitResult {
         let (a, d) = (hit.attacker, hit.defender);
         let Some(atk) = hit.attack.profile.clone() else {
             return HitResult::default();
@@ -613,12 +635,18 @@ impl CombatRules {
             } => weapon.passive_stamina_atk_rate * reinforce.passive_stamina_atk,
             FighterKind::Npc(_) => 1.0,
         };
-        let attacker_damage =
-            attacker_posture_damage(outcome, &atk, guard_broken, weapon_rate, &effects_d);
-        let attacker_broke =
-            outcome.guarded() && attacker_breaks(&self.fighters[a].posture, attacker_damage);
+        let attacker_damage = if from_bullet {
+            0
+        } else {
+            attacker_posture_damage(outcome, &atk, guard_broken, weapon_rate, &effects_d)
+        };
+        let attacker_broke = !from_bullet
+            && outcome.guarded()
+            && attacker_breaks(&self.fighters[a].posture, attacker_damage);
         let control_a = self.fighters[a].control_range(attacker.tae_frame().stamina_type);
-        self.fighters[a].posture.take(attacker_damage, control_a);
+        if !from_bullet {
+            self.fighters[a].posture.take(attacker_damage, control_a);
+        }
 
         // 4. HP damage.
         let hp_damage = self.hp_damage(
@@ -647,14 +675,18 @@ impl CombatRules {
             does_break_repel_stam_damage: atk.does_break_repel_stam_damage,
         })
         .code();
-        let attacker_code = attacker_reaction(
-            outcome,
-            guard_broken,
-            hit.attack.category,
-            false,
-            attacker_broke,
-            atk.does_break_repel_stam_damage,
-        );
+        let attacker_code = if from_bullet {
+            None
+        } else {
+            attacker_reaction(
+                outcome,
+                guard_broken,
+                hit.attack.category,
+                false,
+                attacker_broke,
+                atk.does_break_repel_stam_damage,
+            )
+        };
 
         // 6. Knockback and hit stop.
         // Native ChrActionFlag 24 sets record +0x1CA: b6bfe0 skips knockback and b68d00
@@ -665,7 +697,10 @@ impl CombatRules {
         } else {
             self.knockback(a, d, &atk, hit, outcome, frame_d.knockback_scale)
         };
-        let hit_stop = self.hit_stop(d, &atk, frame_d);
+        let mut hit_stop = self.hit_stop(d, &atk, frame_d);
+        if from_bullet {
+            hit_stop[0] = 0.0;
+        }
 
         let (direction, front_back) = hit_direction(defender, hit.direction);
         // A hit with no damage level that carries a behaviour identification value (the smoke

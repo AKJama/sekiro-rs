@@ -1925,11 +1925,13 @@ impl Duel {
                 continue;
             }
             let from_bullet = k >= first_bullet_hit;
-            let mut result = self.rules.resolve(
-                &hit,
-                [&self.player, &self.enemy],
-                [&self.fighters[0], &self.fighters[1]],
-            );
+            let chars = [&self.player, &self.enemy];
+            let combatants = [&self.fighters[0], &self.fighters[1]];
+            let mut result = if from_bullet {
+                self.rules.resolve_bullet(&hit, chars, combatants)
+            } else {
+                self.rules.resolve(&hit, chars, combatants)
+            };
             let after_contact = (
                 self.rules.fighters[hit.defender].vitality.hp,
                 self.rules.fighters[hit.defender].posture.remaining,

@@ -158,16 +158,16 @@ In AtkParam_Npc, 238 rows block both guard types for both block and deflect (gra
 The Mikiri counter intercepts a counterable thrust contact before ordinary hit resolution.
 Code: `crates/sim/src/perilous.rs`, `crates/sim/src/hits.rs` (`AttackData::perilous`), the duel; tests `crates/sim/tests/perilous.rs`.
 
-### The warning (危)
+### The warning (å±)
 
 All from the data (**data**, except where marked):
 
 1. The clip fires a TAE `BulletBehavior` with a judge from 980 to 989 a little before the blow: soldier sweep `a000_003020` at 0.2 s (blade 1.067 s), soldier thrust `a000_003013` at 0.0 s, Owl sweeps `a000_003004` / `3024` / `3090` at 0.0 s (judges 980, 985, 986), Owl Shinobi stab `a000_003033` at 0.667 s (987).
 2. Its BehaviorParam row names a "dummy bullet, dangerous attack sign" (soldier 10001600, Owl 50601980 to 50601987): 2 m radius, 0.1 s, AtkParam 8 (no damage), `EmittePosType` 7, `generationMaxDistWhenOwner` 5 m (soldier) or 9 m (Owl), SpEffect 211000.
    We read `EmittePosType` 7 as "made at the target" (**inferred**: only these rows use it, and a maximum distance from the owner only makes sense for a bullet made away from him), so no warning is made when Wolf is farther than that from the attacker.
-3. SpEffect 211000 "dangerous enemy attack VFX" (0.1 s) only lands on the player (`effectTargetPCOnlyTarget`, `effectTargetOpposeTarget`); its `vfxId` 48100 is SpEffectVfxParam "漢字_「危」", effect 600035 (`sfx/sfxbnd_commoneffects`, `f000600035.fxr`) at Wolf's dummy 220 (`Spine2`).
+3. SpEffect 211000 "dangerous enemy attack VFX" (0.1 s) only lands on the player (`effectTargetPCOnlyTarget`, `effectTargetOpposeTarget`); its `vfxId` 48100 is SpEffectVfxParam "æ¼¢å­—_ã€Œå±ã€", effect 600035 (`sfx/sfxbnd_commoneffects`, `f000600035.fxr`) at Wolf's dummy 220 (`Spine2`).
    So the symbol is on Wolf, not over the attacker.
-4. sekiro-rs reports the warning (`DuelReport::perilous`) when a bullet hit on Wolf carries an effect with `vfxId` 48100, and the HUD draws a red 危 over Wolf for 0.8 s with a Japanese Windows font (`combat_hud::update_perilous`), as FwLo's RustSekiro does; the effect's texture and timing (the FXR) are not decoded, and no sound for it was found (FwLo has none either).
+4. sekiro-rs reports the warning (`DuelReport::perilous`) when a bullet hit on Wolf carries an effect with `vfxId` 48100, and the HUD draws a red å± over Wolf for 0.8 s with a Japanese Windows font (`combat_hud::update_perilous`), as FwLo's RustSekiro does; the effect's texture and timing (the FXR) are not decoded, and no sound for it was found (FwLo has none either).
 
 What to do about it is not in the warning: FwLo maps judges 980 / 982 / 983 to sweep / thrust / grab, which holds for the Ashina General but not in general (the Owl's sweeps use 980, 985 and 986).
 Here the kind comes from the clip's next attack window: a grab (`throwFlag` 1), a sweep (katana can neither block nor deflect it), or a thrust (can deflect) (**inferred** split; every perilous sweep in these two characters is undeflectable and every perilous thrust deflectable).
@@ -472,3 +472,25 @@ It waits through restricted reactions and deathblow throws until movement is per
 The four stick directions at three camera yaws all align in the following half second, with sideways drift below 0.000002 m in the regression.
 The raw-input replay `crates/game/scripts/held_move_kill.txt` also holds W across a real soldier deathblow; its log shows the released lock and subsequent camera-relative movement.
 Attack timing, hit stop and input buffering are unchanged.
+
+## Deflecting projectiles
+
+A projectile owns its guard/deflect contact; its shooter supplies damage scaling but receives no character recoil, hit stop, posture feedback or attacker posture-break result.
+Melee contacts retain their existing attacker handling.
+Use the TAE `BulletBehavior` / BehaviorParam `refType=1` contact source: `isArrowAtk=0` on all 249 existing NPC attack rows referenced by Bullet, so it cannot identify projectiles.
+
+**data**: Owl act 3014 uses Bullet 50601150 -> AtkParam_Npc 50600150: `guardAtkRate=30`, both katana disable-guard flags 0, `deflectedAction=justDeflectedAction=0`, `isDisableParry=1`, `atkAttribute=9`, `spAttribute=1`.
+The separate new parry-state test described by `isDisableParry` does not forbid ordinary just guard.
+Wolf's posture bases are `atkStam=6` on deflect, `repelLostStamDamage=12` on block and `directAtkStamDamage=12` on hit; all three `_Attacker` feedback fields are 0.
+Genichiro arrow 71000500 has the same permissions and zero attacker feedback, with Wolf's bases 9 / 18 / 18.
+Existing guard/effect cuts, Bullet `staminaDamp` and truncation still apply: the 6 m regression records Wolf posture damage 5 / 11 for Owl and 8 / 17 for Genichiro (deflect / block), zero guarded HP damage, and uninterrupted shooter clips.
+
+Owl's fan 50600131 and firecracker 50600160 contain `repelLostStamDamage_Attacker=30`; feedback to the contacting projectile does not redirect to its distant owner.
+His firecracker still disables katana block and deflect; poison/seal effect contacts, smoke dazzle and lightning discharge retain their existing rules.
+Tomoe lightning Bullet 71100521 is a projectile, while lightning sword AtkParam 71100361 is melee; guarded grounded lightning still electrifies Wolf.
+
+**inferred ownership**: the zero Owl/Genichiro attacker-reaction selectors support the rule, but the exact native bullet-to-owner notification dispatch has not been independently traced here.
+The old resolver unconditionally sent character category recoil codes 1008/1019 to the owner even when attacker posture damage was zero.
+Sources and the complete per-tool/arrow audit, including Paramdex descriptions and FwLo's MIT notes, are in [Projectile guard parameter audit](PROJECTILE-GUARD.md).
+The local primary sources are [AtkParam_Npc](../cache/params/AtkParam_Npc.json), [Bullet](../cache/params/Bullet.json), and Paramdex [AtkParam definitions](../cache/refs/paramdex/Defs/AtkParam.xml).
+Regression evidence: `crates/sim/tests/projectile_guard.rs`, `crates/sim/tests/lightning.rs` and `target/alt/projectile-baseline.log`.

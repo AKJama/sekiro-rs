@@ -127,6 +127,13 @@ fn guarded_lightning_still_electrifies() {
             },
             1.0 / 60.0,
         );
+        for (hit, result) in &r.hits {
+            if hit.attack.atk_id == 71100521 {
+                assert!(result.attacker.is_none());
+                assert_eq!(result.attacker_posture_damage, 0);
+                assert!(duel.enemy.pending_damage.is_none());
+            }
+        }
         guarded |= r
             .hits
             .iter()
