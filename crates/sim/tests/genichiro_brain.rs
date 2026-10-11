@@ -246,7 +246,10 @@ fn lua_brain_preserves_genichiros_choices() {
 #[test]
 fn choices_and_memory_are_character_specific() {
     assert_eq!(BossActions::for_chr("c7100").unwrap().chr, "c7100");
-    assert!(BossActions::for_chr("c7110").is_none());
+    assert_eq!(
+        BossActions::for_chr("c7110").unwrap().ids(),
+        vec![3039, 3043, 3042]
+    );
     for choice in GENICHIRO.choices() {
         assert!(GENICHIRO.parse(&choice.value).is_ok(), "{}", choice.value);
     }

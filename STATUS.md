@@ -716,3 +716,16 @@ No commits, model calls, real coach CLIs, game runs, links or junctions were mad
 All Cargo commands used `target/alt` and six build jobs; formatting uses `CARGO_BUILD_JOBS=6` because cargo fmt has no `-j` option.Formatting, workspace Clippy with `-D warnings`, and the requested release sim/brain-net lib/bin/integration suite passed (351 tests across 37 targets).
 The final full-layer budget regression includes duplicated boss lessons/bans inside the played plan and confirms they are removed before fitting.
 Validation logs: `target/alt/shared-memory-tests-final.log`; no `map_tangents` exception was needed for these checks.
+
+## Genichiro castle lightning (2026-10-11)
+
+Tomoe row 71100000 now runs lightning acts 3039/3042/3043 through its Lua and explicit brain table, using Bullet 71100521 and AtkParams 71100521/71100361.
+Grounded and guarded contacts discharge into Electrified; airborne Wolf catches charge 9492 and the installed HKS selects weak Lightning Reversal on attack, returning AtkParam_Pc 5000281 with effect 9400.
+The castle replay records 2032 HP and 225 posture damage to Genichiro; a blocked grounded bolt records 272 HP and 120 posture damage and Wolf's shipped shock reaction.
+Simple blue sparks/tint, jagged bolt lines and a white return flash are visible in inspected `target/alt/genichiro/lightning-*.png` captures, although the castle scene remains washed out and the incoming beam is thin.
+Five real-data regressions cover bow spawn, grounded/guarded shock, airborne capture, return, missed return on landing and both lightning slashes.
+`docs/GENICHIRO.md` records all ids and placeholders: native electric resistance scaling/threshold, charged input acceptance, TAE 922 timing and the absent weapon dummy replaced with 10 m return reach.
+Castle c7100 has the clips but lacks matching Lua acts and attack rows, so its lightning choices remain excluded.
+Formatting, workspace/all-target Clippy, the full release sim/brain-net suite including doctests, and the release game build passed with `target/alt` and six jobs.
+Validation logs are `target/alt/lightning-suite-final.log`, `lightning-clippy-final2.log` and `lightning-game-final.log`.
+No commits, network/model calls or protected data writes were made; scripted app runs used simple AI and brain memory off, with saves backed up locally first.

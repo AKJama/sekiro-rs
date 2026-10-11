@@ -82,7 +82,7 @@ fn fade_length(look: BulletLook) -> f32 {
 fn style(look: BulletLook, radius: f32) -> Option<(Vec3, Color, LinearRgba, bool)> {
     let ball = |r: f32| Vec3::splat(r);
     Some(match look {
-        BulletLook::Hidden => return None,
+        BulletLook::Hidden | BulletLook::Lightning => return None,
         BulletLook::Missile => (
             ball(0.07),
             Color::srgb(0.78, 0.8, 0.85),

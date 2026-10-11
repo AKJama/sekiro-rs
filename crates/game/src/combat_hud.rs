@@ -313,13 +313,18 @@ pub fn update(
 /// Updates Wolf's status line and shows the poison bar while poison builds up.
 pub fn update_status(
     gauges: Res<Gauges>,
-    mut status: Query<&mut Text, With<StatusText>>,
+    mut status: Query<(&mut Text, &mut TextColor), With<StatusText>>,
     mut poison_row: Query<&mut Visibility, With<PoisonRow>>,
 ) {
-    if let Ok(mut t) = status.single_mut()
-        && t.0 != gauges.status
-    {
-        t.0.clone_from(&gauges.status);
+    if let Ok((mut t, mut color)) = status.single_mut() {
+        if t.0 != gauges.status {
+            t.0.clone_from(&gauges.status);
+        }
+        color.0 = if gauges.status.contains("Electrified") || gauges.status.contains("Lightning") {
+            Color::srgb(0.4, 0.8, 1.0)
+        } else {
+            Color::WHITE
+        };
     }
     if let Ok(mut v) = poison_row.single_mut() {
         *v = if gauges.poison > 0.0 {

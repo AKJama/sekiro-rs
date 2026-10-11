@@ -15,6 +15,7 @@
 //! Map lighting: `--hour H` (default 12), `--no-env-probe` for hemisphere fallback,
 //! `--probe-sky` to show the environment probe capture as the sky (debug only).
 //! `--no-grading`, `--no-bloom`, `--no-auto-exposure` disable individual map post effects.
+//! `--native-tone-reinhard` / `--native-tone-filmic` override the authored/default sensitometric operator.
 
 mod arena;
 mod audio;
@@ -27,6 +28,7 @@ mod deathblow_demo;
 mod draw_mask;
 mod input_replay;
 mod lighting;
+mod lightning_fx;
 mod map;
 mod menu;
 mod perf_log;
@@ -154,7 +156,7 @@ fn dispatch() -> anyhow::Result<()> {
         "                 [--simple-ai] [--passive] [--god] [--immortal] [--force-act <id>] [--enemy cXXXX[:npcrow]|soldier|owl] [--brain lua|scripted|decisions|responses|coach] [--brain-model <name>] [--coach claude|codex|api] [--coach-model <name>] [--coach-effort <level>] [--coach-interval <secs>] [--brain-log] [--brain-memory off|on|<path>] [--player <name>]"
     );
     eprintln!(
-        "       sekiro-rs --arena owl|genichiro [--full-map] [--play options] (a boss on his own map)"
+        "       sekiro-rs --arena owl|genichiro [--full-map] [--genichiro-phase ashina|tomoe] [--play options] (a boss on his own map)"
     );
     eprintln!(
         "                 [--brain-overlay] [--brain-stage lua|early|alive|outsmarted] [--window-size WIDTHxHEIGHT] (F8 toggles overlay)"
@@ -190,7 +192,15 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
             Ok((step.parse()?, PathBuf::from(path)))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let opponent = match (arg_value(args, "--enemy"), boss_arena) {
+    let phase_enemy = match arg_value(args, "--genichiro-phase").as_deref() {
+        None | Some("ashina") => None,
+        Some("tomoe") => Some("c7110:71100000".to_owned()),
+        Some(_) => anyhow::bail!("--genichiro-phase wants ashina or tomoe"),
+    };
+    let opponent = match (
+        phase_enemy.or_else(|| arg_value(args, "--enemy")),
+        boss_arena,
+    ) {
         (Some(name), _) => sekiro_sim::enemy::EnemySpec::from_cache(
             &PathBuf::from(arg_value(args, "--cache").unwrap_or_else(|| "cache".into())),
             &name,

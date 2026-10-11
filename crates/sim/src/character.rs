@@ -526,6 +526,20 @@ impl Character {
             .collect();
         env.held_ms = self.input.held().collect();
         env.sp_effect_refs = tae.behavior_refs.clone();
+        // Charged air reactions have no ordinary attack accept flag. Keep the
+        // held attack available to HKS, which owns the charged-state transition.
+        if !self.body.grounded
+            && (tae.behavior_refs.contains(&510) || tae.behavior_refs.contains(&511))
+            && !self.behavior.runtime.main_clip().is_some_and(|c| {
+                matches!(
+                    c.animation.as_str(),
+                    "a050_308900" | "a050_308901" | "a050_308910" | "a050_308911"
+                )
+            })
+            && self.input.held_ms(crate::input::arm::ATTACK) > 0.0
+        {
+            env.requested.insert(crate::input::arm::ATTACK);
+        }
         if self.kind == ControlKind::Npc {
             env.sp_effect_refs.extend(self.npc.refs.iter().copied());
             env.ai_action = self.npc.action;
@@ -842,6 +856,13 @@ impl Character {
             .velocity_changes
             .iter()
             .find_map(|id| self.tae.velocity_changes.get(id).copied());
+        for id in &tae.velocity_scales {
+            if let Some(scale) = self.tae.velocity_changes.get(id) {
+                self.body.velocity[0] *= scale.horizontal_scale;
+                self.body.velocity[2] *= scale.horizontal_scale;
+                self.body.velocity[1] *= scale.vertical_scale;
+            }
+        }
         let steer_to = match self.kind {
             // TAE 703: the swing keeps its direction (what makes side-steps work).
             _ if tae.fixed_rotation => None,

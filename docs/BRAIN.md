@@ -259,9 +259,10 @@ Excluded from planning:
 - 3020 and 3021 are grab starts, not ordinary sword hits; Act11's 3037 opener remains available alone.
 - 3022 (Act16) is the downed-Wolf punish, and Kengeki counters remain Lua reflexes; 3062 is offered because Act20 explicitly selects it outside Kengeki.
 - 3013 (Act48) is the predictive braking arrow variant, using TAE 3013's imported 3014 clip and bullet judge 540; target prediction is not implemented, so the ordinary Act15 variant is offered.
-- Lightning bow 3039 and lightning jump slashes 3042/3043 have TAE clips, but lightning damage, capture and reversal are unavailable.
+- Lightning bow 3039 and lightning jump slashes 3042/3043 belong to the separate castle Tomoe table `brain::actions::TOMOE` (`c7110:71100000`).
   Castle Tomoe's separate `711000_battle.lua` defines 3039 in Act13/Act17 (no approach), 3043 in Act18 (8.3 m), and 3042 in Act19 (3.5 m); those functions are absent from c7100's battle goal.
-  They are unavailable choices, not substitute ordinary attacks.
+  c7110 now offers 3039 (no approach), 3043 (8.3 m) and 3042 (3.5 m); c7100 has no matching lightning attack rows and keeps excluding them.
+  The automatic map hand-over still returns to Lua; explicit c7110 scripted/repeat control is available for lightning verification.
 - Registered Act07/08/18/19/40/41/42/45/46/47 have no function definition in this castle battle goal, so no attack or approach is inferred from their names.
   No offered action lacks a TAE clip; missing ids such as 3033 and 3047 are not inferred into the vocabulary.
 

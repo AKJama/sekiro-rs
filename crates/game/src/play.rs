@@ -481,6 +481,7 @@ pub fn run(options: Options) -> Result<()> {
             apply_draw_masks,
             sync_actors,
             sync_bullets,
+            sync_lightning_tint,
             (rope::pose, animate, rope::draw, sheath_sword).chain(),
             follow_camera,
             crate::brain_overlay::update,
@@ -1183,13 +1184,63 @@ fn shown(sim: &Sim, i: usize, alpha: f32) -> (Vec3, f32) {
 }
 
 /// Draws the bullets in flight and their areas (see [`crate::bullet_fx`]).
+fn sync_lightning_tint(
+    sim: NonSend<Sim>,
+    roots: Query<&Actor>,
+    parents: Query<&ChildOf>,
+    parts: Query<(Entity, &MeshMaterial3d<StandardMaterial>)>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut original: Local<std::collections::HashMap<AssetId<StandardMaterial>, (Color, LinearRgba)>>,
+) {
+    for (entity, material) in &parts {
+        let mut current = entity;
+        let mut actor = None;
+        for _ in 0..32 {
+            if let Ok(root) = roots.get(current) {
+                actor = Some(root.0);
+                break;
+            }
+            let Ok(parent) = parents.get(current) else {
+                break;
+            };
+            current = parent.parent();
+        }
+        let Some(i) = actor else {
+            continue;
+        };
+        let Some(mut mat) = materials.get_mut(&material.0) else {
+            continue;
+        };
+        let saved = original
+            .entry(material.0.id())
+            .or_insert((mat.base_color, mat.emissive));
+        let status = &sim.duel.rules.fighters[i].status;
+        if status.has(9445) || status.has(9492) {
+            mat.base_color = Color::srgb(0.25, 0.65, 1.0);
+            mat.emissive = LinearRgba::rgb(0.15, 0.4, 0.9);
+        } else {
+            (mat.base_color, mat.emissive) = *saved;
+        }
+    }
+}
+
+/// Draws the bullets in flight and their areas (see [`crate::bullet_fx`]).
 fn sync_bullets(
     sim: NonSend<Sim>,
     time: Res<Time>,
     mut fx: ResMut<crate::bullet_fx::BulletFx>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut q: Query<(&crate::bullet_fx::Marker, &mut Transform, &mut Visibility)>,
+    mut gizmos: Gizmos,
+    mut lightning: Local<crate::lightning_fx::LightningFx>,
 ) {
+    crate::lightning_fx::draw(
+        &sim.duel,
+        time.elapsed_secs(),
+        time.delta_secs(),
+        &mut lightning,
+        &mut gizmos,
+    );
     crate::bullet_fx::sync(
         &sim.duel.bullets.live,
         time.delta_secs(),
@@ -1283,7 +1334,9 @@ fn follow_camera(
 }
 
 /// Names of the status effects the Owl's tools leave on Wolf, for the HUD.
-const STATUS_NAMES: [(i32, &str); 3] = [
+const STATUS_NAMES: [(i32, &str); 5] = [
+    (9445, "Electrified"),
+    (9492, "Lightning Reversal ready"),
     (9050, "Poisoned"),
     (3506090, "Recovery sealed"),
     (113000, "Posture recovery slowed"),

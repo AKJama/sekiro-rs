@@ -68,6 +68,8 @@ pub enum TaeKind {
     SpEffect(i32),
     TurnSpeed(f32),
     VelocityChange(i32),
+    /// TAE 922 scales existing velocity while its window is active.
+    VelocityScale(i32),
     Attack {
         judge: i32,
         attack_type: i32,
@@ -439,6 +441,7 @@ fn decode(template: &Template, e: &tae::TaeEvent) -> Option<TimedEvent> {
         66 | 67 | 401 => TaeKind::SpEffect(int("SpEffectID")?),
         224 => TaeKind::TurnSpeed(d.field("TurnSpeed")?.as_f32()?),
         920 => TaeKind::VelocityChange(int("ChrPhysicsVelocityParam ID")?),
+        922 => TaeKind::VelocityScale(int("ChrPhysicsVelocityParam ID")?),
         1 => TaeKind::Attack {
             judge: int("BehaviorJudgeID")?,
             attack_type: int("AttackType").unwrap_or(0),
@@ -541,6 +544,7 @@ pub struct TaeFrame {
     pub stamina_type: Option<i32>,
     /// Velocity changes whose event started this tick.
     pub velocity_changes: Vec<i32>,
+    pub velocity_scales: Vec<i32>,
     pub attacks: Vec<TimedEvent>,
     pub iframes: Vec<i32>,
     /// True if a playing clip has action flags other than physics marker 28.
@@ -649,6 +653,11 @@ impl TaeRuntime {
                     }
                     TaeKind::TurnSpeed(s) => {
                         f.turn_speed = Some(f.turn_speed.map_or(*s, |c: f32| c.min(*s)));
+                    }
+                    TaeKind::VelocityScale(id) => {
+                        if e.active_at(t) {
+                            f.velocity_scales.push(*id);
+                        }
                     }
                     TaeKind::VelocityChange(id) => {
                         if started {

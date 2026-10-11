@@ -148,3 +148,11 @@ Docs: `docs/INTERFACE.md`.
 
 Update the row when a feature lands.
 Percentages are rough judgements except where a count is given.
+
+## Castle Tomoe lightning (2026-10-11)
+
+Castle c7110 now runs its lightning bow and jump slashes, airborne capture and Wolf's HKS Lightning Reversal.
+Guarding still carries the electric charge, and landing with an unreleased charge causes the data-derived shock discharge.
+Flag-free bright bolts, blue sparks and material tint plus the white reversal flash are stand-ins for FXR.
+The return's missing weapon dummy uses a 10 m facing beam; complete electric resistance accumulation/scaling and the native charged-input acceptance rule remain fidelity gaps.
+Data ids and replay commands are in `docs/GENICHIRO.md`.

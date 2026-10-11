@@ -53,6 +53,8 @@ const MAX_CHILD_DEPTH: usize = 4;
 /// simple stand-in (the real looks are FXR effects, not extracted).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BulletLook {
+    /// Lightning, including the castle Tomoe bow's blue-lightning bolt.
+    Lightning,
     /// Does nothing visible to the player (perilous-attack warning dummies, effect dummies).
     Hidden,
     /// A flying attack that deals damage (shuriken).
@@ -189,7 +191,14 @@ impl BulletDef {
             .and_then(|a| a.profile.as_ref())
             .is_some_and(|p| p.behavior_id != 0);
         let has_children = self.child.is_some() || self.interval.is_some();
-        self.look = if self.damages() {
+        self.look = if self
+            .attack
+            .as_ref()
+            .and_then(|a| a.profile.as_ref())
+            .is_some_and(|p| matches!(p.sp_attribute, 6 | 10))
+        {
+            BulletLook::Lightning
+        } else if self.damages() {
             if moving {
                 BulletLook::Missile
             } else {

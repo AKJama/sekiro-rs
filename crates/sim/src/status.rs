@@ -44,6 +44,11 @@ pub struct StatusEffect {
     pub change_hp_rate: f32,
     /// `changeHpPoint`, HP taken per activation.
     pub change_hp_point: i32,
+    /// SpEffect posture changes; negative values remove remaining stamina.
+    pub change_stamina_rate: f32,
+    pub change_stamina_point: i32,
+    /// Electric-shock build-up uses the legacy freeze field.
+    pub electric_attack: i32,
     /// `poizonAttackPower`: poison build-up added on a hit.
     pub poison_attack: i32,
     /// `replaceSpEffectId`: the effect a filled meter applies (see the module notes).
@@ -63,6 +68,9 @@ impl StatusEffect {
             interval: f("motionInterval"),
             change_hp_rate: f("changeHpRate"),
             change_hp_point: i("changeHpPoint"),
+            change_stamina_rate: f("changeStaminaRate"),
+            change_stamina_point: i("changeStaminaPoint"),
+            electric_attack: i("registFreeze"),
             poison_attack: i("poizonAttackPower"),
             replace: i("replaceSpEffectId"),
             disable_poison: i("disablePoison") != 0,

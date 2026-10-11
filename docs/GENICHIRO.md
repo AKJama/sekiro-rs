@@ -78,13 +78,68 @@ No model/API or real coach CLI call was used, and saves were backed up under `ta
 
 ## Remaining gaps
 
-Lightning damage, airborne lightning capture and Lightning Reversal need dedicated systems.
+Lightning uses the installed attacks and HKS states; the unresolved collision and status details are listed below.
 Cutscenes are treated as completed boundaries; their playback, region warp and story rewards are not implemented.
 Only one enemy is active at a time, with sequential event hand-over; simultaneous enemies and allies remain future work.
 Castle c7100 supports the planning brain through `brain::actions::GENICHIRO`, including sword combos, perilous finishers, bow shots, jumping arrow volleys and existing tactics.
 See `docs/BRAIN.md`, "Genichiro Ashina (c7100)", for the data-derived act table and exclusions.
-The second-mark hand-over drops the c7100 driver and returns castle c7110 to its own Lua; lightning is unavailable to the planning vocabulary.
+The second-mark hand-over drops the c7100 driver and returns castle c7110 to its own Lua; explicit c7110 brain selection offers its three lightning acts through `brain::actions::TOMOE`.
 Lua still reports unimplemented `GetHpLastTarget` and `IsInsideTargetRegion` queries using the existing fallback.
 Boss event discovery and all-boss arena generation remain incomplete; this session adds reviewed event and arena rows.
 
 FwLo's MIT notes supplied the donor, animation-set and castle hand-over facts; the implementation here is original Rust.
+
+## Castle lightning (2026-10-11)
+
+The castle Tomoe row is `c7110:71100000`, with behavior variation 71100.
+Its `711000_battle.lua` Act13/17 requests bow 3039 without approach, Act18 requests 3043 at 8.3 m, and Act19 requests 3042 at 3.5 m.
+Castle c7100 has those animation names but no corresponding Lua functions or lightning BehaviorParam rows, so its planning vocabulary remains unchanged.
+
+| Act | TAE attack | Params |
+|---|---|---|
+| 3039 | Bullet judge 521 at 1.867 s, dummy 24 | BehaviorParam 271100521 -> Bullet 71100521 -> AtkParam_Npc 71100521 |
+| 3042 | Melee judge 361 at 1.667 to 1.900 s | BehaviorParam 271100361 -> AtkParam_Npc 71100361 |
+| 3043 | Melee judge 361 at 2.000 to 2.167 s | Same melee row; its warning bullet is separate |
+
+The bow bolt has speed 80 m/s, life 2 s, initial radius 0.3 m and homing angle 0.
+The slash is a melee attack, not a replacement bolt.
+Both attacks have 16 thunder power and `spAttribute` 10 (blue/weak lightning), and neither disables guard or just guard for Wolf's katana.
+Both leave SpEffect 9492 even on a guarded or deflected contact.
+The bow's effect is on Bullet; the slash's effect is on AtkParam.
+SpEffect 5390 and 5900/400240 accompany the charge animation; their native FXR is represented by blue sparks.
+
+9492 lasts 30 seconds and has stateInfo 356 and behaviorRefId 511.
+It cycles through hit effect 9412 to resistance-damage row 9432, which adds 200 in the legacy `registFreeze` field, specifies 30% max HP plus 160, and removes 15% max posture plus 120 remaining stamina.
+The runtime holds the charge while airborne and discharges on ground contact.
+9445 is the 1.5-second status indicator; 9450 supplies behavior reference 593 for Wolf's shipped shock reaction.
+This is a single discharge, not periodic damage over time.
+The full resistance threshold, scaling and native stateInfo 356 dispatcher remain unreconstructed: a full charge triggers directly in this implementation.
+
+Wolf's HKS reads env 202 (damage type), 236 (level), 285 (element), 201/248 (landing), 1106/1108 (attack input), and 3036 (effect reference).
+Airborne weak lightning selects `W_AirDamageElectroChargeWeakStart`, whose clip is `a000_102930`.
+Attack input with reference 511 selects `W_AirWeakElectroReceiveAttack`, clip `a050_308910`, with landing continuation `a050_308911`.
+Strong lightning uses reference 510 and `W_AirElectroReceiveAttack` instead.
+No new HKS act id is required; existing act 159 is the damage absorption direction, not the reversal trigger.
+Charged input acceptance is inferred: a held attack is made available to HKS while airborne, excluding an already-running reversal.
+TAE 920 reads hop row 1612; TAE 922 reads velocity scale row 1615, whose active-window application is inferred.
+
+The weak return's TAE starts judges 280/281 at 0.133 s: AtkParam_Pc 5000280 is the sword blade and 5000281 is the lightning capsule with radius 1.2 m and effect 9400.
+9400 names resistance-damage row 9420: 200 electric build-up, 67% max HP plus 320, and 5% max posture plus 180 remaining stamina removed.
+TAE effects 9505/9506 at 0.100 s lead to discharge/erase 9507/9508, 9500 and resistance reset 9440; the runtime clears the charge at that authored release.
+The return is an AtkParam attack, rather than an invented Bullet row.
+The current weapon rig lacks its endpoint dummy 10141, so a facing 10 m beam stands in for that capsule endpoint; radius, timing, effect and damage come from the data.
+Native dummy placement and exact return reach remain a placeholder.
+
+Stand-ins are flag-free jagged bright lines for the bolt (with a 0.15 s visual linger), blue charge sparks, blue material tint and small sparks while charged/electrified, and a short white beam/flash during reversal.
+FwLo's MIT hand-off notes confirm lightning is a rank-3 reaction and describe Divine Dragon reversal availability; Genichiro's ids and mechanics above were read from this installation.
+
+```powershell
+target/alt/release/sekiro-rs.exe --arena genichiro --genichiro-phase tomoe --god --simple-ai --brain-memory off --passive --force-act 3039 --lock-on --spawn 107.829,54.044,241.44,0,0 --enemy-distance 6 --script crates/game/scripts/genichiro_lightning.txt --shots 100:target/alt/genichiro/lightning-charge.png,122:target/alt/genichiro/lightning-bolt.png,136:target/alt/genichiro/lightning-reversal.png --exit
+```
+
+The scripted castle replay catches the bow at step 117 and returns AtkParam 5000281 at step 130, taking Genichiro from 2556 to 524 HP and removing 225 posture.
+The grounded guard replay records a blocked bolt with 272 HP and 120 posture damage from discharge, then Wolf's `GroundDamageElectricShockWeak` reaction and the Electrified HUD line.
+Screenshots are `target/alt/genichiro/lightning-charge.png`, `lightning-bolt.png`, `lightning-reversal.png`, `lightning-after.png` and `lightning-ground.png`.
+Visual inspection confirms the blue sparks/tint and white return beam are readable stand-ins; the incoming beam is thin and the castle scene is washed out, so this is functional FX verification rather than a finished visual match.
+The selected bolt capture is step 122 of a replay with grading and auto exposure disabled; earlier step 115/118 captures transiently lacked visible actor meshes and were rejected.
+The five real-data lightning regressions cover grounded and guarded bow hits, airborne capture, landing without returning, successful HKS reversal, and both lightning slashes.

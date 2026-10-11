@@ -357,7 +357,7 @@ pub const SOLDIER: BossActions = BossActions {
 /// Act15 sets number 7 to 1; Act24 sets number 2 to 1.
 /// Left out: undefined registered Act07/08/18/19/40/41/42/45/46/47,
 /// grabs 3020/3021 (Act11's 3020 is a throw start), and lightning 3039/3042/3043
-/// (TAE exists, but lightning capture/reversal is unavailable).
+/// (their functions and attack rows belong to c7110, not castle c7100).
 /// Kengeki counters and Act16's downed-Wolf punish remain Lua reactions.
 /// c7110 has its own battle goal and receives Lua control at the map hand-over.
 pub const GENICHIRO: BossActions = BossActions {
@@ -463,6 +463,25 @@ pub const GENICHIRO: BossActions = BossActions {
     ],
 };
 
+/// Castle 711000 battle goal Act13/17, Act18 and Act19 respectively.
+/// c7100 has no corresponding functions or lightning BehaviorParam rows.
+pub const TOMOE: BossActions = BossActions {
+    chr: "c7110",
+    name: "Genichiro, Way of Tomoe",
+    actions: &[
+        plain(3039, "lightning bow", 0.0),
+        plain(3043, "advancing lightning jump slash", 8.3),
+        plain(3042, "lightning jump slash", 3.5),
+    ],
+    reflex_acts: &[],
+    max_plan: 3,
+    combos: &[],
+    back_steps: &[],
+    scripted: [&[3039], &[3042]],
+    tactics: &[],
+    chains: &[],
+};
+
 /// Why a plan was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanError {
@@ -503,7 +522,7 @@ impl BossActions {
 
     /// The boss's actions for a character id, if a table exists.
     pub fn for_chr(chr: &str) -> Option<&'static BossActions> {
-        [&OWL, &SOLDIER, &GENICHIRO]
+        [&OWL, &SOLDIER, &GENICHIRO, &TOMOE]
             .into_iter()
             .find(|a| a.chr == chr)
     }

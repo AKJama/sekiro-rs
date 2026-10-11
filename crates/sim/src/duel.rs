@@ -175,6 +175,7 @@ pub struct Duel {
     last_steps: [StepReport; 2],
     /// Thrown and shot attacks in flight.
     pub bullets: crate::bullets::Bullets,
+    lightning_returned: bool,
     /// Placeholder void depth below the lowest collision, or spawn without collision, past
     /// which Wolf is returned to where he last stood; `None` disables the return.
     pub fall_respawn_depth: Option<f32>,
@@ -383,6 +384,7 @@ impl Duel {
             knockback: [None; 2],
             last_steps: Default::default(),
             bullets: Default::default(),
+            lightning_returned: false,
             fall_respawn_depth: None,
             fall_materials: load_fall_materials(cache),
             last_safe: None,
@@ -616,6 +618,7 @@ impl Duel {
         self.last_throw_def_clip = None;
         self.swing_hit = None;
         self.bullets.clear();
+        self.lightning_returned = false;
         if let Some(ev) = self.events.as_mut() {
             ev.restart();
         }
@@ -652,6 +655,7 @@ impl Duel {
         self.hit_stop[1] = HitStop::default();
         self.bullets.clear();
         self.respawn_in = None;
+        self.lightning_returned = false;
         self.defender_dying = 0;
         self.boss_brain = None;
         Ok(())
@@ -1372,6 +1376,82 @@ impl Duel {
         for (id, seconds) in applied.timed {
             c.tae_runtime.add_timed(id, seconds);
         }
+        // The weak/strong lightning hit effects point at resistance-damage rows.
+        // Unlike poison this is a single discharge, not damage over time.
+        if ids.contains(&9400) {
+            self.discharge_lightning(i, 9420);
+        }
+        let grounded = if i == 0 {
+            self.player.body.grounded
+        } else {
+            self.enemy.body.grounded
+        };
+        if grounded && let Some(id) = ids.iter().find(|id| (9490..=9495).contains(*id)) {
+            self.discharge_lightning(i, 9430 + (*id - 9490));
+        }
+    }
+
+    fn discharge_lightning(&mut self, i: usize, damage_effect: i32) {
+        let Some(effect) = self.rules.statuses.get(damage_effect).copied() else {
+            return;
+        };
+        let damage = effect.tick_damage(self.rules.fighters[i].vitality.max_hp);
+        let f = &mut self.rules.fighters[i];
+        f.vitality.set_hp(f.vitality.hp - damage);
+        let posture = (f.posture.max as f32 * effect.change_stamina_rate / 100.0
+            + effect.change_stamina_point as f32) as i32;
+        f.posture.remaining = (f.posture.remaining + posture).clamp(0, f.posture.max);
+        f.status.running.retain(|r| !(9490..=9499).contains(&r.id));
+        let applied = self.rules.apply_hit_effects(i, &[9445]);
+        let c = if i == 0 {
+            &mut self.player
+        } else {
+            &mut self.enemy
+        };
+        for id in 9490..=9499 {
+            c.tae_runtime.clear_timed(id);
+        }
+        for (id, seconds) in applied.timed {
+            c.tae_runtime.add_timed(id, seconds);
+        }
+        // A one-tick behaviour notification selects the shipped shock reaction.
+        c.tae_runtime.add_timed(9450, 2.0 / 60.0);
+        c.pending_damage = Some(crate::player::IncomingDamage {
+            damage_type: 99999,
+            level: 3,
+            element: 10,
+            ..Default::default()
+        });
+    }
+
+    fn step_lightning(&mut self) {
+        for i in 0..2 {
+            let c = if i == 0 { &self.player } else { &self.enemy };
+            let released = c
+                .tae_frame()
+                .sp_effects
+                .iter()
+                .any(|id| matches!(id, 9505 | 9506 | 9500));
+            let charge = self.rules.fighters[i]
+                .status
+                .running
+                .iter()
+                .find(|r| (9490..=9495).contains(&r.id))
+                .map(|r| r.id);
+            if let Some(id) = charge {
+                if released {
+                    self.rules.fighters[i].status.running.retain(|r| r.id != id);
+                    let c = if i == 0 {
+                        &mut self.player
+                    } else {
+                        &mut self.enemy
+                    };
+                    c.tae_runtime.clear_timed(id);
+                } else if c.body.grounded {
+                    self.discharge_lightning(i, 9430 + (id - 9490));
+                }
+            }
+        }
     }
 
     /// Leaves a melee hit's AtkParam SpEffects on character `i`: as [`Self::apply_status`], and
@@ -1761,6 +1841,47 @@ impl Duel {
             &[&self.player, &self.enemy],
             &[&self.fighters[0], &self.fighters[1]],
         );
+        // The lightning capsule ends on weapon dummy 10141, absent from the
+        // current rig. A facing beam substitutes for that endpoint until the
+        // native weapon-dummy transform is reconstructed. Radius is AtkParam;
+        // ten metres of reach is explicitly a stand-in.
+        let reversal = self
+            .player
+            .tae_frame()
+            .attacks
+            .iter()
+            .any(|e| matches!(e.kind, crate::tae::TaeKind::Attack { judge: 281, .. }));
+        if !reversal {
+            self.lightning_returned = false;
+        }
+        if reversal && !self.lightning_returned {
+            self.lightning_returned = true;
+            if let Some(attack) = self.fighters[0].attacks.get(&281).cloned() {
+                let start = glam::Vec3::from_array(self.player.body.position) + glam::Vec3::Y;
+                let [x, z] = self.player.body.forward();
+                let end = start + glam::Vec3::new(x, 0.0, z) * 10.0;
+                let feet = glam::Vec3::from_array(self.enemy.body.position);
+                let radius = attack.shapes.first().map_or(0.0, |s| s.radius);
+                if crate::hits::can_be_hit(self.enemy.tae_frame())
+                    && crate::hits::segment_distance(
+                        start,
+                        end,
+                        feet,
+                        feet + glam::Vec3::Y * self.fighters[1].height,
+                    ) <= radius + self.fighters[1].radius
+                {
+                    found.retain(|h| !(h.attacker == 0 && h.judge == 281));
+                    found.push(HitEvent {
+                        attacker: 0,
+                        defender: 1,
+                        judge: 281,
+                        attack,
+                        position: feet.to_array(),
+                        direction: [x, z],
+                    });
+                }
+            }
+        }
         let chars = [&self.player, &self.enemy];
         let fighters = [&self.fighters[0], &self.fighters[1]];
         self.bullets.spawn(&chars, &fighters);
@@ -1804,10 +1925,14 @@ impl Duel {
                 continue;
             }
             let from_bullet = k >= first_bullet_hit;
-            let result = self.rules.resolve(
+            let mut result = self.rules.resolve(
                 &hit,
                 [&self.player, &self.enemy],
                 [&self.fighters[0], &self.fighters[1]],
+            );
+            let after_contact = (
+                self.rules.fighters[hit.defender].vitality.hp,
+                self.rules.fighters[hit.defender].posture.remaining,
             );
             let (att, def) = if hit.attacker == 0 {
                 (&mut self.player, &mut self.enemy)
@@ -1817,7 +1942,12 @@ impl Duel {
             def.pending_damage = Some(result.defender);
             // The AtkParam's SpEffects stay on a landed melee hit's defender (bullets carry
             // their own, below).
-            let melee_effects = if !from_bullet && !result.guarded {
+            let lightning = hit
+                .attack
+                .profile
+                .as_ref()
+                .is_some_and(|p| matches!(p.sp_attribute, 6 | 10));
+            let melee_effects = if !from_bullet && (!result.guarded || lightning) {
                 hit.attack.sp_effects.clone()
             } else {
                 Vec::new()
@@ -1833,12 +1963,15 @@ impl Duel {
             self.hit_stop[hit.defender].start(result.hit_stop[1]);
             self.enemy_damaged |= hit.defender == 1 && !result.guarded;
             // A bullet's SpEffects stay on a guarded hit's guard (inferred).
-            if from_bullet && !result.guarded {
+            if from_bullet && (!result.guarded || lightning) {
                 self.apply_status(hit.defender, &bullet_effects[k - first_bullet_hit]);
             }
             if !melee_effects.is_empty() {
                 self.apply_hit_effects(hit.defender, &melee_effects, dt);
             }
+            result.hp_damage += after_contact.0 - self.rules.fighters[hit.defender].vitality.hp;
+            result.posture_damage +=
+                after_contact.1 - self.rules.fighters[hit.defender].posture.remaining;
             hits.push((hit, result));
         }
         let mut perilous = None;
@@ -1862,6 +1995,7 @@ impl Duel {
                 self.apply_status(b.hit.defender, &b.sp_effects);
             }
         }
+        self.step_lightning();
         let jump_counter = self.note_player_hits(&hits);
         self.rules.tick_status(0, dt);
         self.rules.tick_status(1, dt);
