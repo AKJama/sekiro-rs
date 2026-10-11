@@ -400,3 +400,22 @@ The real-script regression holds a sideways stick across an HP death for 0.5 s, 
 Before the fix the displacement was [0.545, 1.543] m in X/Z; after it, [2.165, -0.308] m, aligned with the camera-relative right stick.
 Test: dead_target_releases_lock_and_camera_relative_movement in crates/sim/tests/duel.rs.
 The soldier pressure regression and its one landed hit, one block and one deflect are documented in docs/AI.md; it does not reproduce a posture break in four seconds and requires no forced guard rule.
+## Guard return audit and held movement (2026-10-11)
+
+The normal-AI, non-god soldier replay in `soldier_guard_return_matches_wolfs_real_attack_data` reproduces an ordinary block at tick 64 (Wolf AtkParam_Pc 5000011) and a deflect at tick 98 (5000050).
+Both rows have `repelVictoryStamDamage_Attacker = 0` and `repelLostStamDamage_Attacker = 0`; Wolf's remaining posture stays 120 before and after those contacts.
+The local executable trace of `842790` is stored in `re/exports/decomp/842943.c` (its header identifies 842790).
+It reads the contacted attack row's signed fields at +0x1B0 for a block and +0x1B2 for a deflect, with a deflector weapon/reinforcement multiplier and `defStaminaAttackRate` on the deflect branch.
+It does not replace these fields with the defender's `staminaAttackRate` or `guardBreakRate`; those fields serve posture attack scaling and repel comparison elsewhere.
+The zero result is therefore consistent with the extracted attack data and existing executable research, and no hand-tuned posture return has been added.
+The general deflect-attacker formula remains covered by the nonzero NPC slash tests (45, 22, 11, 5 for successive Wolf deflect multipliers).
+A claim that these ordinary Wolf slashes must build nonzero posture when deflected still needs a matched recording from the original game or evidence of an additional engine path.
+ThrowParam is not involved, and the defender's no-break-on-deflect rule is unchanged.
+
+The earlier lock release reset MoveDirection and walk twist, but free_move_start_turn still skipped an already moving Wolf.
+A held backward stick across target HP death travelled 1.683 m along the camera-relative direction and 0.600 m sideways in the next half second.
+A lock release now clears the remembered travel heading and queues a free-movement start turn even when the stick stays held.
+It waits through restricted reactions and deathblow throws until movement is permitted, keeping the drawn turn smooth through the existing lower-body twist.
+The four stick directions at three camera yaws all align in the following half second, with sideways drift below 0.000002 m in the regression.
+The raw-input replay `crates/game/scripts/held_move_kill.txt` also holds W across a real soldier deathblow; its log shows the released lock and subsequent camera-relative movement.
+Attack timing, hit stop and input buffering are unchanged.

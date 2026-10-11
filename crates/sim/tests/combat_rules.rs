@@ -12,6 +12,49 @@ use std::path::{Path, PathBuf};
 
 const DT: f32 = 1.0 / 60.0;
 
+#[test]
+fn soldier_guard_return_matches_wolfs_real_attack_data() {
+    let Some(cache) = cache() else { return };
+    let mut duel = Duel::load(&cache, 1.6).unwrap();
+    let mut deflects = 0;
+    for i in 0..240 {
+        let before = duel.rules.fighters[0].posture.remaining;
+        let r = duel.step(
+            &InputFrame {
+                move_stick: [0.0, 1.0],
+                buttons: Buttons {
+                    attack: i % 8 == 0,
+                    lock_on: i == 0,
+                    ..Buttons::default()
+                },
+                ..InputFrame::default()
+            },
+            DT,
+        );
+        for (h, result) in &r.hits {
+            if h.attacker == 0 && result.guarded {
+                let atk = h.attack.profile.as_ref().unwrap();
+                eprintln!(
+                    "tick {i}: atk {} deflect={} return={} posture {} -> {}",
+                    atk.id,
+                    result.deflected,
+                    result.attacker_posture_damage,
+                    before,
+                    duel.rules.fighters[0].posture.remaining
+                );
+                assert_eq!(atk.attacker_blocked_stam, 0);
+                assert_eq!(atk.attacker_deflected_stam, 0);
+                assert_eq!(result.attacker_posture_damage, 0);
+                if result.deflected {
+                    deflects += 1;
+                    assert_eq!(duel.rules.fighters[0].posture.remaining, before);
+                }
+            }
+        }
+    }
+    assert!(deflects > 0);
+}
+
 fn cache() -> Option<PathBuf> {
     let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
     if !cache.join("raw/chr/c1010.behbnd.d/c9997.hkx").exists() {

@@ -44,7 +44,7 @@ use super::coach::{
 };
 use super::habits::{HabitTracker, WolfFrame};
 use super::limits::{self, Pacing};
-use super::memory::{FightEnd, Loaded, Memory, MemorySummary};
+use super::memory::{FightEnd, Loaded, Memory, MemorySummary, PlanFailures};
 use super::metrics::{FightRecord, MetricsTracker, Trend, percentile};
 use super::observation::observe;
 use super::plan::{Plan, Step, Weighted};
@@ -194,6 +194,8 @@ impl Checkpoints {
 /// What is counted about the fight in progress.
 #[derive(Debug, Clone, Default)]
 struct FightState {
+    uses: Vec<PlanUse>,
+    failures: BTreeMap<String, PlanFailures>,
     /// Completed melee samples: count, sum of starting distances, sum of measured reaches.
     ranges: BTreeMap<String, (u32, f32, f32)>,
     range_open: Option<AttackRange>,
@@ -213,6 +215,17 @@ struct FightState {
     by_set: BTreeMap<String, Counts>,
     /// Seconds each set was the active one.
     set_secs: BTreeMap<String, f32>,
+}
+
+#[derive(Debug, Clone)]
+struct PlanUse {
+    text: String,
+    start: f32,
+    last_attack: Option<f32>,
+    attacks: u32,
+    deflected: u32,
+    fatal: bool,
+    settled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -237,6 +250,9 @@ impl FightState {
 }
 
 pub struct BrainDriver {
+    banned: HashSet<String>,
+    bans_at_start: HashSet<String>,
+    retry_baselines: BTreeMap<String, PlanFailures>,
     brain: Box<dyn BossBrain>,
     actions: &'static BossActions,
     /// This fight's tally.
@@ -344,6 +360,9 @@ impl BrainDriver {
                     .map_or(1, |d| d.as_nanos() as u64)
             });
         Self {
+            banned: HashSet::new(),
+            bans_at_start: HashSet::new(),
+            retry_baselines: BTreeMap::new(),
             brain,
             actions,
             tally: Tally::default(),
@@ -433,6 +452,17 @@ impl BrainDriver {
             ),
         }
         self.memory = memory;
+        for (text, f) in &self.memory.coach.failures {
+            if f.banned() {
+                self.banned.insert(text.clone());
+                eprintln!(
+                    "banned: {text} ({} uses, {:.0}% deflected/fatal)",
+                    f.uses,
+                    f.rate() * 100.0
+                );
+            }
+        }
+        self.bans_at_start = self.banned.clone();
         self.memory_path = Some(path);
         if self.coach_mode {
             // The newest plan of an earlier session plays from the first fight (validated
@@ -525,7 +555,8 @@ impl BrainDriver {
     /// if anything happened in it.
     pub fn memory_now(&self) -> Memory {
         let mut m = self.memory.clone();
-        if !self.fight_over && !self.tally.is_empty() {
+        if !self.fight_over && !self.tally.is_empty() && self.fight.metrics.player_active(self.time)
+        {
             let (tally, habits) = self.fight_snapshot();
             m.add_fight(&tally, &habits.habits, FightEnd::Unfinished);
         }
@@ -548,7 +579,7 @@ impl BrainDriver {
     /// wins are the earlier fights'), and Wolf's recent play.
     pub fn memory_summary(&self) -> MemorySummary {
         let mut m = self.memory.clone();
-        if !self.fight_over {
+        if !self.fight_over && self.fight.metrics.player_active(self.time) {
             let (tally, habits) = self.fight_snapshot();
             m.add_data(&tally, &habits.habits);
         }
@@ -680,6 +711,13 @@ impl BrainDriver {
             return;
         }
         self.newest_coach = reply.id;
+        for retry in &v.plan.retry {
+            self.banned.remove(&retry.choice);
+            self.bans_at_start.remove(&retry.choice);
+            // New evidence is evaluated against new uses after the explicit retry.
+            self.retry_baselines
+                .insert(retry.choice.clone(), self.plan_failures(&retry.choice));
+        }
         eprintln!(
             "coach: game plan arrived after {waited:.1} s, played from fight {} on ({tokens})",
             self.fight_no + 1
@@ -716,10 +754,9 @@ impl BrainDriver {
         if self.fight_over {
             return;
         }
-        let stale = self
-            .ready
-            .as_ref()
-            .is_some_and(|r| self.time - r.since > self.max_staleness);
+        let stale = self.ready.as_ref().is_some_and(|r| {
+            self.time - r.since > self.max_staleness || self.banned.contains(&r.plan.value())
+        });
         if stale {
             let ready = self.ready.take();
             if let Some(r) = ready.as_ref().filter(|r| r.opener) {
@@ -799,7 +836,10 @@ impl BrainDriver {
 
     /// Samples the plan for the next slot from the set and hands it to the act hook.
     fn pick_next(&mut self, ai: &mut AiBrain, hit_radius: f32) {
-        let opener = self.opener.take();
+        let opener = self
+            .opener
+            .take()
+            .filter(|p| !self.banned.contains(&p.value()));
         let is_opener = opener.is_some();
         let plan = if let Some(plan) = opener {
             Some(plan)
@@ -813,11 +853,15 @@ impl BrainDriver {
             // own AI's act runs.
             let eligible: Vec<usize> = (0..self.set.len())
                 .filter(|&i| {
-                    !self.anti_stall
-                        || self.set[i]
-                            .plan
-                            .as_ref()
-                            .is_none_or(|p| self.pacing.eligible(p, self.time, self.actions))
+                    self.set[i]
+                        .plan
+                        .as_ref()
+                        .is_none_or(|p| !self.banned.contains(&p.value()))
+                        && (!self.anti_stall
+                            || self.set[i]
+                                .plan
+                                .as_ref()
+                                .is_none_or(|p| self.pacing.eligible(p, self.time, self.actions)))
                 })
                 .collect();
             if self.set.is_empty() {
@@ -934,6 +978,15 @@ impl BrainDriver {
                     if !quiet {
                         self.fight.decisions += 1;
                         self.fight.runs.push((self.time, value.clone(), label));
+                        self.fight.uses.push(PlanUse {
+                            text: value.clone(),
+                            start: self.time,
+                            last_attack: None,
+                            attacks: 0,
+                            deflected: 0,
+                            fatal: false,
+                            settled: false,
+                        });
                         *self.fight.choices.entry(value).or_default() += 1;
                     }
                     "plan"
@@ -1092,7 +1145,7 @@ impl BrainDriver {
 
     /// After the duel step: action changes and hits into the tally and the habits; a death
     /// ends the fight, a respawn starts the next.
-    pub fn after_step(&mut self, duel: &Duel, report: &DuelReport) {
+    pub fn after_step(&mut self, duel: &Duel, report: &DuelReport, input: &crate::InputFrame) {
         if report.respawned {
             self.start_fight();
         }
@@ -1100,6 +1153,7 @@ impl BrainDriver {
             return;
         }
         let t = self.time;
+        self.fight.metrics.input_tick(input, t, self.step_dt);
         let mut events = Vec::new();
         // The boss's actions: his attack and step animations (guards and deflects are
         // reactions, not actions).
@@ -1134,6 +1188,12 @@ impl BrainDriver {
                 // An attack step started (a back step does not count).
                 self.fight.metrics.attack_started(t);
                 self.pacing.last_attack = t;
+                if let Some(use_) = self.fight.uses.last_mut()
+                    && self.fight.runs.last().is_some_and(|r| r.0 == use_.start)
+                {
+                    use_.last_attack = Some(t);
+                    use_.attacks += 1;
+                }
             }
             self.boss_open = boss;
             // An attack or step starting closes an open tactic; its end closes nothing more.
@@ -1178,7 +1238,14 @@ impl BrainDriver {
             });
             self.wolf_open = clip;
         }
+        let mut punished_break = false;
         for (hit, result) in &report.hits {
+            if (result.posture_broke && duel.rules.fighters[1].posture.broken())
+                || (hit.attacker == 0 && matches!(result.defender.damage_type, 1001 | 1004 | 1005))
+            {
+                punished_break = true;
+                self.fatal_plans(t, true);
+            }
             let attacker = Side::from_index(hit.attacker);
             events.push(TallyEvent::Hit {
                 attacker,
@@ -1225,6 +1292,10 @@ impl BrainDriver {
             }
         }
         let marks = boss_fighter.vitality.deathblows_left.max(0);
+        let lost_mark = self.checkpoints.marks.is_some_and(|m| marks < m);
+        if boss_fighter.dead() || lost_mark {
+            self.fatal_plans(t, false);
+        }
         if marks > 0 && self.checkpoints.marks.is_some_and(|m| marks < m) {
             self.pending_why = Some("mark_lost");
         }
@@ -1251,6 +1322,10 @@ impl BrainDriver {
         self.habits.step(&frame, &events);
         let done = self.tally.advance(t);
         self.settle(&done);
+        if boss_fighter.dead() || lost_mark || punished_break {
+            self.fatal_plans(t, punished_break);
+        }
+        self.settle_plans(false);
         self.log_outcomes(t, &done);
         // The duel schedules its respawn exactly when the fight is over: a death outside a
         // deathblow (a boss with marks left gets up from his).
@@ -1280,11 +1355,88 @@ impl BrainDriver {
         }
     }
 
+    fn plan_failures(&self, text: &str) -> PlanFailures {
+        let mut f = self
+            .memory
+            .coach
+            .failures
+            .get(text)
+            .copied()
+            .unwrap_or_default();
+        if !self.fight_over
+            && let Some(now) = self.fight.failures.get(text)
+        {
+            f.uses += now.uses;
+            f.deflected_all += now.deflected_all;
+            f.fatal += now.fatal;
+        }
+        f
+    }
+
+    fn fatal_plans(&mut self, now: f32, posture_break: bool) {
+        let active = self.fight.runs.last().map(|r| r.0);
+        for use_ in &mut self.fight.uses {
+            if !use_.settled
+                && (use_
+                    .last_attack
+                    .is_some_and(|last| now - last <= 3.0 + 1e-3)
+                    || (posture_break && active == Some(use_.start)))
+            {
+                use_.fatal = true;
+            }
+        }
+    }
+
+    fn settle_plans(&mut self, flush: bool) {
+        let active = self.fight.runs.last().map(|r| r.0);
+        for use_ in &mut self.fight.uses {
+            if use_.settled
+                || (!flush
+                    && (active == Some(use_.start)
+                        || self.time - use_.last_attack.unwrap_or(use_.start) <= 3.0 + 1e-3))
+            {
+                continue;
+            }
+            use_.settled = true;
+            let f = self.fight.failures.entry(use_.text.clone()).or_default();
+            f.uses += 1;
+            f.deflected_all += u32::from(use_.attacks > 0 && use_.attacks == use_.deflected);
+            f.fatal += u32::from(use_.fatal);
+        }
+        // Provisional outcomes never teach the sampler while the player is inactive.
+        if !self.fight.metrics.player_active(self.time) {
+            return;
+        }
+        let keys: HashSet<_> = self
+            .memory
+            .coach
+            .failures
+            .keys()
+            .chain(self.fight.failures.keys())
+            .cloned()
+            .collect();
+        for text in keys {
+            let mut f = self.plan_failures(&text);
+            if let Some(base) = self.retry_baselines.get(&text) {
+                f.uses = f.uses.saturating_sub(base.uses);
+                f.deflected_all = f.deflected_all.saturating_sub(base.deflected_all);
+                f.fatal = f.fatal.saturating_sub(base.fatal);
+            }
+            if f.banned() && self.banned.insert(text.clone()) {
+                eprintln!(
+                    "banned: {text} ({} uses, {:.0}% deflected/fatal)",
+                    f.uses,
+                    f.rate() * 100.0
+                );
+            }
+        }
+    }
+
     /// Counts each finished boss exchange for the plan run it began under (the latest plan or
     /// Lua act that started at or before it), and that run's set.
     fn attribute(&mut self, done: &[Exchange]) {
         for x in done.iter().filter(|x| x.side == Side::Boss) {
-            let Some((_, plan, set)) = self
+            let Some((start, plan, set)) = self
                 .fight
                 .runs
                 .iter()
@@ -1294,6 +1446,22 @@ impl BrainDriver {
             else {
                 continue;
             };
+            if x.key
+                .parse::<i32>()
+                .is_ok_and(|a| (3000..3100).contains(&a))
+                && let Some(use_) = self.fight.uses.iter_mut().find(|u| u.start == start)
+                && !use_.settled
+            {
+                // The last attack's end, rather than the beginning of its wind-up, anchors
+                // the post-plan punishment window. It remains live after a new run starts.
+                use_.last_attack = Some(
+                    use_.last_attack
+                        .unwrap_or(x.start)
+                        .max(x.end.unwrap_or(self.time)),
+                );
+                use_.deflected +=
+                    u32::from(x.outcome.deflected && !x.outcome.hit && !x.outcome.blocked);
+            }
             let mut one = Counts::default();
             one.merge(&Counts {
                 n: 1,
@@ -1317,10 +1485,13 @@ impl BrainDriver {
         let done = self.tally.flush(t);
         self.fight.close_range();
         self.attribute(&done);
+        if end == FightEnd::WolfWon {
+            self.fatal_plans(t, false);
+        }
+        self.settle_plans(true);
         self.close_set_time();
         self.log_outcomes(t, &done);
         self.habits.flush(t);
-        self.memory.add_fight(&self.tally, &self.habits.habits, end);
         self.fight_over = true;
         self.stats.fights += 1;
         let winner = match end {
@@ -1363,11 +1534,34 @@ impl BrainDriver {
         };
         eprintln!("{}", record.summary_line());
         self.write(json!({"ev": "fight_end", "t": ms(t), "winner": winner,
-            "fights": self.memory.fights, "summary": record.summary_line()}));
+            "void": record.metrics.void, "fights": self.memory.fights + u32::from(!record.metrics.void), "summary": record.summary_line()}));
         self.write_line(&json!({"ev": "fight_summary", "t": ms(t), "record": record}));
-        self.memory.push_record(record.clone());
-        merge_counts(&mut self.memory.coach.plans, &self.fight.by_plan);
-        if self.coach_mode {
+        if !record.metrics.void {
+            self.memory.add_fight(&self.tally, &self.habits.habits, end);
+            self.memory.push_record(record.clone());
+            merge_counts(&mut self.memory.coach.plans, &self.fight.by_plan);
+            for (text, f) in &self.fight.failures {
+                let all = self.memory.coach.failures.entry(text.clone()).or_default();
+                all.uses += f.uses;
+                all.deflected_all += f.deflected_all;
+                all.fatal += f.fatal;
+            }
+        } else {
+            self.banned = self.bans_at_start.clone();
+            for (text, base) in &mut self.retry_baselines {
+                let committed = self
+                    .memory
+                    .coach
+                    .failures
+                    .get(text)
+                    .copied()
+                    .unwrap_or_default();
+                base.uses = base.uses.min(committed.uses);
+                base.deflected_all = base.deflected_all.min(committed.deflected_all);
+                base.fatal = base.fatal.min(committed.fatal);
+            }
+        }
+        if self.coach_mode && !record.metrics.void {
             self.send_coach(&record);
         }
         self.last_record = Some(record);
@@ -1387,6 +1581,18 @@ impl BrainDriver {
             sets.entry(name.clone()).or_default().secs = (s * 10.0).round() / 10.0;
         }
         let mut input = CoachInput {
+            banned: {
+                let mut list: Vec<_> = self.banned.iter().cloned().collect();
+                list.sort();
+                list
+            },
+            failures: self
+                .memory
+                .coach
+                .failures
+                .iter()
+                .map(|(k, f)| (k.clone(), [f.uses, f.deflected_all, f.fatal]))
+                .collect(),
             fight: self.memory.fights,
             result: FightLine {
                 won: record.winner.clone(),
@@ -1400,6 +1606,7 @@ impl BrainDriver {
                 apm: m.attacks_per_min().round() as u32,
                 dpm: m.damage_per_min().round() as u32,
                 passive: (m.passive_share() * 100.0).round() as u32,
+                engaged_time: m.engaged_time.round() as u32,
             },
             trend: Trend::new(&self.memory.history, None),
             plans: top(&self.fight.by_plan),
@@ -1492,6 +1699,7 @@ impl BrainDriver {
             stats_at_start: self.brain.call_stats(),
             ..FightState::default()
         };
+        self.bans_at_start = self.banned.clone();
         self.coach_done = [0; 5];
         self.pacing = Pacing::new(self.time);
         if self.coach_mode {
@@ -1584,6 +1792,188 @@ struct OutcomeLine<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn learning_driver() -> BrainDriver {
+        let mut d = BrainDriver::new(Box::new(crate::brain::LuaBrain), &crate::brain::SOLDIER);
+        d.time = 5.0;
+        d.fight.metrics.input_tick(
+            &crate::InputFrame {
+                move_stick: [0.0, 1.0],
+                buttons: crate::Buttons {
+                    attack: true,
+                    guard: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            0.1,
+            5.0,
+        );
+        d
+    }
+
+    #[test]
+    fn a_fight_that_becomes_inactive_discards_its_provisional_learning() {
+        let mut d = learning_driver();
+        d.fight.failures.insert(
+            "3000".into(),
+            PlanFailures {
+                uses: 3,
+                deflected_all: 3,
+                fatal: 0,
+            },
+        );
+        d.settle_plans(false);
+        assert!(d.banned.contains("3000"));
+        d.time = 20.0;
+        d.end_fight(FightEnd::BossWon);
+        assert!(d.last_record.as_ref().unwrap().metrics.void);
+        assert!(d.banned.is_empty());
+        assert!(d.memory.coach.failures.is_empty());
+        assert!(d.memory.history.is_empty());
+        assert_eq!(d.memory.fights, 0);
+    }
+
+    #[test]
+    fn losing_plan_is_banned_across_fights_and_only_a_reasoned_retry_reopens_it() {
+        let mut d = learning_driver();
+        d.memory.coach.failures.insert(
+            "3000".into(),
+            PlanFailures {
+                uses: 2,
+                deflected_all: 1,
+                fatal: 0,
+            },
+        );
+        d.fight.runs = vec![
+            (0.0, "3000".into(), "press".into()),
+            (1.0, "lua".into(), "lua".into()),
+        ];
+        d.fight.uses.push(PlanUse {
+            text: "3000".into(),
+            start: 0.0,
+            last_attack: Some(0.1),
+            attacks: 1,
+            deflected: 0,
+            fatal: false,
+            settled: false,
+        });
+        d.settle(&[Exchange {
+            side: Side::Boss,
+            key: "3000".into(),
+            start: 0.1,
+            end: Some(0.7),
+            outcome: super::super::tally::Outcome {
+                deflected: true,
+                ..Default::default()
+            },
+        }]);
+        d.settle_plans(false);
+        assert!(d.banned.contains("3000"));
+        assert_eq!(d.fight.failures["3000"].deflected_all, 1);
+        d.end_fight(FightEnd::BossWon);
+        assert_eq!(d.memory.coach.failures["3000"].uses, 3);
+        assert_eq!(d.memory.coach.failures["3000"].deflected_all, 2);
+        let mut input = d.coach_input(d.last_record.as_ref().unwrap());
+        assert_eq!(input.banned, ["3000"]);
+        assert_eq!(input.failures["3000"], [3, 2, 0]);
+        assert!(input.fit(INPUT_BUDGET) <= INPUT_BUDGET);
+        d.start_fight();
+        assert!(d.banned.contains("3000"));
+        for (id, reason) in [(1, ""), (2, "Try after a bait to change the timing")] {
+            d.coach_flights.push(CoachFlight { id, sent: d.time });
+            d.take_coach_reply(CoachReply {
+                id,
+                plan: Some(GamePlan {
+                    opener: "3000".into(),
+                    retry: vec![super::super::coach::Avoid {
+                        choice: "3000".into(),
+                        reason: reason.into(),
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            assert_eq!(d.banned.contains("3000"), reason.is_empty());
+        }
+        // A retry preserves all historical counts; three new failing uses ban it again.
+        assert_eq!(d.memory.coach.failures["3000"].uses, 3);
+        d.fight.failures.insert(
+            "3000".into(),
+            PlanFailures {
+                uses: 3,
+                deflected_all: 2,
+                fatal: 0,
+            },
+        );
+        d.time = 10.0;
+        d.fight.metrics.input_tick(
+            &crate::InputFrame {
+                move_stick: [0.0, 1.0],
+                buttons: crate::Buttons {
+                    attack: true,
+                    guard: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            5.1,
+            5.0,
+        );
+        d.settle_plans(false);
+        assert!(d.banned.contains("3000"));
+    }
+
+    #[test]
+    fn fatal_window_and_punished_posture_break_are_attributed_once() {
+        let mut d = learning_driver();
+        d.fight.runs.push((0.0, "3000".into(), "press".into()));
+        d.fight.uses.push(PlanUse {
+            text: "3000".into(),
+            start: 0.0,
+            last_attack: Some(1.0),
+            attacks: 1,
+            deflected: 0,
+            fatal: false,
+            settled: false,
+        });
+        d.fatal_plans(4.1, false);
+        assert!(!d.fight.uses[0].fatal);
+        d.fatal_plans(4.0, false);
+        assert!(d.fight.uses[0].fatal);
+        d.fight.uses[0].fatal = false;
+        d.fatal_plans(4.1, true);
+        assert!(d.fight.uses[0].fatal);
+        d.settle_plans(true);
+        d.settle_plans(true);
+        assert_eq!(d.fight.failures["3000"].fatal, 1);
+        assert_eq!(d.fight.failures["3000"].uses, 1);
+        assert_eq!(d.fight.failures["3000"].deflected_all, 0);
+    }
+
+    #[test]
+    fn dying_during_the_last_attack_is_fatal_when_the_fight_flushes() {
+        let mut d = learning_driver();
+        d.fight.runs.push((0.0, "3000".into(), "press".into()));
+        d.fight.uses.push(PlanUse {
+            text: "3000".into(),
+            start: 0.0,
+            last_attack: Some(1.0),
+            attacks: 1,
+            deflected: 0,
+            fatal: false,
+            settled: false,
+        });
+        d.tally.record(
+            1.0,
+            TallyEvent::Start {
+                side: Side::Boss,
+                key: "3000".into(),
+            },
+        );
+        d.end_fight(FightEnd::WolfWon);
+        assert_eq!(d.memory.coach.failures["3000"].fatal, 1);
+    }
 
     #[test]
     fn posture_checkpoints_rearm_and_leave_time_to_act() {

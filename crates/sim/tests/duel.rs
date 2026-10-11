@@ -50,6 +50,47 @@ fn dead_target_releases_lock_and_camera_relative_movement() {
     assert!(duel.step(&input, DT).locked_on);
 }
 
+#[test]
+fn held_stick_release_all_camera_directions() {
+    for yaw in [0.0, 1.2, -2.4] {
+        for stick in [[0.0, 1.0], [-1.0, 0.0], [0.0, -1.0], [1.0, 0.0]] {
+            let Some(mut duel) = load_at(4.0) else { return };
+            duel.enemy_active = false;
+            duel.step(
+                &InputFrame {
+                    buttons: Buttons {
+                        lock_on: true,
+                        ..Buttons::default()
+                    },
+                    ..InputFrame::default()
+                },
+                DT,
+            );
+            let input = InputFrame {
+                move_stick: stick,
+                camera_yaw: yaw,
+                ..InputFrame::default()
+            };
+            for _ in 0..90 {
+                duel.step(&input, DT);
+            }
+            duel.rules.fighters[1].vitality.hp = 0;
+            let start = duel.player.body.position;
+            for _ in 0..30 {
+                duel.step(&input, DT);
+            }
+            let end = duel.player.body.position;
+            let delta = [end[0] - start[0], end[2] - start[2]];
+            let (s, c) = yaw.sin_cos();
+            let desired = [c * stick[0] - s * stick[1], -s * stick[0] - c * stick[1]];
+            let dot = delta[0] * desired[0] + delta[1] * desired[1];
+            let cross = delta[0] * desired[1] - delta[1] * desired[0];
+            eprintln!("yaw {yaw} stick {stick:?}: {delta:?}, dot {dot} cross {cross}");
+            assert!(dot > 0.2 && cross.abs() < dot * 0.3);
+        }
+    }
+}
+
 fn load() -> Option<Duel> {
     load_at(4.0)
 }

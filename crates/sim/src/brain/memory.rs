@@ -75,11 +75,29 @@ pub struct CoachMemory {
     /// whiffed, punished]`.
     #[serde(default)]
     pub plans: CountMap,
+    #[serde(default)]
+    pub failures: std::collections::BTreeMap<String, PlanFailures>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct PlanFailures {
+    pub uses: u32,
+    pub deflected_all: u32,
+    pub fatal: u32,
+}
+
+impl PlanFailures {
+    pub fn rate(&self) -> f32 {
+        (self.deflected_all + self.fatal) as f32 / self.uses.max(1) as f32
+    }
+    pub fn banned(&self) -> bool {
+        self.uses >= 3 && self.rate() >= 0.6
+    }
 }
 
 impl CoachMemory {
     pub fn is_empty(&self) -> bool {
-        self.plan.is_none() && self.plans.is_empty()
+        self.plan.is_none() && self.plans.is_empty() && self.failures.is_empty()
     }
 }
 

@@ -25,7 +25,7 @@ pub const MAX_PASSIVE_SECS: f32 = 6.0;
 /// Margin, seconds, an overdue or nearly overdue plan may spend before its first attack.
 pub const OVERDUE_LEAD_SECS: f32 = 1.0;
 /// Seconds between plans that back off, retreat or step back.
-pub const RETREAT_INTERVAL_SECS: f32 = 8.0;
+pub const RETREAT_INTERVAL_SECS: f32 = 5.0;
 /// A moment is passive when no attack step started in this many seconds (the `passive_share`
 /// metric).
 pub const PASSIVE_WINDOW_SECS: f32 = 4.0;

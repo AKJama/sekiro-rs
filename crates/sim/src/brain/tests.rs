@@ -989,7 +989,7 @@ fn trend_shows_the_last_three_fights() {
     assert_eq!(t.now, Some([50, 1]));
     assert_eq!(
         serde_json::to_string(&t).unwrap(),
-        r#"{"defl":[50,100,80],"guard":[0,0,0],"hits":[5,0,2],"hp":[0,0,0],"kill_s":[30,20,null],"apm":[0,0,0],"dpm":[0,0,0],"passive":[0,0,0],"now":[50,1]}"#
+        r#"{"defl":[50,100,80],"guard":[0,0,0],"hits":[5,0,2],"hp":[0,0,0],"kill_s":[30,20,null],"apm":[0,0,0],"dpm":[0,0,0],"passive":[0,0,0],"engaged_time":[0,0,0],"now":[50,1]}"#
     );
 }
 
@@ -1133,6 +1133,7 @@ fn good_plan() -> GamePlan {
             reason: "always deflected".into(),
         }],
         notes: "he deflects thrusts early".into(),
+        retry: Vec::new(),
     }
 }
 
@@ -1243,7 +1244,7 @@ fn sets_cannot_hold_plans_without_an_attack_or_in_the_avoid_list() {
 #[test]
 fn names_counts_and_notes_are_bounded() {
     let mut plan = good_plan();
-    plan.notes = "é".repeat(NOTES_MAX + 50);
+    plan.notes = "Ã©".repeat(NOTES_MAX + 50);
     plan.start_set = "nope".into();
     plan.sets.push(set("bad name!", &[("3000", 1.0)]));
     plan.sets.push(set("keep", &[("3000", 1.0)]));
@@ -1323,6 +1324,7 @@ fn busy_input() -> CoachInput {
             })
             .collect(),
         notes: "n".repeat(NOTES_MAX),
+        retry: Vec::new(),
     };
     let mut sets = std::collections::BTreeMap::new();
     for i in 0..4 {
@@ -1335,6 +1337,8 @@ fn busy_input() -> CoachInput {
         );
     }
     CoachInput {
+        banned: Vec::new(),
+        failures: Default::default(),
         fight: 123,
         result: FightLine {
             won: "boss".into(),
@@ -1348,6 +1352,7 @@ fn busy_input() -> CoachInput {
             apm: 14,
             dpm: 55,
             passive: 12,
+            engaged_time: 98,
         },
         trend: Trend::new(&memory.history, None),
         range: plans
@@ -1402,6 +1407,23 @@ fn the_coach_input_is_trimmed_to_4kb_and_keeps_the_notes_and_the_played_plan() {
 }
 
 #[test]
+fn all_known_bans_and_their_failure_counts_fit_the_coach_budget() {
+    let mut input = busy_input();
+    input.banned = SOLDIER.choices().iter().map(|c| c.value.clone()).collect();
+    input.banned.sort();
+    input.banned.dedup();
+    input.failures = input
+        .banned
+        .iter()
+        .map(|s| (s.clone(), [123, 99, 34]))
+        .collect();
+    let banned = input.banned.clone();
+    assert!(input.fit(INPUT_BUDGET) <= INPUT_BUDGET);
+    assert_eq!(input.banned, banned);
+    assert_eq!(input.failures.len(), banned.len());
+}
+
+#[test]
 fn passive_share_and_the_rate_metrics_are_computed() {
     use metrics::MetricsTracker;
     let mut m = MetricsTracker::new(0.0);
@@ -1410,6 +1432,17 @@ fn passive_share_and_the_rate_metrics_are_computed() {
     // last attack, so 6 to 10 s and 14 to 20 s (the start counts as an attack at 0).
     for i in 1..=200 {
         let t = i as f32 * 0.1;
+        m.input_tick(
+            &crate::InputFrame {
+                buttons: crate::Buttons {
+                    guard: i % 20 < 15,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            t,
+            0.1,
+        );
         if matches!(i, 10 | 20 | 100) {
             m.attack_started(t);
         }
@@ -1432,6 +1465,7 @@ fn passive_share_and_the_rate_metrics_are_computed() {
         f.damage_per_min()
     );
     assert!(f.stalled());
+    assert_eq!(f.engaged_time, 0.0);
     // A fighter that attacks every 3 s is never passive.
     let mut busy = MetricsTracker::new(0.0);
     for i in 1..=300 {
@@ -1443,6 +1477,7 @@ fn passive_share_and_the_rate_metrics_are_computed() {
     }
     let b = busy.finish(30.0, 0, false);
     assert_eq!((b.passive_share(), b.stalled()), (0.0, false));
+    assert_eq!(b.engaged_time, 30.0);
     assert!((b.attacks_per_min() - 20.0).abs() < 1e-3);
     // The trend and the summary line show them.
     let t = Trend::new(
@@ -1462,6 +1497,37 @@ fn passive_share_and_the_rate_metrics_are_computed() {
         line.contains("attacks/min 9 damage/min 150% passive 50% (STALLED: failed)"),
         "{line}"
     );
+}
+
+#[test]
+fn activity_requires_early_presses_and_forty_percent_held_input() {
+    let held = crate::InputFrame {
+        move_stick: [0.0, 1.0],
+        buttons: crate::Buttons {
+            attack: true,
+            guard: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut tracker = metrics::MetricsTracker::new(0.0);
+    tracker.input_tick(&held, 1.0, 1.0);
+    assert!(tracker.player_active(2.5));
+    assert!(!tracker.player_active(2.6));
+    assert_eq!(tracker.finish(2.6, 0, false).early_inputs, 3);
+    let mut late = metrics::MetricsTracker::new(0.0);
+    late.input_tick(&held, 10.1, 10.1);
+    assert!(!late.player_active(10.1));
+    let mut one = metrics::MetricsTracker::new(0.0);
+    one.input_tick(
+        &crate::InputFrame {
+            move_stick: [0.0, 1.0],
+            ..Default::default()
+        },
+        1.0,
+        1.0,
+    );
+    assert!(!one.player_active(1.0));
 }
 
 #[test]
@@ -1494,13 +1560,18 @@ fn the_limits_force_attacks_and_rate_limit_retreats() {
         limits::lead_secs(&parse("guard1>deflect>3008"), &SOLDIER),
         2.5
     );
-    // One retreating plan per 8 s.
+    // One retreating plan per 5 s, including multi-retreat bait chains.
     let bait = parse("back_off6>3009");
     assert!(p.eligible(&bait, 1.0, &SOLDIER));
     p.last_retreat = Some(1.0);
     p.last_attack = 4.9;
     assert!(!p.eligible(&bait, 5.0, &SOLDIER));
-    assert!(!p.eligible(&bait, 8.9, &SOLDIER));
+    assert!(!p.eligible(&bait, 5.9, &SOLDIER));
+    p.last_attack = 6.0;
+    assert!(p.eligible(&bait, 6.0, &SOLDIER));
+    assert!(!p.eligible(&parse("back_off6>back_off9>3000"), 6.0, &SOLDIER));
+    // Short steps can be chained into a bait without exceeding the attack deadline.
+    assert!(p.eligible(&parse("5211>5211>3000"), 6.0, &SOLDIER));
     p.last_attack = 9.0;
     assert!(p.eligible(&bait, 9.1, &SOLDIER));
     // A plan that does not retreat is not held back by it.

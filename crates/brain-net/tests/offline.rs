@@ -169,6 +169,8 @@ impl Mock {
         config.warm_up = false;
         // The mock server stands in for the Responses API, so its coach is the API backend.
         config.coach_backend = CoachBackend::Api;
+        config.coach_model = CoachBackend::Api.default_model().into();
+        config.coach_effort = "low".into();
         config
     }
 
@@ -780,7 +782,15 @@ fn the_coach_request_has_the_structured_output_shape_and_reports_reasoning_token
     assert_eq!(schema["additionalProperties"], false);
     assert_eq!(
         schema["required"],
-        json!(["version", "opener", "sets", "start_set", "avoid", "notes"])
+        json!([
+            "version",
+            "opener",
+            "sets",
+            "start_set",
+            "avoid",
+            "retry",
+            "notes"
+        ])
     );
     let choices = schema["$defs"]["choice"]["enum"].as_array().unwrap();
     for want in ["3000+3001", "walk_in4>3013", "hold2", "lua"] {
@@ -793,7 +803,9 @@ fn the_coach_request_has_the_structured_output_shape_and_reports_reasoning_token
     let text = body["instructions"].as_str().unwrap();
     assert!(text.starts_with("You are the coach of an Ashina soldier"));
     assert!(
-        text.contains("NOT goals") && text.contains("passive above 35"),
+        text.contains("engaged_time")
+            && text.contains("passive above 35")
+            && text.contains("once per 5 s"),
         "{text}"
     );
     let stats = brain.stats();
@@ -1051,7 +1063,7 @@ fn the_codex_coach_reads_the_last_message_file() {
             "-m",
             "model-x",
             "-c",
-            "model_reasoning_effort=\"low\"",
+            "model_reasoning_effort=\"medium\"",
             "-c",
             "project_doc_max_bytes=0",
             "-c",
@@ -1077,6 +1089,23 @@ fn the_codex_coach_reads_the_last_message_file() {
     assert_eq!(args[n - 3], "-o");
     assert_eq!(args[n - 1], "-");
     assert_eq!(reply.tokens, [0, 0, 0], "codex reports no usage");
+    let mut config = HostedConfig::new(Backend::Coach, ApiKey::new("none"));
+    config.checkpoints = false;
+    config.warm_up = false;
+    config.coach_backend = CoachBackend::Codex;
+    config.coach_model = "configured-model".into();
+    config.coach_effort = "high".into();
+    config.coach_cmd = Some(fake.exe.clone());
+    let mut configured = HostedBrain::new(config, &SOLDIER).unwrap();
+    configured.submit_coach(&coach_request(9), 0.0);
+    assert!(poll_coach(&mut configured).plan.is_some());
+    let calls = fake.calls();
+    let args = args_of(calls.last().unwrap());
+    assert!(args.iter().any(|a| a == "model_reasoning_effort=\"high\""));
+    assert!(
+        args.windows(2)
+            .any(|a| a[0] == "-m" && a[1] == "configured-model")
+    );
 }
 
 #[test]
@@ -1176,6 +1205,12 @@ fn the_coach_mode_checkpoint_request_is_tiny() {
     assert!(brief.len() < 150, "a few numbers, not the memory");
     let text = body["questions"][0]["instructions"].as_str().unwrap();
     assert!(text.len() < 200 && !text.contains("tally"), "{text}");
+    assert!(
+        text.contains("HP+posture damage/min")
+            && text.contains("perfect deflects")
+            && text.contains("passive_share<0.35")
+            && text.contains("baits end in attacks")
+    );
     // Input tokens are counted per call kind.
     let [decide, coach] = brain.call_stats();
     assert_eq!((decide.calls, decide.input, coach.calls), (1, 150, 0));

@@ -960,7 +960,10 @@ fn a_fight_summary_and_the_baseline_are_saved_with_the_metrics() {
             duel.rules.fighters[0].vitality.hp = 1;
         }
         let input = if i < 60 * 15 {
-            swing(i, 50)
+            InputFrame {
+                move_stick: [0.0, 1.0],
+                ..swing(i, 50)
+            }
         } else {
             InputFrame::default()
         };

@@ -669,7 +669,7 @@ fn run_coach(
                 );
                 cli::run(
                     backend,
-                    &config.model,
+                    (&config.model, &config.effort),
                     config.cmd.as_deref(),
                     &cli::Prompt {
                         input: &prompt,

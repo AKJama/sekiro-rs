@@ -246,6 +246,40 @@ fn memory_file() -> PathBuf {
 }
 
 #[test]
+fn a_plan_banned_by_saved_failures_never_reaches_an_ai_slot() {
+    let Some(mut duel) = load(4.0) else { return };
+    let path = memory_file();
+    let mut memory = Memory::new("c1010");
+    memory.coach.failures.insert(
+        "3000".into(),
+        sekiro_sim::brain::memory::PlanFailures {
+            uses: 3,
+            deflected_all: 2,
+            fatal: 0,
+        },
+    );
+    memory.save(&path).unwrap();
+    duel.set_brain(scripted(&[3000], 0.0), false).unwrap();
+    duel.boss_brain.as_mut().unwrap().use_memory(path.clone());
+    for _ in 0..900 {
+        keep_both_fresh(&mut duel);
+        duel.step(&InputFrame::default(), DT);
+    }
+    let driver = duel.boss_brain.as_ref().unwrap();
+    assert!(driver.history.is_empty());
+    assert_eq!(driver.stats.planned, 0);
+    assert!(driver.stats.fallback > 0);
+    assert_eq!(driver.memory.coach.failures["3000"].uses, 3);
+    drop(duel);
+    assert_eq!(
+        Memory::load(&path, "c1010").0.coach.failures["3000"].deflected_all,
+        2
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(path.parent().unwrap());
+}
+
+#[test]
 fn memory_survives_a_death_and_a_new_session() {
     let Some(mut duel) = load(4.0) else { return };
     let path = memory_file();
@@ -271,7 +305,10 @@ fn memory_survives_a_death_and_a_new_session() {
             duel.rules.fighters[0].vitality.hp = 1;
         }
         let input = if i < 60 * 15 {
-            attack_every(i, 50)
+            InputFrame {
+                move_stick: [0.0, 1.0],
+                ..attack_every(i, 50)
+            }
         } else {
             InputFrame::default()
         };
@@ -294,7 +331,13 @@ fn memory_survives_a_death_and_a_new_session() {
     // Fight 2: 15 s, then the session ends mid-fight.
     for i in 0..60 * 15 {
         keep_both_fresh(&mut duel);
-        duel.step(&attack_every(i, 50), DT);
+        duel.step(
+            &InputFrame {
+                move_stick: [0.0, 1.0],
+                ..attack_every(i, 50)
+            },
+            DT,
+        );
     }
     let first_session = seen.borrow().clone();
     drop(duel);

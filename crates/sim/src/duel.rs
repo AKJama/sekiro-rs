@@ -563,12 +563,7 @@ impl Duel {
     /// strafe clip while the body starts steering freely.
     fn release_lock(&mut self) {
         if self.player.lock_target.take().is_some() {
-            self.player
-                .behavior
-                .runtime
-                .set_variable("MoveDirection", 0.0);
-            self.player.walk_twist = 0.0;
-            self.player.walk_twist_target = 0.0;
+            self.player.release_move_lock();
         }
         self.player.behavior.env.locked_on = false;
     }
@@ -1403,6 +1398,7 @@ impl Duel {
     }
 
     pub fn step(&mut self, input: &InputFrame, dt: f32) -> DuelReport {
+        let raw_input = *input;
         if self.spawn.is_none() {
             self.spawn = Some([placement(&self.player), placement(&self.enemy)]);
         }
@@ -1643,7 +1639,7 @@ impl Duel {
             dt,
         );
         if let Some(mut d) = self.boss_brain.take() {
-            d.after_step(self, &report);
+            d.after_step(self, &report, &raw_input);
             self.boss_brain = Some(d);
         }
         report

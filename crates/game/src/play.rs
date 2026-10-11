@@ -330,9 +330,13 @@ pub fn run(options: Options) -> Result<()> {
                 primary_window: Some(Window {
                     title: "sekiro-rs".into(),
                     resolution: (1600, 900).into(),
+                    // Make the first input frame's request a false -> true transition.
+                    // Bevy's winit backend only calls focus_window on that transition.
+                    focused: false,
                     ..default()
                 }),
-                // Scripted and replayed runs leave the cursor alone (a replay clicks to take it).
+                // The input system requests focus and cursor lock on the first frame;
+                // initial scripted/replay settings remain useful before that system runs.
                 primary_cursor_options: Some(CursorOptions {
                     visible: scripted || replay.is_some(),
                     grab_mode: if scripted || replay.is_some() {
@@ -605,17 +609,32 @@ fn spawn_floor_stage(
     }
 }
 
+#[derive(Default)]
+struct MouseCapture {
+    focus_requested: bool,
+    first_click_grabbed: bool,
+    grab_click: bool,
+}
+
 fn gather_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     gamepads: Query<&Gamepad>,
     orbit: Res<Orbit>,
     mut live: ResMut<LiveInput>,
-    mut cursor: Query<&mut CursorOptions>,
-    mut grab_click: Local<bool>,
+    mut windows: Query<(&mut Window, &mut CursorOptions)>,
+    mut capture: Local<MouseCapture>,
 ) {
+    if !capture.focus_requested
+        && let Ok((mut window, mut c)) = windows.single_mut()
+    {
+        window.focused = true;
+        c.grab_mode = CursorGrabMode::Locked;
+        c.visible = false;
+        capture.focus_requested = true;
+    }
     if keys.just_pressed(KeyCode::Escape)
-        && let Ok(mut c) = cursor.single_mut()
+        && let Ok((_, mut c)) = windows.single_mut()
     {
         let locked = c.grab_mode == CursorGrabMode::Locked;
         c.grab_mode = if locked {
@@ -628,15 +647,18 @@ fn gather_input(
     // A click while the cursor is free (after Esc) takes the mouse back for the camera; that
     // click is not an attack.
     if !mouse.pressed(MouseButton::Left) {
-        *grab_click = false;
+        capture.grab_click = false;
     }
     if mouse.just_pressed(MouseButton::Left)
-        && let Ok(mut c) = cursor.single_mut()
-        && c.grab_mode != CursorGrabMode::Locked
+        && let Ok((window, mut c)) = windows.single_mut()
+        && window.focused
+        && window.cursor_position().is_some()
+        && (!capture.first_click_grabbed || c.grab_mode != CursorGrabMode::Locked)
     {
         c.grab_mode = CursorGrabMode::Locked;
         c.visible = false;
-        *grab_click = true;
+        capture.first_click_grabbed = true;
+        capture.grab_click = true;
     }
     let key = |k| keys.pressed(k);
     let mut stick = Vec2::new(
@@ -644,7 +666,7 @@ fn gather_input(
         (key(KeyCode::KeyW) as i32 - key(KeyCode::KeyS) as i32) as f32,
     );
     let mut b = Buttons {
-        attack: mouse.pressed(MouseButton::Left) && !*grab_click,
+        attack: mouse.pressed(MouseButton::Left) && !capture.grab_click,
         guard: mouse.pressed(MouseButton::Right),
         jump: key(KeyCode::Space),
         dodge: key(KeyCode::ShiftLeft) || key(KeyCode::ShiftRight),

@@ -309,3 +309,45 @@ All Cargo commands used target/alt and six jobs; fmt uses CARGO_BUILD_JOBS=6 bec
 This task made no commits, real model/API calls, real Claude/Codex CLI runs, credential reads, live game runs, game-install writes, worktrees, or cache/re links, junctions or deletions.
 Input buffering, attack timing, hit stop and Wolf's movement were not changed by this task.
 Concurrent --immortal edits in the game and Duel were left intact and are separate from this work.
+## Five playtest fixes (11 October 2026)
+
+Raw duel input now determines whether a fight is valid: at least three relevant presses in the first ten seconds and any relevant held input during at least 40% of its duration.
+Void fights print `fight void: no player input` and do not enter history, tally, habits, wins, plan failure evidence or post-fight coach calls; current-fight autosaves also exclude inactive evidence.
+The window requests focus and cursor lock on the first input frame and re-grabs on the first click inside it.
+Windows can still refuse foreground activation.
+The no-input integration test uses a temporary memory file and fake coach; active-fight save tests remain green.
+
+The normal-AI, non-god posture reproduction sampled a soldier block at tick 64 (Wolf attack 5000011) and deflect at tick 98 (5000050).
+Both attack rows specify zero attacker posture return, and Wolf's remaining posture stayed 120 to 120.
+The executable research confirms the attack-row return fields and the deflect multiplier path, so no unsupported nonzero return damage was introduced.
+Nonzero NPC return tests still cover 45, 22, 11 and 5 posture damage.
+Matched original-game contact footage remains unverified; the audit and limitation are recorded in docs/COMBAT-RULES.md.
+
+Held-stick movement retained the old heading because free_move_start_turn skipped an already moving Wolf after lock release.
+Release now clears the remembered heading and queues the camera-relative turn when movement is permitted, including after deathblow recovery.
+The reproduction's backward-stick sideways drift was 0.600 m in half a second; all four stick directions at three camera yaws now have less than 0.000002 m sideways drift.
+The raw-key replay is crates/game/scripts/held_move_kill.txt.
+The final live run held W through a soldier deathblow and recovery, logged lock false and zero direction error, and completed in under ten seconds (exact PID 13736, 60-second cap).
+Its first-frame log reports focused true and cursor Locked.
+The screenshot target/alt/screens/held_move_kill_final.png shows the soldier at zero HP during the deathblow.
+Saves were backed up to the local temporary sekiro-playtest-saves-20261011-015359 directory before game sessions.
+
+Per-plan uses, deflected_all and fatal counters persist in coach memory.
+Three uses with a summed failure rate of at least 0.6 exclude the plan from sampling and openers, including across subsequent fights.
+Fatal attribution covers lost marks, death within three seconds of the final attack exchange and a punished posture break, including death during the final attack.
+Only a validated coach retry with a reason re-allows a plan; historical counts remain intact and new failures can ban it again.
+Void fights roll back provisional bans and never persist their failures.
+Coach summaries include banned choices and packed failure counters within 4096 bytes, tested with the entire known vocabulary banned.
+Codex defaults are gpt-6.1-sol and medium effort, with both CLI overrides tested through a fake executable.
+
+Coach and checkpoint instructions reward HP plus posture damage per minute, fewer perfect deflects and survival while passive_share is below 0.35.
+Engaged_time appears in metrics, scorecards, trends and coach input; it is duration below that passivity threshold and zero otherwise.
+Retreat allowance is once per five seconds and permits retreat chains followed by an attack, while preserving the six-second attack rule and passivity tracking.
+The checkpoint body still fits its 1200-byte limit.
+
+Validation passed: cargo fmt --all and --check, workspace/all-targets Clippy with -D warnings, the requested release sim and brain-net lib/bin/integration suite (321 tests), and the release game build.
+All Cargo work used target/alt and six jobs; fmt used CARGO_BUILD_JOBS=6 because it has no -j option.
+Logs are target/alt/playtest-clippy-final.log, playtest-tests-final.log, playtest-build-final.log and playtest-game-final.err.log.
+Updated docs/BRAIN.md and docs/COMBAT-RULES.md document behavior, evidence and the remaining original-game posture parity question.
+No commits, real model/API calls, real Claude/Codex CLI runs, credential reads, protected memory-log edits, game-install writes, worktrees or cache/re links, junctions or deletions were made.
+Attack timing, hit stop and the input buffer were unchanged.

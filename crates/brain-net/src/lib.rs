@@ -22,7 +22,7 @@ pub fn is_hosted(name: &str) -> bool {
 /// The coach options of the game CLI (`--coach`, `--coach-model`, `--coach-effort`).
 #[derive(Debug, Clone, Default)]
 pub struct CoachCli {
-    /// `api` (default), `claude` or `codex`.
+    /// `codex` (default), `claude` or `api`.
     pub backend: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -99,6 +99,10 @@ pub fn from_cli_with(
                     .unwrap_or_else(|| coach_backend.default_model().to_string());
                 if let Some(effort) = &coach.effort {
                     config.coach_effort = effort.clone();
+                } else if coach_backend == CoachBackend::Codex {
+                    config.coach_effort = "medium".into();
+                } else {
+                    config.coach_effort = "low".into();
                 }
                 config.coach_timeout = coach_backend.timeout();
                 config.coach_cmd = std::env::var_os("SEKIRO_COACH_CMD").map(Into::into);
@@ -106,7 +110,7 @@ pub fn from_cli_with(
                     "coach: {} (model {}{}), checkpoints on {}",
                     coach_backend.name(),
                     config.coach_model,
-                    if coach_backend == CoachBackend::Api {
+                    if coach_backend != CoachBackend::Claude {
                         format!(", effort {}", config.coach_effort)
                     } else {
                         String::new()

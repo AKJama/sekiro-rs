@@ -38,10 +38,50 @@ fn fresh(duel: &mut Duel) {
 }
 
 fn run(duel: &mut Duel, secs: f32) {
-    for _ in 0..(secs / DT) as usize {
+    for i in 0..(secs / DT) as usize {
         fresh(duel);
+        duel.step(
+            &InputFrame {
+                buttons: sekiro_sim::Buttons {
+                    guard: i % 120 < 100,
+                    ..Default::default()
+                },
+                ..InputFrame::default()
+            },
+            DT,
+        );
+    }
+}
+
+#[test]
+fn no_input_fight_is_void_and_never_coached_or_saved() {
+    let Some((mut duel, coach)) = coached(vec![Some(plan("unused"))], 0.0) else {
+        return;
+    };
+    let path = std::env::temp_dir().join(format!("sekiro-void-{}.json", std::process::id()));
+    duel.boss_brain.as_mut().unwrap().use_memory(path.clone());
+    for _ in 0..720 {
+        fresh(&mut duel);
         duel.step(&InputFrame::default(), DT);
     }
+    assert_eq!(driver(&duel).memory_now().fights, 0);
+    die(&mut duel);
+    let d = driver(&duel);
+    let record = d.last_record.as_ref().unwrap();
+    assert!(record.metrics.void);
+    assert!(
+        record
+            .summary_line()
+            .contains("fight void: no player input")
+    );
+    assert_eq!(d.memory.fights, 0);
+    assert!(d.memory.history.is_empty() && d.memory.boss.is_empty() && d.memory.wolf.is_empty());
+    assert_eq!(d.memory.habits, Default::default());
+    assert!(coach.borrow().coach_inputs.is_empty());
+    let saved = sekiro_sim::brain::Memory::load(&path, "c1010").0;
+    assert_eq!(saved.fights, 0);
+    drop(duel);
+    let _ = std::fs::remove_file(path);
 }
 
 /// Wolf dies; steps until the respawn (the next fight has started).
@@ -81,6 +121,7 @@ fn plan(notes: &str) -> GamePlan {
             reason: "deflected".into(),
         }],
         notes: notes.into(),
+        retry: Vec::new(),
     }
 }
 
@@ -364,7 +405,7 @@ fn a_set_of_only_retreats_still_attacks_within_six_seconds() {
 }
 
 #[test]
-fn retreating_plans_run_at_most_once_per_eight_seconds() {
+fn retreating_plans_run_at_most_once_per_five_seconds() {
     let Some(mut duel) = load(4.0) else { return };
     duel.set_brain(single_plan_brain("back_off6>3009"), false)
         .unwrap();
@@ -388,7 +429,7 @@ fn retreating_plans_run_at_most_once_per_eight_seconds() {
     eprintln!("retreating plans started at {times:?}");
     assert!(times.len() >= 2, "{times:?}");
     for w in times.windows(2) {
-        assert!(w[1] - w[0] >= 7.9, "{times:?}");
+        assert!(w[1] - w[0] >= 4.9, "{times:?}");
     }
 }
 

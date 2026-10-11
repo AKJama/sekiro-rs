@@ -141,6 +141,7 @@ pub struct Character {
     /// World yaw of the last step's root-motion travel, when the clip carried the body faster
     /// than [`HEADING_MIN_SPEED`]; `TurnAngle` is measured from it (else from the facing).
     heading: Option<f32>,
+    free_move_pending: bool,
     /// Clip times before the last step, by clip node.
     last_times: HashMap<NodeId, (String, f32)>,
     last_main: Option<PlayingClip>,
@@ -248,6 +249,7 @@ impl Character {
             walk_twist: 0.0,
             walk_twist_target: 0.0,
             heading: None,
+            free_move_pending: false,
             last_times: HashMap::new(),
             last_main: None,
         })
@@ -363,7 +365,7 @@ impl Character {
         if self.kind != ControlKind::Player
             || self.attack_target().is_some()
             || !self.body.grounded
-            || moving
+            || (moving && !self.free_move_pending)
             || !may_move
             || !may_turn
         {
@@ -375,6 +377,17 @@ impl Character {
         let turn = angle_diff(stick, self.body.yaw);
         self.body.yaw = angle_diff(stick, 0.0);
         self.twist = angle_diff((self.twist.to_radians()) + turn, 0.0).to_degrees();
+        self.free_move_pending = false;
+    }
+
+    /// A lock release is a new free-movement start even with the stick held.
+    /// Defer the turn through restricted reactions/throws until movement is permitted.
+    pub fn release_move_lock(&mut self) {
+        self.behavior.runtime.set_variable("MoveDirection", 0.0);
+        self.walk_twist = 0.0;
+        self.walk_twist_target = 0.0;
+        self.heading = None;
+        self.free_move_pending = true;
     }
 
     /// The locked-on walk twist (exe WalkTwist, facts from FwLo's RustSekiro,

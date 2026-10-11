@@ -97,6 +97,8 @@ pub struct GamePlan {
     /// The set played from the start.
     pub start_set: String,
     pub avoid: Vec<Avoid>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub retry: Vec<Avoid>,
     /// The coach's hypotheses about the player (at most [`NOTES_MAX`] characters).
     pub notes: String,
 }
@@ -179,6 +181,21 @@ impl GamePlan {
             }
         }
         let avoided = |p: &str| out.avoid.iter().any(|a| a.choice == p);
+        for r in self.retry.iter().take(MAX_AVOID) {
+            let choice = r.choice.trim();
+            let reason = clip(&r.reason, REASON_MAX);
+            if actions.parse(choice).is_ok() && !reason.is_empty() && !avoided(choice) {
+                out.retry.push(Avoid {
+                    choice: choice.to_string(),
+                    reason,
+                });
+            } else {
+                warnings.push(format!(
+                    "retry entry dropped: {} (known choice and reason required)",
+                    clip(choice, 40)
+                ));
+            }
+        }
         let mut sets: Vec<PlanSet> = Vec::new();
         for set in &self.sets {
             let name = set.name.trim();
@@ -364,6 +381,14 @@ impl GamePlan {
                 .collect();
             lines.push(format!("avoid: {}", avoid.join("; ")));
         }
+        if !self.retry.is_empty() {
+            let retry: Vec<String> = self
+                .retry
+                .iter()
+                .map(|r| format!("{} ({})", r.choice, r.reason))
+                .collect();
+            lines.push(format!("retry: {}", retry.join("; ")));
+        }
         if !self.notes.is_empty() {
             lines.push(format!("notes: {}", self.notes));
         }
@@ -398,6 +423,7 @@ pub struct FightLine {
     pub apm: u32,
     pub dpm: u32,
     pub passive: u32,
+    pub engaged_time: u32,
 }
 
 /// How one of the plan's sets did in the fight: seconds played and the outcome counts of the
@@ -412,6 +438,8 @@ pub struct SetStat {
 /// `[exchanges, hit, blocked, deflected, whiffed, punished]` per plan text.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct CoachInput {
+    pub banned: Vec<String>,
+    pub failures: std::collections::BTreeMap<String, [u32; 3]>,
     /// Fights with this enemy so far, this one included.
     pub fight: u32,
     pub result: FightLine,
@@ -459,6 +487,16 @@ impl CoachInput {
     }
 
     fn trim_one(&mut self) -> bool {
+        if self.failures.len() > 6
+            && let Some(key) = self
+                .failures
+                .keys()
+                .find(|k| !self.banned.contains(k))
+                .cloned()
+        {
+            self.failures.remove(&key);
+            return true;
+        }
         for keep in [6, 4, 3, 2, 1, 0] {
             if self.overall.pop(keep) || self.wolf.pop(keep) {
                 return true;
@@ -473,7 +511,38 @@ impl CoachInput {
         if self.trend.trim() {
             return true;
         }
-        self.range.pop_last().is_some()
+        if self.range.pop_last().is_some() {
+            return true;
+        }
+        if let Some(plan) = self.played.as_mut()
+            && let Some(set) = plan.sets.iter_mut().find(|s| !s.description.is_empty())
+        {
+            set.description.clear();
+            return true;
+        }
+        if self.played.take().is_some() {
+            return true;
+        }
+        if self.plans.pop(0) || self.sets.pop_last().is_some() {
+            return true;
+        }
+        if let Some(key) = self
+            .failures
+            .keys()
+            .find(|k| !self.banned.contains(k))
+            .cloned()
+        {
+            self.failures.remove(&key);
+            return true;
+        }
+        if self.notes.chars().count() > 80 {
+            self.notes = clip(&self.notes, self.notes.chars().count() - 80);
+            return true;
+        }
+        if self.failures.pop_last().is_some() {
+            return true;
+        }
+        self.banned.pop().is_some()
     }
 }
 

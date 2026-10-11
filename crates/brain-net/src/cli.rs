@@ -12,7 +12,7 @@
 //! `-p`, `--model`, `--output-format json`, `--tools ""`, `--no-session-persistence`,
 //! `--json-schema`, `--system-prompt`, `--strict-mcp-config`, `--mcp-config`,
 //! `--setting-sources ""`, `--safe-mode`, `--effort low`; Codex `exec --ignore-user-config
-//! -c model_reasoning_effort="low" --skip-git-repo-check -s read-only -m --ephemeral
+//! -c model_reasoning_effort="medium" --skip-git-repo-check -s read-only -m --ephemeral
 //! --output-schema -o -`. Claude's dynamic-section flag is ignored with --system-prompt.
 
 use std::io::{Read, Write};
@@ -80,13 +80,14 @@ fn programs(backend: CoachBackend, cmd: Option<&Path>) -> Vec<PathBuf> {
 /// Runs the coach CLI with `prompt` on stdin. `schema` is the game plan's JSON schema.
 pub(crate) fn run(
     backend: CoachBackend,
-    model: &str,
+    model_and_effort: (&str, &str),
     cmd: Option<&Path>,
     prompt: &Prompt<'_>,
     schema: &Value,
     timeout: Duration,
     stopping: &AtomicBool,
 ) -> Result<CliAnswer, Failure> {
+    let (model, effort) = model_and_effort;
     let instructions = prompt.instructions;
     let input = prompt.input;
     let scratch = Scratch::new().map_err(|_| Failure::CliFailed)?;
@@ -145,7 +146,7 @@ pub(crate) fn run(
                     "-m",
                     model,
                     "-c",
-                    "model_reasoning_effort=\"low\"",
+                    &format!("model_reasoning_effort={}", toml_string(effort)),
                     "-c",
                     "project_doc_max_bytes=0",
                 ]

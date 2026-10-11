@@ -43,6 +43,14 @@ pub struct FightMetrics {
     pub boss_attacks: u32,
     /// Seconds with no attack step started in the last `limits::PASSIVE_WINDOW_SECS`.
     pub passive_secs: f32,
+    /// Fight seconds credited only below the passivity threshold.
+    pub engaged_time: f32,
+    /// Raw input rising edges in the opening ten seconds.
+    pub early_inputs: u32,
+    /// Seconds with at least one tracked input held.
+    pub input_secs: f32,
+    /// The player's activity did not qualify this fight for learning.
+    pub void: bool,
 }
 
 impl FightMetrics {
@@ -105,9 +113,40 @@ pub struct MetricsTracker {
     prev_hp: Option<f32>,
     prev_posture: Option<f32>,
     last_attack: Option<f32>,
+    previous_input: [bool; 5],
 }
 
 impl MetricsTracker {
+    /// Raw input presses and held time, including during throws and hit stop.
+    pub fn input_tick(&mut self, input: &crate::InputFrame, now: f32, dt: f32) {
+        let b = input.buttons;
+        let held = [
+            b.attack,
+            b.guard,
+            b.dodge,
+            b.jump,
+            input.move_stick[0].hypot(input.move_stick[1]) > 0.1,
+        ];
+        if now - self.start <= 10.0 + 1e-3 {
+            self.metrics.early_inputs += held
+                .iter()
+                .zip(self.previous_input)
+                .filter(|(down, prev)| **down && !prev)
+                .count() as u32;
+        }
+        if held.iter().any(|down| *down) {
+            self.metrics.input_secs += dt;
+        }
+        self.previous_input = held;
+    }
+
+    pub fn player_active(&self, now: f32) -> bool {
+        let duration = (now - self.start).max(0.0);
+        self.metrics.early_inputs >= 3
+            && duration > 0.0
+            && self.metrics.input_secs / duration >= 0.4
+    }
+
     pub fn new(start: f32) -> Self {
         Self {
             start,
@@ -155,10 +194,17 @@ impl MetricsTracker {
 
     /// The numbers so far, at fight time `now`.
     pub fn snapshot(&self, now: f32) -> FightMetrics {
-        FightMetrics {
+        let mut m = FightMetrics {
             duration: now - self.start,
             ..self.metrics
-        }
+        };
+        m.engaged_time = if m.passive_share() < super::limits::PASSIVE_FAIL_SHARE {
+            m.duration
+        } else {
+            0.0
+        };
+        m.void = !self.player_active(now);
+        m
     }
 
     /// The fight is over at `now`: the final numbers.
@@ -205,6 +251,9 @@ impl FightRecord {
     /// One line for the log and the console.
     pub fn summary_line(&self) -> String {
         let m = &self.metrics;
+        if m.void {
+            return format!("fight void: no player input ({:.1}s)", m.duration);
+        }
         let pct = |r: Option<f32>| r.map_or("-".to_string(), |r| format!("{:.0}%", r * 100.0));
         let mut top: Vec<_> = self.choices.iter().collect();
         top.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
@@ -234,7 +283,7 @@ impl FightRecord {
                     .join(" ")
             )
         };
-        format!(
+        let line = format!(
             "fight over: {} won in {:.1}s ({}); {} plans, {} lua acts, {} requests [{}]; wolf deflect {} guard {} hits taken {} hp lost {:.0}% posture {:.0}% punishes {}; attacks/min {:.0} damage/min {:.0}% passive {:.0}%{}; tokens {}/{} (reasoning {}); latency p50 {} ms p90 {} ms{}{}",
             match self.winner.as_str() {
                 "boss" => "boss",
@@ -268,7 +317,8 @@ impl FightRecord {
             self.latency_ms[1],
             coach,
             sets,
-        )
+        );
+        format!("{line}; engaged_time {:.1}s", m.engaged_time)
     }
 }
 
@@ -302,6 +352,7 @@ pub struct Trend {
     pub dpm: Vec<u32>,
     /// Passive share, percent of the fight (above 35 the fight failed).
     pub passive: Vec<u32>,
+    pub engaged_time: Vec<u32>,
     /// This fight so far: deflect percent and hits landed on Wolf.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub now: Option<[u32; 2]>,
@@ -342,6 +393,10 @@ impl Trend {
                 .iter()
                 .map(|r| (r.metrics.passive_share() * 100.0).round() as u32)
                 .collect(),
+            engaged_time: recent
+                .iter()
+                .map(|r| r.metrics.engaged_time.round() as u32)
+                .collect(),
             now: now.map(|m| [pct(m.deflect_rate()), m.hits_taken]),
         }
     }
@@ -363,6 +418,7 @@ impl Trend {
         self.apm.remove(0);
         self.dpm.remove(0);
         self.passive.remove(0);
+        self.engaged_time.remove(0);
         true
     }
 }
