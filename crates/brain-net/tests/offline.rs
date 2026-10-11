@@ -819,6 +819,40 @@ fn the_coach_request_has_the_structured_output_shape_and_reports_reasoning_token
 }
 
 #[test]
+fn mid_review_uses_same_wire_format_and_logs_its_phase() {
+    let mut mock = Mock::at("responses", vec![Response::json(coach_response(PLAN))]);
+    let mut config = mock.config(Backend::Coach);
+    let path = std::env::temp_dir().join(format!("sekiro-mid-{}.jsonl", std::process::id()));
+    config.log_path = Some(path.clone());
+    let mut brain = HostedBrain::new(config, &SOLDIER).unwrap();
+    let mut request = coach_request(1);
+    request.input = r#"{"phase":"mid","elapsed":45.0}"#.into();
+    brain.submit_coach(&request, 45.0);
+    assert!(poll_coach(&mut brain).plan.is_some());
+    mock.finish();
+    drop(brain);
+    let body = mock.requests.recv().unwrap();
+    assert_eq!(body["input"][0]["content"], request.input);
+    let instructions = body["instructions"].as_str().unwrap();
+    assert!(instructions.contains("mid-fight review: keep what works"));
+    assert!(
+        instructions.find("win and win faster").unwrap()
+            < instructions.find("then break Wolf posture").unwrap()
+    );
+    let line: Value = serde_json::from_str(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(line["kind"], "coach");
+    assert_eq!(line["phase"], "mid");
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn a_coach_failure_or_refusal_is_an_error_with_no_plan() {
     for (response, want) in [
         (json!({"status": "incomplete", "output": []}), "incomplete"),
@@ -892,7 +926,7 @@ fn the_checkpoint_chooser_picks_a_set_name_or_keep() {
         ])
     );
     let text = q["instructions"].as_str().unwrap();
-    assert!(text.contains("fighting instinct"), "{text}");
+    assert!(text.contains("win fast"), "{text}");
     assert!(body["input"].as_str().unwrap().contains("\"active\":\"a\""));
     assert_eq!(brain.stats().failed.get(&Failure::UnknownAction), Some(&1));
 }
@@ -1027,7 +1061,7 @@ fn the_claude_coach_runs_the_cli_with_the_prompt_on_stdin_and_reads_its_envelope
         calls[0]["stdin_head"]
             .as_str()
             .unwrap()
-            .starts_with("Input (the fight just over):")
+            .starts_with("Input (fight review):")
     );
     assert!(
         calls[0]["stdin_len"].as_u64().unwrap() < 300,
@@ -1208,10 +1242,10 @@ fn the_coach_mode_checkpoint_request_is_tiny() {
     let text = body["questions"][0]["instructions"].as_str().unwrap();
     assert!(text.len() < 200 && !text.contains("tally"), "{text}");
     assert!(
-        text.contains("HP+posture damage/min")
-            && text.contains("perfect deflects")
-            && text.contains("passive_share<0.35")
-            && text.contains("baits end in attacks")
+        text.contains("Wolf HP+posture/min")
+            && text.contains("low boss HP+posture/min and Wolf deflects")
+            && text.contains("Passive>35% fails")
+            && text.contains("Retreat to attack")
     );
     // Input tokens are counted per call kind.
     let [decide, coach] = brain.call_stats();

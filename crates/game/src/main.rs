@@ -138,6 +138,7 @@ fn main() -> anyhow::Result<()> {
                 },
             )
             .map_err(|e| anyhow::anyhow!("--brain: {e}"))?,
+            coach_interval: arg_f32(&args, "--coach-interval", 45.0)?.max(0.0),
             brain_log: args.iter().any(|a| a == "--brain-log"),
             brain_memory: sekiro_sim::brain::memory::resolve_for(
                 arg_value(&args, "--brain-memory").as_deref(),
@@ -168,7 +169,7 @@ fn main() -> anyhow::Result<()> {
         "                 [--map <id> [--start <n> | --spawn x,y,z,yaw,0]] [--no-enemy] [--lock-on]"
     );
     eprintln!(
-        "                 [--simple-ai] [--passive] [--god] [--immortal] [--force-act <id>] [--enemy c1010|c5060] [--brain lua|scripted|decisions|responses|coach] [--brain-model <name>] [--coach claude|codex|api] [--coach-model <name>] [--coach-effort <level>] [--brain-log] [--brain-memory off|on|<path>]"
+        "                 [--simple-ai] [--passive] [--god] [--immortal] [--force-act <id>] [--enemy c1010|c5060] [--brain lua|scripted|decisions|responses|coach] [--brain-model <name>] [--coach claude|codex|api] [--coach-model <name>] [--coach-effort <level>] [--coach-interval <secs>] [--brain-log] [--brain-memory off|on|<path>]"
     );
     eprintln!("       sekiro-rs --arena owl [--full-map] [--play options] (a boss on his own map)");
     eprintln!("usage: sekiro-rs --arena [--deathblow] [--screenshot <out.png> --at <seconds>]");

@@ -108,7 +108,7 @@ No commits, links, junctions, protected brain edits or game-install writes were 
 
 ## Known issues
 
-- Done 2026-10-11, to be tried in play: the boss **coach** (`--brain coach`, `docs/BRAIN.md` "The coach"). Between fights a reasoning model (`--coach claude|codex|api`, default `api` = Responses, `gpt-6-luna`, low effort, 45 s; `claude` = slim `claude -p --model claude-haiku-5-5`, no API key, `--coach-model`, `--coach-effort`) reads the fight summary (about 4 KB: result, trend, per-plan and per-set outcomes, Wolf's habits, the plan played, its own notes) and writes a versioned game plan (opener, 2 to 4 named plan sets, start set, avoid, notes), validated against the boss's actions. Fight 1 with no memory is his own Lua AI with no model call; the plan arriving during the respawn plays from fight 2 (opener, then the start set), a late one a fight later, a failure keeps the old plan, and the newest plan is saved in `logs/memory/<chr>.json`. In the fight only the Decisions API picks a set at the checkpoints, with a tiny request (about 100 tokens of numbers plus the set names). The console prints the request and a 3 to 5 line summary of each plan. Against reward hacking: kill time is not a goal; new metrics `attacks/min`, `damage/min` and `passive_share` (a fight above 35% passive failed), and hard limits in the driver (an attack at least every 6 s, one retreat per 8 s, plans need an attack). Also fixed: an attack after `retreat12` or a strafe swung at empty air; it now turns to face Wolf first (30 degree rule). Tests `crates/sim/tests/coach.rs`, `crates/sim/src/brain/tests.rs`, `crates/brain-net/tests/offline.rs` (mock servers and a fake CLI only). Not verified: any real API, `claude` or `codex` call (flag names are from `--help` output), that the strict schema with `$defs` is accepted, that 6000 output tokens suffice for `medium` reasoning, how the plans look in play.
+- Done 2026-10-11, to be tried in play: the boss **coach** (`--brain coach`, `docs/BRAIN.md` "The coach"). Between fights a reasoning model (`--coach claude|codex|api`, default `api` = Responses, `gpt-6-luna`, low effort, 45 s; `claude` = slim `claude -p --model claude-haiku-5-5`, no API key, `--coach-model`, `--coach-effort`) reads the fight summary (about 4 KB: result, trend, per-plan and per-set outcomes, Wolf's habits, the plan played, its own notes) and writes a versioned game plan (opener, 2 to 4 named plan sets, start set, avoid, notes), validated against the boss's actions. Fight 1 with no memory starts with his own Lua AI and can be reviewed mid-fight; the plan arriving during the respawn plays from fight 2 (opener, then the start set), a late one a fight later, a failure keeps the old plan, and the newest plan is saved in `logs/memory/<chr>.json`. In the fight only the Decisions API picks a set at the checkpoints, with a tiny request (about 100 tokens of numbers plus the set names). The console prints the request and a 3 to 5 line summary of each plan. Against reward hacking: winning faster is the first goal; new metrics `attacks/min`, `damage/min` and `passive_share` (a fight above 35% passive failed), and hard limits in the driver (an attack at least every 6 s, one retreat per 8 s, plans need an attack). Also fixed: an attack after `retreat12` or a strafe swung at empty air; it now turns to face Wolf first (30 degree rule). Tests `crates/sim/tests/coach.rs`, `crates/sim/src/brain/tests.rs`, `crates/brain-net/tests/offline.rs` (mock servers and a fake CLI only). Not verified: any real API, `claude` or `codex` call (flag names are from `--help` output), that the strict schema with `$defs` is accepted, that 6000 output tokens suffice for `medium` reasoning, how the plans look in play.
 
 - Done 2026-10-10, to be confirmed in play: three features after FwLo's RustSekiro video (his code adapted under MIT, `CREDITS.md`). (1) The deathblow camera: Wolf's deathblow clips drive it through TAE 155 (CameraSetParam slot 41, CameraParam 4000), 153 (distance, 1.5 m at the soldier's blow) and 151 (focus on dummy 142 of his animated camera bone, with look limits; the Owl's deathblow), and it hands back on the params' own chase rates (`docs/DEATHBLOW.md`, "Camera"). (2) The perilous kanji: the warning dummy bullet (judge 980 to 989) is made at Wolf within 5 m (soldier) or 9 m (Owl), its SpEffect 211000 shows VFX 48100 "å±" at Wolf's dummy 220, and the HUD draws a red å± over Wolf with a Windows Japanese font (the game's FXR is not decoded; no sound found). (3) The jump counter: Wolf's jumps carry sweep i-frames (TAE 954 type 1), his air kick (PCBehavior 901, anti-ground) is now a real attack, the sweeps' SpEffect 400200 multiplies its posture damage by 8 (the soldier's posture breaks), and env 2004 lets his script kick off the enemy (`docs/COMBAT-RULES.md`, "Perilous attacks"). Tests `crates/sim/tests/perilous.rs`, `deathblow_camera.rs`; scripts `crates/game/scripts/soldier_deathblow.txt`, `soldier_jump_counter.txt`; screenshots `cache/screens/dbcam_soldier_*.png`, `dbcam_owl2_*.png`, `kanji_soldier_*.png`.
 
@@ -351,3 +351,60 @@ Logs are target/alt/playtest-clippy-final.log, playtest-tests-final.log, playtes
 Updated docs/BRAIN.md and docs/COMBAT-RULES.md document behavior, evidence and the remaining original-game posture parity question.
 No commits, real model/API calls, real Claude/Codex CLI runs, credential reads, protected memory-log edits, game-install writes, worktrees or cache/re links, junctions or deletions were made.
 Attack timing, hit stop and the input buffer were unchanged.
+
+## Owl-driven brain session (2026-10-11)
+
+Boss-only pressure checkpoints and aggregate Lua plan counts hid Wolf's break opportunities and the individual moves' performance.
+The read-only golden Owl dataset confirms five boss wins, six 3040 grabs that all whiffed, four punished grabs and 127/64/49 Lua acts in its last three fights.
+Wolf posture checkpoints now fire at 25%, 50% and 75% damage once per cycle, re-arm below 15%, and report breaks without requesting during deathblows, boss breaks, death or respawn.
+Metrics, scorecards, trends and coach input now include Wolf breaks, hits within 2.5 seconds after a break, the fraction of breaks punished, peak Wolf posture and boss-win time to kill Wolf.
+Multiple hits after one break do not inflate the punish rate above 100%, and the breaking blow is excluded.
+
+The coach can author one to three weighted on_wolf_break responses, validated against the normal action vocabulary and avoid list.
+The fighter replaces Owl's Act40 grab follow-up locally and retains the response through delayed Lua replanning until its first attack starts or the punish window expires.
+A single response attack uses the existing ComboFinal cancellation path and preserves the current animation's TAE windows.
+The real-data scripted slash-to-break regression starts response 3000 after 18 ticks (0.300 seconds); the same setup without a response plan requests Lua grab 3040 after two ticks.
+Response outcomes persist separately and have independent on_wolf_break:<plan> failure evidence, with the existing three-use/60% ban and reasoned retry rule.
+
+Combined Lua weights are capped at 25% per set; the coach is instructed to mix at least three different attacks, with warnings for narrower legacy sets.
+Coach input now reports individual action outcomes, including Lua choices and zero-count untried actions, plus measured attack distance versus reach.
+Up to six principles of 90 characters each persist in the game plan, return on every coach call and print in plan summaries.
+The coach input limit is 8192 bytes to retain the new evidence and lessons; the in-fight chooser still uses its tiny existing input.
+F9 and normal game exit print a session action/range table and fight trend and append to logs/brain-session-<timestamp>.md.
+Report tests use temporary files, and the game enables reports for the real Lua AI as well as controlled brains.
+
+Brain validation passed: owned-file formatting, shared workspace formatting checks, all-target Clippy with -D warnings and the complete requested release sim/brain-net lib/bin/integration suite (333 tests).
+The final shared checks include the parallel posture agent's updates; all Cargo work used target/alt and six jobs.
+Logs: target/alt/brain-break-final.log, brain-unit-final.log, brain-tests-final.log, brain-clippy-final.log, brain-clippy-core.log, brain-clippy-changed-tests.log and brain-fmt-final.log.
+Live model plan quality, rendered F9 behavior and parity against the original game's fights remain unverified.
+The brain work did not edit combat/* or posture_recovery.rs, commit, call a real model/API/CLI, open credentials, alter protected memory/dataset logs, create worktrees or cache/re links, or delete cache/re contents.
+Attack timing, hit stop and the input buffer were unchanged by the brain changes.
+
+## Guarded-pressure posture recovery (2026-10-11)
+
+Report: the Owl's posture barely rises while he guards.
+Finding: the engine's one "no recovery" flag is HKS `act(110)` (`SetStaminaRecoveryDisabled`, bit 21 of the action state's +0x88; its only writer is the HKS command handler `b32410`, reached from `b4e520`).
+No shipped script calls it, so it is not the cause; the sim now honours it anyway (`CombatRules::recover_with_state`, `PlayerEnv::recovery_disabled`, `act(110)` in `player.rs`), for NPCs and Wolf alike.
+There is no post-damage delay timer in the recovery update (`a04850`); pauses come from TAE 960 types and TAE 225.
+The Owl's guard `a000_003100` has neither, so at full HP he recovers 60 per second while guarding (0.3 s of 0% in the guard-hit reaction `a000_008501`), and a guarded Wolf slash costs him only 14 to 15 of 660.
+Sim numbers (Wolf slashing a forced guard every 0.6 s for 10 s): Owl 660 -> 646 -> 646 -> 654 -> 624 -> 634 -> 646, never below 624 and back to about 650 within 0.5 s of each hit; the soldier (guard recovers at 25% of 20) 75 -> 45 -> 15 -> 0, broken in three hits.
+No recovery rule was changed, because the data and code say this is what the game does at full HP; whether the live Owl builds faster is unverified and the next suspects are guarded posture damage and progression scaling (`docs/COMBAT-FUNDAMENTALS.md`, mismatch 4).
+Tests: `crates/sim/tests/posture_recovery.rs`, `act_110_disables_posture_recovery` in `player.rs`.
+
+## Mid-fight coach reviews (2026-10-11)
+
+Coach mode now reviews after 45 seconds of fight time since the last send, or early after a surviving boss mark loss, two Wolf posture breaks, or all plans in the active set being banned.
+The first 20 seconds, inactive-player fights, posture breaks, deathblows and respawn block sends; one coach call is outstanding at most, and a pending post-fight review supersedes a mid-fight trigger.
+`--coach-interval <secs>` defaults to 45; 0 disables every mid-fight trigger.
+Mid requests use `phase: "mid"`, partial fight metrics and outcomes first, elapsed time, both fighters' HP/posture, boss marks and the current plan, within 4096 compact JSON bytes.
+Validated replies wait for the next non-reflex decision slot, preserve existing attack goals and skip their opener, while being saved through the normal memory path.
+Console and JSONL telemetry identify the phase and reason; fight summaries count mid reviews and their completed latency.
+The objective is winning faster, breaking Wolf posture and hitting after, dealing HP plus posture damage per minute, then taking little HP plus posture damage and limiting Wolf perfect deflects.
+Passive share above 0.35 fails regardless; engaged time is information and only a small losing-fight tiebreaker.
+`boss_damage_taken_per_min` is persisted in metrics and included in scorecards, trends and coach results.
+Offline regressions cover the 120-second 45/90 cadence and post call, mark loss at 30 seconds resetting the next timer to 75, serialized slow calls with post-review priority, deferred plan application and opener skipping, the 20-second floor, zero disabling, request budgeting and mock HTTP mid-phase telemetry.
+Validation passed: cargo fmt --all and --check, workspace all-target Clippy with -D warnings, and the full requested release sim/brain-net lib/bin/integration suite (340 tests).
+All Cargo work used target/alt and six jobs; logs are target/mid-final.log and target/mid-clippy-final-pass.log.
+The worst-case input regression fitted 4078 bytes under the 4096-byte limit.
+The all-banned check excludes Lua fallback choices so they cannot hide a failed coached set.
+No commits, real model/API/CLI calls, credential reads, protected log edits, combat edits, worktrees, cache/re links or cache/re deletions were made by this task.

@@ -106,6 +106,8 @@ struct Ready {
 struct CoachFlight {
     id: u64,
     sent: f32,
+    mid: bool,
+    fight: u32,
 }
 
 /// A request in flight.
@@ -378,6 +380,15 @@ pub struct BrainDriver {
     newest_coach: u64,
     /// Coach calls that completed since the fight began: calls, tokens, milliseconds.
     coach_done: [u64; 5],
+    pub coach_interval: f32,
+    last_coach_sent: f32,
+    review_breaks: u32,
+    mid_pending: Option<&'static str>,
+    post_pending: Option<CoachInput>,
+    mid_plan: Option<GamePlan>,
+    staged_mid: Option<GamePlan>,
+    mid_done: [u64; 2],
+    set_banned_seen: bool,
 }
 
 impl BrainDriver {
@@ -463,6 +474,15 @@ impl BrainDriver {
             next_coach_id: 1,
             newest_coach: 0,
             coach_done: [0; 5],
+            coach_interval: super::coach::MID_COACH_INTERVAL,
+            last_coach_sent: 0.0,
+            review_breaks: 0,
+            mid_pending: None,
+            post_pending: None,
+            mid_plan: None,
+            staged_mid: None,
+            mid_done: [0; 2],
+            set_banned_seen: false,
         }
     }
 
@@ -639,11 +659,11 @@ impl BrainDriver {
                 c.n, c.hit, c.blocked, c.deflected, c.whiffed, c.punished
             ));
         }
-        report.push_str("\n| fight | winner | duration (s) | time to kill Wolf (s) | Wolf posture breaks | hits after break | break punish rate | Wolf posture peak |\n|---|---|---:|---:|---:|---:|---:|---:|\n");
+        report.push_str("\n| fight | winner | duration (s) | time to kill Wolf (s) | Wolf posture breaks | hits after break | break punish rate | Wolf posture peak | Wolf damage/min | boss damage taken/min | passive share |\n|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
         for (i, r) in self.session_records.iter().enumerate() {
             let m = r.metrics;
             report.push_str(&format!(
-                "| {} | {} | {:.1} | {} | {} | {} | {:.0}% | {:.0}% |\n",
+                "| {} | {} | {:.1} | {} | {} | {} | {:.0}% | {:.0}% | {:.0}% | {:.0}% | {:.0}% |\n",
                 i + 1,
                 r.winner,
                 m.duration,
@@ -652,18 +672,21 @@ impl BrainDriver {
                 m.wolf_posture_breaks,
                 m.hits_after_break,
                 m.break_punish_rate * 100.0,
-                m.wolf_posture_peak * 100.0
+                m.wolf_posture_peak * 100.0,
+                m.damage_per_min(),
+                m.boss_damage_taken_per_min(),
+                m.passive_share() * 100.0
             ));
         }
         if !self.fight_over && self.fight.metrics.player_active(self.time) {
             let m = self.fight.metrics.snapshot(self.time);
             report.push_str(&format!(
-                "| current | unfinished | {:.1} | - | {} | {} | {:.0}% | {:.0}% |\n",
+                "| current | unfinished | {:.1} | - | {} | {} | {:.0}% | {:.0}% | {:.0}% | {:.0}% | {:.0}% |\n",
                 m.duration,
                 m.wolf_posture_breaks,
                 m.hits_after_break,
                 m.break_punish_rate * 100.0,
-                m.wolf_posture_peak * 100.0
+                m.wolf_posture_peak * 100.0, m.damage_per_min(), m.boss_damage_taken_per_min(), m.passive_share() * 100.0
             ));
         }
         report
@@ -793,6 +816,11 @@ impl BrainDriver {
             while let Some(reply) = self.brain.poll_coach(self.time) {
                 self.take_coach_reply(reply);
             }
+            if self.coach_flights.is_empty()
+                && let Some(input) = self.post_pending.take()
+            {
+                self.submit_coach_input(input, false);
+            }
         }
     }
 
@@ -803,6 +831,9 @@ impl BrainDriver {
             return;
         };
         let flight = self.coach_flights.remove(at);
+        if flight.mid && flight.fight == self.fight_no {
+            self.mid_done[1] += u64::from(reply.latency_ms);
+        }
         let waited = self.time - flight.sent;
         self.coach_done[0] += 1;
         for (i, t) in reply.tokens.iter().enumerate() {
@@ -857,9 +888,13 @@ impl BrainDriver {
             self.retry_baselines
                 .insert(response.clone(), self.plan_failures(&response));
         }
+        let application = if flight.mid && flight.fight == self.fight_no && !self.fight_over {
+            "next decision slot"
+        } else {
+            "next fight"
+        };
         eprintln!(
-            "coach: game plan arrived after {waited:.1} s, played from fight {} on ({tokens})",
-            self.fight_no + 1
+            "coach: game plan arrived after {waited:.1} s, applied at {application} ({tokens})"
         );
         for line in v.plan.summary_lines() {
             eprintln!("  {line}");
@@ -870,7 +905,11 @@ impl BrainDriver {
             "warnings": v.warnings}),
         );
         self.memory.coach.plan = Some(v.plan.clone());
-        self.next_plan = Some(v.plan);
+        if flight.mid && flight.fight == self.fight_no && !self.fight_over {
+            self.mid_plan = Some(v.plan);
+        } else {
+            self.next_plan = Some(v.plan);
+        }
         self.save_memory();
     }
 
@@ -878,6 +917,13 @@ impl BrainDriver {
     /// the next slot and drops a stale one.
     pub fn before_think(&mut self, ai: &mut AiBrain, hit_radius: f32) {
         ai.enable_act_hook(self.actions.reflex_acts);
+        if self.mid_plan.is_some() && !self.fight_over {
+            self.ready = None;
+            self.picked = false;
+            if let Some(hook) = ai.state.act_hook.as_mut() {
+                hook.choice = None;
+            }
+        }
         if self.cancel_break {
             self.cancel_break = false;
             if let Some(hook) = ai.state.act_hook.as_mut() {
@@ -996,7 +1042,12 @@ impl BrainDriver {
         {
             self.picked = true;
         }
-        if !self.picked && (!self.set.is_empty() || self.opener.is_some()) {
+        if !self.picked
+            && (!self.set.is_empty()
+                || self.opener.is_some()
+                || self.mid_plan.is_some()
+                || self.staged_mid.is_some())
+        {
             self.pick_next(ai, hit_radius);
         }
     }
@@ -1057,6 +1108,30 @@ impl BrainDriver {
 
     /// Samples the plan for the next slot from the set and hands it to the act hook.
     fn pick_next(&mut self, ai: &mut AiBrain, hit_radius: f32) {
+        if let Some(plan) = self.mid_plan.take().or_else(|| self.staged_mid.take()) {
+            // Prepare the next slot without replacing the currently running plan or goals.
+            let old_plan = self.game_plan.replace(plan.clone());
+            let old_set = self.set.clone();
+            let old_active = self.active_set;
+            let old_since = self.set_since;
+            let old_opener = self.opener.clone();
+            let old_why = self.pending_why;
+            self.install_plan();
+            self.opener = None;
+            self.pick_from_active(ai, hit_radius);
+            self.game_plan = old_plan;
+            self.set = old_set;
+            self.active_set = old_active;
+            self.set_since = old_since;
+            self.opener = old_opener;
+            self.pending_why = old_why;
+            self.staged_mid = Some(plan);
+        } else {
+            self.pick_from_active(ai, hit_radius);
+        }
+    }
+
+    fn pick_from_active(&mut self, ai: &mut AiBrain, hit_radius: f32) {
         let opener = self
             .opener
             .take()
@@ -1182,6 +1257,14 @@ impl BrainDriver {
                 self.tally
                     .record(self.time, TallyEvent::End { side: Side::Boss });
                 self.tactic_open = false;
+            }
+            if !matches!(slot, ActSlot::Reflex)
+                && let Some(plan) = self.staged_mid.take()
+            {
+                self.close_set_time();
+                self.game_plan = Some(plan);
+                self.install_plan();
+                self.opener = None;
             }
             let by = match slot {
                 ActSlot::External => {
@@ -1547,6 +1630,9 @@ impl BrainDriver {
             .wolf(wolf.hp_fraction(), wolf.posture_fraction());
         self.fight.metrics.passive_tick(t, self.step_dt);
         let boss_fighter = &duel.rules.fighters[1];
+        self.fight
+            .metrics
+            .boss(boss_fighter.hp_fraction(), boss_fighter.posture_fraction());
         let hits = self.hits_to_break(duel);
         if let Some(why) = self.checkpoints.on_vitals(
             boss_fighter.posture_fraction(),
@@ -1571,6 +1657,7 @@ impl BrainDriver {
         }
         if marks > 0 && self.checkpoints.marks.is_some_and(|m| marks < m) {
             self.pending_why = Some("mark_lost");
+            self.mid_pending.get_or_insert("mark_lost");
         }
         self.checkpoints.marks = Some(marks);
         if self.quiet(duel) || duel.deathblow.is_some() || duel.rules.deathblow_open(1) {
@@ -1603,6 +1690,7 @@ impl BrainDriver {
         }
         self.settle_plans(false);
         self.log_outcomes(t, &done);
+        self.review_mid_fight(duel);
         // The duel schedules its respawn exactly when the fight is over: a death outside a
         // deathblow (a boss with marks left gets up from his).
         if duel.respawn_in.is_some() {
@@ -1820,6 +1908,7 @@ impl BrainDriver {
                 .since(&self.fight.stats_at_start[0])
                 .reasoning,
             coach: self.coach_done,
+            mid_coach: self.mid_done,
             sets: self.fight.set_secs.clone(),
         };
         eprintln!("{}", record.summary_line());
@@ -1882,6 +1971,10 @@ impl BrainDriver {
             sets.entry(name.clone()).or_default().secs = (s * 10.0).round() / 10.0;
         }
         let mut input = CoachInput {
+            phase: "post".into(),
+            elapsed: None,
+            vitals: None,
+            marks: None,
             on_wolf_break: self.fight.break_plans.clone(),
             actions: {
                 let mut actions = self.tally.all(Side::Boss).clone();
@@ -1925,6 +2018,7 @@ impl BrainDriver {
                 .collect(),
             fight: self.memory.fights,
             result: FightLine {
+                boss_damage_taken_per_min: m.boss_damage_taken_per_min(),
                 wolf_posture_breaks: m.wolf_posture_breaks,
                 hits_after_break: m.hits_after_break,
                 break_punish_rate: m.break_punish_rate,
@@ -1986,8 +2080,23 @@ impl BrainDriver {
         if !self.brain.plans() || self.fight.runs.is_empty() {
             return;
         }
-        let mut input = self.coach_input(record);
+        self.mid_pending = None;
+        self.mid_plan = None;
+        self.staged_mid = None;
+        let input = self.coach_input(record);
+        if !self.coach_flights.is_empty() {
+            self.post_pending = Some(input);
+            return;
+        }
+        self.submit_coach_input(input, false);
+    }
+
+    fn submit_coach_input(&mut self, mut input: CoachInput, mid: bool) {
+        input.phase = if mid { "mid" } else { "post" }.into();
         let bytes = input.fit(INPUT_BUDGET);
+        if bytes > INPUT_BUDGET {
+            return;
+        }
         let Ok(text) = serde_json::to_string(&input) else {
             return;
         };
@@ -2000,14 +2109,95 @@ impl BrainDriver {
         self.coach_flights.push(CoachFlight {
             id: request.id,
             sent: self.time,
+            mid,
+            fight: self.fight_no,
         });
-        eprintln!(
-            "coach: fight {} over, sent the fight summary ({bytes} bytes); the new game plan plays from the next fight if it arrives during the respawn, else the one after",
-            self.fight_no
-        );
-        self.write(json!({"ev": "coach_request", "t": ms(self.time), "id": request.id,
+        if mid {
+            self.mid_done[0] += 1;
+        }
+        self.last_coach_sent = self.time;
+        self.review_breaks = self.fight.metrics.metrics.wolf_posture_breaks;
+        if !mid {
+            eprintln!(
+                "coach: fight {} over, sent the fight summary ({bytes} bytes); the new game plan plays from the next fight if it arrives during the respawn, else the one after",
+                self.fight_no
+            );
+        }
+        self.write(json!({"ev": "coach_request", "kind": "coach", "phase": input.phase, "t": ms(self.time), "id": request.id,
             "bytes": bytes, "input": serde_json::from_str::<serde_json::Value>(&request.input).ok()}));
         self.brain.submit_coach(&request, self.time);
+    }
+
+    fn review_mid_fight(&mut self, duel: &Duel) {
+        if !self.coach_mode || self.coach_interval <= 0.0 || self.fight_over {
+            return;
+        }
+        let metrics = self.fight.metrics.snapshot(self.time);
+        if metrics
+            .wolf_posture_breaks
+            .saturating_sub(self.review_breaks)
+            >= 2
+        {
+            self.mid_pending.get_or_insert("wolf_broken_twice");
+        }
+        let set_banned = self.active_set_banned();
+        if set_banned && !self.set_banned_seen {
+            self.mid_pending.get_or_insert("set_banned");
+        }
+        self.set_banned_seen = set_banned;
+        if self.time - self.last_coach_sent + 1e-3 >= self.coach_interval {
+            self.mid_pending.get_or_insert("timer");
+        }
+        if metrics.duration < 20.0
+            || metrics.void
+            || self.checkpoint_blocked(duel)
+            || duel.rules.fighters.iter().any(|f| f.posture.broken())
+            || !self.coach_flights.is_empty()
+            || !self.brain.plans()
+        {
+            return;
+        }
+        let Some(why) = self.mid_pending.take() else {
+            return;
+        };
+        self.close_set_time();
+        let (tally, habits) = self.fight_snapshot();
+        let record = FightRecord {
+            metrics: super::metrics::FightMetrics {
+                punishes: tally.all(Side::Boss).values().map(|c| c.punished).sum(),
+                ..metrics
+            },
+            ..FightRecord::default()
+        };
+        let mut input = self.coach_input(&record);
+        for (key, counts) in tally.all(Side::Boss) {
+            input.actions.insert(key.clone(), *counts);
+        }
+        input.wolf = ranked_counts(tally.all(Side::Wolf));
+        input.habits = habits.habits.summary();
+        input.fight = self.fight_no;
+        input.vitals = Some([
+            duel.rules.fighters[0].hp_fraction(),
+            duel.rules.fighters[0].posture_fraction(),
+            duel.rules.fighters[1].hp_fraction(),
+            duel.rules.fighters[1].posture_fraction(),
+        ]);
+        input.marks = Some(duel.rules.fighters[1].vitality.deathblows_left);
+        input.elapsed = Some(metrics.duration);
+        eprintln!(
+            "coach: mid-fight review at {:.1} s (why: {why})",
+            metrics.duration
+        );
+        self.submit_coach_input(input, true);
+    }
+
+    fn active_set_banned(&self) -> bool {
+        self.set.iter().any(|w| w.plan.is_some())
+            && self
+                .set
+                .iter()
+                .filter_map(|w| w.plan.as_ref())
+                .all(|p| self.banned.contains(&p.value()))
     }
 
     /// Starts the next fight (after a respawn): a fresh tally and habits; the memory keeps
@@ -2044,6 +2234,13 @@ impl BrainDriver {
         };
         self.bans_at_start = self.banned.clone();
         self.coach_done = [0; 5];
+        self.mid_done = [0; 2];
+        self.last_coach_sent = self.time;
+        self.review_breaks = 0;
+        self.mid_pending = None;
+        self.mid_plan = None;
+        self.staged_mid = None;
+        self.set_banned_seen = false;
         self.pacing = Pacing::new(self.time);
         if self.coach_mode {
             // The newest plan that has arrived plays; with none, the previous one stays.
@@ -2140,6 +2337,29 @@ struct OutcomeLine<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lua_fallback_does_not_hide_a_banned_active_set() {
+        let mut d = learning_driver();
+        d.set = vec![
+            Weighted {
+                plan: Some(d.actions.parse("3000").unwrap()),
+                weight: 1.0,
+            },
+            Weighted {
+                plan: None,
+                weight: 0.25,
+            },
+        ];
+        assert!(!d.active_set_banned());
+        d.banned.insert("3000".into());
+        assert!(d.active_set_banned());
+        d.set.push(Weighted {
+            plan: Some(d.actions.parse("3001").unwrap()),
+            weight: 1.0,
+        });
+        assert!(!d.active_set_banned());
+    }
 
     #[test]
     fn coach_keeps_lessons_and_reports_lua_actions_separately() {
@@ -2368,7 +2588,12 @@ mod tests {
         d.start_fight();
         assert!(d.banned.contains("3000"));
         for (id, reason) in [(1, ""), (2, "Try after a bait to change the timing")] {
-            d.coach_flights.push(CoachFlight { id, sent: d.time });
+            d.coach_flights.push(CoachFlight {
+                id,
+                sent: d.time,
+                mid: false,
+                fight: d.fight_no,
+            });
             d.take_coach_reply(CoachReply {
                 id,
                 plan: Some(GamePlan {

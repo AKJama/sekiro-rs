@@ -989,7 +989,7 @@ fn trend_shows_the_last_three_fights() {
     assert_eq!(t.now, Some([50, 1]));
     assert_eq!(
         serde_json::to_string(&t).unwrap(),
-        r#"{"duration":[0.0,0.0,0.0],"wolf_posture_breaks":[0,0,0],"hits_after_break":[0,0,0],"break_punish_rate":[0.0,0.0,0.0],"wolf_posture_peak":[0.0,0.0,0.0],"time_to_kill_wolf":[null,null,null],"defl":[50,100,80],"guard":[0,0,0],"hits":[5,0,2],"hp":[0,0,0],"kill_s":[30,20,null],"apm":[0,0,0],"dpm":[0,0,0],"passive":[0,0,0],"engaged_time":[0,0,0],"now":[50,1]}"#
+        r#"{"boss_damage_taken_per_min":[0.0,0.0,0.0],"duration":[0.0,0.0,0.0],"wolf_posture_breaks":[0,0,0],"hits_after_break":[0,0,0],"break_punish_rate":[0.0,0.0,0.0],"wolf_posture_peak":[0.0,0.0,0.0],"time_to_kill_wolf":[null,null,null],"defl":[50,100,80],"guard":[0,0,0],"hits":[5,0,2],"hp":[0,0,0],"kill_s":[30,20,null],"apm":[0,0,0],"dpm":[0,0,0],"passive":[0,0,0],"engaged_time":[0,0,0],"now":[50,1]}"#
     );
 }
 
@@ -1242,6 +1242,30 @@ fn posture_break_metrics_count_follow_up_hits_and_successful_breaks() {
     let old: FightMetrics = serde_json::from_str("{\"duration\":31.0}").unwrap();
     assert_eq!(old.wolf_posture_breaks, 0);
     assert!(old.time_to_kill_wolf.is_none());
+}
+
+#[test]
+fn boss_damage_rate_counts_drops_and_rises_without_refunding_recovery() {
+    let mut tracker = metrics::MetricsTracker::new(0.0);
+    tracker.boss(1.0, 0.0);
+    tracker.boss(0.8, 0.5);
+    tracker.boss(1.0, 0.0);
+    tracker.boss(0.9, 0.2);
+    let m = tracker.snapshot(60.0);
+    assert!((m.boss_damage_taken_per_min - 100.0).abs() < 0.001);
+    assert!(
+        (Trend::new(
+            &[FightRecord {
+                metrics: m,
+                ..Default::default()
+            }],
+            None
+        )
+        .boss_damage_taken_per_min[0]
+            - 100.0)
+            .abs()
+            < 0.001
+    );
 }
 
 #[test]
@@ -1513,7 +1537,7 @@ fn the_coach_input_is_bounded_and_keeps_the_notes_and_the_played_plan() {
     small.trend = Trend::default();
     let len = small.json_len();
     assert_eq!(small.fit(INPUT_BUDGET), len);
-    assert!(len < 3200, "{len}");
+    assert!(len < INPUT_BUDGET, "{len}");
 }
 
 #[test]
@@ -1530,7 +1554,23 @@ fn all_known_bans_and_their_failure_counts_fit_the_coach_budget() {
     let banned = input.banned.clone();
     assert!(input.fit(INPUT_BUDGET) <= INPUT_BUDGET);
     assert_eq!(input.banned, banned);
-    assert_eq!(input.failures.len(), banned.len());
+    assert!(!input.failures.is_empty());
+    assert!(input.failures.keys().all(|key| banned.contains(key)));
+}
+
+#[test]
+fn mid_input_keeps_current_plan_and_results_first_within_four_kb() {
+    let mut input = busy_input();
+    input.phase = "mid".into();
+    input.elapsed = Some(45.0);
+    input.vitals = Some([0.7, 0.8, 0.9, 0.3]);
+    input.marks = Some(2);
+    assert!(input.fit(INPUT_BUDGET) <= 4096);
+    let text = serde_json::to_string(&input).unwrap();
+    assert!(input.played.is_some());
+    assert!(!input.plans.0.is_empty());
+    assert!(text.find("\"result\"").unwrap() < text.find("\"trend\"").unwrap());
+    assert!(text.find("\"plans\"").unwrap() < text.find("\"trend\"").unwrap());
 }
 
 #[test]

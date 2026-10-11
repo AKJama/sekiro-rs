@@ -1,4 +1,4 @@
-//! The coach: between fights a reasoning model reads the fight summary and writes a **game plan**
+//! The coach: during and between fights a reasoning model reads the fight summary and writes a **game plan**
 //! for the next fight; in the fight the driver runs that plan locally and a cheap model only
 //! picks which of the plan's sets to play at the checkpoints.
 //!
@@ -8,7 +8,7 @@
 //!   time). [`GamePlan::validate`] checks it against the boss's [`BossActions`]: invalid plans
 //!   and choices are dropped with a warning, and a plan with nothing valid is not usable (the
 //!   Lua AI plays).
-//! - [`CoachInput`] is what the coach is sent about the fight just over (bounded to 8 KB).
+//! - [`CoachInput`] is what the coach is sent about the current or finished fight (bounded to 4 KB).
 //! - [`CoachRequest`] / [`CoachReply`] are the non-blocking hand-off to a controller
 //!   ([`super::BossBrain::submit_coach`]); [`ScriptedCoach`] is the offline test controller.
 //!
@@ -41,7 +41,8 @@ pub const NAME_MAX: usize = 24;
 pub const DESCRIPTION_MAX: usize = 140;
 pub const REASON_MAX: usize = 80;
 /// The coach input's size target, bytes of compact JSON.
-pub const INPUT_BUDGET: usize = 8192;
+pub const INPUT_BUDGET: usize = 4096;
+pub const MID_COACH_INTERVAL: f32 = 45.0;
 /// The checkpoint events a set's `when` hint may name.
 pub const CHECKPOINTS: [&str; 11] = [
     "start",
@@ -497,13 +498,13 @@ pub struct SetOffer {
 /// Wolf's result in the fight just over, in percent and whole numbers.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct FightLine {
+    /// `boss`, `wolf` or `none`.
+    pub won: String,
+    pub time_to_kill_wolf: Option<f32>,
     pub wolf_posture_breaks: u32,
     pub hits_after_break: u32,
     pub break_punish_rate: f32,
     pub wolf_posture_peak: f32,
-    pub time_to_kill_wolf: Option<f32>,
-    /// `boss`, `wolf` or `none`.
-    pub won: String,
     pub secs: u32,
     /// Perfect-deflect percent, guard percent.
     pub defl: u32,
@@ -518,6 +519,7 @@ pub struct FightLine {
     /// posture) and the passive share in percent (above 35 the fight failed).
     pub apm: u32,
     pub dpm: u32,
+    pub boss_damage_taken_per_min: f32,
     pub passive: u32,
     pub engaged_time: u32,
 }
@@ -534,6 +536,15 @@ pub struct SetStat {
 /// `[exchanges, hit, blocked, deflected, whiffed, punished]` per plan text.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct CoachInput {
+    pub phase: String,
+    pub result: FightLine,
+    pub plans: TopMap<Counts>,
+    pub sets: std::collections::BTreeMap<String, SetStat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub played: Option<GamePlan>,
+    pub elapsed: Option<f32>,
+    pub vitals: Option<[f32; 4]>,
+    pub marks: Option<i32>,
     pub on_wolf_break: std::collections::BTreeMap<String, Counts>,
     pub principles: Vec<String>,
     /// Every observed boss action, including acts selected by Lua.
@@ -543,27 +554,19 @@ pub struct CoachInput {
     pub failures: std::collections::BTreeMap<String, [u32; 4]>,
     /// Fights with this enemy so far, this one included.
     pub fight: u32,
-    pub result: FightLine,
     /// Wolf's play over the last 3 finished fights, this one last.
     pub trend: Trend,
-    /// This fight, per plan text (`lua` is his own AI's acts).
-    pub plans: TopMap<Counts>,
     /// Per-plan mean [attack-start distance, observed melee reach], metres.
     /// Reach includes root travel, hit capsules and Wolf's radius; projectile-only attacks
     /// have no sample. Trimmed together with the plan outcomes.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub range: std::collections::BTreeMap<String, [f32; 2]>,
-    /// This fight, per set of the game plan played (`opener`, `lua` for his own AI).
-    pub sets: std::collections::BTreeMap<String, SetStat>,
     /// Wolf's attacks this fight.
     pub wolf: TopMap<Counts>,
     /// Every fight, per plan text.
     pub overall: TopMap<Counts>,
     /// Wolf's habits over every fight.
     pub habits: HabitSummary,
-    /// The game plan this fight ran (none for a fight with no plan).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub played: Option<GamePlan>,
     /// The coach's own previous notes.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub notes: String,
@@ -612,6 +615,12 @@ impl CoachInput {
         if self.trend.trim() {
             return true;
         }
+        if self.action_range.pop_last().is_some() || self.actions.pop_last().is_some() {
+            return true;
+        }
+        if self.principles.pop().is_some() {
+            return true;
+        }
         if self.range.pop_last().is_some() {
             return true;
         }
@@ -621,8 +630,23 @@ impl CoachInput {
             set.description.clear();
             return true;
         }
-        if self.played.take().is_some() {
+        if self.phase != "mid" && self.played.take().is_some() {
             return true;
+        }
+        if self.phase == "mid"
+            && let Some(plan) = self.played.as_mut()
+        {
+            if plan.avoid.pop().is_some()
+                || plan.retry.pop().is_some()
+                || plan.principles.pop().is_some()
+                || plan.on_wolf_break.pop().is_some()
+            {
+                return true;
+            }
+            if !plan.notes.is_empty() {
+                plan.notes.clear();
+                return true;
+            }
         }
         if self.plans.pop(0) || self.sets.pop_last().is_some() {
             return true;
@@ -727,6 +751,7 @@ pub struct ScriptedCoach {
     pub delay: f32,
     /// Every coach request's input, and the checkpoint requests' count (for assertions).
     pub coach_inputs: Vec<String>,
+    pub coach_times: Vec<f32>,
     pub checkpoint_requests: Vec<(Option<&'static str>, Vec<String>)>,
     /// The chooser's input text of each checkpoint request.
     pub checkpoint_briefs: Vec<Option<String>>,
@@ -778,6 +803,8 @@ impl BossBrain for ScriptedCoach {
         })
     }
     fn submit_coach(&mut self, request: &CoachRequest, now: f32) {
+        assert!(self.coach_pending.is_empty(), "overlapping coach requests");
+        self.coach_times.push(now);
         self.coach_inputs.push(request.input.clone());
         self.coach_pending
             .push((request.id, now + self.coach_delay));

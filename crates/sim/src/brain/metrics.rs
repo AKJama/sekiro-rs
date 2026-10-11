@@ -29,6 +29,9 @@ pub const TREND_FIGHTS: usize = 3;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FightMetrics {
+    pub boss_hp_lost: f32,
+    pub boss_posture_gained: f32,
+    pub boss_damage_taken_per_min: f32,
     pub wolf_posture_breaks: u32,
     pub hits_after_break: u32,
     /// Breaks followed by at least one landed hit, divided by breaks.
@@ -60,6 +63,13 @@ pub struct FightMetrics {
 }
 
 impl FightMetrics {
+    pub fn boss_damage_taken_per_min(&self) -> f32 {
+        if self.duration > 0.0 {
+            (self.boss_hp_lost + self.boss_posture_gained) * 6000.0 / self.duration
+        } else {
+            0.0
+        }
+    }
     /// The boss's hits that were resolved against Wolf.
     pub fn resolved(&self) -> u32 {
         self.deflected + self.guarded + self.hits_taken
@@ -121,11 +131,19 @@ pub struct MetricsTracker {
     start: f32,
     prev_hp: Option<f32>,
     prev_posture: Option<f32>,
+    prev_boss: Option<[f32; 2]>,
     last_attack: Option<f32>,
     previous_input: [bool; 5],
 }
 
 impl MetricsTracker {
+    pub fn boss(&mut self, hp: f32, posture: f32) {
+        if let Some([old_hp, old_posture]) = self.prev_boss {
+            self.metrics.boss_hp_lost += (old_hp - hp).max(0.0);
+            self.metrics.boss_posture_gained += (posture - old_posture).max(0.0);
+        }
+        self.prev_boss = Some([hp, posture]);
+    }
     pub fn wolf_break(&mut self, now: f32) {
         self.metrics.wolf_posture_breaks += 1;
         self.metrics.break_punish_rate =
@@ -237,6 +255,7 @@ impl MetricsTracker {
             0.0
         };
         m.void = !self.player_active(now);
+        m.boss_damage_taken_per_min = m.boss_damage_taken_per_min();
         m
     }
 
@@ -253,6 +272,7 @@ impl MetricsTracker {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FightRecord {
+    pub mid_coach: [u64; 2],
     /// `boss`, `wolf` or `none` (unfinished).
     pub winner: String,
     pub metrics: FightMetrics,
@@ -352,7 +372,14 @@ impl FightRecord {
             sets,
         );
         format!(
-            "{line}; engaged_time {:.1}s; wolf_posture_breaks {} hits_after_break {} break_punish_rate {:.0}% wolf_posture_peak {:.0}% time_to_kill_wolf {}",
+            "time_to_kill_wolf {}; wolf_posture_breaks {} hits_after_break {}; boss_damage_taken_per_min {:.0}%; mid-coach {} reviews {} ms; {line}; engaged_time {:.1}s; wolf_posture_breaks {} hits_after_break {} break_punish_rate {:.0}% wolf_posture_peak {:.0}% time_to_kill_wolf {}",
+            m.time_to_kill_wolf
+                .map_or("-".into(), |t| format!("{t:.1}s")),
+            m.wolf_posture_breaks,
+            m.hits_after_break,
+            m.boss_damage_taken_per_min(),
+            self.mid_coach[0],
+            self.mid_coach[1],
             m.engaged_time,
             m.wolf_posture_breaks,
             m.hits_after_break,
@@ -378,6 +405,7 @@ pub fn percentile(values: &[f32], p: f32) -> f32 {
 /// fight, plus this fight so far.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Trend {
+    pub boss_damage_taken_per_min: Vec<f32>,
     pub duration: Vec<f32>,
     pub wolf_posture_breaks: Vec<u32>,
     pub hits_after_break: Vec<u32>,
@@ -415,6 +443,10 @@ impl Trend {
     pub fn new(history: &[FightRecord], now: Option<&FightMetrics>) -> Self {
         let recent = &history[history.len().saturating_sub(TREND_FIGHTS)..];
         Self {
+            boss_damage_taken_per_min: recent
+                .iter()
+                .map(|r| r.metrics.boss_damage_taken_per_min())
+                .collect(),
             duration: recent.iter().map(|r| r.metrics.duration).collect(),
             wolf_posture_breaks: recent
                 .iter()
@@ -468,6 +500,7 @@ impl Trend {
             return false;
         }
         self.defl.remove(0);
+        self.boss_damage_taken_per_min.remove(0);
         self.duration.remove(0);
         self.wolf_posture_breaks.remove(0);
         self.hits_after_break.remove(0);

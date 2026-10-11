@@ -664,7 +664,7 @@ fn run_coach(
             }
             (_, backend) => {
                 let prompt = format!(
-                    "Input (the fight just over):\n{}\n\nReply with only the game plan as one JSON object matching the schema, no other text.",
+                    "Input (fight review):\n{}\n\nReply with only the game plan as one JSON object matching the schema, no other text.",
                     work.input
                 );
                 cli::run(
@@ -696,7 +696,7 @@ fn run_coach(
             Err(f) => (None, Some(f), TokenUsage::default(), None),
         };
         let line = json!({
-            "id": work.id, "kind": "coach", "backend": config.backend.name(),
+            "id": work.id, "kind": "coach", "phase": serde_json::from_str::<serde_json::Value>(&work.input).ok().and_then(|v| v.get("phase").cloned()), "backend": config.backend.name(),
             "model": config.model, "round_trip_ms": ms,
             "status": if failure.is_some() {"failed"} else {"answered"},
             "failure": failure, "usage": usage, "cost_usd": cost

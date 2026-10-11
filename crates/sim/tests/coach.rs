@@ -19,6 +19,88 @@ use sekiro_sim::enemy::EnemySpec;
 
 const DT: f32 = 1.0 / 60.0;
 
+#[test]
+fn short_interval_waits_for_twenty_seconds_and_answer_waits_for_slot() {
+    let Some((mut duel, coach)) = coached(vec![Some(plan("mid")); 5], 2.0) else {
+        return;
+    };
+    duel.boss_brain.as_mut().unwrap().coach_interval = 5.0;
+    run(&mut duel, 19.9);
+    assert!(coach.borrow().coach_inputs.is_empty());
+    run(&mut duel, 0.2);
+    assert_eq!(coach.borrow().coach_inputs.len(), 1);
+    // Only poll the coach, without giving Lua a decision slot.
+    let old = driver(&duel).game_plan.clone();
+    duel.boss_brain.as_mut().unwrap().tick(2.1);
+    assert_eq!(driver(&duel).game_plan, old);
+    run(&mut duel, 10.0);
+    assert_eq!(driver(&duel).game_plan.as_ref().unwrap().notes, "mid");
+    assert!(!played(&duel).contains(&"3002".into()));
+}
+
+#[test]
+fn long_fight_reviews_at_45_and_90_then_post_and_zero_disables() {
+    for interval in [45.0, 0.0] {
+        let Some((mut duel, coach)) = coached(vec![Some(plan("mid")); 4], 2.0) else {
+            return;
+        };
+        duel.boss_brain.as_mut().unwrap().coach_interval = interval;
+        run(&mut duel, 120.0);
+        let inputs = coach.borrow().coach_inputs.clone();
+        if interval == 0.0 {
+            assert!(inputs.is_empty());
+        } else {
+            assert_eq!(inputs.len(), 2);
+            for (input, expected) in inputs.iter().zip([45.0, 90.0]) {
+                let value: serde_json::Value = serde_json::from_str(input).unwrap();
+                let elapsed = value["elapsed"].as_f64().unwrap();
+                assert!((elapsed - expected).abs() < 0.1, "{elapsed}");
+                assert_eq!(value["phase"], "mid");
+                assert!(input.len() <= 4096);
+            }
+            assert_eq!(driver(&duel).game_plan.as_ref().unwrap().notes, "mid");
+            assert!(
+                !played(&duel).contains(&"3002".into()),
+                "mid opener must be skipped"
+            );
+        }
+        die(&mut duel);
+        assert_eq!(coach.borrow().coach_inputs.len(), inputs.len() + 1);
+        assert_eq!(
+            driver(&duel).last_record.as_ref().unwrap().mid_coach[0],
+            if interval == 0.0 { 0 } else { 2 }
+        );
+    }
+}
+
+#[test]
+fn mark_lost_at_30_resets_timer_and_slow_call_serializes_post_review() {
+    let Some((mut duel, coach)) = coached(vec![Some(plan("mid")); 4], 2.0) else {
+        return;
+    };
+    duel.rules.fighters[1].vitality.deathblows_left = 2;
+    run(&mut duel, 30.0);
+    duel.rules.fighters[1].vitality.deathblows_left = 1;
+    run(&mut duel, 48.0);
+    let c = coach.borrow();
+    assert_eq!(c.coach_inputs.len(), 2);
+    assert!((c.coach_times[0] - 30.0).abs() < 0.1);
+    assert!((c.coach_times[1] - 75.0).abs() < 0.1);
+    drop(c);
+
+    let Some((mut duel, coach)) = coached(vec![Some(plan("slow")); 4], 60.0) else {
+        return;
+    };
+    run(&mut duel, 100.0);
+    assert_eq!(coach.borrow().coach_inputs.len(), 1);
+    die(&mut duel);
+    run(&mut duel, 8.0);
+    let c = coach.borrow();
+    assert_eq!(c.coach_inputs.len(), 2);
+    let second: serde_json::Value = serde_json::from_str(&c.coach_inputs[1]).unwrap();
+    assert_eq!(second["phase"], "post");
+}
+
 fn load(distance: f32) -> Option<Duel> {
     let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
     if !cache.join("anim/c1010/tae.json").exists()

@@ -373,7 +373,7 @@ Per fight (from its start or a respawn until a death) the driver computes how we
 | `kill_time` | Seconds Wolf took to kill the boss, when he did |
 
 The last 10 fights are kept in the memory file (`history`, below) with the choices made, so the Lua baseline and a model can be compared by reading two files.
-Every request carries the trend of the last 3 fights and this fight so far, and the instructions tell the controller its goal: lower Wolf's deflect and guard rates, land more hits, survive longer; probe with untried options, drop what keeps being deflected or guarded, bait his habits.
+Every request carries the trend of the last 3 fights and this fight so far, and the instructions tell the controller its goal: win faster, break Wolf posture and land its follow-up, deal more damage per minute and take less damage; probe with untried options, drop what keeps being deflected or guarded, bait his habits.
 The same metrics are computed and saved when the Lua brain fights (`--brain lua --brain-memory on`, file `<chr>.lua.json`; `a_fight_summary_and_the_baseline_are_saved_with_the_metrics`).
 
 At the end of each fight the driver prints one line to the console and writes the same record to the log (`fight_summary`):
@@ -514,7 +514,7 @@ Bodies are emitted as compact JSON; indentation here is for reading.
           "value": "lua"
         }
       ],
-      "instructions": "You are a doc example boss fighting Wolf. Reward order: breaking Wolf posture is very good; landing a hit immediately after a break is best; then damage per minute; then fewer perfect deflects; then staying alive longer while engaged. You are scored on the damage you deal to Wolf (his HP and posture) per minute, the attacks you land per minute, fewer perfect deflects by him, and fewer of your actions he punishes. Stay alive longer while engaged: engaged_time counts fight seconds only with passive_share below 0.35. Stalling, running away or passivity counts as failure: a fight where no attack of yours started in the last 4 s more than 35% of the time failed, whatever else happened, plans without an attack are ignored, you must start an attack at least every 6 s and may back off or retreat only once per 5 s. Retreat chains are allowed as baits when followed by an attack, including turning to punish a chase. Movement tactics exist to set up attacks (baits, spacing, timing mixups), not to avoid fighting. Think like a swordsman: turning your back or retreating while the opponent is in sword range leaves you open, so tactics should set up attacks safely. Probe instead of repeating: try untried options, drop what keeps being deflected or guarded, bait his habits (stand still briefly, walk in slowly, strafe, mix timings) and punish them. Input: obs is a fair view of both fighters (plan is what runs now); tally counts this fight per action or tactic as [n, hit, blocked, deflected, whiffed, punished]; memory holds every fight so far (the same counts, Wolf's habits, and trend: his deflect%, guard%, hits you landed, hp% lost, attacks per minute, damage per minute and passive percent, and kill seconds for information only, over the last fights, now = this fight so far); why is what triggered this question. You are asked only a few times a fight. The boss samples from your probabilities all fight, so spread them over several good options. Reflexes (guarding, deflecting, counters and reactions) are automatic. Choose lua to leave an act to your own AI. Options are single actions, movement tactics (distances from Wolf, left and right are yours) and plans of up to 3 steps joined with > (consecutive attacks joined with +):\n3005: front kick\n5201: back step\nhold2: stand still facing Wolf for 2 s\nwalk_in4: walk slowly toward Wolf until 4 m away\nwalk_in4>3005: walk slowly toward Wolf until 4 m away, then front kick",
+      "instructions": "You are a doc example boss fighting Wolf. Reward order: win and win faster (time_to_kill_wolf, lower is better); then break Wolf posture and land a hit right after (wolf_posture_breaks, hits_after_break); then damage to Wolf per minute (HP plus posture); then take little damage (boss_damage_taken_per_min, HP plus posture) and reduce Wolf perfect deflects, each of which builds your posture. engaged_time is information and only a small tiebreaker when losing while landing hits; survival time is never a goal. Stalling, running away or passivity counts as failure: a fight where no attack of yours started in the last 4 s more than 35% of the time failed, whatever else happened, plans without an attack are ignored, you must start an attack at least every 6 s and may back off or retreat only once per 5 s. Retreat chains are allowed as baits when followed by an attack, including turning to punish a chase. Movement tactics exist to set up attacks (baits, spacing, timing mixups), not to avoid fighting. Think like a swordsman: turning your back or retreating while the opponent is in sword range leaves you open, so tactics should set up attacks safely. Probe instead of repeating: try untried options, drop what keeps being deflected or guarded, bait his habits (stand still briefly, walk in slowly, strafe, mix timings) and punish them. Input: obs is a fair view of both fighters (plan is what runs now); tally counts this fight per action or tactic as [n, hit, blocked, deflected, whiffed, punished]; memory holds every fight so far (the same counts, Wolf's habits, and trend: his deflect%, guard%, hits you landed, hp% lost, attacks per minute, damage per minute and passive percent, and kill seconds for information only, over the last fights, now = this fight so far); why is what triggered this question. You are asked only a few times a fight. The boss samples from your probabilities all fight, so spread them over several good options. Reflexes (guarding, deflecting, counters and reactions) are automatic. Choose lua to leave an act to your own AI. Options are single actions, movement tactics (distances from Wolf, left and right are yours) and plans of up to 3 steps joined with > (consecutive attacks joined with +):\n3005: front kick\n5201: back step\nhold2: stand still facing Wolf for 2 s\nwalk_in4: walk slowly toward Wolf until 4 m away\nwalk_in4>3005: walk slowly toward Wolf until 4 m away, then front kick",
       "name": "boss_action",
       "type": "choice"
     }
@@ -538,7 +538,7 @@ The reply carries the chosen plan and the whole set (`BrainReply::set`, from `an
       "role": "user"
     }
   ],
-  "instructions": "You are a doc example boss fighting Wolf. Reward order: breaking Wolf posture is very good; landing a hit immediately after a break is best; then damage per minute; then fewer perfect deflects; then staying alive longer while engaged. You are scored on the damage you deal to Wolf (his HP and posture) per minute, the attacks you land per minute, fewer perfect deflects by him, and fewer of your actions he punishes. Stay alive longer while engaged: engaged_time counts fight seconds only with passive_share below 0.35. Stalling, running away or passivity counts as failure: a fight where no attack of yours started in the last 4 s more than 35% of the time failed, whatever else happened, plans without an attack are ignored, you must start an attack at least every 6 s and may back off or retreat only once per 5 s. Retreat chains are allowed as baits when followed by an attack, including turning to punish a chase. Movement tactics exist to set up attacks (baits, spacing, timing mixups), not to avoid fighting. Think like a swordsman: turning your back or retreating while the opponent is in sword range leaves you open, so tactics should set up attacks safely. Probe instead of repeating: try untried options, drop what keeps being deflected or guarded, bait his habits (stand still briefly, walk in slowly, strafe, mix timings) and punish them. Input: obs is a fair view of both fighters (plan is what runs now); tally counts this fight per action or tactic as [n, hit, blocked, deflected, whiffed, punished]; memory holds every fight so far (the same counts, Wolf's habits, and trend: his deflect%, guard%, hits you landed, hp% lost, attacks per minute, damage per minute and passive percent, and kill seconds for information only, over the last fights, now = this fight so far); why is what triggered this question. You are asked only a few times a fight. The boss samples from your probabilities all fight, so spread them over several good options. Reflexes (guarding, deflecting, counters and reactions) are automatic. Choose lua to leave an act to your own AI. Options are single actions, movement tactics (distances from Wolf, left and right are yours) and plans of up to 3 steps joined with > (consecutive attacks joined with +):\n3005: front kick\n5201: back step\nhold2: stand still facing Wolf for 2 s\nwalk_in4: walk slowly toward Wolf until 4 m away\nwalk_in4>3005: walk slowly toward Wolf until 4 m away, then front kick",
+  "instructions": "You are a doc example boss fighting Wolf. Reward order: win and win faster (time_to_kill_wolf, lower is better); then break Wolf posture and land a hit right after (wolf_posture_breaks, hits_after_break); then damage to Wolf per minute (HP plus posture); then take little damage (boss_damage_taken_per_min, HP plus posture) and reduce Wolf perfect deflects, each of which builds your posture. engaged_time is information and only a small tiebreaker when losing while landing hits; survival time is never a goal. Stalling, running away or passivity counts as failure: a fight where no attack of yours started in the last 4 s more than 35% of the time failed, whatever else happened, plans without an attack are ignored, you must start an attack at least every 6 s and may back off or retreat only once per 5 s. Retreat chains are allowed as baits when followed by an attack, including turning to punish a chase. Movement tactics exist to set up attacks (baits, spacing, timing mixups), not to avoid fighting. Think like a swordsman: turning your back or retreating while the opponent is in sword range leaves you open, so tactics should set up attacks safely. Probe instead of repeating: try untried options, drop what keeps being deflected or guarded, bait his habits (stand still briefly, walk in slowly, strafe, mix timings) and punish them. Input: obs is a fair view of both fighters (plan is what runs now); tally counts this fight per action or tactic as [n, hit, blocked, deflected, whiffed, punished]; memory holds every fight so far (the same counts, Wolf's habits, and trend: his deflect%, guard%, hits you landed, hp% lost, attacks per minute, damage per minute and passive percent, and kill seconds for information only, over the last fights, now = this fight so far); why is what triggered this question. You are asked only a few times a fight. The boss samples from your probabilities all fight, so spread them over several good options. Reflexes (guarding, deflecting, counters and reactions) are automatic. Choose lua to leave an act to your own AI. Options are single actions, movement tactics (distances from Wolf, left and right are yours) and plans of up to 3 steps joined with > (consecutive attacks joined with +):\n3005: front kick\n5201: back step\nhold2: stand still facing Wolf for 2 s\nwalk_in4: walk slowly toward Wolf until 4 m away\nwalk_in4>3005: walk slowly toward Wolf until 4 m away, then front kick",
   "max_output_tokens": 16,
   "model": "gpt-6-luna",
   "reasoning": {
@@ -611,15 +611,15 @@ Credential-source tests use in-memory dotenv text and never read the real enviro
 ## The coach
 
 Real-time per-move calls are wasteful, and the Decisions API cannot reason.
-FromSoftware players fight the same enemy dozens of times, so the boss learns *between* fights.
+FromSoftware players fight the same enemy dozens of times, so the boss learns between fights and reviews during long fights.
 
-- **Coach (between fights, full reasoning).** When a fight ends (a death, a win, a respawn that restarts it), the driver sends the coach a compact summary of it (`CoachInput` in `crates/sim/src/brain/coach.rs`, bounded to 8 KB, measured in `the_coach_input_is_bounded_and_keeps_the_notes_and_the_played_plan`).
+- **Coach (between fights, full reasoning).** When a fight ends (a death, a win, a respawn that restarts it), the driver sends the coach a compact summary of it (`CoachInput` in `crates/sim/src/brain/coach.rs`, bounded to 4 KB, measured in `the_coach_input_is_bounded_and_keeps_the_notes_and_the_played_plan`).
   The coach writes a **game plan** for the next fight.
   It runs on its own thread in `sekiro-brain-net` (never the game thread), so latency does not matter: the plan is used from the next fight if it arrived by then (during the 6 s respawn), else from the fight after; a failed or empty answer keeps the previous plan.
 - **Fighter (in the fight, cheap).** The driver runs the plan's sets locally with the sampler (`sampler.rs`, with the repelled-plan penalty and the untried bonus).
   At the checkpoints (`start`, `pressure`, `pressure_critical`, `half_hp` (fallback), `mark_lost`, `punished_twice`, `deflected_thrice`) the Decisions API picks which set to play, or `keep`.
   No per-move calls.
-- **Phases across fights.** Fight 1 against an enemy with no memory is his own Lua AI with no model call at all; the coach runs after it.
+- **Phases across fights.** Fight 1 against an enemy with no memory starts with his own Lua AI; the coach can review it mid-fight and runs after it.
   From fight 2 on the coach's plan drives him: the opener runs first, then plans sampled from the start set.
   The newest validated plan is kept in the memory file (`coach.plan`, with `coach.plans`, the outcomes of every plan text), so a new session starts from it.
   No coach call is made at exit (the game would wait for it); the unfinished fight is saved in the memory as before.
@@ -635,6 +635,7 @@ FromSoftware players fight the same enemy dozens of times, so the boss learns *b
 | `--brain coach` | The coach plus the Decisions checkpoint chooser. Memory is on by default (`logs/memory/<chr>.json`); `--brain-memory off` turns it off. `decisions` and `responses` stay as they were |
 | `--coach claude\|codex\|api` | Who writes the plan. `codex` (default) uses `gpt-6.1-sol`, medium reasoning effort, ignores user config, and uses a read-only sandbox, ephemeral sessions and the output schema. `api` uses Responses with `gpt-6-luna`, low effort, strict schema, `store:false` and a 45 s deadline. `claude` uses `claude-haiku-5-5`, our replacement system prompt, empty settings and MCP configuration, safe mode, low effort, no tools or session persistence, and the JSON schema. Only `api` needs an API key |
 | `--coach-model <name>` | Default `claude-haiku-5-5` (claude), `gpt-6.1-sol` (codex), `gpt-6-luna` (api) |
+| `--coach-interval <secs>` | Mid-fight review interval, default 45 seconds; 0 disables all mid-fight triggers |
 | `--coach-effort <level>` | `codex` and `api`: defaults `medium` and `low`, respectively |
 | `SEKIRO_COACH_CMD` | Replaces the program of the `claude` and `codex` coaches (the tests point it at a fake) |
 
@@ -693,10 +694,20 @@ Projectile-only attacks and attacks interrupted before any measurable melee wind
 This is a radial envelope relative to the attack's starting centre: distance above reach indicates insufficient reach to Wolf's starting position, while distance below reach does not establish contact.
 Direction, height, timing and Wolf's movement still matter; per-plan means are diagnostic summaries rather than individual-hit proofs.
 The entries are paired with the surviving plan outcomes during budget trimming; range entries are the final fallback to trim.
-Entries are trimmed (overall plans first, then Wolf's attacks, habits, this fight's plans, the oldest trend fights) to stay under 8192 bytes.
+Entries are trimmed (overall plans first, then Wolf's attacks, habits, this fight's plans, the oldest trend fights) to stay under 4096 bytes.
 The instructions (`protocol::coach_instructions`, followed by every choice with its label, 80 or 82 lines) are:
 
-> You are the coach of {name}, who fights the player (Wolf) again and again. After each fight you write the game plan for the next one. Reward order: breaking Wolf posture is very good; landing a hit immediately after a break is best; then damage per minute; then fewer perfect deflects; then staying alive longer while engaged. You are scored on the damage you deal to Wolf (HP and posture) per minute (dpm), your attacks per minute (apm), fewer perfect deflects (defl) and fewer of your actions he punishes. Your other goal is staying alive longer while engaged: engaged_time is fight seconds only when passive_share is below 0.35, otherwise zero. Stalling, running away or passivity counts as failure: passive = the percent of the fight with no attack of yours started in the last 4 s, and a fight with passive above 35 failed regardless of every other number; if the last fight failed this way, make the next plan attack more. Retreat chains are allowed as baits when followed by an attack, including turning to punish a chase. Movement tactics exist to set up attacks (baits, spacing, timing mixups such as a hold or a slow walk-in before a strike), not to avoid fighting. Think like a swordsman: turning your back or retreating while the opponent is in sword range leaves you open, so tactics should set up attacks safely. The fighter enforces limits you cannot override: a plan in a set must contain an attack (plans without one are dropped), an attack must start at least every 6 s, and back_off, retreat or back-step plans run at most once per 5 s. Players learn patterns, so probe with untried tactics, exploit the habits you see and retire what keeps failing. Test one idea at a time and write down what you learn.\n\
+> You are the coach of {name}, who fights the player (Wolf) again and again.
+> After each fight you write the game plan for the next one.
+> Reward order: win and win faster (time_to_kill_wolf, lower is better); then break Wolf posture and land a hit right after (wolf_posture_breaks, hits_after_break); then damage to Wolf per minute (HP plus posture); then take little damage (boss_damage_taken_per_min, HP plus posture) and reduce Wolf perfect deflects, each of which builds your posture.
+> engaged_time is information and only a small tiebreaker when losing while landing hits; survival time is never a goal.
+> Stalling, running away or passivity counts as failure: passive = the percent of the fight with no attack of yours started in the last 4 s, and a fight with passive above 35 failed regardless of every other number; if the last fight failed this way, make the next plan attack more.
+> Retreat chains are allowed as baits when followed by an attack, including turning to punish a chase.
+> Movement tactics exist to set up attacks (baits, spacing, timing mixups such as a hold or a slow walk-in before a strike), not to avoid fighting.
+> Think like a swordsman: turning your back or retreating while the opponent is in sword range leaves you open, so tactics should set up attacks safely.
+> The fighter enforces limits you cannot override: a plan in a set must contain an attack (plans without one are dropped), an attack must start at least every 6 s, and back_off, retreat or back-step plans run at most once per 5 s.
+> Players learn patterns, so probe with untried tactics, exploit the habits you see and retire what keeps failing.
+> Test one idea at a time and write down what you learn.\n\
 > How combat works: Posture is the real bar: breaking it opens a deathblow; the deathblow spends one enemy life.
 > Guarding costs the guarder posture; deflects cost the attacker posture and less to the deflector.
 > HP loss slows posture recovery.
@@ -713,7 +724,7 @@ The checkpoint chooser (coach mode) gets only a few numbers and the set names, a
 {"model": "gpt-6-luna",
  "input": "{\"why\":\"pressure\",\"set\":\"bait\",\"boss_hp\":0.48,\"boss_posture\":0.55,\"wolf_hp\":0.91,\"wolf_posture\":0.12,\"dist\":3.4}",
  "questions": [{"type": "choice", "name": "plan_set",
-   "instructions": "As an Ashina soldier with a one-handed sword's fighting instinct, choose: Wolf HP+posture damage/min, fewer perfect deflects, survival at passive_share<0.35. Retreat baits end in attacks.",
+   "instructions": "an Ashina soldier with a one-handed sword: win fast; break+hit; Wolf HP+posture/min; low boss HP+posture/min and Wolf deflects. Passive>35% fails. Retreat to attack.",
    "choices": [{"value": "press", "description": "..."}, {"value": "bait", "description": "... (suits: pressure)"}, {"value": "keep", "description": "stay on the current set"}]}]}
 ```
 
@@ -724,7 +735,7 @@ The legacy `--brain decisions` request is unchanged apart from its instructions.
 
 ### Hard limits (`brain/limits.rs`)
 
-The goals are damage dealt per minute and surviving longer while engaged: the instructions drop kill time as a goal and say that stalling, running away or passivity is failure; a fight where no attack of his started in the last 4 s more than 35% of the time (`passive_share`) failed whatever else happened.
+The goals prioritize winning faster, breaking Wolf posture and landing a hit after, dealing damage per minute, and taking little damage; a fight where no attack of his started in the last 4 s more than 35% of the time (`passive_share`) failed whatever else happened.
 `FightMetrics` has `boss_attacks` and `passive_secs` (`attacks_per_min`, `damage_per_min` = HP plus posture in percent of a bar per minute, `passive_share`); `kill_time` stays as information.
 They are in the scorecard line, the trend (`apm`, `dpm`, `passive`) and the coach input.
 The driver enforces, for every hosted brain (`BrainDriver::anti_stall`), however the model answers:
@@ -808,7 +819,7 @@ Historical memory is not rewritten.
 `retreat_rechecks_range_before_a_close_slash` retains the actual range-whiff reproduction.
 `reactive_tactics_answer_pressure_and_keep_the_attack_chain` drives Wolf's real HKS with attack presses every eight frames at 1.6 m against both bosses and checks script guard/deflect, timed back-step motion, the following attack request and idle caps.
 The soldier's readiness finishes after 36 ticks under pressure, its short step gains 0.86 m and finishes after 38 ticks, and both idle waits finish after 90 ticks at 60 Hz.
-`coach_reports_measured_attack_ranges_per_plan` checks spacing telemetry and excludes tactic whiffs; the worst-case coach-input test keeps the summary inside 8192 bytes with per-action and range entries.
+`coach_reports_measured_attack_ranges_per_plan` checks spacing telemetry and excludes tactic whiffs; the worst-case coach-input test keeps the summary inside 4096 bytes with per-action and range entries.
 
 ### Five playtest findings (2026-10-11)
 
@@ -840,7 +851,7 @@ The schema includes retry as an array, with an empty array meaning no retry; old
 All coach CLI tests use a fake executable and all HTTP tests use a loopback server.
 Codex defaults to `gpt-6.1-sol` and `model_reasoning_effort="medium"`; model and effort overrides are checked against the fake CLI's ordered arguments.
 
-The goals now include damage to Wolf per minute (HP plus posture), fewer perfect deflects, and longer survival while fighting.
+The goals prioritize winning faster, break follow-ups, damage to Wolf per minute, and little boss damage taken per minute including posture from perfect deflects.
 `engaged_time` is the fight duration when `passive_share < 0.35`, otherwise zero, and appears in persisted metrics, the scorecard, the trend and coach result.
 Retreat plans are permitted once per five seconds, including short retreat chains followed by an attack.
 The six-second attack rule, lead-in deadline checks and four-second passivity window are retained, so a chain whose lifetime caps exceed the attack deadline remains ineligible.
@@ -863,7 +874,7 @@ The hit window is 2.5 seconds after a Wolf break and excludes the breaking blow 
 The punish rate is the fraction of breaks followed by at least one landed hit, so several hits after one break cannot inflate it above 100%.
 Peak posture is a fraction of maximum damage; kill time is present only for a boss win.
 Old memory fields default to zero or null rather than inventing historical break counts.
-The coach's reward order prioritizes the break and its immediate landed follow-up, then damage per minute, fewer perfect deflects, and surviving while engaged.
+The coach prioritizes winning faster before breaks and their immediate follow-ups, damage per minute, and low boss damage taken; engaged time only breaks ties on losses while landing hits.
 
 A game plan can contain `on_wolf_break`, one to three weighted attack-containing plans validated against the boss's normal vocabulary and avoid list.
 An absent or empty list preserves the Lua follow-up.
@@ -884,7 +895,7 @@ The coach is instructed to mix at least three different attack ids per set; narr
 Coach input `actions` contains individual `[n, hit, blocked, deflected, whiffed, punished]` counts for Lua and coached moves, with zero-count rows for untried offered actions.
 `action_range` supplies each measured action's mean attack-start distance and melee reach, rounded to two decimals; projectile-only actions have no reach sample.
 The coach can therefore probe under-used moves using their own outcomes rather than the aggregate `lua` plan count.
-The input budget is now 8192 bytes to accommodate this evidence and persistent lessons; the small in-fight chooser request remains unchanged.
+The input budget is 4096 bytes; the small in-fight chooser request remains unchanged.
 
 `principles` keeps up to six lessons, each at most 90 Unicode characters, in the saved game plan.
 Every coach input sends them back once, independently of whether the played-plan summary must be trimmed, and console plan summaries print them.
@@ -898,3 +909,26 @@ Offline regressions cover threshold re-arming and actual chooser requests, respo
 In the scripted Owl duel, a real 3001 slash breaks low-posture Wolf, then the 3000 response animation starts after 18 ticks (0.300 seconds); without a response plan Lua requests 3040 instead.
 These checks use extracted local data, fake coach CLIs and loopback HTTP only.
 Live model plan quality, live-game fidelity, and the F9 presentation in a rendered window remain unverified.
+
+
+### Mid-fight coach reviews
+
+Coach mode reviews every 45 seconds of fight time since the last coach send, with a loaded starting plan counting as a send at fight start.
+A surviving boss mark loss, two Wolf posture breaks since the last review, or all coached plans in the active set being banned triggers an early review, even if a Lua fallback remains.
+Each send resets the timer and break counter.
+Calls are serialized across fights: a blocked trigger waits for the outstanding call, and an ended fight's post review supersedes the pending mid review.
+Reviews wait until 20 seconds have elapsed, the player is active, and both fighters are outside breaks, deathblows and respawn.
+`--coach-interval 0` disables the timer and all early triggers.
+
+Requests use `phase: "mid"` and start with this fight's partial result and per-plan/per-set outcomes before older evidence.
+They include elapsed seconds, `[wolf_hp, wolf_posture, boss_hp, boss_posture]` fractions, boss marks left and the current game plan, with a strict 4096-byte compact JSON budget.
+The coach keeps what works, replaces what fails and returns a full game plan.
+The next decision-slot choice uses the replacement start set and skips its opener; queued active attack goals continue normally.
+Validated plans are saved through the existing memory path.
+Console review lines name the trigger, arriving plans print their summary, and coach JSONL lines include `kind: "coach"` and `phase: "mid"`.
+Fight records include mid-review counts and total completed review latency in milliseconds.
+
+The objective order is win and win faster (`time_to_kill_wolf`), Wolf posture breaks and immediate landed hits, Wolf HP plus posture damage per minute, then little boss HP plus posture damage per minute and fewer Wolf perfect deflects.
+Passive share above 0.35 fails regardless of the other results, and retreats are attack setups.
+`engaged_time` remains informational and only a small tiebreaker for losing fights while landing hits.
+`boss_damage_taken_per_min` sums observed boss HP drops and posture rises, normalized to percent of a bar per minute, without subtracting healing or recovery.

@@ -84,6 +84,7 @@ pub struct Options {
     /// The boss brain's memory file across fights and sessions (`--brain-memory`; by default
     /// `logs/memory/<chr>.json` for hosted brains, none for the others).
     pub brain_memory: Option<PathBuf>,
+    pub coach_interval: f32,
     /// Play on this exported map (`cache/maps/<id>`) instead of the flat floor.
     pub map: Option<String>,
     /// Player start point on the map.
@@ -217,6 +218,9 @@ pub fn run(options: Options) -> Result<()> {
         );
         if let Some(driver) = duel.boss_brain.as_mut() {
             driver.enable_session_report(Path::new("logs"));
+        }
+        if let Some(driver) = duel.boss_brain.as_mut() {
+            driver.coach_interval = options.coach_interval;
         }
         if let (Some(path), Some(driver)) = (options.brain_memory, duel.boss_brain.as_mut()) {
             driver.use_memory(path);
