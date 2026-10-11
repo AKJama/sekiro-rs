@@ -1254,3 +1254,140 @@ fn the_coach_mode_checkpoint_request_is_tiny() {
     let [decide, coach] = brain.call_stats();
     assert_eq!((decide.calls, decide.input, coach.calls), (1, 150, 0));
 }
+
+#[test]
+fn subscription_tokens_are_a_proxy_and_stop_calls_without_any_dollars() {
+    for backend in [CoachBackend::Codex, CoachBackend::Claude] {
+        let fake = FakeCli::new("ok", PLAN);
+        let mut config = HostedConfig::new(Backend::Coach, ApiKey::new("none"));
+        config.checkpoints = false;
+        config.warm_up = false;
+        config.coach_backend = backend;
+        config.coach_model = backend.default_model().into();
+        config.coach_cmd = Some(fake.exe.clone());
+        config.token_budget = Some(1);
+        config.budget_usd = Some(0.000001);
+        let log = fake.dir.join("telemetry.jsonl");
+        config.log_path = Some(log.clone());
+        let mut brain = HostedBrain::new(config, &SOLDIER).unwrap();
+        brain.submit_coach(&coach_request(1), 0.0);
+        assert!(poll_coach(&mut brain).plan.is_some());
+        let costs = brain.costs();
+        let tokens = if backend == CoachBackend::Codex {
+            11000
+        } else {
+            465
+        };
+        assert_eq!(costs.totals.plan_tokens, tokens);
+        assert_eq!(costs.totals.tokens(), tokens);
+        assert_eq!(costs.totals.api_tokens, 0);
+        assert_eq!(costs.totals.billed_usd, 0.0);
+        assert_eq!(costs.totals.unknown_billed, 0);
+        assert!(!costs.totals.line("session").contains('$'));
+        assert!(costs.budget_notice.unwrap().contains("token budget"));
+        brain.submit_coach(&coach_request(2), 0.0);
+        assert!(poll_coach(&mut brain).plan.is_none());
+        assert_eq!(fake.calls().len(), 1);
+        let text = std::fs::read_to_string(log).unwrap();
+        let line: Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(line["billed"], false);
+        assert!(line["usd_estimate"].is_null());
+        assert!(line["cost_usd"].is_null());
+        assert_eq!(line["sekiro.tokens.proxy"], true);
+        assert_eq!(line["gen_ai.request.model"], backend.default_model());
+        assert_eq!(
+            line["gen_ai.usage.input_tokens"],
+            line["usage"]["input_tokens"]
+        );
+        assert_eq!(
+            line["sekiro.usage.cached_input_tokens"],
+            if backend == CoachBackend::Codex {
+                2000
+            } else {
+                300
+            }
+        );
+        eprintln!("sample telemetry: {text}");
+    }
+}
+
+#[test]
+fn subscription_usage_does_not_exhaust_a_positive_usd_budget() {
+    let fake = FakeCli::new("ok", PLAN);
+    let mut config = HostedConfig::new(Backend::Coach, ApiKey::new("none"));
+    config.checkpoints = false;
+    config.warm_up = false;
+    config.coach_backend = CoachBackend::Codex;
+    config.coach_cmd = Some(fake.exe.clone());
+    config.budget_usd = Some(0.000001);
+    let mut brain = HostedBrain::new(config, &SOLDIER).unwrap();
+    for id in 1..=2 {
+        brain.submit_coach(&coach_request(id), 0.0);
+        assert!(poll_coach(&mut brain).plan.is_some());
+        assert!(!brain.budget_exhausted());
+    }
+    assert_eq!(fake.calls().len(), 2);
+    assert_eq!(brain.costs().totals.plan_tokens, 22000);
+}
+
+#[test]
+fn unusable_cli_plans_still_spend_the_token_budget() {
+    for backend in [CoachBackend::Codex, CoachBackend::Claude] {
+        let fake = FakeCli::new("ok", "not a plan");
+        let mut config = HostedConfig::new(Backend::Coach, ApiKey::new("none"));
+        config.checkpoints = false;
+        config.warm_up = false;
+        config.coach_backend = backend;
+        config.coach_cmd = Some(fake.exe.clone());
+        config.token_budget = Some(1);
+        let mut brain = HostedBrain::new(config, &SOLDIER).unwrap();
+        brain.submit_coach(&coach_request(1), 0.0);
+        assert!(poll_coach(&mut brain).plan.is_none());
+        assert_eq!(
+            brain.costs().totals.plan_tokens,
+            if backend == CoachBackend::Codex {
+                11000
+            } else {
+                465
+            }
+        );
+        assert!(brain.budget_exhausted());
+        brain.submit_coach(&coach_request(2), 0.0);
+        assert!(poll_coach(&mut brain).plan.is_none());
+        assert_eq!(fake.calls().len(), 1);
+    }
+}
+
+#[test]
+fn api_budget_stops_queued_calls_and_unknown_prices_fail_closed() {
+    for unknown in [false, true] {
+        let mut mock = Mock::new(
+            Backend::Decisions,
+            vec![Response::json(decisions("3005", 250, 2))],
+        );
+        let mut config = mock.config(Backend::Decisions);
+        config.budget_usd = Some(0.000025);
+        if unknown {
+            config.model = "unknown-model".into();
+        }
+        let mut brain = HostedBrain::new(config, &OWL).unwrap();
+        // Queue both before the first finishes: admission must be checked inside the worker.
+        brain.submit(&request(1));
+        brain.submit(&request(2));
+        assert!(poll(&mut brain).plan.is_some());
+        assert!(poll(&mut brain).plan.is_none());
+        mock.finish();
+        assert_eq!(mock.requests.try_iter().count(), 1);
+        let costs = brain.costs();
+        assert_eq!(costs.totals.calls, 1);
+        assert_eq!(costs.totals.api_tokens, 252);
+        assert_eq!(costs.totals.plan_tokens, 0);
+        assert!(brain.budget_exhausted());
+        if unknown {
+            assert_eq!(costs.totals.unknown_billed, 1);
+            assert!(costs.totals.line("session").contains("unknown"));
+        } else {
+            assert!((costs.totals.billed_usd - 0.000025).abs() < 1e-12);
+        }
+    }
+}

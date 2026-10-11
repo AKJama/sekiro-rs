@@ -4,6 +4,34 @@ Last updated 11 October 2026.
 Read this first in a new session, then `AGENTS.md` and `docs/DESIGN.md`.
 How much of the game is done overall: `docs/PROGRESS.md`.
 
+## Boss brain token observability and budgets (2026-10-11)
+
+Tokens are the primary metric in fight summaries, session reports and the recording overlay.
+Subscription Codex/Claude usage is labelled as a plan proxy, with no computed or displayed dollar estimate.
+API-key requests retain billed USD estimates from the editable `config/brain-prices.toml`, with standard OpenAI model/pricing and Decisions source URLs checked on 11 October.
+The price table is whitelisted for tracking; unknown API models show unknown USD.
+The task-specified Haiku seed retains an explicit cache-pricing TODO and is never applied to subscription Claude.
+
+Codex JSON completed-turn events supply tokens while `-o` supplies the final plan.
+Reported CLI usage now survives an invalid plan, so failures cannot bypass the token budget.
+Telemetry keeps legacy fields alongside GenAI semantic names and `sekiro.*` extras, including billing and the plan-proxy flag.
+Fight summaries print both fight and session totals; the report Cost section groups kind/model and separates plan tokens from API tokens and billed USD.
+F8 displays the session totals and persistent budget notice in a smaller overlay footer.
+
+`--brain-token-budget N` counts all reported input plus output tokens; `--brain-budget USD` counts only billed API usage.
+Both default to no limit and zero stops immediately.
+Budgeted admission is serialized across the decision and coach workers, and queued work is rechecked before starting a call.
+After a limit is reached, the current fight retains its plan and the next uses Lua AI.
+Unknown billed prices stop a USD-budgeted session; a final completed call can overshoot a limit because usage is known after completion.
+
+Workspace Clippy with `-D warnings`, `cargo fmt --all` and the final formatting check are clean.
+The requested release sim/brain-net library, binary and integration suite passed all 368 tests across 37 targets; its log is `target/alt/brain-cost-release-tests.log`.
+Offline regressions cover realistic fake Codex events and final-message separation, cached/reasoning subsets, unknown prices, queued-call stopping, subscription token/USD separation, failed-plan token accounting, current-plan retention and next-fight Lua fallback.
+All Cargo commands used `target/alt` and six jobs (fmt uses `CARGO_BUILD_JOBS=6`).
+No model/API calls, credential reads, real model CLI execution beyond `codex exec --help`, protected memory/dataset writes, cache/re deletion or links, worktrees or commits were made.
+The overlay footer was checked through compilation and driver/format tests; a newly rendered window was not inspected in this session.
+The pre-existing game `map_tangents` test was outside the requested suite.
+
 ## Where things stand
 
 | Area | State | Docs |

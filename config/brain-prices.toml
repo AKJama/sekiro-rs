@@ -1,9 +1,12 @@
 # USD per million tokens, checked 2026-10-11. Standard text pricing, no tools.
 # Sources: https://developers.openai.com/api/docs/models/gpt-6-luna
 # https://developers.openai.com/api/docs/models/gpt-6.1-sol
+# https://developers.openai.com/api/docs/pricing (standard, short context)
+# https://developers.openai.com/api/docs/guides/decisions
 # Decisions and Haiku rates: task-specified seeds (not independently verified).
 # reasoning omitted means it is included in output; cached input is included in input.
 # CLI subscription=true means plan usage, never billed USD, even if a CLI reports cost.
+# Subscription CLI prices are never applied and no API-equivalent estimate is computed.
 
 [backends.codex]
 subscription = true

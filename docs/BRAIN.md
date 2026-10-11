@@ -722,7 +722,8 @@ FromSoftware players fight the same enemy dozens of times, so the boss learns be
 
 The CLI coaches run from their own temporary directory with no tools, are killed through their own child handle at the 120 s deadline and when the game exits, and never have their output echoed (it may contain the prompt).
 A CLI that is not on PATH prints "the claude CLI was not found on PATH (...)" and the previous plan (or his own AI) stays.
-The Claude Code envelope's `usage` and `total_cost_usd` and its `result` (or `structured_output`) are read; Codex reports no usage.
+The Claude Code envelope's `usage` and its `result` (or `structured_output`) are read; its dollar field is ignored for subscription usage.
+Codex runs with `--json`: completed-turn usage events supply input, cached input, output and reported reasoning tokens, while the plan still comes from the `-o` last-message file.
 The flags come from `claude --help` and `codex exec --help` (read on 2026-10-11; the tests never run the real CLIs, only a fake).
 Without an `OPENAI_API_KEY` a CLI coach still works and the checkpoint switches are off (the opener and the start set play).
 On Windows the codex npm shim is tried as `codex.cmd`; killing it by its handle may leave its node child running until it ends.
@@ -838,7 +839,7 @@ Test `an_attack_after_retreat12_turns_to_face_wolf_first`: `retreat12>3005` with
 
 ### Stats and cost
 
-`HostedStats` counts per call kind: the checkpoint chooser (`requests`, `answered`, tokens, `reasoning_tokens`, round trip) and the coach (`coach.*`); the telemetry log line has `"kind": "decide"` or `"coach"`, the backend, the usage (input tokens per call) and, for a CLI, `cost_usd`.
+`HostedStats` counts per call kind: the checkpoint chooser (`requests`, `answered`, tokens, `reasoning_tokens`, round trip) and the coach (`coach.*`); telemetry records the backend and usage, with USD estimates only for billed API calls.
 The fight summary line ends with the reasoning tokens, the coach calls that finished during the fight, and the seconds each set was played.
 Reasoning tokens count against `max_output_tokens` (the reasoning guide recommends reserving at least 25000 while experimenting); the default here is 6000 for `low` and unverified, raise it if calls come back `incomplete`.
 Estimate per fight with `--coach api`: one coach call of about 3 KB input plus the 6 KB instructions (3000 to 4000 input tokens) and 1000 to 3000 output tokens including reasoning, plus up to 5 chooser calls of about 250 input tokens each; with `--coach claude` or `codex` the coach runs on the subscription.
@@ -1075,3 +1076,51 @@ The input still fits 4096 bytes: trimming prefers the current plan's moves and t
 The four Owl fixtures measured 3916 to 4067 bytes for the complete fitted coach JSON, including the move sheet, break log and aggregate totals.
 The mixed `walk_in4>3000+3001` fixture also checks that the current attack group remains in the fitted sheet and that its break is logged as hit 2 of 2.
 No hosted calls or real model CLIs are needed for these tests.
+
+## Cost and observability
+
+Tokens are the primary session metric.
+Subscription coaches (`--coach codex` and `--coach claude`) record only the tokens the CLI reports, labelled as a plan proxy.
+Hidden system/tool tokens and plan quota rules may differ from those counts; these numbers do not measure remaining subscription allowance.
+No subscription dollar estimate is computed, including when Claude emits `total_cost_usd`.
+USD estimates apply only to API-key requests (Decisions, Responses and `--coach api`).
+
+The editable `config/brain-prices.toml` records verification dates and source URLs, with input, cached input and output rates per million tokens.
+Responses uses standard short-context text rates from the [OpenAI pricing page](https://developers.openai.com/api/docs/pricing) and [model catalog](https://developers.openai.com/api/docs/models).
+Decisions uses $0.10/M input and no output charge, as specified in the [Decisions guide](https://developers.openai.com/api/docs/guides/decisions).
+Luna Responses is $0.10/$0.01/$0.50 for input/cached/output; Sol Responses is $2.00/$0.10/$10.00.
+The Haiku $0.10/$0.50 seed is task-specified, with cached pricing explicitly marked TODO; subscription Claude never uses this entry.
+An unknown model records tokens and unknown billed USD, without guessing a rate.
+Reasoning is included in output unless the table explicitly sets its separate rate; cached input is a subset of input, and neither subset is added twice.
+These are local estimates, not provider invoices; tools, other processing tiers and long-context premiums require an appropriate table update.
+
+Each worker JSONL line retains legacy `model`, `usage`, `kind`, `phase` and `round_trip_ms` fields for one compatibility version.
+It also carries `gen_ai.system`, `gen_ai.request.model`, `gen_ai.operation.name`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` and `sekiro.*` extras for cached/reasoning usage, latency, kind, phase, billing and the plan-proxy flag.
+`usd_estimate` and `sekiro.usd_estimate` are null for subscription CLIs and unknown prices; `billed` distinguishes them.
+Codex usage sums `turn.completed` events, ignores item messages and printed totals, and reads the final plan from `-o`.
+Claude input includes reported cache creation and cache reads.
+Failed API answers retain reported usage even when their plan is unusable.
+
+Fight summary lines include both fight and session totals, counting calls that complete during that fight (including a previous fight's coach review).
+Session reports include a Cost table by kind and model, with plan-proxy tokens, API tokens and billed USD.
+F9 and normal exit print the report; the F8 recording overlay shows the session line and persistent budget notice.
+For example: `session: 12 calls · 48.0k tok (plan proxy) · 2.0k tok · $0.000200 (API)`.
+
+Measured coach context is about 11k reported tokens per Codex call, while a Decisions checkpoint uses about 250 input tokens.
+Two subscription coach reviews plus eight checkpoints therefore use roughly 22k plan-proxy tokens plus 2k API input tokens, with about $0.0002 billed API usage per fight (output is free for Decisions).
+Mid-fight reviews add about another 11k plan-proxy tokens each.
+For an API Luna coach, an illustrative 10k input + 1k output call without caching is $0.0015, so two such calls plus eight checkpoints are approximately $0.0032 per fight.
+Actual input/output splits and cache hits come from the telemetry, rather than an assumption that all coach tokens are input.
+
+Use `--brain-token-budget 50000` as the main per-session stop, counting all reported input plus output tokens across both workers.
+Use `--brain-budget 0.01` to limit billed API usage independently; subscription calls do not spend this USD budget.
+Both default to no limit, and zero stops calls immediately.
+With either budget enabled, the two workers serialize call admission and recheck the shared totals before each call, including already queued work.
+Once a completed call reaches either limit, no further model calls start in that session.
+The current fight keeps its last installed plan, and the next fight uses the boss's own Lua AI.
+A console notice and overlay notice explain the stop.
+A USD budget also stops after an unknown billed price, because the remaining spend cannot be established.
+
+Usage is known after completion, so the final call can exceed the limit; this is a stop-after-call budget, not a hard provider spending cap.
+API-key testers should set both budgets and provider-side spending limits, and keep the existing request deadline/output cap small.
+No third-party telemetry service is involved.

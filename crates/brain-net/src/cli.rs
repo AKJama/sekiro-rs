@@ -79,6 +79,7 @@ fn programs(backend: CoachBackend, cmd: Option<&Path>) -> Vec<PathBuf> {
 }
 
 /// Runs the coach CLI with `prompt` on stdin. `schema` is the game plan's JSON schema.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     backend: CoachBackend,
     model_and_effort: (&str, &str),
@@ -87,6 +88,7 @@ pub(crate) fn run(
     schema: &Value,
     timeout: Duration,
     stopping: &AtomicBool,
+    spent: &mut crate::TokenUsage,
 ) -> Result<CliAnswer, Failure> {
     let (model, effort) = model_and_effort;
     let instructions = prompt.instructions;
@@ -241,6 +243,20 @@ pub(crate) fn run(
     };
     let _ = writer.join();
     let out = reader.join().unwrap_or_default();
+    // Account for reported usage even if the exit status or final plan is unusable.
+    *spent = if backend == CoachBackend::Claude {
+        serde_json::from_slice::<Value>(&out)
+            .map(|v| claude_usage(&v))
+            .unwrap_or_default()
+    } else {
+        let (tokens, cached_input_tokens) = codex_usage(&out);
+        crate::TokenUsage {
+            input_tokens: tokens[0],
+            output_tokens: tokens[1],
+            reasoning_tokens: tokens[2],
+            cached_input_tokens,
+        }
+    };
     if !status.is_some_and(|s| s.success()) {
         return Err(Failure::CliFailed);
     }
@@ -250,8 +266,12 @@ pub(crate) fn run(
             let text = std::fs::read_to_string(&answer_file).map_err(|_| Failure::InvalidAnswer)?;
             Ok(CliAnswer {
                 plan: protocol::plan_from_text(&text)?,
-                tokens: codex_usage(&out).0,
-                cached_tokens: codex_usage(&out).1,
+                tokens: [
+                    spent.input_tokens,
+                    spent.output_tokens,
+                    spent.reasoning_tokens,
+                ],
+                cached_tokens: spent.cached_input_tokens,
                 cost_usd: None,
             })
         }
@@ -259,7 +279,7 @@ pub(crate) fn run(
 }
 
 /// Reads Claude Code's `--output-format json` envelope: `result` (text) or `structured_output`
-/// (when a schema was given) hold the plan; `usage` and `total_cost_usd` the cost.
+/// (when a schema was given) hold the plan; `usage` is recorded as a plan proxy.
 pub(crate) fn parse_claude(out: &[u8]) -> Result<CliAnswer, Failure> {
     let envelope: Value = serde_json::from_slice(out).map_err(|_| Failure::MalformedJson)?;
     if envelope["is_error"] == true {
@@ -270,18 +290,25 @@ pub(crate) fn parse_claude(out: &[u8]) -> Result<CliAnswer, Failure> {
             .map_err(|_| Failure::InvalidAnswer)?,
         _ => protocol::plan_from_text(envelope["result"].as_str().ok_or(Failure::InvalidAnswer)?)?,
     };
-    let usage = &envelope["usage"];
-    let n = |k: &str| usage[k].as_u64().unwrap_or(0);
+    let usage = claude_usage(&envelope);
     Ok(CliAnswer {
         plan,
-        tokens: [
-            n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens"),
-            n("output_tokens"),
-            0,
-        ],
-        cost_usd: envelope["total_cost_usd"].as_f64(),
-        cached_tokens: n("cache_read_input_tokens"),
+        tokens: [usage.input_tokens, usage.output_tokens, 0],
+        cost_usd: None,
+        cached_tokens: usage.cached_input_tokens,
     })
+}
+
+fn claude_usage(envelope: &Value) -> crate::TokenUsage {
+    let n = |k: &str| envelope["usage"][k].as_u64().unwrap_or(0);
+    crate::TokenUsage {
+        input_tokens: n("input_tokens")
+            .saturating_add(n("cache_creation_input_tokens"))
+            .saturating_add(n("cache_read_input_tokens")),
+        output_tokens: n("output_tokens"),
+        cached_input_tokens: n("cache_read_input_tokens"),
+        reasoning_tokens: 0,
+    }
 }
 
 /// Each completed turn has its own usage; item events and printed totals are not usage.
@@ -310,4 +337,23 @@ fn codex_usage(out: &[u8]) -> ([u64; 3], u64) {
 /// A TOML basic string, for a `-c key=value` override.
 fn toml_string(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_usage_sums_completed_turns_and_ignores_other_events_and_text() {
+        let stream = br#"{"type":"turn.started"}
+{"type":"item.completed","usage":{"input_tokens":999999}}
+{"type":"turn.completed","usage":{"input_tokens":10000,"cached_input_tokens":2000,"output_tokens":1000,"output_tokens_details":{"reasoning_tokens":600}}}
+tokens used
+11,000
+{"type":"turn.completed","usage":{"input_tokens":500,"output_tokens":100,"reasoning_tokens":50}}
+{"type":"turn.failed"}
+"#;
+        assert_eq!(codex_usage(stream), ([10500, 1100, 650], 2000));
+        assert_eq!(codex_usage(b"unknown event\n"), ([0, 0, 0], 0));
+    }
 }

@@ -45,7 +45,7 @@ pub fn spawn(
             Visibility::Hidden,
         ))
         .with_children(|p| {
-            for i in 0..7 {
+            for i in 0..8 {
                 p.spawn((
                     Section(i),
                     Text::new(""),
@@ -62,7 +62,7 @@ pub fn spawn(
                         font: font.clone(),
                         font_size: bevy::text::FontSize::Px(if i == 0 {
                             15.0
-                        } else if i == 4 {
+                        } else if i == 4 || i == 7 {
                             12.0
                         } else {
                             14.0
@@ -71,7 +71,7 @@ pub fn spawn(
                     },
                     TextColor(if i == 0 || i == 3 {
                         Color::srgb(0.91, 0.78, 0.54)
-                    } else if i == 4 {
+                    } else if i == 4 || i == 7 {
                         Color::srgb(0.68, 0.71, 0.75)
                     } else {
                         Color::srgb(0.92, 0.9, 0.85)
@@ -139,6 +139,13 @@ pub fn update(
         view.principles.join("\n"),
         view.ban.clone().unwrap_or_default(),
         view.scorecard.clone().unwrap_or_default(),
+        format!(
+            "{}{}",
+            view.cost,
+            view.budget_notice
+                .as_ref()
+                .map_or(String::new(), |notice| format!("\n{notice}"))
+        ),
     ];
     if !brain.unicode_font {
         for text in &mut content {
@@ -170,7 +177,7 @@ pub fn update(
             scale
                 * if section.0 == 0 {
                     15.0
-                } else if section.0 == 4 {
+                } else if section.0 == 4 || section.0 == 7 {
                     12.0
                 } else {
                     14.0

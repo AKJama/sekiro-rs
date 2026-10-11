@@ -11,8 +11,8 @@ pub struct CostTotals {
     pub output: u64,
     pub reasoning: u64,
     pub billed_usd: f64,
-    pub api_equivalent_usd: f64,
-    pub unknown_prices: u64,
+    pub plan_tokens: u64,
+    pub api_tokens: u64,
     pub unknown_billed: u64,
 }
 
@@ -28,19 +28,35 @@ impl CostTotals {
             output: self.output.saturating_sub(old.output),
             reasoning: self.reasoning.saturating_sub(old.reasoning),
             billed_usd: (self.billed_usd - old.billed_usd).max(0.0),
-            api_equivalent_usd: (self.api_equivalent_usd - old.api_equivalent_usd).max(0.0),
-            unknown_prices: self.unknown_prices.saturating_sub(old.unknown_prices),
+            plan_tokens: self.plan_tokens.saturating_sub(old.plan_tokens),
+            api_tokens: self.api_tokens.saturating_sub(old.api_tokens),
             unknown_billed: self.unknown_billed.saturating_sub(old.unknown_billed),
         }
     }
     pub fn line(&self, label: &str) -> String {
-        format!(
-            "{label}: {} calls · {} tok · {} billed · {} api-equiv",
-            self.calls,
-            self.tokens(),
-            usd(self.billed_usd, self.unknown_billed),
-            usd(self.api_equivalent_usd, self.unknown_prices)
-        )
+        let mut line = format!("{label}: {} calls", self.calls);
+        if self.plan_tokens > 0 {
+            line.push_str(&format!(
+                " · {} tok (plan proxy)",
+                compact(self.plan_tokens)
+            ));
+        }
+        if self.api_tokens > 0 || self.unknown_billed > 0 || self.billed_usd > 0.0 {
+            line.push_str(&format!(
+                " · {} tok · {} (API)",
+                compact(self.api_tokens),
+                usd(self.billed_usd, self.unknown_billed)
+            ));
+        }
+        line
+    }
+}
+
+fn compact(n: u64) -> String {
+    if n >= 1000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        n.to_string()
     }
 }
 
@@ -64,4 +80,42 @@ pub struct CostSnapshot {
     pub totals: CostTotals,
     pub rows: Vec<CostRow>,
     pub budget_notice: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mixed_session_line_and_fight_delta_count_subsets_once() {
+        let old = CostTotals {
+            calls: 1,
+            input: 10000,
+            cached: 2000,
+            output: 1000,
+            plan_tokens: 11000,
+            ..Default::default()
+        };
+        let now = CostTotals {
+            calls: 12,
+            input: 47000,
+            cached: 2000,
+            output: 3000,
+            reasoning: 500,
+            plan_tokens: 48000,
+            api_tokens: 2000,
+            billed_usd: 0.0002,
+            ..Default::default()
+        };
+        assert_eq!(now.tokens(), 50000);
+        assert_eq!(
+            now.line("session"),
+            "session: 12 calls · 48.0k tok (plan proxy) · 2.0k tok · $0.000200 (API)"
+        );
+        let fight = now.since(&old);
+        assert_eq!(fight.calls, 11);
+        assert_eq!(fight.tokens(), 39000);
+        assert_eq!(fight.plan_tokens, 37000);
+        assert_eq!(fight.api_tokens, 2000);
+    }
 }

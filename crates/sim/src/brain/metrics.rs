@@ -376,7 +376,12 @@ impl FightRecord {
     pub fn summary_line(&self) -> String {
         let m = &self.metrics;
         if m.void {
-            return format!("fight void: no player input ({:.1}s)", m.duration);
+            return format!(
+                "fight void: no player input ({:.1}s); {}; {}",
+                m.duration,
+                self.cost.line("fight"),
+                self.session_cost.line("session")
+            );
         }
         let pct = |r: Option<f32>| r.map_or("-".to_string(), |r| format!("{:.0}%", r * 100.0));
         let mut top: Vec<_> = self.choices.iter().collect();
@@ -445,6 +450,11 @@ impl FightRecord {
         let conversion = m
             .break_conversion_delay
             .map_or("-".into(), |d| format!("{d:.3}s"));
+        let line = format!(
+            "{line}; {}; {}",
+            self.cost.line("fight"),
+            self.session_cost.line("session")
+        );
         format!(
             "break_conversion_delay {conversion}; time_to_kill_wolf {}; wolf_posture_breaks {} hits_after_break {}; boss_damage_taken_per_min {:.0}%; mid-coach {} reviews {} ms; {line}; engaged_time {:.1}s; wolf_posture_breaks {} hits_after_break {} break_punish_rate {:.0}% wolf_posture_peak {:.0}% time_to_kill_wolf {}",
             m.time_to_kill_wolf

@@ -10,6 +10,39 @@ struct Price {
     reasoning: Option<f64>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prices_count_cached_and_reasoning_subsets_once_and_unknowns_are_absent() {
+        let prices = PriceTable::default();
+        let usage = TokenUsage {
+            input_tokens: 10000,
+            cached_input_tokens: 2000,
+            output_tokens: 1000,
+            reasoning_tokens: 600,
+        };
+        assert_eq!(prices.estimate("missing", "responses", usage), None);
+        assert!(
+            (prices.estimate("gpt-6.1-sol", "responses", usage).unwrap() - 0.0262).abs() < 1e-12
+        );
+        assert!((prices.estimate("gpt-6-luna", "decisions", usage).unwrap() - 0.001).abs() < 1e-12);
+        let text = include_str!("../../../config/brain-prices.toml")
+            .replace("output = 10.00", "output = 10.00\nreasoning = 20.00");
+        assert!(
+            (PriceTable::parse(&text)
+                .unwrap()
+                .estimate("gpt-6.1-sol", "responses", usage)
+                .unwrap()
+                - 0.0322)
+                .abs()
+                < 1e-12
+        );
+        assert!(PriceTable::parse(&text.replace("input = 2.00", "input = -1.00")).is_err());
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PriceTable {
     prices: Vec<Price>,

@@ -922,11 +922,11 @@ impl BrainDriver {
             ));
         }
         let costs = self.brain.costs();
-        report.push_str(&format!("\n## Cost\n\n{}\n\n| kind | model | calls | input | cached | output | reasoning | billed USD | API-equivalent USD |\n|---|---|---:|---:|---:|---:|---:|---:|---:|\n", costs.totals.line("session")));
+        report.push_str(&format!("\n## Cost\n\n{}\n\n| kind | model | calls | input | cached | output | reasoning | plan tokens (proxy) | API tokens | billed USD |\n|---|---|---:|---:|---:|---:|---:|---:|---:|---:|\n", costs.totals.line("session")));
         for row in costs.rows {
             let t = row.totals;
             report.push_str(&format!(
-                "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
                 row.kind.replace('|', "/"),
                 row.model.replace('|', "/"),
                 t.calls,
@@ -934,8 +934,13 @@ impl BrainDriver {
                 t.cached,
                 t.output,
                 t.reasoning,
-                super::cost::usd(t.billed_usd, t.unknown_billed),
-                super::cost::usd(t.api_equivalent_usd, t.unknown_prices)
+                t.plan_tokens,
+                t.api_tokens,
+                if t.api_tokens > 0 || t.unknown_billed > 0 {
+                    super::cost::usd(t.billed_usd, t.unknown_billed)
+                } else {
+                    "-".into()
+                }
             ));
         }
         if let Some(notice) = costs.budget_notice {
@@ -1703,6 +1708,9 @@ impl BrainDriver {
             RequestMode::Checkpoints => self.pending_why.map(Some),
         };
         let Some(why) = why else { return };
+        if self.brain.budget_exhausted() {
+            return;
+        }
         self.want_request = false;
         self.pending_why = None;
         let (active, sets) = if self.coach_mode {
@@ -2845,6 +2853,49 @@ struct OutcomeLine<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exhausted_budget_keeps_current_plan_then_resets_to_own_ai() {
+        struct BudgetBrain(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl BossBrain for BudgetBrain {
+            fn name(&self) -> &'static str {
+                "coach"
+            }
+            fn coaches(&self) -> bool {
+                true
+            }
+            fn budget_exhausted(&self) -> bool {
+                self.0.load(std::sync::atomic::Ordering::Relaxed)
+            }
+            fn submit(&mut self, _: &BrainRequest) {
+                panic!("no request after budget");
+            }
+            fn submit_coach(&mut self, _: &CoachRequest, _: f32) {
+                panic!("no coach after budget");
+            }
+            fn poll(&mut self, _: f32) -> Option<BrainReply> {
+                None
+            }
+        }
+        let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut d = BrainDriver::new(
+            Box::new(BudgetBrain(stopped.clone())),
+            &crate::brain::SOLDIER,
+        );
+        let plan = GamePlan::from_json(r#"{"sets":[{"name":"press","plans":[{"plan":"3000","weight":1}]}],"start_set":"press"}"#).unwrap();
+        d.game_plan = Some(plan);
+        d.install_plan();
+        assert!(!d.set.is_empty());
+        stopped.store(true, std::sync::atomic::Ordering::Relaxed);
+        d.submit_coach_input(CoachInput::default(), true);
+        assert!(d.game_plan.is_some());
+        assert!(!d.set.is_empty());
+        assert!(d.coach_flights.is_empty());
+        d.start_fight();
+        assert!(d.game_plan.is_none() && d.set.is_empty() && d.opener.is_none());
+        assert!(d.active_set.is_none() && !d.want_request);
+        assert_eq!(d.overlay().running, "Lua");
+    }
 
     #[test]
     fn overlay_tracks_steps_and_expires_cards_without_logging() {

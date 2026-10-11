@@ -148,9 +148,12 @@ impl StatsHandle {
             t.cached += usage.cached_input_tokens;
             t.output += usage.output_tokens;
             t.reasoning += usage.reasoning_tokens;
-            t.api_equivalent_usd += estimate.unwrap_or(0.0);
+            if billed {
+                t.api_tokens += usage.input_tokens.saturating_add(usage.output_tokens);
+            } else {
+                t.plan_tokens += usage.input_tokens.saturating_add(usage.output_tokens);
+            }
             t.billed_usd += if billed { estimate.unwrap_or(0.0) } else { 0.0 };
-            t.unknown_prices += u64::from(estimate.is_none());
             t.unknown_billed += u64::from(billed && estimate.is_none());
         };
         add(&mut s.costs.totals);
@@ -586,9 +589,10 @@ fn annotate(
         "gen_ai.usage.output_tokens": usage.output_tokens,
         "sekiro.usage.cached_input_tokens": usage.cached_input_tokens,
         "sekiro.usage.reasoning_tokens": usage.reasoning_tokens,
-        "sekiro.usd_estimate": estimate, "sekiro.billed": billed,
+        "sekiro.usd_estimate": if billed { estimate } else { None }, "sekiro.billed": billed,
+        "sekiro.tokens.proxy": !billed,
         "sekiro.latency_ms": ms, "sekiro.kind": line["kind"], "sekiro.phase": phase,
-        "usd_estimate": estimate, "billed": billed, "phase": phase
+        "usd_estimate": if billed { estimate } else { None }, "billed": billed, "phase": phase
     });
     line.as_object_mut()
         .expect("telemetry object")
@@ -843,6 +847,7 @@ fn run_coach(
                     &schema,
                     config.timeout,
                     &stopping,
+                    &mut spent,
                 )
                 .map(|a| CoachAnswer {
                     plan: a.plan,
@@ -861,8 +866,10 @@ fn run_coach(
             Ok(a) => (Some(a.plan), None, a.usage, a.cost_usd),
             Err(f) => (None, Some(f), spent, None),
         };
-        let estimate = config.prices.estimate(&config.model, "responses", usage);
         let billed = config.backend == CoachBackend::Api;
+        let estimate = billed
+            .then(|| config.prices.estimate(&config.model, "responses", usage))
+            .flatten();
         let phase = serde_json::from_str::<Value>(&work.input)
             .ok()
             .and_then(|v| v["phase"].as_str().map(str::to_owned))
@@ -871,7 +878,7 @@ fn run_coach(
             "id": work.id, "kind": "coach", "phase": serde_json::from_str::<serde_json::Value>(&work.input).ok().and_then(|v| v.get("phase").cloned()), "backend": config.backend.name(),
             "model": config.model, "round_trip_ms": ms,
             "status": if failure.is_some() {"failed"} else {"answered"},
-            "failure": failure, "usage": usage, "cost_usd": cost
+            "failure": failure, "usage": usage, "cost_usd": if billed { cost } else { None }
         });
         annotate(
             &mut line,
