@@ -8,7 +8,7 @@
 //!   time). [`GamePlan::validate`] checks it against the boss's [`BossActions`]: invalid plans
 //!   and choices are dropped with a warning, and a plan with nothing valid is not usable (the
 //!   Lua AI plays).
-//! - [`CoachInput`] is what the coach is sent about the fight just over (kept near 4 KB).
+//! - [`CoachInput`] is what the coach is sent about the fight just over (bounded to 8 KB).
 //! - [`CoachRequest`] / [`CoachReply`] are the non-blocking hand-off to a controller
 //!   ([`super::BossBrain::submit_coach`]); [`ScriptedCoach`] is the offline test controller.
 //!
@@ -41,9 +41,9 @@ pub const NAME_MAX: usize = 24;
 pub const DESCRIPTION_MAX: usize = 140;
 pub const REASON_MAX: usize = 80;
 /// The coach input's size target, bytes of compact JSON.
-pub const INPUT_BUDGET: usize = 4096;
+pub const INPUT_BUDGET: usize = 8192;
 /// The checkpoint events a set's `when` hint may name.
-pub const CHECKPOINTS: [&str; 7] = [
+pub const CHECKPOINTS: [&str; 11] = [
     "start",
     "pressure",
     "pressure_critical",
@@ -51,6 +51,10 @@ pub const CHECKPOINTS: [&str; 7] = [
     "mark_lost",
     "punished_twice",
     "deflected_thrice",
+    "wolf_posture_25",
+    "wolf_posture_50",
+    "wolf_posture_75",
+    "wolf_broken",
 ];
 /// The checkpoint chooser's "stay on the current set" value.
 pub const KEEP: &str = "keep";
@@ -89,6 +93,10 @@ pub struct Avoid {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GamePlan {
+    /// Local response to Wolf's posture break, never requiring a model call.
+    pub on_wolf_break: Vec<WeightedChoice>,
+    /// Lessons retained by the coach across fights.
+    pub principles: Vec<String>,
     /// Format version ([`GAME_PLAN_VERSION`]; a missing one reads as 1).
     pub version: u32,
     /// A plan run first in the fight (`lua` or empty: none).
@@ -143,7 +151,7 @@ impl GamePlan {
 
     /// Whether anything can be played.
     pub fn usable(&self) -> bool {
-        !self.sets.is_empty() || !self.opener.is_empty()
+        !self.sets.is_empty() || !self.opener.is_empty() || !self.on_wolf_break.is_empty()
     }
 
     /// Checks the plan against the boss's table: unknown choices and plans are dropped with a
@@ -278,6 +286,76 @@ impl GamePlan {
             warnings.push("only one valid set: no checkpoint choices".into());
         }
         out.sets = sets;
+        for w in self.on_wolf_break.iter().take(3) {
+            if w.weight.is_finite()
+                && w.weight > 0.0
+                && actions
+                    .parse(w.plan.trim())
+                    .is_ok_and(|p| limits::has_attack(&p, actions))
+                && !out.avoid.iter().any(|a| a.choice == w.plan.trim())
+            {
+                out.on_wolf_break.push(WeightedChoice {
+                    plan: w.plan.trim().into(),
+                    weight: w.weight,
+                });
+            } else {
+                warnings.push(format!("on_wolf_break dropped: {}", clip(&w.plan, 60)));
+            }
+        }
+        for set in &mut out.sets {
+            let total: f64 = set
+                .plans
+                .iter()
+                .filter(|p| p.plan != "lua")
+                .map(|p| f64::from(p.weight))
+                .sum();
+            let lua: f64 = set
+                .plans
+                .iter()
+                .filter(|p| p.plan == "lua")
+                .map(|p| f64::from(p.weight))
+                .sum();
+            if lua > total / 3.0 {
+                for p in set.plans.iter_mut().filter(|p| p.plan == "lua") {
+                    p.weight = (f64::from(p.weight) * total / (3.0 * lua)) as f32;
+                }
+                set.plans.retain(|p| p.weight > 0.0);
+                warnings.push(format!("set {}: lua capped at 25%", set.name));
+            }
+            let ids: std::collections::HashSet<_> = set
+                .plans
+                .iter()
+                .filter_map(|p| actions.parse(&p.plan).ok())
+                .flat_map(|p| p.steps)
+                .filter_map(|s| match s {
+                    super::plan::Step::Act(id)
+                        if actions.actions.iter().any(|a| {
+                            a.id == id && a.kind == super::actions::ActionKind::Attack
+                        }) =>
+                    {
+                        Some(id)
+                    }
+                    _ => None,
+                })
+                .collect();
+            if ids.len() < 3 {
+                warnings.push(format!(
+                    "set {}: mix at least 3 different attack ids",
+                    set.name
+                ));
+            }
+        }
+        out.sets.retain(|s| !s.plans.is_empty());
+        if !out.sets.iter().any(|s| s.name == out.start_set) {
+            out.start_set = out.sets.first().map(|s| s.name.clone()).unwrap_or_default();
+        }
+        out.principles = self
+            .principles
+            .iter()
+            .take(6)
+            .map(|s| clip(s, 90))
+            .filter(|s| !s.is_empty())
+            .collect();
         out.notes = clip(&self.notes, NOTES_MAX);
         Validated {
             plan: out,
@@ -392,6 +470,19 @@ impl GamePlan {
         if !self.notes.is_empty() {
             lines.push(format!("notes: {}", self.notes));
         }
+        if !self.on_wolf_break.is_empty() {
+            lines.push(format!(
+                "on_wolf_break: {}",
+                self.on_wolf_break
+                    .iter()
+                    .map(|w| w.plan.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !self.principles.is_empty() {
+            lines.push(format!("principles: {}", self.principles.join("; ")));
+        }
         lines
     }
 }
@@ -406,6 +497,11 @@ pub struct SetOffer {
 /// Wolf's result in the fight just over, in percent and whole numbers.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct FightLine {
+    pub wolf_posture_breaks: u32,
+    pub hits_after_break: u32,
+    pub break_punish_rate: f32,
+    pub wolf_posture_peak: f32,
+    pub time_to_kill_wolf: Option<f32>,
     /// `boss`, `wolf` or `none`.
     pub won: String,
     pub secs: u32,
@@ -438,8 +534,13 @@ pub struct SetStat {
 /// `[exchanges, hit, blocked, deflected, whiffed, punished]` per plan text.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct CoachInput {
+    pub on_wolf_break: std::collections::BTreeMap<String, Counts>,
+    pub principles: Vec<String>,
+    /// Every observed boss action, including acts selected by Lua.
+    pub actions: std::collections::BTreeMap<String, Counts>,
+    pub action_range: std::collections::BTreeMap<String, [f32; 2]>,
     pub banned: Vec<String>,
-    pub failures: std::collections::BTreeMap<String, [u32; 3]>,
+    pub failures: std::collections::BTreeMap<String, [u32; 4]>,
     /// Fights with this enemy so far, this one included.
     pub fight: u32,
     pub result: FightLine,
@@ -537,6 +638,15 @@ impl CoachInput {
         }
         if self.notes.chars().count() > 80 {
             self.notes = clip(&self.notes, self.notes.chars().count() - 80);
+            return true;
+        }
+        if self.action_range.pop_last().is_some() {
+            return true;
+        }
+        if self.actions.pop_last().is_some() {
+            return true;
+        }
+        if self.on_wolf_break.pop_last().is_some() {
             return true;
         }
         if self.failures.pop_last().is_some() {

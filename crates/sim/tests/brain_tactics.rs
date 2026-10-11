@@ -396,7 +396,9 @@ fn coach_reports_measured_attack_ranges_per_plan() {
     assert_eq!(tactic.whiffed, 0, "movement is not a whiffed attack");
     let [distance, reach] = input.range["walk_in4>3000+3001"];
     assert!(distance > 0.0 && reach > distance, "{distance} {reach}");
-    assert!(input.fit(sekiro_sim::brain::coach::INPUT_BUDGET) <= 4096);
+    assert!(
+        input.fit(sekiro_sim::brain::coach::INPUT_BUDGET) <= sekiro_sim::brain::coach::INPUT_BUDGET
+    );
     assert!(input.range.contains_key("walk_in4>3000+3001"));
 }
 

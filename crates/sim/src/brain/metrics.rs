@@ -29,6 +29,12 @@ pub const TREND_FIGHTS: usize = 3;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FightMetrics {
+    pub wolf_posture_breaks: u32,
+    pub hits_after_break: u32,
+    /// Breaks followed by at least one landed hit, divided by breaks.
+    pub break_punish_rate: f32,
+    pub wolf_posture_peak: f32,
+    pub time_to_kill_wolf: Option<f32>,
     pub duration: f32,
     pub deflected: u32,
     pub guarded: u32,
@@ -108,6 +114,9 @@ impl FightMetrics {
 /// Collects [`FightMetrics`] as a fight goes.
 #[derive(Debug, Clone, Default)]
 pub struct MetricsTracker {
+    last_break: Option<f32>,
+    break_punished: bool,
+    punished_breaks: u32,
     pub metrics: FightMetrics,
     start: f32,
     prev_hp: Option<f32>,
@@ -117,6 +126,29 @@ pub struct MetricsTracker {
 }
 
 impl MetricsTracker {
+    pub fn wolf_break(&mut self, now: f32) {
+        self.metrics.wolf_posture_breaks += 1;
+        self.metrics.break_punish_rate =
+            self.punished_breaks as f32 / self.metrics.wolf_posture_breaks as f32;
+        self.metrics.wolf_posture_peak = 1.0;
+        self.last_break = Some(now);
+        self.break_punished = false;
+    }
+
+    pub fn post_break_hit(&mut self, now: f32) {
+        if self
+            .last_break
+            .is_some_and(|t| (0.0..=2.5).contains(&(now - t)))
+        {
+            self.metrics.hits_after_break += 1;
+            if !self.break_punished {
+                self.punished_breaks += 1;
+                self.break_punished = true;
+            }
+            self.metrics.break_punish_rate =
+                self.punished_breaks as f32 / self.metrics.wolf_posture_breaks as f32;
+        }
+    }
     /// Raw input presses and held time, including during throws and hit stop.
     pub fn input_tick(&mut self, input: &crate::InputFrame, now: f32, dt: f32) {
         let b = input.buttons;
@@ -182,6 +214,7 @@ impl MetricsTracker {
 
     /// Wolf's HP and posture (fractions) after a step.
     pub fn wolf(&mut self, hp: f32, posture: f32) {
+        self.metrics.wolf_posture_peak = self.metrics.wolf_posture_peak.max(posture);
         if let Some(p) = self.prev_hp {
             self.metrics.hp_lost += (p - hp).max(0.0);
         }
@@ -318,7 +351,16 @@ impl FightRecord {
             coach,
             sets,
         );
-        format!("{line}; engaged_time {:.1}s", m.engaged_time)
+        format!(
+            "{line}; engaged_time {:.1}s; wolf_posture_breaks {} hits_after_break {} break_punish_rate {:.0}% wolf_posture_peak {:.0}% time_to_kill_wolf {}",
+            m.engaged_time,
+            m.wolf_posture_breaks,
+            m.hits_after_break,
+            m.break_punish_rate * 100.0,
+            m.wolf_posture_peak * 100.0,
+            m.time_to_kill_wolf
+                .map_or("-".into(), |t| format!("{t:.1}s"))
+        )
     }
 }
 
@@ -336,6 +378,12 @@ pub fn percentile(values: &[f32], p: f32) -> f32 {
 /// fight, plus this fight so far.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Trend {
+    pub duration: Vec<f32>,
+    pub wolf_posture_breaks: Vec<u32>,
+    pub hits_after_break: Vec<u32>,
+    pub break_punish_rate: Vec<f32>,
+    pub wolf_posture_peak: Vec<f32>,
+    pub time_to_kill_wolf: Vec<Option<f32>>,
     /// Perfect-deflect rate, percent.
     pub defl: Vec<u32>,
     /// Guard rate, percent.
@@ -367,6 +415,15 @@ impl Trend {
     pub fn new(history: &[FightRecord], now: Option<&FightMetrics>) -> Self {
         let recent = &history[history.len().saturating_sub(TREND_FIGHTS)..];
         Self {
+            duration: recent.iter().map(|r| r.metrics.duration).collect(),
+            wolf_posture_breaks: recent
+                .iter()
+                .map(|r| r.metrics.wolf_posture_breaks)
+                .collect(),
+            hits_after_break: recent.iter().map(|r| r.metrics.hits_after_break).collect(),
+            break_punish_rate: recent.iter().map(|r| r.metrics.break_punish_rate).collect(),
+            wolf_posture_peak: recent.iter().map(|r| r.metrics.wolf_posture_peak).collect(),
+            time_to_kill_wolf: recent.iter().map(|r| r.metrics.time_to_kill_wolf).collect(),
             defl: recent
                 .iter()
                 .map(|r| pct(r.metrics.deflect_rate()))
@@ -411,6 +468,12 @@ impl Trend {
             return false;
         }
         self.defl.remove(0);
+        self.duration.remove(0);
+        self.wolf_posture_breaks.remove(0);
+        self.hits_after_break.remove(0);
+        self.break_punish_rate.remove(0);
+        self.wolf_posture_peak.remove(0);
+        self.time_to_kill_wolf.remove(0);
         self.guard.remove(0);
         self.hits.remove(0);
         self.hp.remove(0);

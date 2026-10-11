@@ -254,6 +254,12 @@ pub enum ActSlot {
 /// that queues [`ActHook::choice`] instead, unless the moment is a reaction.
 #[derive(Debug, Clone, Default)]
 pub struct ActHook {
+    /// One local posture-break response, replacing the script's queued follow-up.
+    pub break_response: bool,
+    /// Retained until its first attack starts, so a delayed Lua replan cannot steal it.
+    pub break_followup: Option<ActChoice>,
+    /// Stop reserving the follow-up slot after the break's reward window.
+    pub break_until: f32,
     /// Act indices of the battle goal that are reactions (punishing a heal, turning to a
     /// target behind); when the script weighs any of them, its own pick stands.
     pub reflex_acts: Vec<i32>,
@@ -652,6 +658,13 @@ impl AiState {
     /// params)` while an [`ActHook`] is installed: queues the external act on the battle goal,
     /// or calls the script's own function.
     fn battle_activate(&mut self, vm: &mut Vm, args: &[Value]) -> LuaResult<Vec<Value>> {
+        if self
+            .act_hook
+            .as_ref()
+            .is_some_and(|h| h.break_followup.is_some())
+        {
+            return Ok(vec![]);
+        }
         let goal = match args.get(1) {
             Some(Value::Obj(o))
                 if o.kind == OBJ_GOAL
@@ -1249,6 +1262,15 @@ fn update(vm: &mut Vm, st: &mut AiState, id: u32, depth: usize) -> i32 {
         return RESULT_FAILED;
     }
     let dt = st.world.dt;
+    if st.time
+        >= st
+            .act_hook
+            .as_ref()
+            .map_or(f32::INFINITY, |h| h.break_until)
+        && let Some(hook) = st.act_hook.as_mut()
+    {
+        hook.break_followup = None;
+    }
     if !st.goal(id).activated {
         st.goal_mut(id).activated = true;
         let kind = st.goal(id).kind;
@@ -1285,6 +1307,46 @@ fn update(vm: &mut Vm, st: &mut AiState, id: u32, depth: usize) -> i32 {
         }
         if st.goals.get(id as usize).is_none_or(Option::is_none) {
             return RESULT_FAILED;
+        }
+    }
+    // Replace the post-break follow-up after Activate, and retain ownership until
+    // the attack starts. Observed effects can replan one tick after the hit.
+    if st.goal(id).kind == st.think.battle_goal_id
+        && let Some(choice) = st.act_hook.as_ref().and_then(|h| h.break_followup.clone())
+    {
+        let attack = choice.goals.iter().find_map(|g| {
+            g.params
+                .first()
+                .copied()
+                .map(|p| p as i32)
+                .filter(|id| (3000..3100).contains(id))
+        });
+        if !st.act_hook.as_ref().unwrap().break_response
+            && attack.is_some()
+            && st.world.current_anim == attack
+        {
+            st.act_hook.as_mut().unwrap().break_followup = None;
+        } else if st.act_hook.as_ref().unwrap().break_response
+            || !st
+                .goal(id)
+                .subgoals
+                .iter()
+                .any(|&g| st.goal(g).plan_step.is_some())
+        {
+            let subs: Vec<_> = st.goal_mut(id).subgoals.drain(..).collect();
+            for s in subs {
+                terminate(vm, st, s);
+            }
+            let hook = st.act_hook.as_mut().unwrap();
+            hook.choice = None;
+            if hook.break_response {
+                hook.slots.push((st.time, ActSlot::External));
+            }
+            hook.break_response = false;
+            if let Err(e) = st.queue_act(vm, id, &choice) {
+                st.log(AiEvent::Error(e.to_string()));
+                st.act_hook.as_mut().unwrap().break_followup = None;
+            }
         }
     }
     {

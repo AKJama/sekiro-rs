@@ -67,6 +67,70 @@ fn actions(duel: &mut Duel) -> Vec<i32> {
         .collect()
 }
 
+/// Scripted combat path: a real slash breaks low-posture Wolf, then Lua follows up.
+#[test]
+fn local_coach_response_replaces_owls_post_break_grab() {
+    use sekiro_sim::brain::ScriptedCoach;
+    use sekiro_sim::brain::coach::{GamePlan, WeightedChoice};
+    let Some(mut duel) = load(1.6) else { return };
+    duel.set_brain(Box::new(ScriptedCoach::new(Vec::new(), 0.0, 0.0)), false)
+        .unwrap();
+    duel.boss_brain.as_mut().unwrap().game_plan = Some(GamePlan {
+        opener: "3001".into(),
+        on_wolf_break: vec![WeightedChoice {
+            plan: "3000".into(),
+            weight: 1.0,
+        }],
+        ..Default::default()
+    });
+    duel.boss_brain.as_mut().unwrap().start_fight();
+    duel.force_act = Some(3001);
+    let mut broke = None;
+    let mut first_response = None;
+    let mut requested_response = false;
+    for tick in 0..1200 {
+        duel.rules.fighters[0].vitality.hp = duel.rules.fighters[0].vitality.max_hp;
+        if broke.is_none() {
+            duel.rules.fighters[0].posture.remaining = 1;
+        }
+        let report = duel.step(&frame(false, false, tick == 0), DT);
+        if broke.is_none() && duel.rules.fighters[0].posture.broken() {
+            broke = Some(tick);
+            duel.force_act = None;
+            actions(&mut duel);
+            continue;
+        }
+        let requested = actions(&mut duel);
+        if let Some(start) = broke {
+            assert!(
+                !requested.contains(&3040),
+                "Lua grab replaced: {requested:?}"
+            );
+            requested_response |= requested.contains(&3000);
+            if report.enemy.clip_started
+                && report
+                    .enemy
+                    .animation
+                    .as_deref()
+                    .and_then(sekiro_sim::lua_ai::anim_id_from_clip)
+                    == Some(3000)
+            {
+                first_response = Some(tick - start);
+                break;
+            }
+        }
+    }
+    assert!(broke.is_some(), "Wolf never broke");
+    assert!(requested_response, "3000 never requested");
+    let ticks = first_response.expect("3000 animation never started");
+    eprintln!(
+        "Owl local break response 3000 started after {ticks} ticks ({:.3}s)",
+        ticks as f32 * DT
+    );
+    assert!(ticks <= 18, "response took {ticks} ticks");
+    assert_eq!(duel.boss_brain.as_ref().unwrap().memory_now().fights, 0);
+}
+
 #[test]
 fn lua_brain_leaves_his_choices_unchanged() {
     let Some(mut plain) = load(6.0) else { return };
@@ -270,4 +334,37 @@ fn reflex_deflects_happen_while_a_plan_runs() {
     );
     assert!(stats.planned >= 3, "{stats:?}");
     assert!(reflexes_in_plan > 0, "no guard or deflect while a plan ran");
+}
+
+#[test]
+fn absent_break_plan_keeps_owls_lua_grab() {
+    use sekiro_sim::brain::ScriptedCoach;
+    let Some(mut duel) = load(1.6) else { return };
+    duel.set_brain(Box::new(ScriptedCoach::new(Vec::new(), 0.0, 0.0)), false)
+        .unwrap();
+    duel.force_act = Some(3001);
+    let mut broke = None;
+    for tick in 0..1200 {
+        duel.rules.fighters[0].vitality.hp = duel.rules.fighters[0].vitality.max_hp;
+        if broke.is_none() {
+            duel.rules.fighters[0].posture.remaining = 1;
+        }
+        duel.step(&frame(false, false, tick == 0), DT);
+        if broke.is_none() && duel.rules.fighters[0].posture.broken() {
+            broke = Some(tick);
+            duel.force_act = None;
+            actions(&mut duel);
+            continue;
+        }
+        if let Some(start) = broke
+            && actions(&mut duel).contains(&3040)
+        {
+            eprintln!(
+                "Owl Lua break follow-up 3040 requested after {} ticks",
+                tick - start
+            );
+            return;
+        }
+    }
+    panic!("Owl did not use his Lua grab after the break");
 }

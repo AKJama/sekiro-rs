@@ -122,6 +122,8 @@ fn plan(notes: &str) -> GamePlan {
         }],
         notes: notes.into(),
         retry: Vec::new(),
+        on_wolf_break: Vec::new(),
+        principles: Vec::new(),
     }
 }
 
@@ -178,6 +180,61 @@ fn driver(duel: &Duel) -> &sekiro_sim::brain::BrainDriver {
 }
 
 #[test]
+fn wolf_posture_crossings_reach_the_checkpoint_chooser_and_rearm() {
+    let Some((mut duel, coach)) = coached(Vec::new(), 0.0) else {
+        return;
+    };
+    duel.player.body.position[2] += 25.0;
+    let d = duel.boss_brain.as_mut().unwrap();
+    d.game_plan = Some(plan("posture pressure"));
+    d.start_fight();
+    for fraction in [0.3, 0.6, 0.8, 0.1, 0.3] {
+        for _ in 0..20 {
+            fresh(&mut duel);
+            let wolf = &mut duel.rules.fighters[0];
+            wolf.posture.remaining = (wolf.posture.max as f32 * (1.0 - fraction)) as i32;
+            duel.step(&InputFrame::default(), DT);
+        }
+    }
+    let c = coach.borrow();
+    let events: Vec<_> = c
+        .checkpoint_requests
+        .iter()
+        .filter_map(|(why, _)| *why)
+        .collect();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|&&why| why == "wolf_posture_25")
+            .count(),
+        2,
+        "{events:?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|&&why| why == "wolf_posture_50")
+            .count(),
+        1,
+        "{events:?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|&&why| why == "wolf_posture_75")
+            .count(),
+        1,
+        "{events:?}"
+    );
+    assert!(
+        c.checkpoint_briefs
+            .iter()
+            .flatten()
+            .any(|b| b.contains("wolf_posture_75"))
+    );
+}
+
+#[test]
 fn fight_one_makes_no_calls_and_a_plan_that_arrives_in_the_respawn_plays_from_fight_two() {
     let Some((mut duel, coach)) = coached(
         vec![
@@ -202,8 +259,15 @@ fn fight_one_makes_no_calls_and_a_plan_that_arrives_in_the_respawn_plays_from_fi
     assert_eq!(coach.borrow().coach_inputs.len(), 1);
     let first = coach.borrow().coach_inputs[0].clone();
     eprintln!("coach input of fight 1 ({} bytes): {first}", first.len());
-    assert!(first.len() <= 4096, "{}", first.len());
-    assert!(first.contains("\"result\":{\"won\":\"boss\""), "{first}");
+    assert!(
+        first.len() <= sekiro_sim::brain::coach::INPUT_BUDGET,
+        "{}",
+        first.len()
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&first).unwrap()["result"]["won"],
+        "boss"
+    );
     assert!(!first.contains("\"played\""), "fight 1 played no plan");
     assert!(
         driver(&duel).game_plan.is_some(),
@@ -244,7 +308,11 @@ fn fight_one_makes_no_calls_and_a_plan_that_arrives_in_the_respawn_plays_from_fi
     // The coach's notes come back in its next request, with the plan that was played.
     die(&mut duel);
     let second = coach.borrow().coach_inputs[1].clone();
-    assert!(second.len() <= 4096, "{}", second.len());
+    assert!(
+        second.len() <= sekiro_sim::brain::coach::INPUT_BUDGET,
+        "{}",
+        second.len()
+    );
     assert!(
         second.contains("\"notes\":\"he deflects thrusts\""),
         "{second}"

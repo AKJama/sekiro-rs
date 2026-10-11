@@ -119,6 +119,8 @@ struct InFlight {
 /// Which checkpoint events have fired this fight (see [`RequestMode::Checkpoints`]).
 #[derive(Debug, Clone, Default)]
 struct Checkpoints {
+    wolf_thresholds: [bool; 3],
+    wolf_broken: bool,
     previous_posture: f32,
     pressure: bool,
     pressure_critical: bool,
@@ -131,6 +133,31 @@ struct Checkpoints {
 }
 
 impl Checkpoints {
+    fn on_wolf(&mut self, posture: f32, broken: bool) -> (Vec<&'static str>, bool) {
+        if posture < 0.15 {
+            self.wolf_thresholds = [false; 3];
+        }
+        let edge = broken && !self.wolf_broken;
+        self.wolf_broken = broken;
+        let mut events = Vec::new();
+        for (i, (level, name)) in [
+            (0.25, "wolf_posture_25"),
+            (0.5, "wolf_posture_50"),
+            (0.75, "wolf_posture_75"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if posture >= level && !self.wolf_thresholds[i] {
+                self.wolf_thresholds[i] = true;
+                events.push(name);
+            }
+        }
+        if edge {
+            events.push("wolf_broken");
+        }
+        (events, edge)
+    }
     fn on_vitals(&mut self, posture: f32, hp: f32, hits: Option<f32>) -> Option<&'static str> {
         let growing = posture > self.previous_posture;
         if 1.0 - posture > PRESSURE_REARM && 1.0 - self.previous_posture <= PRESSURE_REARM {
@@ -194,6 +221,8 @@ impl Checkpoints {
 /// What is counted about the fight in progress.
 #[derive(Debug, Clone, Default)]
 struct FightState {
+    break_plans: CountMap,
+    action_ranges: BTreeMap<String, (u32, f32, f32)>,
     uses: Vec<PlanUse>,
     failures: BTreeMap<String, PlanFailures>,
     /// Completed melee samples: count, sum of starting distances, sum of measured reaches.
@@ -219,6 +248,8 @@ struct FightState {
 
 #[derive(Debug, Clone)]
 struct PlanUse {
+    break_response: bool,
+    failed: bool,
     text: String,
     start: f32,
     last_attack: Option<f32>,
@@ -230,6 +261,7 @@ struct PlanUse {
 
 #[derive(Debug, Clone)]
 struct AttackRange {
+    action: String,
     plan: String,
     start: [f32; 3],
     distance: f32,
@@ -245,11 +277,22 @@ impl FightState {
             *n += 1;
             *distance += sample.distance;
             *total_reach += reach;
+            let (n, distance, total_reach) = self.action_ranges.entry(sample.action).or_default();
+            *n += 1;
+            *distance += sample.distance;
+            *total_reach += reach;
         }
     }
 }
 
 pub struct BrainDriver {
+    session_records: Vec<FightRecord>,
+    session_actions: CountMap,
+    session_ranges: BTreeMap<String, (u32, f32, f32)>,
+    session_report_path: Option<PathBuf>,
+    break_pending: bool,
+    cancel_break: bool,
+    wolf_events: std::collections::VecDeque<&'static str>,
     banned: HashSet<String>,
     bans_at_start: HashSet<String>,
     retry_baselines: BTreeMap<String, PlanFailures>,
@@ -360,6 +403,13 @@ impl BrainDriver {
                     .map_or(1, |d| d.as_nanos() as u64)
             });
         Self {
+            session_records: Vec::new(),
+            session_actions: Default::default(),
+            session_ranges: Default::default(),
+            session_report_path: None,
+            break_pending: false,
+            cancel_break: false,
+            wolf_events: Default::default(),
             banned: HashSet::new(),
             bans_at_start: HashSet::new(),
             retry_baselines: BTreeMap::new(),
@@ -456,7 +506,7 @@ impl BrainDriver {
             if f.banned() {
                 self.banned.insert(text.clone());
                 eprintln!(
-                    "banned: {text} ({} uses, {:.0}% deflected/fatal)",
+                    "banned: {text} ({} uses, {:.0}% deflected/fatal/break failure)",
                     f.uses,
                     f.rate() * 100.0
                 );
@@ -532,7 +582,11 @@ impl BrainDriver {
         self.close_set_time();
         self.active_set = Some(i);
         self.set = set;
-        if self.ready.as_ref().is_none_or(|r| !r.opener) {
+        if self
+            .ready
+            .as_ref()
+            .is_none_or(|r| !r.opener && r.label != "on_wolf_break")
+        {
             self.ready = None;
             self.picked = false;
         }
@@ -549,6 +603,86 @@ impl BrainDriver {
 
     pub fn memory_path(&self) -> Option<&Path> {
         self.memory_path.as_deref()
+    }
+
+    /// Enable exit/F9 reports in the game; offline tests do not write reports.
+    pub fn enable_session_report(&mut self, logs: &Path) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis());
+        self.session_report_path = Some(logs.join(format!("brain-session-{stamp}.md")));
+    }
+
+    pub fn session_report(&self) -> String {
+        let mut actions = self.session_actions.clone();
+        let mut ranges = self.session_ranges.clone();
+        if !self.fight_over && self.fight.metrics.player_active(self.time) {
+            let (tally, _) = self.fight_snapshot();
+            merge_counts(&mut actions, tally.all(Side::Boss));
+            for (key, &(n, distance, reach)) in &self.fight.action_ranges {
+                let entry = ranges.entry(key.clone()).or_default();
+                entry.0 += n;
+                entry.1 += distance;
+                entry.2 += reach;
+            }
+        }
+        let mut report = format!(
+            "# Brain session: {}\n\n| action | n | hit | blocked | deflected | whiffed | punished | distance / reach (m) |\n|---|---:|---:|---:|---:|---:|---:|---|\n",
+            self.actions.chr
+        );
+        for (key, c) in actions {
+            let range = ranges.get(&key).map_or("-".into(), |&(n, d, r)| {
+                format!("{:.2} / {:.2}", d / n as f32, r / n as f32)
+            });
+            report.push_str(&format!(
+                "| {key} | {} | {} | {} | {} | {} | {} | {range} |\n",
+                c.n, c.hit, c.blocked, c.deflected, c.whiffed, c.punished
+            ));
+        }
+        report.push_str("\n| fight | winner | duration (s) | time to kill Wolf (s) | Wolf posture breaks | hits after break | break punish rate | Wolf posture peak |\n|---|---|---:|---:|---:|---:|---:|---:|\n");
+        for (i, r) in self.session_records.iter().enumerate() {
+            let m = r.metrics;
+            report.push_str(&format!(
+                "| {} | {} | {:.1} | {} | {} | {} | {:.0}% | {:.0}% |\n",
+                i + 1,
+                r.winner,
+                m.duration,
+                m.time_to_kill_wolf
+                    .map_or("-".into(), |t| format!("{t:.1}")),
+                m.wolf_posture_breaks,
+                m.hits_after_break,
+                m.break_punish_rate * 100.0,
+                m.wolf_posture_peak * 100.0
+            ));
+        }
+        if !self.fight_over && self.fight.metrics.player_active(self.time) {
+            let m = self.fight.metrics.snapshot(self.time);
+            report.push_str(&format!(
+                "| current | unfinished | {:.1} | - | {} | {} | {:.0}% | {:.0}% |\n",
+                m.duration,
+                m.wolf_posture_breaks,
+                m.hits_after_break,
+                m.break_punish_rate * 100.0,
+                m.wolf_posture_peak * 100.0
+            ));
+        }
+        report
+    }
+
+    pub fn print_session_report(&self) -> std::io::Result<()> {
+        let report = self.session_report();
+        eprintln!("{report}");
+        if let Some(path) = &self.session_report_path {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
+            file.write_all(report.as_bytes())?;
+        }
+        Ok(())
     }
 
     /// The memory as it would be saved now: every earlier fight, plus this one as unfinished
@@ -717,6 +851,11 @@ impl BrainDriver {
             // New evidence is evaluated against new uses after the explicit retry.
             self.retry_baselines
                 .insert(retry.choice.clone(), self.plan_failures(&retry.choice));
+            let response = format!("on_wolf_break:{}", retry.choice);
+            self.banned.remove(&response);
+            self.bans_at_start.remove(&response);
+            self.retry_baselines
+                .insert(response.clone(), self.plan_failures(&response));
         }
         eprintln!(
             "coach: game plan arrived after {waited:.1} s, played from fight {} on ({tokens})",
@@ -739,10 +878,30 @@ impl BrainDriver {
     /// the next slot and drops a stale one.
     pub fn before_think(&mut self, ai: &mut AiBrain, hit_radius: f32) {
         ai.enable_act_hook(self.actions.reflex_acts);
+        if self.cancel_break {
+            self.cancel_break = false;
+            if let Some(hook) = ai.state.act_hook.as_mut() {
+                if hook.break_followup.take().is_some() {
+                    hook.choice = None;
+                }
+                hook.break_response = false;
+            }
+            if self
+                .ready
+                .as_ref()
+                .is_some_and(|r| r.label == "on_wolf_break")
+            {
+                self.ready = None;
+                self.picked = false;
+            }
+        }
         if let Some(reply) = self.brain.poll(self.time) {
             self.take_reply(reply);
         }
         if self.fight_over {
+            if let Some(hook) = ai.state.act_hook.as_mut() {
+                hook.break_followup = None;
+            }
             self.ready = None;
         }
         // A plan that is no longer waiting (a new fight began) must not run.
@@ -750,9 +909,62 @@ impl BrainDriver {
             && let Some(hook) = ai.state.act_hook.as_mut()
         {
             hook.choice = None;
+            if hook.break_followup.is_none() {
+                hook.break_response = false;
+            }
         }
         if self.fight_over {
             return;
+        }
+        if self.break_pending {
+            self.break_pending = false;
+            let choices: Vec<_> = self
+                .game_plan
+                .as_ref()
+                .map(|p| p.on_wolf_break.as_slice())
+                .unwrap_or_default()
+                .iter()
+                .filter(|w| {
+                    !self.banned.contains(&w.plan)
+                        && !self.banned.contains(&format!("on_wolf_break:{}", w.plan))
+                })
+                .filter_map(|w| {
+                    Some(Weighted {
+                        plan: Some(self.actions.parse(&w.plan).ok()?),
+                        weight: w.weight,
+                    })
+                })
+                .collect();
+            let ctx = Context {
+                streaks: &Streaks::default(),
+                tried: &HashSet::new(),
+                temperature: self.temperature,
+            };
+            if let Pick::Plan(i) = sampler::pick(&choices, &ctx, &mut self.rng)
+                && let Some(plan) = choices[i].plan.clone()
+                && let Ok(mut choice) = self.actions.act_for_plan(&plan, hit_radius)
+                && let Some(hook) = ai.state.act_hook.as_mut()
+            {
+                // A break response is a follow-up: request it through the existing combo
+                // cancel path, preserving the animation's own TAE windows.
+                if let Some(first) = choice.goals.first_mut()
+                    && first.goal == "GOAL_COMMON_AttackTunableSpin"
+                {
+                    first.goal = "GOAL_COMMON_ComboFinal";
+                    first.params.truncate(6);
+                }
+                hook.break_followup = Some(choice.clone());
+                hook.break_until = ai.state.time + 2.5;
+                hook.choice = Some(choice);
+                hook.break_response = true;
+                self.ready = Some(Ready {
+                    since: self.time,
+                    plan,
+                    opener: false,
+                    label: "on_wolf_break".into(),
+                });
+                self.picked = true;
+            }
         }
         let stale = self.ready.as_ref().is_some_and(|r| {
             self.time - r.since > self.max_staleness || self.banned.contains(&r.plan.value())
@@ -766,6 +978,7 @@ impl BrainDriver {
             let plan = ready.map(|r| r.plan);
             if let Some(hook) = ai.state.act_hook.as_mut() {
                 hook.choice = None;
+                hook.break_response = false;
             }
             self.picked = false;
             if !self.persist {
@@ -774,6 +987,14 @@ impl BrainDriver {
                 self.write(json!({"ev": "stale", "t": ms(self.time),
                     "plan": plan.map(|p| p.value())}));
             }
+        }
+        if ai
+            .state
+            .act_hook
+            .as_ref()
+            .is_some_and(|h| h.break_followup.is_some())
+        {
+            self.picked = true;
         }
         if !self.picked && (!self.set.is_empty() || self.opener.is_some()) {
             self.pick_next(ai, hit_radius);
@@ -977,9 +1198,17 @@ impl BrainDriver {
                     self.tried.insert(value.clone());
                     if !quiet {
                         self.fight.decisions += 1;
-                        self.fight.runs.push((self.time, value.clone(), label));
+                        self.fight
+                            .runs
+                            .push((self.time, value.clone(), label.clone()));
                         self.fight.uses.push(PlanUse {
-                            text: value.clone(),
+                            break_response: label == "on_wolf_break",
+                            failed: false,
+                            text: if label == "on_wolf_break" {
+                                format!("on_wolf_break:{value}")
+                            } else {
+                                value.clone()
+                            },
                             start: self.time,
                             last_attack: None,
                             attacks: 0,
@@ -1054,6 +1283,9 @@ impl BrainDriver {
             return;
         }
         if self.mode == RequestMode::Checkpoints {
+            if self.pending_why.is_none() {
+                self.pending_why = self.wolf_events.pop_front();
+            }
             let limit = match self.pending_why {
                 Some("pressure") => Some(PRESSURE_HITS),
                 Some("pressure_critical") => Some(PRESSURE_CRITICAL_HITS),
@@ -1178,6 +1410,7 @@ impl BrainDriver {
                     let start = duel.enemy.body.position;
                     let wolf = duel.player.body.position;
                     self.fight.range_open = Some(AttackRange {
+                        action: boss.unwrap().to_string(),
                         plan: plan.clone(),
                         start,
                         distance: ((wolf[0] - start[0]).powi(2) + (wolf[2] - start[2]).powi(2))
@@ -1239,7 +1472,43 @@ impl BrainDriver {
             self.wolf_open = clip;
         }
         let mut punished_break = false;
-        for (hit, result) in &report.hits {
+        let wolf = &duel.rules.fighters[0];
+        let (wolf_events, wolf_broke) = self
+            .checkpoints
+            .on_wolf(wolf.posture_fraction(), wolf.posture.broken());
+        for why in wolf_events {
+            if !self.wolf_events.contains(&why) {
+                self.wolf_events.push_back(why);
+            }
+        }
+        let breaking_hit = wolf_broke
+            .then(|| {
+                report.hits.iter().position(|(hit, result)| {
+                    result.posture_broke
+                        && (if hit.defender == 0 {
+                            matches!(result.defender.damage_type, 1001 | 1004 | 1005)
+                        } else {
+                            result.attacker.as_ref().is_some_and(|damage| {
+                                matches!(damage.damage_type, 1001 | 1004 | 1005)
+                            })
+                        })
+                })
+            })
+            .flatten();
+        if wolf_broke && breaking_hit.is_none() {
+            self.fight.metrics.wolf_break(t);
+        }
+        if wolf_broke
+            && !self.quiet(duel)
+            && duel.deathblow.is_none()
+            && !duel.rules.deathblow_open(1)
+        {
+            self.break_pending = true;
+        }
+        for (index, (hit, result)) in report.hits.iter().enumerate() {
+            if breaking_hit == Some(index) {
+                self.fight.metrics.wolf_break(t);
+            }
             if (result.posture_broke && duel.rules.fighters[1].posture.broken())
                 || (hit.attacker == 0 && matches!(result.defender.damage_type, 1001 | 1004 | 1005))
             {
@@ -1257,6 +1526,10 @@ impl BrainDriver {
                 self.since_hit[if attacker == Side::Boss { 0 } else { 1 }] = Some(0.0);
             }
             if attacker == Side::Boss {
+                // The blow that caused the break is not its follow-up.
+                if breaking_hit != Some(index) && !result.guarded && !result.deflected {
+                    self.fight.metrics.post_break_hit(t);
+                }
                 self.fight
                     .metrics
                     .boss_hit(result.guarded, result.deflected);
@@ -1301,6 +1574,9 @@ impl BrainDriver {
         }
         self.checkpoints.marks = Some(marks);
         if self.quiet(duel) || duel.deathblow.is_some() || duel.rules.deathblow_open(1) {
+            self.wolf_events.clear();
+            self.break_pending = false;
+            self.cancel_break = true;
             // A lost mark is useful after the get-up; pressure during a deathblow opening is obsolete.
             self.pending_why = self
                 .pending_why
@@ -1369,6 +1645,7 @@ impl BrainDriver {
             f.uses += now.uses;
             f.deflected_all += now.deflected_all;
             f.fatal += now.fatal;
+            f.failed += now.failed;
         }
         f
     }
@@ -1402,6 +1679,7 @@ impl BrainDriver {
             f.uses += 1;
             f.deflected_all += u32::from(use_.attacks > 0 && use_.attacks == use_.deflected);
             f.fatal += u32::from(use_.fatal);
+            f.failed += u32::from(use_.failed && !use_.fatal && use_.attacks != use_.deflected);
         }
         // Provisional outcomes never teach the sampler while the player is inactive.
         if !self.fight.metrics.player_active(self.time) {
@@ -1421,10 +1699,11 @@ impl BrainDriver {
                 f.uses = f.uses.saturating_sub(base.uses);
                 f.deflected_all = f.deflected_all.saturating_sub(base.deflected_all);
                 f.fatal = f.fatal.saturating_sub(base.fatal);
+                f.failed = f.failed.saturating_sub(base.failed);
             }
             if f.banned() && self.banned.insert(text.clone()) {
                 eprintln!(
-                    "banned: {text} ({} uses, {:.0}% deflected/fatal)",
+                    "banned: {text} ({} uses, {:.0}% deflected/fatal/break failure)",
                     f.uses,
                     f.rate() * 100.0
                 );
@@ -1461,6 +1740,9 @@ impl BrainDriver {
                 );
                 use_.deflected +=
                     u32::from(x.outcome.deflected && !x.outcome.hit && !x.outcome.blocked);
+                if use_.break_response {
+                    use_.failed |= x.whiffed() || x.outcome.punished;
+                }
             }
             let mut one = Counts::default();
             one.merge(&Counts {
@@ -1471,6 +1753,13 @@ impl BrainDriver {
                 whiffed: u32::from(x.whiffed()),
                 punished: u32::from(x.outcome.punished),
             });
+            if set == "on_wolf_break" {
+                self.fight
+                    .break_plans
+                    .entry(plan.clone())
+                    .or_default()
+                    .merge(&one);
+            }
             self.fight.by_plan.entry(plan).or_default().merge(&one);
             self.fight.by_set.entry(set).or_default().merge(&one);
         }
@@ -1505,10 +1794,11 @@ impl BrainDriver {
             .values()
             .map(|c| c.punished)
             .sum();
-        let metrics = self
+        let mut metrics = self
             .fight
             .metrics
             .finish(t, punishes, end == FightEnd::WolfWon);
+        metrics.time_to_kill_wolf = (end == FightEnd::BossWon).then_some(metrics.duration);
         let usage = self.brain.usage();
         let record = FightRecord {
             winner: winner.to_string(),
@@ -1537,14 +1827,24 @@ impl BrainDriver {
             "void": record.metrics.void, "fights": self.memory.fights + u32::from(!record.metrics.void), "summary": record.summary_line()}));
         self.write_line(&json!({"ev": "fight_summary", "t": ms(t), "record": record}));
         if !record.metrics.void {
+            self.session_records.push(record.clone());
+            merge_counts(&mut self.session_actions, self.tally.all(Side::Boss));
+            for (action, &(n, distance, reach)) in &self.fight.action_ranges {
+                let entry = self.session_ranges.entry(action.clone()).or_default();
+                entry.0 += n;
+                entry.1 += distance;
+                entry.2 += reach;
+            }
             self.memory.add_fight(&self.tally, &self.habits.habits, end);
             self.memory.push_record(record.clone());
             merge_counts(&mut self.memory.coach.plans, &self.fight.by_plan);
+            merge_counts(&mut self.memory.coach.break_plans, &self.fight.break_plans);
             for (text, f) in &self.fight.failures {
                 let all = self.memory.coach.failures.entry(text.clone()).or_default();
                 all.uses += f.uses;
                 all.deflected_all += f.deflected_all;
                 all.fatal += f.fatal;
+                all.failed += f.failed;
             }
         } else {
             self.banned = self.bans_at_start.clone();
@@ -1559,6 +1859,7 @@ impl BrainDriver {
                 base.uses = base.uses.min(committed.uses);
                 base.deflected_all = base.deflected_all.min(committed.deflected_all);
                 base.fatal = base.fatal.min(committed.fatal);
+                base.failed = base.failed.min(committed.failed);
             }
         }
         if self.coach_mode && !record.metrics.void {
@@ -1581,6 +1882,35 @@ impl BrainDriver {
             sets.entry(name.clone()).or_default().secs = (s * 10.0).round() / 10.0;
         }
         let mut input = CoachInput {
+            on_wolf_break: self.fight.break_plans.clone(),
+            actions: {
+                let mut actions = self.tally.all(Side::Boss).clone();
+                for action in self.actions.actions {
+                    actions.entry(action.id.to_string()).or_default();
+                }
+                actions
+            },
+            action_range: self
+                .fight
+                .action_ranges
+                .iter()
+                .map(|(key, &(n, distance, reach))| {
+                    (
+                        key.clone(),
+                        [
+                            (distance / n as f32 * 100.0).round() / 100.0,
+                            (reach / n as f32 * 100.0).round() / 100.0,
+                        ],
+                    )
+                })
+                .collect(),
+            principles: self
+                .memory
+                .coach
+                .plan
+                .as_ref()
+                .map(|p| p.principles.clone())
+                .unwrap_or_default(),
             banned: {
                 let mut list: Vec<_> = self.banned.iter().cloned().collect();
                 list.sort();
@@ -1591,10 +1921,15 @@ impl BrainDriver {
                 .coach
                 .failures
                 .iter()
-                .map(|(k, f)| (k.clone(), [f.uses, f.deflected_all, f.fatal]))
+                .map(|(k, f)| (k.clone(), [f.uses, f.deflected_all, f.fatal, f.failed]))
                 .collect(),
             fight: self.memory.fights,
             result: FightLine {
+                wolf_posture_breaks: m.wolf_posture_breaks,
+                hits_after_break: m.hits_after_break,
+                break_punish_rate: m.break_punish_rate,
+                wolf_posture_peak: m.wolf_posture_peak,
+                time_to_kill_wolf: m.time_to_kill_wolf,
                 won: record.winner.clone(),
                 secs: m.duration.round() as u32,
                 defl: pct(m.deflect_rate()),
@@ -1637,6 +1972,11 @@ impl BrainDriver {
             && p.notes == input.notes
         {
             p.notes.clear();
+        }
+        if let Some(p) = input.played.as_mut()
+            && p.principles == input.principles
+        {
+            p.principles.clear();
         }
         input
     }
@@ -1692,6 +2032,9 @@ impl BrainDriver {
         self.want_request = true;
         self.running = Plan::default();
         self.checkpoints = Checkpoints::default();
+        self.wolf_events.clear();
+        self.break_pending = false;
+        self.cancel_break = true;
         self.pending_why = Some("start");
         self.fight = FightState {
             metrics: MetricsTracker::new(self.time),
@@ -1748,6 +2091,11 @@ impl BrainDriver {
 impl Drop for BrainDriver {
     /// The game is closing: keep an unfinished fight in the memory file.
     fn drop(&mut self) {
+        if self.session_report_path.is_some()
+            && let Err(e) = self.print_session_report()
+        {
+            eprintln!("brain session report: {e}");
+        }
         if self.memory_path.is_some() && !self.fight_over && !self.tally.is_empty() {
             self.save_memory();
         }
@@ -1793,6 +2141,141 @@ struct OutcomeLine<'a> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn coach_keeps_lessons_and_reports_lua_actions_separately() {
+        let mut d = learning_driver();
+        d.memory.coach.plan = Some(GamePlan {
+            principles: vec!["kick 3005 lands".into()],
+            ..Default::default()
+        });
+        d.game_plan = d.memory.coach.plan.clone();
+        d.tally.record(
+            0.0,
+            TallyEvent::Start {
+                side: Side::Boss,
+                key: "3005".into(),
+            },
+        );
+        d.tally.record(
+            0.5,
+            TallyEvent::Hit {
+                attacker: Side::Boss,
+                guarded: false,
+                deflected: false,
+            },
+        );
+        d.tally.flush(3.0);
+        d.fight.action_ranges.insert("3005".into(), (2, 4.0, 6.0));
+        let mut input = d.coach_input(&FightRecord::default());
+        assert_eq!(input.principles, ["kick 3005 lands"]);
+        assert!(input.played.as_ref().unwrap().principles.is_empty());
+        assert_eq!(input.actions["3005"].hit, 1);
+        assert_eq!(input.actions["3000"].n, 0);
+        assert_eq!(input.action_range["3005"], [2.0, 3.0]);
+        assert!(input.fit(INPUT_BUDGET) <= INPUT_BUDGET);
+        assert_eq!(input.principles, ["kick 3005 lands"]);
+        let encoded = serde_json::to_string(&d.memory).unwrap();
+        let decoded: Memory = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.coach.plan.unwrap().principles, ["kick 3005 lands"]);
+    }
+
+    #[test]
+    fn session_report_contains_action_ranges_and_break_trend_and_appends_at_exit() {
+        let mut d = learning_driver();
+        d.session_actions.insert(
+            "3000".into(),
+            Counts {
+                n: 2,
+                hit: 1,
+                whiffed: 1,
+                ..Default::default()
+            },
+        );
+        d.session_ranges.insert("3000".into(), (2, 8.0, 6.0));
+        d.session_records.push(FightRecord {
+            winner: "boss".into(),
+            metrics: super::super::metrics::FightMetrics {
+                duration: 31.0,
+                time_to_kill_wolf: Some(31.0),
+                wolf_posture_breaks: 2,
+                hits_after_break: 1,
+                break_punish_rate: 0.5,
+                wolf_posture_peak: 1.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let report = d.session_report();
+        assert!(report.contains("| 3000 | 2 | 1 | 0 | 0 | 1 | 0 | 4.00 / 3.00 |"));
+        assert!(report.contains("| 1 | boss | 31.0 | 31.0 | 2 | 1 | 50% | 100% |"));
+        d.enable_session_report(&std::env::temp_dir());
+        let path = d.session_report_path.clone().unwrap();
+        d.print_session_report().unwrap();
+        drop(d);
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(written.matches("# Brain session:").count(), 2);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn wolf_posture_checkpoints_are_once_per_cycle_and_break_is_an_edge() {
+        let mut c = Checkpoints::default();
+        assert_eq!(c.on_wolf(0.26, false).0, ["wolf_posture_25"]);
+        assert!(c.on_wolf(0.3, false).0.is_empty());
+        assert_eq!(
+            c.on_wolf(0.76, false).0,
+            ["wolf_posture_50", "wolf_posture_75"]
+        );
+        assert_eq!(c.on_wolf(1.0, true), (vec!["wolf_broken"], true));
+        assert!(c.on_wolf(1.0, true).0.is_empty());
+        assert!(c.on_wolf(0.2, false).0.is_empty());
+        assert!(c.on_wolf(0.14, false).0.is_empty());
+        assert_eq!(
+            c.on_wolf(0.5, false).0,
+            ["wolf_posture_25", "wolf_posture_50"]
+        );
+    }
+
+    #[test]
+    fn failed_break_responses_are_banned_independently_of_regular_uses() {
+        let mut d = learning_driver();
+        for i in 0..3 {
+            let start = i as f32;
+            d.fight
+                .runs
+                .push((start, "3000".into(), "on_wolf_break".into()));
+            d.fight.uses.push(PlanUse {
+                break_response: true,
+                failed: false,
+                text: "on_wolf_break:3000".into(),
+                start,
+                last_attack: Some(start),
+                attacks: 1,
+                deflected: 0,
+                fatal: false,
+                settled: false,
+            });
+            d.attribute(&[Exchange {
+                side: Side::Boss,
+                key: "3000".into(),
+                start,
+                end: Some(start + 0.5),
+                outcome: super::super::tally::Outcome {
+                    punished: i == 1,
+                    hit: i == 2,
+                    ..Default::default()
+                },
+            }]);
+        }
+        d.settle_plans(true);
+        assert!(d.banned.contains("on_wolf_break:3000"));
+        assert!(!d.banned.contains("3000"));
+        assert_eq!(d.fight.break_plans["3000"].n, 3);
+        assert_eq!(d.fight.break_plans["3000"].hit, 1);
+        assert_eq!(d.fight.break_plans["3000"].whiffed, 2);
+        assert_eq!(d.fight.break_plans["3000"].punished, 1);
+    }
+
     fn learning_driver() -> BrainDriver {
         let mut d = BrainDriver::new(Box::new(crate::brain::LuaBrain), &crate::brain::SOLDIER);
         d.time = 5.0;
@@ -1818,6 +2301,7 @@ mod tests {
         d.fight.failures.insert(
             "3000".into(),
             PlanFailures {
+                failed: 0,
                 uses: 3,
                 deflected_all: 3,
                 fatal: 0,
@@ -1840,6 +2324,7 @@ mod tests {
         d.memory.coach.failures.insert(
             "3000".into(),
             PlanFailures {
+                failed: 0,
                 uses: 2,
                 deflected_all: 1,
                 fatal: 0,
@@ -1850,6 +2335,8 @@ mod tests {
             (1.0, "lua".into(), "lua".into()),
         ];
         d.fight.uses.push(PlanUse {
+            break_response: false,
+            failed: false,
             text: "3000".into(),
             start: 0.0,
             last_attack: Some(0.1),
@@ -1876,7 +2363,7 @@ mod tests {
         assert_eq!(d.memory.coach.failures["3000"].deflected_all, 2);
         let mut input = d.coach_input(d.last_record.as_ref().unwrap());
         assert_eq!(input.banned, ["3000"]);
-        assert_eq!(input.failures["3000"], [3, 2, 0]);
+        assert_eq!(input.failures["3000"], [3, 2, 0, 0]);
         assert!(input.fit(INPUT_BUDGET) <= INPUT_BUDGET);
         d.start_fight();
         assert!(d.banned.contains("3000"));
@@ -1901,6 +2388,7 @@ mod tests {
         d.fight.failures.insert(
             "3000".into(),
             PlanFailures {
+                failed: 0,
                 uses: 3,
                 deflected_all: 2,
                 fatal: 0,
@@ -1929,6 +2417,8 @@ mod tests {
         let mut d = learning_driver();
         d.fight.runs.push((0.0, "3000".into(), "press".into()));
         d.fight.uses.push(PlanUse {
+            break_response: false,
+            failed: false,
             text: "3000".into(),
             start: 0.0,
             last_attack: Some(1.0),
@@ -1956,6 +2446,8 @@ mod tests {
         let mut d = learning_driver();
         d.fight.runs.push((0.0, "3000".into(), "press".into()));
         d.fight.uses.push(PlanUse {
+            break_response: false,
+            failed: false,
             text: "3000".into(),
             start: 0.0,
             last_attack: Some(1.0),

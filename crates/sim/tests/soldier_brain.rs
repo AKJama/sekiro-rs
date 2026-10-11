@@ -253,6 +253,7 @@ fn a_plan_banned_by_saved_failures_never_reaches_an_ai_slot() {
     memory.coach.failures.insert(
         "3000".into(),
         sekiro_sim::brain::memory::PlanFailures {
+            failed: 0,
             uses: 3,
             deflected_all: 2,
             fatal: 0,

@@ -68,6 +68,8 @@ pub struct Memory {
 /// What the coach mode keeps across sessions (old files lack it).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CoachMemory {
+    #[serde(default)]
+    pub break_plans: CountMap,
     /// The newest validated game plan (its `notes` are the coach's hypotheses).
     #[serde(default)]
     pub plan: Option<GamePlan>,
@@ -81,6 +83,9 @@ pub struct CoachMemory {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct PlanFailures {
+    /// Whiffed or punished posture-break responses, excluding other failure classifications.
+    #[serde(default)]
+    pub failed: u32,
     pub uses: u32,
     pub deflected_all: u32,
     pub fatal: u32,
@@ -88,7 +93,7 @@ pub struct PlanFailures {
 
 impl PlanFailures {
     pub fn rate(&self) -> f32 {
-        (self.deflected_all + self.fatal) as f32 / self.uses.max(1) as f32
+        (self.deflected_all + self.fatal + self.failed) as f32 / self.uses.max(1) as f32
     }
     pub fn banned(&self) -> bool {
         self.uses >= 3 && self.rate() >= 0.6
@@ -97,7 +102,10 @@ impl PlanFailures {
 
 impl CoachMemory {
     pub fn is_empty(&self) -> bool {
-        self.plan.is_none() && self.plans.is_empty() && self.failures.is_empty()
+        self.plan.is_none()
+            && self.plans.is_empty()
+            && self.break_plans.is_empty()
+            && self.failures.is_empty()
     }
 }
 

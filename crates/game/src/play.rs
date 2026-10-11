@@ -25,7 +25,7 @@
 //! map pieces and collision within the arena radius (`--full-map` loads all of it). A
 //! character that falls far below its start is put back there.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -204,7 +204,7 @@ pub fn run(options: Options) -> Result<()> {
     duel.force_act = options.force_act;
     if options.simple_ai {
         duel.use_simple_ai();
-    } else if options.brain.plans() || options.brain_log || options.brain_memory.is_some() {
+    } else {
         let brain_name = options.brain.name();
         let log = duel
             .set_brain(options.brain, options.brain_log)
@@ -215,6 +215,9 @@ pub fn run(options: Options) -> Result<()> {
             log.map(|p| format!(", log {}", p.display()))
                 .unwrap_or_default()
         );
+        if let Some(driver) = duel.boss_brain.as_mut() {
+            driver.enable_session_report(Path::new("logs"));
+        }
         if let (Some(path), Some(driver)) = (options.brain_memory, duel.boss_brain.as_mut()) {
             driver.use_memory(path);
         }
@@ -412,6 +415,7 @@ pub fn run(options: Options) -> Result<()> {
             // that is drawn.
             orbit_camera,
             gather_input,
+            brain_report,
             bind_rigs,
             apply_draw_masks,
             sync_actors,
@@ -1307,6 +1311,15 @@ fn log_camera(
         wolf.x,
         wolf.z,
     );
+}
+
+fn brain_report(keys: Res<ButtonInput<KeyCode>>, sim: NonSend<Sim>) {
+    if keys.just_pressed(KeyCode::F9)
+        && let Some(driver) = sim.duel.boss_brain.as_ref()
+        && let Err(e) = driver.print_session_report()
+    {
+        eprintln!("brain session report: {e}");
+    }
 }
 
 #[cfg(test)]

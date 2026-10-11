@@ -989,7 +989,7 @@ fn trend_shows_the_last_three_fights() {
     assert_eq!(t.now, Some([50, 1]));
     assert_eq!(
         serde_json::to_string(&t).unwrap(),
-        r#"{"defl":[50,100,80],"guard":[0,0,0],"hits":[5,0,2],"hp":[0,0,0],"kill_s":[30,20,null],"apm":[0,0,0],"dpm":[0,0,0],"passive":[0,0,0],"engaged_time":[0,0,0],"now":[50,1]}"#
+        r#"{"duration":[0.0,0.0,0.0],"wolf_posture_breaks":[0,0,0],"hits_after_break":[0,0,0],"break_punish_rate":[0.0,0.0,0.0],"wolf_posture_peak":[0.0,0.0,0.0],"time_to_kill_wolf":[null,null,null],"defl":[50,100,80],"guard":[0,0,0],"hits":[5,0,2],"hp":[0,0,0],"kill_s":[30,20,null],"apm":[0,0,0],"dpm":[0,0,0],"passive":[0,0,0],"engaged_time":[0,0,0],"now":[50,1]}"#
     );
 }
 
@@ -1051,7 +1051,11 @@ fn the_request_with_a_trend_and_tactics_stays_under_the_budget() {
     let json = serde_json::to_string(&req).unwrap();
     eprintln!("{len} bytes: {json}");
     assert!(len <= REQUEST_BUDGET && len == json.len());
-    assert!(json.contains("\"trend\":{\"defl\""), "{json}");
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&json).unwrap()["memory"]["trend"]["defl"]
+            .is_array(),
+        "{json}"
+    );
     assert!(json.contains("\"why\":\"deflected_thrice\""));
     // `excluded` is for the request body, never part of the input text.
     req.excluded = vec!["3003".into()];
@@ -1124,7 +1128,10 @@ fn good_plan() -> GamePlan {
             set("press", &[("3000+3001", 2.0), ("3008", 1.0)]),
             PlanSet {
                 when: Some("half_hp".into()),
-                ..set("bait", &[("walk_in4>3013", 1.0), ("hold2>3002", 1.0)])
+                ..set(
+                    "bait",
+                    &[("walk_in4>3013", 1.0), ("hold2>3002", 1.0), ("3000", 1.0)],
+                )
             },
         ],
         start_set: "bait".into(),
@@ -1134,6 +1141,8 @@ fn good_plan() -> GamePlan {
         }],
         notes: "he deflects thrusts early".into(),
         retry: Vec::new(),
+        on_wolf_break: Vec::new(),
+        principles: Vec::new(),
     }
 }
 
@@ -1160,6 +1169,79 @@ fn a_good_game_plan_is_accepted_whole() {
     let bare = GamePlan::from_json(r#"{"opener":"3000"}"#).unwrap();
     assert!(bare.validate(&SOLDIER).usable());
     assert_eq!(plan.summary_lines().len(), 4);
+}
+
+#[test]
+fn coach_caps_lua_and_keeps_bounded_principles_and_break_plans() {
+    let mut p = good_plan();
+    p.sets[0].plans.extend([
+        coach::WeightedChoice {
+            plan: "lua".into(),
+            weight: 100.0,
+        },
+        coach::WeightedChoice {
+            plan: "lua".into(),
+            weight: 50.0,
+        },
+    ]);
+    p.principles = vec!["界".repeat(120); 8];
+    p.on_wolf_break = vec![
+        coach::WeightedChoice {
+            plan: "3000".into(),
+            weight: 2.0,
+        },
+        coach::WeightedChoice {
+            plan: "hold2".into(),
+            weight: 1.0,
+        },
+        coach::WeightedChoice {
+            plan: "9999".into(),
+            weight: 1.0,
+        },
+    ];
+    let v = p.validate(&SOLDIER);
+    let set = &v.plan.sets[0];
+    let lua: f32 = set
+        .plans
+        .iter()
+        .filter(|p| p.plan == "lua")
+        .map(|p| p.weight)
+        .sum();
+    let total: f32 = set.plans.iter().map(|p| p.weight).sum();
+    assert!(lua / total <= 0.250001);
+    assert_eq!(v.plan.principles.len(), 6);
+    assert!(v.plan.principles.iter().all(|s| s.chars().count() == 90));
+    assert_eq!(v.plan.on_wolf_break.len(), 1);
+    assert!(
+        v.plan
+            .summary_lines()
+            .iter()
+            .any(|l| l.starts_with("principles:"))
+    );
+    let json = serde_json::to_string(&v.plan).unwrap();
+    assert_eq!(GamePlan::from_json(&json).unwrap(), v.plan);
+    let legacy = GamePlan::from_json("{\"version\":1}").unwrap();
+    assert!(legacy.principles.is_empty() && legacy.on_wolf_break.is_empty());
+}
+
+#[test]
+fn posture_break_metrics_count_follow_up_hits_and_successful_breaks() {
+    let mut tracker = metrics::MetricsTracker::new(0.0);
+    tracker.wolf(1.0, 0.75);
+    tracker.wolf_break(1.0);
+    tracker.post_break_hit(1.2);
+    tracker.post_break_hit(3.5);
+    tracker.post_break_hit(3.51);
+    tracker.wolf_break(5.0);
+    tracker.post_break_hit(7.51);
+    let m = tracker.snapshot(8.0);
+    assert_eq!(m.wolf_posture_breaks, 2);
+    assert_eq!(m.hits_after_break, 2);
+    assert_eq!(m.break_punish_rate, 0.5);
+    assert_eq!(m.wolf_posture_peak, 1.0);
+    let old: FightMetrics = serde_json::from_str("{\"duration\":31.0}").unwrap();
+    assert_eq!(old.wolf_posture_breaks, 0);
+    assert!(old.time_to_kill_wolf.is_none());
 }
 
 #[test]
@@ -1325,6 +1407,8 @@ fn busy_input() -> CoachInput {
             .collect(),
         notes: "n".repeat(NOTES_MAX),
         retry: Vec::new(),
+        on_wolf_break: Vec::new(),
+        principles: Vec::new(),
     };
     let mut sets = std::collections::BTreeMap::new();
     for i in 0..4 {
@@ -1353,6 +1437,7 @@ fn busy_input() -> CoachInput {
             dpm: 55,
             passive: 12,
             engaged_time: 98,
+            ..Default::default()
         },
         trend: Trend::new(&memory.history, None),
         range: plans
@@ -1367,12 +1452,34 @@ fn busy_input() -> CoachInput {
         habits: memory.habits.summary(),
         played: Some(big_plan.clone()),
         notes: big_plan.notes,
+        ..Default::default()
     }
 }
 
 #[test]
-fn the_coach_input_is_trimmed_to_4kb_and_keeps_the_notes_and_the_played_plan() {
+fn the_coach_input_is_bounded_and_keeps_the_notes_and_the_played_plan() {
     let mut input = busy_input();
+    input.principles = vec!["?".repeat(90); 6];
+    input.actions = SOLDIER
+        .actions
+        .iter()
+        .map(|a| {
+            (
+                a.id.to_string(),
+                Counts {
+                    n: 12,
+                    hit: 5,
+                    whiffed: 7,
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    input.action_range = SOLDIER
+        .actions
+        .iter()
+        .map(|a| (a.id.to_string(), [4.25, 3.75]))
+        .collect();
     let before = input.json_len();
     let after = input.fit(INPUT_BUDGET);
     let json = serde_json::to_string(&input).unwrap();
@@ -1384,7 +1491,10 @@ fn the_coach_input_is_trimmed_to_4kb_and_keeps_the_notes_and_the_played_plan() {
     assert!(after <= INPUT_BUDGET && after == json.len(), "{after}");
     assert!(json.contains(&"n".repeat(NOTES_MAX)), "the notes survive");
     assert!(json.contains("\"played\":{"), "the played plan survives");
-    assert!(json.contains("\"result\":{\"won\":\"boss\""));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&json).unwrap()["result"]["won"],
+        "boss"
+    );
     assert!(json.contains("\"passive\":12"));
     assert!(!input.range.is_empty());
     assert!(
@@ -1415,7 +1525,7 @@ fn all_known_bans_and_their_failure_counts_fit_the_coach_budget() {
     input.failures = input
         .banned
         .iter()
-        .map(|s| (s.clone(), [123, 99, 34]))
+        .map(|s| (s.clone(), [123, 99, 34, 0]))
         .collect();
     let banned = input.banned.clone();
     assert!(input.fit(INPUT_BUDGET) <= INPUT_BUDGET);
