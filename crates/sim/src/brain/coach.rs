@@ -42,7 +42,7 @@ pub const DESCRIPTION_MAX: usize = 140;
 pub const REASON_MAX: usize = 80;
 /// The coach input's size target, bytes of compact JSON.
 pub const INPUT_BUDGET: usize = 4096;
-pub const MID_COACH_INTERVAL: f32 = 45.0;
+pub const MID_COACH_INTERVAL: f32 = 30.0;
 /// The checkpoint events a set's `when` hint may name.
 pub const CHECKPOINTS: [&str; 11] = [
     "start",
@@ -94,9 +94,12 @@ pub struct Avoid {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GamePlan {
+    pub boss_principles: Vec<String>,
+    pub boss_bans: Vec<Avoid>,
     /// Local response to Wolf's posture break, never requiring a model call.
     pub on_wolf_break: Vec<WeightedChoice>,
     /// Lessons retained by the coach across fights.
+    #[serde(rename = "player_principles", alias = "principles")]
     pub principles: Vec<String>,
     /// Format version ([`GAME_PLAN_VERSION`]; a missing one reads as 1).
     pub version: u32,
@@ -358,6 +361,23 @@ impl GamePlan {
             .filter(|s| !s.is_empty())
             .collect();
         out.notes = clip(&self.notes, NOTES_MAX);
+        out.boss_principles = self
+            .boss_principles
+            .iter()
+            .take(6)
+            .map(|s| clip(s, 90))
+            .filter(|s| !s.is_empty())
+            .collect();
+        out.boss_bans = self
+            .boss_bans
+            .iter()
+            .take(MAX_AVOID)
+            .filter(|a| actions.parse(&a.choice).is_ok() && !a.reason.trim().is_empty())
+            .map(|a| Avoid {
+                choice: a.choice.clone(),
+                reason: clip(&a.reason, REASON_MAX),
+            })
+            .collect();
         Validated {
             plan: out,
             warnings,
@@ -482,7 +502,16 @@ impl GamePlan {
             ));
         }
         if !self.principles.is_empty() {
-            lines.push(format!("principles: {}", self.principles.join("; ")));
+            lines.push(format!(
+                "principles: player: {}",
+                self.principles.join("; ")
+            ));
+        }
+        if !self.boss_principles.is_empty() {
+            lines.push(format!(
+                "principles: boss: {}",
+                self.boss_principles.join("; ")
+            ));
         }
         lines
     }
@@ -535,7 +564,9 @@ pub struct SetStat {
 /// What the coach is told about the fight just over. Counts are
 /// `[exchanges, hit, blocked, deflected, whiffed, punished]` per plan text.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(into = "CoachWire")]
 pub struct CoachInput {
+    pub boss_knowledge: super::memory::BossSummary,
     pub phase: String,
     pub result: FightLine,
     pub plans: TopMap<Counts>,
@@ -572,6 +603,53 @@ pub struct CoachInput {
     pub notes: String,
 }
 
+impl From<CoachInput> for serde_json::Value {
+    fn from(i: CoachInput) -> Self {
+        let mut value = serde_json::json!({
+            "boss_knowledge": i.boss_knowledge,
+            "player_profile": {"fight": i.fight, "trend": i.trend, "habits": i.habits,
+                "player_principles": i.principles, "notes": i.notes, "overall": i.overall,
+                "banned": i.banned, "failures": i.failures},
+            "phase": i.phase, "result": i.result, "plans": i.plans, "sets": i.sets,
+            "played": i.played, "elapsed": i.elapsed, "vitals": i.vitals, "marks": i.marks,
+            "on_wolf_break": i.on_wolf_break, "actions": i.actions,
+            "action_range": i.action_range, "range": i.range, "wolf": i.wolf
+        });
+        if value["played"].is_null() {
+            value
+                .as_object_mut()
+                .expect("coach wire object")
+                .remove("played");
+        }
+        value
+    }
+}
+
+#[derive(Clone)]
+struct CoachWire(serde_json::Value);
+
+impl From<CoachInput> for CoachWire {
+    fn from(input: CoachInput) -> Self {
+        Self(input.into())
+    }
+}
+
+impl Serialize for CoachWire {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        for key in ["boss_knowledge", "player_profile"] {
+            map.serialize_entry(key, &self.0[key])?;
+        }
+        for (key, value) in self.0.as_object().expect("coach wire object") {
+            if key != "boss_knowledge" && key != "player_profile" {
+                map.serialize_entry(key, value)?;
+            }
+        }
+        map.end()
+    }
+}
+
 impl CoachInput {
     pub fn json_len(&self) -> usize {
         serde_json::to_string(self).map_or(0, |s| s.len())
@@ -579,6 +657,11 @@ impl CoachInput {
 
     /// Drops the least telling entries until the JSON fits in `budget` bytes; returns the size.
     pub fn fit(&mut self, budget: usize) -> usize {
+        // Shared lessons and bans are sent in the boss layer, not duplicated in the plan.
+        if let Some(plan) = self.played.as_mut() {
+            plan.boss_principles.clear();
+            plan.boss_bans.clear();
+        }
         self.range
             .retain(|key, _| self.plans.0.iter().any(|(plan, _)| plan == key));
         let mut len = self.json_len();
@@ -591,6 +674,9 @@ impl CoachInput {
     }
 
     fn trim_one(&mut self) -> bool {
+        if self.boss_knowledge.trim() {
+            return true;
+        }
         if self.failures.len() > 6
             && let Some(key) = self
                 .failures
@@ -676,7 +762,7 @@ impl CoachInput {
         if self.failures.pop_last().is_some() {
             return true;
         }
-        self.banned.pop().is_some()
+        self.banned.pop().is_some() || self.boss_knowledge.trim_last()
     }
 }
 

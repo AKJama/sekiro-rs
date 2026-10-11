@@ -20,6 +20,43 @@ use sekiro_sim::enemy::EnemySpec;
 const DT: f32 = 1.0 / 60.0;
 
 #[test]
+fn fresh_player_runs_shared_opener_in_a_real_duel_or_thin_lua_baseline() {
+    for fights in [19, 20] {
+        let Some((mut duel, coach)) = coached(Vec::new(), 0.0) else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "sekiro-starter-{}-{}-{}",
+            std::process::id(),
+            fights,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("c1010.json");
+        let mut legacy = sekiro_sim::brain::Memory::new("c1010");
+        legacy.fights = fights;
+        legacy.coach.plan = Some(plan("old player hypothesis"));
+        legacy.save(&path).unwrap();
+        let d = duel.boss_brain.as_mut().unwrap();
+        d.coach_interval = 0.0;
+        d.use_player_memory(path, "newcomer");
+        run(&mut duel, 10.0);
+        if fights >= 20 {
+            assert_eq!(played(&duel).first().map(String::as_str), Some("3002"));
+            assert!(driver(&duel).stats.planned > 0);
+            assert!(driver(&duel).game_plan.as_ref().unwrap().notes.is_empty());
+        } else {
+            assert!(driver(&duel).game_plan.is_none());
+            assert_eq!(driver(&duel).stats.planned, 0);
+            assert!(driver(&duel).stats.fallback > 0);
+        }
+        assert!(coach.borrow().coach_inputs.is_empty());
+    }
+}
+
+#[test]
 fn short_interval_waits_for_twenty_seconds_and_answer_waits_for_slot() {
     let Some((mut duel, coach)) = coached(vec![Some(plan("mid")); 5], 2.0) else {
         return;
@@ -85,12 +122,13 @@ fn mark_lost_at_30_resets_timer_and_slow_call_serializes_post_review() {
     let c = coach.borrow();
     assert_eq!(c.coach_inputs.len(), 2);
     assert!((c.coach_times[0] - 30.0).abs() < 0.1);
-    assert!((c.coach_times[1] - 75.0).abs() < 0.1);
+    assert!((c.coach_times[1] - 60.0).abs() < 0.1);
     drop(c);
 
     let Some((mut duel, coach)) = coached(vec![Some(plan("slow")); 4], 60.0) else {
         return;
     };
+    duel.boss_brain.as_mut().unwrap().coach_interval = 45.0;
     run(&mut duel, 100.0);
     assert_eq!(coach.borrow().coach_inputs.len(), 1);
     die(&mut duel);
@@ -160,7 +198,11 @@ fn no_input_fight_is_void_and_never_coached_or_saved() {
     assert!(d.memory.history.is_empty() && d.memory.boss.is_empty() && d.memory.wolf.is_empty());
     assert_eq!(d.memory.habits, Default::default());
     assert!(coach.borrow().coach_inputs.is_empty());
-    let saved = sekiro_sim::brain::Memory::load(&path, "c1010").0;
+    let saved = sekiro_sim::brain::Memory::load(
+        &sekiro_sim::brain::memory::LayerPaths::new(&path, "default").player,
+        "c1010",
+    )
+    .0;
     assert_eq!(saved.fights, 0);
     drop(duel);
     let _ = std::fs::remove_file(path);
@@ -206,6 +248,8 @@ fn plan(notes: &str) -> GamePlan {
         retry: Vec::new(),
         on_wolf_break: Vec::new(),
         principles: Vec::new(),
+        boss_principles: Vec::new(),
+        boss_bans: Vec::new(),
     }
 }
 

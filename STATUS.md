@@ -19,7 +19,7 @@ How much of the game is done overall: `docs/PROGRESS.md`.
 | Enemy | Soldier runs its own HKS script, behaviour graph and real Lua AI (Lua 5.0 VM + goal runtime); real combo cancels | `docs/AI.md` |
 | Great Shinobi Owl | c5060 (not c5070, his bird) with his own HKS, graph, TAE, params and Lua AI on the flat floor and on the Ashina Castle top where the game places him (`--arena owl`); shuriken bullets; two deathblows with the get-up and finishing pairs; his grabs (3040, 3041) throw Wolf from the data (ThrowParam 25060000 / 25060100); phase 2 (heat-up, SpEffect 200051, boss bar, defeat) runs from the map's own event script (`event/m11_01_00_00.emevd`) | `docs/OWL.md` |
 | Owl's tools | Bullets with child bullets, flight from the Bullet params, area and lingering hits, shared hit records; poison build-up and damage over time, recovery seal, blinding, lock-on break; warp clips fade him out, unhittable, when forced (his castle AI never warps); simple stand-in looks and a HUD status line | `docs/OWL.md` (Tools) |
-| Boss brain | The Owl's and the Ashina soldier's act choices can come from an outside controller (`--brain lua\|scripted\|decisions\|responses`, `--brain-log`): plans of his own action ids run through his battle goal, reflexes stay with his Lua AI, mirrored observation, this fight's outcome tally, and a memory of every fight with Wolf's habits kept in `logs/memory/<chr>.json` (`--brain-memory`) | `docs/BRAIN.md` |
+| Boss brain | The Owl's and the Ashina soldier's act choices can come from an outside controller (`--brain lua\|scripted\|decisions\|responses`, `--brain-log`): plans of his own action ids run through his battle goal, reflexes stay with his Lua AI, mirrored observation, this fight's outcome tally, and shared boss knowledge in `logs/memory/<chr>.boss.json` and Wolf's habits/history in `<chr>.player-<name>.json` (`--brain-memory`, `--player`) | `docs/BRAIN.md` |
 | Audio | The game's own FMOD Ex runtime from the install plays the game's event projects (`main`, the enemy's `cXXXX`, the map area's): TAE sounds with floor-material footsteps and armour rustle, hit, block and deflect clangs from the hit-effect params, listener on the camera with the events' own 3D rolloff; decoded samples only as a fallback | `docs/AUDIO.md` |
 | Map | All ten archive maps extracted and loadable; 69 starts across nine gameplay maps walk; m89 is sky-only | `docs/MAP-BASELINE.md`, `docs/FORMATS.md` |
 
@@ -449,3 +449,23 @@ Final validation: `cargo fmt --all`, workspace/all-targets Clippy with `-D warni
 Full suite log: `cache/tests/owl-transition-final.log`; local native research: `re/exports/decomp/owl_transition/`; parameter evidence: `cache/tests/owl-transition-params.txt`.
 All Cargo commands used `CARGO_TARGET_DIR=target/alt` and six jobs; fmt uses `CARGO_BUILD_JOBS=6` because it has no `-j` option.
 No commits, real model/API calls, protected-log edits, game sessions, game-install writes, worktrees, or cache/re links, junctions or deletions were made.
+
+## Shared boss knowledge and player profiles (2026-10-11)
+
+Boss knowledge is now shared across player profiles, with counted action/plan/break-response evidence, reasoned bans, six universal principles and the best known sanitized game plan with its results.
+`--player <name>` selects isolated habits, history, notes, player principles, local failure bans and the current tuned plan; the default is `default`.
+A fresh player starts immediately with the shared plan at 20 recorded fights, while thinner knowledge uses the Lua baseline.
+Mid-fight review defaults to 30 seconds, with the interval flag retained.
+Coach requests separate boss knowledge and player profiles under the same 4096-byte budget; responses add `player_principles`, `boss_principles` and `boss_bans`.
+Old `principles` replies remain readable as player principles.
+
+First load copies legacy memory to a byte-identical `.v2-backup.json` and creates `.boss.json` plus `.player-default.json`, retaining the original.
+Unclassified legacy principles remain local until the coach explicitly promotes universal lessons.
+Temporary-copy migration preserved the outsmarted Owl dataset's 21 fights, 20 boss wins, one Wolf win and 656 action/plan exchanges, and the alive dataset's seven fights, six boss wins, one Wolf win and 281 action/plan exchanges.
+Both migrations retained all break-response counts and backup bytes, and repeated loads did not inflate totals.
+New offline regressions cover rich/thin knowledge in a real extracted-data duel, shared coach lessons, isolated habits and bans, repeated/stale saves and full-layer Unicode budget pressure.
+Details and file examples are in `docs/BRAIN.md`.
+No commits, model calls, real coach CLIs, game runs, links or junctions were made, and protected memory/dataset files were untouched.
+All Cargo commands used `target/alt` and six build jobs; formatting uses `CARGO_BUILD_JOBS=6` because cargo fmt has no `-j` option.Formatting, workspace Clippy with `-D warnings`, and the requested release sim/brain-net lib/bin/integration suite passed (351 tests across 37 targets).
+The final full-layer budget regression includes duplicated boss lessons/bans inside the played plan and confirms they are removed before fitting.
+Validation logs: `target/alt/shared-memory-tests-final.log`; no `map_tangents` exception was needed for these checks.

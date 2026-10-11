@@ -1,21 +1,19 @@
-//! Memory across fights and sessions: the outcome tally and Wolf's habits summed over every
-//! fight against one enemy, with the fight count and who won, kept in
-//! `logs/memory/<chr>.json` (gitignored) and sent with each request. Hosted models remember
-//! nothing, so this is all they know of earlier fights.
-//!
-//! The file is versioned ([`MEMORY_VERSION`]); a missing file starts fresh, and an unreadable
-//! one (bad JSON, another version or another enemy) starts fresh with a warning and is kept
-//! beside the new one as `<name>.json.corrupt`.
+//! Shared boss evidence and isolated player profiles across fights and sessions.
+//! [`LayerPaths`] migrates legacy memory without deleting its source, and persists counted
+//! boss knowledge beside each player's habits, history and tuned game plan.
+//! [`Memory`] remains the version-2 profile and legacy format; [`BossKnowledge`] is version 1.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::coach::Avoid;
 use super::coach::GamePlan;
 use super::habits::{HabitSummary, Habits};
 use super::metrics::{FightMetrics, FightRecord, HISTORY, Trend};
 use super::tally::{CountMap, Counts, Side, Tally, TopMap, merge_counts, ranked_counts};
+use std::collections::BTreeMap;
 
 /// The memory file format version.
 pub const MEMORY_VERSION: u32 = 2;
@@ -276,4 +274,366 @@ pub fn resolve_for(arg: Option<&str>, chr: &str, brain: &str, hosted: bool) -> O
         Some(a) if a.to_ascii_lowercase().ends_with(".json") => Some(PathBuf::from(a)),
         Some(a) => Some(Path::new(a).join(&file)),
     }
+}
+
+/// Shared evidence contains no player habits, history or notes.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BossEvidence {
+    pub fights: u32,
+    pub boss_wins: u32,
+    pub wolf_wins: u32,
+    pub actions: CountMap,
+    pub plans: CountMap,
+    pub break_plans: CountMap,
+}
+
+impl BossEvidence {
+    fn from_player(m: &Memory) -> Self {
+        Self {
+            fights: m.fights,
+            boss_wins: m.boss_wins,
+            wolf_wins: m.wolf_wins,
+            actions: m.boss.clone(),
+            plans: m.coach.plans.clone(),
+            break_plans: m.coach.break_plans.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BestPlan {
+    pub plan: GamePlan,
+    pub results: BossEvidence,
+    pub score: f32,
+    #[serde(default)]
+    pub last_result: Option<FightRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BossKnowledge {
+    pub version: u32,
+    pub chr: String,
+    pub evidence: BossEvidence,
+    pub players: BTreeMap<String, BossEvidence>,
+    pub principles: Vec<String>,
+    pub bans: Vec<Avoid>,
+    pub best: Option<BestPlan>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct BossSummary {
+    pub fights: u32,
+    pub players: usize,
+    pub actions: TopMap<Counts>,
+    pub plans: TopMap<Counts>,
+    pub break_plans: TopMap<Counts>,
+    pub principles: Vec<String>,
+    pub bans: Vec<Avoid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub best: Option<BestSummary>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct BestSummary {
+    pub opener: String,
+    pub sets: BTreeMap<String, Vec<super::coach::WeightedChoice>>,
+    pub start_set: String,
+    pub on_wolf_break: Vec<super::coach::WeightedChoice>,
+    /// Last result: [boss won, seconds, Wolf damage/min, break conversion rate].
+    pub result: Option<[f32; 4]>,
+}
+
+impl BossSummary {
+    pub fn trim(&mut self) -> bool {
+        self.actions.pop(4) || self.plans.pop(4) || self.break_plans.pop(3)
+    }
+    pub fn trim_last(&mut self) -> bool {
+        self.actions.pop(0)
+            || self.plans.pop(0)
+            || self.break_plans.pop(0)
+            || self.best.take().is_some()
+            || self.principles.pop().is_some()
+            || self.bans.pop().is_some()
+    }
+}
+
+impl BossKnowledge {
+    pub fn new(chr: &str) -> Self {
+        Self {
+            version: 1,
+            chr: chr.into(),
+            evidence: BossEvidence::default(),
+            players: BTreeMap::new(),
+            principles: Vec::new(),
+            bans: Vec::new(),
+            best: None,
+        }
+    }
+    pub fn update(&mut self, player: &str, memory: &Memory) {
+        self.players
+            .insert(player.into(), BossEvidence::from_player(memory));
+        self.evidence = BossEvidence::default();
+        for e in self.players.values() {
+            self.evidence.fights += e.fights;
+            self.evidence.boss_wins += e.boss_wins;
+            self.evidence.wolf_wins += e.wolf_wins;
+            merge_counts(&mut self.evidence.actions, &e.actions);
+            merge_counts(&mut self.evidence.plans, &e.plans);
+            merge_counts(&mut self.evidence.break_plans, &e.break_plans);
+        }
+        for (choice, counts) in self
+            .evidence
+            .actions
+            .iter()
+            .chain(self.evidence.plans.iter())
+        {
+            if counts.n >= 9
+                && counts.whiffed == counts.n
+                && choice.split(['>', '+']).any(|step| {
+                    step.parse::<i32>()
+                        .is_ok_and(|id| (3000..3100).contains(&id))
+                })
+                && !self.bans.iter().any(|b| &b.choice == choice)
+            {
+                self.bans.push(Avoid {
+                    choice: choice.clone(),
+                    reason: format!("shared: {}/{} whiffs", counts.whiffed, counts.n),
+                });
+            }
+        }
+    }
+    pub fn learn(&mut self, plan: &GamePlan) {
+        for principle in plan.boss_principles.iter().rev() {
+            self.principles
+                .retain(|p| !p.eq_ignore_ascii_case(principle));
+            self.principles.insert(0, principle.clone());
+        }
+        self.principles.truncate(6);
+        for ban in &plan.boss_bans {
+            self.bans.retain(|b| b.choice != ban.choice);
+            self.bans.push(ban.clone());
+        }
+    }
+    pub fn consider(&mut self, plan: &GamePlan, memory: &Memory) {
+        if !plan.usable() {
+            return;
+        }
+        let score = memory.history.last().map_or(0.0, |r| {
+            let m = &r.metrics;
+            if m.void || m.stalled() {
+                -1.0
+            } else {
+                f32::from(r.winner == "boss") * 100000.0
+                    + if r.winner == "boss" {
+                        10000.0 / m.duration.max(1.0)
+                    } else {
+                        0.0
+                    }
+                    + m.break_punish_rate * 100.0
+                    + (m.damage_per_min() - m.boss_damage_taken_per_min()).clamp(-100.0, 100.0)
+            }
+        });
+        if score < 0.0 {
+            return;
+        }
+        if self.best.as_ref().is_none_or(|b| score >= b.score) {
+            let mut shared = plan.clone();
+            shared.notes.clear();
+            shared.principles.clear();
+            shared.avoid.clear();
+            shared.retry.clear();
+            for set in &mut shared.sets {
+                set.description = format!("shared {} attack set", set.name);
+            }
+            shared.boss_principles = self.principles.clone();
+            self.best = Some(BestPlan {
+                plan: shared,
+                results: BossEvidence::from_player(memory),
+                score,
+                last_result: memory.history.last().cloned(),
+            });
+        }
+    }
+    pub fn starter(&self) -> Option<GamePlan> {
+        (self.evidence.fights >= 20)
+            .then(|| self.best.as_ref().map(|b| b.plan.clone()))
+            .flatten()
+    }
+    pub fn summary(&self) -> BossSummary {
+        BossSummary {
+            fights: self.evidence.fights,
+            players: self.players.values().filter(|e| e.fights > 0).count(),
+            actions: ranked_counts(&self.evidence.actions),
+            plans: ranked_counts(&self.evidence.plans),
+            break_plans: ranked_counts(&self.evidence.break_plans),
+            principles: self.principles.clone(),
+            bans: self.bans.clone(),
+            best: self.best.as_ref().map(|b| BestSummary {
+                opener: b.plan.opener.clone(),
+                sets: b
+                    .plan
+                    .sets
+                    .iter()
+                    .map(|s| (s.name.clone(), s.plans.clone()))
+                    .collect(),
+                start_set: b.plan.start_set.clone(),
+                on_wolf_break: b.plan.on_wolf_break.clone(),
+                result: b.last_result.as_ref().map(|r| {
+                    [
+                        f32::from(r.winner == "boss"),
+                        r.metrics.duration,
+                        r.metrics.damage_per_min(),
+                        r.metrics.break_punish_rate,
+                    ]
+                }),
+            }),
+        }
+    }
+}
+
+/// Validated profile names cannot escape the memory directory.
+pub fn player_name(name: &str) -> Result<String, String> {
+    if name.is_empty()
+        || name.len() > 48
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        Err("--player requires 1 to 48 letters, digits, underscores or hyphens".into())
+    } else {
+        Ok(name.into())
+    }
+}
+
+/// Both files are replaced atomically individually; contribution snapshots make retries idempotent.
+#[derive(Debug, Clone)]
+pub struct LayerPaths {
+    pub boss: PathBuf,
+    pub player: PathBuf,
+    pub legacy: PathBuf,
+    pub backup: PathBuf,
+}
+
+impl LayerPaths {
+    pub fn new(legacy: &Path, name: &str) -> Self {
+        let stem = legacy.file_stem().unwrap_or_default().to_string_lossy();
+        Self {
+            boss: legacy.with_file_name(format!("{stem}.boss.json")),
+            player: legacy.with_file_name(format!("{stem}.player-{name}.json")),
+            backup: legacy.with_file_name(format!("{stem}.v2-backup.json")),
+            legacy: legacy.into(),
+        }
+    }
+    pub fn load(&self, chr: &str) -> std::io::Result<(BossKnowledge, Memory)> {
+        let mut boss = match std::fs::read_to_string(&self.boss) {
+            Ok(text) => {
+                let b: BossKnowledge = serde_json::from_str(&text)?;
+                if b.version != 1 || b.chr != chr {
+                    return Err(std::io::Error::other("incompatible boss knowledge"));
+                }
+                b
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BossKnowledge::new(chr),
+            Err(e) => return Err(e),
+        };
+        let default = Self::new(&self.legacy, "default");
+        if !default.player.exists() && self.legacy.exists() {
+            // Never rename/delete the source or overwrite an existing backup.
+            let text = std::fs::read_to_string(&self.legacy)?;
+            let m: Memory = serde_json::from_str(&text)?;
+            if !(OLDEST_VERSION..=MEMORY_VERSION).contains(&m.version) || m.chr != chr {
+                return Err(std::io::Error::other("incompatible legacy memory"));
+            }
+            if !self.backup.exists() {
+                std::fs::copy(&self.legacy, &self.backup)?;
+            }
+            boss.update("default", &m);
+            if let Some(p) = &m.coach.plan {
+                boss.learn(p);
+                boss.consider(p, &m);
+            }
+            write_json(&self.boss, &boss)?;
+            m.save(&default.player)?;
+        }
+        let player = match std::fs::read_to_string(&self.player) {
+            Ok(text) => {
+                let m: Memory = serde_json::from_str(&text)?;
+                if m.chr != chr || !(OLDEST_VERSION..=MEMORY_VERSION).contains(&m.version) {
+                    return Err(std::io::Error::other("incompatible player profile"));
+                }
+                m
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Memory::new(chr),
+            Err(e) => return Err(e),
+        };
+        // Repair a interrupted two-file save using the durable profile snapshot.
+        let name = self
+            .player
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy();
+        if let Some((_, name)) = name.rsplit_once(".player-") {
+            boss.update(name, &player);
+        }
+        Ok((boss, player))
+    }
+    pub fn save(&self, boss: &BossKnowledge, player: &Memory) -> std::io::Result<BossKnowledge> {
+        player.save(&self.player)?;
+        // Another profile may have been saved since this driver loaded.
+        let mut combined = match std::fs::read_to_string(&self.boss) {
+            Ok(text) => serde_json::from_str::<BossKnowledge>(&text)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => boss.clone(),
+            Err(e) => return Err(e),
+        };
+        if combined.version != boss.version || combined.chr != boss.chr {
+            return Err(std::io::Error::other("incompatible boss knowledge"));
+        }
+        let name = self
+            .player
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy();
+        if let Some((_, name)) = name.rsplit_once(".player-") {
+            let snapshot = boss.players.get(name).cloned().unwrap_or_default();
+            combined.players.insert(name.into(), snapshot);
+            // Aggregate the snapshots without importing player habits or provisional fights.
+            let snapshot = combined.players.get(name).cloned().unwrap_or_default();
+            let mut evidence = Memory::new(&boss.chr);
+            evidence.fights = snapshot.fights;
+            evidence.boss_wins = snapshot.boss_wins;
+            evidence.wolf_wins = snapshot.wolf_wins;
+            evidence.boss = snapshot.actions;
+            evidence.coach.plans = snapshot.plans;
+            evidence.coach.break_plans = snapshot.break_plans;
+            combined.update(name, &evidence);
+        }
+        combined.learn(&GamePlan {
+            boss_principles: boss.principles.clone(),
+            boss_bans: boss.bans.clone(),
+            ..Default::default()
+        });
+        if boss.best.as_ref().is_some_and(|b| {
+            combined
+                .best
+                .as_ref()
+                .is_none_or(|old| b.score >= old.score)
+        }) {
+            combined.best = boss.best.clone();
+        }
+        write_json(&self.boss, &combined)?;
+        Ok(combined)
+    }
+}
+
+fn write_json(path: &Path, value: &impl Serialize) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let mut file = std::fs::File::create(&tmp)?;
+    serde_json::to_writer_pretty(&mut file, value)?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    std::fs::rename(tmp, path)
 }

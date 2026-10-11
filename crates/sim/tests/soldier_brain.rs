@@ -273,7 +273,14 @@ fn a_plan_banned_by_saved_failures_never_reaches_an_ai_slot() {
     assert_eq!(driver.memory.coach.failures["3000"].uses, 3);
     drop(duel);
     assert_eq!(
-        Memory::load(&path, "c1010").0.coach.failures["3000"].deflected_all,
+        Memory::load(
+            &sekiro_sim::brain::memory::LayerPaths::new(&path, "default").player,
+            "c1010"
+        )
+        .0
+        .coach
+        .failures["3000"]
+            .deflected_all,
         2
     );
     let _ = std::fs::remove_file(&path);
@@ -327,7 +334,11 @@ fn memory_survives_a_death_and_a_new_session() {
         assert!(d.memory.habits.attack_dist.n > 0, "{:?}", d.memory.habits);
         assert!(d.tally.is_empty(), "a fresh tally for fight 2");
     }
-    let saved = Memory::load(&path, "c1010").0;
+    let saved = Memory::load(
+        &sekiro_sim::brain::memory::LayerPaths::new(&path, "default").player,
+        "c1010",
+    )
+    .0;
     assert_eq!((saved.fights, saved.boss_wins), (1, 1));
     // Fight 2: 15 s, then the session ends mid-fight.
     for i in 0..60 * 15 {
@@ -342,7 +353,10 @@ fn memory_survives_a_death_and_a_new_session() {
     }
     let first_session = seen.borrow().clone();
     drop(duel);
-    let (after, how) = Memory::load(&path, "c1010");
+    let (after, how) = Memory::load(
+        &sekiro_sim::brain::memory::LayerPaths::new(&path, "default").player,
+        "c1010",
+    );
     assert_eq!(how, Loaded::Read);
     eprintln!(
         "respawn at step {respawned_at}; memory after two fights: {}",

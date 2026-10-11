@@ -16,7 +16,7 @@ cargo test -p sekiro-sim --test owl_brain --test soldier_brain --test brain_tact
 
 Three environment variables tune the driver (no flags): `SEKIRO_BRAIN_MODE=slot|plan_end|checkpoints` (when requests go out, see "Timing model"; the default is `checkpoints` for hosted brains and `slot` for the others), `SEKIRO_BRAIN_TEMPERATURE` (sampling temperature, default 1.0) and `SEKIRO_BRAIN_SEED` (seeds the sampler; random otherwise).
 
-The baseline to compare a model against is the Lua brain with memory on: `--brain lua --brain-memory on` keeps `logs/memory/<chr>.lua.json` with the same per-fight metrics ("The score to beat"), apart from the model's `logs/memory/<chr>.json`.
+The baseline to compare a model against is the Lua brain with memory on: `--brain lua --brain-memory on` keeps `logs/memory/<chr>.lua.boss.json` and `<chr>.lua.player-default.json` with the same per-fight metrics ("The score to beat"), apart from the model's boss knowledge and player profiles.
 
 ## Design
 
@@ -236,15 +236,51 @@ Then the tally and the habits go into the memory, and the next fight starts with
 
 ## Memory across fights
 
-`brain::Memory` sums the tally and Wolf's habits over every fight against one enemy, with the fight count and who won.
-It lives in `logs/memory/<chr>.json` (the root whitelist `.gitignore` ignores `logs/`), is loaded when the brain is set up and saved at the end of each fight (a death), at every respawn, every 15 s of fight (so a crash keeps most of it) and when the game exits (the driver's `Drop`); an unfinished fight is saved as a fight with no winner.
-Saves go through a temporary file, so a crash never leaves half a file.
+`--player <name>` selects a profile in the game (default `default`); names are 1 to 48 letters, digits, underscores or hyphens.
+The two layers live beside the legacy memory path:
 
-`--brain-memory off` keeps memory for the session only (across deaths, not on disk); `on` uses `logs/memory/<chr>.json`; a path ending in `.json` is the file; any other path is a folder holding `<chr>.json`.
-Without the flag, hosted brains (`decisions`, `responses`) use the default file and `lua` and `scripted` keep session memory only.
-The same flag works in `duel-sim`.
+- `logs/memory/<chr>.boss.json`, version 1, holds shared `evidence` (fights, wins, action/plan/break-response outcome counts), `players` (count-bearing contribution snapshots), `principles`, reasoned `bans`, and `best` (sanitized game plan, evidence snapshot, score and last result).
+- `logs/memory/<chr>.player-<name>.json`, version 2, holds this player's habits, recent history/trend, outcome counts for local bans, and `coach.plan` with player notes and principles.
 
-The file format, version 2 (an example after two short soldier fights in `soldier_brain.rs`, rounded; `history` is new in version 2):
+```json
+{"version":1,"chr":"c5060","evidence":{"fights":21,"boss_wins":20,"wolf_wins":1,"actions":{"3010":[9,0,0,0,9,0]},"plans":{},"break_plans":{}},"players":{},"principles":["Strike immediately after a posture break"],"bans":[{"choice":"3010","reason":"shared: 9/9 whiffs"}],"best":null}
+```
+
+This abbreviated boss example omits the contribution snapshots and the full best plan.
+`best.plan` contains the opener, sets, start set and `on_wolf_break`, with player notes, principles, avoids and retries removed.
+The best candidate prefers wins, faster wins, successful break conversions and damage efficiency; stalled or void fights cannot improve a demonstrated plan.
+During migration the newest legacy plan seeds `best`, using the last legacy result as a proxy because old files do not associate each historical plan with its result.
+Legacy unclassified principles stay in the default player profile; subsequent coach replies explicitly promote universal lessons.
+
+On first load, `<chr>.json` is copied byte-for-byte to `<chr>.v2-backup.json` without overwriting an existing backup, then split into boss knowledge and `player-default`.
+The original is also retained and never written again.
+Action, plan, break-response, win and fight totals are preserved exactly.
+Migration is idempotent and also happens when the first selected player has another name.
+Invalid layers disable persistence with a warning rather than overwriting the source.
+
+A new player inherits `best.plan` at fight 1 once shared knowledge has at least 20 fights; otherwise the Lua baseline plays.
+Existing players resume their own latest validated plan.
+A shared ban from at least nine all-whiff action outcomes, or an explicit coach `boss_bans` entry, applies to every player and to offered chains containing that action.
+Failure-rate bans, avoids and retries remain scoped to the selected player; a player retry cannot reopen a shared ban.
+Shared principles merge newest first, deduplicate case-insensitively and keep six.
+
+Coach JSON sends `boss_knowledge` first, `player_profile` second, then the current fight evidence.
+The shared object contains counts, player/fight totals, principles, bans and a compact best plan/result; it contains no habits, history or player notes.
+The player object contains fight count, habits, trend, notes, `player_principles`, local outcomes and bans/failures.
+The response remains a full game plan, now with `player_principles`, `boss_principles` and `boss_bans` arrays.
+Strict hosted schemas require the arrays (use an empty `boss_bans` for no update); older replies using `principles` still deserialize as player principles.
+Both layers and current fight evidence share the 4096-byte budget, trimming low-priority rows before retained shared lessons and exclusions.
+The tiny checkpoint chooser is unchanged.
+
+Saves replace each file through a temporary file at fight end, respawn, 15-second autosave and exit.
+Contribution snapshots replace each player's earlier evidence rather than adding it again, so repeated saves cannot inflate totals.
+Autosave retains provisional activity only in the player profile; shared learning uses committed active fights, and load reconciles a durable profile snapshot after an interrupted save.
+Saving a different profile preserves the contribution snapshots already on disk.
+`--brain-memory off` keeps session-only memory; `on` uses the default folder; an explicit JSON path supplies the base stem, and any other path supplies the folder.
+Lua and scripted baselines retain their separate `<chr>.lua` or `<chr>.scripted` stems for both layers.
+`duel-sim` uses the default player through the same driver path.
+
+The player file format, version 2 (an example after two short soldier fights in `soldier_brain.rs`, rounded; `history` is new in version 2):
 
 ```json
 {
@@ -271,7 +307,7 @@ The file format, version 2 (an example after two short soldier fights in `soldie
 A version 1 file loads (its `history` is empty) and is saved as version 2 from then on (`memory_v1_migrates_and_keeps_ten_fights`).
 `history` holds the last 10 finished fights, oldest first, each as `{"winner", "metrics", "decisions", "lua_acts", "requests", "choices", "tokens", "latency_ms", "brain"}` (see "The score to beat"); `boss` also holds tactic tokens next to action ids.
 A missing file starts fresh with a note on stderr.
-An unusable file (bad JSON, another `version`, or another enemy's `chr`) starts fresh with a warning and is moved aside to `<name>.json.corrupt`, so the next save does not destroy it.
+An unusable layer (bad JSON, another `version`, or another enemy's `chr`) disables persistence with a warning and keeps every existing file intact.
 Every field but `version` and `chr` has a default, so a file from a build with fewer fields still loads.
 
 ## Wolf's habits
@@ -449,7 +485,7 @@ cargo run --release -p sekiro-game -- --play --enemy soldier --brain decisions -
 
 These commands authorize real calls when the player runs them; development tests make no provider API calls.
 `lua`, `scripted`, `--force-act`, and the independent simulation `--brain-log` remain available.
-Hosted brains remember every fight in `logs/memory/<chr>.json` unless `--brain-memory off` is given (see "Memory across fights").
+Hosted brains remember every fight in shared boss knowledge and a selected player profile unless `--brain-memory off` is given (see "Memory across fights").
 `--simple-ai` retains precedence over the boss controller.
 `HostedConfig::from_env` checks `OPENAI_API_KEY` in the environment first, then only the `OPENAI_API_KEY=` setting in the working directory `.env`.
 Surrounding single or double quotes on the dotenv value are accepted.
@@ -619,9 +655,9 @@ FromSoftware players fight the same enemy dozens of times, so the boss learns be
 - **Fighter (in the fight, cheap).** The driver runs the plan's sets locally with the sampler (`sampler.rs`, with the repelled-plan penalty and the untried bonus).
   At the checkpoints (`start`, `pressure`, `pressure_critical`, `half_hp` (fallback), `mark_lost`, `punished_twice`, `deflected_thrice`) the Decisions API picks which set to play, or `keep`.
   No per-move calls.
-- **Phases across fights.** Fight 1 against an enemy with no memory starts with his own Lua AI; the coach can review it mid-fight and runs after it.
+- **Phases across fights.** Fight 1 for a new player uses the shared best plan once boss knowledge has at least 20 fights; with thinner knowledge it starts with his own Lua AI; the coach can review it mid-fight and runs after it.
   From fight 2 on the coach's plan drives him: the opener runs first, then plans sampled from the start set.
-  The newest validated plan is kept in the memory file (`coach.plan`, with `coach.plans`, the outcomes of every plan text), so a new session starts from it.
+  The newest validated player plan is kept in the player profile (`coach.plan`, with `coach.plans`, the outcomes of every plan text), so a new session starts from it.
   No coach call is made at exit (the game would wait for it); the unfinished fight is saved in the memory as before.
 
 ```powershell
@@ -632,10 +668,10 @@ FromSoftware players fight the same enemy dozens of times, so the boss learns be
 
 | Flag | Meaning |
 |---|---|
-| `--brain coach` | The coach plus the Decisions checkpoint chooser. Memory is on by default (`logs/memory/<chr>.json`); `--brain-memory off` turns it off. `decisions` and `responses` stay as they were |
+| `--brain coach` | The coach plus the Decisions checkpoint chooser. Memory is on by default (`logs/memory/<chr>.boss.json` and `<chr>.player-default.json`); `--brain-memory off` turns it off. `decisions` and `responses` stay as they were |
 | `--coach claude\|codex\|api` | Who writes the plan. `codex` (default) uses `gpt-6.1-sol`, medium reasoning effort, ignores user config, and uses a read-only sandbox, ephemeral sessions and the output schema. `api` uses Responses with `gpt-6-luna`, low effort, strict schema, `store:false` and a 45 s deadline. `claude` uses `claude-haiku-5-5`, our replacement system prompt, empty settings and MCP configuration, safe mode, low effort, no tools or session persistence, and the JSON schema. Only `api` needs an API key |
 | `--coach-model <name>` | Default `claude-haiku-5-5` (claude), `gpt-6.1-sol` (codex), `gpt-6-luna` (api) |
-| `--coach-interval <secs>` | Mid-fight review interval, default 45 seconds; 0 disables all mid-fight triggers |
+| `--coach-interval <secs>` | Mid-fight review interval, default 30 seconds; 0 disables all mid-fight triggers |
 | `--coach-effort <level>` | `codex` and `api`: defaults `medium` and `low`, respectively |
 | `SEKIRO_COACH_CMD` | Replaces the program of the `claude` and `codex` coaches (the tests point it at a fake) |
 
@@ -662,7 +698,9 @@ Plans in sets must contain an attack and may not be in `avoid` (see "Hard limits
    "when": "pressure"}],
  "start_set": "press",
  "on_wolf_break": [{"plan":"3000", "weight":1.0}],
- "principles": ["kick 3005 lands; probe other close attacks"],
+ "player_principles": ["this player rarely answers the kick"],
+ "boss_principles": ["convert posture breaks with an immediate attack"],
+ "boss_bans": [],
  "retry": [],
  "avoid": [{"choice": "3003", "reason": "deflected 5 of 5"}],
  "notes": "He deflects thrusts early but never the kick; he backs off after a deflect."}
@@ -897,8 +935,8 @@ Coach input `actions` contains individual `[n, hit, blocked, deflected, whiffed,
 The coach can therefore probe under-used moves using their own outcomes rather than the aggregate `lua` plan count.
 The input budget is 4096 bytes; the small in-fight chooser request remains unchanged.
 
-`principles` keeps up to six lessons, each at most 90 Unicode characters, in the saved game plan.
-Every coach input sends them back once, independently of whether the played-plan summary must be trimmed, and console plan summaries print them.
+`player_principles` and `boss_principles` each keep up to six lessons of at most 90 Unicode characters.
+Coach inputs separate shared lessons from player lessons, and console plan summaries mark each as boss or player.
 
 In play with the real Lua AI or any boss brain, F9 and normal exit print the session's per-action success/range table and fight trend.
 Each report appends to `logs/brain-session-<timestamp>.md`, including duration, boss-win kill time, Wolf breaks and post-break hits.
@@ -913,7 +951,7 @@ Live model plan quality, live-game fidelity, and the F9 presentation in a render
 
 ### Mid-fight coach reviews
 
-Coach mode reviews every 45 seconds of fight time since the last coach send, with a loaded starting plan counting as a send at fight start.
+Coach mode reviews every 30 seconds of fight time since the last coach send, with a loaded starting plan counting as a send at fight start.
 A surviving boss mark loss, two Wolf posture breaks since the last review, or all coached plans in the active set being banned triggers an early review, even if a Lua fallback remains.
 Each send resets the timer and break counter.
 Calls are serialized across fights: a blocked trigger waits for the outstanding call, and an ended fight's post review supersedes the pending mid review.

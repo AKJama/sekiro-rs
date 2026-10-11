@@ -791,7 +791,9 @@ fn the_coach_request_has_the_structured_output_shape_and_reports_reasoning_token
             "retry",
             "notes",
             "on_wolf_break",
-            "principles"
+            "player_principles",
+            "boss_principles",
+            "boss_bans"
         ])
     );
     let choices = schema["$defs"]["choice"]["enum"].as_array().unwrap();

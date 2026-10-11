@@ -494,6 +494,86 @@ fn temp_file(name: &str) -> std::path::PathBuf {
     dir.join(name)
 }
 
+#[test]
+fn real_owl_datasets_migrate_without_losing_totals() {
+    for session in ["owl-2026-10-11-outsmarted", "owl-2026-10-11-alive"] {
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../../logs/datasets/{session}/c5060.json"));
+        // Local research data is optional on other machines, never embedded in source.
+        if !source.exists() {
+            continue;
+        }
+        let legacy = temp_file("c5060.json");
+        std::fs::copy(&source, &legacy).unwrap();
+        let original = std::fs::read(&legacy).unwrap();
+        let old: Memory = serde_json::from_slice(&original).unwrap();
+        let paths = memory::LayerPaths::new(&legacy, "default");
+        let (boss, profile) = paths.load("c5060").unwrap();
+        assert_eq!(profile, old);
+        assert_eq!(boss.evidence.fights, old.fights);
+        assert_eq!(boss.evidence.boss_wins, old.boss_wins);
+        assert_eq!(boss.evidence.wolf_wins, old.wolf_wins);
+        assert_eq!(boss.evidence.actions, old.boss);
+        assert_eq!(boss.evidence.plans, old.coach.plans);
+        assert_eq!(boss.evidence.break_plans, old.coach.break_plans);
+        assert_eq!(std::fs::read(&paths.backup).unwrap(), original);
+        assert_eq!(std::fs::read(&legacy).unwrap(), original);
+        assert!(paths.boss.exists() && paths.player.exists());
+        let (again, _) = paths.load("c5060").unwrap();
+        assert_eq!(boss, again);
+        eprintln!(
+            "migration {session}: fights={} boss_wins={} wolf_wins={} action_exchanges={} plan_exchanges={} players={}",
+            boss.evidence.fights,
+            boss.evidence.boss_wins,
+            boss.evidence.wolf_wins,
+            boss.evidence.actions.values().map(|c| c.n).sum::<u32>(),
+            boss.evidence.plans.values().map(|c| c.n).sum::<u32>(),
+            boss.summary().players
+        );
+    }
+}
+
+#[test]
+fn both_full_layers_fit_coach_budget() {
+    let mut input = busy_input();
+    input.boss_knowledge = memory::BossSummary {
+        best: Some(memory::BestSummary {
+            sets: input
+                .played
+                .as_ref()
+                .unwrap()
+                .sets
+                .iter()
+                .map(|s| (s.name.clone(), s.plans.clone()))
+                .collect(),
+            opener: "3000".into(),
+            start_set: "set0".into(),
+            ..Default::default()
+        }),
+        fights: 100,
+        players: 8,
+        actions: input.overall.clone(),
+        plans: input.overall.clone(),
+        break_plans: input.overall.clone(),
+        principles: vec!["界".repeat(90); 6],
+        bans: (0..8)
+            .map(|i| coach::Avoid {
+                choice: format!("300{i}"),
+                reason: "界".repeat(80),
+            })
+            .collect(),
+    };
+    input.principles = vec!["界".repeat(90); 6];
+    input.played.as_mut().unwrap().boss_principles = input.boss_knowledge.principles.clone();
+    input.played.as_mut().unwrap().boss_bans = input.boss_knowledge.bans.clone();
+    input.phase = "mid".into();
+    assert!(input.fit(INPUT_BUDGET) <= INPUT_BUDGET);
+    let value = serde_json::to_value(&input).unwrap();
+    assert_eq!(value["boss_knowledge"]["fights"], 100);
+    assert!(value["player_profile"].is_object());
+    assert!(value["boss_knowledge"].get("habits").is_none());
+}
+
 /// A fight's tally and habits: the soldier's 3000 deflected once, Wolf's slash landing.
 fn one_fight() -> (Tally, HabitTracker) {
     let mut t = Tally::default();
@@ -1143,6 +1223,8 @@ fn good_plan() -> GamePlan {
         retry: Vec::new(),
         on_wolf_break: Vec::new(),
         principles: Vec::new(),
+        boss_principles: Vec::new(),
+        boss_bans: Vec::new(),
     }
 }
 
@@ -1433,6 +1515,8 @@ fn busy_input() -> CoachInput {
         retry: Vec::new(),
         on_wolf_break: Vec::new(),
         principles: Vec::new(),
+        boss_principles: Vec::new(),
+        boss_bans: Vec::new(),
     };
     let mut sets = std::collections::BTreeMap::new();
     for i in 0..4 {
@@ -1569,8 +1653,8 @@ fn mid_input_keeps_current_plan_and_results_first_within_four_kb() {
     let text = serde_json::to_string(&input).unwrap();
     assert!(input.played.is_some());
     assert!(!input.plans.0.is_empty());
-    assert!(text.find("\"result\"").unwrap() < text.find("\"trend\"").unwrap());
-    assert!(text.find("\"plans\"").unwrap() < text.find("\"trend\"").unwrap());
+    assert!(text.find("\"boss_knowledge\"").unwrap() < text.find("\"player_profile\"").unwrap());
+    assert!(text.starts_with("{\"boss_knowledge\":"));
 }
 
 #[test]

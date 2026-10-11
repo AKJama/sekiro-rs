@@ -988,7 +988,10 @@ fn a_fight_summary_and_the_baseline_are_saved_with_the_metrics() {
     assert!(record.metrics.duration > 15.0 && record.metrics.kill_time.is_none());
     assert!(record.metrics.hp_lost > 0.0);
     assert_eq!(record.requests, 0, "the Lua brain asks nothing");
-    let (saved, _) = Memory::load(&path, "c1010");
+    let (saved, _) = Memory::load(
+        &sekiro_sim::brain::memory::LayerPaths::new(&path, "default").player,
+        "c1010",
+    );
     assert_eq!(
         (saved.version, saved.fights, saved.history.len()),
         (2, 1, 1)

@@ -44,7 +44,9 @@ use super::coach::{
 };
 use super::habits::{HabitTracker, WolfFrame};
 use super::limits::{self, Pacing};
-use super::memory::{FightEnd, Loaded, Memory, MemorySummary, PlanFailures};
+use super::memory::{
+    BossKnowledge, FightEnd, LayerPaths, Loaded, Memory, MemorySummary, PlanFailures,
+};
 use super::metrics::{FightRecord, MetricsTracker, Trend, percentile};
 use super::observation::observe;
 use super::plan::{Plan, Step, Weighted};
@@ -306,6 +308,9 @@ pub struct BrainDriver {
     pub habits: HabitTracker,
     /// Every earlier fight (loaded from the memory file, plus the fights of this session).
     pub memory: Memory,
+    pub boss_knowledge: BossKnowledge,
+    pub player: String,
+    layer_paths: Option<LayerPaths>,
     memory_path: Option<PathBuf>,
     last_save: f32,
     /// The last step's length, seconds.
@@ -429,6 +434,9 @@ impl BrainDriver {
             tally: Tally::default(),
             habits: HabitTracker::new(actions.back_steps),
             memory: Memory::new(actions.chr),
+            boss_knowledge: BossKnowledge::new(actions.chr),
+            player: "default".into(),
+            layer_paths: None,
             memory_path: None,
             last_save: 0.0,
             step_dt: 0.0,
@@ -503,8 +511,38 @@ impl BrainDriver {
     /// `logs/memory/<chr>.json`): loads it now (a missing or unusable file starts fresh, with a
     /// line on stderr) and saves to it from then on.
     pub fn use_memory(&mut self, path: PathBuf) -> Loaded {
+        self.use_player_memory(path, "default")
+    }
+
+    pub fn use_player_memory(&mut self, path: PathBuf, player: &str) -> Loaded {
         let chr = self.actions.chr;
-        let (memory, how) = Memory::load(&path, chr);
+        if let Err(e) = super::memory::player_name(player) {
+            return Loaded::Corrupt(e);
+        }
+        let paths = LayerPaths::new(&path, player);
+        let existed = paths.player.exists();
+        let (boss, memory) = match paths.load(chr) {
+            Ok(layers) => layers,
+            Err(e) => {
+                eprintln!("warning: memory layers: {e}; persistence disabled");
+                return Loaded::Corrupt(e.to_string());
+            }
+        };
+        let how = if existed || memory.fights > 0 {
+            Loaded::Read
+        } else {
+            Loaded::Missing
+        };
+        self.player = player.into();
+        self.boss_knowledge = boss;
+        self.layer_paths = Some(paths);
+        eprintln!(
+            "boss knowledge: {} fights from {} players; player profile: {} ({} fights)",
+            self.boss_knowledge.evidence.fights,
+            self.boss_knowledge.summary().players,
+            player,
+            memory.fights
+        );
         match &how {
             Loaded::Read => eprintln!(
                 "brain memory: {} earlier fights against {chr} from {}",
@@ -522,6 +560,7 @@ impl BrainDriver {
             ),
         }
         self.memory = memory;
+        self.apply_boss_bans();
         for (text, f) in &self.memory.coach.failures {
             if f.banned() {
                 self.banned.insert(text.clone());
@@ -537,7 +576,12 @@ impl BrainDriver {
         if self.coach_mode {
             // The newest plan of an earlier session plays from the first fight (validated
             // again: the file may be from another build).
-            let saved = self.memory.coach.plan.take();
+            let saved = self
+                .memory
+                .coach
+                .plan
+                .take()
+                .or_else(|| self.boss_knowledge.starter());
             if let Some(saved) = saved {
                 let v = saved.validate(self.actions);
                 for w in &v.warnings {
@@ -623,6 +667,21 @@ impl BrainDriver {
 
     pub fn memory_path(&self) -> Option<&Path> {
         self.memory_path.as_deref()
+    }
+
+    fn apply_boss_bans(&mut self) {
+        for ban in &self.boss_knowledge.bans {
+            self.banned.insert(ban.choice.clone());
+            for choice in self.actions.choices() {
+                if choice
+                    .value
+                    .split(['>', '+'])
+                    .any(|step| step == ban.choice)
+                {
+                    self.banned.insert(choice.value);
+                }
+            }
+        }
     }
 
     /// Enable exit/F9 reports in the game; offline tests do not write reports.
@@ -726,9 +785,22 @@ impl BrainDriver {
         let Some(path) = self.memory_path.clone() else {
             return;
         };
-        if let Err(e) = self.memory_now().save(&path) {
-            self.stats.save_errors += 1;
-            eprintln!("brain memory: saving {} failed: {e}", path.display());
+        let now = self.memory_now();
+        self.boss_knowledge.update(&self.player, &self.memory);
+        self.apply_boss_bans();
+        let saved = self.layer_paths.as_ref().map_or_else(
+            || now.save(&path).map(|()| self.boss_knowledge.clone()),
+            |p| p.save(&self.boss_knowledge, &now),
+        );
+        match saved {
+            Ok(boss) => {
+                self.boss_knowledge = boss;
+                self.apply_boss_bans();
+            }
+            Err(e) => {
+                self.stats.save_errors += 1;
+                eprintln!("brain memory: saving {} failed: {e}", path.display());
+            }
         }
     }
 
@@ -876,7 +948,16 @@ impl BrainDriver {
             return;
         }
         self.newest_coach = reply.id;
+        self.boss_knowledge.learn(&v.plan);
         for retry in &v.plan.retry {
+            if self
+                .boss_knowledge
+                .bans
+                .iter()
+                .any(|b| b.choice == retry.choice)
+            {
+                continue;
+            }
             self.banned.remove(&retry.choice);
             self.bans_at_start.remove(&retry.choice);
             // New evidence is evaluated against new uses after the explicit retry.
@@ -905,6 +986,7 @@ impl BrainDriver {
             "warnings": v.warnings}),
         );
         self.memory.coach.plan = Some(v.plan.clone());
+        self.apply_boss_bans();
         if flight.mid && flight.fight == self.fight_no && !self.fight_over {
             self.mid_plan = Some(v.plan);
         } else {
@@ -1952,6 +2034,10 @@ impl BrainDriver {
             }
         }
         if self.coach_mode && !record.metrics.void {
+            self.boss_knowledge.update(&self.player, &self.memory);
+            if let Some(plan) = &self.game_plan {
+                self.boss_knowledge.consider(plan, &self.memory);
+            }
             self.send_coach(&record);
         }
         self.last_record = Some(record);
@@ -1971,6 +2057,7 @@ impl BrainDriver {
             sets.entry(name.clone()).or_default().secs = (s * 10.0).round() / 10.0;
         }
         let mut input = CoachInput {
+            boss_knowledge: self.boss_knowledge.summary(),
             phase: "post".into(),
             elapsed: None,
             vitals: None,
@@ -2005,7 +2092,17 @@ impl BrainDriver {
                 .map(|p| p.principles.clone())
                 .unwrap_or_default(),
             banned: {
-                let mut list: Vec<_> = self.banned.iter().cloned().collect();
+                let mut list: Vec<_> = self
+                    .banned
+                    .iter()
+                    .filter(|choice| {
+                        !self.boss_knowledge.bans.iter().any(|ban| {
+                            *choice == &ban.choice
+                                || choice.split(['>', '+']).any(|step| step == ban.choice)
+                        })
+                    })
+                    .cloned()
+                    .collect();
                 list.sort();
                 list
             },
@@ -2337,6 +2434,98 @@ struct OutcomeLine<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn layer_test_path() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sekiro-layers-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("c1010.json")
+    }
+
+    #[test]
+    fn new_player_uses_rich_shared_plan_and_bans_but_not_other_player_habits() {
+        let path = layer_test_path();
+        let mut a = learning_driver();
+        a.coach_mode = true;
+        a.use_player_memory(path.clone(), "alice");
+        a.memory.fights = 21;
+        a.memory.habits.jumps = 77;
+        a.memory.coach.failures.insert(
+            "3000".into(),
+            PlanFailures {
+                uses: 9,
+                fatal: 9,
+                ..Default::default()
+            },
+        );
+        a.memory.boss.insert(
+            "3003".into(),
+            Counts {
+                n: 9,
+                whiffed: 9,
+                ..Default::default()
+            },
+        );
+        a.coach_flights.push(CoachFlight {
+            id: 1,
+            sent: a.time,
+            mid: false,
+            fight: a.fight_no,
+        });
+        a.take_coach_reply(CoachReply {
+            id: 1,
+            plan: Some(GamePlan {
+                opener: "3005".into(),
+                boss_principles: vec!["kick has short recovery".into()],
+                principles: vec!["Alice jumps".into()],
+                notes: "Alice is aggressive".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        a.boss_knowledge
+            .consider(a.memory.coach.plan.as_ref().unwrap(), &a.memory);
+        a.save_memory();
+        let mut b = learning_driver();
+        b.coach_mode = true;
+        b.use_player_memory(path.clone(), "bob");
+        assert_eq!(b.game_plan.as_ref().unwrap().opener, "3005");
+        assert_eq!(b.opener.as_ref().unwrap().value(), "3005");
+        assert!(b.banned.contains("3003"));
+        assert!(!b.banned.contains("3000"));
+        assert_eq!(b.memory.habits.jumps, 0);
+        let request = serde_json::to_value(b.coach_input(&FightRecord::default())).unwrap();
+        assert_eq!(
+            request["boss_knowledge"]["principles"][0],
+            "kick has short recovery"
+        );
+        assert!(!request.to_string().contains("Alice"));
+        b.memory.fights = 1;
+        b.save_memory();
+        b.save_memory();
+        assert_eq!(b.boss_knowledge.evidence.fights, 22);
+        assert_eq!(b.boss_knowledge.summary().players, 2);
+        // A stale Alice driver must not overwrite Bob's durable contribution.
+        a.save_memory();
+        assert_eq!(a.boss_knowledge.evidence.fights, 22);
+        let paths = LayerPaths::new(&layer_test_path(), "bob");
+        let existing = LayerPaths::new(&path, "bob");
+        let (mut boss, profile) = existing.load("c1010").unwrap();
+        boss.players.get_mut("alice").unwrap().fights = 2;
+        boss.update("bob", &profile);
+        paths.save(&boss, &profile).unwrap();
+        let mut c = learning_driver();
+        c.coach_mode = true;
+        c.use_player_memory(paths.legacy, "charlie");
+        assert!(c.game_plan.is_none() && c.opener.is_none());
+        assert!(c.banned.contains("3003"));
+    }
 
     #[test]
     fn a_lua_fallback_does_not_hide_a_banned_active_set() {
