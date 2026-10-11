@@ -23,6 +23,32 @@ pub struct Move {
 
 pub type MoveSheet = BTreeMap<String, Move>;
 
+/// Pool only byte-identical decoded clips with identical resolved TAE event timelines.
+pub fn shared_genichiro_actions(
+    cache: &std::path::Path,
+    old: &crate::Character,
+    next: &crate::Character,
+) -> BTreeSet<String> {
+    let mut shared = BTreeSet::new();
+    for id in (3000..3100).chain(5200..5300) {
+        let name = format!("a000_{id:06}");
+        let (Some(a), Some(b)) = (old.tae.anim(&name), next.tae.anim(&name)) else {
+            continue;
+        };
+        if a.events != b.events {
+            continue;
+        }
+        let first = std::fs::read(cache.join("anim/c7100").join(format!("{name}.bin")));
+        let second = std::fs::read(cache.join("anim/c7110").join(format!("{name}.bin")));
+        if let (Ok(a), Ok(b)) = (first, second)
+            && a == b
+        {
+            shared.insert(id.to_string());
+        }
+    }
+    shared
+}
+
 fn rounded(v: f32) -> f32 {
     (v * 1000.0).round() / 1000.0
 }
@@ -101,8 +127,14 @@ pub fn build(duel: &Duel, actions: &BossActions) -> MoveSheet {
     let effects_d = duel.rules.active_effects(0, &duel.player);
     // Wolf's normal sword guard behaviour, independent of his current idle clip.
     let guard = duel.fighters[0].attacks.get(&90);
-    for action in actions.actions {
-        let name = format!("a000_{:06}", action.id);
+    let ids: BTreeSet<_> = actions
+        .actions
+        .iter()
+        .map(|a| a.id)
+        .chain(actions.counter_ids())
+        .collect();
+    for id in ids {
+        let name = format!("a000_{id:06}");
         let (Some(clip), Some(tae)) = (npc.clips.clip(&name), npc.tae.anim(&name)) else {
             continue;
         };
@@ -167,11 +199,11 @@ pub fn build(duel: &Duel, actions: &BossActions) -> MoveSheet {
                 _ => {}
             }
         }
-        row.reach = clip_reach(duel, action.id, clip.duration, glam::Mat4::IDENTITY);
+        row.reach = clip_reach(duel, id, clip.duration, glam::Mat4::IDENTITY);
         row.hits.sort_by(|a, b| a[0].total_cmp(&b[0]));
         row.cancels.sort_by(|a, b| a[0].total_cmp(&b[0]));
         row.recovery = row.hits.last().map_or(0.0, |h| rounded(row.wait(h[0])));
-        sheet.insert(action.id.to_string(), row);
+        sheet.insert(id.to_string(), row);
     }
     let mut combos: BTreeSet<Vec<i32>> = actions.combos.iter().map(|c| c.ids.to_vec()).collect();
     // Attack groups in mixed tactic plans are part of the offered vocabulary too.

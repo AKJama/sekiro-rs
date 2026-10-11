@@ -520,6 +520,7 @@ impl Character {
     }
 
     fn fill_env(&mut self, dt: f32) {
+        let authored_airborne = self.authored_air_height() > 0.0;
         let tae = &self.tae_runtime.frame;
         let env = &mut self.behavior.env;
         env.requested = self
@@ -566,7 +567,7 @@ impl Character {
         let move_window = !tae.restricted || tae.flag(cancel::MOVE) || ended;
         env.standby = Some(move_window);
         env.move_cancel = Some(move_window);
-        env.landed = self.body.grounded;
+        env.landed = self.body.grounded && !authored_airborne;
         let [x, y, z] = self.body.position;
         let water = self.ground.water_surface(x, z, f32::INFINITY);
         env.in_water = water.is_some_and(|w| {
@@ -606,6 +607,11 @@ impl Character {
 
     /// Runs one step of `dt` seconds. `frame` is the player's input; NPCs read [`Self::npc`].
     pub fn tick(&mut self, frame: &InputFrame, dt: f32) -> StepReport {
+        let interrupted_height = if self.pending_damage.is_some() {
+            self.authored_air_height()
+        } else {
+            0.0
+        };
         // HangIdle carries turn/prosthetic flags but no step/jump cancel windows.
         // Docking's idle actions are gated by HKS, not the ground combat buffer.
         let docking_idle = self.docking.active.is_some()
@@ -796,6 +802,16 @@ impl Character {
             .iter()
             .find(|(n, _)| Some(*n) == main_node)
             .map(|(_, c)| c.clone());
+        // If a full-body reaction actually replaces an authored aerial clip, retain
+        // its elevation as physical flight. Subsequent env(201)/fall transitions
+        // then use the NPC's own damage/fall/landing graph instead of grounding it.
+        if interrupted_height > 0.0
+            && main.as_ref().map(|c| &c.animation) != self.last_main.as_ref().map(|c| &c.animation)
+        {
+            self.body.position[1] += interrupted_height;
+            self.body.grounded = false;
+            self.body.velocity[1] = 0.0;
+        }
         let mut root_motion = main
             .as_ref()
             .and_then(|c| {
@@ -1024,6 +1040,37 @@ impl Character {
         };
         let pose = clip.sample(main.time.min(clip.duration), &self.skeleton);
         self.skeleton.model_space(&pose)
+    }
+
+    /// NPC jumps can lift both authored foot targets while the physics root stays grounded.
+    /// Use their support height relative to the clip's starting pose for env(201).
+    /// The 15 cm contact tolerance avoids treating ordinary footwork as flight.
+    pub fn authored_air_height(&self) -> f32 {
+        if self.kind != ControlKind::Npc || !self.body.grounded {
+            return 0.0;
+        }
+        let Some(main) = &self.last_main else {
+            return 0.0;
+        };
+        let Some(clip) = self.clips.clip(&main.animation) else {
+            return 0.0;
+        };
+        let feet: Option<Vec<_>> = ["L_Foot_Target", "R_Foot_Target"]
+            .iter()
+            .map(|name| self.skeleton.bone_index(name))
+            .collect();
+        let Some(feet) = feet else { return 0.0 };
+        let current = self
+            .skeleton
+            .model_space(&clip.sample(main.time, &self.skeleton));
+        let start = self.skeleton.model_space(&clip.sample(0.0, &self.skeleton));
+        let support = |pose: &[Mat4]| {
+            feet.iter()
+                .map(|i| pose[*i].w_axis.y)
+                .fold(f32::INFINITY, f32::min)
+        };
+        let lift = support(&current) - support(&start);
+        if lift > 0.15 { lift } else { 0.0 }
     }
 
     /// Source model space to Bevy world space: mirror X, then place at the body.

@@ -186,6 +186,7 @@ impl RequestMode {
 /// A boss controller. Calls never block: a controller that needs time (a hosted model) works
 /// on a background thread and answers through [`BossBrain::poll`].
 pub trait BossBrain {
+    fn change_phase(&mut self, _actions: &'static BossActions) {}
     fn costs(&self) -> cost::CostSnapshot {
         cost::CostSnapshot::default()
     }
@@ -252,6 +253,7 @@ impl BossBrain for LuaBrain {
 /// each request, to exercise the timeout path.
 #[derive(Debug, Clone)]
 pub struct ScriptedBrain {
+    follow_phase: bool,
     pub opener: Plan,
     pub fallback_plan: Plan,
     pub switch_after_deflects: u32,
@@ -271,6 +273,7 @@ impl ScriptedBrain {
     pub fn new(opener: Plan, fallback_plan: Plan, switch_after_deflects: u32, delay: f32) -> Self {
         Self {
             opener,
+            follow_phase: false,
             fallback_plan,
             switch_after_deflects,
             delay,
@@ -282,7 +285,9 @@ impl ScriptedBrain {
     /// openers, answering after 0.1 s.
     pub fn for_actions(actions: &BossActions) -> Self {
         let [opener, fallback] = actions.scripted;
-        Self::new(Plan::new(opener), Plan::new(fallback), 2, 0.1)
+        let mut brain = Self::new(Plan::new(opener), Plan::new(fallback), 2, 0.1);
+        brain.follow_phase = true;
+        brain
     }
 
     /// The plan this controller picks for a tally.
@@ -302,6 +307,14 @@ impl ScriptedBrain {
 }
 
 impl BossBrain for ScriptedBrain {
+    fn change_phase(&mut self, actions: &'static BossActions) {
+        if self.follow_phase {
+            let next = Self::for_actions(actions);
+            self.opener = next.opener;
+            self.fallback_plan = next.fallback_plan;
+            self.pending = None;
+        }
+    }
     fn name(&self) -> &'static str {
         "scripted"
     }

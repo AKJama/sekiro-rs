@@ -94,6 +94,10 @@ pub struct Avoid {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GamePlan {
+    /// Multipliers for counter animation ids; zero vetoes a callback containing that act.
+    pub counter_weights: std::collections::BTreeMap<String, f32>,
+    /// Character phase this plan was validated for; old plans default to the installing phase.
+    pub boss_phase: String,
     pub boss_principles: Vec<String>,
     pub boss_bans: Vec<Avoid>,
     /// Local response to Wolf's posture break, never requiring a model call.
@@ -167,6 +171,26 @@ impl GamePlan {
             version: GAME_PLAN_VERSION,
             ..GamePlan::default()
         };
+        out.boss_phase = actions.chr.into();
+        if !self.boss_phase.is_empty() && self.boss_phase != actions.chr {
+            warnings.push("game plan belongs to another boss phase".into());
+            return Validated {
+                plan: out,
+                warnings,
+            };
+        }
+        for (id, weight) in &self.counter_weights {
+            if id
+                .parse::<i32>()
+                .is_ok_and(|id| actions.counter_ids().contains(&id))
+                && weight.is_finite()
+                && (0.0..=10.0).contains(weight)
+            {
+                out.counter_weights.insert(id.clone(), *weight);
+            } else {
+                warnings.push(format!("counter weight dropped: {id}"));
+            }
+        }
         if self.version != 0 && self.version != GAME_PLAN_VERSION {
             warnings.push(format!("unsupported game plan version {}", self.version));
             return Validated {
@@ -527,6 +551,7 @@ pub struct SetOffer {
 /// Wolf's result in the fight just over, in percent and whole numbers.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct FightLine {
+    pub countered: u32,
     /// `boss`, `wolf` or `none`.
     pub won: String,
     pub time_to_kill_wolf: Option<f32>,
@@ -567,6 +592,8 @@ pub struct SetStat {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(into = "CoachWire")]
 pub struct CoachInput {
+    pub counters: TopMap<Counts>,
+    pub boss_phase: String,
     pub move_sheet: super::moves::MoveSheet,
     pub break_log: Vec<super::metrics::BreakRecord>,
     pub break_summary: std::collections::BTreeMap<String, [u32; 2]>,
@@ -616,7 +643,7 @@ impl From<CoachInput> for serde_json::Value {
             "player_profile": {"fight": i.fight, "trend": i.trend, "habits": i.habits,
                 "player_principles": i.principles, "notes": i.notes, "overall": i.overall,
                 "banned": i.banned, "failures": i.failures},
-            "phase": i.phase, "result": i.result, "plans": i.plans, "sets": i.sets,
+            "phase": i.phase, "boss_phase": i.boss_phase, "counters": i.counters, "result": i.result, "plans": i.plans, "sets": i.sets,
             "played": i.played, "elapsed": i.elapsed, "vitals": i.vitals, "marks": i.marks,
             "on_wolf_break": i.on_wolf_break, "actions": i.actions,
             "action_range": i.action_range, "range": i.range, "wolf": i.wolf
@@ -680,6 +707,9 @@ impl CoachInput {
     }
 
     fn trim_one(&mut self) -> bool {
+        if self.counters.pop(4) {
+            return true;
+        }
         if self.move_sheet.len() > 6 {
             let used = self
                 .played
@@ -742,6 +772,29 @@ impl CoachInput {
         {
             set.description.clear();
             return true;
+        }
+        // Counter statistics must fit without erasing which game plan was played.
+        // Detailed timelines can be reduced before that higher-value context.
+        if self.move_sheet.len() > 3 {
+            let used = self
+                .played
+                .as_ref()
+                .map(|p| p.summary_lines().join(" "))
+                .unwrap_or_default();
+            if let Some(key) = self
+                .move_sheet
+                .keys()
+                .min_by_key(|key| {
+                    (
+                        used.contains(key.as_str()),
+                        self.actions.get(*key).map_or(0, |c| c.n),
+                    )
+                })
+                .cloned()
+            {
+                self.move_sheet.remove(&key);
+                return true;
+            }
         }
         if self.phase != "mid" && self.played.take().is_some() {
             return true;

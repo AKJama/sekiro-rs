@@ -162,6 +162,14 @@ impl AiBrain {
             return;
         }
         self.vm.set_global(SCRIPT_BATTLE_ACTIVATE, script);
+        let kengeki = self.vm.get_global("Common_Kengeki_Activate");
+        if !kengeki.is_nil() {
+            self.vm.set_global("__brain_kengeki_activate", kengeki);
+            self.vm.set_global(
+                "Common_Kengeki_Activate",
+                Value::Host("Common_Kengeki_Activate".into()),
+            );
+        }
         self.vm.set_global(
             "Common_Battle_Activate",
             Value::Host("Common_Battle_Activate".into()),

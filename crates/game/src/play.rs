@@ -460,6 +460,14 @@ pub fn run(options: Options) -> Result<()> {
         unicode_font: false,
     })
     .init_resource::<crate::bullet_fx::BulletFx>()
+    .add_plugins(crate::fxr::plugin(cache.clone(), |app| {
+        app.add_systems(
+            FixedUpdate,
+            (|sim: NonSend<Sim>, mut fx: ResMut<crate::fxr::FxrPlayer>| fx.observe(&sim.duel))
+                .after(simulate)
+                .run_if(crate::menu::active),
+        );
+    }))
     .add_plugins(cinematic_fade::CinematicFadePlugin)
     .add_plugins(crate::audio::GameAudioPlugin {
         cache: cache.clone(),

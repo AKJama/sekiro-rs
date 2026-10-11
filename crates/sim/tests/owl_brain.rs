@@ -539,7 +539,13 @@ fn owl_move_sheet_matches_guard_and_deflect_resolution_at_current_power() {
             .unwrap();
         duel.set_brain(Box::new(LuaBrain), false).unwrap();
         let sheet = duel.boss_brain.as_ref().unwrap().move_sheet.clone();
-        assert_eq!(sheet.len(), OWL.actions.len() + OWL.combos.len() + 1);
+        assert!(sheet.len() > OWL.actions.len() + OWL.combos.len());
+        for counter in [3061, 3066, 3064, 3068, 3060, 3065, 3069, 3090, 3091] {
+            assert!(
+                sheet.contains_key(&counter.to_string()),
+                "missing counter {counter}"
+            );
+        }
         assert_eq!(sheet["3000+3001"].hits.len(), 2);
         for action in [
             "3000",

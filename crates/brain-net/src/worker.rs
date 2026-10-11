@@ -186,6 +186,7 @@ impl StatsHandle {
 }
 
 struct Work {
+    actions: &'static BossActions,
     id: u64,
     input: Result<String, Failure>,
     excluded: Vec<String>,
@@ -199,6 +200,7 @@ struct CoachWork {
 }
 
 pub struct HostedBrain {
+    actions: &'static BossActions,
     backend: Backend,
     tx: Option<mpsc::Sender<Work>>,
     rx: mpsc::Receiver<BrainReply>,
@@ -280,17 +282,7 @@ impl HostedBrain {
             .name(format!("boss-{}", backend.name()))
             // TLS setup and the handshake use large stack frames; 2 MB overflows on Windows.
             .stack_size(8 * 1024 * 1024)
-            .spawn(move || {
-                run(
-                    config,
-                    actions,
-                    work,
-                    reply,
-                    worker_stats,
-                    worker_stopping,
-                    log,
-                )
-            })
+            .spawn(move || run(config, work, reply, worker_stats, worker_stopping, log))
             .map_err(|_| ConfigError::WorkerStart)?;
         let coach_worker = match coach_config {
             Some(cc) => {
@@ -318,6 +310,7 @@ impl HostedBrain {
             None => None,
         };
         Ok(Self {
+            actions,
             backend,
             tx: Some(tx),
             rx,
@@ -342,6 +335,9 @@ impl HostedBrain {
 }
 
 impl BossBrain for HostedBrain {
+    fn change_phase(&mut self, actions: &'static BossActions) {
+        self.actions = actions;
+    }
     fn costs(&self) -> sekiro_sim::brain::cost::CostSnapshot {
         self.stats.snapshot().costs
     }
@@ -401,6 +397,7 @@ impl BossBrain for HostedBrain {
         self.stats.requests.fetch_add(1, Ordering::Relaxed);
         if let Some(tx) = &self.tx {
             let _ = tx.send(Work {
+                actions: self.actions,
                 id: request.id,
                 input,
                 excluded: request.excluded.clone(),
@@ -601,7 +598,6 @@ fn annotate(
 
 fn run(
     config: HostedConfig,
-    actions: &'static BossActions,
     work: mpsc::Receiver<Work>,
     reply: mpsc::Sender<BrainReply>,
     stats: StatsHandle,
@@ -648,7 +644,7 @@ fn run(
         let start = Instant::now();
         let mut usage = TokenUsage::default();
         let result = match &work.input {
-            Ok(input) => call(&agent, &config, actions, &work, input, &mut usage),
+            Ok(input) => call(&agent, &config, work.actions, &work, input, &mut usage),
             Err(f) => Err(*f),
         };
         let round_trip_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -801,8 +797,15 @@ fn run_coach(
         .proxy(None)
         .build()
         .into();
-    let schema = protocol::game_plan_schema(actions);
     for work in work {
+        let phase = serde_json::from_str::<serde_json::Value>(&work.input)
+            .ok()
+            .and_then(|v| v["boss_phase"].as_str().map(str::to_owned));
+        let actions = phase
+            .as_deref()
+            .and_then(BossActions::for_chr)
+            .unwrap_or(actions);
+        let schema = protocol::game_plan_schema(actions);
         if stopping.load(Ordering::Acquire) {
             break;
         }

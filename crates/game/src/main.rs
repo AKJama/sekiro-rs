@@ -18,6 +18,8 @@
 //! `--native-tone-reinhard` / `--native-tone-filmic` override the authored/default sensitometric operator.
 //! `--visual-stats` logs periodic map frame times in viewer and play modes.
 //! `--profile-systems` also logs map-system CPU timers and render-schedule/pass diagnostics.
+//! `--no-fxr` disables authored FXR playback and keeps the existing effect stand-ins.
+//! `--fxr-preview <id>` repeats an installed effect between the actors every two seconds.
 
 mod arena;
 mod audio;
@@ -28,6 +30,7 @@ mod character;
 mod combat_hud;
 mod deathblow_demo;
 mod draw_mask;
+mod fxr;
 mod input_replay;
 mod lighting;
 mod lightning_fx;

@@ -494,3 +494,71 @@ The old resolver unconditionally sent character category recoil codes 1008/1019 
 Sources and the complete per-tool/arrow audit, including Paramdex descriptions and FwLo's MIT notes, are in [Projectile guard parameter audit](PROJECTILE-GUARD.md).
 The local primary sources are [AtkParam_Npc](../cache/params/AtkParam_Npc.json), [Bullet](../cache/params/Bullet.json), and Paramdex [AtkParam definitions](../cache/refs/paramdex/Defs/AtkParam.xml).
 Regression evidence: `crates/sim/tests/projectile_guard.rs`, `crates/sim/tests/lightning.rs` and `target/alt/projectile-baseline.log`.
+
+## Super armour and interruption (2026-10-11)
+
+Interruption is a damage-motion decision, separate from HP and posture damage.
+The local v1.6 executable's `84ff70` calls `bfd980` to choose the active SpEffect with `spCategory = 1001` and the lowest `categoryPriority`, then indexes its `dmgLv_*` fields (`10cea20`).
+Guard contacts and level zero bypass replacement (`bdbac0`).
+The replacement values are enums, not HKS damage levels: `10b5100` and the table at RVA `2b979e8` translate enums 1 through 12 to levels `[0, 8, 1, 2, 3, 7, 4, 6, 9, 5, 10, 11]`.
+Level 8 is minimum/additive damage, so a sword hit can deal HP and posture without changing the full-body clip.
+The simulation applies this replacement after HP/posture resolution and before delivering the incoming damage to HKS.
+
+| Source | Meaning and audited values |
+| --- | --- |
+| TAE 0, ChrActionFlag 24 | Disables damage motion; `b51b70`, `bdbb40` and `b68d00` publish level zero and suppress knockback, while HP/posture remain active. |
+| TAE 66/67/401, AddSpEffect | Timed category-1001 replacement windows. 5350 makes every positive level minimum; 5358 leaves large/blow-off reactions; 5359 leaves blow-off reactions. |
+| SpEffect 5325 / 5311 / 5320 | Genichiro / Owl / soldier resident damage-motion tables, priority 200. Middle sword hits remain level 2. |
+| SpEffect 5375 | Boss resident, priority 150, `stateInfo = 120`: valid only while a super-armour meter is active, with a small-blow/kick exception. It is not unconditional immunity. |
+| NpcParam `superArmorDurability`, `superArmorRecoverCorrection` | All three tested rows (71001000, 50600000, 10100000) have durability 0 and recovery correction 0.4. `bdb440`/`bdbaf0` require positive base plus added durability and unbroken remaining armour. |
+| SpEffect `changeSuperArmorPoint`, `saReceiveDamageRate` | `stateInfo = 155` adds armour capacity (`bfe4a0`/`bdb690`); received armour damage is scaled by `saReceiveDamageRate` (`bdb470`). The audited attack-window effects and these NPC residents add no capacity. |
+| NpcParam `toughness`, SpEffect `toughnessDamageCutRate` | All three rows have toughness 0. Native `be4e30` requires positive toughness, remaining toughness and action-module flag +0x70 bit 34; `be5bf0` consumes hit toughness damage with the effect multiplier. Zero base toughness supplies no extra resistance here. |
+| AtkParam_Pc `atkSuperArmor`, `atkSuperArmorCorrection` | Wolf's opening slash 5000010 has 0 and 100%; charged thrust 5000000 has correction 200%. These do not create defender armour. |
+| TAE 795, DS3Poise | Template fields `ToughnessParamID`, `ToughnessType`, `DamageRatio`; no such event on the sampled Genichiro 3015/3010/3044/3007/3025 clips. No DS3-labelled event is assumed to grant Sekiro armour. |
+
+The shipped NPC HKS `c9997.hks` functions `IsDamagedAerial` and `ExecDamageDefault` supply another resistance path.
+A hit is aerial when env(201) is false or SpEffect reference 1000060 is present.
+Middle/large/push/fling/small-blow hits then require animation 8140 or 8141 before firing an aerial full-body flinch.
+The existence query must include TAE aliases: Genichiro 8140/8141 alias 8010/8011, so missing standalone .bin files do not mean the aerial reactions are absent.
+The ordinary ground branch instead chooses 8010/8011/8012-style directional flinches.
+Guard/deflect and posture-break reaction codes still follow the existing HKS branches.
+
+### Audited attack windows
+
+Times are seconds in the extracted `a000_<act>` clip, not wall-clock time.
+These are reaction rules, not a blanket immunity for every attack labelled perilous.
+
+| Enemy / act | Resistance data |
+| --- | --- |
+| Genichiro 3015 diving slash | No special replacement SpEffect or 795; ordinary aerial hits select existing 8140/8141 aliases and interrupt. No native armour gate has been verified for this move. Its strike window is 1.033-1.200. |
+| Genichiro 3010 | Two spinning slashes, physics marker 28 at 0.200-0.967. Flag 28 alone is not armour. |
+| Genichiro 3044 jumping volley | 5900 (aerial damage reference 1000060) at 0.400-2.133; 5355 at 0.333-2.133. 5355 alone still allows middle damage. |
+| Genichiro 3007 | No category-1001 timed effect in the audited clip; do not infer immunity from its act number. |
+| Genichiro 3025 perilous thrust | 5358 at 0.000-0.867. |
+| Genichiro other 5358 commitments | 3021: 0-0.833; 3028: 0-4.733; 3040: 0-3.300; 3041: 0-0.900; 3062: 0-1.200; 3067: 0-2.233. |
+| Genichiro 3030 protected aerial strike | 5350 at 0.067-1.167; 5900 (aerial damage reference 1000060) at 0.133-1.167; attack judge 350 at 1.100-1.167. |
+| Genichiro 5350 / 5359 | 3026: 0.067-2.500 and 3030: 0.067-1.167 (5350); 3092: 0-4.033 (5359). |
+| Owl aerial 5350 windows | 3003: 0.300-0.967; 3006: 0.067-0.667; 3007/3030: 0-0.900; 3029: 0.433-0.900; 3035: 0-0.733; 3036: 0-0.400; 3038: 0.300-0.967; 3046: 0.167-0.567; 3047: 0.500-1.100; 3092: 0.900-1.367. |
+| Owl 5358 commitments | 3008: 0-0.700; 3010: 0.600-1.000; 3013: 0-0.633; 3026: 0-1.733; 3027: 0-1.800; 3039: 0.767-1.400; 3064: 0.333-0.700; 3068: 0-0.533; 3069: 0-1.633; 3091: 0-3.000. |
+| Owl 3044 / 3093 | Flag 24 at 0.900-1.467, 2.100-3.300, 3.933-4.533 / 0.767-2.033, 2.333-2.867, 3.300-3.700. |
+| Owl 3040 / 3069 | 5359 at 0.500-0.800 / additional 5350 at 1.467-1.733. |
+| Soldier commitments | 5358 on 3010: 0-0.867, 3031: 0-5.000, 3032: 0-3.400; 5359 on 3013: 0-0.967; flag 24 on 3011: 0.967-1.367 and 3080: 0-2.433. |
+
+The snap to ground came from reporting only `Body.grounded` to env(201): these NPC animations lift their skeleton while their physics root stays on the floor.
+The wrong grounded branch replaced the jump with DamageMiddle, discarding the authored elevation; a legitimate aerial hit now selects DamageAerialFront/Back and retains height.
+NPC support now compares the lowest of both extracted foot targets with the lowest starting foot, with a 0.15 m contact tolerance.
+This support reconstruction is an engine approximation, not a recovered native tolerance.
+It changes the aerial damage query without forcing the normal falling graph to cancel the authored jump.
+When incoming damage actually replaces that full-body clip, its support elevation transfers to the body, which falls and lands through the existing graph and collision integration.
+Positive durability/toughness meters for other NPC data remain unimplemented; the audited three NPCs do not activate them.
+The requested unconditional protection for 3015 is unresolved: adding it without another verified source would invent a per-move rule.
+The protected aerial regression uses 3026 at 1.5 s, inside its actual 5350 window, and verifies its later strike.
+
+
+### Aerial reaction and landing data
+
+Genichiro's aerial-back reaction 8141 aliases HKX 8011; the front reaction 8140 aliases 8010.
+Their TAE 920 events select velocity row 5000 at 0.000-0.033 s and row 5100 at 0.033-0.067, 0.067-0.100 and 0.100-0.133 s.
+Action flag 51 at 0.000-0.133 prevents premature fall cancellation, and SpEffect 5910 carries landing-decision reference 1000070.
+The scripted interrupted 3015 run selects DamageAerialBack and then LandDownward (7220).
+Support-height transfer starts with zero vertical speed; retaining the authored pre-contact vertical momentum and reconstructing native animation-root physics remain approximations.

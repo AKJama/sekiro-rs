@@ -469,17 +469,59 @@ pub const TOMOE: BossActions = BossActions {
     chr: "c7110",
     name: "Genichiro, Way of Tomoe",
     actions: &[
-        plain(3039, "lightning bow", 0.0),
+        plain(3000, "right kesa slash", 3.6),
+        plain(3001, "left kesa slash", 3.6),
+        plain(3002, "left elbow", 3.6),
+        plain(3003, "right body slash", 3.6),
+        plain(3010, "spinning slashes", 3.6),
+        plain(3025, "perilous thrust", 3.6),
+        plain(3004, "body slashes", 3.0),
+        plain(3005, "draw slash", 2.2),
+        plain(3006, "advancing slashes", 4.8),
+        plain(3007, "perilous sweep", 5.9),
+        plain(3016, "running draw slash", 5.2),
+        plain(3040, "Floating Passage opener", 4.5),
+        plain(3041, "Floating Passage finisher", 4.5),
+        plain(3067, "Passage perilous finisher", 4.5),
+        plain(3037, "circling slash", 3.5),
+        setting(3012, "bow attack", 0.0, 2, 1.0),
+        plain(3014, "braking bow shot", 8.9),
+        plain(3015, "diving slash", 8.9),
+        setting(3008, "advancing attack", 12.5, 7, 1.0),
+        plain(3009, "bow shot", 0.0),
+        plain(3011, "bow shot after sweep", 5.9),
+        plain(3045, "roundhouse kick", 3.6),
+        plain_step(5201, "back step"),
+        plain_step(5202, "side step right"),
+        plain_step(5203, "side step left"),
+        setting(3039, "lightning bow", 0.0, 2, 1.0),
         plain(3043, "advancing lightning jump slash", 8.3),
         plain(3042, "lightning jump slash", 3.5),
     ],
-    reflex_acts: &[],
+    reflex_acts: &[16, 21, 28],
     max_plan: 3,
-    combos: &[],
-    back_steps: &[],
+    combos: &[
+        Combo {
+            ids: &[3000, 3001, 3002],
+            label: "sword combo",
+        },
+        Combo {
+            ids: &[3040, 3041, 3067],
+            label: "Floating Passage with perilous finish",
+        },
+        Combo {
+            ids: &[3014, 3015],
+            label: "bow then diving slash",
+        },
+        Combo {
+            ids: &[3012, 3039],
+            label: "bow then lightning",
+        },
+    ],
+    back_steps: &[5201],
     scripted: [&[3039], &[3042]],
-    tactics: &[],
-    chains: &[],
+    tactics: &Tactic::ALL,
+    chains: &["walk_in4>3042", "back_off9>3039", "deflect>3000+3001"],
 };
 
 /// Why a plan was refused.
@@ -512,6 +554,117 @@ pub struct Choice {
 }
 
 impl BossActions {
+    /// Lua Kengeki callback indices and their attack bodies, from each battle goal.
+    /// An empty body is an authored fallback, never an invented no-counter option.
+    pub fn counters(&self) -> &'static [(i32, &'static [i32])] {
+        match self.chr {
+            "c1010" => &[
+                (1, &[3050]),
+                (2, &[3051]),
+                (3, &[3055]),
+                (4, &[3056]),
+                (5, &[3070]),
+                (6, &[3071]),
+                (7, &[3075]),
+                (8, &[3076]),
+                (30, &[5201]),
+            ],
+            "c5060" => &[
+                (1, &[3061]),
+                (2, &[3066]),
+                (3, &[3064]),
+                (4, &[3068, 3017]),
+                (5, &[3063]),
+                (6, &[3060]),
+                (7, &[3065]),
+                (8, &[3069]),
+                (9, &[3090]),
+                (10, &[3091]),
+                (11, &[3026]),
+                (12, &[3005]),
+                (26, &[]),
+            ],
+            "c7100" => &[
+                (1, &[3050]),
+                (2, &[5201, 3044]),
+                (3, &[3009]),
+                (4, &[3055]),
+                (7, &[3060]),
+                (9, &[3018, 3015]),
+                (10, &[3065]),
+                (13, &[3075]),
+                (14, &[3076]),
+                (15, &[3031, 3019, 3029, 3036]),
+                (17, &[3071]),
+                (18, &[3004]),
+                (19, &[3044]),
+                (20, &[5202, 3007]),
+                (21, &[3010]),
+                (30, &[3063]),
+                (31, &[3068]),
+                (32, &[3018, 3015]),
+                (33, &[3018, 3019, 3029]),
+                (34, &[3037, 3020]),
+                (35, &[3016]),
+                (38, &[3030, 3067, 3025]),
+                (39, &[3034, 3036, 3015]),
+                (40, &[3028]),
+                (43, &[3062]),
+                (44, &[3067]),
+                (45, &[3045]),
+                (46, &[3039]),
+                (47, &[3038]),
+            ],
+            "c7110" => &[
+                (1, &[3050]),
+                (2, &[5201]),
+                (4, &[3055]),
+                (7, &[3060]),
+                (9, &[3018, 3043]),
+                (10, &[3065]),
+                (13, &[3075]),
+                (14, &[3076]),
+                (15, &[3031, 3019, 3029, 3036]),
+                (17, &[3076]),
+                (18, &[3004]),
+                (20, &[5202, 3007]),
+                (21, &[3010]),
+                (22, &[3018, 3087]),
+                (30, &[3063]),
+                (31, &[3068]),
+                (32, &[3018, 3043]),
+                (33, &[3018, 3019, 3029]),
+                (34, &[3037, 3020]),
+                (35, &[3016]),
+                (38, &[3030, 3067, 3025, 3032]),
+                (39, &[3034, 3036, 3015]),
+                (40, &[3028]),
+                (41, &[3020]),
+                (43, &[3062]),
+                (44, &[3067]),
+                (45, &[3042]),
+                (46, &[3039]),
+                (47, &[3043]),
+            ],
+            _ => &[],
+        }
+    }
+
+    pub fn counter_ids(&self) -> std::collections::BTreeSet<i32> {
+        self.counters()
+            .iter()
+            .flat_map(|(_, ids)| ids.iter().copied())
+            // The scripts also name variants without a decoded clip in this character.
+            // They remain Lua callbacks, but are not coach-editable moves.
+            .filter(|id| match self.chr {
+                "c1010" => ![3070, 3076].contains(id),
+                "c7100" => *id != 3039,
+                "c7110" => ![3060, 3065, 3075, 3020].contains(id),
+                _ => true,
+            })
+            .collect()
+    }
+
     pub fn get(&self, id: i32) -> Option<&BossAction> {
         self.actions.iter().find(|a| a.id == id)
     }

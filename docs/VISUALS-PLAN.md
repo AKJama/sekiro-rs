@@ -885,7 +885,10 @@ These counts include repeated effect IDs in different bundles, not unique IDs.
 | 10012 | 2123 | None |
 
 The other encountered raw action IDs are 0, 1, 15, 34, 35, 36, 46, 55, 60, 64, 65, 75, 83, 84, 105, 106, 113, 120, 121, 122, 128, 129, 130, 131, 132, 133, 199, 200, 201, 300, 301, 399, 400, 401, 402, 403, 404, 405, 500, 501, 502, 503, 732, 733, 734, 10013, 10100, 10300, 10301, 10400, 10500 and 11000.
-Every action remains semantically raw in this reader, including the named appearances; parsing coverage must not be mistaken for playback coverage.
+Appearance IDs 603/604/606-609 now have named accessors and the documented blend values have an explicit enum.
+All action field positions remain semantically raw; parsing coverage must not be mistaken for playback coverage.
+Control-free property arrays can be compiled once and sampled without allocations using explicit caller-selected linear or stepped policies.
+Native function-ID/clock mapping, cubic curves, random modifiers and looping remain unimplemented; unsupported compilation is an error rather than a guessed value.
 There are 64 distinct raw action IDs in this installed-data inventory.
 Run `crates/game/scripts/fxr_audit.ps1` for the complete action/property frequency report in `target/alt/fxr/coverage.txt`.
 Coverage, four reader tests, two TAE effect tests, formatting, workspace/all-target Clippy and the release game build pass offline with six jobs in `target/alt`.
@@ -898,14 +901,47 @@ The combined release suite fails the two `deathblow_lock` wall regressions, repo
 
 ### Step 11. FXR player, then wire to TAE events
 
+**2026-10-11 follow-up: first 603 playback milestone, still incomplete.**
+The local EvenTorset Unlicense action schemas now supply named Sekiro fields and properties, with a credit in `CREDITS.md`.
+The supplied `src/fxr.ts` is zero bytes, so it does not supply the requested modifier encoding specification.
+The player indexes unpacked binders read-only, selects state-zero configurations, preserves static parent transforms, samples constant/stepped/linear/Bezier/Hermite properties and draws 603 texture/blend mesh batches in HDR with alpha thresholds.
+Periodic and one-shot emission, lifetime, initial speed, gravity/acceleration, scale/color curves, Z spin, atlas frame selection, orientation modes and simple attached-particle movement are implemented for supported properties.
+TAE body-dummy requests and Bullet `sfxId_Bullet` are connected; `--no-fxr` retains all stand-ins and `--fxr-preview <id>` provides a focused capture hook.
+The cap is 4,096 particles and 256 live emitters, with bounded catch-up and a 30-second safety timeout for indefinite effects.
+This is CPU quad batching, not the requested instanced renderer.
+Random modifiers, spread/volume shapes, moving nodes, referenced effects, state transitions, 604 layer composition, interpolated atlas frames, soft depth-copy fading, 606 ribbons and 609 lights remain open.
+HitEffectSfxParam routing, Bullet hit/flick/erase cues, exact dummy orientation and weapon/blade attachment also remain open.
+Stand-ins have not been suppressed, even when one supported layer plays; the requested combat effects are not claimed fully replaced.
+`crates/game/scripts/fxr_capture.ps1` defines reproducible offline, simple-AI sequences under `target/alt/fxr`, including an explicit billboard preview and a stand-in comparison switch.
+The installed-data test accepts 50 emitter layers across 18 effects; this is partial layer coverage, not full effect fidelity.
+Inspected deflect and deathblow sequences show authored contact but no convincing sparks or blood, while lightning remains thin white/cyan stand-in geometry rather than bright authored particles.
+Warp frames show stand-in geometry without volumetric smoke; shuriken shots missed the projectile, and early firecracker, smoke and arrow captures contain only sky/HUD and are rejected.
+The first short-lived preview exposed an empty-mesh upload error in Bevy's slab allocator; inactive batches now retain their allocation and become hidden.
+The final `billboard-final-{152,154,156}.png` sequence shows effect 300240's two supported layers as an orange textured flare, with zero-coverage additive blending and the existing scene radiance bridge; `billboard-disabled-154.png` confirms the switch removes it.
+No shader or slab errors remain in those two runs, but they establish only partial 603 playback, not the requested combat-effect replacements.
+Formatting, workspace/all-target Clippy, formats/game release tests and the release game build pass offline with six jobs in `target/alt`.
+The full sim release suite also passes after retrying concurrent repairs; validation reports are `player-*-verified.txt` and `player-{fmt,clippy}-final.txt` under `target/alt/fxr`.
+The larger 900000001 preview reaches 90 live particles: FXR CPU work averages 0.089-0.103 ms in the final loaded samples, with a 0.314 ms maximum and roughly 15-17 ms VSync frames.
+The disabled comparison averages 0.000-0.001 ms FXR work, with noisy 15-20 ms frames; these wall times do not isolate GPU cost.
+Inspected `preview-load-{392,394,396,600}.png` show bright cards, not convincing combat particles, and this modest pool does not establish the requested heavy-effect budget.
+
 **2026-10-11 status: TAE visual-request decoding implemented; player and replacements not implemented.**
 `tae.rs` now retains event types 96, 99, 100 and 118-121 as `TaeEffect`, with effect IDs, dummy source/base/tip, slot, follow/angle/restriction flags and repeat metadata where the template defines them.
 `TaeFrame.effects` reports requests active or starting during the current tick and obeys the existing StateInfo gate.
 Tests cover body and blade decoding, truncation, start edges, StateInfo and event-end behavior.
 Event 122/123 SpEffect-specific semantics, Bullet sfxId fields and HitEffectSfxParam routing remain open.
-No game renderer consumes these cues yet, so every combat effect remains its existing stand-in.
-There is no `--no-fxr` switch, GPU particle batching, depth-copy pass, capture sequence or effects frame-cost measurement yet.
+At the reader-foundation milestone, no game renderer consumed these cues and every combat effect retained its existing stand-in.
+The follow-up above adds partial playback and a switch; GPU instancing and depth-copy fading remain open.
 Steps 10 and 11 are not complete.
+
+The player follow-up found no local action schema in the supplied `target/alt/fwlo` notes or this repository.
+Those notes establish appearance families and blend operations, but not field/property positions for billboard textures, lifetimes, emission, movement or colours.
+The notes' `C:/DeadlockModding/reference/fxr` checkout is absent on this machine.
+Network access is prohibited for this session, so an offline copy of the Unlicense action definitions or equivalent verified field mapping is needed before implementing authored playback.
+No offsets were guessed, no stand-in was suppressed and no FXR screenshot or frame-cost claim is made.
+The sampling groundwork passes eight FXR unit tests, the installed-data audit, all 115 formats/game release tests, formatting, workspace/all-target Clippy and the release game build.
+The full simulation retry passes 399 tests after the concurrent wall-clearance changes.
+All commands ran offline with six jobs and `CARGO_TARGET_DIR=target/alt`; reports are in `target/alt/fxr/player-*`.
 
 - Files: new `crates/game/src/fxr.rs` (nodes, emitters, particles, blend modes, batched meshes), `fx_*.wgsl` as needed (multi-texture billboards, soft particles, distortion), hooks in `play.rs` and `bullet_fx.rs`, `crates/sim` TAE events 96, 118 and bullet `sfxId_*`.
 - Order inside the step: billboards (603) and multi-texture (604) first because most tool effects use them, then lights (609), tracers (606), then distortion (607) and radial blur (608).

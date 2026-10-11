@@ -793,7 +793,9 @@ fn the_coach_request_has_the_structured_output_shape_and_reports_reasoning_token
             "on_wolf_break",
             "player_principles",
             "boss_principles",
-            "boss_bans"
+            "boss_bans",
+            "boss_phase",
+            "counter_weights"
         ])
     );
     let choices = schema["$defs"]["choice"]["enum"].as_array().unwrap();
@@ -982,7 +984,9 @@ impl FakeCli {
     fn calls(&self) -> Vec<Value> {
         std::fs::read_to_string(&self.log)
             .unwrap_or_default()
-            .lines()
+            // A running fake may still be writing its final record.
+            .split_inclusive('\n')
+            .filter(|line| line.ends_with('\n'))
             .map(|l| serde_json::from_str(l).unwrap())
             .collect()
     }

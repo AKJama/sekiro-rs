@@ -420,7 +420,18 @@ Record links are 64-bit even though the header table offsets are 32-bit.
 Node links select contiguous ranges of configurations, actions and children.
 Actions retain the low-16-bit ID, full tag, variant, two fixed-field groups, two property groups and sequence references.
 Properties preserve the evaluator, raw payload bits and modifier range.
-Constants and curve payload arrays are available separately; native cubic interpolation, random modifiers, action field names and texture/model-reference semantics are not implemented.
+Constants and curve payload arrays are available separately.
+`Action::property`, `field`, `float_field` and `transform` expose the implemented Sekiro positions from EvenTorset's Unlicense schemas.
+These cover appearance properties for 603/604/609, emission 300/301, attributes 128/129/131, movement 55/60, shape dimensions and static transforms 35/36.
+`Fxr::initial_configuration` resolves action 199's state-zero configuration mapping.
+`Property::compile_unmodified` compiles constants or control-free key arrays into allocation-free scalar/RGBA samples with an explicit caller-selected linear or stepped interpolation policy.
+It preserves the argument ID, holds endpoints and rejects non-finite or unordered keys, modifiers, looping and cubic evaluators.
+This utility does not establish native function-ID or clock mappings.
+`Action::appearance` names 603/604/606-609, and `Blend::from_raw` preserves additive, source, alpha, multiply and subtract operations from the existing FwLo notes.
+The named action accessors assign supported Sekiro field positions; appearance classification alone does not establish renderer support.
+`Property::compile_native_unmodified` adds native stepped/linear/Bezier/Hermite families and looping with finite-key validation.
+Hermite controls are angles, using the curve family described by FwLo's MIT engine research.
+Random modifiers remain explicit errors; unsupported properties do not silently become linear curves.
 The original bytes preserve remaining condition and extension-table fields.
 Unknown actions are never rejected solely for their IDs.
 
@@ -428,8 +439,12 @@ Unknown actions are never rejected solely for their IDs.
 Set `CARGO_TARGET_DIR=target/alt` and `CARGO_BUILD_JOBS=6` before running it.
 `crates/game/scripts/fxr_audit.ps1` checks every installed binder and unpacked FXR, without proprietary fixtures in source.
 The current cache has 2,913 FXR entries across eight bundles, including 1,856 common effects and 450 m11 effects.
-There is no FXR player yet; the structural coverage is not a rendering-fidelity claim.
+A first 603-only player in `crates/game/src/fxr.rs` draws HDR, depth-tested texture/blend mesh batches with alpha remapping, finite lifetimes and bounded emissions.
+The structural coverage is not a rendering-fidelity claim.
 
 TAE effect requests 96/99/100/118-121 now decode into `TaeEffect` in the simulation, preserving body/weapon dummy IDs, slots, flags, repeat metadata and StateInfo gating.
 The tick's `TaeFrame.effects` distinguishes start edges from still-active requests.
-The renderer does not consume them yet.
+The player consumes eligible body-dummy cues and Bullet `sfxId_Bullet` requests through a single play-plugin registration.
+Dummy position is posed, but orientation currently uses character yaw; restricted missing dummies, weapon/blade requests, extra conditions and repeating variants remain unsupported.
+`--no-fxr` disables playback entirely, leaving the previous stand-ins.
+Stand-ins are also retained while the player has incomplete action support; a playable layer does not establish that its whole effect is supported.

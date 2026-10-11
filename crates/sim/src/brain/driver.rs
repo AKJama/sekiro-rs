@@ -225,6 +225,7 @@ impl Checkpoints {
 /// What is counted about the fight in progress.
 #[derive(Debug, Clone, Default)]
 struct FightState {
+    phase_changes: Vec<(f32, String)>,
     cost_at_start: super::cost::CostTotals,
     break_plans: CountMap,
     action_ranges: BTreeMap<String, (u32, f32, f32)>,
@@ -304,6 +305,7 @@ pub struct BrainDriver {
     retry_baselines: BTreeMap<String, PlanFailures>,
     brain: Box<dyn BossBrain>,
     actions: &'static BossActions,
+    phase_plans: BTreeMap<String, GamePlan>,
     /// This fight's tally.
     pub tally: Tally,
     /// Wolf's habits in this fight.
@@ -402,6 +404,7 @@ pub struct BrainDriver {
 /// Text and transient cards for the game's recording HUD.
 #[derive(Debug, Default, Clone)]
 pub struct BrainOverlay {
+    pub countered: u32,
     pub cost: String,
     pub budget_notice: Option<String>,
     pub fight: u32,
@@ -427,6 +430,121 @@ struct OverlayEvents {
 }
 
 impl BrainDriver {
+    fn action_evidence(&self, key: &str) -> Counts {
+        let shared = self.memory.shared_actions.contains(key) || self.tally.shared.contains(key);
+        let mut counts = if self.actions.chr == "c7110" && !shared {
+            self.boss_knowledge
+                .evidence
+                .phase_actions
+                .get("c7110")
+                .and_then(|a| a.get(key))
+                .or_else(|| {
+                    self.memory
+                        .phase_actions
+                        .get("c7110")
+                        .and_then(|a| a.get(key))
+                })
+                .copied()
+                .unwrap_or_default()
+        } else {
+            self.boss_knowledge
+                .evidence
+                .actions
+                .get(key)
+                .or_else(|| self.memory.boss.get(key))
+                .copied()
+                .unwrap_or_default()
+        };
+        if !self.fight_over
+            && let Some(c) = self
+                .tally
+                .phases
+                .get(self.actions.chr)
+                .and_then(|m| m.get(key))
+        {
+            counts.merge(c);
+        }
+        if shared && !self.fight_over {
+            let other = if self.actions.chr == "c7110" {
+                "c7100"
+            } else {
+                "c7110"
+            };
+            if let Some(c) = self.tally.phases.get(other).and_then(|a| a.get(key)) {
+                counts.merge(c);
+            }
+        }
+        counts
+    }
+    /// Rebinds the same session to the character installed by a map hand-over or reset.
+    pub fn rebind(&mut self, duel: &Duel) {
+        let Some(actions) = BossActions::for_chr(&duel.spec.chr) else {
+            return;
+        };
+        self.close_set_time();
+        self.memory.coach.phase_bans.insert(
+            self.actions.chr.into(),
+            self.banned.iter().cloned().collect(),
+        );
+        self.banned = self
+            .memory
+            .coach
+            .phase_bans
+            .get(actions.chr)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        if let Some(plan) = self.game_plan.take() {
+            self.memory
+                .coach
+                .phase_plans
+                .entry(self.actions.chr.into())
+                .or_insert_with(|| plan.clone());
+            self.phase_plans.insert(self.actions.chr.into(), plan);
+        }
+        self.actions = actions;
+        self.fight
+            .phase_changes
+            .push((self.time, actions.chr.into()));
+        self.brain.change_phase(actions);
+        self.tally
+            .record(self.time, TallyEvent::End { side: Side::Boss });
+        self.tally.phase = actions.chr.into();
+        self.move_sheet = super::moves::build(duel, actions);
+        self.ready = None;
+        self.set.clear();
+        self.opener = None;
+        self.active_set = None;
+        self.next_plan = self
+            .next_plan
+            .take()
+            .filter(|plan| plan.boss_phase.is_empty() || plan.boss_phase == actions.chr);
+        self.mid_plan = None;
+        self.staged_mid = None;
+        self.running = Plan::default();
+        self.picked = false;
+        self.in_flight = None;
+        self.want_request = true;
+        self.pending_why = Some("mark_lost");
+        self.boss_open = None;
+        self.checkpoints.marks = Some(duel.rules.fighters[1].vitality.deathblows_left);
+        if actions.chr == "c7110" && self.coach_mode {
+            self.mid_pending = Some("phase_change");
+        }
+        if let Some(plan) = self
+            .memory
+            .coach
+            .phase_plans
+            .get(actions.chr)
+            .or_else(|| self.phase_plans.get(actions.chr))
+            .cloned()
+        {
+            self.game_plan = Some(plan.validate(actions).plan);
+            self.install_plan();
+        }
+    }
+
     pub fn new(brain: Box<dyn BossBrain>, actions: &'static BossActions) -> Self {
         let env = |name: &str| std::env::var(name).ok();
         let coach_mode = brain.coaches();
@@ -464,8 +582,16 @@ impl BrainDriver {
             actions,
             tally: Tally::default(),
             habits: HabitTracker::new(actions.back_steps),
-            memory: Memory::new(actions.chr),
-            boss_knowledge: BossKnowledge::new(actions.chr),
+            memory: Memory::new(if actions.chr == "c7110" {
+                "c7100"
+            } else {
+                actions.chr
+            }),
+            boss_knowledge: BossKnowledge::new(if actions.chr == "c7110" {
+                "c7100"
+            } else {
+                actions.chr
+            }),
             player: "default".into(),
             layer_paths: None,
             memory_path: None,
@@ -473,6 +599,7 @@ impl BrainDriver {
             step_dt: 0.0,
             fight_over: false,
             fight_no: 1,
+            phase_plans: Default::default(),
             stats: BrainStats::default(),
             max_staleness: 6.0,
             time: 0.0,
@@ -498,7 +625,10 @@ impl BrainDriver {
             boss_open: None,
             wolf_open: None,
             tactic_open: false,
-            fight: FightState::default(),
+            fight: FightState {
+                phase_changes: vec![(0.0, actions.chr.into())],
+                ..FightState::default()
+            },
             last_record: None,
             log: None,
             log_path: None,
@@ -586,6 +716,7 @@ impl BrainDriver {
             cost: self.brain.costs().totals.line("session"),
             budget_notice: self.brain.costs().budget_notice,
             fight: self.overlay_events.fights_before + self.fight_no,
+            countered: self.fight.metrics.metrics.countered,
             set: set
                 .map(|s| format!("{}: {}", s.name, s.description))
                 .unwrap_or_else(|| {
@@ -602,15 +733,15 @@ impl BrainDriver {
             checkpoint: events
                 .checkpoint
                 .as_ref()
-                .map(|(t, text)| format!("{text} · {:.1} s ago", self.time - t)),
+                .map(|(t, text)| format!("{text} Â· {:.1} s ago", self.time - t)),
             coach: recent(&events.coach, 8.0),
             thinking: !self.coach_flights.is_empty(),
             principles: plan
                 .map(|p| {
                     p.boss_principles
                         .iter()
-                        .map(|s| format!("Boss · {s}"))
-                        .chain(p.principles.iter().map(|s| format!("Player · {s}")))
+                        .map(|s| format!("Boss Â· {s}"))
+                        .chain(p.principles.iter().map(|s| format!("Player Â· {s}")))
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -636,13 +767,13 @@ impl BrainDriver {
     }
 
     pub fn use_player_memory(&mut self, path: PathBuf, player: &str) -> Loaded {
-        let chr = self.actions.chr;
+        let chr = self.memory.chr.clone();
         if let Err(e) = super::memory::player_name(player) {
             return Loaded::Corrupt(e);
         }
         let paths = LayerPaths::new(&path, player);
         let existed = paths.player.exists();
-        let (boss, memory) = match paths.load(chr) {
+        let (boss, memory) = match paths.load(&chr) {
             Ok(layers) => layers,
             Err(e) => {
                 eprintln!("warning: memory layers: {e}; persistence disabled");
@@ -681,9 +812,27 @@ impl BrainDriver {
             ),
         }
         self.memory = memory;
+        self.banned.extend(
+            self.memory
+                .coach
+                .phase_bans
+                .get(self.actions.chr)
+                .cloned()
+                .unwrap_or_default(),
+        );
         self.overlay_events.fights_before = self.memory.fights;
         self.apply_boss_bans();
         for (text, f) in &self.memory.coach.failures {
+            let text = if self.actions.chr == "c7110" {
+                let Some(text) = text.strip_prefix("c7110:") else {
+                    continue;
+                };
+                text.to_owned()
+            } else if text.starts_with("c7110:") {
+                continue;
+            } else {
+                text.clone()
+            };
             if f.banned() {
                 self.banned.insert(text.clone());
                 eprintln!(
@@ -701,9 +850,17 @@ impl BrainDriver {
             let saved = self
                 .memory
                 .coach
-                .plan
-                .take()
-                .or_else(|| self.boss_knowledge.starter());
+                .phase_plans
+                .get(self.actions.chr)
+                .cloned()
+                .or_else(|| {
+                    self.memory
+                        .coach
+                        .plan
+                        .take()
+                        .filter(|p| p.boss_phase.is_empty() || p.boss_phase == self.actions.chr)
+                        .or_else(|| self.boss_knowledge.starter())
+                });
             if let Some(saved) = saved {
                 let v = saved.validate(self.actions);
                 for w in &v.warnings {
@@ -715,6 +872,10 @@ impl BrainDriver {
                         format!("coach (pre-fight, 0 s): {}", v.plan.notes),
                     ));
                     self.memory.coach.plan = Some(v.plan.clone());
+                    self.memory
+                        .coach
+                        .phase_plans
+                        .insert(self.actions.chr.into(), v.plan.clone());
                     self.game_plan = Some(v.plan);
                 }
             }
@@ -786,6 +947,11 @@ impl BrainDriver {
     /// Adds the time the active set has been played to this fight's seconds.
     fn close_set_time(&mut self) {
         if let Some(name) = self.active_set_name().map(str::to_string) {
+            let name = if self.actions.chr == "c7110" {
+                format!("c7110:{name}")
+            } else {
+                name
+            };
             *self.fight.set_secs.entry(name).or_default() += (self.time - self.set_since).max(0.0);
         }
         self.set_since = self.time;
@@ -797,6 +963,9 @@ impl BrainDriver {
 
     fn apply_boss_bans(&mut self) {
         for ban in &self.boss_knowledge.bans {
+            if self.actions.chr == "c7110" && !self.memory.shared_actions.contains(&ban.choice) {
+                continue;
+            }
             if self.banned.insert(ban.choice.clone()) {
                 self.overlay_events.ban = Some((
                     self.time,
@@ -841,7 +1010,7 @@ impl BrainDriver {
             }
         }
         let mut report = format!(
-            "# Brain session: {}\n\n| action | n | hit | blocked | deflected | whiffed | punished | distance / reach (m) |\n|---|---:|---:|---:|---:|---:|---:|---|\n",
+            "# Brain session: {}\n\n| action | n | hit | blocked | deflected | whiffed | punished | countered | distance / reach (m) |\n|---|---:|---:|---:|---:|---:|---:|---:|---|\n",
             self.actions.chr
         );
         for (key, c) in actions {
@@ -849,8 +1018,8 @@ impl BrainDriver {
                 format!("{:.2} / {:.2}", d / n as f32, r / n as f32)
             });
             report.push_str(&format!(
-                "| {key} | {} | {} | {} | {} | {} | {} | {range} |\n",
-                c.n, c.hit, c.blocked, c.deflected, c.whiffed, c.punished
+                "| {key} | {} | {} | {} | {} | {} | {} | {} | {range} |\n",
+                c.n, c.hit, c.blocked, c.deflected, c.whiffed, c.punished, c.countered
             ));
         }
         report.push_str("\n| fight | winner | duration (s) | time to kill Wolf (s) | Wolf posture breaks | hits after break | break punish rate | Wolf posture peak | Wolf damage/min | boss damage taken/min | passive share |\n|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
@@ -1011,7 +1180,12 @@ impl BrainDriver {
             m.add_data(&tally, &habits.habits);
         }
         let now = (!self.fight_over).then(|| self.fight.metrics.snapshot(self.time));
-        m.summary_with(now.as_ref())
+        let mut summary = m.summary_with(now.as_ref());
+        if self.actions.chr == "c7110" {
+            summary.boss =
+                ranked_counts(&m.phase_actions.get("c7110").cloned().unwrap_or_default());
+        }
+        summary
     }
 
     /// Copies of this fight's tally and habits with everything still open settled.
@@ -1128,6 +1302,9 @@ impl BrainDriver {
             );
             return;
         };
+        if !raw.boss_phase.is_empty() && raw.boss_phase != self.actions.chr {
+            return;
+        }
         let v = raw.validate(self.actions);
         for w in &v.warnings {
             eprintln!("coach: warning: {w}");
@@ -1197,6 +1374,10 @@ impl BrainDriver {
             "warnings": v.warnings}),
         );
         self.memory.coach.plan = Some(v.plan.clone());
+        self.memory
+            .coach
+            .phase_plans
+            .insert(self.actions.chr.into(), v.plan.clone());
         self.apply_boss_bans();
         if flight.mid && flight.fight == self.fight_no && !self.fight_over {
             self.mid_plan = Some(v.plan);
@@ -1210,6 +1391,49 @@ impl BrainDriver {
     /// the next slot and drops a stale one.
     pub fn before_think(&mut self, ai: &mut AiBrain, hit_radius: f32) {
         ai.enable_act_hook(self.actions.reflex_acts);
+        if self.brain.plans()
+            && let Some(hook) = ai.state.act_hook.as_mut()
+        {
+            hook.counter_weights = self
+                .actions
+                .counters()
+                .iter()
+                .map(|(index, ids)| {
+                    let factor = ids
+                        .iter()
+                        .map(|id| {
+                            let key = id.to_string();
+                            let counts = self.action_evidence(&key);
+                            let evidence = if counts.n >= 3 {
+                                let success =
+                                    0.5 + 0.5 * counts.hit.min(counts.n) as f64 / counts.n as f64;
+                                ((1.0
+                                    - (counts.countered + counts.deflected).min(counts.n) as f64
+                                        / counts.n as f64)
+                                    * success)
+                                    .max(0.02)
+                            } else {
+                                1.0
+                            };
+                            let planned = if counts.n >= 3
+                                && counts.countered as f32 / counts.n as f32 >= 0.6
+                            {
+                                0.0
+                            } else {
+                                self.game_plan
+                                    .as_ref()
+                                    .and_then(|p| p.counter_weights.get(&key))
+                                    .copied()
+                                    .unwrap_or(1.0)
+                            };
+                            evidence * f64::from(planned)
+                        })
+                        .reduce(f64::min)
+                        .unwrap_or(1.0);
+                    (*index, factor)
+                })
+                .collect();
+        }
         if self.mid_plan.is_some() && !self.fight_over {
             self.ready = None;
             self.picked = false;
@@ -1786,7 +2010,7 @@ impl BrainDriver {
     /// ends the fight, a respawn starts the next.
     pub fn after_step(&mut self, duel: &Duel, report: &DuelReport, input: &crate::InputFrame) {
         if report.respawned {
-            self.start_fight();
+            return;
         }
         if self.fight_over {
             return;
@@ -1794,7 +2018,26 @@ impl BrainDriver {
         let t = self.time;
         self.fight.metrics.settle_break(t, false);
         self.fight.metrics.input_tick(input, t, self.step_dt);
+        self.tally.phase = self.actions.chr.into();
         let mut events = Vec::new();
+        if report.mikiri.is_some() {
+            self.fight.metrics.countered();
+            events.push(TallyEvent::Countered {
+                kind: super::tally::CounterKind::Mikiri,
+            });
+        }
+        if report.jump_counter {
+            self.fight.metrics.countered();
+            events.push(TallyEvent::Countered {
+                kind: super::tally::CounterKind::Jump,
+            });
+        }
+        if report.other_counter {
+            self.fight.metrics.countered();
+            events.push(TallyEvent::Countered {
+                kind: super::tally::CounterKind::Other,
+            });
+        }
         // The boss's actions: his attack and step animations (guards and deflects are
         // reactions, not actions).
         let boss = duel
@@ -2142,7 +2385,11 @@ impl BrainDriver {
         self.review_mid_fight(duel);
         // The duel schedules its respawn exactly when the fight is over: a death outside a
         // deathblow (a boss with marks left gets up from his).
-        if duel.respawn_in.is_some() {
+        if duel.respawn_in.is_some()
+            && !(duel.spec.chr == "c7100"
+                && duel.spec.npc_param == 71001000
+                && !duel.rules.fighters[0].dead())
+        {
             self.end_fight(if duel.rules.fighters[0].dead() {
                 FightEnd::BossWon
             } else {
@@ -2160,7 +2407,7 @@ impl BrainDriver {
         for x in done.iter().filter(|x| x.side == Side::Boss) {
             let o = &x.outcome;
             let repelled = if x.key.parse::<i32>().is_ok() {
-                (o.deflected || o.blocked) && !o.hit
+                (o.deflected || o.blocked || o.countered.is_some()) && !o.hit
             } else {
                 o.punished
             };
@@ -2169,15 +2416,20 @@ impl BrainDriver {
     }
 
     fn plan_failures(&self, text: &str) -> PlanFailures {
+        let key = if self.actions.chr == "c7110" {
+            format!("c7110:{text}")
+        } else {
+            text.into()
+        };
         let mut f = self
             .memory
             .coach
             .failures
-            .get(text)
+            .get(&key)
             .copied()
             .unwrap_or_default();
         if !self.fight_over
-            && let Some(now) = self.fight.failures.get(text)
+            && let Some(now) = self.fight.failures.get(&key)
         {
             f.uses += now.uses;
             f.deflected_all += now.deflected_all;
@@ -2202,6 +2454,21 @@ impl BrainDriver {
     }
 
     fn settle_plans(&mut self, flush: bool) {
+        if self.fight.metrics.player_active(self.time) {
+            for action in self.actions.actions {
+                let key = action.id.to_string();
+                let counts = self.action_evidence(&key);
+                if counts.n >= 3
+                    && counts.countered as f32 / counts.n as f32 >= 0.6
+                    && self.banned.insert(key.clone())
+                {
+                    self.overlay_events.ban = Some((
+                        self.time,
+                        format!("banned {key}: {}/{} countered", counts.countered, counts.n),
+                    ));
+                }
+            }
+        }
         let active = self.fight.runs.last().map(|r| r.0);
         for use_ in &mut self.fight.uses {
             if use_.settled
@@ -2212,7 +2479,20 @@ impl BrainDriver {
                 continue;
             }
             use_.settled = true;
-            let f = self.fight.failures.entry(use_.text.clone()).or_default();
+            let phase = self
+                .fight
+                .phase_changes
+                .iter()
+                .rev()
+                .find(|(time, _)| *time <= use_.start)
+                .map(|(_, phase)| phase.as_str())
+                .unwrap_or(self.actions.chr);
+            let key = if phase == "c7110" {
+                format!("c7110:{}", use_.text)
+            } else {
+                use_.text.clone()
+            };
+            let f = self.fight.failures.entry(key).or_default();
             f.uses += 1;
             f.deflected_all += u32::from(use_.attacks > 0 && use_.attacks == use_.deflected);
             f.fatal += u32::from(use_.fatal);
@@ -2231,6 +2511,16 @@ impl BrainDriver {
             .cloned()
             .collect();
         for text in keys {
+            let text = if self.actions.chr == "c7110" {
+                let Some(text) = text.strip_prefix("c7110:") else {
+                    continue;
+                };
+                text.to_owned()
+            } else if text.starts_with("c7110:") {
+                continue;
+            } else {
+                text
+            };
             let mut f = self.plan_failures(&text);
             if let Some(base) = self.retry_baselines.get(&text) {
                 f.uses = f.uses.saturating_sub(base.uses);
@@ -2242,7 +2532,7 @@ impl BrainDriver {
                 let reasons = [
                     (f.deflected_all, "fully deflected"),
                     (f.fatal, "fatal"),
-                    (f.failed, "whiffed/punished"),
+                    (f.failed, "countered/whiffed/punished"),
                 ]
                 .into_iter()
                 .filter(|(n, _)| *n > 0)
@@ -2288,12 +2578,19 @@ impl BrainDriver {
                 );
                 use_.deflected +=
                     u32::from(x.outcome.deflected && !x.outcome.hit && !x.outcome.blocked);
+                use_.failed |= x.outcome.countered.is_some();
                 if use_.break_response {
                     use_.failed |= x.whiffed() || x.outcome.punished;
                 }
             }
             let mut one = Counts::default();
             one.merge(&Counts {
+                countered: u32::from(x.outcome.countered.is_some()),
+                counter_kinds: [
+                    u32::from(x.outcome.countered == Some(super::tally::CounterKind::Mikiri)),
+                    u32::from(x.outcome.countered == Some(super::tally::CounterKind::Jump)),
+                    u32::from(x.outcome.countered == Some(super::tally::CounterKind::Other)),
+                ],
                 n: 1,
                 hit: u32::from(x.outcome.hit),
                 blocked: u32::from(x.outcome.blocked),
@@ -2308,8 +2605,23 @@ impl BrainDriver {
                     .or_default()
                     .merge(&one);
             }
-            self.fight.by_plan.entry(plan).or_default().merge(&one);
-            self.fight.by_set.entry(set).or_default().merge(&one);
+            let phase_key = |key: String| {
+                if x.phase == "c7110" {
+                    format!("c7110:{key}")
+                } else {
+                    key
+                }
+            };
+            self.fight
+                .by_plan
+                .entry(phase_key(plan))
+                .or_default()
+                .merge(&one);
+            self.fight
+                .by_set
+                .entry(phase_key(set))
+                .or_default()
+                .merge(&one);
         }
     }
 
@@ -2461,6 +2773,14 @@ impl BrainDriver {
             sets.entry(name.clone()).or_default().secs = (s * 10.0).round() / 10.0;
         }
         let mut input = CoachInput {
+            counters: super::tally::TopMap::ranked(
+                self.actions
+                    .counter_ids()
+                    .iter()
+                    .map(|id| (id.to_string(), self.action_evidence(&id.to_string()))),
+                |c| c.n as f32,
+            ),
+            boss_phase: self.actions.chr.into(),
             move_sheet: self.move_sheet.clone(),
             break_log: self.fight.metrics.breaks.clone(),
             break_summary: super::metrics::break_summary(&self.fight.metrics.breaks),
@@ -2471,9 +2791,18 @@ impl BrainDriver {
             marks: None,
             on_wolf_break: self.fight.break_plans.clone(),
             actions: {
-                let mut actions = self.tally.all(Side::Boss).clone();
+                let mut actions = self
+                    .tally
+                    .phases
+                    .get(self.actions.chr)
+                    .or_else(|| self.tally.phases.get(""))
+                    .cloned()
+                    .unwrap_or_default();
                 for action in self.actions.actions {
                     actions.entry(action.id.to_string()).or_default();
+                }
+                for id in self.actions.counter_ids() {
+                    actions.insert(id.to_string(), self.action_evidence(&id.to_string()));
                 }
                 actions
             },
@@ -2518,10 +2847,20 @@ impl BrainDriver {
                 .coach
                 .failures
                 .iter()
+                .filter_map(|(k, f)| {
+                    if self.actions.chr == "c7110" {
+                        k.strip_prefix("c7110:").map(|k| (k.to_owned(), f))
+                    } else if k.starts_with("c7110:") {
+                        None
+                    } else {
+                        Some((k.clone(), f))
+                    }
+                })
                 .map(|(k, f)| (k.clone(), [f.uses, f.deflected_all, f.fatal, f.failed]))
                 .collect(),
             fight: self.memory.fights,
             result: FightLine {
+                countered: m.countered,
                 boss_damage_taken_per_min: m.boss_damage_taken_per_min(),
                 wolf_posture_breaks: m.wolf_posture_breaks,
                 hits_after_break: m.hits_after_break,
@@ -2576,6 +2915,25 @@ impl BrainDriver {
             && p.principles == input.principles
         {
             p.principles.clear();
+        }
+        if self.actions.chr == "c7110" {
+            input.boss_knowledge.actions = ranked_counts(
+                &self
+                    .boss_knowledge
+                    .evidence
+                    .phase_actions
+                    .get("c7110")
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+            input.boss_knowledge.best = None;
+            input
+                .boss_knowledge
+                .plans
+                .0
+                .retain(|(key, _)| key.starts_with("c7110:"));
+            input.plans.0.retain(|(key, _)| key.starts_with("c7110:"));
+            input.overall.0.retain(|(key, _)| key.starts_with("c7110:"));
         }
         input
     }
@@ -2714,7 +3072,10 @@ impl BrainDriver {
         if !self.fight_over && !self.tally.is_empty() {
             self.end_fight(FightEnd::Unfinished);
         }
+        let shared = self.tally.shared.clone();
         self.tally = Tally::default();
+        self.tally.shared = shared;
+        self.tally.phase = self.actions.chr.into();
         self.habits = HabitTracker::new(self.actions.back_steps);
         self.since_hit = [None, None];
         self.boss_open = None;
@@ -2735,6 +3096,7 @@ impl BrainDriver {
         self.cancel_break = true;
         self.pending_why = Some("start");
         self.fight = FightState {
+            phase_changes: vec![(self.time, self.actions.chr.into())],
             cost_at_start: self.brain.costs().totals,
             metrics: MetricsTracker::new(self.time),
             tokens_at_start: self.brain.usage(),
@@ -2855,6 +3217,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tomoe_plan_failures_and_counter_weights_are_phase_scoped() {
+        use crate::brain::actions::{GENICHIRO, TOMOE};
+        let mut driver = BrainDriver::new(Box::new(crate::brain::LuaBrain), &GENICHIRO);
+        driver.memory.coach.failures.insert(
+            "3000".into(),
+            PlanFailures {
+                uses: 25,
+                failed: 24,
+                ..Default::default()
+            },
+        );
+        driver.memory.coach.failures.insert(
+            "c7110:3000".into(),
+            PlanFailures {
+                uses: 3,
+                fatal: 1,
+                ..Default::default()
+            },
+        );
+        assert_eq!(driver.plan_failures("3000").uses, 25);
+        driver.actions = &TOMOE;
+        assert_eq!(driver.plan_failures("3000").uses, 3);
+        let plan = GamePlan {
+            boss_phase: "c7110".into(),
+            counter_weights: [("3043".into(), 0.0), ("3060".into(), 0.0)].into(),
+            ..Default::default()
+        };
+        assert_eq!(plan.validate(&TOMOE).plan.counter_weights.len(), 1);
+        assert!(plan.validate(&GENICHIRO).plan.counter_weights.is_empty());
+    }
+
+    #[test]
     fn exhausted_budget_keeps_current_plan_then_resets_to_own_ai() {
         struct BudgetBrain(std::sync::Arc<std::sync::atomic::AtomicBool>);
         impl BossBrain for BudgetBrain {
@@ -2921,8 +3315,8 @@ mod tests {
         assert_eq!(view.running, "walk_in4 > [hold2] > 3013");
         assert!(view.checkpoint.unwrap().ends_with("2.0 s ago"));
         assert!(view.thinking && view.coach.is_some() && view.ban.is_some());
-        assert!(view.principles[0].starts_with("Boss ·"));
-        assert!(view.principles[1].starts_with("Player ·"));
+        assert!(view.principles[0].starts_with("Boss Â·"));
+        assert!(view.principles[1].starts_with("Player Â·"));
         d.time = 10.0;
         assert!(d.overlay().ban.is_none());
         assert!(d.overlay().scorecard.is_some());
@@ -3165,7 +3559,7 @@ mod tests {
             ..Default::default()
         });
         let report = d.session_report();
-        assert!(report.contains("| 3000 | 2 | 1 | 0 | 0 | 1 | 0 | 4.00 / 3.00 |"));
+        assert!(report.contains("| 3000 | 2 | 1 | 0 | 0 | 1 | 0 | 0 | 4.00 / 3.00 |"));
         assert!(report.contains("| 1 | boss | 31.0 | 31.0 | 2 | 1 | 50% | 100% |"));
         d.enable_session_report(&std::env::temp_dir());
         let path = d.session_report_path.clone().unwrap();
@@ -3215,6 +3609,7 @@ mod tests {
                 settled: false,
             });
             d.attribute(&[Exchange {
+                phase: "c5060".into(),
                 side: Side::Boss,
                 key: "3000".into(),
                 start,
@@ -3305,6 +3700,7 @@ mod tests {
             settled: false,
         });
         d.settle(&[Exchange {
+            phase: "c5060".into(),
             side: Side::Boss,
             key: "3000".into(),
             start: 0.1,

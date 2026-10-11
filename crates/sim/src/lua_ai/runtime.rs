@@ -255,6 +255,8 @@ pub enum ActSlot {
 /// that queues [`ActHook::choice`] instead, unless the moment is a reaction.
 #[derive(Debug, Clone, Default)]
 pub struct ActHook {
+    /// Relative multipliers for Lua's offered Kengeki callback indices.
+    pub counter_weights: Vec<(i32, f64)>,
     /// One local posture-break response, replacing the script's queued follow-up.
     pub break_response: bool,
     /// Retained until its first attack starts, so a delayed Lua replan cannot steal it.
@@ -593,6 +595,7 @@ impl Host for AiState {
                 self.combo_cancel.insert(n(0) as i32);
             }
             "Common_Battle_Activate" => return self.battle_activate(_vm, args),
+            "Common_Kengeki_Activate" => return self.kengeki_activate(_vm, args),
             "REGISTER_LOGIC_FUNC"
             | "REGISTER_GOAL_NO_SUB_GOAL"
             | "REGISTER_GOAL_NO_UPDATE"
@@ -659,6 +662,46 @@ impl Host for AiState {
 }
 
 impl AiState {
+    fn kengeki_activate(&mut self, vm: &mut Vm, args: &[Value]) -> LuaResult<Vec<Value>> {
+        if let (Some(hook), Some(Value::Table(weights))) = (&self.act_hook, args.get(2)) {
+            let mut table = weights.borrow_mut();
+            let offered: Vec<_> = hook
+                .counter_weights
+                .iter()
+                .filter_map(|&(id, factor)| {
+                    let weight = table.get(&Value::Num(f64::from(id))).num().unwrap_or(0.0);
+                    (weight > 0.0).then_some((id, weight, factor))
+                })
+                .collect();
+            // Keep the script's choice when every offered callback was vetoed.
+            // This includes a sole mandatory counter, and adds no fallback candidate.
+            let mut weights: Vec<_> = (1..=50)
+                .map(|id| {
+                    let weight = table.get(&Value::Num(f64::from(id))).num().unwrap_or(0.0);
+                    let factor = offered
+                        .iter()
+                        .find(|(i, _, _)| *i == id)
+                        .map_or(1.0, |(_, _, f)| *f);
+                    (id, weight, factor)
+                })
+                .collect();
+            if offered.iter().any(|(_, _, factor)| *factor != 1.0)
+                && weights
+                    .iter()
+                    .any(|(_, weight, factor)| weight * factor > 0.0)
+            {
+                for (id, weight, factor) in weights.drain(..) {
+                    table.set(
+                        Value::Num(f64::from(id)),
+                        Value::Num((weight * factor * 100.0).round()),
+                    );
+                }
+            }
+        }
+        let script = vm.get_global("__brain_kengeki_activate");
+        vm.call(self, &script, args)
+    }
+
     /// Stands in for the scripts' `Common_Battle_Activate(ai, goal, weights, acts, after,
     /// params)` while an [`ActHook`] is installed: queues the external act on the battle goal,
     /// or calls the script's own function.
@@ -1639,4 +1682,52 @@ fn action_update(st: &mut AiState, id: u32, g: &Goal) -> i32 {
         return RESULT_SUCCESS;
     }
     RESULT_CONTINUE
+}
+
+#[cfg(test)]
+mod counter_choice_tests {
+    use super::super::lua50::Table;
+    use super::*;
+
+    #[test]
+    fn reweights_only_offered_callbacks_and_preserves_mandatory_choice() {
+        let mut state = AiState::new(ThinkParams::default(), HashMap::new(), 1);
+        state.act_hook = Some(ActHook {
+            counter_weights: vec![(14, 0.0), (1, 1.0), (7, 10.0)],
+            ..Default::default()
+        });
+        let mut vm = Vm::new();
+        vm.set_global("__brain_kengeki_activate", Value::Host("print".into()));
+        let table = Table::new_ref();
+        table.borrow_mut().set(Value::Num(14.0), Value::Num(100.0));
+        state
+            .kengeki_activate(
+                &mut vm,
+                &[Value::Nil, Value::Nil, Value::Table(table.clone())],
+            )
+            .unwrap();
+        assert_eq!(table.borrow().get(&Value::Num(14.0)).num(), Some(100.0));
+        table.borrow_mut().set(Value::Num(1.0), Value::Num(100.0));
+        state
+            .kengeki_activate(
+                &mut vm,
+                &[Value::Nil, Value::Nil, Value::Table(table.clone())],
+            )
+            .unwrap();
+        assert_eq!(table.borrow().get(&Value::Num(14.0)).num(), Some(0.0));
+        assert_eq!(table.borrow().get(&Value::Num(1.0)).num(), Some(10000.0));
+        assert_eq!(table.borrow().get(&Value::Num(7.0)).num(), Some(0.0));
+        // Lua's offered NoAction is a valid fallback, even with one attack candidate.
+        table.borrow_mut().set(Value::Num(14.0), Value::Num(100.0));
+        table.borrow_mut().set(Value::Num(1.0), Value::Num(0.0));
+        table.borrow_mut().set(Value::Num(50.0), Value::Num(20.0));
+        state
+            .kengeki_activate(
+                &mut vm,
+                &[Value::Nil, Value::Nil, Value::Table(table.clone())],
+            )
+            .unwrap();
+        assert_eq!(table.borrow().get(&Value::Num(14.0)).num(), Some(0.0));
+        assert_eq!(table.borrow().get(&Value::Num(50.0)).num(), Some(2000.0));
+    }
 }

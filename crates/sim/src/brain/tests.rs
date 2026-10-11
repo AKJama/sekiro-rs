@@ -56,7 +56,9 @@ fn tally_counts_each_outcome() {
             blocked: 0,
             deflected: 1,
             whiffed: 0,
-            punished: 1
+            punished: 1,
+            countered: 0,
+            counter_kinds: [0; 3],
         }
     );
     let throw = t.counts(Side::Boss, "3031");
@@ -86,7 +88,7 @@ fn punish_window_and_ranked_summary() {
     // Most used first, then by key.
     assert_eq!(
         serde_json::to_string(&s.boss).unwrap(),
-        r#"{"3002":[2,0,0,0,2,0],"3000":[1,0,0,0,1,0],"3001":[1,0,0,0,1,0]}"#
+        r#"{"3002":[2,0,0,0,2,0,0,0,0,0],"3000":[1,0,0,0,1,0,0,0,0,0],"3001":[1,0,0,0,1,0,0,0,0,0]}"#
     );
 }
 
@@ -555,15 +557,15 @@ fn both_full_layers_fit_coach_budget() {
         actions: input.overall.clone(),
         plans: input.overall.clone(),
         break_plans: input.overall.clone(),
-        principles: vec!["界".repeat(90); 6],
+        principles: vec!["Ã§â€¢Å’".repeat(90); 6],
         bans: (0..8)
             .map(|i| coach::Avoid {
                 choice: format!("300{i}"),
-                reason: "界".repeat(80),
+                reason: "Ã§â€¢Å’".repeat(80),
             })
             .collect(),
     };
-    input.principles = vec!["界".repeat(90); 6];
+    input.principles = vec!["Ã§â€¢Å’".repeat(90); 6];
     input.played.as_mut().unwrap().boss_principles = input.boss_knowledge.principles.clone();
     input.played.as_mut().unwrap().boss_bans = input.boss_knowledge.bans.clone();
     input.phase = "mid".into();
@@ -691,6 +693,8 @@ fn full_memory() -> Memory {
         deflected: n / 5,
         whiffed: n / 6,
         punished: n / 7,
+        countered: 0,
+        counter_kinds: [0; 3],
     };
     for (i, a) in SOLDIER.actions.iter().enumerate() {
         m.boss.insert(a.id.to_string(), counts(100 + i as u32));
@@ -1202,6 +1206,8 @@ fn set(name: &str, plans: &[(&str, f32)]) -> PlanSet {
 
 fn good_plan() -> GamePlan {
     GamePlan {
+        boss_phase: "c1010".into(),
+        counter_weights: Default::default(),
         version: 1,
         opener: "hold3.5>walk_in4".into(),
         sets: vec![
@@ -1266,7 +1272,7 @@ fn coach_caps_lua_and_keeps_bounded_principles_and_break_plans() {
             weight: 50.0,
         },
     ]);
-    p.principles = vec!["界".repeat(120); 8];
+    p.principles = vec!["Ã§â€¢Å’".repeat(120); 8];
     p.on_wolf_break = vec![
         coach::WeightedChoice {
             plan: "3000".into(),
@@ -1432,7 +1438,7 @@ fn sets_cannot_hold_plans_without_an_attack_or_in_the_avoid_list() {
 #[test]
 fn names_counts_and_notes_are_bounded() {
     let mut plan = good_plan();
-    plan.notes = "Ã©".repeat(NOTES_MAX + 50);
+    plan.notes = "ÃƒÆ’Ã‚Â©".repeat(NOTES_MAX + 50);
     plan.start_set = "nope".into();
     plan.sets.push(set("bad name!", &[("3000", 1.0)]));
     plan.sets.push(set("keep", &[("3000", 1.0)]));
@@ -1465,6 +1471,8 @@ fn busy_input() -> CoachInput {
         deflected: n / 5,
         whiffed: n / 6,
         punished: n / 7,
+        countered: 0,
+        counter_kinds: [0; 3],
     };
     let mut plans = TopMap::default();
     let mut overall = TopMap::default();
@@ -1487,6 +1495,8 @@ fn busy_input() -> CoachInput {
         memory.push_record(record(3 + i, i, Some(30.0 + i as f32)));
     }
     let big_plan = GamePlan {
+        boss_phase: "c1010".into(),
+        counter_weights: Default::default(),
         version: 1,
         opener: "hold3.5>walk_in4".into(),
         sets: (0..4)

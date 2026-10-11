@@ -108,6 +108,8 @@ pub struct DuelReport {
     /// Wolf's anti-ground attack (the air kick) landed on an enemy in a perilous sweep, whose
     /// "jump kick effective" SpEffect multiplied its posture damage this step.
     pub jump_counter: bool,
+    /// Wolf's HKS-powered lightning return opened its actual attack window this step.
+    pub other_counter: bool,
     /// ThrowParam row and posture damage of a Mikiri begun this step.
     pub mikiri: Option<(i32, i32)>,
 }
@@ -632,6 +634,16 @@ impl Duel {
         if let Some(ev) = self.events.as_mut() {
             ev.restart();
         }
+        if let Some(mut driver) = self.boss_brain.take() {
+            driver.rebind(self);
+            driver.start_fight();
+            if let Some(ai) = self.ai.as_mut()
+                && let Some(actions) = crate::brain::BossActions::for_chr(&self.spec.chr)
+            {
+                ai.enable_act_hook(actions.reflex_acts);
+            }
+            self.boss_brain = Some(driver);
+        }
         Ok(())
     }
 
@@ -639,6 +651,17 @@ impl Duel {
     /// Wolf, his health/status, the arena and the original reset point survive the hand-over.
     fn switch_enemy(&mut self, spec: EnemySpec, spot: Placement) -> Result<(), LoadError> {
         let mut next = Self::load_with(&self.cache, 6.0, spec)?;
+        if matches!(
+            (self.spec.chr.as_str(), next.spec.chr.as_str()),
+            ("c7100", "c7110") | ("c7110", "c7100")
+        ) && let Some(driver) = self.boss_brain.as_mut()
+        {
+            driver.tally.shared = crate::brain::moves::shared_genichiro_actions(
+                &self.cache,
+                &self.enemy,
+                &next.enemy,
+            );
+        }
         std::mem::swap(&mut next.enemy.ground, &mut self.enemy.ground);
         next.enemy.body.position = spot.position;
         next.enemy.body.yaw = spot.yaw;
@@ -673,7 +696,15 @@ impl Duel {
         self.respawn_in = None;
         self.lightning_returned = false;
         self.defender_dying = 0;
-        self.boss_brain = None;
+        if let Some(mut driver) = self.boss_brain.take() {
+            driver.rebind(self);
+            if let Some(ai) = self.ai.as_mut()
+                && let Some(actions) = crate::brain::BossActions::for_chr(&self.spec.chr)
+            {
+                ai.enable_act_hook(actions.reflex_acts);
+            }
+            self.boss_brain = Some(driver);
+        }
         Ok(())
     }
 
@@ -1913,7 +1944,7 @@ impl Duel {
         }
         let enemy_alive = !self.rules.fighters[1].dead();
         let mut endure_action = None;
-        if self.enemy_active && enemy_alive && self.deathblow.is_none() {
+        if self.enemy_active && enemy_alive && self.deathblow.is_none() && !respawned {
             if self.ai.is_some() {
                 let world = self.ai_world(dt);
                 let mut driver = self.boss_brain.take();
@@ -2007,7 +2038,8 @@ impl Duel {
         if !reversal {
             self.lightning_returned = false;
         }
-        if reversal && !self.lightning_returned {
+        let other_counter = reversal && !self.lightning_returned;
+        if other_counter {
             self.lightning_returned = true;
             if let Some(attack) = self.fighters[0].attacks.get(&281).cloned() {
                 let start = glam::Vec3::from_array(self.player.body.position) + glam::Vec3::Y;
@@ -2182,6 +2214,7 @@ impl Duel {
             respawned,
             perilous,
             jump_counter,
+            other_counter,
             mikiri,
         };
         let clip = self

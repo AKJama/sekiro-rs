@@ -67,7 +67,7 @@ Lighting remains dark under the roof, and wall camera framing needs further work
 The sixty-second idle god-mode run starts 52 brain-chosen attacks across 18 plans, with zero invalid plans.
 The bow plan produces Bullet rows 71000500 and 71000530 through 71000533.
 The move sheet includes all 24 actions and the three-hit sword and seven-hit Floating Passage timelines, with real TAE cancels and AtkParam-derived posture costs.
-Other regressions cover unchanged Lua choices, plan-set pacing, posture checkpoint re-arming, character-specific boss/player memory and the c7110 hand-over back to Lua.
+Other regressions cover unchanged Lua choices, plan-set pacing, posture checkpoint re-arming, character-specific boss/player memory and the continuous c7110 brain hand-over and numbered reset.
 
 The forty-second game replay uses `--arena genichiro --brain scripted --brain-memory off --brain-overlay --god --lock-on`, with its input under `target/alt/genichiro/brain-idle.txt`.
 Reviewed screenshots are `target/alt/genichiro/brain-005.png`, `brain-010.png`, `brain-020.png` and `brain-040.png`.
@@ -83,7 +83,9 @@ Cutscene playback and story rewards remain unimplemented; the castle hand-over u
 Only one enemy is active at a time, with sequential event hand-over; simultaneous enemies and allies remain future work.
 Castle c7100 supports the planning brain through `brain::actions::GENICHIRO`, including sword combos, perilous finishers, bow shots, jumping arrow volleys and existing tactics.
 See `docs/BRAIN.md`, "Genichiro Ashina (c7100)", for the data-derived act table and exclusions.
-The second-mark hand-over drops the c7100 driver and returns castle c7110 to its own Lua; explicit c7110 brain selection offers its three lightning acts through `brain::actions::TOMOE`.
+The second-mark hand-over preserves the same brain session and coach, switches to the Lua-derived c7110 action table, and continues the same fight.
+Tomoe includes the three lightning acts, sword and bow plans, tactics and phase-specific counter evidence; reset reinstalls the c7100 hook for the next numbered fight.
+See `docs/BRAIN.md`, "Continuous Genichiro brain and counter learning", for phase storage, strict move-identity pooling and Lua counter constraints.
 Lua still reports unimplemented `GetHpLastTarget` and `IsInsideTargetRegion` queries using the existing fallback.
 Boss event discovery and all-boss arena generation remain incomplete; this session adds reviewed event and arena rows.
 
@@ -162,3 +164,12 @@ Screenshots are `target/alt/genichiro/lightning-charge.png`, `lightning-bolt.png
 Visual inspection confirms the blue sparks/tint and white return beam are readable stand-ins; the incoming beam is thin and the castle scene is washed out, so this is functional FX verification rather than a finished visual match.
 The selected bolt capture is step 122 of a replay with grading and auto exposure disabled; earlier step 115/118 captures transiently lacked visible actor meshes and were rejected.
 The five real-data lightning regressions cover grounded and guarded bow hits, airborne capture, landing without returning, successful HKS reversal, and both lightning slashes.
+
+## Aerial interruption (2026-10-11)
+
+Act 3015's jump does not carry a DS3Poise/795 event or a special damage-motion replacement effect.
+The NPC script's aerial branch requires flinch clips 8140/8141; these exist as aliases of 8010/8011.
+The authored foot lift now makes env(201) false and a legitimate flinch falls through the aerial reaction graph instead of snapping to the floor.
+No native source granting 3015 uninterrupted armour has been verified; the original attack is still interruptible in this implementation.
+The data-protected aerial case is 3026, whose 5350 window lasts 0.067-2.500 s and preserves its later strike after a damaging hit.
+See `COMBAT-RULES.md`, "Super armour and interruption", for the native category-1001 replacement table, perilous windows and the support-height approximation.

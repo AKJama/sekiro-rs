@@ -236,6 +236,8 @@ fn set(name: &str, plan: &str) -> PlanSet {
 
 fn plan(notes: &str) -> GamePlan {
     GamePlan {
+        boss_phase: "c1010".into(),
+        counter_weights: Default::default(),
         version: 1,
         opener: "3002".into(),
         sets: vec![set("a", "3000+3001"), set("b", "3005+3007")],

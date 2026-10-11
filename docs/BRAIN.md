@@ -1,7 +1,7 @@
 # The boss brain
 
 A pluggable "boss brain" for an enemy with a Lua battle goal: his high-level choices can come from his real Lua AI (the default) or from an outside controller, including a hosted model.
-Three enemies have action tables: the Great Shinobi Owl (c5060), the Ashina soldier with a one-handed sword (c1010), and castle Genichiro Ashina (c7100).
+Four characters have action tables: the Great Shinobi Owl (c5060), the Ashina soldier with a one-handed sword (c1010), castle Genichiro Ashina (c7100), and his Way of Tomoe phase (c7110).
 The code is in `crates/sim/src/brain/`, with a small hook in the Lua goal runtime (`crates/sim/src/lua_ai/runtime.rs`, `ActHook`).
 
 ```powershell
@@ -26,7 +26,7 @@ The fixed-width dark panel wraps text, uses the HUD's warm colours and Windows S
 The panel shows the controller and coach model, fight number (including the snapshot's earlier fights), selected player, active set and description, running plan with its current step in brackets, and the current move's label.
 Lua choices display `Lua`.
 The last checkpoint shows its reason, set switch or keep decision, and age.
-Accepted coach notes appear as a highlighted pre-, mid- or post-fight card for eight seconds; boss and player principles remain beneath it, and `coach thinking…` shows while a coach request is pending.
+Accepted coach notes appear as a highlighted pre-, mid- or post-fight card for eight seconds; boss and player principles remain beneath it, and `coach thinkingÃ¢â‚¬Â¦` shows while a coach request is pending.
 The last ban appears for five seconds, including the driver's actual whiff or failure evidence.
 A fight's scorecard appears for six seconds with the winner, time to kill Wolf, Wolf's posture breaks, deflect rate and mean break conversion delay.
 The view reads driver state directly and works without `--brain-log`.
@@ -90,7 +90,8 @@ A moment is a reaction when the script already queued subgoals in step 1, or whe
 - the Owl: Act21, which turns to punish a heal or to face a Wolf behind him, and Act40, his answer to SpEffect 110125;
 - the soldier: Act23 (strafe), Act25 (back away) and Act27 (wait and strafe), which his script weighs before any distance band, when Wolf is down (SpEffect 109031), on SpEffects 3170200 and 3101540, or with no path to Wolf.
 
-A deflect counter never reaches a slot at all, because `Kengeki_Activate` returns first.
+A deflect counter bypasses the normal plan slot because `Kengeki_Activate` returns first.
+Its shared helper now lets the driver reweight only the callbacks Lua offered, as described below.
 The soldier's interrupt also replans when Wolf goes down (SpEffect 109031, after his leaping slash 3003 for example), so a plan that knocks Wolf down is cut short by his own back step or retreat (Act24, Act25), as one of his own acts would be.
 
 A plan runs exactly as one of his acts would:
@@ -262,7 +263,7 @@ Excluded from planning:
 - Lightning bow 3039 and lightning jump slashes 3042/3043 belong to the separate castle Tomoe table `brain::actions::TOMOE` (`c7110:71100000`).
   Castle Tomoe's separate `711000_battle.lua` defines 3039 in Act13/Act17 (no approach), 3043 in Act18 (8.3 m), and 3042 in Act19 (3.5 m); those functions are absent from c7100's battle goal.
   c7110 now offers 3039 (no approach), 3043 (8.3 m) and 3042 (3.5 m); c7100 has no matching lightning attack rows and keeps excluding them.
-  The automatic map hand-over still returns to Lua; explicit c7110 scripted/repeat control is available for lightning verification.
+  The automatic map hand-over retains the brain and switches to the full c7110 table within the same fight.
 - Registered Act07/08/18/19/40/41/42/45/46/47 have no function definition in this castle battle goal, so no attack or approach is inferred from their names.
   No offered action lacks a TAE clip; missing ids such as 3033 and 3047 are not inferred into the vocabulary.
 
@@ -273,7 +274,7 @@ The posture-pressure checkpoints, local posture-break response, plan-set validat
 
 Hosted memory is `c7100.boss.json` and `c7100.player-<name>.json`; Lua/scripted baselines retain their own suffixes.
 It cannot collide with c5060 or c1010 unless a caller explicitly supplies the same JSON stem, which is a user-selected override.
-At the second deathblow the existing map hand-over drops the driver and loads castle c7110 row 71100000 with its own 711000 Lua battle goal.
+At the second deathblow the map hand-over retains the driver and loads castle c7110 row 71100000 with its own 711000 Lua battle goal and phase-specific brain table.
 Tomoe therefore runs Lua, with no c7100 plans or brain memory applied to him; resetting after that hand-over currently requires reinstalling the brain through a new game run.
 
 ```powershell
@@ -348,7 +349,7 @@ An exchange stays open for a punish window of 1 s after its clip ends, then coun
 Each flag counts at most once per exchange; hits that arrive after the clip ended (a shuriken in flight) count for that side's latest exchange.
 `n` includes tactic and back-step exchanges, so it is not a count of plan uses or attacks alone.
 Older saved counts included non-attacking tactics as whiffs; existing memory files are left untouched, so historical totals still include those false whiffs.
-The request carries this fight's counts per key (`tally.boss`, `tally.wolf`, most used first) as arrays `[n, hit, blocked, deflected, whiffed, punished]`; the same counts over every fight are in `memory.boss` and `memory.wolf`, so a controller can notice "the player deflects 3005" and "the player has adapted" (this fight differs from all fights).
+The request carries this fight's counts per key (`tally.boss`, `tally.wolf`, most used first) as arrays `[n, hit, blocked, deflected, whiffed, punished, countered, mikiri, jump, other]`; the same counts over every fight are in `memory.boss` and `memory.wolf`, so a controller can notice "the player deflects 3005" and "the player has adapted" (this fight differs from all fights).
 
 ```json
 {"boss":{"3005":[8,7,0,0,1,2],"3031":[1,0,0,0,1,0]},
@@ -674,7 +675,7 @@ Bodies are emitted as compact JSON; indentation here is for reading.
           "value": "lua"
         }
       ],
-      "instructions": "You are a doc example boss fighting Wolf. Reward order: win and win faster (time_to_kill_wolf, lower is better); then break Wolf posture and land a hit right after (wolf_posture_breaks, hits_after_break); then damage to Wolf per minute (HP plus posture); then take little damage (boss_damage_taken_per_min, HP plus posture) and reduce Wolf perfect deflects, each of which builds your posture. engaged_time is information and only a small tiebreaker when losing while landing hits; survival time is never a goal. Stalling, running away or passivity counts as failure: a fight where no attack of yours started in the last 4 s more than 35% of the time failed, whatever else happened, plans without an attack are ignored, you must start an attack at least every 6 s and may back off or retreat only once per 5 s. Retreat chains are allowed as baits when followed by an attack, including turning to punish a chase. Movement tactics exist to set up attacks (baits, spacing, timing mixups), not to avoid fighting. Think like a swordsman: turning your back or retreating while the opponent is in sword range leaves you open, so tactics should set up attacks safely. Probe instead of repeating: try untried options, drop what keeps being deflected or guarded, bait his habits (stand still briefly, walk in slowly, strafe, mix timings) and punish them. Input: obs is a fair view of both fighters (plan is what runs now); tally counts this fight per action or tactic as [n, hit, blocked, deflected, whiffed, punished]; memory holds every fight so far (the same counts, Wolf's habits, and trend: his deflect%, guard%, hits you landed, hp% lost, attacks per minute, damage per minute and passive percent, and kill seconds for information only, over the last fights, now = this fight so far); why is what triggered this question. You are asked only a few times a fight. The boss samples from your probabilities all fight, so spread them over several good options. Reflexes (guarding, deflecting, counters and reactions) are automatic. Choose lua to leave an act to your own AI. Options are single actions, movement tactics (distances from Wolf, left and right are yours) and plans of up to 3 steps joined with > (consecutive attacks joined with +):\n3005: front kick\n5201: back step\nhold2: stand still facing Wolf for 2 s\nwalk_in4: walk slowly toward Wolf until 4 m away\nwalk_in4>3005: walk slowly toward Wolf until 4 m away, then front kick",
+      "instructions": "You are a doc example boss fighting Wolf. Reward order: win and win faster (time_to_kill_wolf, lower is better); then break Wolf posture and land a hit right after (wolf_posture_breaks, hits_after_break); then damage to Wolf per minute (HP plus posture); then take little damage (boss_damage_taken_per_min, HP plus posture) and reduce Wolf perfect deflects, each of which builds your posture. engaged_time is information and only a small tiebreaker when losing while landing hits; survival time is never a goal. Stalling, running away or passivity counts as failure: a fight where no attack of yours started in the last 4 s more than 35% of the time failed, whatever else happened, plans without an attack are ignored, you must start an attack at least every 6 s and may back off or retreat only once per 5 s. Retreat chains are allowed as baits when followed by an attack, including turning to punish a chase. Movement tactics exist to set up attacks (baits, spacing, timing mixups), not to avoid fighting. Think like a swordsman: turning your back or retreating while the opponent is in sword range leaves you open, so tactics should set up attacks safely. Probe instead of repeating: try untried options, drop what keeps being deflected or guarded, bait his habits (stand still briefly, walk in slowly, strafe, mix timings) and punish them. Input: obs is a fair view of both fighters (plan is what runs now); tally counts this fight per action or tactic as [n, hit, blocked, deflected, whiffed, punished, countered, mikiri, jump, other]; memory holds every fight so far (the same counts, Wolf's habits, and trend: his deflect%, guard%, hits you landed, hp% lost, attacks per minute, damage per minute and passive percent, and kill seconds for information only, over the last fights, now = this fight so far); why is what triggered this question. You are asked only a few times a fight. The boss samples from your probabilities all fight, so spread them over several good options. Reflexes (guarding, deflecting, counters and reactions) are automatic. Choose lua to leave an act to your own AI. Options are single actions, movement tactics (distances from Wolf, left and right are yours) and plans of up to 3 steps joined with > (consecutive attacks joined with +):\n3005: front kick\n5201: back step\nhold2: stand still facing Wolf for 2 s\nwalk_in4: walk slowly toward Wolf until 4 m away\nwalk_in4>3005: walk slowly toward Wolf until 4 m away, then front kick",
       "name": "boss_action",
       "type": "choice"
     }
@@ -698,7 +699,7 @@ The reply carries the chosen plan and the whole set (`BrainReply::set`, from `an
       "role": "user"
     }
   ],
-  "instructions": "You are a doc example boss fighting Wolf. Reward order: win and win faster (time_to_kill_wolf, lower is better); then break Wolf posture and land a hit right after (wolf_posture_breaks, hits_after_break); then damage to Wolf per minute (HP plus posture); then take little damage (boss_damage_taken_per_min, HP plus posture) and reduce Wolf perfect deflects, each of which builds your posture. engaged_time is information and only a small tiebreaker when losing while landing hits; survival time is never a goal. Stalling, running away or passivity counts as failure: a fight where no attack of yours started in the last 4 s more than 35% of the time failed, whatever else happened, plans without an attack are ignored, you must start an attack at least every 6 s and may back off or retreat only once per 5 s. Retreat chains are allowed as baits when followed by an attack, including turning to punish a chase. Movement tactics exist to set up attacks (baits, spacing, timing mixups), not to avoid fighting. Think like a swordsman: turning your back or retreating while the opponent is in sword range leaves you open, so tactics should set up attacks safely. Probe instead of repeating: try untried options, drop what keeps being deflected or guarded, bait his habits (stand still briefly, walk in slowly, strafe, mix timings) and punish them. Input: obs is a fair view of both fighters (plan is what runs now); tally counts this fight per action or tactic as [n, hit, blocked, deflected, whiffed, punished]; memory holds every fight so far (the same counts, Wolf's habits, and trend: his deflect%, guard%, hits you landed, hp% lost, attacks per minute, damage per minute and passive percent, and kill seconds for information only, over the last fights, now = this fight so far); why is what triggered this question. You are asked only a few times a fight. The boss samples from your probabilities all fight, so spread them over several good options. Reflexes (guarding, deflecting, counters and reactions) are automatic. Choose lua to leave an act to your own AI. Options are single actions, movement tactics (distances from Wolf, left and right are yours) and plans of up to 3 steps joined with > (consecutive attacks joined with +):\n3005: front kick\n5201: back step\nhold2: stand still facing Wolf for 2 s\nwalk_in4: walk slowly toward Wolf until 4 m away\nwalk_in4>3005: walk slowly toward Wolf until 4 m away, then front kick",
+  "instructions": "You are a doc example boss fighting Wolf. Reward order: win and win faster (time_to_kill_wolf, lower is better); then break Wolf posture and land a hit right after (wolf_posture_breaks, hits_after_break); then damage to Wolf per minute (HP plus posture); then take little damage (boss_damage_taken_per_min, HP plus posture) and reduce Wolf perfect deflects, each of which builds your posture. engaged_time is information and only a small tiebreaker when losing while landing hits; survival time is never a goal. Stalling, running away or passivity counts as failure: a fight where no attack of yours started in the last 4 s more than 35% of the time failed, whatever else happened, plans without an attack are ignored, you must start an attack at least every 6 s and may back off or retreat only once per 5 s. Retreat chains are allowed as baits when followed by an attack, including turning to punish a chase. Movement tactics exist to set up attacks (baits, spacing, timing mixups), not to avoid fighting. Think like a swordsman: turning your back or retreating while the opponent is in sword range leaves you open, so tactics should set up attacks safely. Probe instead of repeating: try untried options, drop what keeps being deflected or guarded, bait his habits (stand still briefly, walk in slowly, strafe, mix timings) and punish them. Input: obs is a fair view of both fighters (plan is what runs now); tally counts this fight per action or tactic as [n, hit, blocked, deflected, whiffed, punished, countered, mikiri, jump, other]; memory holds every fight so far (the same counts, Wolf's habits, and trend: his deflect%, guard%, hits you landed, hp% lost, attacks per minute, damage per minute and passive percent, and kill seconds for information only, over the last fights, now = this fight so far); why is what triggered this question. You are asked only a few times a fight. The boss samples from your probabilities all fight, so spread them over several good options. Reflexes (guarding, deflecting, counters and reactions) are automatic. Choose lua to leave an act to your own AI. Options are single actions, movement tactics (distances from Wolf, left and right are yours) and plans of up to 3 steps joined with > (consecutive attacks joined with +):\n3005: front kick\n5201: back step\nhold2: stand still facing Wolf for 2 s\nwalk_in4: walk slowly toward Wolf until 4 m away\nwalk_in4>3005: walk slowly toward Wolf until 4 m away, then front kick",
   "max_output_tokens": 16,
   "model": "gpt-6-luna",
   "reasoning": {
@@ -850,7 +851,7 @@ The full plan goes to the brain log (`coach_plan` event, with the warnings and t
 
 ### What the coach is told
 
-The input (user message) is the compact JSON of `CoachInput`: `fight`, `result` (won, secs, `defl`, `guard`, `hits`, `hp`, `posture`, `punishes`, `apm`, `dpm`, `passive`), `trend` (the last 3 fights), `plans` and `sets` (this fight, per plan text and per set of the plan played, as `[exchanges, hit, blocked, deflected, whiffed, punished]`), `range` (this fight's measured melee spacing), `wolf` (his attacks), `overall` (every fight per plan text), `habits`, `played` (the plan the fight ran) and `notes` (the coach's own notes from last time, so its reasoning accumulates).
+The input (user message) is the compact JSON of `CoachInput`: `fight`, `result` (won, secs, `defl`, `guard`, `hits`, `hp`, `posture`, `punishes`, `apm`, `dpm`, `passive`), `trend` (the last 3 fights), `plans` and `sets` (this fight, per plan text and per set of the plan played, as `[exchanges, hit, blocked, deflected, whiffed, punished, countered, mikiri, jump, other]`), `range` (this fight's measured melee spacing), `wolf` (his attacks), `overall` (every fight per plan text), `habits`, `played` (the plan the fight ran) and `notes` (the coach's own notes from last time, so its reasoning accumulates).
 `range` maps each plan to `[mean attack-start distance, mean observed melee reach]` in metres, rounded to two decimals.
 Each attack samples its own start and maximum active dummy-poly capsule envelope, including actual root travel, AtkParam capsule radius and Wolf's body radius.
 Projectile-only attacks and attacks interrupted before any measurable melee window have no sample.
@@ -878,7 +879,7 @@ The instructions (`protocol::coach_instructions`, followed by every choice with 
 > Attack until deflected, then answer the counter.
 > Jump and stomp sweeps, Mikiri thrusts (or deflect), and dodge grabs.
 
-> Input (compact JSON about the fight just over): fight = fights so far; result = Wolf's result (won = who won, secs, defl/guard = Wolf's perfect-deflect and guard percent, hits = hits you landed, hp/posture = percent of his bars lost, punishes = your actions he hit, apm, dpm = percent of a bar per minute, passive percent); trend = his deflect%, guard%, hits, hp%, kill seconds (information only), apm, dpm and passive over the last fights; plans = this fight per plan text, as [exchanges, hit, blocked, deflected, whiffed, punished] (lua = your own AI's acts); sets = this fight per set of the game plan played: secs and the same counts (opener = the opener, lua = own AI); wolf = his attacks this fight, same counts; overall = every fight per plan text; habits = how Wolf behaves; played = the game plan this fight ran; notes = your own notes from last time. With no played plan this fight was your plain AI, the baseline.\n\
+> Input (compact JSON about the fight just over): fight = fights so far; result = Wolf's result (won = who won, secs, defl/guard = Wolf's perfect-deflect and guard percent, hits = hits you landed, hp/posture = percent of his bars lost, punishes = your actions he hit, apm, dpm = percent of a bar per minute, passive percent); trend = his deflect%, guard%, hits, hp%, kill seconds (information only), apm, dpm and passive over the last fights; plans = this fight per plan text, as [exchanges, hit, blocked, deflected, whiffed, punished, countered, mikiri, jump, other] (lua = your own AI's acts); sets = this fight per set of the game plan played: secs and the same counts (opener = the opener, lua = own AI); wolf = his attacks this fight, same counts; overall = every fight per plan text; habits = how Wolf behaves; played = the game plan this fight ran; notes = your own notes from last time. With no played plan this fight was your plain AI, the baseline.\n\
 > Output: one game plan. opener = a plan run first in the fight (may be tactics such as hold3.5>walk_in4, or lua for none). sets = 2 to 4 named sets (name of letters, digits, _ or -, at most 24 characters), each with a one-line description for the fighter who picks the set (what it does and when it suits), 2 to 6 weighted plans from the choices below (weights relative), and when = the checkpoint it suits or null. start_set = the set played from the start. avoid = choices not to use, each with a short reason. notes = at most 400 characters: your hypotheses about this player, kept and shown to you next time so your reasoning accumulates; revise them with the new evidence. In the fight a cheap model only picks which set to switch to at the checkpoints (start, pressure, pressure_critical, half_hp (fallback), mark_lost, punished_twice, deflected_thrice, or keep), and your plans run locally, sampled by weight with a penalty for plans that keep being deflected, so spread weights over good options and make the sets clearly different. pressure means about 6 Wolf hits to break, pressure_critical about 3 but at least 2; both re-arm above 70% remaining posture. mark_lost only fires with lives still left; checkpoints wait until the boss can act. half_hp is the backup event at 50% HP left. Reflexes (guarding, deflecting, counters, reactions) are automatic. Use only the choices listed; lua leaves an act to the boss's own AI. A choice is a single action, a movement tactic (distances from Wolf, left and right are the boss's) or a plan of up to {max} steps joined with > (consecutive attacks joined with +). Choices:
 
 The checkpoint chooser (coach mode) gets only a few numbers and the set names, about 100 input tokens plus the choice list (the sets' descriptions and `keep`):
@@ -1055,7 +1056,7 @@ A reasoned retry for the ordinary plan text also resets the response's evidence 
 
 Validation caps the combined Lua weight to at most 25% of each set, including duplicate Lua entries, and drops a Lua-only set.
 The coach is instructed to mix at least three different attack ids per set; narrower sets receive a validation warning and remain compatible with old memory.
-Coach input `actions` contains individual `[n, hit, blocked, deflected, whiffed, punished]` counts for Lua and coached moves, with zero-count rows for untried offered actions.
+Coach input `actions` contains individual `[n, hit, blocked, deflected, whiffed, punished, countered, mikiri, jump, other]` counts for Lua and coached moves, with zero-count rows for untried offered actions.
 `action_range` supplies each measured action's mean attack-start distance and melee reach, rounded to two decimals; projectile-only actions have no reach sample.
 The coach can therefore probe under-used moves using their own outcomes rather than the aggregate `lua` plan count.
 The input budget is 4096 bytes; the small in-fight chooser request remains unchanged.
@@ -1183,7 +1184,7 @@ Failed API answers retain reported usage even when their plan is unusable.
 Fight summary lines include both fight and session totals, counting calls that complete during that fight (including a previous fight's coach review).
 Session reports include a Cost table by kind and model, with plan-proxy tokens, API tokens and billed USD.
 F9 and normal exit print the report; the F8 recording overlay shows the session line and persistent budget notice.
-For example: `session: 12 calls · 48.0k tok (plan proxy) · 2.0k tok · $0.000200 (API)`.
+For example: `session: 12 calls Ã‚Â· 48.0k tok (plan proxy) Ã‚Â· 2.0k tok Ã‚Â· $0.000200 (API)`.
 
 Measured coach context is about 11k reported tokens per Codex call, while a Decisions checkpoint uses about 250 input tokens.
 Two subscription coach reviews plus eight checkpoints therefore use roughly 22k plan-proxy tokens plus 2k API input tokens, with about $0.0002 billed API usage per fight (output is free for Decisions).
@@ -1203,3 +1204,109 @@ A USD budget also stops after an unknown billed price, because the remaining spe
 Usage is known after completion, so the final call can exceed the limit; this is a stop-after-call budget, not a hard provider spending cap.
 API-key testers should set both budgets and provider-side spending limits, and keep the existing request deadline/output cap small.
 No third-party telemetry service is involved.
+
+## Continuous Genichiro brain and counter learning (2026-10-11)
+
+The c7100 to c7110 EMEVD hand-over is a phase change within one fight.
+The same driver, coach worker, clock, player profile and habits survive it.
+The intermediate castle defeat does not increment fight totals or send a post-fight review.
+Every enemy reset reloads its Lua hook and rebinds the retained driver; a supported reset starts the next numbered fight.
+Owl's second phase changes his existing character's effects rather than replacing the driver, so it already retains the session; its reset now follows the same explicit rebind path.
+The supported tables cover soldier, Owl and both Genichiro characters; unsupported hand-overs are outside this session path.
+
+### Way of Tomoe action table
+
+`brain::actions::TOMOE` is for castle c7110, NpcParam/NpcThinkParam 71100000.
+The derivation follows the c7100 method: read `GOAL_Rival_hadaka_711000_Battle` in the installed `m11_01_00_00.luabnd.d/711000_battle.lua`, resolve its requested clips and TAE, then build the move sheet from the loaded BehaviorParam and AtkParam rows.
+Local research output is gitignored under `cache/brain_research`; no decompiler text is included in source.
+Distances below are the script's base approach before its hit-radius subtraction.
+Follow-ups chosen alone retain their parent act's distance, as with the existing tables.
+
+| Lua act | Offered animation ids | Approach (m) |
+|---|---|---:|
+| 01 | 3000, 3001, 3002, 3003, 3010, 3025 | 3.6 |
+| 02 | 3004 | 3.0 |
+| 03 | 3005 | 2.2 |
+| 05 / 34 | 3007, 3011 | 5.9 |
+| 06 | 3016 | 5.2 |
+| 09 | 3040, 3041, 3067 | 4.5 |
+| 10 | 3006 | 4.8 |
+| 12 | 3037 | 3.5 |
+| 13 | 3012, optional 3039 | none |
+| 15 | 3014, 3015 | 8.9 |
+| 17 | 3039, lightning bow | none |
+| 18 | 3043, advancing lightning jump slash | 8.3 |
+| 19 | 3042, lightning jump slash | 3.5 |
+| 20 | 3008 | 12.5 |
+| 22 / 24 | 5202, 5203 / 5201 | none |
+| 30 | 3009, bow shot | none |
+| 31 | 3003, 3045 | 3.6 |
+
+3039 sets AI number 2 to 1 and 3008 sets number 7 to 1.
+The normal bow and lightning bullets use their existing combat paths; the move sheet does not invent projectile contact times.
+Lightning bow 3039 resolves TAE judge 521 through BehaviorParam 271100521 to Bullet 71100521 and AtkParam_Npc 71100521; 3042/3043 use melee judge 361 and AtkParam_Npc 71100361, as recorded in `docs/GENICHIRO.md`.
+Combos offered are the first three sword hits, Floating Passage with its perilous finish, braking bow into diving slash, and bow into lightning.
+All existing tactics and three curated attack chains are supported.
+The phase's scripted controller uses 3039 and 3042, rather than reusing c7100's test plans.
+
+Excluded normal plans: 3020/3021 from Act07/08/11/12 are paired throw starts; 3022 in Act16 is a downed-Wolf reflex; turning Act21 and reaction Act28 stay Lua.
+The 3085/3086/3087 branches of Act09/15/40-45/48 require SpEffect 3711500, outside this castle row's normal phase.
+Act48's 3013 opener belongs to that variant branch and is excluded.
+Act01's complete four-step branches exceed the three-step cap.
+Movement Act23/25/26/27 is represented through tactics rather than extra attack ids.
+Counter callbacks are separately described to the coach and cannot be requested as arbitrary normal plans unless that id also belongs to the normal table.
+
+### Phase memory and validation
+
+Both Genichiro characters resolve default persistence to c7100's boss and player files, isolated from Owl and soldier.
+Tomoe action evidence lives in `evidence.phase_actions.c7110`, and its plan outcome keys have the `c7110:` prefix.
+The player layer uses the same `phase_actions` store and keeps `coach.phase_plans` and `coach.phase_bans` by character phase.
+Every game plan includes `boss_phase`, which tags its opener and sets together.
+Missing phase stores, tags and counter weights default cleanly for old files; historical whiffs are not retrospectively labelled as Mikiri.
+
+Pooling requires the same act id, byte-identical decoded clip and equal resolved TAE event timelines.
+Verified ids are recorded in `shared_actions`; only these also contribute Tomoe outcomes to the common action store.
+The installed attack clips inspected during this session differ between c7100 and c7110, so matching ids alone do not pool their evidence.
+Habits are retained independently of that stricter move identity check.
+Coach input identifies `boss_phase` and uses that phase's move sheet and counter statistics.
+The offline/hosted coach schema is selected from this tag for every review, using the same worker.
+Replies tagged for a different phase are discarded, and every plan is validated against the current table before use.
+
+### Successful Wolf counters
+
+The tally consumes combat resolution reports, rather than inferring a counter from a dodge or airborne state.
+Mikiri is reported only after forward-step TAE flag 125, thrust/counter-dummy checks, facing and the matching ThrowParam row have succeeded, and Wolf's `W_ThrowAtk511xx` pair starts.
+The sweep jump outcome requires an actual anti-ground kick hit while the enemy's jump-kick-effective SpEffect is active; merely jumping over a sweep remains avoidance.
+The HKS-powered lightning return is reported at its judge-281 attack-window edge as `other`.
+The exchange carries `countered: mikiri|jump|other`; it cannot also count as a whiff.
+Counts now append total counters and the three kind counts to the old six entries: `[n, hit, blocked, deflected, whiffed, punished, countered, mikiri, jump, other]`.
+Six-entry legacy arrays and the transitional seven-entry form default the missing values to zero.
+Metrics, coach results, action reports and the recording overlay expose the total.
+Countered plan exchanges contribute failure evidence; a move with at least three uses and a counter rate of at least 60% is locally vetoed/banned.
+Shared evidence uses the existing nine-use minimum before imposing a shared counter-rate ban.
+
+### Reweighting Lua deflect counters
+
+Lua still decides when `Kengeki_Activate` runs and computes its candidate callback weights.
+The new hook wraps only `Common_Kengeki_Activate`, reweights positive offered entries, and calls the saved helper with the same callbacks and parameters.
+Callback bodies, their combos, pressure settings, timers and conditional branches are preserved.
+The driver uses each callback's animation outcome evidence; countered and deflected rates reduce its multiplier, hit rate rewards successful alternatives, and untried moves retain their original weight.
+A high counter rate vetoes the callback; coach `counter_weights` supplies additional multipliers from 0 to 10 for legal counter animation ids.
+For a multi-animation callback the least favourable multiplier governs the whole callback.
+The coach receives a ranked `counters` map that retains at least four entries under the existing 4096-byte budget, alongside counter move-sheet rows.
+
+The hook never introduces a positive weight for a callback Lua did not offer.
+If all offered weights would become zero, the original Lua weights stand.
+Thus a sole mandatory counter remains mandatory, even after repeated Mikiri.
+When Lua offers NoAction, it can be selected: index 50 for Genichiro/Tomoe and soldier, index 26 for Owl.
+Those callbacks return -1 to the helper, allowing the battle goal to continue normally.
+Soldier's offered Act24/25/30 and Genichiro's existing step callbacks also remain available under their own Lua validity checks; no new guard/step fallback is invented.
+Lua-only brains leave counter weights unchanged.
+
+Verification uses headless real-data hand-over/reset, lightning choices, successful Mikiri and sweep-kick fixtures, isolated phase evidence, fitted coach input, legacy defaults and synthetic offered-candidate checks.
+No hosted calls or persistent playtest-file writes are needed.
+Rendered playtest presentation and native-game comparisons remain outside this offline change.
+The counter move sheet excludes script-named variants without a decoded character clip: soldier 3070/3076 and Tomoe 3060/3065/3075/3020.
+Castle Genichiro's 3039 is also excluded because lightning belongs to Tomoe.
+These callbacks remain Lua-owned; the coach cannot assign them explicit weights.
+Plan failure keys also carry the c7110 prefix, so phase-only failures cannot ban the castle plan after reset.

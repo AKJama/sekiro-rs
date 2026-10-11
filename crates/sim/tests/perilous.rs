@@ -19,6 +19,8 @@ fn forward_step_counters_the_thrust() {
         (EnemySpec::owl(), 3033, 75, "ThrowDef13800"),
     ] {
         let mut d = Duel::load_with(&cache, 2.0, spec).unwrap();
+        d.set_brain(Box::new(sekiro_sim::brain::LuaBrain), false)
+            .unwrap();
         d.enemy_active = false;
         let mut countered = false;
         let hp = d.rules.fighters[0].vitality.hp;
@@ -55,6 +57,21 @@ fn forward_step_counters_the_thrust() {
             assert_eq!(d.rules.fighters[0].vitality.hp, hp);
         }
         assert!(countered, "no counter for {act}");
+        let brain = d.boss_brain.as_ref().unwrap();
+        assert_eq!(
+            brain
+                .tally
+                .counts(sekiro_sim::brain::tally::Side::Boss, &act.to_string())
+                .countered,
+            1
+        );
+        assert_eq!(
+            brain
+                .tally
+                .counts(sekiro_sim::brain::tally::Side::Boss, &act.to_string())
+                .whiffed,
+            0
+        );
         assert!(
             !d.player.state().starts_with("ThrowAtk511"),
             "counter never released"
@@ -283,6 +300,8 @@ fn run(
     jumps: &[usize],
 ) -> Run {
     let mut d = Duel::load_with(cache, distance, spec).unwrap();
+    d.set_brain(Box::new(sekiro_sim::brain::LuaBrain), false)
+        .unwrap();
     d.enemy_active = false;
     let mut out = Run::default();
     let mut kicked_at = None;
@@ -311,6 +330,13 @@ fn run(
             out.enemy_clip_after_kick = clip(&d.enemy).0;
         }
         out.broken |= d.rules.fighters[1].posture.remaining < 1;
+    }
+    if out.counter {
+        let mut tally = d.boss_brain.as_ref().unwrap().tally.clone();
+        tally.flush(170.0 * DT);
+        let counts = tally.counts(sekiro_sim::brain::tally::Side::Boss, &act.to_string());
+        assert_eq!(counts.countered, 1);
+        assert_eq!(counts.counter_kinds[1], 1);
     }
     out
 }

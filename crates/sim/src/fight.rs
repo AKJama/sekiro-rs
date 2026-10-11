@@ -171,9 +171,42 @@ impl Fighter {
 pub struct CombatRules {
     pub fighters: Vec<Fighter>,
     effects: HashMap<i32, ActiveEffect>,
+    damage_motion: HashMap<i32, DamageMotionEffect>,
     knockback: KnockbackTable,
     /// Status fields of every SpEffect (build-up, periodic HP change).
     pub statuses: StatusBook,
+}
+
+/// SpEffect category 1001 stores replacement *enum* values, not HKS damage levels.
+/// Native bfd980 selects the lowest categoryPriority; 10cea20 indexes dmgLv_*;
+/// 10b5100 translates through the executable's table at RVA 2b979e8.
+#[derive(Debug, Clone)]
+struct DamageMotionEffect {
+    priority: u8,
+    requires_armour: bool,
+    levels: [i32; 12],
+}
+
+const DAMAGE_LEVEL_FIELDS: [&str; 12] = [
+    "dmgLv_None",
+    "dmgLv_S",
+    "dmgLv_M",
+    "dmgLv_L",
+    "dmgLv_BlowM",
+    "dmgLv_Push",
+    "dmgLv_Strike",
+    "dmgLv_BlowS",
+    "dmgLv_Min",
+    "dmgLv_Uppercut",
+    "dmgLv_BlowLL",
+    "dmgLv_Breath",
+];
+
+fn replacement_level(value: i32) -> Option<i32> {
+    const LEVELS: [i32; 12] = [0, 8, 1, 2, 3, 7, 4, 6, 9, 5, 10, 11];
+    usize::try_from(value - 1)
+        .ok()
+        .and_then(|i| LEVELS.get(i).copied())
 }
 
 fn param_dirs(cache: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -264,6 +297,26 @@ impl CombatRules {
             .map(|t| {
                 t.rows()
                     .filter_map(|r| ActiveEffect::from_row(&r).ok().map(|e| (r.id(), e)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let damage_motion = sp
+            .as_ref()
+            .map(|table| {
+                table
+                    .rows()
+                    .filter(|r| r.int("spCategory").ok() == Some(1001))
+                    .map(|r| {
+                        (
+                            r.id(),
+                            DamageMotionEffect {
+                                priority: r.int("categoryPriority").unwrap_or(255) as u8,
+                                requires_armour: r.int("stateInfo").ok() == Some(120),
+                                levels: DAMAGE_LEVEL_FIELDS
+                                    .map(|field| r.int(field).unwrap_or(0) as i32),
+                            },
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -394,9 +447,45 @@ impl CombatRules {
         Self {
             fighters,
             effects,
+            damage_motion,
             knockback,
             statuses,
         }
+    }
+
+    /// The damage level HKS sees after active category-1001 SpEffects replace it.
+    /// Guard contacts bypass replacement, as in native bdbac0/84ff70.
+    fn damage_motion_level(
+        &self,
+        d: usize,
+        frame: &TaeFrame,
+        level: i32,
+        guarded: bool,
+        armoured: bool,
+    ) -> i32 {
+        if guarded || level <= 0 {
+            return level;
+        }
+        let Some(index) = usize::try_from(level).ok().filter(|i| *i < 12) else {
+            return level;
+        };
+        frame
+            .sp_effects
+            .iter()
+            .chain(self.fighters[d].resident.iter())
+            .filter(|id| {
+                self.effects.get(id).is_some_and(|e| {
+                    e.hp_gate_open(
+                        self.fighters[d].vitality.hp,
+                        self.fighters[d].vitality.max_hp,
+                    )
+                })
+            })
+            .filter_map(|id| self.damage_motion.get(id))
+            .filter(|e| !e.requires_armour || armoured)
+            .min_by_key(|e| e.priority)
+            .and_then(|e| replacement_level(e.levels[index]))
+            .unwrap_or(level)
     }
 
     /// The SpEffects acting on fighter `i`: its animation's plus its resident ones, each only
@@ -711,6 +800,9 @@ impl CombatRules {
         } else {
             hit.attack.damage_level.max(1)
         };
+        // These NPCs have zero superArmorDurability and toughness. StateInfo 120
+        // replacements require a live armour meter; ordinary category-1001 effects do not.
+        let level = self.damage_motion_level(d, frame_d, level, outcome.guarded(), false);
         HitResult {
             defender: IncomingDamage {
                 damage_type: defender_code,

@@ -29,6 +29,7 @@ pub const TREND_FIGHTS: usize = 3;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FightMetrics {
+    pub countered: u32,
     pub boss_hp_lost: f32,
     pub boss_posture_gained: f32,
     pub boss_damage_taken_per_min: f32,
@@ -168,6 +169,9 @@ pub fn break_summary(records: &[BreakRecord]) -> BTreeMap<String, [u32; 2]> {
 }
 
 impl MetricsTracker {
+    pub fn countered(&mut self) {
+        self.metrics.countered += 1;
+    }
     pub fn boss(&mut self, hp: f32, posture: f32) {
         if let Some([old_hp, old_posture]) = self.prev_boss {
             self.metrics.boss_hp_lost += (old_hp - hp).max(0.0);

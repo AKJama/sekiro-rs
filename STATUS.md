@@ -4,6 +4,39 @@ Last updated 11 October 2026.
 Read this first in a new session, then `AGENTS.md` and `docs/DESIGN.md`.
 How much of the game is done overall: `docs/PROGRESS.md`.
 
+## Continuous Genichiro brain and counter learning (2026-10-11)
+
+The retained driver controls castle Genichiro and Way of Tomoe as one fight, then reinstalls the proper table and advances numbering on reset; Owl's existing phase path remains continuous.
+Tomoe has a Lua-derived action table, lightning plans and a phase move sheet, with c7100-owned persistence and phase-specific evidence, plans, failures and bans.
+Only byte-identical decoded clips with matching TAE timelines pool evidence; the inspected installed attack clips did not qualify.
+Actual Mikiri pairs, successful sweep kicks and HKS lightning-return windows tally typed counters, visible in memory, coaching, reports and the overlay.
+Lua retains counter timing, candidates and mandatory choices; the brain reweights or vetoes offered callbacks, using NoAction only when Lua offers it.
+All 449 sim/brain-net release tests, formatting, workspace/all-target Clippy and the release game build pass offline with six jobs in `target/alt`.
+No commits or real model/coach calls; protected research, game data and existing log/memory files were not changed.
+
+## Enemy damage-motion armour and aerial falling (2026-10-11)
+
+Category-1001 SpEffect tables now replace incoming damage levels using the native enum translation and priority, preserving HP/posture while protected clips continue.
+Audited windows include Genichiro 3026/3030/3025, Owl aerial and committed swings, and soldier commitments; full IDs and timings are in `docs/COMBAT-RULES.md`.
+Authored foot elevation now selects aerial damage aliases and transfers height into falling physics when interrupted, fixing the grounded reaction snap.
+Genichiro 3015 protection remains unresolved because its audited data supplies no verified armour source; positive durability/toughness meters remain unimplemented.
+Six installed-data regressions pass, and the inspected `target/alt/armour/final-{windup,hit,strike,landing,recovery}.png` captures show 3030 continuing after 80 HP and 30 posture damage.
+All combined sim/brain-net release tests, formatting, workspace/all-target Clippy and the release game build pass offline with six jobs in `target/alt`.
+No commits, network, or protected-path writes.
+
+## FXR 603 playback milestone, incomplete (2026-10-11)
+
+Original Rust/WGSL now play supported 603 layers with native unmodified curves, authored emission/lifetime/motion/color/scale, TPF/DDS textures, alpha/additive batches and bounded particle pools.
+TAE body-dummy and Bullet sfxId requests are connected; all existing stand-ins remain, and `--no-fxr` disables the player entirely.
+The installed scan accepts 50 layers across 18 effects; `target/alt/fxr/billboard-final-{152,154,156}.png` shows an orange textured flare and the disabled comparison removes it.
+Expiry and additive-blending bugs found in E2E runs are fixed; final preview logs contain no shader/slab errors.
+At 90 live preview particles, FXR CPU work averages about 0.09-0.10 ms with a 0.314 ms maximum; 15-17 ms VSync frames do not establish GPU cost or the heavy-effect budget.
+Requested combat captures still lack real deflect sparks, blood, soft smoke and authored lightning; early firecracker/smoke/arrow captures are rejected and shuriken shots missed the trail.
+GPU instancing, modifiers/spread, 604 composition, 606 ribbons, 609 lights, soft particles, hit/blood routing and exact dummy orientation remain open.
+The supplied EvenTorset `src/fxr.ts` is zero bytes; credits and the remaining gaps are documented in `CREDITS.md` and `docs/VISUALS-PLAN.md`.
+Formatting, workspace/all-target Clippy, all 120 formats/game release tests, the full sim release suite and the release build pass offline with six jobs in `target/alt` after concurrent repairs.
+No commits, network, dependencies or protected-path writes; `play.rs` only gained the plugin registration.
+
 ## Deathblow wall clearance and Tomoe fade (2026-10-11)
 
 ThrowParam dummy frames now drive one shared, floor-aware capsule reservation through the full paired body clip; both characters bypass independent wall pushes while held.

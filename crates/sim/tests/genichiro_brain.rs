@@ -6,6 +6,52 @@ use sekiro_sim::{InputFrame, duel::Duel, lua_ai::AiEvent, registry::Registry};
 
 const DT: f32 = 1.0 / 60.0;
 
+#[test]
+fn counter_memory_vetoes_mikiri_bait_and_is_in_the_fitted_coach_input() {
+    let Some(mut duel) = load(4.0) else { return };
+    duel.set_brain(BrainKind::Scripted.build("c7100"), false)
+        .unwrap();
+    let driver = duel.boss_brain.as_mut().unwrap();
+    driver.memory.boss.insert(
+        "3076".into(),
+        sekiro_sim::brain::tally::Counts {
+            n: 25,
+            hit: 1,
+            countered: 24,
+            counter_kinds: [24, 0, 0],
+            ..Default::default()
+        },
+    );
+    duel.step(&InputFrame::default(), DT);
+    let hook = duel.ai.as_ref().unwrap().state.act_hook.as_ref().unwrap();
+    assert_eq!(
+        hook.counter_weights
+            .iter()
+            .find(|(id, _)| *id == 14)
+            .unwrap()
+            .1,
+        0.0
+    );
+    assert!(
+        hook.counter_weights
+            .iter()
+            .find(|(id, _)| *id == 1)
+            .unwrap()
+            .1
+            > 0.0
+    );
+    let mut input = duel
+        .boss_brain
+        .as_ref()
+        .unwrap()
+        .coach_input(&Default::default());
+    assert!(
+        input.fit(sekiro_sim::brain::coach::INPUT_BUDGET) <= sekiro_sim::brain::coach::INPUT_BUDGET
+    );
+    assert_eq!(input.counters["3076"].countered, 24);
+    assert_eq!(input.boss_phase, "c7100");
+}
+
 struct CheckpointRecorder {
     inner: ScriptedBrain,
     seen: std::rc::Rc<std::cell::RefCell<Vec<Option<&'static str>>>>,
@@ -246,10 +292,7 @@ fn lua_brain_preserves_genichiros_choices() {
 #[test]
 fn choices_and_memory_are_character_specific() {
     assert_eq!(BossActions::for_chr("c7100").unwrap().chr, "c7100");
-    assert_eq!(
-        BossActions::for_chr("c7110").unwrap().ids(),
-        vec![3039, 3043, 3042]
-    );
+    assert!(BossActions::for_chr("c7110").unwrap().get(3039).is_some());
     for choice in GENICHIRO.choices() {
         assert!(GENICHIRO.parse(&choice.value).is_ok(), "{}", choice.value);
     }
@@ -294,7 +337,7 @@ fn choices_and_memory_are_character_specific() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 #[test]
-fn tomoe_handover_returns_control_to_lua() {
+fn tomoe_handover_preserves_the_brain_and_reset_continues_numbering() {
     let Some(mut duel) = load(1.6) else { return };
     duel.set_brain(BrainKind::Scripted.build("c7100"), false)
         .unwrap();
@@ -315,8 +358,18 @@ fn tomoe_handover_returns_control_to_lua() {
         (duel.spec.chr.as_str(), duel.spec.npc_param),
         ("c7110", 71100000)
     );
-    assert!(duel.boss_brain.is_none());
-    assert!(duel.ai.as_ref().unwrap().state.act_hook.is_none());
+    assert!(duel.boss_brain.is_some());
+    assert_eq!(duel.boss_brain.as_ref().unwrap().overlay().fight, 1);
+    assert_eq!(duel.boss_brain.as_ref().unwrap().stats.fights, 0);
+    duel.step(&InputFrame::default(), DT);
+    assert!(duel.ai.as_ref().unwrap().state.act_hook.is_some());
+    assert!(
+        duel.boss_brain
+            .as_ref()
+            .unwrap()
+            .move_sheet
+            .contains_key("3039")
+    );
     // The headless duel starts at the origin, whereas the map hand-over uses
     // Tomoe's authored castle placement. Put idle Wolf in that fight's range.
     let p = duel.enemy.body.position;
@@ -330,7 +383,23 @@ fn tomoe_handover_returns_control_to_lua() {
             .filter(|id| (3000..3100).contains(*id))
             .count();
     }
-    assert!(attacks >= 3, "Tomoe Lua attacks: {attacks}");
+    assert!(attacks >= 3, "Tomoe attacks: {attacks}");
+    assert!(
+        duel.boss_brain
+            .as_ref()
+            .unwrap()
+            .history
+            .iter()
+            .any(|p| p.actions().contains(&3039))
+    );
+    duel.reset().unwrap();
+    assert_eq!(duel.spec.chr, "c7100");
+    assert_eq!(duel.boss_brain.as_ref().unwrap().overlay().fight, 2);
+    let planned = duel.boss_brain.as_ref().unwrap().stats.planned;
+    for _ in 0..600 {
+        duel.step(&InputFrame::default(), DT);
+    }
+    assert!(duel.boss_brain.as_ref().unwrap().stats.planned > planned);
 }
 
 fn take_mark(duel: &mut Duel) {

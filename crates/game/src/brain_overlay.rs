@@ -115,14 +115,15 @@ pub fn update(
             brain.mode, view.fight, brain.player
         ),
         format!(
-            "NOW\n{}\n{}{}",
+            "NOW\n{}\n{}{}\nCountered: {}",
             view.set,
             view.running,
             if view.label.is_empty() {
                 String::new()
             } else {
                 format!("\n{}", view.label)
-            }
+            },
+            view.countered
         ),
         format!(
             "LAST CHECKPOINT\n{}",

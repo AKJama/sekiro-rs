@@ -14,6 +14,8 @@ fn installed_fxr_coverage() {
     let mut actions = BTreeMap::<u16, usize>::new();
     let mut properties = BTreeMap::<u32, usize>::new();
     let mut curve_payloads = BTreeMap::<u32, usize>::new();
+    let mut sampled_properties = 0usize;
+    let mut unsupported_sampling = BTreeMap::new();
     for entry in std::fs::read_dir(&root).unwrap() {
         let entry = entry.unwrap();
         if !entry.file_type().unwrap().is_dir() {
@@ -35,6 +37,21 @@ fn installed_fxr_coverage() {
             }
             for property in &effect.properties {
                 *properties.entry(property.tag & 0xffff).or_default() += 1;
+                // Explicit linear policy checks the sampling utility, not native semantics.
+                match property.compile_unmodified(sekiro_formats::fxr::Interpolation::Linear) {
+                    Ok(compiled) => {
+                        for argument in [0.0, 0.25, 0.5, 1.0] {
+                            let sample = compiled.sample(argument).unwrap();
+                            assert!(sample.iter().all(|v| v.is_finite()));
+                        }
+                        sampled_properties += 1;
+                    }
+                    Err(error) => {
+                        *unsupported_sampling
+                            .entry(format!("{error:?}"))
+                            .or_insert(0usize) += 1;
+                    }
+                }
                 if matches!((property.tag >> 4) & 255, 3..=6) {
                     assert!(
                         property.curve().is_some(),
@@ -76,5 +93,7 @@ fn installed_fxr_coverage() {
     eprintln!("FXR action records by id (raw semantics): {actions:?}");
     eprintln!("FXR property evaluator records: {properties:?}");
     eprintln!("FXR structured curve payloads: {curve_payloads:?}");
+    eprintln!("FXR sampleable properties with explicit linear policy: {sampled_properties}");
+    eprintln!("FXR unsupported sampling: {unsupported_sampling:?}");
     assert!(bundles.values().sum::<usize>() > 0);
 }

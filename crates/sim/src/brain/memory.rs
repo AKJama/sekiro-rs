@@ -38,6 +38,10 @@ pub enum FightEnd {
 /// The memory file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Memory {
+    #[serde(default)]
+    pub shared_actions: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    pub phase_actions: BTreeMap<String, CountMap>,
     pub version: u32,
     /// The enemy (`c1010`).
     pub chr: String,
@@ -66,6 +70,10 @@ pub struct Memory {
 /// What the coach mode keeps across sessions (old files lack it).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CoachMemory {
+    #[serde(default)]
+    pub phase_bans: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub phase_plans: BTreeMap<String, GamePlan>,
     #[serde(default)]
     pub break_plans: CountMap,
     /// The newest validated game plan (its `notes` are the coach's hypotheses).
@@ -100,7 +108,9 @@ impl PlanFailures {
 
 impl CoachMemory {
     pub fn is_empty(&self) -> bool {
-        self.plan.is_none()
+        self.phase_plans.is_empty()
+            && self.phase_bans.is_empty()
+            && self.plan.is_none()
             && self.plans.is_empty()
             && self.break_plans.is_empty()
             && self.failures.is_empty()
@@ -150,6 +160,8 @@ impl Memory {
             boss_wins: 0,
             wolf_wins: 0,
             boss: CountMap::new(),
+            shared_actions: Default::default(),
+            phase_actions: BTreeMap::new(),
             wolf: CountMap::new(),
             habits: Habits::default(),
             history: Vec::new(),
@@ -216,7 +228,23 @@ impl Memory {
 
     /// Adds a fight's tally and habits without counting it as a fight.
     pub fn add_data(&mut self, tally: &Tally, habits: &Habits) {
-        merge_counts(&mut self.boss, tally.all(Side::Boss));
+        self.shared_actions.extend(tally.shared.iter().cloned());
+        for (phase, actions) in &tally.phases {
+            if phase == "c7110" {
+                for (key, counts) in actions
+                    .iter()
+                    .filter(|(key, _)| tally.shared.contains(*key))
+                {
+                    self.boss.entry(key.clone()).or_default().merge(counts);
+                }
+                merge_counts(
+                    self.phase_actions.entry(phase.clone()).or_default(),
+                    actions,
+                );
+            } else {
+                merge_counts(&mut self.boss, actions);
+            }
+        }
         merge_counts(&mut self.wolf, tally.all(Side::Wolf));
         self.habits.merge(habits);
     }
@@ -262,6 +290,7 @@ pub fn resolve(arg: Option<&str>, chr: &str, hosted: bool) -> Option<PathBuf> {
 /// (`lua`, `scripted`) keeps its own `<chr>.<brain>.json`, so baselines and model runs never
 /// mix, and remembers only when asked.
 pub fn resolve_for(arg: Option<&str>, chr: &str, brain: &str, hosted: bool) -> Option<PathBuf> {
+    let chr = if chr == "c7110" { "c7100" } else { chr };
     let file = if hosted || brain.is_empty() {
         format!("{chr}.json")
     } else {
@@ -280,6 +309,7 @@ pub fn resolve_for(arg: Option<&str>, chr: &str, brain: &str, hosted: bool) -> O
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BossEvidence {
+    pub phase_actions: BTreeMap<String, CountMap>,
     pub fights: u32,
     pub boss_wins: u32,
     pub wolf_wins: u32,
@@ -295,6 +325,7 @@ impl BossEvidence {
             boss_wins: m.boss_wins,
             wolf_wins: m.wolf_wins,
             actions: m.boss.clone(),
+            phase_actions: m.phase_actions.clone(),
             plans: m.coach.plans.clone(),
             break_plans: m.coach.break_plans.clone(),
         }
@@ -375,6 +406,15 @@ impl BossKnowledge {
             .insert(player.into(), BossEvidence::from_player(memory));
         self.evidence = BossEvidence::default();
         for e in self.players.values() {
+            for (phase, actions) in &e.phase_actions {
+                merge_counts(
+                    self.evidence
+                        .phase_actions
+                        .entry(phase.clone())
+                        .or_default(),
+                    actions,
+                );
+            }
             self.evidence.fights += e.fights;
             self.evidence.boss_wins += e.boss_wins;
             self.evidence.wolf_wins += e.wolf_wins;
@@ -389,7 +429,7 @@ impl BossKnowledge {
             .chain(self.evidence.plans.iter())
         {
             if counts.n >= 9
-                && counts.whiffed == counts.n
+                && (counts.whiffed == counts.n || counts.countered as f32 / counts.n as f32 >= 0.6)
                 && choice.split(['>', '+']).any(|step| {
                     step.parse::<i32>()
                         .is_ok_and(|id| (3000..3100).contains(&id))
@@ -398,7 +438,10 @@ impl BossKnowledge {
             {
                 self.bans.push(Avoid {
                     choice: choice.clone(),
-                    reason: format!("shared: {}/{} whiffs", counts.whiffed, counts.n),
+                    reason: format!(
+                        "shared: {}/{} whiffs, {} countered",
+                        counts.whiffed, counts.n, counts.countered
+                    ),
                 });
             }
         }
