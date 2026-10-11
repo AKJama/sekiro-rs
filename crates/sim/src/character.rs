@@ -551,6 +551,26 @@ impl Character {
         env.move_cancel = Some(move_window);
         env.landed = self.body.grounded;
         let [x, y, z] = self.body.position;
+        let water = self.ground.water_surface(x, z, f32::INFINITY);
+        env.in_water = water.is_some_and(|w| {
+            w.deep()
+                && y <= w.height + 0.01
+                && self
+                    .ground
+                    .floor(x, z, w.height + 0.01)
+                    .is_none_or(|floor| floor < w.height - 0.01)
+        });
+        env.can_dive = env.in_water;
+        env.can_surface = env.in_water && water.is_some_and(|w| y >= w.height - 0.05);
+        if env.in_water && water.is_some_and(|w| y < w.height - 0.05) {
+            env.landed = self
+                .ground
+                .floor(x, z, y + 0.01)
+                .is_some_and(|floor| y - floor <= 0.01);
+        }
+        if water.is_some_and(|w| y <= w.height + 0.5) {
+            env.sp_effect_refs.insert(110005);
+        }
         env.landing_ready = self.wire.active.is_some()
             && self.body.falling()
             && self
@@ -838,6 +858,7 @@ impl Character {
             ControlKind::Npc => self.npc.face_yaw,
         };
         let body_input = BodyInput {
+            water_mode: self.behavior.env.water_mode.get(),
             stick: if self.kind == ControlKind::Player {
                 self.input
                     .stick_world_yaw()
@@ -914,14 +935,18 @@ impl Character {
             main.as_ref().map_or(0.0, |c| c.time),
             root_progress,
         ) {
-            self.body.step(
-                &body_input,
-                dt,
-                &crate::wire::PerchGround {
-                    terrain: self.ground.as_ref(),
-                    perch: self.wire.perch,
-                },
-            );
+            if body_input.water_mode.is_some() || self.wire.perch.is_none() {
+                self.body.step(&body_input, dt, self.ground.as_ref());
+            } else {
+                self.body.step(
+                    &body_input,
+                    dt,
+                    &crate::wire::PerchGround {
+                        terrain: self.ground.as_ref(),
+                        perch: self.wire.perch,
+                    },
+                );
+            }
         }
         if self.wire.active.is_none() {
             self.behavior.env.wire_action.set(false);

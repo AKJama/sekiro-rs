@@ -23,7 +23,7 @@ use std::path::Path;
 use glam::{Vec2, Vec3};
 use sekiro_formats::hknp::CollisionMesh;
 
-use crate::body::Ground;
+use crate::body::{Ground, WaterSurface};
 
 /// Body radius in metres: the player's physics capsule is 1.5 m tall with a 0.4 m radius, read
 /// from the running game by FwLo's RustSekiro (`docs/kb/movement.md`).
@@ -145,7 +145,9 @@ impl CollisionWorld {
         let cell = self.cells.get(&cell_of(x, z))?;
         let mut best: Option<(f32, u32)> = None;
         for &t in cell {
-            if self.normals[t as usize].y.abs() < self.min_walk_ny {
+            if matches!(self.materials[t as usize], 22 | 36 | 38)
+                || self.normals[t as usize].y.abs() < self.min_walk_ny
+            {
                 continue;
             }
             let [a, b, c] = self.corners(t);
@@ -187,6 +189,9 @@ impl CollisionWorld {
         );
         let mut best: Option<f32> = None;
         for t in tris {
+            if matches!(self.materials[t as usize], 22 | 36 | 38) {
+                continue;
+            }
             let [a, b, c] = self.corners(t);
             if let Some(d) = ray_triangle(origin, dir, a, b, c)
                 && d <= max
@@ -235,6 +240,9 @@ impl CollisionWorld {
             let centre = feet + Vec3::Y * h;
             let mut push = Vec2::ZERO;
             for &t in tris {
+                if matches!(self.materials[t as usize], 22 | 36 | 38) {
+                    continue;
+                }
                 let [a, b, c] = self.corners(t);
                 let q = closest_on_triangle(centre, a, b, c);
                 let away = centre - q;
@@ -271,6 +279,21 @@ impl CollisionWorld {
 }
 
 impl Ground for CollisionWorld {
+    fn water_surface(&self, x: f32, z: f32, top: f32) -> Option<WaterSurface> {
+        self.cells
+            .get(&cell_of(x, z))?
+            .iter()
+            .filter_map(|&t| {
+                let material = self.materials[t as usize];
+                if !matches!(material, 20..=24 | 35..=38) {
+                    return None;
+                }
+                let [a, b, c] = self.corners(t);
+                let height = height_on(x, z, a, b, c)?;
+                (height <= top).then_some(WaterSurface { height, material })
+            })
+            .max_by(|a, b| a.height.total_cmp(&b.height))
+    }
     fn height(&self, x: f32, z: f32) -> Option<f32> {
         self.floor(x, z, f32::INFINITY)
     }
@@ -294,11 +317,22 @@ impl Ground for CollisionWorld {
     }
 
     fn material(&self, x: f32, z: f32, top: f32) -> Option<u32> {
+        if let Some(water) = self.water_surface(x, z, top)
+            && water.deep()
+            && self
+                .floor(x, z, top)
+                .is_none_or(|floor| floor < water.height)
+        {
+            return Some(water.material);
+        }
         self.floor_material(x, z, top)
     }
 }
 
 impl<T: Ground + ?Sized> Ground for std::sync::Arc<T> {
+    fn water_surface(&self, x: f32, z: f32, top: f32) -> Option<WaterSurface> {
+        (**self).water_surface(x, z, top)
+    }
     fn height(&self, x: f32, z: f32) -> Option<f32> {
         (**self).height(x, z)
     }

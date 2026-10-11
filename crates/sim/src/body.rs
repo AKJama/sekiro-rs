@@ -87,8 +87,25 @@ fn air_velocity(mut v: Vec2, stick: Vec2, control: FallControl, dt: f32) -> Vec2
 /// RustSekiro, `docs/kb/movement.md`); a 9.64 m/s jump rises about 2 m and lands after 0.82 s.
 pub const GRAVITY: f32 = 9.8 + 13.72;
 
+/// Authored water collision, separate from supporting terrain.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WaterSurface {
+    pub height: f32,
+    pub material: u32,
+}
+
+impl WaterSurface {
+    pub fn deep(self) -> bool {
+        matches!(self.material, 22 | 36 | 38)
+    }
+}
+
 /// Something the character can stand on.
 pub trait Ground {
+    /// Water planes above or below the body; underwater floor materials are not surfaces.
+    fn water_surface(&self, _x: f32, _z: f32, _top: f32) -> Option<WaterSurface> {
+        None
+    }
     /// Lowest walkable collision at this horizontal point, for the placeholder void boundary.
     fn lowest_floor(&self, x: f32, z: f32) -> Option<f32> {
         let mut lowest = self.height(x, z)?;
@@ -174,6 +191,8 @@ impl Default for Body {
 /// What moves the body this tick.
 #[derive(Debug, Clone, Default)]
 pub struct BodyInput {
+    /// HKS act 3037 = surface, act 3011 = dive. None uses ordinary physics.
+    pub water_mode: Option<bool>,
     /// World-space horizontal movement stick, with magnitude at most one.
     pub stick: Vec2,
     /// Root-motion delta in the character's local source space: `[x, y, z, yaw]`.
@@ -253,6 +272,31 @@ impl Body {
         self.position[0] += mx;
         self.position[2] += mz;
 
+        if let Some(diving) = input.water_mode
+            && (self.grounded || diving)
+            && let Some(water) =
+                ground.water_surface(self.position[0], self.position[2], f32::INFINITY)
+            && water.deep()
+        {
+            self.velocity = [0.0; 3];
+            self.grounded = true;
+            if diving {
+                // Vertical distance is authored root motion, including up/down clips.
+                let floor = ground.floor(
+                    self.position[0],
+                    self.position[2],
+                    self.position[1] + ground.max_step(),
+                );
+                self.position[1] = (self.position[1] + input.root_motion[1]).min(water.height);
+                if let Some(floor) = floor {
+                    self.position[1] = self.position[1].max(floor);
+                }
+            } else {
+                self.position[1] = water.height;
+            }
+            return;
+        }
+
         let step = ground.max_step();
         if self.grounded {
             // Follow the floor up or down by a step, plus what a 50 degree slope rises over
@@ -285,6 +329,14 @@ impl Body {
         // Land on the highest floor the feet passed through this tick, or one up to a step
         // above them (a stair tread or ledge the body was carried into while airborne).
         let floor = ground.floor(self.position[0], self.position[2], previous_y + step);
+        let water = ground
+            .water_surface(self.position[0], self.position[2], previous_y + step)
+            .filter(|w| w.deep())
+            .map(|w| w.height);
+        let floor = match (floor, water) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
         if let Some(h) = floor
             && self.velocity[1] <= 0.0
             && self.position[1] <= h

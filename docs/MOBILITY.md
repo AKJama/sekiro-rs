@@ -638,6 +638,13 @@ The suite reports 431 passed and two existing ignored tests, including five cove
 Final check logs are `cover-fmt-latest.log`, `cover-clippy-latest.log`, `cover-build-latest.log` and `cover-suite-pass.log` under `target/alt/mobility/`.
 Play integration changes are limited to cover action-guide text and docking diagnostics; existing E / gamepad Y bindings and script `action` input are reused.
 
+**Cover sword follow-up (2026-10-11):** The reviewed `cover-peek.png` exposed a drawn katana in Wolf's right hand.
+Unlike HangIdle, CoverIdle / 021000, CoverActionLoop / 205020 and StandToCover2Back / 218103 have no TAE 720 sheath command [V: local `tae_probe`].
+Active kind-3 docking now uses the existing hang fix's dmy:147 scabbard attachment, restoring the hand attachment on release.
+This cover-mode sheath retention is an inferred equipment policy, not an authored 720 event added to those clips.
+The matched `target/alt/mobility/cover-sword-before.png` and `cover-sword-after.png` at step 270 show the blade removed from the right hand; the replay still exits normally.
+Both captures were inspected; concurrent fog changes alter the distant background, but the pose and camera match.
+
 ### Step 5. Climbing
 
 - Files: `crates/formats/src/` new `wall.rs` only after the `.wall` layout is decoded; ladders through the object-action path (`ObjActParam`) once a ladder placement is found.
@@ -652,5 +659,46 @@ Play integration changes are limited to cover action-guide text and docking diag
 - Reads: `HitMtrlParam`, clips for `SwimMove` and `DiveMove`, `SP_EF_REF_IN_WATERSIDE_AREA` 110005.
 - Unknown or risky: speeds (from root motion and `_DiveSpeedUpdate`), water surface height source (collision plane or a region), fall into water (`W_LandWaterFreeFall*`, long stiff at 20 m), underwater camera and fog.
 - Scripted test: pick the first start in `m13_00_00_00`, `m15_00_00_00` or `m17_00_00_00` whose collision under the feet reports material 22, 36 or 38 (not yet scanned), jump in, and expect `W_LandWaterFreeFall` then `SwimMove` states.
+
+**Status (2026-10-11):** Surface swimming, diving, vertical movement, surfacing and shore exit are implemented through the shipped HKS.
+HitMtrlParam names were verified locally: 20/21/35/37 are walkable water, 22/36/38 are deep surfaces, 23/24 are walkable poison swamp, and 45/46/47 are solid underwater floors.
+`Ground::water_surface` queries authored water triangles independently of terrain, returning their interpolated height and material.
+The collision world excludes only 22/36/38 from solid floor, capsule pushes and camera/LOS rays; ordinary water, swamp and underwater floors retain solid collision.
+Water surfaces below solid terrain do not start swimming, and underwater-floor materials alone do not invent a surface or volume.
+Env 3025 reports deep-water contact, 3038 permits diving and 3039 reports surface proximity; waterside reference 110005 is supplied near water.
+Acts 3037 and 3011 select surface or underwater body integration for that tick.
+Surface movement pins the body origin to the collision plane, while horizontal swimming and vertical diving use authored root deltas without a hand-tuned speed.
+The HKS `_DiveSpeedUpdate` retains its own MoveSpeedIndex selection.
+Underwater env 201/248 report seabed contact rather than buoyant support, allowing HKS down movement until the solid floor.
+Dive movement clamps to that floor and the surface, while water jump launches retain their authored TAE velocity changes and normal airborne integration.
+TAE flag 28 alone no longer restricts inputs: SwimIdle's persistent physics marker previously prevented moving after surfacing.
+Arm 30 is bound to C / gamepad L3, arm 29 to Space / A and arm 28 to Shift / B, sharing the existing logical crouch, jump and dodge buttons.
+Scripts accept `dive`, `surface` and `swim-boost` aliases; rising with Space can select the HKS dolphin-jump surface exit.
+Swim arms have no reconstructed TAE execute-window mapping and are offered directly to HKS, which retains its state gates.
+Shallow-water transitions restore ground locomotion, and the real map route jumps onto the shore using SwimJumpReady and LandSwimKickMoveJump.
+Falling bodies contact the water plane before the seabed, preserving the material-22 80 m fall-death threshold and its existing fall-damage metadata.
+Real HKS tests verify the 25 m and 60 m long-stiff water landing, survival at 60 m, death at 85 m, up/down movement, seabed clamps, surface return and movement onto shallow land.
+The HP formula for nonlethal fall damage remains untraced, as in step 1; the 0.5 water fallDamageRate is not used to invent one.
+
+The local census found 198 material-22 triangles in m13, with a usable pool beside player start 1 at surface Y = -60.729.
+The closest material-22 triangle to that start is underneath a bank, so material proximity alone is not a usable entry route.
+Run `--play --map m13_00_00_00 --spawn 467,-59,346,-45,0 --no-enemy --simple-ai --enemy-distance 1000 --no-env-probe --script crates/game/scripts/m13_swim.txt --exit`.
+This is the Abandoned Dungeon, not Hirata Estate.
+The replay enters StandMoveToSwim at about step 127, SwimMoveStart at 157, SwimToDive at 346 and DiveMoveDownLoop at 386.
+It reaches the local floor at about Y = -62.36, rises through DiveJump / DiveToAir, lands back in water and resumes SwimIdle at surface Y = -60.729.
+A second swim jump and westward input reach LandSwimKickMoveJump and restore ground movement, ending near (469.10, -59.99, 341.81).
+Reviewed captures are `target/alt/mobility/swim-{shore,surface,dive,resurface,exit}.png`; the final log is `swim-play-final.log`.
+The captures show the swimming pose, a lower dive position and standing on the shore, but do not establish correct visible immersion: Wolf appears above the pale rendered water in the surface view, and the resurface camera pulls very close against the rock.
+The body origin matches the authoritative collision surface in logs and tests; render/collision water alignment, native swim body offsets, transparent water, underwater fog/refraction and native camera behavior remain gaps.
+Water rendering would require the concurrently owned map/material files, which this task does not edit.
+
+Placeholder tolerances are 0.01 m contact/shore clearance, 0.05 m surface proximity and 0.5 m waterside proximity; these are numerical/modelled allowances, not exe-traced thresholds.
+The water column is inferred from the deep plane's horizontal footprint and solid terrain below it; authored volume bottoms, overlapping multi-level water selection and native water docking/root warp remain unreconstructed.
+The existing capsule stack is retained, without reconstructing a swimming-specific collider or foot/hand IK.
+No swimming attacks/guards, poison effects, ladder/cling work or native swim-wire fidelity is claimed by this step.
+All Cargo validation uses offline mode, `CARGO_TARGET_DIR=target/alt`, `CARGO_BUILD_JOBS=6` and `-j 6` where supported.
+Check logs use `target/alt/mobility/swim-{fmt,clippy,suite,build-final}.log`.
+Formatting, workspace/all-target Clippy with `-D warnings`, the release sim/formats suite and the release game build all pass.
+The complete suite reports 445 passed and two existing ignored, including six swimming, six mobility, five cover, four docking and fifteen wire tests.
 
 Biggest unknowns overall: the wire set and search row per area, native rope chain deformation and the EaseIn curve formula, the exe tests behind env 3000 and 3043 to 3050, fall damage HP and the void kill height, edge flags bytes 2 and 3, and whether the object transform in section 3.1 matches the rendered map (check one point against a screenshot first).

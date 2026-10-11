@@ -90,6 +90,11 @@ pub mod arm {
 /// The engine-side facts the script asks about that the behaviour runtime cannot answer.
 #[derive(Debug, Clone)]
 pub struct PlayerEnv {
+    pub in_water: bool,
+    pub can_dive: bool,
+    pub can_surface: bool,
+    /// This tick's HKS movement mode: Some(false) surface, Some(true) underwater.
+    pub water_mode: std::cell::Cell<Option<bool>>,
     pub wire_candidate: bool,
     pub wire_action: std::cell::Cell<bool>,
     pub wire_precompute: std::cell::Cell<Option<(i32, i32)>>,
@@ -176,6 +181,10 @@ pub struct PlayerEnv {
 impl Default for PlayerEnv {
     fn default() -> Self {
         Self {
+            in_water: false,
+            can_dive: false,
+            can_surface: false,
+            water_mode: std::cell::Cell::new(None),
             wire_candidate: false,
             wire_action: std::cell::Cell::new(false),
             wire_precompute: std::cell::Cell::new(None),
@@ -281,6 +290,9 @@ impl Adapter<'_> {
         }
         let env = self.env;
         match id {
+            3025 => truth(env.in_water),
+            3038 => truth(env.can_dive),
+            3039 => truth(env.can_surface),
             3000 => truth(env.wire_candidate),
             3011 => env.docking_end as f32,
             3017 => env.docking_variation as f32,
@@ -387,6 +399,12 @@ impl Host for Adapter<'_> {
     }
 
     fn act(&mut self, id: CommandId<'_>, args: &[Value]) -> Value {
+        if id == CommandId::Number(3011) {
+            self.env.water_mode.set(Some(true));
+        }
+        if id == CommandId::Number(3037) {
+            self.env.water_mode.set(Some(false));
+        }
         if id == CommandId::Number(3018) {
             self.env.wire_action.set(num(args.first()) == Some(1));
         }
@@ -603,6 +621,7 @@ impl PlayerBehavior {
         let mut errors = Vec::new();
         let mut ran = Vec::new();
         self.env.recovery_disabled.set(false);
+        self.env.water_mode.set(None);
         self.call(&[("Update".to_owned(), None)], &mut events, &mut errors);
         let updates = self.runtime.update_hooks();
         self.run_hooks(&updates, &mut events, &mut errors, &mut ran);

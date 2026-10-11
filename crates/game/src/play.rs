@@ -1376,6 +1376,9 @@ fn hud(
         }
         _ => {}
     }
+    if sim.duel.player.behavior.env.in_water {
+        s += "C / L3: Dive or descend   Space / A: Rise   Shift / B: Swim kick\n";
+    }
     s += "WASD move, mouse look, LMB attack, RMB guard, Space jump, Shift step/sprint, C crouch, Q lock-on, Esc pause, -/= volume";
     text.0 = s;
 }
@@ -1591,18 +1594,26 @@ fn sheath_sword(
     };
     let saved = *original.entry(blade).or_insert(*local);
     let report = &sim.last.player;
-    let sheathed = report
-        .animation
+    // Cover's TAE has no 720 command: docking retains the sheath across these clips.
+    let sheathed = sim
+        .duel
+        .player
+        .docking
+        .active
         .as_ref()
-        .and_then(|n| sim.duel.player.tae.anim(n))
-        .is_some_and(|a| {
-            a.events.iter().any(|e| {
-                e.start <= report.anim_time
-                    && report.anim_time < e.end
-                    && matches!(&e.kind, sekiro_sim::tae::TaeKind::Wire { kind: 720, args }
+        .is_some_and(|t| sim.duel.player.docking.is_cover(t))
+        || report
+            .animation
+            .as_ref()
+            .and_then(|n| sim.duel.player.tae.anim(n))
+            .is_some_and(|a| {
+                a.events.iter().any(|e| {
+                    e.start <= report.anim_time
+                        && report.anim_time < e.end
+                        && matches!(&e.kind, sekiro_sim::tae::TaeKind::Wire { kind: 720, args }
                 if args.get(..2) == Some(&[0, 1]))
-            })
-        });
+                })
+            });
     if sheathed {
         if let (Ok(parent), Ok(sheath)) = (globals.get(parent.parent()), globals.get(sheath)) {
             *local =

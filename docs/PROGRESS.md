@@ -46,7 +46,8 @@ Docs: [FORMATS.md](FORMATS.md), [PARAMS.md](PARAMS.md).
 | Grappling hook | Mobility slice (b) implemented | Solved arrival arc, air shots, two chain shoot states, HKS cancels and landing, no-ride homing offsets, 0.6 m perch, exported rope, line fallback and target ring; native skinned rope placement and search boxes remain gaps. |
 | Ledge hang | Partial | Ground grab, idle, climb up and drop for variation 0; real-data replay and synthetic HKS tests; docking thresholds remain placeholders. |
 | Wall hug | Mobility step 4 implemented | Kind-3 entry, idle, root-distance sliding, endpoint peek and action/away-stick exit through HKS; docking placement and search thresholds remain approximations. |
-| Swimming, climbing | Not started | |
+| Swimming | Mobility step 6 implemented | Collision water surfaces, HKS swimming/diving/up/down, water landings, dolphin surfacing and shore exit; native water rendering/immersion, volumes and camera remain gaps. |
+| Climbing | Not started | Ladder/cling data remains undecoded. |
 
 Docs: [HKS-COMBAT.md](HKS-COMBAT.md), [FORMATS.md](FORMATS.md).
 

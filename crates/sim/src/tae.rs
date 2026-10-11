@@ -543,8 +543,8 @@ pub struct TaeFrame {
     pub velocity_changes: Vec<i32>,
     pub attacks: Vec<TimedEvent>,
     pub iframes: Vec<i32>,
-    /// True if any playing clip has action flags at all. Clips without any (idle, locomotion
-    /// loops) put no limits on actions.
+    /// True if a playing clip has action flags other than physics marker 28.
+    /// Clips without them (idle, locomotion loops) put no limits on actions.
     pub restricted: bool,
     /// Sound events that started this tick: (sound type, sound id).
     pub sounds: Vec<(i32, i32)>,
@@ -618,7 +618,10 @@ impl TaeRuntime {
                 if e.state_info != 0 && !states.contains(&e.state_info) {
                     continue;
                 }
-                if let TaeKind::ActionFlag(_) | TaeKind::Guard { .. } = e.kind {
+                // Flag 28 is the water/ladder physics marker, not an input window.
+                if matches!(e.kind, TaeKind::ActionFlag(flag) if flag != 28)
+                    || matches!(e.kind, TaeKind::Guard { .. })
+                {
                     f.restricted = true;
                 }
                 // Started this tick: the event's start lies in [prev_time, time). A clip that just

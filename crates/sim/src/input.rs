@@ -30,6 +30,9 @@ pub mod arm {
     pub const ITEM: i32 = 7;
     pub const ACTION: i32 = 12;
     pub const CROUCH: i32 = 15;
+    pub const SWIM_ACCELERATION: i32 = 28;
+    pub const SWIM_UP: i32 = 29;
+    pub const SWIM_DOWN: i32 = 30;
     pub const COMBAT_ART: i32 = 32;
 }
 
@@ -51,7 +54,7 @@ pub struct Buttons {
 }
 
 impl Buttons {
-    fn arms(&self) -> [(i32, bool); 10] {
+    fn arms(&self) -> [(i32, bool); 13] {
         [
             (arm::ATTACK, self.attack),
             (arm::GUARD, self.guard),
@@ -63,6 +66,9 @@ impl Buttons {
             (arm::PROSTHETIC, self.prosthetic),
             (arm::ITEM, self.item),
             (arm::COMBAT_ART, self.combat_art),
+            (arm::SWIM_ACCELERATION, self.dodge),
+            (arm::SWIM_UP, self.jump),
+            (arm::SWIM_DOWN, self.crouch),
         ]
     }
 }
@@ -77,13 +83,25 @@ pub struct InputFrame {
     pub buttons: Buttons,
 }
 
-/// Script extension for docking's action button, without changing the common demo format.
+/// Script extensions for docking's action button and the water movement aliases.
 pub fn parse_action_script(text: &str) -> Result<Vec<InputFrame>, String> {
     let mut frames = Vec::new();
     for line in text.lines() {
         let line = line.split('#').next().unwrap_or("");
         let mut fields: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
         let mut action = false;
+        if let Some(field) = fields.get_mut(3) {
+            *field = field
+                .split(',')
+                .map(|b| match b {
+                    "dive" => "crouch",
+                    "surface" => "jump",
+                    "swim-boost" => "dodge",
+                    b => b,
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+        }
         if let Some(buttons) = fields.get_mut(3) {
             let kept: Vec<&str> = buttons
                 .split(',')
@@ -210,9 +228,11 @@ impl InputState {
         if action == arm::GUARD && !self.frame.buttons.guard {
             return false;
         }
-        // Arm 12 has no traced TAE execute flag. HKS owns its state gating.
-        action == arm::ACTION
-            || !tae.restricted
+        // Docking and swim arms have no traced execute mapping. HKS owns their state gates.
+        matches!(
+            action,
+            arm::ACTION | arm::SWIM_ACCELERATION | arm::SWIM_UP | arm::SWIM_DOWN
+        ) || !tae.restricted
             || execute_flags(action).iter().any(|&f| tae.flag(f))
     }
 
