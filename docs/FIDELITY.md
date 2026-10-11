@@ -6,6 +6,14 @@ Owl's phase-2 transition rejects deathblows for the lifetime of the TAE judgment
 The native damage-motion suppression bit is traced and implemented, but the complete native throw-defence and ThrowKind condition dispatcher remains unreconstructed.
 See [OWL.md](OWL.md#transition-deathblow-protection) for the data, native addresses and real-data regression tests.
 
+## Throw walls and cinematic hand-overs
+
+The shared, floor-aware throw capsule reservation and temporary wall-push bypass are inferred engine placeholders, not traced native behavior.
+The bounded search can exhaust in cramped space; it does not reserve full animated meshes or predict airborne velocity events and lethal defender branches.
+See [DEATHBLOW.md](DEATHBLOW.md#alignment) for data-derived dummy placement and wall regressions.
+Genichiro's native cutscene is replaced by a timed black fade with the event's MSB warp; synchronous model loading can extend the black hold.
+See [GENICHIRO.md](GENICHIRO.md#hand-over-cinematic-placeholder-2026-10-11) for timing, input suppression and captures.
+
 ## Maps
 
 The ten-map baseline and reviewed evidence are in [MAP-BASELINE.md](MAP-BASELINE.md).

@@ -34,6 +34,7 @@ fn load(map: bool) -> Option<(Duel, Option<Arena>)> {
 
 #[derive(Clone, Debug)]
 struct Sample {
+    paired_body: bool,
     positions: [Vec3; 2],
     yaws: [f32; 2],
     /// Wolf's full-body clip and its time.
@@ -42,6 +43,10 @@ struct Sample {
 
 fn sample(duel: &Duel) -> Sample {
     Sample {
+        paired_body: duel
+            .deathblow
+            .as_ref()
+            .is_some_and(|d| d.phase == sekiro_sim::deathblow::Phase::Body),
         positions: [
             duel.player.body.position.into(),
             duel.enemy.body.position.into(),
@@ -372,6 +377,17 @@ fn wall_case(case: WallCase) {
     // level. What must not happen is a jump onto something: no step may carry a character more
     // than a stride sideways or up more than a tile step, and each must end standing on a floor.
     for (step, pair) in samples.windows(2).enumerate() {
+        // Body entry may reserve wall space with one shared translation, before absorption.
+        // It must keep the pair together; later animation steps retain the stride bound.
+        if !pair[0].paired_body && pair[1].paired_body {
+            let moves = [0, 1].map(|actor| {
+                let d = pair[1].positions[actor] - pair[0].positions[actor];
+                glam::Vec2::new(d.x, d.z)
+            });
+            assert!(moves[0].distance(moves[1]) < 0.1);
+            assert!(moves.iter().all(|d| d.length() <= 4.1));
+            continue;
+        }
         for actor in 0..2 {
             let delta = pair[1].positions[actor] - pair[0].positions[actor];
             if delta.x.hypot(delta.z) > 0.2 || delta.y > 0.1 {

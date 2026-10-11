@@ -359,7 +359,9 @@ fn grab_near_a_wall_does_not_clip() {
                     violations.push(format!("step {step}, actor {actor}: {from:?} -> {to:?}"));
                 }
             }
-            if delta.x.hypot(delta.z) > 0.2 || delta.y > 0.1 {
+            // Walkable roof tiles include 0.115 m rises; use the terrain's actual step
+            // limit rather than the former 0.1 m assumption. Wall crossings stay forbidden.
+            if delta.x.hypot(delta.z) > 0.2 || delta.y > sekiro_sim::collision::STEP_HEIGHT {
                 violations.push(format!("step {step}, actor {actor}: jumped {delta:?}"));
             }
         }
