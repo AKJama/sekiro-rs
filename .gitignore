@@ -24,6 +24,7 @@
 !/crates/**/*.rs
 !/crates/**/*.wgsl
 !/crates/**/scripts/*.txt
+!/crates/game/scripts/fxr_capture.ps1
 !/tools/
 !/tools/**/
 !/tools/**/*.ps1
