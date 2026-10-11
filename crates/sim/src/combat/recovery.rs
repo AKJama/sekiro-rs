@@ -14,15 +14,22 @@
 //! (`+0x10d0`); both are 100% / 1.0 unless an animation changes them (inferred: their writers were
 //! not traced). The control percent is `staminaRecoverRatio_forTypeNNN` of the character's
 //! StaminaControlParam row for the type the current animation selects (TAE event 960 per
-//! Smithbox, community); with no type active the factor is skipped. The whole update is skipped
-//! while a flag of the action state is set (bit 21 of +0x88, inferred to be an animation-driven
-//! "no recovery").
+//! Smithbox, community); with no type active the factor is skipped.
+//!
+//! The whole update is skipped while bit 21 of the action state's flag word +0x88 is set. That
+//! bit has exactly one writer in the executable: the HKS command handler `b32410` (reached from
+//! `b4e520`), case 0x6e = `act(110)`, named `SetStaminaRecoveryDisabled` in the community HKS
+//! list. The shipped scripts (`c0000`, `c9997`, `c1010`, `c5060` and all other `action/script`
+//! chunks) never call it, so no vanilla character is ever affected; the sim still honours it
+//! (`CombatRules::recover_with_state`) for scripts that do. A TAE ChrActionFlag cannot set it:
+//! the flag handler `b51b70` writes +0x88 bits 1, 2, 4 to 12, 15 to 20 and 22 to 24, never 21.
 //!
 //! There is no separate timer for "delay after damage" in this code; pauses come from the
 //! animation's control type (type 0 is 0% for both the player row 0 and the soldier row
-//! 1000100). HP affects recovery only through SpEffects gated by `conditionHp`, such as the
-//! soldier's resident 300600 / 300601 / 300602 (0.6, 0.5, 1/3 at 80%, 60%, 40% HP); all active
-//! ones multiply.
+//! 1000100) and TAE 225. A guarding character with neither (the Owl's guard `a000_003100`)
+//! recovers at its full base speed (60 per second for the Owl). HP affects recovery only
+//! through SpEffects gated by `conditionHp`, such as the soldier's resident 300600 / 300601 /
+//! 300602 (0.6, 0.5, 1/3 at 80%, 60%, 40% HP); all active ones multiply.
 
 use super::effects::{ActiveEffect, recover_change_speed, recover_speed_rate};
 use super::trunc;

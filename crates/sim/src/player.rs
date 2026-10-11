@@ -48,6 +48,10 @@ pub const ACT_RESET_INPUT: i32 = 9101;
 pub const ACT_FACE_DIRECTION: i32 = 3025;
 pub const ACT_FACE_LOCK_TARGET: i32 = 2019;
 pub const ACT_RELEASE_LOCK_ANGLE: i32 = 2018;
+/// Sets bit 21 of the action state's flag word, which makes the character's per-frame update
+/// skip posture recovery (`b32410` case 0x6e, read by `a04850`); named
+/// `SetStaminaRecoveryDisabled` in the community HKS list.
+pub const ACT_SET_STAMINA_RECOVERY_DISABLED: i32 = 110;
 pub const ENV_FALLING: i32 = 200;
 pub const ENV_FALL_HEIGHT: i32 = 224;
 pub const ENV_DT: i32 = 333;
@@ -128,6 +132,12 @@ pub struct PlayerEnv {
     /// (`STYLE_TYPE_SPRINT` in `c0000.hks` `Update`) and as the sprint starts from a step. The
     /// body reads and clears it.
     pub release_lock_angle: std::cell::Cell<bool>,
+    /// `act(110)` ("SetStaminaRecoveryDisabled" in the community list) was called during the
+    /// latest tick: the engine skips the character's whole posture recovery update while the
+    /// flag it sets (bit 21 of the action state's flag word +0x88) is up. Cleared at the start of
+    /// every tick (that the engine clears it each frame is inferred). The shipped scripts never
+    /// call it. Read through [`PlayerBehavior::stamina_recovery_disabled`].
+    pub recovery_disabled: std::cell::Cell<bool>,
     /// The hit being reacted to this step, if any (env 202, 222, 236, 237, 256, 285, ...).
     pub damage: Option<IncomingDamage>,
     /// NPC only: the action the AI requests (env 106), an animation-id-like code.
@@ -165,6 +175,7 @@ impl Default for PlayerEnv {
             face_turn: std::cell::Cell::new(None),
             face_lock_target: std::cell::Cell::new(false),
             release_lock_angle: std::cell::Cell::new(false),
+            recovery_disabled: std::cell::Cell::new(false),
             damage: None,
             ai_action: 0,
             ai_cancel_actions: [0; 3],
@@ -328,6 +339,9 @@ impl Host for Adapter<'_> {
         }
         if id == CommandId::Number(ACT_RELEASE_LOCK_ANGLE) {
             self.env.release_lock_angle.set(true);
+        }
+        if id == CommandId::Number(ACT_SET_STAMINA_RECOVERY_DISABLED) {
+            self.env.recovery_disabled.set(true);
         }
         if id == CommandId::Number(ACT_RESET_INPUT) {
             self.env.input_resets.set(self.env.input_resets.get() + 1);
@@ -509,6 +523,7 @@ impl PlayerBehavior {
         let mut events = Vec::new();
         let mut errors = Vec::new();
         let mut ran = Vec::new();
+        self.env.recovery_disabled.set(false);
         self.call(&[("Update".to_owned(), None)], &mut events, &mut errors);
         let updates = self.runtime.update_hooks();
         self.run_hooks(&updates, &mut events, &mut errors, &mut ran);
@@ -539,6 +554,12 @@ impl PlayerBehavior {
         };
         self.frame += 1;
         report
+    }
+
+    /// Whether the script called `act(110)` during the latest tick, which stops the character's
+    /// posture recovery for that frame ([`ACT_SET_STAMINA_RECOVERY_DISABLED`]).
+    pub fn stamina_recovery_disabled(&self) -> bool {
+        self.env.recovery_disabled.get()
     }
 
     /// The animation playing in the full-body slot.
@@ -574,4 +595,36 @@ pub struct IncomingDamage {
     /// env 334: the hit's AtkParam `atkBehaviorId` ("behaviour identification value"; 17
     /// blinding), 0 for none. `env(334, v)` is true when it equals `v`.
     pub behavior_id: i32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `act(110)` raises the recovery-disabled flag; nothing else does. Skips without `cache/`.
+    #[test]
+    fn act_110_disables_posture_recovery() {
+        let hkx = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../cache/raw/chr/c1010.behbnd.d/c9997.hkx");
+        let Ok(data) = std::fs::read(&hkx) else {
+            eprintln!("skipping: cache not extracted");
+            return;
+        };
+        let graph = sekiro_formats::hkb::parse(&data).unwrap();
+        let mut runtime = BehaviorRuntime::new(Arc::new(graph), AnimOffsets::player_default());
+        let env = PlayerEnv::default();
+        let mut events = Vec::new();
+        let mut host = Adapter {
+            rt: &mut runtime,
+            env: &env,
+            events: &mut events,
+            log: None,
+            hook_state: None,
+        };
+        host.act(CommandId::Number(ACT_FACE_LOCK_TARGET), &[]);
+        host.act(CommandId::Number(ACT_SET_VARIABLE + 1), &[]);
+        assert!(!env.recovery_disabled.get());
+        host.act(CommandId::Number(ACT_SET_STAMINA_RECOVERY_DISABLED), &[]);
+        assert!(env.recovery_disabled.get());
+    }
 }

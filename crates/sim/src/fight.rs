@@ -427,7 +427,12 @@ impl CombatRules {
     /// [`crate::combat::recovery`]). The animation's control type also clamps the meter, which
     /// is how a posture break ends at a fixed value.
     pub fn recover(&mut self, i: usize, character: &Character, dt: f32) {
-        self.recover_with_frame(i, character.tae_frame(), dt);
+        self.recover_with_state(
+            i,
+            character.tae_frame(),
+            character.behavior.stamina_recovery_disabled(),
+            dt,
+        );
     }
 
     /// [`Self::recover`] for a character whose TAE state is `frame`. TAE 225
@@ -436,6 +441,19 @@ impl CombatRules {
     /// its effect traced by FwLo's RustSekiro, `docs/kb/guard-deflect.md`; that it is the
     /// percent byte `a04850` reads is inferred).
     pub fn recover_with_frame(&mut self, i: usize, frame: &TaeFrame, dt: f32) {
+        self.recover_with_state(i, frame, false, dt);
+    }
+
+    /// [`Self::recover_with_frame`] for a character whose script may have called `act(110)`
+    /// (`disabled`, see [`crate::player::ACT_SET_STAMINA_RECOVERY_DISABLED`]). The engine's
+    /// update (`a04850`) then skips the whole step: no gain, no carry change and no new speed
+    /// for the debug display, so [`Fighter::recovery_rate`] keeps its last value. This is the
+    /// only "no recovery" flag the engine has; there is no timer for a delay after damage, so
+    /// pauses come from animations (TAE 225 and the StaminaControlParam type of TAE 960).
+    pub fn recover_with_state(&mut self, i: usize, frame: &TaeFrame, disabled: bool, dt: f32) {
+        if disabled {
+            return;
+        }
         let effects = self.effects_for(i, frame);
         let stamina_type = frame.stamina_type;
         let f = &mut self.fighters[i];
