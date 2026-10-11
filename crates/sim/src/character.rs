@@ -99,6 +99,7 @@ pub enum ControlKind {
 
 pub struct Character {
     pub docking: crate::docking::Docking,
+    pub wire: crate::wire::Wire,
     pub chr: String,
     pub kind: ControlKind,
     pub behavior: PlayerBehavior,
@@ -237,6 +238,7 @@ impl Character {
             tae_runtime: TaeRuntime::default(),
             body: Body::default(),
             docking: crate::docking::Docking::default(),
+            wire: crate::wire::Wire::default(),
             input: InputState::default(),
             npc: NpcControl::default(),
             lock_target: None,
@@ -578,6 +580,10 @@ impl Character {
                 .collect();
         }
         self.docking.search(&self.body, self.ground.as_ref());
+        self.wire.search(&self.body, frame.camera_yaw);
+        self.behavior.env.wire_candidate = self.wire.candidate.is_some();
+        self.behavior.env.wire_precompute.set(None);
+        self.behavior.env.wire_prefer.set(false);
         let dock = self
             .docking
             .active
@@ -768,13 +774,46 @@ impl Character {
                 (delta.length_squared() > 1e-6)
                     .then(|| (current - start).dot(delta) / delta.length_squared())
             });
-        if !self.docking.step(
+        let travel_window = main
+            .as_ref()
+            .and_then(|c| self.tae.anim(&c.animation))
+            .and_then(|a| {
+                a.events
+                    .iter()
+                    .find(|e| matches!(e.kind, crate::tae::TaeKind::Wire { kind: 901, .. }))
+            })
+            .map(|e| (e.start, e.end))
+            .or_else(|| {
+                // Slice (a)'s act 3023 pre-evaluation: retain the requested clip's wire window.
+                // Native root-motion warping remains a documented approximation.
+                let (kind, animation) = self.behavior.env.wire_precompute.get()?;
+                if !(2..=6).contains(&kind) {
+                    return None;
+                }
+                let name = sekiro_formats::tae::anim_name(i64::from(animation));
+                self.tae
+                    .anim(&name)?
+                    .events
+                    .iter()
+                    .find(|e| matches!(e.kind, crate::tae::TaeKind::Wire { kind: 901, .. }))
+                    .map(|e| (e.start, e.end))
+            });
+        if !self.wire.step(
+            &mut self.body,
+            main.as_ref().map(|c| c.animation.as_str()),
+            travel_window,
+            dt,
+            self.ground.as_ref(),
+        ) && !self.docking.step(
             &mut self.body,
             main.as_ref().map(|c| c.animation.as_str()),
             main.as_ref().map_or(0.0, |c| c.time),
             root_progress,
         ) {
             self.body.step(&body_input, dt, self.ground.as_ref());
+        }
+        if self.wire.active.is_none() {
+            self.behavior.env.wire_action.set(false);
         }
         // The lower body catches up with the facing at the default turn speed.
         let unwind = DEFAULT_TURN_SPEED * dt;

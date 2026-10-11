@@ -522,6 +522,11 @@ impl Duel {
         let (mut player, mut enemy) = Self::load_characters(&self.cache, 4.0, &self.spec)?;
         std::mem::swap(&mut player.ground, &mut self.player.ground);
         player.docking.edges = std::mem::take(&mut self.player.docking.edges);
+        player.wire.points = std::mem::take(&mut self.player.wire.points);
+        player.wire.search = self.player.wire.search.clone();
+        player.wire.variations = self.player.wire.variations.clone();
+        player.wire.offsets = self.player.wire.offsets.clone();
+        player.wire.collision = self.player.wire.collision.take();
         std::mem::swap(&mut enemy.ground, &mut self.enemy.ground);
         if let Some([p, e]) = self.spawn {
             (player.body.position, player.body.yaw) = (p.position, p.yaw);

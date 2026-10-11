@@ -244,3 +244,77 @@ fn tpf_stem(file_name: &str) -> String {
     let lower = lower.strip_suffix(".dcx").unwrap_or(&lower);
     lower.strip_suffix(".tpf").unwrap_or(lower).to_string()
 }
+
+/// Preserve display-space LUT bytes without lossy compression or an sRGB conversion.
+pub fn export_grading(raw: &Path, out: &Path, id: &str) -> anyhow::Result<()> {
+    let area = id.get(..3).context("map area")?;
+    let block = id.get(..6).context("map block")?;
+    let path = raw.join(format!("map/{area}/{area}_cgrading.tpf"));
+    if !path.is_file() {
+        return Ok(());
+    }
+    let data = std::fs::read(path)?;
+    let dir = out.join("grading");
+    std::fs::create_dir_all(&dir)?;
+    let prefix = format!("{block}_cgrading");
+    let mut count = 0;
+    for t in tpf::parse(&data)? {
+        let name = t.name.to_ascii_lowercase();
+        let Some(index) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        let index: u32 = index.parse().context("LUT texture index")?;
+        let h = t.header()?;
+        anyhow::ensure!(
+            h.width == 16 && h.height == 256,
+            "unexpected LUT dimensions"
+        );
+        let rgba = crate::models::textures::decode_rgba(&h, t.dds)?;
+        let png = crate::models::textures::encode_png(h.width, h.height, &rgba)?;
+        std::fs::write(dir.join(format!("lut{index}.png")), png)?;
+        count += 1;
+    }
+    eprintln!("{id}: {count} display-space grading LUTs");
+    Ok(())
+}
+
+#[cfg(test)]
+mod grading_tests {
+    use super::*;
+    #[test]
+    fn exported_strips_preserve_source_display_bytes() {
+        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        for (area, block, map) in [
+            ("m11", "m11_00", "m11_00_00_00"),
+            ("m11", "m11_01", "m11_01_00_00"),
+            ("m25", "m25_00", "m25_00_00_00"),
+        ] {
+            let path = cache.join(format!("raw/map/{area}/{area}_cgrading.tpf"));
+            if !path.is_file() {
+                continue;
+            }
+            let data = std::fs::read(path).unwrap();
+            for t in tpf::parse(&data).unwrap() {
+                let name = t.name.to_ascii_lowercase();
+                let Some(id) = name.strip_prefix(&format!("{block}_cgrading")) else {
+                    continue;
+                };
+                let id: u32 = id.parse().unwrap();
+                let path = cache.join(format!("maps/{map}/grading/lut{id}.png"));
+                if !path.is_file() {
+                    continue;
+                }
+                let source =
+                    crate::models::textures::decode_rgba(&t.header().unwrap(), t.dds).unwrap();
+                let png = std::fs::read(path).unwrap();
+                let mut reader = png::Decoder::new(std::io::Cursor::new(png))
+                    .read_info()
+                    .unwrap();
+                let mut bytes = vec![0; reader.output_buffer_size().unwrap()];
+                let info = reader.next_frame(&mut bytes).unwrap();
+                assert_eq!((info.width, info.height), (16, 256));
+                assert_eq!(&bytes[..info.buffer_size()], source.as_slice());
+            }
+        }
+    }
+}

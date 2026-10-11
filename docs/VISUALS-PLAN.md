@@ -363,6 +363,7 @@ The runtime frame measurements are capped at 60 Hz; `perf-summary.csv` records m
 Final formatting, workspace Clippy, release formats/extract tests (64 passed, two ignored), 14 game unit tests and the alternate release game build pass.
 The permitted pre-existing map_tangents failure remains: direction agreement 0.004 and handedness agreement 0.953 across 1,288,976 vertices.
 Unused `sky_*.dds` experiment outputs may remain in the ignored cache but are never loaded by the final implementation.
+
 ### Step 2. HDR camera, tonemapper, GPARAM bloom, colour-grading LUT
 
 - Files: `crates/game/src/lighting.rs` (camera components), a new `crates/game/src/grading.rs` and `grading_lut.wgsl` (post pass after tonemapping, our own code using Bevy's post-process pattern), `crates/extract/src/maps/textures.rs` (export `m11_cgrading` strips as small DDS).
@@ -372,6 +373,44 @@ Unused `sky_*.dds` experiment outputs may remain in the ignored cache but are ne
   Verify no banding by zooming on the sky gradient in a screenshot.
 - Risk: the LUT must run after the tonemapper in display space, and must stay a no-op on views without the component (the HUD camera).
 
+#### Step 2 status (2026-10-11)
+
+Map viewer and play cameras now have `Hdr`, analytic `Tonemapping::AcesFitted` and `DebandDither::Enabled`.
+ACES fitted provides a filmic shoulder and restrained highlight saturation without requiring Bevy's optional tonemapping LUT assets.
+It approximates Yebis rather than reproducing its unknown curve.
+The probe images remain lighting only; they are not the sky.
+All effects are restricted to 3D map cameras, and the LUT render system additionally requires its own `GradingLut` component.
+The pass runs in `Core3dSystems::PostProcess`, after tonemapping and before Bevy's UI pass, so HUD colours are unaffected.
+
+Bloom uses additive composition with `intensity = clamp(GlareBloom Alpha * 0.08, 0, 0.08)`, the authored `Glare Threshold` clamped to 0..1 in the camera-exposed HDR buffer, softness 0.5 and zero low-frequency boost.
+`GaussianRadiusScale` maps to isotropic `Bloom.scale`, clamped to 0.25..2.
+These are conservative mappings between different bloom kernels, not a verified Yebis equivalence.
+`--no-bloom` disables the effect.
+
+The extractor exports each block's 16x256 RGBA8 strips from `<area>_cgrading.tpf` to `cache/maps/<id>/grading/lut<id>.png` without changing the display-space bytes.
+Re-extraction produced four LUTs each for m11_00 and m11_01 and two for m25_00, with zero failed GLBs.
+`LutSourceId` uses the nearest authored circular hour key, with light-set fallback to id zero; it is never interpolated into a nonexistent LUT index.
+The embedded WGSL converts the tonemapped linear buffer to sRGB display space, samples eight strip cells for trilinear interpolation (x=red, row=blue*16+green), adds half-LSB display dither and converts back to linear for Bevy's output conversion.
+The LUT is loaded as unorm data rather than an sRGB texture, avoiding a second gamma decode.
+Missing or disabled LUTs leave the camera without the component and perform no pass; `--no-grading` disables grading.
+FwLo's layout and compensation facts are credited in `CREDITS.md`; the pass is original code.
+
+Every capture was inspected, including the matched normal-map before/after pair and the six grading pairs in `target/alt/visuals/v2-start{0,3}-h{6,12,18}-{on,off}.png`.
+Review sheets are `v2-review-start0.png`, `v2-review-start3.png`, `v2-review-castle.png` and `v2-review-controls.png` in that directory.
+Morning light is warm, noon snow and shade stay cool, and evening LUT 0 adds plausible teal/amber separation without whitening the highlights.
+No fully white samples were found in the sampled world region of these views; evening temple ceilings remain dark on both sides of the grading comparison because local lights and material layers are still absent.
+Castle start 2 and interior start 1 noon pairs are `v2-castle-h12-{on,off}.png` and `v2-interior-h12-{on,off}.png`.
+Bloom pairs are `v2-start3-h6-on.png` / `v2-start3-h6-bloom-off.png` and the corresponding noon pair; the conservative halo is subtle and retains cliff/snow detail.
+`v2-sky-zoom.png` is a sixfold nearest-neighbour crop of the Castle window sky, with fine dither and no visible bands.
+The sky is still a clear colour, so this cannot establish the quality of a true sky-dome gradient before step 14.
+
+The pre-existing tangent test was reproduced at 0.004 direction agreement and 0.953 sign agreement across 1,288,976 sampled vertices.
+Sekiro's stored semantic-6 vector aligns with the UV bitangent, approximately 90 degrees from the glTF U tangent; the reader's bytes, vertex order and test space were not the problem.
+The exporter now reconstructs `U = normalize(N cross mirrored_stored_vector) * mirrored_handedness`, retaining the existing mirrored sign.
+The original test thresholds remain unchanged and pass after re-extraction, with direction agreement approximately 0.933 and sign agreement 0.953.
+`v2-tangent-before.png` and `v2-tangent-after.png` show corrected cliff and masonry normal-map directions at the same camera before post effects were enabled.
+The remaining differences from MikkTSpace are not fully traced; authored smoothing, seams and degenerate UVs are possible contributors, and all 462 sampled normal-texture references use UV0.
+
 ### Step 3. Auto exposure from the Tone Map group
 
 - Files: `lighting.rs`, `map.rs` (a `from_gparam` helper), tests.
@@ -380,6 +419,38 @@ Unused `sky_*.dds` experiment outputs may remain in the ignored cache but are ne
 - Check: m11_01 start 2 at 0 h and 12 h, and a walk from a dark interior to bright outdoors in a script with shots every 60 steps.
   Expected: brightness adapts over a second or two and neither extreme clips.
 - Risk: Bevy's spline needs points snapped to 1/64 EV (his note), covered by a unit test.
+
+#### Step 3 status (2026-10-11)
+
+Bevy `AutoExposure` runs on the tested RTX 5070 Ti Vulkan device; compute support is checked before adding camera components.
+An unsupported device, a disabled GPARAM switch or `--no-auto-exposure` uses fixed tonemapping compensation `BASE_EV + ToneMap-Exposure` instead.
+Physical camera exposure remains Bevy's daylight default, matching the existing 9000 lux light scale.
+The histogram meters the already camera-exposed HDR buffer over -12..12 log2 luminance, excluding its darkest and brightest 10 percent.
+Our conservative visual calibration uses `BASE_EV = -0.5` and `METER_EV = 2.0`, rather than copying FwLo's constants.
+These are provisional renderer offsets, not recovered physical Yebis units.
+The target correction is `BASE_EV + Exposure + clamp(MiddleGray + METER_EV - L, AdaptionMin, AdaptionMax)`.
+The compensation spline stores `L + target`, because Bevy subtracts metered L internally.
+Authored min/max are clamped to -2..+2 EV, with max never below min, and every spline point is snapped to 1/64 EV on both axes.
+Bright-scene adaptation runs at 3 stops/s and dark-scene adaptation at 2 stops/s, with a one-stop exponential transition.
+GPARAM exposure and middle grey interpolate by hour; the night +8 maximum is deliberately capped to +2 until Yebis's interpretation is traced.
+
+Castle start 2 at 0 h and 12 h is checked with auto and fixed exposure in `v2-castle-h{0,12}-{auto,fixed}.png`, using the noon `-on` image for the auto side.
+Night auto exposure lifts readable floor and Wolf detail while retaining the bright patches; near-black samples drop from 21.129 percent fixed to 0.181 percent auto, with no sampled white clipping.
+The Outskirts temple-to-courtyard walk uses `target/alt/visuals/v2-walk.txt`, with matched `v2-walk-{auto,fixed}-<step>.png` captures at 120..660 in 60-step increments and a final 720-step image without the step suffix.
+The reviewed sheets `v2-review-walk-a.png`, `v2-review-walk-b.png` and `v2-review-walk-final.png` show shadow detail indoors, the doorway transition and preserved snow detail outside without an exposure flash.
+The noon adaptation range is only -0.01..+0.5, so its visible change is modest compared with night.
+Probe and collision light-set changes still cut immediately, as documented in step 1; exposure smooths its own metered correction.
+
+Matched noon medians with optional effects disabled versus all effects enabled are 16.661 -> 16.675 ms for Outskirts and 16.681 -> 16.641 ms for Castle.
+The historical step-1 probe medians were 16.760 and 16.601 ms respectively, but those shorter captures and parallel compilation are not an isolated HDR cost measurement.
+Per-feature controls and their source CSV paths are recorded in `target/alt/visuals/v2-perf-summary.csv`.
+All runs are capped at 60 Hz, so the deltas are within measurement noise and cannot establish uncapped GPU overhead.
+Image sampling results are in `v2-image-metrics.csv`.
+
+Final workspace formatting, Clippy with `-D warnings`, the requested release game/formats/extract suite (84 passed, two existing ignored tests, including map_tangents) and the release game build pass with `CARGO_TARGET_DIR=target/alt`, four jobs and offline Cargo.
+Regressions cover discrete time keys, lossless LUT export, snapped/capped exposure curves and 3D-only component application with an unaffected 2D camera.
+The three requested maps were re-extracted into their existing map output directories.
+No commits, network requests, worktrees, protected-path writes or changes to the parallel mobility files were made.
 
 ### Step 4. Shadow budget and quality
 

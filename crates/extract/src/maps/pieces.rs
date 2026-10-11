@@ -122,9 +122,6 @@ pub fn skip_material(mtd_name: &str) -> bool {
         || m.contains("fog")
 }
 
-/// Sign applied to the FLVER bitangent sign after the X mirror (see the TANGENT export).
-const TANGENT_W_MIRROR: f32 = 1.0;
-
 pub struct BuiltPiece {
     pub glb: Vec<u8>,
     pub triangles: usize,
@@ -184,9 +181,9 @@ pub fn build(
                 })
                 .collect();
             attributes["NORMAL"] = json!(g.vec3(&normals, false));
-            // FLVER tangents, so Bevy need not generate MikkTSpace tangents at load. Mirrored
-            // on X like the normals; the handedness flips with the mirror (checked against
-            // Bevy's generated tangents in crates/game/tests/map_tangents.rs).
+            // Sekiro's semantic-6 vector is the UV bitangent, not glTF's U tangent.
+            // Mirror it with the normal, then reconstruct U using the mirrored handedness.
+            // Exporting the stored vector directly rotates normal-map detail by 90 degrees.
             if choice.normal.is_some()
                 && let Some(t) = v.tangents.first()
                 && t.len() == count
@@ -196,12 +193,11 @@ pub fn build(
                     .zip(&normals)
                     .map(|(t, n)| {
                         let n = Vec3::from(*n);
-                        let t3 = Vec3::new(-t[0], t[1], t[2]);
-                        // Gram-Schmidt against the normal; fall back to any perpendicular.
-                        let t3 = (t3 - n * n.dot(t3))
+                        let bitangent = Vec3::new(-t[0], t[1], t[2]);
+                        let w = if t[3] < 0.0 { 1.0 } else { -1.0 };
+                        let t3 = (n.cross(bitangent) * w)
                             .try_normalize()
                             .unwrap_or_else(|| n.any_orthonormal_vector());
-                        let w = if t[3] < 0.0 { 1.0 } else { -1.0 } * TANGENT_W_MIRROR;
                         [t3.x, t3.y, t3.z, w]
                     })
                     .collect();

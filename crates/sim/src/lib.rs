@@ -36,6 +36,7 @@ pub mod scenario;
 pub mod sound;
 pub mod status;
 pub mod tae;
+pub mod wire;
 
 pub use behavior::{AnimOffsets, BehaviorRuntime, ClipDurations, ClipState, HookCall, HookKind};
 pub use character::{Character, ControlKind, NpcControl, PlayerCharacter, StepReport};

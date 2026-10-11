@@ -223,6 +223,7 @@ fn write_dds(path: &Path, cube: Cube, size: usize, mips: bool) -> Result<()> {
 }
 
 pub fn export(raw: &Path, out: &Path, id: &str, msb: &Msb) -> Result<()> {
+    super::textures::export_grading(raw, out, id)?;
     std::fs::create_dir_all(out.join("env"))?;
     let regions: Vec<_> = msb
         .env_regions

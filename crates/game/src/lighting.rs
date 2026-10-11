@@ -18,6 +18,239 @@ use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 use sekiro_formats::gparam::Gparam;
 
+#[path = "grading.rs"]
+mod grading;
+use bevy::camera::Hdr;
+use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
+use bevy::math::cubic_splines::LinearSpline;
+use bevy::post_process::{
+    auto_exposure::{AutoExposure, AutoExposureCompensationCurve, AutoExposurePlugin},
+    bloom::{Bloom, BloomCompositeMode, BloomPrefilter},
+};
+use bevy::render::view::ColorGrading;
+
+/// Conservative calibration in the already camera-exposed HDR buffer, not physical lux.
+const BASE_EV: f32 = -0.5;
+const METER_EV: f32 = 2.0;
+
+#[derive(Resource, Default)]
+struct MapPostEffects {
+    luts: std::collections::BTreeMap<u32, Handle<Image>>,
+    no_grading: bool,
+    no_bloom: bool,
+    no_auto: bool,
+    compute: bool,
+}
+
+struct PostEffectsPlugin;
+impl Plugin for PostEffectsPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins((grading::GradingPlugin, AutoExposurePlugin));
+    }
+    fn finish(&self, app: &mut App) {
+        let compute = app.get_sub_app(bevy::render::RenderApp).is_some_and(|r| {
+            let device = r.world().resource::<bevy::render::renderer::RenderDevice>();
+            let limits = device.limits();
+            limits.max_compute_workgroup_size_x >= 16
+                && limits.max_compute_workgroup_size_y >= 16
+                && limits.max_compute_invocations_per_workgroup >= 256
+                && limits.max_storage_buffers_per_shader_stage >= 3
+        });
+        app.world_mut().resource_mut::<MapPostEffects>().compute = compute;
+        info!("map auto exposure compute support: {compute}");
+    }
+}
+
+/// Load authored strips as unorm data, even though PNG loaders normally assume sRGB.
+pub fn install_post_effects(app: &mut App, dir: &std::path::Path) -> anyhow::Result<()> {
+    let args: Vec<_> = std::env::args().collect();
+    let mut effects = MapPostEffects {
+        no_grading: args.iter().any(|a| a == "--no-grading"),
+        no_bloom: args.iter().any(|a| a == "--no-bloom"),
+        no_auto: args.iter().any(|a| a == "--no-auto-exposure"),
+        ..default()
+    };
+    if let Ok(entries) = std::fs::read_dir(dir.join("grading")) {
+        for entry in entries {
+            let path = entry?.path();
+            let Some(id) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.strip_prefix("lut"))
+                .and_then(|s| s.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if path.extension().is_none_or(|s| s != "png") {
+                continue;
+            }
+            let image = Image::from_buffer(
+                &std::fs::read(&path)?,
+                bevy::image::ImageType::Extension("png"),
+                bevy::image::CompressedImageFormats::NONE,
+                false,
+                bevy::image::ImageSampler::default(),
+                bevy::asset::RenderAssetUsages::default(),
+            )?;
+            anyhow::ensure!(
+                image.width() == 16 && image.height() == 256,
+                "invalid LUT strip"
+            );
+            effects.luts.insert(
+                id,
+                app.world_mut().resource_mut::<Assets<Image>>().add(image),
+            );
+        }
+    }
+    app.insert_resource(effects)
+        .add_plugins(PostEffectsPlugin)
+        .add_systems(Update, apply_post_effects.after(apply_lighting));
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct PostSettings {
+    exposure: f32,
+    middle: f32,
+    min: f32,
+    max: f32,
+    auto: bool,
+    lut: Option<u32>,
+    alpha: f32,
+    threshold: f32,
+    radius: f32,
+}
+
+impl PostSettings {
+    fn from_gparam(g: &Gparam, id: i32, hour: f32) -> Self {
+        let get = |group, name, fallback| {
+            g.param(group, name)
+                .and_then(|p| p.at(id, hour))
+                .and_then(|v| v.first().copied())
+                .filter(|v| v.is_finite())
+                .unwrap_or(fallback)
+        };
+        let lut = (get("ColorGrading", "Enable", 0.) > 0.5).then(|| {
+            g.param("ColorGrading", "LutSourceId")
+                .and_then(|p| p.nearest(id, hour))
+                .and_then(|v| v.first().copied())
+                .unwrap_or(0.)
+                .max(0.) as u32
+        });
+        let min = get("Tone Map", "Adaption Min", -0.5).clamp(-2., 2.);
+        let max = get("Tone Map", "Adaption Max", 0.5).clamp(min, 2.);
+        Self {
+            exposure: get("Tone Map", "ToneMap-Exposure", 0.).clamp(-4., 4.),
+            middle: get("Tone Map", "Middle Gray", -4.).clamp(-12., 4.),
+            min,
+            max,
+            auto: get("Tone Map", "Enable AutoExposure", 0.) > 0.5,
+            lut,
+            alpha: get("Bloom", "GlareBloom Alpha", 0.).clamp(0., 1.),
+            threshold: get("Bloom", "Glare Threshold", 0.).clamp(0., 1.),
+            radius: get("Bloom", "GaussianRadiusScale", 1.).clamp(0.25, 2.),
+        }
+    }
+    fn correction(&self, luminance_ev: f32) -> f32 {
+        BASE_EV + self.exposure + (self.middle + METER_EV - luminance_ev).clamp(self.min, self.max)
+    }
+    fn compensation_points(&self) -> Vec<Vec2> {
+        // A dense linear spline avoids duplicate knees and floating-point discontinuities.
+        // All control points are exact multiples of 1/64, including y.
+        (-768..=768)
+            .step_by(16)
+            .map(|i| {
+                let x = i as f32 / 64.;
+                Vec2::new(x, ((x + self.correction(x)) * 64.).round() / 64.)
+            })
+            .collect()
+    }
+}
+
+#[derive(Component)]
+struct AppliedPost(i32, f32);
+
+fn apply_post_effects(
+    mut commands: Commands,
+    lighting: Res<MapLighting>,
+    effects: Res<MapPostEffects>,
+    mut curves: ResMut<Assets<AutoExposureCompensationCurve>>,
+    cameras: Query<(Entity, Option<&AppliedPost>), With<Camera3d>>,
+) {
+    let pending: Vec<_> = cameras
+        .iter()
+        .filter(|(_, p)| p.is_none_or(|p| p.0 != lighting.light_set || p.1 != lighting.hour))
+        .map(|(e, _)| e)
+        .collect();
+    if pending.is_empty() {
+        return;
+    }
+    let set = PostSettings::from_gparam(&lighting.gparam, lighting.light_set, lighting.hour);
+    let auto = effects.compute && !effects.no_auto && set.auto;
+    let curve = auto.then(|| {
+        curves.add(
+            AutoExposureCompensationCurve::from_curve(LinearSpline::new(set.compensation_points()))
+                .expect("snapped monotonic compensation spline"),
+        )
+    });
+    info!(
+        "map post effects: ACES fitted, {set:?}, auto={auto}, grading={}",
+        !effects.no_grading
+    );
+    for entity in pending {
+        let mut camera = commands.entity(entity);
+        camera.insert((
+            Hdr,
+            Tonemapping::AcesFitted,
+            DebandDither::Enabled,
+            AppliedPost(lighting.light_set, lighting.hour),
+        ));
+        // Camera physical exposure remains Bevy's daylight default. These offsets are
+        // applied by tonemapping, matching the buffer that the histogram meters.
+        camera.insert(ColorGrading {
+            global: bevy::render::view::ColorGradingGlobal {
+                exposure: if auto { 0. } else { BASE_EV + set.exposure },
+                ..default()
+            },
+            ..default()
+        });
+        if let Some(curve) = &curve {
+            camera.insert(AutoExposure {
+                range: -12.0..=12.0,
+                speed_brighten: 3.,
+                speed_darken: 2.,
+                exponential_transition_distance: 1.,
+                compensation_curve: curve.clone(),
+                ..default()
+            });
+        } else {
+            camera.remove::<AutoExposure>();
+        }
+        if !effects.no_bloom && set.alpha > 0. {
+            camera.insert(Bloom {
+                intensity: (set.alpha * 0.08).clamp(0., 0.08),
+                low_frequency_boost: 0.,
+                prefilter: BloomPrefilter {
+                    threshold: set.threshold,
+                    threshold_softness: 0.5,
+                },
+                composite_mode: BloomCompositeMode::Additive,
+                scale: Vec2::splat(set.radius),
+                ..default()
+            });
+        } else {
+            camera.remove::<Bloom>();
+        }
+        if !effects.no_grading
+            && let Some(lut) = set.lut.and_then(|id| effects.luts.get(&id))
+        {
+            camera.insert(grading::GradingLut(lut.clone()));
+        } else {
+            camera.remove::<grading::GradingLut>();
+        }
+    }
+}
+
 /// Bevy illuminance (lux) per unit of gparam light intensity. Tuned by eye so the noon sun of
 /// m11 lands near Bevy's default outdoor exposure.
 const LUX_PER_UNIT: f32 = 9_000.0;
@@ -340,6 +573,80 @@ pub fn apply_lighting(
 #[cfg(test)]
 mod probe_tests {
     use super::*;
+    #[test]
+    fn post_effects_only_mark_3d_cameras_and_disabled_lut_is_removed() {
+        use sekiro_formats::gparam::{Entry, Group, Param, Value};
+        let mut app = App::new();
+        let lut = Handle::<Image>::default();
+        let gparam = Gparam {
+            groups: vec![Group {
+                name: "ColorGrading[Yebis]".into(),
+                display_name: String::new(),
+                params: ["Enable", "LutSourceId"]
+                    .into_iter()
+                    .map(|name| Param {
+                        name: name.into(),
+                        display_name: String::new(),
+                        entries: vec![Entry {
+                            id: 0,
+                            time: 12.,
+                            value: Value::Int(if name == "Enable" { 1 } else { 30 }),
+                        }],
+                    })
+                    .collect(),
+            }],
+        };
+        app.insert_resource(MapLighting {
+            gparam,
+            hour: 12.,
+            light_set: 0,
+            applied: None,
+            source: "fixture".into(),
+        })
+        .insert_resource(MapPostEffects {
+            luts: [(30, lut)].into(),
+            ..default()
+        })
+        .init_resource::<Assets<AutoExposureCompensationCurve>>()
+        .add_systems(Update, apply_post_effects);
+        let scene = app.world_mut().spawn(Camera3d::default()).id();
+        let hud = app.world_mut().spawn(Camera2d).id();
+        app.update();
+        assert!(app.world().get::<Hdr>(scene).is_some());
+        assert!(app.world().get::<grading::GradingLut>(scene).is_some());
+        assert!(app.world().get::<Hdr>(hud).is_none());
+        assert!(app.world().get::<Bloom>(hud).is_none());
+        assert!(app.world().get::<AutoExposure>(hud).is_none());
+        assert!(app.world().get::<grading::GradingLut>(hud).is_none());
+        app.world_mut().resource_mut::<MapPostEffects>().no_grading = true;
+        app.world_mut().resource_mut::<MapLighting>().hour = 18.;
+        app.update();
+        assert!(app.world().get::<grading::GradingLut>(scene).is_none());
+    }
+    #[test]
+    fn exposure_curve_is_snapped_continuous_and_caps_night_gain() {
+        let settings = PostSettings {
+            exposure: 0.,
+            middle: -3.,
+            min: -0.4,
+            max: 2.,
+            auto: true,
+            lut: None,
+            alpha: 1.,
+            threshold: 0.075,
+            radius: 1.,
+        };
+        assert!((settings.correction(-12.) - (BASE_EV + 2.)).abs() < 1e-6);
+        assert!((settings.correction(12.) - (BASE_EV - 0.4)).abs() < 1e-6);
+        let points = settings.compensation_points();
+        assert!(points.windows(2).all(|w| w[0].x < w[1].x));
+        for p in &points {
+            assert_eq!((p.x * 64.).fract(), 0.);
+            assert_eq!((p.y * 64.).fract(), 0.);
+            assert!((p.y - p.x - settings.correction(p.x)).abs() <= 1. / 128.);
+        }
+        AutoExposureCompensationCurve::from_curve(LinearSpline::new(points)).unwrap();
+    }
     #[test]
     fn extracted_hdr_cube_loads_as_six_layers() {
         use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};

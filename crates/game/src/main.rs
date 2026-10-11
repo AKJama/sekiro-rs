@@ -14,6 +14,7 @@
 //!
 //! Map lighting: `--hour H` (default 12), `--no-env-probe` for hemisphere fallback,
 //! `--probe-sky` to show the environment probe capture as the sky (debug only).
+//! `--no-grading`, `--no-bloom`, `--no-auto-exposure` disable individual map post effects.
 
 mod arena;
 mod audio;

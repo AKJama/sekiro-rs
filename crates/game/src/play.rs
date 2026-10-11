@@ -323,6 +323,11 @@ pub fn run(options: Options) -> Result<()> {
         duel.player.docking = sekiro_sim::docking::Docking::load(&dir.join("edges.json"))
             .map_err(anyhow::Error::msg)?;
     }
+    if let Some((dir, _, _)) = &on_map
+        && dir.join("grapple.json").exists()
+    {
+        duel.player.wire = sekiro_sim::wire::Wire::load(&cache, dir).map_err(anyhow::Error::msg)?;
+    }
     let script = match options.script.as_deref() {
         None => None,
         Some("builtin") => Some(demo::parse(demo::DEMO).map_err(anyhow::Error::msg)?),
@@ -456,6 +461,7 @@ pub fn run(options: Options) -> Result<()> {
             follow_camera,
             crate::brain_overlay::update,
             hud,
+            grapple_marker,
             combat_hud::update,
             combat_hud::update_status,
             combat_hud::update_perilous,
@@ -526,6 +532,20 @@ fn setup(
         Transform::from_xyz(0.0, 2.0, 4.0).looking_at(Vec3::new(0.0, 1.2, 0.0), Vec3::Y),
     ));
     combat_hud::spawn(&mut commands);
+    commands.spawn((
+        GrappleMarker,
+        Node {
+            position_type: PositionType::Absolute,
+            width: px(18),
+            height: px(18),
+            border: UiRect::all(px(2)),
+            border_radius: BorderRadius::all(px(9)),
+            display: Display::None,
+            ..default()
+        },
+        BorderColor::all(Color::srgb(0.2, 1.0, 0.4)),
+        GlobalZIndex(20),
+    ));
     // Bullets have no model yet (their look is an effect, FXR, not extracted): simple shapes.
     let fx = crate::bullet_fx::spawn(&mut commands, &mut meshes, &mut materials);
     commands.insert_resource(fx);
@@ -844,7 +864,37 @@ fn simulate(
         posture.remaining = posture.remaining.min(1);
     }
     let before = sim.duel.player.body.position;
+    sim.duel.player.wire.view_pitch = orbit.pitch;
     let report = sim.duel.step(&frame, dt);
+    if std::env::var_os("PLAY_LOG_WIRE").is_some() {
+        let wolf = &sim.duel.player;
+        let target = wolf.wire.active.as_ref().or(wolf.wire.candidate.as_ref());
+        eprintln!(
+            "WIRE step={} env3000={} pos={:?} target={:?} arrival={:?} distance={:?} anim={:?} events={:?} precompute={:?}",
+            sim.step,
+            wolf.behavior.env.wire_candidate,
+            wolf.body.position,
+            target.map(|t| &wolf.wire.points[t.index].source_part),
+            target.map(|t| t.arrival.to_array()),
+            target.map(|t| Vec3::from_array(wolf.body.position).distance(t.arrival)),
+            report.player.animation,
+            report.player.behavior.events,
+            wolf.behavior.env.wire_precompute.get()
+        );
+        if report.player.clip_started
+            && let Some(anim) = report
+                .player
+                .animation
+                .as_ref()
+                .and_then(|a| wolf.tae.anim(a))
+        {
+            for e in anim.events.iter() {
+                if matches!(e.kind, sekiro_sim::tae::TaeKind::Wire { .. }) {
+                    eprintln!("WIRE TAE {e:?}");
+                }
+            }
+        }
+    }
     if std::env::var_os("PLAY_LOG_DOCKING").is_some() {
         let wolf = &sim.duel.player;
         let target = wolf
@@ -1418,6 +1468,38 @@ fn recording_brain(sim: NonSend<Sim>, mut brain: ResMut<crate::brain_overlay::Re
     if let Some(driver) = sim.duel.boss_brain.as_ref() {
         brain.view = driver.overlay();
     }
+}
+
+#[derive(Component)]
+struct GrappleMarker;
+
+fn grapple_marker(
+    sim: NonSend<Sim>,
+    cameras: Query<(&Camera, &GlobalTransform), With<FollowCamera>>,
+    mut markers: Query<(&mut Node, &mut BorderColor), With<GrappleMarker>>,
+) {
+    let Ok((mut node, mut color)) = markers.single_mut() else {
+        return;
+    };
+    node.display = Display::None;
+    let Some(target) = sim.duel.player.wire.candidate.as_ref() else {
+        return;
+    };
+    let Ok((camera, transform)) = cameras.single() else {
+        return;
+    };
+    let Ok(p) = camera.world_to_viewport(transform, Vec3::from_array(target.point.to_array()))
+    else {
+        return;
+    };
+    node.display = Display::Flex;
+    node.left = px(p.x - 9.0);
+    node.top = px(p.y - 9.0);
+    *color = BorderColor::all(if target.rideable {
+        Color::srgb(0.2, 1.0, 0.4)
+    } else {
+        Color::srgb(1.0, 0.7, 0.2)
+    });
 }
 
 #[cfg(test)]

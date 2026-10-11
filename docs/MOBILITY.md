@@ -101,7 +101,8 @@ STATUS.md's "16 files, 255 edges" is the partial extract under `re/edge/` (16 fi
 Kind 2 variation split on m11_01: 880 with variation 0, 83 with variation 1.
 The new extractor places all 2289 m11_01 records, but only 1486 m11_00 records (579 hang, 907 cover) have a collision owner placed by its MSB.
 Unplaced collision models are omitted from `edges.json`; the binder parser tests still verify the complete raw counts above.
-The 4 kind-1 records on m11_00 sit in collision part `h060000` with variation 0 and 10 [V].
+The 4 kind-1 records on m11_00 belong to raw collision owner `h060000` with variation 0 and 10 [V].
+That owner has no placed collision part in the current MSB, so `grapple.json` retains these records with null world positions and their authored `local_position`; the runtime excludes them from targeting [V: `crates/formats/tests/grapple.rs`].
 
 ### 3.3 `.wall` files
 
@@ -158,8 +159,9 @@ Our TAE reader (`crates/sim/src/tae.rs`) only acts on 920 here; 900 to 905, 921,
   The per-target rows are `300000000 + WireVariationParam.chrPhysicsHomingIdOffset`: 300000020 "cannot ride default" offset (0, -2.5, 7.5), 300000024 offset (0, 3, 2), 300000040 kite valley offset (0, -30, 30), 300000041 kite castle offset (0, -22, 25) [V: ids and names match the variation rows].
   `fallCorrectionGuaranteeArrival` 2 vs 1 is undefined in our data [?]; FwLo reads 1 as "re-aim the horizontal velocity each frame so the fall ends on the target" [V: his `src/player.rs` plunge code, used for the plunge deathblow].
 - `WireVariationParam` (45 rows): `targetMarkerType` (0 rideable marker, 1 not rideable), `extendWireActionDistance`, `recognitionAngleUp/Down/Left/Right`, `chrPhysicsHomingIdOffset`.
-  Rows used by m11 objects: 0, 1, 3, 5 (ride, extension 10), 20 (cannot ride), 24 (cannot ride, castle snake valley), 40 and 41 (kites, extension 30) [V].
+  Rows used by m11 objects: 0, 1, 3 (ride, extension 0), 5 (ride, extension 10), 20 (cannot ride), 24 (cannot ride, castle snake valley), 40 and 41 (kites, extension 30) [V].
   Row 1 and 5: 90 degrees all round; row 3: 90 up and down, 180 left and right.
+  Row 1 has extension 0; row 5 has extension 10 [V: extracted rows].
 - `WirePointSearchParam` (20 rows), default row 0: act near 3 m, act far 15 m, find far 25 m, filter box height 10.2 up and 10.2 down, width 14.3, soft-lock box 10.2 and 7.15 [V].
   Castle rows: 11100 far 25 and find 50 (cavalry boss map), 11110 far 50, 11500 far 20, 11510 far 28, 11520 far 15 with filter height down 30.
 - `WireSetParam` (24 rows) lists up to 20 search-row ids per area; row 0 is `[0, 100, 10100]`, all identical to the default distances.
@@ -198,7 +200,9 @@ The 120 dedicated points on m11_01 are the 79 `o003610` and 26 `o003600` Shachi 
 ### 4.5 What we extract and what is missing
 
 - Extracted today: MSB object parts (`crates/formats/src/msb.rs`, `crates/extract/src/maps/mod.rs`) with model name and transform in `layout.json`; the param tables including all three Wire tables (`cache/params/Wire*.json`) [V].
-- Missing: an `.edge` reader (nothing in `crates/formats/src` parses `.edge`; `lib.rs` has no module for it); an extractor step that writes object grapple points and map edges into `layout.json` or a new `edges.bin`; MSB events and regions are skipped by the loader (`msb.rs`: only `MODEL_PARAM_ST` and `PARTS_PARAM_ST` are read), so region-triggered wire-set changes are not available; TAE 900 to 905 and 921 decoding; edge-end semantics for kinds 1 to 3.
+- Steps 2 and 3 now add the shared `.edge` reader, placed `edges.json`, object/collision `grapple.json`, and TAE 900 to 905 / 921 timing and argument retention.
+- Missing: region-triggered wire-set changes, authored object disablement, native wire kinematics, hook attachment, and complete edge-end semantics for kinds 1 to 3.
+  The MSB loader now reads environment-probe regions for visuals, but traversal region/event logic remains unavailable.
 
 ## 5. Air control, falling, fall death and respawn
 
@@ -459,6 +463,48 @@ Game unit tests pass; the full game suite retains the permitted pre-existing `ma
   Expected: env 3000 true before the press, `W_GroundWireShoot` then `GroundWireMoveStart` (clip 202010 to 202012), TAE 901 window starts, and about 1.5 s later Wolf stands within 0.5 m of the point.
   Negative test: `--spawn 103.5,54.0,243.6,-41,0` (facing away) must not fire.
   Counts to assert in a unit test: `layout` reports 172 objects and 224 edges on m11_01, 237 and 360 plus 4 on m11_00.
+
+**Status (2026-10-11):** Slice (a), ground shot and arrival, is implemented.
+The shared edge exporter writes `grapple.json` using the same mirrored part matrix as collision.
+The two m11 maps were re-extracted: castle has 172 grapple objects / 224 points; outskirts has 237 objects / 360 points plus four unplaced collision records.
+The raw/MSB census and extracted census have regression tests.
+`o003610_0014` transforms to (97.10218, 52.843166, 250.97510), with collision floor 52.54494, 0.29823 m below.
+The runtime reads WirePointSearchParam row 0's actual near/far/find fields and WireVariationParam angles, extension, marker type and homing id offset.
+Grounded candidates use camera yaw and pitch, a chest ray to the authored point, and a placeholder ranking of smallest angular distance from view centre followed by distance.
+Headless callers default to the body's horizontal view.
+The engine's screen-space filtering/soft-lock boxes and region-driven wire-set changes are not reconstructed.
+The LOS ray ignores only the last 0.1 m at the anchor, as a placeholder allowance for its own surface.
+Env 3000 exposes a selected target; env 3003 retains the step-1 cm/s answer.
+Act 3018 tracks the wire action flag, cleared on release; act 3023 pre-evaluates the requested clip's wire interval as a travel-window fallback, and act 3035 marks the wire preference.
+This slice searches kind-1 points only, with no docking/chained-hook bias yet.
+HKS selects GroundWireShoot and GroundWireMoveStart without injected events.
+TAE 900 to 905 and 921 retain their timings and raw argument bytes and are logged with `PLAY_LOG_WIRE=1`.
+TAE 901 supplies the travel interval; 920 retains the real row-1100 fall type 2.
+Travel currently fits a straight path to the 901 interval, 0.5 s on clip 202012, with gravity suspended while wire owns movement.
+This linear fit is a placeholder for native act-3023 root pre-evaluation and homing kinematics, not a traced root-motion warp.
+Missing travel windows fall back to distance / 20 m/s.
+Collision sweeps at feet and capsule-centre heights stop travel on a hit and release to normal physics; a complete swept-capsule solver remains unimplemented.
+Rideable arrival is at the authored point, then the HKS landing clip settles onto nearby collision.
+Nonrideable arrival reads ChrPhysicsHomingParam targetOffsetX/Y/Z, using a placeholder approach-facing frame for horizontal offsets.
+Variation 20 therefore arrives 2.5 m below and 7.5 m beyond the anchor; its release and retained downward velocity are tested synthetically.
+Air shots and chained hooks remain disabled for this slice.
+F and the existing L2/LT binding fire grapple; R2/RT is already prosthetic use and remains so.
+The selected target has an 18 px projected UI ring, green for rideable and amber for nonrideable.
+Hook-model attachment and the optional rope are not implemented.
+
+The requested (103.5, 54.0, 243.6), yaw 139 replay does not select a target: collision blocks the chest ray at 4.34167 m of its 10.04281 m path.
+Its negative yaw -41 replay also stays Idle with env 3000 false.
+The collision-backed positive route is `--spawn 104.03038,53.234768,254.9751,60,0` with the same `grapple_shachi.txt` script.
+Use `--arena owl --simple-ai --passive --god --objects --enemy-distance 1000` to show the ornament and keep the passive Owl out of the capture.
+Env 3000 is true before step 30; that press fires W_GroundWireShoot / 202000.
+Step 61 enters GroundWireMoveStart / 202012, and step 90 reaches the anchor exactly: 0.5 s travel and 1.0 s after the press.
+LandWireMove / 202035 follows, and the final body position is (97.10218, 52.56432, 250.97510), 0.27885 m from the anchor, grounded.
+The deterministic roof test also verifies yaw -41 at the original spawn and the obstructed yaw-139 original spawn.
+Turning away on the clear roof can select another nearby point whose recognition angles allow it; it must not be treated as a universal negative case.
+Logs and reviewed before/mid/after captures are under `target/alt/mobility/grapple-*`.
+The captures show the ornament, airborne movement and arrival on the roof, though the native hook model and rope remain absent.
+Validation passes with `CARGO_TARGET_DIR=target/alt` and four jobs: formatting, workspace/all-target Clippy with `-D warnings`, all requested release sim/formats/extract tests (418 passed, two existing ignored) and the release game build.
+The final test log is `target/alt/mobility/grapple-suite-v2.log`; final scripted logs are `grapple-final-v2.log` and `grapple-negative-v2.log` in the same directory.
 
 ### Step 4. Wall hug
 

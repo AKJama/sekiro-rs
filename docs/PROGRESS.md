@@ -43,7 +43,7 @@ Docs: [FORMATS.md](FORMATS.md), [PARAMS.md](PARAMS.md).
 | Input buffer | Done | Uses the engine's accept/execute flags. |
 | Air control | Implemented | Per-type fall table, stick steering/braking and speed cap; fall heights in cm, material fall death and map respawn. |
 | Upper/lower body animation layering | Not started | One clip shown at a time. |
-| Grappling hook | Not started | Grapple points found in data. |
+| Grappling hook | Ground shot and arrival implemented | Authored points, param search, collision LOS, HKS shoot/move/landing and target ring; air/chained hooks remain. |
 | Ledge hang | Partial | Ground grab, idle, climb up and drop for variation 0; real-data replay and synthetic HKS tests; docking thresholds remain placeholders. |
 | Wall hug, swimming, climbing | Not started | |
 

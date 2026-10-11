@@ -1,4 +1,4 @@
-//! The map export writes the FLVER's own tangents (mirrored on X with the rest of the model).
+//! The map export reconstructs glTF U tangents from Sekiro's stored UV bitangents.
 //! This checks them against the MikkTSpace tangents Bevy would generate from the same
 //! positions, normals and UVs: the directions must agree and, above all, the handedness sign.
 //! Skips when `cache/maps/m11_00_00_00` has not been exported.

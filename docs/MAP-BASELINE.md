@@ -6,6 +6,25 @@ Nine are gameplay maps; m89 is a library of sky domes with no collision terrain.
 This is a baseline inspection, not a claim that materials, event state or lighting match the original game exactly.
 No commits were made, and the install and default release executable were left untouched.
 
+## HDR, grading and tangent follow-up (11 October 2026)
+
+Visuals steps 2 and 3 add HDR/ACES fitted, conservative GPARAM bloom, display-space map LUTs and compute auto exposure to map cameras.
+The HUD is composited after grading and remains unaffected.
+`--no-grading`, `--no-bloom` and `--no-auto-exposure` provide matched controls.
+The probes remain lighting only, with the clear-colour sky retained until sky domes are implemented.
+`docs/VISUALS-PLAN.md` records the mappings and remaining Yebis approximations.
+
+Re-extraction of m11_00_00_00, m11_01_00_00 and m25_00_00_00 adds four, four and two lossless LUT strips respectively and corrects their normal-map basis.
+The old exporter treated Sekiro's stored UV bitangent as glTF's U tangent, rotating detail by roughly 90 degrees.
+Reconstructing U from the normal and stored vector fixes the exporter; the MikkTSpace regression now passes without relaxing its thresholds.
+Matched cliff and masonry captures are `target/alt/visuals/v2-tangent-before.png` and `v2-tangent-after.png`.
+
+All requested grading/bloom views, night controls, temple-to-outdoor replay frames and a magnified sky crop were inspected under `target/alt/visuals/v2-*.png`.
+Evening grading is teal/amber, noon stays cooler and the sky crop has no visible banding; material layering and local lights remain future work.
+The noon all-effects frame medians are 16.675 ms in Outskirts and 16.641 ms in Castle, within 0.040 ms of HDR/ACES-only controls at the 60 Hz cap.
+This establishes runnable capped behaviour, not an uncapped GPU-cost bound.
+The requested release suite, workspace Clippy, formatting and alternate release build pass.
+
 ## Inventory and measurements
 
 Area names come from the English place-name FMG and MSB collision map-name IDs, rather than guesses from map-number prefixes.

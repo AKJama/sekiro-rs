@@ -90,6 +90,10 @@ pub mod arm {
 /// The engine-side facts the script asks about that the behaviour runtime cannot answer.
 #[derive(Debug, Clone)]
 pub struct PlayerEnv {
+    pub wire_candidate: bool,
+    pub wire_action: std::cell::Cell<bool>,
+    pub wire_precompute: std::cell::Cell<Option<(i32, i32)>>,
+    pub wire_prefer: std::cell::Cell<bool>,
     pub hang_candidate: bool,
     pub docking_variation: u8,
     pub docking_end: u8,
@@ -167,6 +171,10 @@ pub struct PlayerEnv {
 impl Default for PlayerEnv {
     fn default() -> Self {
         Self {
+            wire_candidate: false,
+            wire_action: std::cell::Cell::new(false),
+            wire_precompute: std::cell::Cell::new(None),
+            wire_prefer: std::cell::Cell::new(false),
             hang_candidate: false,
             docking_variation: 0,
             docking_end: 0,
@@ -264,6 +272,7 @@ impl Adapter<'_> {
         }
         let env = self.env;
         match id {
+            3000 => truth(env.wire_candidate),
             3011 => env.docking_end as f32,
             3017 => env.docking_variation as f32,
             3029 => 0.0,
@@ -363,6 +372,17 @@ impl Host for Adapter<'_> {
     }
 
     fn act(&mut self, id: CommandId<'_>, args: &[Value]) -> Value {
+        if id == CommandId::Number(3018) {
+            self.env.wire_action.set(num(args.first()) == Some(1));
+        }
+        if id == CommandId::Number(3023) {
+            self.env
+                .wire_precompute
+                .set(num(args.first()).zip(num(args.get(1))));
+        }
+        if id == CommandId::Number(3035) {
+            self.env.wire_prefer.set(true);
+        }
         if let CommandId::Number(id @ 3026..=3028) = id {
             self.env
                 .docking_searches

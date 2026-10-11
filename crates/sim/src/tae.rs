@@ -59,6 +59,11 @@ pub mod cancel {
 /// One decoded event of interest.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TaeKind {
+    /// Wire timing and raw arguments; semantics beyond the travel window remain untraced.
+    Wire {
+        kind: i32,
+        args: Vec<u8>,
+    },
     ActionFlag(i32),
     SpEffect(i32),
     TurnSpeed(f32),
@@ -412,6 +417,17 @@ impl TaeDb {
 }
 
 fn decode(template: &Template, e: &tae::TaeEvent) -> Option<TimedEvent> {
+    if matches!(e.event_type, 900..=905 | 921) {
+        return Some(TimedEvent {
+            start: e.start,
+            end: e.end,
+            state_info: 0,
+            kind: TaeKind::Wire {
+                kind: e.event_type,
+                args: e.params.clone(),
+            },
+        });
+    }
     let d = template.decode(e)?;
     let int = |name: &str| d.field(name).and_then(|v| v.as_int()).map(|v| v as i32);
     let kind = match e.event_type {
@@ -606,6 +622,7 @@ impl TaeRuntime {
                     continue;
                 }
                 match &e.kind {
+                    TaeKind::Wire { .. } => {}
                     TaeKind::ActionFlag(flag) => {
                         f.flags.insert(*flag);
                         if *flag == cancel::WARP_INVULNERABLE && e.active_at(t) {

@@ -50,6 +50,20 @@ pub struct Param {
 }
 
 impl Param {
+    /// Nearest authored time key for discrete values such as LUT indices and switches.
+    /// Circular distance wraps midnight; missing area rows fall back to id zero.
+    pub fn nearest(&self, id: i32, hour: f32) -> Option<Vec<f32>> {
+        let distance = |time: f32| {
+            let d = (hour.rem_euclid(24.) - time.rem_euclid(24.)).abs();
+            d.min(24. - d)
+        };
+        self.entries
+            .iter()
+            .filter(|e| e.id == id)
+            .min_by(|a, b| distance(a.time).total_cmp(&distance(b.time)))
+            .map(|e| e.value.floats())
+            .or_else(|| (id != 0).then(|| self.nearest(0, hour)).flatten())
+    }
     /// The value for `id` at `hour`, interpolated linearly between the nearest keyed times
     /// (wrapping around midnight). Falls back to id 0 when `id` has no entries.
     pub fn at(&self, id: i32, hour: f32) -> Option<Vec<f32>> {
@@ -215,5 +229,14 @@ mod tests {
         assert_eq!(p.at(0, 0.0).unwrap(), vec![0.0]);
         // Unknown ids fall back to the base values.
         assert_eq!(p.at(100, 15.0).unwrap(), vec![3.0]);
+    }
+
+    #[test]
+    fn discrete_keys_wrap_and_do_not_invent_lut_ids() {
+        let p = param(&[(2., 20.), (6., 0.), (12., 30.), (18., 0.), (22., 20.)]);
+        assert_eq!(p.nearest(0, 10.).unwrap(), vec![30.]);
+        assert_eq!(p.nearest(100, 23.).unwrap(), vec![20.]);
+        assert_eq!(p.nearest(0, -1.).unwrap(), vec![20.]);
+        assert_eq!(p.nearest(0, 7.).unwrap(), vec![0.]);
     }
 }

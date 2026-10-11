@@ -399,6 +399,7 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
             .with_context(|| format!("reading {}", gparam_path.display()))?,
     )?;
     let hour = scene.hour;
+    crate::lighting::install_post_effects(app, dir)?;
     let mut probes = MapProbes {
         prefix: scene.prefix.clone(),
         variant: nearest_variant(hour),
