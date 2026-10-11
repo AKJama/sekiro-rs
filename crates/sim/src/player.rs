@@ -64,6 +64,7 @@ pub const ENV_GUARD_MOTION_LEVEL: i32 = 258;
 pub const ENV_TOOK_DAMAGE: i32 = 256;
 pub const ENV_DAMAGE_ELEMENT: i32 = 285;
 pub const ENV_DAMAGE_BEHAVIOR_ID: i32 = 334;
+pub const ENV_DAMAGE_MOTION_DISABLED: i32 = 349;
 pub const ENV_AI_ACTION: i32 = 106;
 /// The AI's queued action as the script's cancel windows read it ("AI combo action type",
 /// "AI attack cancel type", "AI step type"; env names from the community env list).
@@ -140,6 +141,8 @@ pub struct PlayerEnv {
     pub recovery_disabled: std::cell::Cell<bool>,
     /// The hit being reacted to this step, if any (env 202, 222, 236, 237, 256, 285, ...).
     pub damage: Option<IncomingDamage>,
+    /// TAE ChrActionFlag 24, queried by the NPC's damage-break branch through env 349.
+    pub damage_motion_disabled: bool,
     /// NPC only: the action the AI requests (env 106), an animation-id-like code.
     pub ai_action: i32,
     /// NPC only: the action offered to an attack's cancel window: env 107 (combo), 120 (attack
@@ -177,6 +180,7 @@ impl Default for PlayerEnv {
             release_lock_angle: std::cell::Cell::new(false),
             recovery_disabled: std::cell::Cell::new(false),
             damage: None,
+            damage_motion_disabled: false,
             ai_action: 0,
             ai_cancel_actions: [0; 3],
             existing_anims: std::rc::Rc::default(),
@@ -280,6 +284,7 @@ impl Adapter<'_> {
             ENV_TOOK_DAMAGE => truth(env.damage.is_some()),
             ENV_DAMAGE_TYPE => env.damage.map_or(0.0, |d| d.damage_type as f32),
             ENV_DAMAGE_LEVEL => env.damage.map_or(0.0, |d| d.level as f32),
+            ENV_DAMAGE_MOTION_DISABLED => truth(env.damage_motion_disabled),
             ENV_DAMAGE_DIRECTION => env.damage.map_or(0.0, |d| d.direction as f32),
             ENV_DAMAGE_FRONT_BACK => env.damage.map_or(0.0, |d| d.front_back as f32),
             ENV_GUARD_LEVEL => env.damage.map_or(0.0, |d| d.guard_level as f32),

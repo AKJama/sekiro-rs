@@ -640,14 +640,21 @@ impl CombatRules {
         );
 
         // 6. Knockback and hit stop.
-        let knockback = self.knockback(a, d, &atk, hit, outcome, frame_d.knockback_scale);
+        // Native ChrActionFlag 24 sets record +0x1CA: b6bfe0 skips knockback and b68d00
+        // publishes damage level 0. The hit still deals HP/posture damage.
+        let motion_disabled = frame_d.flag(crate::tae::cancel::DISABLE_DAMAGE_MOTION);
+        let knockback = if motion_disabled {
+            None
+        } else {
+            self.knockback(a, d, &atk, hit, outcome, frame_d.knockback_scale)
+        };
         let hit_stop = self.hit_stop(d, &atk, frame_d);
 
         let (direction, front_back) = hit_direction(defender, hit.direction);
         // A hit with no damage level that carries a behaviour identification value (the smoke
         // screen's blinding, 17) reaches the script as DAMAGE_LEVEL_NONE, the level its
         // blinding branch tests (`c0000_transition.hks`); other hits keep at least level 1.
-        let level = if hit.attack.damage_level <= 0 && atk.behavior_id != 0 {
+        let level = if motion_disabled || (hit.attack.damage_level <= 0 && atk.behavior_id != 0) {
             0
         } else {
             hit.attack.damage_level.max(1)

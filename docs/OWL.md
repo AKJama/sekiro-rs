@@ -433,6 +433,33 @@ His AI picks the escape (all three through `EndureAttack`):
 - Wolf's attack (parry timing) or a shuriken impact during 3506080 gives **20007**;
 - each 3506082 activation counts AI number 3; at 5 or more, **20008** (he waits out about five kneeling loops).
 
+### Transition deathblow protection
+
+Confirmed against the real game by the user: the heat-up and kneeling Owl cannot receive a second deathblow.
+His 1 HP is the floor left by the first deathblow, whose get-up was interrupted before its HP reset; it is not a new deathblow opening.
+The duel rejects deathblow selection while the playing TAE has **3506080**, covering all of `a000_020005`, every `a000_021003` loop and the first 0.233 s of the escape.
+Both the HUD's red mark and attack-input interception use that same selection check.
+This uses the data's transition lifetime, without a timer or animation-name check.
+
+The data and executable distinguish that protection from invulnerability:
+
+| Evidence | Meaning |
+|---|---|
+| Event 11115860 enables immortality; 11115872 disables it on 3506050 from the finishing clip | Immortality keeps HP above zero; it cannot be a blanket deathblow prohibition because both legitimate deathblows happen while it is enabled |
+| 3506080 and 3506221 have `stateInfo` 0, `throwCondition` 0, `overrideThrowTypeId` -1 and `throwChangeIdOffset` 0 | These are judgment markers, not a standalone SpEffect throw-defence flag; 3506221's name does not grant a deathblow |
+| Neither heat-up nor kneel carries TAE 950, 951 or 952; escapes carry 951 throughout | Ordinary slashes can contact him while he begs; invulnerability belongs to the escape |
+| Both transition clips carry ChrActionFlag **24** throughout | Native `FUN_140b51b70`, case 24, sets action-state +0x88 bit 16; `FUN_140bdbb40` reads that bit, and `FUN_140b6e6a0` copies its result into damage record +0x1CA |
+| Native `FUN_140b68d00` and `FUN_140b6bfe0` read +0x1CA | Damage motion reports level zero and skips knockback, while HP/posture damage still resolves |
+| Shared NPC HKS `ExecDamageBreak` checks `env(349)` before collapsing | The host now supplies the active damage-motion flag, so a landed slash cannot replace the transition with `TrunkCollapseFront` and reopen a deathblow |
+| Castle Lua `Parry`, called by `INTERUPT_ParryTiming`, checks 3506080 and its parry range with a 360-degree cone | Wolf's attack requests **20007**, deletes the observed area and escapes before a hit is required; this is attack detection, not an HP-loss test |
+
+The native HP break test (`b6e6a0`) treats HP below 2 with marks left like posture collapse.
+Our previous selection used that numerical test alone after the previous throw clip ended, so the interrupted get-up incorrectly offered the finishing ThrowParam pair 15060180 / 15060181 immediately.
+The transition gate prevents that selection; escape 20007 restores HP with 300610 and posture with StaminaControl type 7, then ordinary posture breaks and HP depletion can offer the finishing pair again.
+The complete native throw-defence/ThrowKind condition dispatcher is not reconstructed by this change; the marker gate implements the confirmed transition behavior, while the damage-motion bit and its consumers are exe-traced.
+Local research exports stay in `re/exports/decomp/owl_transition/` and parameter evidence in `cache/tests/owl-transition-params.txt`.
+The real-data `owl_phase2.rs` regressions land the first deathblow, check the red mark and attack input in both transition clips, land ordinary slashes without interrupting the protected animation, verify Lua's 20007 escape and HP reset, and finish the second life through either posture break or HP depletion.
+
 ### What phase 2 changes in his AI
 
 His castle battle goal tests 200051 twice (read from `506001_battle.lua`):
@@ -474,7 +501,6 @@ cargo run --release -p sekiro-game -- --arena owl --god --break-posture --spawn 
 - `env(206)` "in a throw" as the deathblow pair plus the defender clip; the request in `env(105)` staying until a `W_Event*` fires; `env(123)` as any `EndureAttack` request with no TAE gate; the observe-area interrupt raised on every step the target is inside.
 - Our clip-end stand-in for env 2000 / 1105 is switched off only in `Event*` states.
 - A 0-duration SpEffect (3506000) stays visible for two steps so his observer sees it.
-- While he begs at 1 HP with a mark left, our duel allows a deathblow (HP 1 opens it); whether the game does (3506221 is "for judgment") is not known.
 - Not run: the intro part of 11115860 (cutscene, conversation copy, warps), 11115861 (music: the boss music is in the encrypted banks), 11115871, map effects, camera and gparam changes, network flags.
 - The per-frame order of the engine's event loop against characters and AI is ours (events run after the step's hits).
 - What judge 910's blow-away in the heat-up is for in the game (it keeps Wolf off him while he begs) is a guess.

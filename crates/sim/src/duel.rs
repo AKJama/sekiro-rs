@@ -46,6 +46,9 @@ const COMBO_FLAGS: [i32; 2] = [23, 86];
 /// locked, seconds given, Ninja Army Chief").
 const STATE_INFO_NO_LOCK: i32 = 350;
 
+/// Owl's TAE transition judgment marker, active throughout the heat-up and kneeling loop.
+const OWL_HEAT_UP: i32 = 3_506_080;
+
 /// env 2004, "swing is hitting" ([`Duel::publish_swing_hit`]).
 const ENV_SWING_HIT: i32 = 2004;
 
@@ -623,6 +626,13 @@ impl Duel {
     }
 
     fn deathblow_rows(&self) -> Option<(i32, i32)> {
+        // Owl's TAE keeps the heat-up judgment effect on throughout the heat-up and kneel.
+        // HP 1 here is the interrupted first deathblow's HP floor, not another opening.
+        // Leave attacks enabled: his Lua ParryTiming interrupt uses this same effect to
+        // request escape 20007, whose TAE restores HP and posture (docs/OWL.md, Phase 2).
+        if self.enemy.tae_frame().sp_effects.contains(&OWL_HEAT_UP) {
+            return None;
+        }
         // The enemy must have reacted to the hit that broke it first: while it is frozen in hit
         // stop or has not read the damage yet, its script would still send it into the stagger
         // after the throw event (ours; the engine checks the throwable state the stagger sets).

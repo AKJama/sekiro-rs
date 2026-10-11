@@ -431,3 +431,21 @@ $env:CARGO_TARGET_DIR = 'target/alt'
 $env:CARGO_BUILD_JOBS = '6'
 & "$env:USERPROFILE\.cargo\bin\cargo.exe" run --release -j 6 -p sekiro-game -- --arena owl --progression castle-roof
 ```
+
+## Owl's phase-2 deathblow protection (2026-10-11)
+
+Reproduced with a real first deathblow in the sim: attack during `a000_020005` immediately started the finishing pair 15060180 / 15060181.
+Deathblow selection now rejects the active TAE judgment marker 3506080, which covers the heat-up, kneeling loop and first 0.233 s of the escape.
+The red mark and input both use this check; ordinary slashes stay available.
+The transition also carries ChrActionFlag 24 throughout: native `b51b70` sets action +0x88 bit 16, `bdbb40` reads it, and `b6e6a0` stores it in damage record +0x1CA.
+Implemented its traced damage-level-zero and no-knockback behavior (`b68d00`, `b6bfe0`) and the HKS `env(349)` answer, so a landed slash cannot replace the protected animation with posture collapse.
+Owl's unchanged castle Lua detects Wolf's attack through `INTERUPT_ParryTiming`, checks 3506080 and its parry range, and requests escape 20007.
+The escape restores HP and posture from its TAE, returns the phase-2 boss bar and keeps one mark; posture break and HP depletion both still open the finishing deathblow afterward.
+The user's real-game confirmation replaces the previous uncertainty about a deathblow while begging in `docs/OWL.md`.
+That document separates the exe-traced damage-motion rule from the marker-based transition gate; the complete native throw-defence/ThrowKind condition dispatcher remains unreconstructed and is recorded in `docs/FIDELITY.md`.
+The real-data regressions test no red mark or second deathblow in both transition clips, landed ordinary slashes preserving the transition, Lua escape 20007, and the finishing blow after HP depletion alongside the existing posture-break victory.
+Focused `owl_phase2`, `owl` and `deathblow_lock` tests passed.
+Final validation: `cargo fmt --all`, workspace/all-targets Clippy with `-D warnings`, and the full requested release sim lib/bin/integration suite passed (313 tests, zero failures).
+Full suite log: `cache/tests/owl-transition-final.log`; local native research: `re/exports/decomp/owl_transition/`; parameter evidence: `cache/tests/owl-transition-params.txt`.
+All Cargo commands used `CARGO_TARGET_DIR=target/alt` and six jobs; fmt uses `CARGO_BUILD_JOBS=6` because it has no `-j` option.
+No commits, real model/API calls, protected-log edits, game sessions, game-install writes, worktrees, or cache/re links, junctions or deletions were made.

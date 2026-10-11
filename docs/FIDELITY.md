@@ -1,5 +1,11 @@
 # Known fidelity approximations
 
+## Deathblow selection
+
+Owl's phase-2 transition rejects deathblows for the lifetime of the TAE judgment marker 3506080, matching the user's real-game confirmation.
+The native damage-motion suppression bit is traced and implemented, but the complete native throw-defence and ThrowKind condition dispatcher remains unreconstructed.
+See [OWL.md](OWL.md#transition-deathblow-protection) for the data, native addresses and real-data regression tests.
+
 ## Maps
 
 The ten-map baseline and reviewed evidence are in [MAP-BASELINE.md](MAP-BASELINE.md).

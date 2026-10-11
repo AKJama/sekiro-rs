@@ -76,6 +76,100 @@ fn has_effect(duel: &Duel, id: i32) -> bool {
     duel.enemy.tae_frame().sp_effects.contains(&id)
 }
 
+/// Reach the transition through a real first deathblow, then let Wolf recover his controls.
+fn transition(duel: &mut Duel, clip: &str) {
+    duel.enemy_active = false;
+    let (_, killed, _) = break_and_deathblow(duel);
+    assert!(!killed);
+    for _ in 0..900 {
+        let r = duel.step(&InputFrame::default(), DT);
+        assert_no_script_errors(&r);
+        if owl_clip(duel) == clip {
+            let p = duel.player.body.position;
+            duel.enemy.body.position = [p[0], p[1], p[2] - 1.6];
+            duel.player.body.yaw = 0.0;
+            duel.enemy.body.yaw = std::f32::consts::PI;
+            assert!(has_effect(duel, HEAT_UP));
+            assert_eq!(duel.rules.fighters[1].vitality.hp, 1);
+            assert_eq!(duel.rules.fighters[1].vitality.deathblows_left, 1);
+            return;
+        }
+    }
+    panic!("never reached {clip}: {}", owl_clip(duel));
+}
+
+#[test]
+fn no_second_deathblow_during_heat_up_or_kneel() {
+    for clip in ["a000_020005", "a000_021003"] {
+        let Some(mut duel) = load(1.6) else { return };
+        transition(&mut duel, clip);
+        assert!(!duel.deathblow_available(), "red mark during {clip}");
+        let mut landed = false;
+        for i in 0..60 {
+            let r = duel.step(&frame(i % 20 == 0, false), DT);
+            assert_no_script_errors(&r);
+            assert!(
+                r.deathblow.started.is_none(),
+                "second deathblow during {clip}: {:?}",
+                r.deathblow.started
+            );
+            landed |= r.hits.iter().any(|(h, _)| h.attacker == 0);
+            assert!(!r.deathblow.killed);
+            assert_eq!(duel.rules.fighters[1].vitality.deathblows_left, 1);
+            assert!(
+                !duel.deathblow_available(),
+                "red mark during {clip}, now {}",
+                owl_clip(&duel)
+            );
+            assert!(has_effect(&duel, HEAT_UP), "slash interrupted {clip}");
+        }
+        assert!(
+            landed,
+            "ordinary slashes did not contact the Owl during {clip}"
+        );
+    }
+}
+
+#[test]
+fn slashing_the_kneeling_owl_triggers_attack_escape_and_phase_two() {
+    let Some(mut duel) = load(1.6) else { return };
+    transition(&mut duel, "a000_021003");
+    // Enable the actual Lua interrupt handler, without walking into its observed area.
+    duel.enemy_active = true;
+    let mut slash = false;
+    let mut escape = false;
+    for i in 0..180 {
+        keep_wolf_fresh(&mut duel);
+        let r = duel.step(&frame(i == 0, false), DT);
+        assert_no_script_errors(&r);
+        assert!(r.deathblow.started.is_none());
+        slash |= r
+            .player
+            .behavior
+            .state_path
+            .iter()
+            .any(|s| s.contains("Attack"));
+        escape |= owl_clip(&duel) == "a000_020007";
+        if escape && flag(&duel, PHASE_2_SEEN) {
+            break;
+        }
+    }
+    assert!(
+        escape,
+        "attack did not request escape 20007: {}",
+        owl_clip(&duel)
+    );
+    assert!(slash, "Wolf never performed an ordinary slash");
+    assert!(flag(&duel, PHASE_2_SEEN));
+    assert!(has_effect(&duel, PHASE_2));
+    assert_eq!(boss_bar(&duel), Some(905_060));
+    let owl = &duel.rules.fighters[1];
+    assert_eq!(owl.vitality.hp, owl.vitality.max_hp);
+    assert_eq!(owl.vitality.deathblows_left, 1);
+    assert!(!owl.dead());
+    assert!(!flag(&duel, DEFEATED));
+}
+
 fn flag(duel: &Duel, id: i32) -> bool {
     duel.events.as_ref().unwrap().scripts.flag(id)
 }
@@ -324,6 +418,45 @@ fn only_the_second_deathblow_ends_the_fight() {
     assert!(duel.rules.fighters[1].dead());
     assert!(duel.events.as_ref().unwrap().defeated, "no boss defeat");
     assert!(flag(&duel, DEFEATED));
+}
+
+#[test]
+fn phase_two_hp_depletion_still_opens_the_finishing_deathblow() {
+    let Some(mut duel) = load(1.6) else { return };
+    duel.enemy_active = false;
+    let (_, killed, _) = break_and_deathblow(&mut duel);
+    assert!(!killed);
+    finish_heat_up(&mut duel, false);
+    duel.enemy_active = false;
+    face_off(&mut duel);
+    // One ordinary landed hit reaches the protected HP floor without emptying posture.
+    duel.rules.fighters[1].vitality.hp = 40;
+    let mut hp_open = false;
+    let mut hp_floor = false;
+    let mut killed = false;
+    let mut rows = None;
+    for i in 0..1200 {
+        keep_wolf_fresh(&mut duel);
+        let r = duel.step(&frame(i % 20 == 0, false), DT);
+        assert_no_script_errors(&r);
+        if duel.rules.fighters[1].vitality.hp == 1 {
+            if !hp_floor {
+                assert!(duel.rules.fighters[1].posture.remaining > 0);
+                hp_floor = true;
+            }
+            hp_open |= duel.deathblow_available();
+        }
+        rows = rows.or(r.deathblow.started);
+        killed |= r.deathblow.killed;
+        if killed {
+            break;
+        }
+    }
+    assert!(hp_open, "no HP-depletion deathblow in phase 2");
+    assert_eq!(rows, Some((15_060_180, 15_060_181)));
+    assert!(killed);
+    assert!(duel.rules.fighters[1].dead());
+    assert_eq!(duel.rules.fighters[1].vitality.deathblows_left, 0);
 }
 
 #[test]

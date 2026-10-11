@@ -25,6 +25,9 @@ use std::sync::Arc;
 
 /// ChrActionFlag types that open action windows, by the action they allow.
 pub mod cancel {
+    /// Suppresses damage motion: native handler `b51b70` case 24 sets action +0x88 bit 16;
+    /// `bdbb40` reads it into damage record +0x1CA (`b6e6a0`). See docs/OWL.md.
+    pub const DISABLE_DAMAGE_MOTION: i32 = 24;
     /// Interrupt into movement (stick) allowed.
     pub const MOVE: i32 = 11;
     /// Step / dodge allowed.

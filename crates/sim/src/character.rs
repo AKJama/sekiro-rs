@@ -542,6 +542,7 @@ impl Character {
         env.dt = dt;
         env.locked_on = self.lock_target.is_some();
         env.damage = self.pending_damage.take();
+        env.damage_motion_disabled = tae.flag(cancel::DISABLE_DAMAGE_MOTION);
     }
 
     /// Runs one step of `dt` seconds. `frame` is the player's input; NPCs read [`Self::npc`].
