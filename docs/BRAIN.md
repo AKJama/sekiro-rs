@@ -284,12 +284,12 @@ The request carries a compact summary (`HabitSummary`): only entries with at lea
 ## The request and its size
 
 ```json
-{"id":12,"why":"posture_half","obs":{...},"tally":{"boss":{...},"wolf":{...}},
+{"id":12,"why":"pressure","obs":{...},"tally":{"boss":{...},"wolf":{...}},
  "memory":{"fights":2,"boss_wins":1,"wolf_wins":0,"boss":{...},"wolf":{...},"habits":{...},
            "trend":{"defl":[100,100,80],"guard":[0,0,10],"hits":[0,1,2],"hp":[0,7,12],"kill_s":[38,31,null],"now":[67,1]}}}
 ```
 
-`why` is the checkpoint that made the request (`start`, `posture_half`, `posture_critical`, `half_hp` (fallback), `mark_lost`, `punished_twice`, `deflected_thrice`); it is left out in the other modes.
+`why` is the checkpoint that made the request (`start`, `pressure`, `pressure_critical`, `half_hp` (fallback), `mark_lost`, `punished_twice`, `deflected_thrice`); it is left out in the other modes.
 `memory` counts the earlier fights (`fights`, `boss_wins`, `wolf_wins`; the rest were unfinished) and sums the counts and habits over every fight, this one included.
 `memory.trend` is Wolf's play over the last 3 finished fights, oldest first (see "The score to beat"): perfect-deflect percent (`defl`), guard percent, hits the boss landed, his HP lost in percent of max, and seconds he took to kill the boss (`null`: the boss won); `now` is this fight so far, `[deflect percent, hits landed]`.
 The whole request is kept within 1400 bytes of compact JSON (`REQUEST_BUDGET`): `BrainRequest::fit` drops the least telling entries (fewest samples) until it fits, in this order, each map down to 4, 3, 2, 1 and 0 entries: `memory.boss`, `memory.wolf`, the habits' `punish_s`, `vs` and `after`, then `tally.wolf` and `tally.boss`; last the single habit values, the older fights of the trend and the memory itself.
@@ -309,8 +309,8 @@ Per duel step (`BrainDriver`):
    At most one is in flight, and an event that arrives while one is out waits for it:
    - `slot` (the default for `scripted` and other brains; today's behaviour): after any slot, so the controller thinks while the current act runs. The answer is used for one plan.
    - `plan_end`: when the last step of the running plan starts, so a fresh answer is ready as the plan ends; also at slots where the Lua AI acted. The answer is used for one plan.
-   - `checkpoints` (the default for hosted brains): `start`, `posture_half` at 50% posture damage, `posture_critical` at 85%, `half_hp` as an HP fallback, `mark_lost`, `punished_twice` and `deflected_thrice`.
-     Both posture checkpoints re-arm only when posture damage recovers below 25%; crossing both in one step prefers critical, with no delayed half event.
+   - `checkpoints` (the default for hosted brains): `start`, `pressure` at about 6 estimated Wolf hits remaining, `pressure_critical` at about 3 (only with at least 2 left), `half_hp` as an HP fallback, `mark_lost`, `punished_twice` and `deflected_thrice`.
+     Both posture checkpoints re-arm when remaining posture recovers above 70%; growing damage crossing both thresholds prefers critical, with no delayed pressure event.
      HP fallback fires once per fight, lost marks once per mark, and the hit streak events once per fight.
      Between requests the set persists and plans are sampled at each slot; the request count depends on posture recovery cycles.
 4. After the step, action changes and hits feed the tally, the habits and the metrics; a death ends the fight, a respawn starts the next.
@@ -597,7 +597,7 @@ FromSoftware players fight the same enemy dozens of times, so the boss learns *b
   The coach writes a **game plan** for the next fight.
   It runs on its own thread in `sekiro-brain-net` (never the game thread), so latency does not matter: the plan is used from the next fight if it arrived by then (during the 6 s respawn), else from the fight after; a failed or empty answer keeps the previous plan.
 - **Fighter (in the fight, cheap).** The driver runs the plan's sets locally with the sampler (`sampler.rs`, with the repelled-plan penalty and the untried bonus).
-  At the checkpoints (`start`, `posture_half`, `posture_critical`, `half_hp` (fallback), `mark_lost`, `punished_twice`, `deflected_thrice`) the Decisions API picks which set to play, or `keep`.
+  At the checkpoints (`start`, `pressure`, `pressure_critical`, `half_hp` (fallback), `mark_lost`, `punished_twice`, `deflected_thrice`) the Decisions API picks which set to play, or `keep`.
   No per-move calls.
 - **Phases across fights.** Fight 1 against an enemy with no memory is his own Lua AI with no model call at all; the coach runs after it.
   From fight 2 on the coach's plan drives him: the opener runs first, then plans sampled from the start set.
@@ -638,7 +638,7 @@ Plans in sets must contain an attack and may not be in `avoid` (see "Hard limits
    "plans": [{"plan": "3000+3001", "weight": 2.0}, {"plan": "run_in3>3008", "weight": 1.0}], "when": null},
   {"name": "bait", "description": "slow walk-ins and holds before the thrust to break his timing",
    "plans": [{"plan": "walk_in4>hold1>3013", "weight": 1.0}, {"plan": "hold2>3002", "weight": 1.0}],
-   "when": "posture_half"}],
+   "when": "pressure"}],
  "start_set": "press",
  "avoid": [{"choice": "3003", "reason": "deflected 5 of 5"}],
  "notes": "He deflects thrusts early but never the kick; he backs off after a deflect."}
@@ -668,17 +668,24 @@ Entries are trimmed (overall plans first, then Wolf's attacks, habits, this figh
 The instructions (`protocol::coach_instructions`, followed by every choice with its label, 73 or 75 lines) are:
 
 > You are the coach of {name}, who fights the player (Wolf) again and again. After each fight you write the game plan for the next one. Your goal: make Wolf play worse by fighting him. You are scored on the damage you deal to Wolf (HP and posture) per minute (dpm), your attacks per minute (apm), fewer perfect deflects (defl) and fewer of your actions he punishes. How long the fight lasts, and how fast he kills you, are NOT goals (kill time is information only). Stalling, running away or passivity counts as failure: passive = the percent of the fight with no attack of yours started in the last 4 s, and a fight with passive above 35 failed regardless of every other number; if the last fight failed this way, make the next plan attack more. Movement tactics exist to set up attacks (baits, spacing, timing mixups such as a hold or a slow walk-in before a strike), not to avoid fighting. Think like a swordsman: turning your back or retreating while the opponent is in sword range leaves you open, so tactics should set up attacks safely. The fighter enforces limits you cannot override: a plan in a set must contain an attack (plans without one are dropped), an attack must start at least every 6 s, and back_off, retreat or back-step plans run at most once per 8 s. Players learn patterns, so probe with untried tactics, exploit the habits you see and retire what keeps failing. Test one idea at a time and write down what you learn.\n\
+> How combat works: Posture is the real bar: breaking it opens a deathblow; the deathblow spends one enemy life.
+> Guarding costs the guarder posture; deflects cost the attacker posture and less to the deflector.
+> HP loss slows posture recovery.
+> Pressure only pays off while the enemy can still act; stop planning during a deathblow opening or stagger.
+> Attack until deflected, then answer the counter.
+> Jump and stomp sweeps, Mikiri thrusts (or deflect), and dodge grabs.
+
 > Input (compact JSON about the fight just over): fight = fights so far; result = Wolf's result (won = who won, secs, defl/guard = Wolf's perfect-deflect and guard percent, hits = hits you landed, hp/posture = percent of his bars lost, punishes = your actions he hit, apm, dpm = percent of a bar per minute, passive percent); trend = his deflect%, guard%, hits, hp%, kill seconds (information only), apm, dpm and passive over the last fights; plans = this fight per plan text, as [exchanges, hit, blocked, deflected, whiffed, punished] (lua = your own AI's acts); sets = this fight per set of the game plan played: secs and the same counts (opener = the opener, lua = own AI); wolf = his attacks this fight, same counts; overall = every fight per plan text; habits = how Wolf behaves; played = the game plan this fight ran; notes = your own notes from last time. With no played plan this fight was your plain AI, the baseline.\n\
-> Output: one game plan. opener = a plan run first in the fight (may be tactics such as hold3.5>walk_in4, or lua for none). sets = 2 to 4 named sets (name of letters, digits, _ or -, at most 24 characters), each with a one-line description for the fighter who picks the set (what it does and when it suits), 2 to 6 weighted plans from the choices below (weights relative), and when = the checkpoint it suits or null. start_set = the set played from the start. avoid = choices not to use, each with a short reason. notes = at most 400 characters: your hypotheses about this player, kept and shown to you next time so your reasoning accumulates; revise them with the new evidence. In the fight a cheap model only picks which set to switch to at the checkpoints (start, posture_half, posture_critical, half_hp (fallback), mark_lost, punished_twice, deflected_thrice, or keep), and your plans run locally, sampled by weight with a penalty for plans that keep being deflected, so spread weights over good options and make the sets clearly different. posture_half means 50% posture damage, posture_critical 85%; both re-arm below 25% damage. half_hp is the backup event at 50% HP left. Reflexes (guarding, deflecting, counters, reactions) are automatic. Use only the choices listed; lua leaves an act to the boss's own AI. A choice is a single action, a movement tactic (distances from Wolf, left and right are the boss's) or a plan of up to {max} steps joined with > (consecutive attacks joined with +). Choices:
+> Output: one game plan. opener = a plan run first in the fight (may be tactics such as hold3.5>walk_in4, or lua for none). sets = 2 to 4 named sets (name of letters, digits, _ or -, at most 24 characters), each with a one-line description for the fighter who picks the set (what it does and when it suits), 2 to 6 weighted plans from the choices below (weights relative), and when = the checkpoint it suits or null. start_set = the set played from the start. avoid = choices not to use, each with a short reason. notes = at most 400 characters: your hypotheses about this player, kept and shown to you next time so your reasoning accumulates; revise them with the new evidence. In the fight a cheap model only picks which set to switch to at the checkpoints (start, pressure, pressure_critical, half_hp (fallback), mark_lost, punished_twice, deflected_thrice, or keep), and your plans run locally, sampled by weight with a penalty for plans that keep being deflected, so spread weights over good options and make the sets clearly different. pressure means about 6 Wolf hits to break, pressure_critical about 3 but at least 2; both re-arm above 70% remaining posture. mark_lost only fires with lives still left; checkpoints wait until the boss can act. half_hp is the backup event at 50% HP left. Reflexes (guarding, deflecting, counters, reactions) are automatic. Use only the choices listed; lua leaves an act to the boss's own AI. A choice is a single action, a movement tactic (distances from Wolf, left and right are the boss's) or a plan of up to {max} steps joined with > (consecutive attacks joined with +). Choices:
 
 The checkpoint chooser (coach mode) gets only a few numbers and the set names, about 100 input tokens plus the choice list (the sets' descriptions and `keep`):
 
 ```json
 {"model": "gpt-6-luna",
- "input": "{\"why\":\"posture_half\",\"set\":\"bait\",\"boss_hp\":0.48,\"boss_posture\":0.55,\"wolf_hp\":0.91,\"wolf_posture\":0.12,\"dist\":3.4}",
+ "input": "{\"why\":\"pressure\",\"set\":\"bait\",\"boss_hp\":0.48,\"boss_posture\":0.55,\"wolf_hp\":0.91,\"wolf_posture\":0.12,\"dist\":3.4}",
  "questions": [{"type": "choice", "name": "plan_set",
    "instructions": "You are an Ashina soldier with a one-handed sword's fighting instinct. The coach prepared these plan sets; pick one for what just happened, or keep the current one.",
-   "choices": [{"value": "press", "description": "..."}, {"value": "bait", "description": "... (suits: posture_half)"}, {"value": "keep", "description": "stay on the current set"}]}]}
+   "choices": [{"value": "press", "description": "..."}, {"value": "bait", "description": "... (suits: pressure)"}, {"value": "keep", "description": "stay on the current set"}]}]}
 ```
 
 No memory, habits, tally or 73-choice list goes in; those are the coach's.
@@ -736,3 +743,18 @@ Fake CLI tests assert the complete ordered argument vectors, Claude's empty MCP 
 Installed CLI help confirms all flags used; --exclude-dynamic-system-prompt-sections explicitly does nothing with --system-prompt and is omitted.
 Codex --ignore-user-config removes user-configured MCP servers without relying on a possibly merged mcp_servers override.
 No real API request or authenticated CLI execution was made, so provider latency and total context size remain unverified.
+
+### Combat-aware checkpoints (2026-10-11)
+
+See [COMBAT-FUNDAMENTALS.md](COMBAT-FUNDAMENTALS.md) for sourced base mechanics and the ranked fidelity gaps.
+The coach now receives a compact combat paragraph covering posture, guard/deflect costs, HP-dependent recovery, actionable pressure and perilous counters.
+`BrainDriver` estimates hits to break as remaining posture divided by Wolf's first combo hit's direct posture damage, using its real TAE attack judge, AtkParam, weapon/reinforcement, enemy defence and current effects through `CombatRules::wolf_posture_per_hit`.
+This is a lead-time estimate, not a prediction of guarding or future deflects.
+`PRESSURE_HITS = 6`, `PRESSURE_CRITICAL_HITS = 3`, `PRESSURE_MIN_HITS = 2` and `PRESSURE_REARM = 0.70` document our decision policy in `brain/driver.rs`.
+Warnings fire once each per posture cycle while damage grows; recovery above 70% remaining re-arms them without raising warnings on recovery itself.
+HP-half remains a fallback when no posture event is raised, including unavailable/zero damage estimates.
+No checkpoint request is sent during an enemy deathblow opening, posture break, damage stagger, active deathblow, death or respawn.
+Warnings wait through a brief damage stagger and are revalidated against the hit range before sending; deathblow openings, death and respawn discard transient warnings, while a surviving `mark_lost` waits for the get-up.
+Only a deathblow leaving another mark raises `mark_lost`: the soldier never does, Owl does after his first.
+The old `posture_half` and `posture_critical` names are replaced in the schema and hints; old saved hints are rejected by normal validation while their valid plans remain usable.
+Offline real-data duel tests exercise both soldier posture cycles and actual soldier/Owl deathblows without a model call.

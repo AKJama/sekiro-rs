@@ -746,8 +746,8 @@ fn checkpoint_events_ask_once_each() {
         keep_wolf_fresh(&mut duel);
         let boss = &mut duel.rules.fighters[1];
         let damage = match i / 60 {
-            8..=11 | 20..=23 => 0.55,
-            12..=15 | 24..=27 => 0.90,
+            8..=11 | 20..=23 => 0.10,
+            12..=15 | 24..=27 => 0.35,
             _ => 0.0,
         };
         boss.posture.remaining = (boss.posture.max as f32 * (1.0 - damage)) as i32;
@@ -765,13 +765,105 @@ fn checkpoint_events_ask_once_each() {
         whys,
         [
             Some("start"),
-            Some("posture_half"),
-            Some("posture_critical"),
-            Some("posture_half"),
-            Some("posture_critical"),
+            Some("pressure"),
+            Some("pressure_critical"),
+            Some("pressure"),
+            Some("pressure_critical"),
             Some("half_hp")
         ]
     );
     let d = duel.boss_brain.as_ref().unwrap();
     assert!(d.stats.planned >= 8, "{:?}", d.stats);
+}
+
+#[test]
+fn deathblow_checkpoints_wait_for_getup_and_only_report_surviving_marks() {
+    for who in [Who::Soldier, Who::Owl] {
+        let Some(mut duel) = load(who, 1.6) else {
+            continue;
+        };
+        let (brain, seen) = recorded(who, "hold2>strafe_left", 0.0, RequestMode::Checkpoints);
+        duel.set_brain(brain, false).unwrap();
+        duel.boss_brain.as_mut().unwrap().anti_stall = false;
+        duel.enemy_active = false;
+        duel.events = None;
+        // Use the real attack, posture-break reaction, ThrowParam pair and get-up.
+        // Manually run the request hook while passive so AI movement cannot move the target.
+        let mut started = false;
+        let mut broke = false;
+        let mut checked_open = false;
+        for i in 0..1200 {
+            keep_wolf_fresh(&mut duel);
+            if !broke {
+                duel.rules.fighters[1].posture.remaining = 1;
+            }
+            let attack = if broke {
+                !started && i % 10 == 0
+            } else {
+                i % 40 == 0
+            };
+            let r = duel.step(
+                &InputFrame {
+                    buttons: Buttons {
+                        attack,
+                        lock_on: (2..4).contains(&i),
+                        ..Buttons::default()
+                    },
+                    ..InputFrame::default()
+                },
+                DT,
+            );
+            broke |= r
+                .hits
+                .iter()
+                .any(|(h, res)| h.attacker == 0 && res.posture_broke);
+            started |= r.deathblow.started.is_some();
+            checked_open |= duel.deathblow_available();
+            let blocked = duel.rules.deathblow_open(1)
+                || duel.deathblow.is_some()
+                || duel.respawn_in.is_some()
+                || duel.rules.fighters[1].dead()
+                || duel
+                    .enemy
+                    .behavior
+                    .runtime
+                    .main_state_path()
+                    .first()
+                    .is_some_and(|s| s.contains("Damage") || s.contains("Throw"));
+            let count = seen.borrow().len();
+            let mut driver = duel.boss_brain.take().unwrap();
+            let mut ai = duel.ai.take().unwrap();
+            driver.before_think(&mut ai, 1.0);
+            driver.after_think(&mut ai, &duel);
+            duel.ai = Some(ai);
+            duel.boss_brain = Some(driver);
+            if blocked {
+                assert_eq!(
+                    seen.borrow().len(),
+                    count,
+                    "request during an unavailable decision"
+                );
+            }
+            if started
+                && (duel.rules.fighters[1].dead()
+                    || seen.borrow().iter().any(|r| r.2 == Some("mark_lost")))
+            {
+                break;
+            }
+        }
+        assert!(
+            broke && started && checked_open,
+            "real deathblow did not run for {}",
+            who.chr()
+        );
+        let marks = seen
+            .borrow()
+            .iter()
+            .filter(|r| r.2 == Some("mark_lost"))
+            .count();
+        assert_eq!(marks, usize::from(matches!(who, Who::Owl)), "{}", who.chr());
+        if matches!(who, Who::Owl) {
+            assert_eq!(duel.rules.fighters[1].vitality.deathblows_left, 1);
+        }
+    }
 }

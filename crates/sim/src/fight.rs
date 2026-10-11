@@ -190,6 +190,38 @@ fn row_f32(t: Option<&Table>, id: i32, field: &str) -> Option<f32> {
 }
 
 impl CombatRules {
+    /// Direct-hit posture estimate using the same weapon, defence and effects as resolution.
+    /// Used for checkpoint lead time, without applying damage or changing either fighter.
+    pub fn wolf_posture_per_hit(&self, attack: &AttackData, chars: [&Character; 2]) -> Option<f32> {
+        let atk = attack.profile.as_ref()?;
+        let FighterKind::Player {
+            weapon, reinforce, ..
+        } = &self.fighters[0].kind
+        else {
+            return None;
+        };
+        let FighterKind::Npc(npc) = &self.fighters[1].kind else {
+            return None;
+        };
+        let effects_a = self.active_effects(0, chars[0]);
+        let effects_d = self.active_effects(1, chars[1]);
+        let base = player_posture_base(
+            HitOutcome::Hit,
+            atk,
+            weapon,
+            reinforce.stamina_atk,
+            attacker_stamina_attack_rate(&effects_a),
+        );
+        let defence = DefenderPosture {
+            attribute_rate: npc.stamina_dmg_rates.get(atk.stamina_attribute),
+            guard_def: npc.stamina_guard_def as f32,
+            ..DefenderPosture::default()
+        };
+        let damage =
+            defender_posture_damage_from_base(HitOutcome::Hit, base, atk, &defence, &effects_d);
+        (damage > 0).then_some(damage as f32)
+    }
+
     /// Builds a fighter for each combatant from the params in `cache`. Index 0 is the player
     /// (weapon `param_id`), the rest NPCs (NpcParam `param_id`).
     pub fn load(cache: &Path, combatants: &[&Combatant]) -> Self {

@@ -45,8 +45,8 @@ pub const INPUT_BUDGET: usize = 4096;
 /// The checkpoint events a set's `when` hint may name.
 pub const CHECKPOINTS: [&str; 7] = [
     "start",
-    "posture_half",
-    "posture_critical",
+    "pressure",
+    "pressure_critical",
     "half_hp",
     "mark_lost",
     "punished_twice",

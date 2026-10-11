@@ -254,3 +254,20 @@ All Cargo invocations used target/alt and six build jobs; fmt uses CARGO_BUILD_J
 Logs: logs/playtest-fixes-tests.log and logs/playtest-fixes-clippy.log.
 No rendered game session was run; real scripts, graphs, Lua AI, TAE and params were exercised through the deterministic duel tests.
 No cache/re links, junctions, worktrees, deletions or game-install writes were made.
+
+## Combat fundamentals and actionable checkpoints (2026-10-11)
+
+Added `docs/COMBAT-FUNDAMENTALS.md`: sourced base mechanics in original words, a rule-by-rule code/test audit and six fight-impact-ranked fidelity gaps.
+The largest gaps are general/thrust dodge i-frames, unverified complete poise/guard-counter parity, and player progression scaling; combat mismatches were documented without changing simulation rules.
+Checkpoint posture events are now `pressure` at about 6 estimated Wolf hits left and `pressure_critical` at about 3, with no pressure warning below 2 hits.
+The estimate uses Wolf's first combo TAE judge and the same AtkParam, weapon, reinforcement, enemy defence and active-effect posture formulas as the duel.
+Each warning fires once per posture cycle and re-arms when remaining posture recovers above 70%; HP-half is retained as a fallback.
+Requests are suppressed during enemy deathblow openings, posture breaks, damage staggers, throw/get-up reactions, death and respawn.
+Queued pressure waits through a brief stagger and is revalidated before sending; deathblow openings discard obsolete pressure.
+`mark_lost` only fires with another mark remaining: none for the soldier, one after Owl's first deathblow and get-up.
+Coach instructions now include a 447-character combat paragraph; the schema, hint names and `docs/BRAIN.md` use the new events.
+The real-data offline regression first demonstrated the old percentage timing and later caught a get-up request before Owl could act; the final soldier/Owl deathblow regression passes with suppression through the throw state.
+Validation passed: `cargo fmt --all`, `cargo fmt --all --check`, workspace/all-targets Clippy with `-D warnings`, and the requested release sim plus brain-net lib/bin/integration suites (305 tests).
+All Cargo commands used `CARGO_TARGET_DIR=target/alt` and six jobs; fmt uses `CARGO_BUILD_JOBS=6` because it has no `-j` flag.
+Final release test log: `target/alt/combat-fundamentals-final-tests.log`.
+No commits, real model/API calls, real Claude/Codex CLI runs, credential reads, game sessions, game-install writes, worktrees, or cache/re links, junctions or deletions were made.

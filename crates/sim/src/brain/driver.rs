@@ -53,13 +53,21 @@ use super::tally::{
     CountMap, Counts, Exchange, Side, Tally, TallyEvent, merge_counts, ranked_counts,
 };
 use super::{BossBrain, BrainReply, BrainRequest, REQUEST_BUDGET, RequestMode};
-use crate::deathblow::deathblow_marks;
 use crate::duel::{Duel, DuelReport, FLAG_PARRY_TIMING};
 use crate::hits::FLAG_GUARD;
 use crate::lua_ai::{ActSlot, AiBrain, anim_id_from_clip};
 
 /// Seconds of fight between saves of an unfinished fight.
 pub const AUTOSAVE_SECS: f32 = 15.0;
+
+/// Estimated Wolf hits remaining: enough lead time to change the next exchange.
+pub const PRESSURE_HITS: f32 = 6.0;
+/// Urgent warning, still leaving at least two hits for a decision to matter.
+pub const PRESSURE_CRITICAL_HITS: f32 = 3.0;
+/// Below this estimate, no pressure warning leaves enough time to act.
+pub const PRESSURE_MIN_HITS: f32 = 2.0;
+/// Re-arm both warnings after remaining posture recovers above 70% of maximum.
+pub const PRESSURE_REARM: f32 = 0.70;
 
 /// Counters for tests and the end-of-fight summary.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -111,8 +119,9 @@ struct InFlight {
 /// Which checkpoint events have fired this fight (see [`RequestMode::Checkpoints`]).
 #[derive(Debug, Clone, Default)]
 struct Checkpoints {
-    posture_half: bool,
-    posture_critical: bool,
+    previous_posture: f32,
+    pressure: bool,
+    pressure_critical: bool,
     half_hp: bool,
     marks: Option<i32>,
     punish_run: u32,
@@ -122,18 +131,26 @@ struct Checkpoints {
 }
 
 impl Checkpoints {
-    fn on_vitals(&mut self, posture: f32, hp: f32) -> Option<&'static str> {
-        if posture < 0.25 {
-            self.posture_half = false;
-            self.posture_critical = false;
+    fn on_vitals(&mut self, posture: f32, hp: f32, hits: Option<f32>) -> Option<&'static str> {
+        let growing = posture > self.previous_posture;
+        if 1.0 - posture > PRESSURE_REARM && 1.0 - self.previous_posture <= PRESSURE_REARM {
+            self.pressure = false;
+            self.pressure_critical = false;
         }
-        if !self.posture_critical && posture >= 0.85 {
-            self.posture_critical = true;
-            self.posture_half = true;
-            Some("posture_critical")
-        } else if !self.posture_half && posture >= 0.5 {
-            self.posture_half = true;
-            Some("posture_half")
+        self.previous_posture = posture;
+        if growing
+            && !self.pressure_critical
+            && hits.is_some_and(|h| (PRESSURE_MIN_HITS..=PRESSURE_CRITICAL_HITS).contains(&h))
+        {
+            self.pressure_critical = true;
+            self.pressure = true;
+            Some("pressure_critical")
+        } else if growing
+            && !self.pressure
+            && hits.is_some_and(|h| (PRESSURE_MIN_HITS..=PRESSURE_HITS).contains(&h))
+        {
+            self.pressure = true;
+            Some("pressure")
         } else if !self.half_hp && hp <= 0.5 {
             self.half_hp = true;
             Some("half_hp")
@@ -835,6 +852,32 @@ impl BrainDriver {
             || duel.rules.fighters[1].dead()
     }
 
+    fn checkpoint_blocked(&self, duel: &Duel) -> bool {
+        self.quiet(duel)
+            || duel.deathblow.is_some()
+            || duel.deathblow_available()
+            || duel.rules.deathblow_open(1)
+            || duel
+                .enemy
+                .behavior
+                .runtime
+                .main_state_path()
+                .first()
+                .is_some_and(|s| s.contains("Damage") || s.contains("Throw"))
+    }
+
+    fn hits_to_break(&self, duel: &Duel) -> Option<f32> {
+        let anim = duel.player.tae.anim("a050_300000")?;
+        let attack = anim.events.iter().find_map(|e| match e.kind {
+            crate::tae::TaeKind::Attack { judge, .. } => duel.fighters[0].attacks.get(&judge),
+            _ => None,
+        })?;
+        let damage = duel
+            .rules
+            .wolf_posture_per_hit(attack, [&duel.player, &duel.enemy])?;
+        Some(duel.rules.fighters[1].posture.remaining as f32 / damage)
+    }
+
     /// After the Lua AI thought: notes who chose any act that started and sends the next
     /// request when one is due.
     pub fn after_think(&mut self, ai: &mut AiBrain, duel: &Duel) {
@@ -926,8 +969,26 @@ impl BrainDriver {
                 self.want_request = true;
             }
         }
-        if quiet || !self.brain.plans() || self.in_flight.is_some() {
+        if quiet
+            || !self.brain.plans()
+            || self.in_flight.is_some()
+            || (self.mode == RequestMode::Checkpoints && self.checkpoint_blocked(duel))
+        {
             return;
+        }
+        if self.mode == RequestMode::Checkpoints {
+            let limit = match self.pending_why {
+                Some("pressure") => Some(PRESSURE_HITS),
+                Some("pressure_critical") => Some(PRESSURE_CRITICAL_HITS),
+                _ => None,
+            };
+            if let Some(limit) = limit
+                && self
+                    .hits_to_break(duel)
+                    .is_none_or(|hits| !(PRESSURE_MIN_HITS..=limit).contains(&hits))
+            {
+                self.pending_why = None;
+            }
         }
         let why = match self.mode {
             RequestMode::Slot | RequestMode::PlanEnd => {
@@ -1104,26 +1165,34 @@ impl BrainDriver {
             .wolf(wolf.hp_fraction(), wolf.posture_fraction());
         self.fight.metrics.passive_tick(t, self.step_dt);
         let boss_fighter = &duel.rules.fighters[1];
-        if let Some(why) = self
-            .checkpoints
-            .on_vitals(boss_fighter.posture_fraction(), boss_fighter.hp_fraction())
-        {
+        let hits = self.hits_to_break(duel);
+        if let Some(why) = self.checkpoints.on_vitals(
+            boss_fighter.posture_fraction(),
+            boss_fighter.hp_fraction(),
+            hits,
+        ) {
             // A request may still be in flight when pressure grows. Keep the newest
             // posture warning instead of sending an obsolete half-meter/HP warning later.
-            if (why == "posture_critical"
-                && matches!(self.pending_why, Some("posture_half" | "half_hp")))
-                || (why == "posture_half" && self.pending_why == Some("half_hp"))
+            if (why == "pressure_critical"
+                && matches!(self.pending_why, Some("pressure" | "half_hp")))
+                || (why == "pressure" && self.pending_why == Some("half_hp"))
             {
                 self.pending_why = Some(why);
             } else {
                 self.pending_why.get_or_insert(why);
             }
         }
-        let marks = deathblow_marks(boss_fighter.vitality.deathblows_left);
-        if self.checkpoints.marks.is_some_and(|m| marks < m) {
-            self.pending_why.get_or_insert("mark_lost");
+        let marks = boss_fighter.vitality.deathblows_left.max(0);
+        if marks > 0 && self.checkpoints.marks.is_some_and(|m| marks < m) {
+            self.pending_why = Some("mark_lost");
         }
         self.checkpoints.marks = Some(marks);
+        if self.quiet(duel) || duel.deathblow.is_some() || duel.rules.deathblow_open(1) {
+            // A lost mark is useful after the get-up; pressure during a deathblow opening is obsolete.
+            self.pending_why = self
+                .pending_why
+                .filter(|why| matches!(*why, "mark_lost" | "start"));
+        }
         for e in &events {
             self.tally.record(t, e.clone());
         }
@@ -1465,20 +1534,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn posture_checkpoints_rearm_below_a_quarter_and_prefer_critical() {
+    fn posture_checkpoints_rearm_and_leave_time_to_act() {
         let mut c = Checkpoints::default();
-        assert_eq!(c.on_vitals(0.49, 1.0), None);
-        assert_eq!(c.on_vitals(0.5, 1.0), Some("posture_half"));
-        assert_eq!(c.on_vitals(0.84, 1.0), None);
-        assert_eq!(c.on_vitals(0.85, 1.0), Some("posture_critical"));
-        assert_eq!(c.on_vitals(0.25, 1.0), None);
-        assert_eq!(c.on_vitals(0.9, 1.0), None);
-        assert_eq!(c.on_vitals(0.24, 1.0), None);
-        assert_eq!(c.on_vitals(0.9, 0.4), Some("posture_critical"));
-        assert_eq!(c.on_vitals(0.9, 0.4), Some("half_hp"));
-        assert_eq!(c.on_vitals(0.9, 0.4), None);
+        assert_eq!(c.on_vitals(0.4, 1.0, Some(6.1)), None);
+        assert_eq!(c.on_vitals(0.41, 1.0, Some(6.0)), Some("pressure"));
+        assert_eq!(c.on_vitals(0.5, 1.0, Some(3.1)), None);
+        assert_eq!(c.on_vitals(0.6, 1.0, Some(3.0)), Some("pressure_critical"));
+        assert_eq!(c.on_vitals(0.3, 1.0, Some(6.0)), None);
+        assert_eq!(c.on_vitals(0.6, 1.0, Some(2.0)), None);
+        assert_eq!(c.on_vitals(0.29, 1.0, Some(8.0)), None);
+        assert_eq!(c.on_vitals(0.6, 1.0, Some(2.0)), Some("pressure_critical"));
+        let mut c = Checkpoints::default();
+        assert_eq!(c.on_vitals(0.9, 1.0, Some(1.9)), None);
+        assert_eq!(c.on_vitals(0.9, 0.4, None), Some("half_hp"));
     }
-
     #[test]
     fn wolf_landing_two_hits_in_a_row_raises_one_checkpoint() {
         let mut c = Checkpoints::default();
