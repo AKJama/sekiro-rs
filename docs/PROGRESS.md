@@ -8,13 +8,14 @@ This is a high-level view of how much of Sekiro is reimplemented.
 | Area | Status | Progress |
 | --- | --- | --- |
 | Game data and formats | Partial | `#########-` 90% |
-| Player movement | Partial | `######----` 60% |
-| Combat rules | Partial | `#######---` 65% |
-| Deathblows and death | Partial | `######----` 60% |
+| Player movement | Partial | `########--` 80% |
+| Combat rules | Partial | `########--` 75% |
+| Deathblows and death | Partial | `#######---` 70% |
 | Enemies and bosses | Partial | 102 placed types load; soldier, Owl and castle Genichiro fights verified |
-| Enemy AI | Partial | `#####-----` 50% |
+| Enemy AI | Partial | `#######---` 70% |
 | Maps and world | Partial | All 10 maps extracted; 9 gameplay maps walkable at baseline |
 | Audio | Partial | `###-------` 30% |
+| Rendering | Partial | `#######---` 70% |
 | Interface and game flow | Partial | Start/pause menus and combat HUD; inventory, checkpoints and story flow pending |
 
 ## Game data and formats
@@ -41,12 +42,12 @@ Docs: [FORMATS.md](FORMATS.md), [PARAMS.md](PARAMS.md).
 | Jump | Done | Traced gravity: 23.52 m/s2. |
 | Lock-on and camera | Done | From LockCamParam/CameraParam. |
 | Input buffer | Done | Uses the engine's accept/execute flags. |
-| Air control | Implemented | Per-type fall table, stick steering/braking and speed cap; fall heights in cm, material fall death and map respawn. |
+| Air control and falls | Done | Per-type fall table, stick steering and braking, fall heights in cm, material fall death, void falls return to safe ground. |
 | Upper/lower body animation layering | Not started | One clip shown at a time. |
-| Grappling hook | Mobility slice (b) implemented | Solved arrival arc, air shots, two chain shoot states, HKS cancels and landing, no-ride homing offsets, 0.6 m perch, exported rope, line fallback and target ring; native skinned rope placement and search boxes remain gaps. |
+| Grappling hook | Done | Solved arrival arcs, ground, air and chained shots, landing and perch, target ring; the rope is a line stand-in. |
 | Ledge hang | Partial | Ground grab, idle, climb up and drop for variation 0; real-data replay and synthetic HKS tests; docking thresholds remain placeholders. |
-| Wall hug | Mobility step 4 implemented | Kind-3 entry, idle, root-distance sliding, endpoint peek and action/away-stick exit through HKS; docking placement and search thresholds remain approximations. |
-| Swimming | Mobility step 6 implemented | Collision water surfaces, HKS swimming/diving/up/down, water landings, dolphin surfacing and shore exit; native water rendering/immersion, volumes and camera remain gaps. |
+| Wall hug | Done | Kind-3 entry, idle, root-distance sliding, endpoint peek and action/away-stick exit through HKS; docking placement and search thresholds remain approximations. |
+| Swimming and diving | Done | Collision water surfaces, HKS swimming/diving/up/down, water landings, dolphin surfacing and shore exit; native water rendering/immersion, volumes and camera remain gaps. |
 | Climbing | Not started | Ladder/cling data remains undecoded. |
 
 Docs: [HKS-COMBAT.md](HKS-COMBAT.md), [FORMATS.md](FORMATS.md).
@@ -60,9 +61,11 @@ Docs: [HKS-COMBAT.md](HKS-COMBAT.md), [FORMATS.md](FORMATS.md).
 | Guard arc, invulnerability windows, hit stop, knockback | Done | |
 | Attack lunge and auto-aim | Done | |
 | HP damage | Partial | Formula inferred, not traced. |
-| Perilous attacks and Mikiri counter | Not started | |
+| Perilous attacks, Mikiri counter, sweep counter | Done | |
+| Super armour | Done | TAE damage-motion windows (category 1001 SpEffects); airborne interruption falls and lands. |
+| Projectile guard and deflect | Done | Resolved against the bullet, no recoil for the shooter. |
 | Combat arts, prosthetic tools, items (gourd) | Not started | |
-| Status effects | Not started | Burn, poison, terror. |
+| Status effects | Partial | Owl's poison, seal and blinding; Genichiro's electrified and Lightning Reversal; burn and terror not yet. |
 
 Docs: [COMBAT-RULES.md](COMBAT-RULES.md), [HKS-COMBAT.md](HKS-COMBAT.md).
 
@@ -70,9 +73,10 @@ Docs: [COMBAT-RULES.md](COMBAT-RULES.md), [HKS-COMBAT.md](HKS-COMBAT.md).
 
 | Item | Status | Notes |
 | --- | --- | --- |
-| Posture-break deathblow | Done | Real throw pairs. |
+| Posture-break deathblow | Done | Real throw pairs, placed from ThrowParam dummies, kept clear of walls. |
+| Multi-mark bosses and phases | Done for the Owl and Genichiro | Map event hand-overs; Way of Tomoe behind a fade. |
 | Wolf death and respawn | Done | |
-| Multi-life bosses, deathblow from behind, plunge, stealth | Not started | |
+| Deathblow from behind, plunge, stealth | Not started | |
 | Resurrection | Not started | |
 
 Docs: [DEATHBLOW.md](DEATHBLOW.md).
@@ -84,8 +88,8 @@ Docs: [DEATHBLOW.md](DEATHBLOW.md).
 | Item | Status | Notes |
 | --- | --- | --- |
 | Ashina soldier (c1010) | Done | Own HKS script and real Lua AI. |
-| Great Shinobi Owl (c5060) | Working | Lua, tools, two deathblows and map phase events. |
-| Castle Genichiro (c7100, c7110) | Working with gaps | Castle rows, Lua attacks, arrows, marks and event hand-over; lightning remains. |
+| Great Shinobi Owl (c5060) | Done | Lua, tools, two deathblows and map phase events, boss brain. |
+| Castle Genichiro (c7100, c7110) | Done | Rooftop arena, arrows, two deathblows, Way of Tomoe with lightning and Lightning Reversal, boss brain through all three bars. |
 | Placed roster | Loads | 102/102 resource smoke; donor and animation-set support; combat fidelity needs per-enemy verification. |
 
 Docs: [AI.md](AI.md), [OWL.md](OWL.md), [GENICHIRO.md](GENICHIRO.md).
@@ -97,7 +101,8 @@ Docs: [AI.md](AI.md), [OWL.md](OWL.md), [GENICHIRO.md](GENICHIRO.md).
 | Lua 5.0 VM and goal runtime | Done | Runs the game's battle scripts. |
 | Parry timing | Done | From the attack flag (TAE flag 63). |
 | Stealth, perception, patrols, group behaviour | Not started | |
-| Model-driven boss brain | Not started | The project's research goal. |
+| Deflect counters | Done | Lua decides when; the boss brain can re-weight the offered counters. |
+| Model-driven boss brain | Done for the Owl, Genichiro and the soldier | Coach, checkpoint chooser, memory across sessions, per-player profiles, overlay; see [BRAIN.md](BRAIN.md). |
 
 Docs: [AI.md](AI.md).
 
@@ -119,18 +124,35 @@ Detailed measurements, reviewed screenshots, visual limitations and verification
 | m20_00_00_00 (Senpou Temple, Mt. Kongo) | Baseline | Walkable; foliage and material layers approximate. |
 | m25_00_00_00 (Fountainhead Palace) | Baseline | Walkable; use start 1, lake shader approximate. |
 | m89_00_00_99 (sky-dome library) | Inspection only | Loads after GPARAM/group fixes; no authored collision, cannot be walked. |
-| Map lighting from draw params, foliage, fog | Partial | GPARAM sun, ambient and fog load per map; local lights and shader fidelity remain. |
+| Ledges, grapple points, cover edges, lights | Done | Extracted for all maps. |
 | Placed enemies, objects, doors, ladders, events (EMEVD) | Started | Objects extracted, event visibility incomplete; Owl fight events run. |
 
 Docs: [FORMATS.md (Maps)](FORMATS.md#maps-msb-layouts-map-pieces-and-hit-collision).
+
+## Rendering
+
+| Item | Status | Notes |
+| --- | --- | --- |
+| Fog | Done | The game's volumetric fog model from its shaders, with exe-traced inputs. |
+| Exposure, tone mapping, bloom, colour grading | Done | The game's own post chain from its shaders. |
+| Light probes and bounce light | Done | GILM probes for specular, GIIV irradiance volumes for ambient. |
+| Point lights | Done | From the map's BTL files. |
+| Sky | Done | Authored sky domes per map and hour. |
+| Layered map materials, foliage cut-outs | Done | |
+| Shadows | Done | Two cascades with a caster budget. |
+| Arena far scenery | Done | Rendered to 1.5 km, collision cropped. |
+| Particle effects (FXR) | Partial | Reader for all effect files; billboard playback; combat effects are stand-ins. |
+| Character materials, cloth, water, wind | Not started | |
+
+Docs: [VISUALS-PLAN.md](VISUALS-PLAN.md), [SHADERS.md](SHADERS.md), [SHADER-INPUTS.md](SHADER-INPUTS.md).
 
 ## Audio
 
 | Item | Status | Notes |
 | --- | --- | --- |
-| Plain sound banks and TAE sound cues | Done | |
+| Plain sound banks and TAE sound cues | Done | Through the game's own FMOD runtime. |
 | Encrypted banks | Not started | Footsteps, voices, music. |
-| 3D positioning and mixing | Not started | |
+| 3D positioning and mixing | Partial | Listener on the camera with the events' own rolloff; no reverb or boss music yet. |
 
 Docs: [AUDIO.md](AUDIO.md).
 
@@ -148,11 +170,3 @@ Docs: `docs/INTERFACE.md`.
 
 Update the row when a feature lands.
 Percentages are rough judgements except where a count is given.
-
-## Castle Tomoe lightning (2026-10-11)
-
-Castle c7110 now runs its lightning bow and jump slashes, airborne capture and Wolf's HKS Lightning Reversal.
-Guarding still carries the electric charge, and landing with an unreleased charge causes the data-derived shock discharge.
-Flag-free bright bolts, blue sparks and material tint plus the white reversal flash are stand-ins for FXR.
-The return's missing weapon dummy uses a 10 m facing beam; complete electric resistance accumulation/scaling and the native charged-input acceptance rule remain fidelity gaps.
-Data ids and replay commands are in `docs/GENICHIRO.md`.
