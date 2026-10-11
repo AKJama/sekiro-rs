@@ -154,6 +154,107 @@ fn run_tactic(who: Who, start: f32, text: &str, kind: i32) -> Option<TacticRun> 
 const WHO: [Who; 2] = [Who::Soldier, Who::Owl];
 
 #[test]
+fn plan_attack_range_reproduction() {
+    let mut failures = Vec::new();
+    for distance in [1.6, 2.5, 4.0, 6.0] {
+        let mut plans: Vec<String> = table(Who::Soldier)
+            .actions
+            .iter()
+            .filter(|a| a.kind == sekiro_sim::brain::actions::ActionKind::Attack)
+            .map(|a| a.id.to_string())
+            .collect();
+        plans.extend(
+            [
+                "walk_in4>3013",
+                "walk_in2.5>3013",
+                "keep_range>3013",
+                "walk_in6>3013",
+                "strafe_right>3005+3007",
+                "walk_in4>3000+3001",
+                "keep_range>3000",
+                "back_off6>3000",
+                "retreat12>3000",
+            ]
+            .map(str::to_string),
+        );
+        for text in &plans {
+            let Some(mut duel) = load(Who::Soldier, distance) else {
+                return;
+            };
+            let ai = duel.ai.as_mut().unwrap();
+            ai.start_in_battle();
+            ai.enable_act_hook(&[]);
+            ai.state.act_hook.as_mut().unwrap().choice = Some(
+                table(Who::Soldier)
+                    .act_for_plan(
+                        &table(Who::Soldier).parse(text).unwrap(),
+                        duel.fighters[1].radius,
+                    )
+                    .unwrap(),
+            );
+            let mut contacts = 0;
+            let mut active = Vec::new();
+            let mut previous = false;
+            let last = *table(Who::Soldier)
+                .parse(text)
+                .unwrap()
+                .actions()
+                .last()
+                .unwrap();
+            let mut last_started = false;
+            let mut start = None;
+            let mut reach = 0.0f32;
+            let wolf_position = duel.player.body.position;
+            for _ in 0..600 {
+                keep_both_fresh(&mut duel);
+                duel.player.body.position = wolf_position;
+                let r = duel.step(&InputFrame::default(), DT);
+                let anim = duel
+                    .enemy
+                    .behavior
+                    .runtime
+                    .main_clip()
+                    .and_then(|c| sekiro_sim::lua_ai::anim_id_from_clip(&c.animation));
+                if last_started && anim != Some(last) {
+                    break;
+                }
+                last_started |= anim == Some(last);
+                if start.is_none() && anim.is_some_and(|id| (3000..3100).contains(&id)) {
+                    start = Some(duel.enemy.body.position);
+                }
+                if let Some(start) = start {
+                    reach = reach.max(
+                        duel.fighters[1]
+                            .active_reach(&duel.enemy, start, duel.fighters[0].radius)
+                            .unwrap_or(0.0),
+                    );
+                }
+                let now = !duel.enemy.tae_frame().attacks.is_empty();
+                if now && !previous {
+                    active.push(dist(&duel));
+                }
+                previous = now;
+                contacts += r.hits.iter().filter(|(h, _)| h.attacker == 1).count();
+                let events = duel.ai.as_mut().unwrap().drain_log();
+                if events
+                    .iter()
+                    .any(|e| matches!(e, AiEvent::GoalEnd { kind: 101000, .. }))
+                {
+                    break;
+                }
+            }
+            eprintln!(
+                "RANGE {distance} {text}: active={active:.2?} reach={reach:.2} contacts={contacts}"
+            );
+            if contacts == 0 {
+                failures.push(format!("{distance} {text}: {active:?}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
 fn walk_in_and_run_in_close_to_their_band() {
     for who in WHO {
         for (text, kind, start, band, cap) in [
@@ -179,6 +280,172 @@ fn walk_in_and_run_in_close_to_their_band() {
             }
         }
     }
+}
+
+#[test]
+fn reactive_tactics_answer_pressure_and_keep_the_attack_chain() {
+    for who in WHO {
+        for (text, kind, mash) in [
+            ("deflect>3000+3001", -10002, true),
+            ("dodge_back>3002", -10003, true),
+            ("deflect>3000+3001", -10002, false),
+            ("dodge_back>3002", -10003, false),
+        ] {
+            // Owl's corresponding ranged punish is 3011.
+            let text = if matches!(who, Who::Owl) && kind == -10003 {
+                "dodge_back>3011"
+            } else {
+                text
+            };
+            let expected_attack = table(who).parse(text).unwrap().actions()[0];
+            let Some(mut duel) = load(who, 1.6) else {
+                return;
+            };
+            let choice = table(who)
+                .act_for_plan(&table(who).parse(text).unwrap(), duel.fighters[1].radius)
+                .unwrap();
+            let ai = duel.ai.as_mut().unwrap();
+            ai.start_in_battle();
+            ai.enable_act_hook(&[]);
+            ai.state.act_hook.as_mut().unwrap().choice = Some(choice);
+            let mut began = None;
+            let mut ended = None;
+            let mut guarded = false;
+            let mut step_requested = false;
+            let mut attack_requested = false;
+            let mut step_distance = None;
+            let mut max_step_gain = 0.0f32;
+            for i in 0..600 {
+                keep_both_fresh(&mut duel);
+                let input = if mash && began.is_some() {
+                    swing(i, 8)
+                } else {
+                    InputFrame::default()
+                };
+                let r = duel.step(&input, DT);
+                guarded |= r
+                    .hits
+                    .iter()
+                    .any(|(h, result)| h.attacker == 0 && result.guarded);
+                for event in duel.ai.as_mut().unwrap().drain_log() {
+                    match event {
+                        AiEvent::GoalStart { kind: k, .. } if k == kind => began = Some(i),
+                        AiEvent::GoalEnd { kind: k, .. } if k == kind => ended = Some(i),
+                        AiEvent::Action(id) if table(who).back_steps.contains(&id) => {
+                            step_requested = true;
+                            step_distance = Some(dist(&duel));
+                        }
+                        AiEvent::Action(id) if began.is_some() && id == expected_attack => {
+                            attack_requested = true
+                        }
+                        AiEvent::Error(e) => panic!("{e}"),
+                        _ => {}
+                    }
+                }
+                if let Some(d) = step_distance {
+                    max_step_gain = max_step_gain.max(dist(&duel) - d);
+                }
+                if ended.is_some() && attack_requested && (!mash || kind == -10003 || guarded) {
+                    break;
+                }
+            }
+            eprintln!(
+                "{} {text} mash={mash}: {began:?}..{ended:?}, guarded={guarded}, step={step_requested}, gain={max_step_gain:.2}, attack={attack_requested}",
+                who.chr()
+            );
+            assert!(attack_requested, "{text}: no following attack");
+            assert!(
+                ended.unwrap() - began.unwrap() <= 92,
+                "{text}: exceeded 1.5 s cap"
+            );
+            if mash && kind == -10002 {
+                assert!(guarded, "{text}: no script guard/deflect");
+            }
+            if mash && kind == -10003 {
+                assert!(
+                    step_requested && max_step_gain > 0.2,
+                    "{text}: did not step back"
+                );
+            }
+            if !mash {
+                assert!(!step_requested && !guarded);
+            }
+        }
+    }
+}
+
+#[test]
+fn coach_reports_measured_attack_ranges_per_plan() {
+    let Some(mut duel) = load(Who::Soldier, 4.0) else {
+        return;
+    };
+    duel.set_brain(repeating(Who::Soldier, "walk_in4>3000+3001", 0.0), false)
+        .unwrap();
+    for _ in 0..900 {
+        keep_both_fresh(&mut duel);
+        duel.step(&InputFrame::default(), DT);
+        duel.ai.as_mut().unwrap().drain_log();
+    }
+    let driver = duel.boss_brain.as_mut().unwrap();
+    driver.end_fight(sekiro_sim::brain::FightEnd::Unfinished);
+    let mut input = driver.coach_input(driver.last_record.as_ref().unwrap());
+    let tactic = driver
+        .tally
+        .counts(sekiro_sim::brain::Side::Boss, "walk_in4");
+    eprintln!("COACH walk_in4: {tactic:?}; plans={:?}", input.plans);
+    assert_eq!(tactic.whiffed, 0, "movement is not a whiffed attack");
+    let [distance, reach] = input.range["walk_in4>3000+3001"];
+    assert!(distance > 0.0 && reach > distance, "{distance} {reach}");
+    assert!(input.fit(sekiro_sim::brain::coach::INPUT_BUDGET) <= 4096);
+    assert!(input.range.contains_key("walk_in4>3000+3001"));
+}
+
+#[test]
+fn retreat_rechecks_range_before_a_close_slash() {
+    let Some(mut duel) = load(Who::Soldier, 1.6) else {
+        return;
+    };
+    let choice = table(Who::Soldier)
+        .act_for_plan(
+            &table(Who::Soldier).parse("retreat12>3000").unwrap(),
+            duel.fighters[1].radius,
+        )
+        .unwrap();
+    let ai = duel.ai.as_mut().unwrap();
+    ai.start_in_battle();
+    ai.enable_act_hook(&[]);
+    ai.state.act_hook.as_mut().unwrap().choice = Some(choice);
+    let wolf = duel.player.body.position;
+    let mut attack_start = None;
+    let mut active_distance = None;
+    let mut reach = 0.0f32;
+    let mut contacted = false;
+    for _ in 0..900 {
+        keep_both_fresh(&mut duel);
+        duel.player.body.position = wolf;
+        let r = duel.step(&InputFrame::default(), DT);
+        let attacking = r.enemy.animation.as_deref() == Some("a000_003000");
+        if attack_start.is_some() && !attacking {
+            break;
+        }
+        if attacking && attack_start.is_none() {
+            attack_start = Some((duel.enemy.body.position, dist(&duel)));
+        }
+        if let Some((start, _)) = attack_start
+            && let Some(r) =
+                duel.fighters[1].active_reach(&duel.enemy, start, duel.fighters[0].radius)
+        {
+            reach = reach.max(r);
+            active_distance.get_or_insert(dist(&duel));
+        }
+        contacted |= r.hits.iter().any(|(h, _)| h.attacker == 1);
+        duel.ai.as_mut().unwrap().drain_log();
+    }
+    eprintln!(
+        "RETREAT slash: start={:.2} first_active={active_distance:?} reach={reach:.2} contacted={contacted}",
+        attack_start.unwrap().1
+    );
+    assert!(contacted);
 }
 
 #[test]

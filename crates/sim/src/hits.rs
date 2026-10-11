@@ -352,6 +352,42 @@ pub struct Combatant {
 }
 
 impl Combatant {
+    /// Furthest active melee capsule from an attack's starting centre, including actual
+    /// root travel and the defender's radius. This is a radial envelope, not a cone test.
+    /// No value for projectile-only windows or missing shapes.
+    pub fn active_reach(
+        &self,
+        character: &Character,
+        start: [f32; 3],
+        defender_radius: f32,
+    ) -> Option<f32> {
+        if character.tae_frame().attacks.is_empty() {
+            return None;
+        }
+        let model = character.bone_source_matrices();
+        let world = character.source_to_world();
+        let mut reach: Option<f32> = None;
+        for event in &character.tae_frame().attacks {
+            let TaeKind::Attack { judge, .. } = event.kind else {
+                continue;
+            };
+            let Some(attack) = self.attacks.get(&judge) else {
+                continue;
+            };
+            for shape in &attack.shapes {
+                for dummy in [shape.dummy_a, shape.dummy_b] {
+                    for p in self.rig.positions(dummy, &model, world) {
+                        let r = ((p.x - start[0]).powi(2) + (p.z - start[2]).powi(2)).sqrt()
+                            + shape.radius
+                            + defender_radius;
+                        reach = Some(reach.unwrap_or(0.0).max(r));
+                    }
+                }
+            }
+        }
+        reach
+    }
+
     /// The player with the starting katana (CharaInitParam 10010).
     pub fn player(cache: &Path, skeleton: &Skeleton) -> Self {
         let (pd, dd) = param_dirs(cache);

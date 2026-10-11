@@ -163,6 +163,12 @@ Before this, every NPC combo waited for the previous animation to end and stood 
 `AiBrain::enable_act_hook` lets an outside controller (the boss brain, `docs/BRAIN.md`) choose a battle goal's acts.
 It keeps the scripts' shared `Common_Battle_Activate` under another global name and puts a host function in its place; that function queues the outside `ActChoice` (an `Approach_Act_Flex` approach, then the attack goals) on the battle goal, unless the script already queued a reaction or weighted one of the configured reflex acts, and otherwise calls the script's own function unchanged (ours).
 Interrupts, the deflect counters and everything before the act pick still run in the scripts.
+External attack approaches are deferred until that step activates, so `Approach_Act_Flex` sees the distance after earlier tactics.
+The private plan wrappers use negative ids outside the game's goal-id space.
+`deflect` intercepts only FindAttack/ParryTiming while ready and offers the battle goal's real interrupt callback a local queue, preserving the attack chain after a parry response.
+It does not alter probabilities, ranks, parry intervals or combat resolution.
+`dodge_back` reads the target's visible attack state (`AiWorld::target_attacking`, including wind-up), requests the table's back-step action within 2.5 m, and leaves other reactions live.
+Both readiness goals succeed at their 1.5 s cap.
 
 ## Not done yet
 

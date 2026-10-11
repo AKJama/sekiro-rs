@@ -129,7 +129,8 @@ const fn plain_step(id: i32, label: &'static str) -> BossAction {
 
 /// The Great Shinobi Owl (c5060) in phase 1. Approach distances and pressure from the act that
 /// uses each id in `506001_battle.lua` (Act01 to Act15, Act30); descriptions from his TAE and
-/// AtkParam rows (`docs/OWL.md`). The tool acts (3010 firecracker, 3017 explosive slash, 3030
+/// AtkParam rows (`docs/OWL.md`). Firecrackers (3010) use Act07's 3.5 m approach and reset
+/// pressure number 5 to zero. The other tool acts (3017 explosive slash, 3030
 /// poison balls, 3069 smoke screen) were added with their bullets; their approach distances are
 /// ours, read from where their bullets land (the reach of each in `docs/OWL.md`, "Tools"), and
 /// their pressure is 0 until the acts that use them are read. Left out: warps, grabs, phase-2
@@ -144,10 +145,11 @@ pub const OWL: BossActions = BossActions {
         attack(3003, "jumping forward roll, slash down", 10.7, 9.0),
         attack(3005, "front kick (posture only)", 2.8, 1.0),
         attack(3009, "shuriken", 9.7, 1.0),
-        attack(
+        setting(
             3010,
             "firecrackers scattered in front (unblockable bangs)",
-            4.0,
+            3.5,
+            5,
             0.0,
         ),
         attack(3011, "rushing slash", 11.0, 1.0),
@@ -181,6 +183,11 @@ pub const OWL: BossActions = BossActions {
     scripted: [&[3005], &[3031]],
     tactics: &Tactic::ALL,
     chains: &[
+        "deflect>3000+3001",
+        "deflect>3005",
+        "guard1>deflect>3000",
+        "dodge_back>3003",
+        "dodge_back>3011",
         "walk_in4>3005",
         "walk_in2.5>3005",
         "walk_in4>3000+3001",
@@ -292,6 +299,11 @@ pub const SOLDIER: BossActions = BossActions {
     scripted: [&[3000, 3001], &[3005, 3007]],
     tactics: &Tactic::ALL,
     chains: &[
+        "deflect>3000+3001",
+        "deflect>3005+3007",
+        "guard1>deflect>3008",
+        "dodge_back>3002",
+        "dodge_back>3014",
         "walk_in4>3013",
         "walk_in2.5>3013",
         "walk_in6>3013",
@@ -486,7 +498,11 @@ impl BossActions {
         let mut i = 0;
         while i < plan.steps.len() {
             if let Step::Tactic(t) = plan.steps[i] {
-                goals.push(t.goal(i));
+                let mut goal = t.goal(i);
+                if t == Tactic::DodgeBack {
+                    goal.params[0] = f64::from(*self.back_steps.last().unwrap_or(&5201));
+                }
+                goals.push(goal);
                 i += 1;
                 continue;
             }

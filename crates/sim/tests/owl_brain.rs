@@ -164,7 +164,24 @@ fn tally_counts_outcomes_in_a_scripted_duel() {
         let m = if side == Side::Boss { &s.boss } else { &s.wolf };
         m.values().map(f).sum::<u32>()
     };
-    let n = total(Side::Boss, |c| c.n);
+    let n: u32 = s
+        .boss
+        .0
+        .iter()
+        .filter(|(key, _)| {
+            key.parse::<i32>()
+                .is_ok_and(|id| (3000..3100).contains(&id))
+        })
+        .map(|(_, c)| c.n)
+        .sum();
+    for (key, c) in &s.boss.0 {
+        if key
+            .parse::<i32>()
+            .is_ok_and(|id| (5200..5300).contains(&id))
+        {
+            assert_eq!(c.whiffed, 0, "back step {key} cannot whiff");
+        }
+    }
     let hit = total(Side::Boss, |c| c.hit);
     let guarded = total(Side::Boss, |c| c.blocked + c.deflected);
     let whiffed = total(Side::Boss, |c| c.whiffed);
@@ -174,7 +191,7 @@ fn tally_counts_outcomes_in_a_scripted_duel() {
     assert!(guarded > 0 && guarded <= owl[1], "{guarded} vs {owl:?}");
     assert!(
         whiffed + hit + guarded >= n,
-        "every exchange has an outcome"
+        "every attack exchange has an outcome"
     );
     assert!(s.boss["3000"].n > 0 && s.boss["3001"].n > 0);
     // Wolf's slashes are in his tally, and the ones that landed punished the Owl.

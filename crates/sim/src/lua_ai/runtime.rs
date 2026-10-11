@@ -31,12 +31,20 @@ pub const RESULT_FAILED: i32 = -1;
 pub const RESULT_CONTINUE: i32 = 0;
 pub const RESULT_SUCCESS: i32 = 1;
 
+// Private plan wrappers, outside the game's goal-id space.
+const PLAN_APPROACH: i32 = -10001;
+const PLAN_DEFLECT: i32 = -10002;
+const PLAN_DODGE_BACK: i32 = -10003;
+
 const OBJ_AI: u8 = 0;
 const OBJ_GOAL: u8 = 1;
 
 /// The engine's leaf goals, by goal id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeGoal {
+    PlanApproach,
+    PlanDeflect,
+    PlanDodgeBack,
     /// 2000 Wait, 2 Stay, 5000 WaitCancelTiming: idle until the lifetime ends.
     Wait,
     /// 2019 MoveToSomewhere and its variants: move until within a distance of a target.
@@ -59,6 +67,9 @@ pub enum NativeGoal {
 impl NativeGoal {
     pub fn for_id(id: i32) -> Option<NativeGoal> {
         Some(match id {
+            PLAN_APPROACH => NativeGoal::PlanApproach,
+            PLAN_DEFLECT => NativeGoal::PlanDeflect,
+            PLAN_DODGE_BACK => NativeGoal::PlanDodgeBack,
             2000 | 2 | 5000 => NativeGoal::Wait,
             2019 | 2013 | 2025 | 2026 | 2027 | 2023 | 2024 | 2028 | 4 => NativeGoal::MoveTo,
             2101 => NativeGoal::Guard,
@@ -698,33 +709,22 @@ impl AiState {
         let n = Value::Num;
         for step in &choice.goals {
             if let Some(d) = step.approach {
-                // Approach_Act_Flex(ai, goal, dist, walkDist, runDist, walkChance, guardChance,
-                // walkLife, runLife). The Owl's acts pass (d, d, 999, 30, 0, 1.5, 3), but his
-                // script only picks an act at a distance that suits it; an outside plan may
-                // start from anywhere, so it runs beyond 3 m more and gets longer lifetimes
-                // (ours).
-                let before = self.goal(g).subgoals.len();
-                vm.call_global(
-                    self,
-                    "Approach_Act_Flex",
-                    &[
-                        ai_obj(),
-                        goal_obj(g),
-                        n(d),
-                        n(d),
-                        n(d + 3.0),
-                        n(30.0),
-                        n(0.0),
-                        n(3.0),
-                        n(5.0),
-                    ],
-                )?;
-                let added: Vec<u32> = self.goal(g).subgoals.iter().skip(before).copied().collect();
-                for id in added {
-                    self.goal_mut(id).plan_step = step.step;
+                // Evaluate the script's range check when this step runs, after earlier
+                // tactics, rather than against the world at whole-plan queue time.
+                if let Some(Value::Obj(sub)) = self
+                    .add_goal(g, false, &[n(f64::from(PLAN_APPROACH)), n(6.0), n(d)])
+                    .into_iter()
+                    .next()
+                {
+                    self.goal_mut(sub.id).plan_step = step.step;
                 }
             }
-            let Some(kind) = vm.get_global(step.goal).num() else {
+            let kind = match step.goal {
+                "PLAN_Deflect" => Some(f64::from(PLAN_DEFLECT)),
+                "PLAN_DodgeBack" => Some(f64::from(PLAN_DODGE_BACK)),
+                _ => vm.get_global(step.goal).num(),
+            };
+            let Some(kind) = kind else {
                 self.log(AiEvent::Error(format!(
                     "act goal {} is not defined",
                     step.goal
@@ -1106,6 +1106,36 @@ pub fn tick(vm: &mut Vm, st: &mut AiState, world: AiWorld) {
 fn dispatch_interrupt(vm: &mut Vm, st: &mut AiState, kind: i32) {
     st.interrupt = Some(kind);
     st.log(AiEvent::Interrupt(kind));
+    // A parry reflex normally clears the battle goal, dropping its remaining plan.
+    // During readiness, give that same script a local queue so its response finishes
+    // this tactic and preserves the following attack. Other interrupts remain normal.
+    if kind == 1 || kind == 24 {
+        let mut at = st.top;
+        while let Some(&next) = st.goal(at).subgoals.front() {
+            at = next;
+            let k = st.goal(at).kind;
+            if k == PLAN_DODGE_BACK || k == PLAN_DEFLECT {
+                if k == PLAN_DEFLECT && kind == 24 && st.goal(at).phase == 0 {
+                    let battle = st.think.battle_goal_id;
+                    let handled = vm
+                        .call_global(
+                            st,
+                            "InterruptTableGoal_Common",
+                            &[ai_obj(), goal_obj(at), Value::Num(f64::from(battle))],
+                        )
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.into_iter().next())
+                        .is_some_and(|v| v.truthy());
+                    if handled && !st.goal(at).subgoals.is_empty() {
+                        st.goal_mut(at).phase = 1;
+                    }
+                }
+                st.interrupt = None;
+                return;
+            }
+        }
+    }
     let logic = st.think.logic_id as f64;
     let top = st.top;
     let handled = vm
@@ -1232,6 +1262,27 @@ fn update(vm: &mut Vm, st: &mut AiState, id: u32, depth: usize) -> i32 {
         }
         apply_timing_sets(st, id, TIMING_ACTIVATE);
         call_cb(vm, st, id, "Activate");
+        if kind == PLAN_APPROACH {
+            let d = st.goal(id).param(0);
+            if let Err(e) = vm.call_global(
+                st,
+                "Approach_Act_Flex",
+                &[
+                    ai_obj(),
+                    goal_obj(id),
+                    Value::Num(d),
+                    Value::Num(d),
+                    Value::Num(d + 3.0),
+                    Value::Num(30.0),
+                    Value::Num(0.0),
+                    Value::Num(3.0),
+                    Value::Num(5.0),
+                ],
+            ) {
+                st.log(AiEvent::Error(e.to_string()));
+                return RESULT_FAILED;
+            }
+        }
         if st.goals.get(id as usize).is_none_or(Option::is_none) {
             return RESULT_FAILED;
         }
@@ -1322,6 +1373,31 @@ fn update(vm: &mut Vm, st: &mut AiState, id: u32, depth: usize) -> i32 {
 fn native_update(st: &mut AiState, id: u32, n: NativeGoal) -> i32 {
     let g = st.goal(id).clone();
     match n {
+        NativeGoal::PlanApproach => {
+            if g.subgoals.is_empty() {
+                RESULT_SUCCESS
+            } else {
+                RESULT_CONTINUE
+            }
+        }
+        NativeGoal::PlanDeflect => {
+            st.request.face_yaw = st.yaw_to(0);
+            if g.phase == 1 && g.subgoals.is_empty() {
+                RESULT_SUCCESS
+            } else {
+                RESULT_CONTINUE
+            }
+        }
+        NativeGoal::PlanDodgeBack => {
+            st.request.face_yaw = st.yaw_to(0);
+            if g.phase == 0 {
+                if !st.world.target_attacking || st.dist(0) > 2.5 {
+                    return RESULT_CONTINUE;
+                }
+                st.goal_mut(id).phase = 1;
+            }
+            action_update(st, id, &g)
+        }
         NativeGoal::Wait => {
             let target = g.param(0) as i32;
             if target != -1 && target != -2 {

@@ -194,6 +194,9 @@ impl Checkpoints {
 /// What is counted about the fight in progress.
 #[derive(Debug, Clone, Default)]
 struct FightState {
+    /// Completed melee samples: count, sum of starting distances, sum of measured reaches.
+    ranges: BTreeMap<String, (u32, f32, f32)>,
+    range_open: Option<AttackRange>,
     metrics: MetricsTracker,
     requests: u32,
     decisions: u32,
@@ -210,6 +213,27 @@ struct FightState {
     by_set: BTreeMap<String, Counts>,
     /// Seconds each set was the active one.
     set_secs: BTreeMap<String, f32>,
+}
+
+#[derive(Debug, Clone)]
+struct AttackRange {
+    plan: String,
+    start: [f32; 3],
+    distance: f32,
+    reach: Option<f32>,
+}
+
+impl FightState {
+    fn close_range(&mut self) {
+        if let Some(sample) = self.range_open.take()
+            && let Some(reach) = sample.reach
+        {
+            let (n, distance, total_reach) = self.ranges.entry(sample.plan).or_default();
+            *n += 1;
+            *distance += sample.distance;
+            *total_reach += reach;
+        }
+    }
 }
 
 pub struct BrainDriver {
@@ -1087,6 +1111,7 @@ impl BrainDriver {
             .and_then(|c| anim_id_from_clip(&c.animation))
             .filter(|a| (3000..3100).contains(a) || (5200..5300).contains(a));
         if boss != self.boss_open || (boss.is_some() && report.enemy.clip_started) {
+            self.fight.close_range();
             events.push(match boss {
                 Some(a) => TallyEvent::Start {
                     side: Side::Boss,
@@ -1095,6 +1120,17 @@ impl BrainDriver {
                 None => TallyEvent::End { side: Side::Boss },
             });
             if boss.is_some_and(|a| a < 3100) {
+                if let Some((_, plan, _)) = self.fight.runs.last() {
+                    let start = duel.enemy.body.position;
+                    let wolf = duel.player.body.position;
+                    self.fight.range_open = Some(AttackRange {
+                        plan: plan.clone(),
+                        start,
+                        distance: ((wolf[0] - start[0]).powi(2) + (wolf[2] - start[2]).powi(2))
+                            .sqrt(),
+                        reach: None,
+                    });
+                }
                 // An attack step started (a back step does not count).
                 self.fight.metrics.attack_started(t);
                 self.pacing.last_attack = t;
@@ -1104,6 +1140,12 @@ impl BrainDriver {
             if boss.is_some() {
                 self.tactic_open = false;
             }
+        }
+        if let Some(sample) = self.fight.range_open.as_mut()
+            && let Some(reach) =
+                duel.fighters[1].active_reach(&duel.enemy, sample.start, duel.fighters[0].radius)
+        {
+            sample.reach = Some(sample.reach.unwrap_or(0.0).max(reach));
         }
         // Wolf's attacks: from the step his clip raises the parry-timing flag (the signal the
         // game gives enemies) until the clip changes.
@@ -1258,7 +1300,7 @@ impl BrainDriver {
                 hit: u32::from(x.outcome.hit),
                 blocked: u32::from(x.outcome.blocked),
                 deflected: u32::from(x.outcome.deflected),
-                whiffed: u32::from(x.outcome.whiffed()),
+                whiffed: u32::from(x.whiffed()),
                 punished: u32::from(x.outcome.punished),
             });
             self.fight.by_plan.entry(plan).or_default().merge(&one);
@@ -1273,6 +1315,7 @@ impl BrainDriver {
         }
         let t = self.time;
         let done = self.tally.flush(t);
+        self.fight.close_range();
         self.attribute(&done);
         self.close_set_time();
         self.log_outcomes(t, &done);
@@ -1360,6 +1403,15 @@ impl BrainDriver {
             },
             trend: Trend::new(&self.memory.history, None),
             plans: top(&self.fight.by_plan),
+            range: self
+                .fight
+                .ranges
+                .iter()
+                .map(|(plan, &(n, distance, reach))| {
+                    let round = |x: f32| (x / n as f32 * 100.0).round() / 100.0;
+                    (plan.clone(), [round(distance), round(reach)])
+                })
+                .collect(),
             sets,
             wolf: top(self.tally.all(Side::Wolf)),
             overall: top(&self.memory.coach.plans),
@@ -1478,7 +1530,7 @@ impl BrainDriver {
             self.write_line(&OutcomeLine {
                 ev: "outcome",
                 t: ms(t),
-                whiffed: x.outcome.whiffed(),
+                whiffed: x.whiffed(),
                 exchange: x,
             });
         }

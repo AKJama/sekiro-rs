@@ -18,6 +18,10 @@ use crate::lua_ai::ActGoal;
 /// (`lua_ai::runtime::NativeGoal`) with a lifetime cap, after which it counts as done.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Tactic {
+    /// Face Wolf and let the battle script answer an incoming hit for up to 1.5 s.
+    Deflect,
+    /// Wait for a nearby attack wind-up, then request the boss's own back step.
+    DodgeBack,
     /// Stand still facing Wolf for this many seconds (Wait, goal 2000).
     Hold(f32),
     /// Hold the guard for this many seconds (Guard, 2101, action 3100).
@@ -51,7 +55,9 @@ const GUARD_ACTION: f64 = 3100.0;
 
 impl Tactic {
     /// Every tactic variant a plan may use, in the order they are offered.
-    pub const ALL: [Tactic; 15] = [
+    pub const ALL: [Tactic; 17] = [
+        Tactic::Deflect,
+        Tactic::DodgeBack,
         Tactic::Hold(1.0),
         Tactic::Hold(2.0),
         Tactic::Hold(3.5),
@@ -72,6 +78,8 @@ impl Tactic {
     /// The text form, such as `hold3.5` or `strafe_left`.
     pub fn token(&self) -> String {
         match *self {
+            Tactic::Deflect => "deflect".into(),
+            Tactic::DodgeBack => "dodge_back".into(),
             Tactic::Hold(s) => format!("hold{s}"),
             Tactic::Guard(s) => format!("guard{s}"),
             Tactic::WalkIn(d) => format!("walk_in{d}"),
@@ -91,6 +99,10 @@ impl Tactic {
     /// What it does, for the instructions and the choice list.
     pub fn label(&self) -> String {
         match *self {
+            Tactic::Deflect => "ready for a script-governed guard or deflect, up to 1.5 s".into(),
+            Tactic::DodgeBack => {
+                "back step when Wolf starts attacking within 2.5 m, up to 1.5 s".into()
+            }
             Tactic::Hold(s) => format!("stand still facing Wolf for {s} s"),
             Tactic::Guard(s) => format!("hold your guard for {s} s"),
             Tactic::WalkIn(d) => format!("walk slowly toward Wolf until {d} m away"),
@@ -106,6 +118,7 @@ impl Tactic {
     /// The most seconds it can take (its goal's lifetime); at the cap it counts as done.
     pub fn cap(&self) -> f32 {
         match *self {
+            Tactic::Deflect | Tactic::DodgeBack => 1.5,
             Tactic::Hold(s) | Tactic::Guard(s) => s,
             Tactic::WalkIn(_) => 5.0,
             Tactic::RunIn(_) => 4.0,
@@ -121,6 +134,8 @@ impl Tactic {
     pub fn goal(&self, step: usize) -> ActGoal {
         let life = f64::from(self.cap());
         let (goal, params, away): (&'static str, Vec<f64>, bool) = match *self {
+            Tactic::Deflect => ("PLAN_Deflect", vec![0.0], false),
+            Tactic::DodgeBack => ("PLAN_DodgeBack", vec![5201.0, 0.0, 0.0, 2.0, 0.0], false),
             Tactic::Hold(_) => (WAIT, vec![0.0], false),
             Tactic::Guard(_) => (GUARD, vec![GUARD_ACTION, 0.0], false),
             // MoveToSomewhere(target, dirType, dist, turnTarget, walk)

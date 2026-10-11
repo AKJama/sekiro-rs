@@ -158,6 +158,10 @@ pub struct Duel {
     /// Testing aid: the player takes no HP or posture damage (hits, reactions, hit stop and
     /// knockback are unchanged).
     pub god: bool,
+    /// Testing aid (`--immortal`): Wolf cannot die (HP stops at 1) but his posture, guard breaks
+    /// and HP-dependent recovery work as in the game, so mashing into guards and deflects
+    /// can still break him.
+    pub immortal: bool,
     /// The fight's map events (phase changes, boss bar, defeat), when the enemy has any
     /// ([`crate::arena::boss_events`]).
     pub events: Option<FightEvents>,
@@ -343,6 +347,7 @@ impl Duel {
             fall_respawn_depth: None,
             boss_brain: None,
             god: false,
+            immortal: false,
             events: None,
         })
         .map(|mut duel| {
@@ -454,6 +459,13 @@ impl Duel {
                 .spawn
                 .map_or(self.enemy.body.position, |s| s[1].position),
             parry_timing: self.parry_timing(),
+            target_attacking: self
+                .player
+                .behavior
+                .runtime
+                .main_state_path()
+                .iter()
+                .any(|s| s.contains("Attack")),
             damaged: self.enemy_damaged,
         }
     }
@@ -1477,6 +1489,9 @@ impl Duel {
             let f = &mut self.rules.fighters[0];
             f.vitality.cannot_die = true;
             f.posture.no_consume = true;
+        }
+        if self.immortal {
+            self.rules.fighters[0].vitality.cannot_die = true;
         }
         let mut found = self.detector.detect(
             &[&self.player, &self.enemy],

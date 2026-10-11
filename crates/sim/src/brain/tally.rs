@@ -79,6 +79,19 @@ pub struct Exchange {
     pub outcome: Outcome,
 }
 
+impl Exchange {
+    /// Only attacks can whiff. Boss movement/guard tactics and back steps remain exchanges
+    /// for usage and punishment, but contacting nothing is their normal outcome.
+    pub fn whiffed(&self) -> bool {
+        let attack = self.side == Side::Wolf
+            || self
+                .key
+                .parse::<i32>()
+                .is_ok_and(|id| (3000..3100).contains(&id));
+        attack && self.outcome.whiffed()
+    }
+}
+
 /// Counts over exchanges: `[n, hit, blocked, deflected, whiffed, punished]` in JSON.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Counts {
@@ -91,12 +104,13 @@ pub struct Counts {
 }
 
 impl Counts {
-    fn add(&mut self, o: &Outcome) {
+    fn add(&mut self, exchange: &Exchange) {
+        let o = &exchange.outcome;
         self.n += 1;
         self.hit += u32::from(o.hit);
         self.blocked += u32::from(o.blocked);
         self.deflected += u32::from(o.deflected);
-        self.whiffed += u32::from(o.whiffed());
+        self.whiffed += u32::from(exchange.whiffed());
         self.punished += u32::from(o.punished);
     }
 
@@ -340,7 +354,7 @@ impl Tally {
             self.all[x.side.index()]
                 .entry(x.key.clone())
                 .or_default()
-                .add(&x.outcome);
+                .add(x);
         }
         done
     }

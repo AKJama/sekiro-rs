@@ -46,7 +46,10 @@ pub fn has_attack(plan: &Plan, actions: &BossActions) -> bool {
 pub fn is_retreat(plan: &Plan, actions: &BossActions) -> bool {
     plan.steps.iter().any(|s| match s {
         Step::Act(id) => actions.get(*id).is_some_and(|a| a.kind == ActionKind::Step),
-        Step::Tactic(t) => matches!(t, Tactic::BackOff(_) | Tactic::Retreat(_)),
+        Step::Tactic(t) => matches!(
+            t,
+            Tactic::BackOff(_) | Tactic::Retreat(_) | Tactic::DodgeBack
+        ),
     })
 }
 

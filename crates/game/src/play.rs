@@ -70,6 +70,7 @@ pub struct Options {
     /// Testing aid (`--god`): Wolf takes no HP or posture damage; hits, reactions and hit stop
     /// are otherwise unchanged.
     pub god: bool,
+    pub immortal: bool,
     /// Testing aid (`--force-act <id>`): the enemy requests this action (an animation id such
     /// as 3040, the Owl's grab) whenever it is free, on top of its AI (or alone with `--passive`).
     pub force_act: Option<i32>,
@@ -199,6 +200,7 @@ pub fn run(options: Options) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("loading the simulation: {e}"))?;
     duel.enemy_active = options.enemy;
     duel.god = options.god;
+    duel.immortal = options.immortal;
     duel.force_act = options.force_act;
     if options.simple_ai {
         duel.use_simple_ai();

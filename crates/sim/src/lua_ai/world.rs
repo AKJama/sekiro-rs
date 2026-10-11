@@ -40,6 +40,8 @@ pub struct AiWorld {
     /// engine's parry-timing signal to the AI); its rising edge fires INTERUPT_FindAttack and
     /// INTERUPT_ParryTiming.
     pub parry_timing: bool,
+    /// An attack animation is playing on the target, including its wind-up.
+    pub target_attacking: bool,
     /// I took damage this step (INTERUPT_Damaged).
     pub damaged: bool,
 }

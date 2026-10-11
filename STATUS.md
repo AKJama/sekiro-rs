@@ -271,3 +271,41 @@ Validation passed: `cargo fmt --all`, `cargo fmt --all --check`, workspace/all-t
 All Cargo commands used `CARGO_TARGET_DIR=target/alt` and six jobs; fmt uses `CARGO_BUILD_JOBS=6` because it has no `-j` flag.
 Final release test log: `target/alt/combat-fundamentals-final-tests.log`.
 No commits, real model/API calls, real Claude/Codex CLI runs, credential reads, game sessions, game-install writes, worktrees, or cache/re links, junctions or deletions were made.
+
+## Plan spacing, deflect and timed back steps (2026-10-11)
+
+Plan attack approaches now evaluate the real Lua `Approach_Act_Flex` range check when the attack step activates, after earlier tactics, instead of while the whole plan is queued.
+The soldier's action-table distances already match `101000_battle.lua`; his hit radius was subtracted once and NPC TAE 760 lunges already work.
+The actual range reproduction is `retreat12>3000` with stationary Wolf initially 1.6 m away: before, attack start 4.57 m, first active frame 3.19 m, observed capsule/root-travel reach 4.29 m, no contact; after, start 2.02 m, first active 0.80 m, reach 3.92 m, contact.
+The six reported plans contact stationary Wolf at 2.5, 4 and 6 m even on the original runtime, so their historical whiff rates were not reproduced as pure stationary range failures.
+Owl's firecrackers now use `506001_battle.lua` Act07's 3.5 m approach and reset pressure number 5 to zero instead of the previous approximation.
+
+A second bug inflated the evidence: movement, guard and back-step exchanges were counted as whiffed attacks because they contacted nothing.
+They still contribute usage and punishment but cannot whiff in the tally, per-plan/per-set summaries or outcome logs.
+The 15 s offline `walk_in4>3000+3001` fight runs four plans and lands eight attacks: its count changes from [12,8,0,0,4,0] to [12,8,0,0,0,0].
+Existing memory files were not read or rewritten; historical totals retain their old false whiffs.
+
+Both bosses offer `deflect` and `dodge_back` and five new attack chains each; all chains are listed in `docs/BRAIN.md`.
+`deflect` faces Wolf for up to 1.5 s and routes the real parry-timing interrupt through the boss's own battle callback into a local queue, preserving the following attack after its guard/deflect response.
+The soldier's rank, facing, weapon reach, interval and consecutive-guard roll still choose guard 3100 versus deflect 3101; the duel's guard judge, repel defence, active effects and attack data still decide the contact.
+Owl uses his own parry callback.
+`dodge_back` watches Wolf's visible attack wind-up within 2.5 m and requests soldier 5211 or Owl 5201, then continues the attack chain.
+The soldier's pressure replay guards then requests 3000, finishes readiness after 36 ticks, and its timed short step gains 0.86 m and finishes after 38 ticks before requesting 3002.
+Both idle waits finish after 90 ticks at 60 Hz.
+Both caps feed anti-stall lead time; `dodge_back` also uses the eight-second retreat allowance.
+
+The coach summary now includes per-plan mean [attack-start distance, observed melee reach] in metres, rounded to two decimals.
+Reach samples actual animated dummy-poly capsules, AtkParam radii, root travel and Wolf's body radius; projectile-only and interrupted-before-active attacks have no melee sample.
+The radial envelope and averages are diagnostics, with direction, timing and target movement still relevant.
+Ranges trim with plan outcomes and the worst-case summary stays inside 4096 bytes.
+Updated `docs/BRAIN.md` and `docs/AI.md` document the mechanics, limitations, chains and before/after evidence.
+
+Validation passed: cargo fmt --all and its check, workspace/all-targets Clippy with -D warnings, and the requested release sim plus brain-net lib/bin/integration suite (310 tests).
+The final coach wording was also rechecked through the complete offline brain-net suite.
+The range regression exercises all thirteen soldier attacks and nine mixed plans at 1.6, 2.5, 4 and 6 m (88 cases), plus dedicated retreat-whiff, reactive soldier/Owl pressure, timeout, telemetry/budget and non-attack-whiff tests.
+The Owl tally test now checks contact/whiff outcomes only for attacks and separately verifies that back steps cannot whiff.
+Logs: `target/alt/plan-range-before.log`, `plan-retreat-before.log`, `plan-combat-tests-final.log`, `plan-protocol-tests.log`, and `plan-combat-clippy.log`.
+All Cargo commands used target/alt and six jobs; fmt uses CARGO_BUILD_JOBS=6 because it has no -j option.
+This task made no commits, real model/API calls, real Claude/Codex CLI runs, credential reads, live game runs, game-install writes, worktrees, or cache/re links, junctions or deletions.
+Input buffering, attack timing, hit stop and Wolf's movement were not changed by this task.
+Concurrent --immortal edits in the game and Duel were left intact and are separate from this work.

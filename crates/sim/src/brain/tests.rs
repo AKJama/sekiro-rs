@@ -91,6 +91,31 @@ fn punish_window_and_ranked_summary() {
 }
 
 #[test]
+fn tactics_and_back_steps_cannot_whiff_but_attacks_can() {
+    let mut tally = Tally::default();
+    for (i, key) in [
+        "walk_in4",
+        "guard1",
+        "deflect",
+        "dodge_back",
+        "5201",
+        "5211",
+        "3013",
+    ]
+    .iter()
+    .enumerate()
+    {
+        start(&mut tally, i as f32, Side::Boss, key);
+    }
+    let done = tally.flush(8.0);
+    for x in done {
+        let expected = u32::from(x.key == "3013");
+        assert_eq!(u32::from(x.whiffed()), expected);
+        assert_eq!(tally.counts(Side::Boss, &x.key).whiffed, expected);
+    }
+}
+
+#[test]
 fn exchanges_wait_out_the_punish_window() {
     let mut t = Tally::default();
     start(&mut t, 0.0, Side::Boss, "3005");
@@ -104,6 +129,12 @@ fn exchanges_wait_out_the_punish_window() {
 
 #[test]
 fn plans_become_acts() {
+    let firecracker = OWL.act_for(&[3010], 0.7).unwrap();
+    assert_eq!(firecracker.goals[0].approach, Some(f64::from(3.5f32 - 0.7)));
+    assert_eq!(
+        firecracker.goals[0].number,
+        Some(NumberOnActivate::Set(5, 0.0))
+    );
     let act = OWL.act_for(&[3000, 3001, 3002], 0.7).unwrap();
     assert_eq!(act.goals[0].approach, Some(f64::from(4.8f32 - 0.7)));
     let goals: Vec<_> = act.goals.iter().map(|g| (g.goal, g.params[0])).collect();
@@ -1319,6 +1350,11 @@ fn busy_input() -> CoachInput {
             passive: 12,
         },
         trend: Trend::new(&memory.history, None),
+        range: plans
+            .0
+            .iter()
+            .map(|(plan, _)| (plan.clone(), [4.25, 3.75]))
+            .collect(),
         plans,
         sets,
         wolf,
@@ -1345,10 +1381,18 @@ fn the_coach_input_is_trimmed_to_4kb_and_keeps_the_notes_and_the_played_plan() {
     assert!(json.contains("\"played\":{"), "the played plan survives");
     assert!(json.contains("\"result\":{\"won\":\"boss\""));
     assert!(json.contains("\"passive\":12"));
+    assert!(!input.range.is_empty());
+    assert!(
+        input
+            .range
+            .keys()
+            .all(|key| input.plans.0.iter().any(|(plan, _)| plan == key))
+    );
     // A normal input (a few plans, one earlier fight) is far smaller and untouched.
     let mut small = busy_input();
     small.overall = TopMap::default();
     small.plans = TopMap::default();
+    small.range.clear();
     small.wolf = TopMap::default();
     small.habits = Default::default();
     small.trend = Trend::default();
@@ -1425,7 +1469,15 @@ fn the_limits_force_attacks_and_rate_limit_retreats() {
     let parse = |t: &str| SOLDIER.parse(t).unwrap();
     let mut p = Pacing::new(0.0);
     // Plans without an attack are never eligible.
-    for t in ["retreat12", "hold2", "back_off9", "5201", "strafe_left"] {
+    for t in [
+        "retreat12",
+        "hold2",
+        "back_off9",
+        "5201",
+        "strafe_left",
+        "deflect",
+        "dodge_back",
+    ] {
         assert!(!p.eligible(&parse(t), 1.0, &SOLDIER), "{t}");
     }
     assert!(!limits::has_attack(&parse("walk_in4"), &SOLDIER));
@@ -1433,6 +1485,15 @@ fn the_limits_force_attacks_and_rate_limit_retreats() {
     assert!(limits::is_retreat(&parse("back_off6>3009"), &SOLDIER));
     assert!(limits::is_retreat(&parse("5201>3000"), &SOLDIER));
     assert!(!limits::is_retreat(&parse("walk_in4>3013"), &SOLDIER));
+    assert!(limits::is_retreat(&parse("dodge_back>3002"), &SOLDIER));
+    assert_eq!(
+        limits::lead_secs(&parse("deflect>3000+3001"), &SOLDIER),
+        1.5
+    );
+    assert_eq!(
+        limits::lead_secs(&parse("guard1>deflect>3008"), &SOLDIER),
+        2.5
+    );
     // One retreating plan per 8 s.
     let bait = parse("back_off6>3009");
     assert!(p.eligible(&bait, 1.0, &SOLDIER));

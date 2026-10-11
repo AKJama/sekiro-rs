@@ -50,12 +50,14 @@ The soldier's interrupt also replans when Wolf goes down (SpEffect 109031, after
 
 A plan runs exactly as one of his acts would:
 
-- an approach with the scripts' own `Approach_Act_Flex`, to the distance of the act that opens with that action (less his hit radius, as his acts do);
+- an approach with the scripts' own `Approach_Act_Flex`, to the distance of the act that opens with that action (less his hit radius, as his acts do), evaluated when that attack step runs, after earlier tactics;
 - a single attack as `AttackTunableSpin`; a chain as `ComboAttackTunableSpin`, `ComboRepeat`, ..., `ComboFinal`; a step as `SpinStep`;
 - each attack sets the AI number its act sets: for the Owl, number 5, his pressure score read by `Kengeki_Activate`; for the soldier, number 5 is set to 1 by his rushes (3010, 3011), which his script then stops weighing from afar.
 
 So animations, TAE cancel windows, the combo-cancel envs and reactions go through the same goals and the same native `CommonAttack` as his own choices.
 When a reflex interrupts a plan (a `Parry` clears the battle goal's subgoals and queues a guard), the rest of the plan is dropped, as with his own acts.
+The `deflect` readiness tactic gives the same parry callback a local queue, so its guard/deflect response finishes that tactic and preserves the following attack.
+Damage, observed-effect replanning and other reactions still run normally.
 
 With `--brain lua` the hook is still installed but never has a plan, and the script runs unchanged; `lua_brain_leaves_his_choices_unchanged` (in both `owl_brain.rs` and `soldier_brain.rs`) checks that a fight takes the same action sequence with and without it.
 
@@ -122,7 +124,9 @@ Each boss has a `BossActions` table (`brain::actions`): his name for the instruc
 | 5202 | Side step (his act picks it with Wolf on his right) | | Step |
 | 5203 | Side step (his act picks it with Wolf on his left) | | Step |
 
-The tool acts 3010 (firecrackers), 3017 (explosive slash), 3030 (poison balls) and 3069 (smoke screen) are in the vocabulary since their bullets work (`docs/OWL.md`, "Tools"); their approach distances are ours, from where their bullets land, and their pressure is 0 until their acts are read.
+Firecrackers (3010) use Act07's 3.5 m approach and set pressure number 5 to zero.
+The other tool acts 3017 (explosive slash), 3030 (poison balls) and 3069 (smoke screen) are in the vocabulary since their bullets work (`docs/OWL.md`, "Tools"); their standalone approach distances are ours, from where their bullets land.
+Their scripts use them as counter/reaction follow-ups without a separate approach, so those standalone choices retain the documented approximation.
 Left out on purpose: warps (3035 to 3047; the transparency is not rendered), grabs (3037, 3040, 3041; they now throw Wolf, `docs/OWL.md` "Grabs", but are not in the vocabulary yet), phase-2 acts other than the poison balls 3030, the perilous sweeps of Act32 and Act33, and the deflect counters (3060 to 3066 with the firecracker counter 3064, 3090, 3091), which stay reactions; the smoke screen 3069 is offered as an act.
 Combo: `3000+3001+3002` (three-slash combo).
 Scripted test plans: the kick 3005, then the recovery-sealing throw 3031 once two kicks were deflected.
@@ -168,6 +172,8 @@ Each tactic's goal has a lifetime cap, and a goal queued by a plan *succeeds* wh
 |---|---|---|---|---:|
 | `hold1`, `hold2`, `hold3.5` | Stand still facing Wolf | Wait (2000) | target Wolf | 1, 2, 3.5 s |
 | `guard1`, `guard2.5` | Hold his guard | Guard (2101) | action 3100, target Wolf | 1, 2.5 s |
+| `deflect` | Face Wolf ready for the battle script's guard or deflect response to TAE flag 63 | Local plan wrapper around his Lua parry callback and its own goals | Script rank, facing, weapon reach, interval and consecutive-guard rules | 1.5 s |
+| `dodge_back` | Step back when Wolf's attack wind-up is visible within 2.5 m | Local plan wrapper requesting a back-step action | Soldier 5211 (his short step), Owl 5201 | 1.5 s |
 | `walk_in6`, `walk_in4`, `walk_in2.5` | Walk toward Wolf until within that distance | MoveToSomewhere (2019), walking | distance | 5 s |
 | `run_in3` | Run at Wolf until within 3 m | MoveToSomewhere (2019), running | distance | 4 s |
 | `strafe_left`, `strafe_right` | Walk around Wolf, facing him (left and right are the boss's own) | SidewayMove (2017) | 1 left, 0 right | 2 s |
@@ -179,13 +185,25 @@ Each tactic's goal has a lifetime cap, and a goal queued by a plan *succeeds* wh
 - Two things the native goals did not do and now do for a plan only: `KeepDist` holds its range until the lifetime ends instead of succeeding the moment it is inside it, and `LeaveTarget` can face the way he runs (`retreat12`; his other leaves face Wolf). Both are flags on the goal (`Goal::timed`, `Goal::away`) set by `queue_act`; his own acts are unchanged (`lua_brain_leaves_his_choices_unchanged`).
 - An attack that follows a tactic gets its own approach (`Approach_Act_Flex`) when its action has an approach distance, since a tactic can leave him far away; one that opens the plan gets it as before.
 - Tactics are exchanges in the tally under their token (see "The tally"): `n`, and `punished` when Wolf hit him during one. The sampler penalises a tactic Wolf keeps punishing.
-- Both tables offer all fifteen tactics. They are the same for the soldier and the Owl; the speeds come from each one's own clips (the Owl backs off and strafes slowly, the soldier walks about 1 m/s and runs only a little faster over a short distance).
+- Both tables offer all seventeen tactics.
+  Their movement speeds come from each one's own clips (the Owl backs off and strafes slowly, the soldier walks about 1 m/s and runs only a little faster over a short distance).
+
+`deflect` does not request an unconditional perfect deflect or extend an animation's deflect window.
+The soldier's `Common_Parry(ai, goal, 50, 25, 0, 3102)` checks rank SpEffect 221002, facing, weapon reach and a 0.1 s interval.
+Ordinary incoming slashes request guard 3100 unless the script's roll is within consecutive-guard count times 50, in which case it requests deflect 3101.
+The Owl uses his own `Goal.Parry` rules.
+Their HKS and TAE choose the guard judge and active effects; `CombatRules::resolve` compares the guard's data-derived repel defence with the attack's repel power to decide block versus deflect.
+Parry goal 2113 remains an ordinary action goal; the battle scripts actually request EndureAttack/CommonAttack for these reflexes.
+
+Soldier chains: `deflect>3000+3001`, `deflect>3005+3007`, `guard1>deflect>3008`, `dodge_back>3002`, `dodge_back>3014`.
+Owl chains: `deflect>3000+3001`, `deflect>3005`, `guard1>deflect>3000`, `dodge_back>3003`, `dodge_back>3011`.
+Both tactics contribute their 1.5 s caps to the anti-stall lead time and require an attack in a plan set; `dodge_back` also consumes the eight-second retreat allowance.
 
 ### The choice list
 
 `BossActions::choices()` is what a hosted model is offered, and what `BossActions::parse` accepts: his actions, his named combos, each tactic, and a curated list of two and three step plans (`BossActions::chains`, validated by the tests), then `lua`.
 The text form joins steps with `>` and consecutive attacks with `+` (they run as one combo chain), for example `walk_in4>hold2>3013`, `3005+3007`, `strafe_left>3005+3007`.
-The soldier has 15 actions, 2 combos, 15 tactics and 40 chains, 73 choices with `lua`; the Owl 20 actions, 1 combo, 15 tactics and 38 chains, 75 with `lua` (the Decisions API takes up to 255).
+The soldier has 15 actions, 2 combos, 17 tactics and 45 chains, 80 choices with `lua`; the Owl 20 actions, 1 combo, 17 tactics and 43 chains, 82 with `lua` (the Decisions API takes up to 255).
 The chains are, for both bosses, variations of: walk in slowly to a band, then an attack; hold still, then a running or leaping attack; back off or retreat, then a ranged attack or a rush (stone throw, shuriken); strafe, then a combo or a kick and rising slash; guard, then a combo; run in, then a combo; keep range, then a perilous attack; an attack, then a back off or strafe; and a few three step baits (retreat, run in, leaping slash; walk in, hold, perilous thrust; strafe left, strafe right, thrust).
 Run `cargo test -p sekiro-brain-net both_bosses_offer_tactics -- --nocapture` to print the counts.
 
@@ -200,10 +218,12 @@ An exchange stays open for a punish window of 1 s after its clip ends, then coun
 | `hit` | One of its hits landed unguarded |
 | `blocked` | The other side guarded one of its hits |
 | `deflected` | The other side deflected one of its hits |
-| `whiffed` | None of the three (dodged, out of range, interrupted before contact) |
+| `whiffed` | An attack contacted nothing (dodged, out of range, interrupted before contact); tactics and back steps cannot whiff |
 | `punished` | Its side took an unguarded hit during it or within 1 s after |
 
 Each flag counts at most once per exchange; hits that arrive after the clip ended (a shuriken in flight) count for that side's latest exchange.
+`n` includes tactic and back-step exchanges, so it is not a count of plan uses or attacks alone.
+Older saved counts included non-attacking tactics as whiffs; existing memory files are left untouched, so historical totals still include those false whiffs.
 The request carries this fight's counts per key (`tally.boss`, `tally.wolf`, most used first) as arrays `[n, hit, blocked, deflected, whiffed, punished]`; the same counts over every fight are in `memory.boss` and `memory.wolf`, so a controller can notice "the player deflects 3005" and "the player has adapted" (this fight differs from all fights).
 
 ```json
@@ -663,9 +683,15 @@ The full plan goes to the brain log (`coach_plan` event, with the warnings and t
 
 ### What the coach is told
 
-The input (user message) is the compact JSON of `CoachInput`: `fight`, `result` (won, secs, `defl`, `guard`, `hits`, `hp`, `posture`, `punishes`, `apm`, `dpm`, `passive`), `trend` (the last 3 fights), `plans` and `sets` (this fight, per plan text and per set of the plan played, as `[exchanges, hit, blocked, deflected, whiffed, punished]`), `wolf` (his attacks), `overall` (every fight per plan text), `habits`, `played` (the plan the fight ran) and `notes` (the coach's own notes from last time, so its reasoning accumulates).
+The input (user message) is the compact JSON of `CoachInput`: `fight`, `result` (won, secs, `defl`, `guard`, `hits`, `hp`, `posture`, `punishes`, `apm`, `dpm`, `passive`), `trend` (the last 3 fights), `plans` and `sets` (this fight, per plan text and per set of the plan played, as `[exchanges, hit, blocked, deflected, whiffed, punished]`), `range` (this fight's measured melee spacing), `wolf` (his attacks), `overall` (every fight per plan text), `habits`, `played` (the plan the fight ran) and `notes` (the coach's own notes from last time, so its reasoning accumulates).
+`range` maps each plan to `[mean attack-start distance, mean observed melee reach]` in metres, rounded to two decimals.
+Each attack samples its own start and maximum active dummy-poly capsule envelope, including actual root travel, AtkParam capsule radius and Wolf's body radius.
+Projectile-only attacks and attacks interrupted before any measurable melee window have no sample.
+This is a radial envelope relative to the attack's starting centre: distance above reach indicates insufficient reach to Wolf's starting position, while distance below reach does not establish contact.
+Direction, height, timing and Wolf's movement still matter; per-plan means are diagnostic summaries rather than individual-hit proofs.
+The entries are paired with the surviving plan outcomes during budget trimming; range entries are the final fallback to trim.
 Entries are trimmed (overall plans first, then Wolf's attacks, habits, this fight's plans, the oldest trend fights) to stay under 4096 bytes.
-The instructions (`protocol::coach_instructions`, followed by every choice with its label, 73 or 75 lines) are:
+The instructions (`protocol::coach_instructions`, followed by every choice with its label, 80 or 82 lines) are:
 
 > You are the coach of {name}, who fights the player (Wolf) again and again. After each fight you write the game plan for the next one. Your goal: make Wolf play worse by fighting him. You are scored on the damage you deal to Wolf (HP and posture) per minute (dpm), your attacks per minute (apm), fewer perfect deflects (defl) and fewer of your actions he punishes. How long the fight lasts, and how fast he kills you, are NOT goals (kill time is information only). Stalling, running away or passivity counts as failure: passive = the percent of the fight with no attack of yours started in the last 4 s, and a fight with passive above 35 failed regardless of every other number; if the last fight failed this way, make the next plan attack more. Movement tactics exist to set up attacks (baits, spacing, timing mixups such as a hold or a slow walk-in before a strike), not to avoid fighting. Think like a swordsman: turning your back or retreating while the opponent is in sword range leaves you open, so tactics should set up attacks safely. The fighter enforces limits you cannot override: a plan in a set must contain an attack (plans without one are dropped), an attack must start at least every 6 s, and back_off, retreat or back-step plans run at most once per 8 s. Players learn patterns, so probe with untried tactics, exploit the habits you see and retire what keeps failing. Test one idea at a time and write down what you learn.\n\
 > How combat works: Posture is the real bar: breaking it opens a deathblow; the deathblow spends one enemy life.
@@ -758,3 +784,25 @@ Warnings wait through a brief damage stagger and are revalidated against the hit
 Only a deathblow leaving another mark raises `mark_lost`: the soldier never does, Owl does after his first.
 The old `posture_half` and `posture_critical` names are replaced in the schema and hints; old saved hints are rejected by normal validation while their valid plans remain usable.
 Offline real-data duel tests exercise both soldier posture cycles and actual soldier/Owl deathblows without a model call.
+
+### Plan spacing and reactive tactics (2026-10-11)
+
+The soldier table and Owl's standard attack entries match the base values in `101000_battle.lua` and `506001_battle.lua`; the boss radius was subtracted once, and NPC attacks already apply TAE 760 through `Character::attack_target`.
+The audit also replaces Owl's approximate 4 m firecracker approach with Act07's actual 3.5 m and its pressure reset.
+The range defect was evaluating `Approach_Act_Flex` when the whole plan was queued: its range check could skip an approach while close, before an earlier tactic moved the boss away.
+A private deferred goal now calls that same helper when the attack step actually activates, without changing the attack clip, its lunge, input buffering, hit stop or Wolf's movement.
+
+With a stationary Wolf initially 1.6 m away, the original runtime's `retreat12>3000` slash starts at 4.57 m, opens its first active window at 3.19 m and has a 4.29 m observed capsule/root-travel envelope from its starting centre; it whiffs.
+The fixed runtime starts it at 2.02 m, opens the active window at 0.80 m and measures 3.92 m of reach from the starting centre; it contacts Wolf.
+The six reported plans all contact stationary Wolf in the original runtime at 2.5, 4 and 6 m, so this replay does not reproduce their historical whiff rates.
+At 6 m, first-active distances are 2.48 m (`walk_in2.5>3013`), 4.58 m (`keep_range>3013`), 3.98 m (`walk_in4>3013`), 4.58 m (`walk_in6>3013`), 1.10 m (`strafe_right>3005+3007`) and 0.80 m (`walk_in4>3000+3001`); the thrust's later hit window follows its lunge.
+
+There was also a measurement defect: tactic exchanges with no outgoing contact incremented `whiffed` in the tally, per-plan/per-set summaries and outcome logs.
+The offline 15 s `walk_in4>3000+3001` fight has four plans, eight landed attacks and four movement exchanges: the old per-plan count was `[12,8,0,0,4,0]`, and the corrected count is `[12,8,0,0,0,0]`.
+Historical memory is not rewritten.
+
+`brain_tactics::plan_attack_range_reproduction` records first-active distances, observed reach and contact for all thirteen soldier attacks plus nine mixed plans at 1.6, 2.5, 4 and 6 m.
+`retreat_rechecks_range_before_a_close_slash` retains the actual range-whiff reproduction.
+`reactive_tactics_answer_pressure_and_keep_the_attack_chain` drives Wolf's real HKS with attack presses every eight frames at 1.6 m against both bosses and checks script guard/deflect, timed back-step motion, the following attack request and idle caps.
+The soldier's readiness finishes after 36 ticks under pressure, its short step gains 0.86 m and finishes after 38 ticks, and both idle waits finish after 90 ticks at 60 Hz.
+`coach_reports_measured_attack_ranges_per_plan` checks spacing telemetry and excludes tactic whiffs; the worst-case coach-input test keeps the summary inside 4096 bytes with range entries.

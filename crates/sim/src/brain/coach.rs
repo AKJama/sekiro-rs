@@ -419,6 +419,11 @@ pub struct CoachInput {
     pub trend: Trend,
     /// This fight, per plan text (`lua` is his own AI's acts).
     pub plans: TopMap<Counts>,
+    /// Per-plan mean [attack-start distance, observed melee reach], metres.
+    /// Reach includes root travel, hit capsules and Wolf's radius; projectile-only attacks
+    /// have no sample. Trimmed together with the plan outcomes.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub range: std::collections::BTreeMap<String, [f32; 2]>,
     /// This fight, per set of the game plan played (`opener`, `lua` for his own AI).
     pub sets: std::collections::BTreeMap<String, SetStat>,
     /// Wolf's attacks this fight.
@@ -442,8 +447,12 @@ impl CoachInput {
 
     /// Drops the least telling entries until the JSON fits in `budget` bytes; returns the size.
     pub fn fit(&mut self, budget: usize) -> usize {
+        self.range
+            .retain(|key, _| self.plans.0.iter().any(|(plan, _)| plan == key));
         let mut len = self.json_len();
         while len > budget && self.trim_one() {
+            self.range
+                .retain(|key, _| self.plans.0.iter().any(|(plan, _)| plan == key));
             len = self.json_len();
         }
         len
@@ -461,7 +470,10 @@ impl CoachInput {
                 return true;
             }
         }
-        self.trend.trim()
+        if self.trend.trim() {
+            return true;
+        }
+        self.range.pop_last().is_some()
     }
 }
 
