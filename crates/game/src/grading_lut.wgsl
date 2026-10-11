@@ -5,6 +5,8 @@
 @group(0) @binding(1) var lut: texture_2d<f32>;
 
 fn linear_to_display(v: vec3<f32>) -> vec3<f32> {
+    // Undo native tone-pass storage encoding. This recovers the ordinary output
+    // power result for LUT input; it introduces no extra native gamma stage.
     return select(1.055 * pow(max(v, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055,
                   v * 12.92, v <= vec3(0.0031308));
 }

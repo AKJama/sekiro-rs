@@ -373,7 +373,7 @@ Unused `sky_*.dds` experiment outputs may remain in the ignored cache but are ne
   Verify no banding by zooming on the sky gradient in a screenshot.
 - Risk: the LUT must run after the tonemapper in display space, and must stay a no-op on views without the component (the HUD camera).
 
-#### Step 2 status (2026-10-11)
+#### Step 2 historical status (2026-10-11, superseded by native post below)
 
 Map viewer and play cameras now have `Hdr`, analytic `Tonemapping::AcesFitted` and `DebandDither::Enabled`.
 ACES fitted provides a filmic shoulder and restrained highlight saturation without requiring Bevy's optional tonemapping LUT assets.
@@ -420,7 +420,7 @@ The remaining differences from MikkTSpace are not fully traced; authored smoothi
   Expected: brightness adapts over a second or two and neither extreme clips.
 - Risk: Bevy's spline needs points snapped to 1/64 EV (his note), covered by a unit test.
 
-#### Step 3 status (2026-10-11)
+#### Step 3 historical status (2026-10-11, superseded by native post below)
 
 Bevy `AutoExposure` runs on the tested RTX 5070 Ti Vulkan device; compute support is checked before adding camera components.
 An unsupported device, a disabled GPARAM switch or `--no-auto-exposure` uses fixed tonemapping compensation `BASE_EV + ToneMap-Exposure` instead.
@@ -451,6 +451,66 @@ Final workspace formatting, Clippy with `-D warnings`, the requested release gam
 Regressions cover discrete time keys, lossless LUT export, snapped/capped exposure curves and 3D-only component application with an unaffected 2D camera.
 The three requested maps were re-extracted into their existing map output directories.
 No commits, network requests, worktrees, protected-path writes or changes to the parallel mobility files were made.
+
+#### Steps 2 and 3 native post status (2026-10-11)
+
+Original GPU passes now replace Bevy ACES, Bloom and AutoExposure as a single ordered HDR chain before the HUD.
+The executable tracing delivered in `SHADER-INPUTS.md` during this session supplies the post CPU transforms, replacing the initial v6 named-calibration candidates.
+The camera has `Tonemapping::None`, and `--no-auto-exposure`, `--no-bloom` and `--no-grading` retain their independent controls.
+
+Metering uses sixteen samples per reduction cell on a 64x64 grid, native biased log luminance and radial center weighting.
+Adaptation uses authored MiddleGray and `1-10^(-dt*speed)`, then the native soft EV shoulders rather than hard clamps or the old +2 EV ceiling.
+The CPU path's previous-frame adaptation gain is retained entirely on GPU.
+Gain `2^Exposure*2^(-softlimitedEV)` applies to scene and bright extraction; shipped native pre-exposure is one.
+One shared renderer-unit conversion, `BEVY_HDR_TO_NATIVE_RADIANCE=0.5`, applies to meter and scene because the existing Bevy light/daylight camera calibration does not establish native radiance units.
+It leaves the recovered GPARAM transforms intact and addresses the rejected unconverted noon candidate's 1.03 percent pure-white world pixels.
+Missing rates use traced LightAdapt 1 and DarkAdapt 0.5, and elapsed time is presumed seconds.
+
+Tone transfer defaults to native mode 7, sensitometric, with traced contrast 0.5, table exponent one and ordinary output exponent 1/2.2.
+Authored modes 0, 3 and 8 select the recovered filmic, Reinhard and extended-Reinhard alternatives.
+`--native-tone-filmic` and `--native-tone-reinhard` expose comparison controls.
+The table functions are evaluated analytically, preserving their formula while avoiding table quantization.
+
+Bloom uses luminance-subtractive extraction, separable seven-tap Gaussian filtering and the recovered three-level 1/0.5/0.25 composite before tone transfer.
+Final colour gain is `Alpha*Luminance/sum(Smooth^i)` for authored GlareNumLevels, with renderer quality scale one explicitly named as unresolved.
+GaussianRadiusScale multiplies the current sigma-1.4 tap spacing, whose precise native CPU kernel remains unverified.
+The full authored-level upscale schedule and motion-reprojected temporal feedback remain gaps.
+
+The unorm LUT's red-fastest, green-row, blue-slice layout was confirmed against the recovered copy shader.
+Its exact trilinear input is the ordinary output-power result; storage conversion into Bevy's linear ping-pong buffer is reversed before lookup.
+Display dither runs after grading, or after tone transfer when grading is absent.
+HUD colours stay outside the chain.
+GIIV export, coefficient sampling, region fades and parallax correction remain pending under section 3.2/recommendation 3.
+Newly resolved fog/light CPU transforms remain for their own follow-up.
+
+The seven requested matched scene pairs are `target/alt/visuals/v6-{owl,genichiro,outskirts6,outskirts12,outskirts18,interior,hirata}-{before,final}.png`.
+Every before/final view was inspected, along with noon controls for bloom, adaptation, grading, filmic/Reinhard overrides and the extra Castle midnight view.
+Owl's snow rails and feather/fabric detail remain visible, morning retains warm rock against cool shade, noon shade stays blue, and evening keeps warm/cool separation with stronger midtones.
+The interior doorway and Hirata floor retain readable texture rather than a bloom veil.
+Bloom halos are subtle and no obvious bands appear at native capture resolution.
+All seven final world crops have zero pure-white RGB pixels; noon has one near-white pixel in 1,152,000 samples, versus about 1.03 percent pure white in the rejected unconverted native candidate.
+The crop excludes the top 100 and bottom 80 rows, including most HUD/debug text.
+The measurements are in `v6-image-metrics.csv`, produced with a standard-library PNG reader.
+
+| Viewer scene | Before frame snapshot, ms | Final frame snapshot, ms | Native exposure/bloom/tone GPU, ms |
+|---|---:|---:|---:|
+| Outskirts start 3, 6 h | 24.814 | 23.753 | 0.06 |
+| Outskirts start 3, 12 h | 22.222 | 25.381 | 0.06 |
+| Outskirts start 3, 18 h | 21.978 | 20.704 | 0.06 |
+| Castle start 1, 12 h | 25.510 | 23.923 | 0.06 |
+| Hirata start 0, 12 h | 16.639 | 16.556 | 0.08 |
+
+Viewer snapshots are `1000/smoothedFPS`, not isolated repeatable overhead measurements, and the shared machine was also running the parallel job.
+Final Owl and Genichiro diagnostics report 24.150/26.423 ms frame time and 0.062 ms native-post GPU time; the initial arena baselines did not log frame diagnostics.
+The earlier Bevy morning sample reported bloom 0.07 ms and auto exposure 0.04 ms, with tone/LUT timing not included in those spans.
+The new native-post span includes metering, adaptation, spatial bloom and tone transfer, with grading still separate.
+These measurements support a small GPU cost, but do not establish an isolated wall-frame improvement.
+
+Final formatting, workspace/all-target Clippy with `-D warnings`, the requested release game/formats/extract suite and the release game build pass offline in `target/alt` with six jobs.
+The suite reports 104 passed and two existing ignored tests, including the new shader-composer regression covering every post shader permutation.
+Validation logs are `v6-fmt-delivery.log`, `v6-clippy-delivery.log`, `v6-tests-delivery.log` and `v6-build-delivery-calibrated.log`.
+The save backup, scripts, metrics and captures stay under `target/alt/visuals/`.
+This session made no commits, network calls, protected-path writes or extractor outputs.
 
 ### Step 4. Shadow budget and quality
 

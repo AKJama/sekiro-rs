@@ -3,7 +3,6 @@ use bevy::asset::{embedded_asset, load_embedded_asset};
 use bevy::core_pipeline::{
     FullscreenShader,
     schedule::{Core3d, Core3dSystems},
-    tonemapping::tonemapping,
 };
 use bevy::prelude::*;
 use bevy::render::{
@@ -29,7 +28,9 @@ impl Plugin for GradingPlugin {
                 .add_systems(RenderStartup, init_pipeline)
                 .add_systems(
                     Core3d,
-                    grade.after(tonemapping).in_set(Core3dSystems::PostProcess),
+                    grade
+                        .after(super::tonemap::NativePost)
+                        .in_set(Core3dSystems::PostProcess),
                 );
         }
     }

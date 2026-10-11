@@ -7,7 +7,7 @@
 //! volumetric fog group, the sky colour, a fixed fog density and the colour of light scattered
 //! toward the sun (`DirectColor`). Colours are RGB with the intensity in W.
 //!
-//! What maps onto Bevy is approximated: the engine's units and tone mapping are not known, so
+//! Light-unit uploads remain approximated; tone arithmetic comes from recovered shaders, so
 //! intensities scale by [`LUX_PER_UNIT`]; ambient light is the average of the hemisphere colours;
 //! fog uses the recovered global shader profile in an HDR post pass. Angles are (pitch, yaw) in radians in the
 //! game's space: the vector `Ry(yaw) * Rx(pitch) * +Z` points toward the light, and is mirrored
@@ -24,16 +24,11 @@ use sekiro_formats::gparam::Gparam;
 mod grading;
 use bevy::camera::Hdr;
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
-use bevy::math::cubic_splines::LinearSpline;
-use bevy::post_process::{
-    auto_exposure::{AutoExposure, AutoExposureCompensationCurve, AutoExposurePlugin},
-    bloom::{Bloom, BloomCompositeMode, BloomPrefilter},
-};
+use bevy::post_process::{auto_exposure::AutoExposure, bloom::Bloom};
 use bevy::render::view::ColorGrading;
 
-/// Conservative calibration in the already camera-exposed HDR buffer, not physical lux.
-const BASE_EV: f32 = -0.5;
-const METER_EV: f32 = 2.0;
+#[path = "tonemap.rs"]
+pub(crate) mod tonemap;
 
 #[derive(Resource, Default)]
 struct MapPostEffects {
@@ -41,25 +36,17 @@ struct MapPostEffects {
     no_grading: bool,
     no_bloom: bool,
     no_auto: bool,
-    compute: bool,
+    tone_override: Option<u32>,
 }
 
 struct PostEffectsPlugin;
 impl Plugin for PostEffectsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((grading::GradingPlugin, fog::FogPlugin, AutoExposurePlugin));
-    }
-    fn finish(&self, app: &mut App) {
-        let compute = app.get_sub_app(bevy::render::RenderApp).is_some_and(|r| {
-            let device = r.world().resource::<bevy::render::renderer::RenderDevice>();
-            let limits = device.limits();
-            limits.max_compute_workgroup_size_x >= 16
-                && limits.max_compute_workgroup_size_y >= 16
-                && limits.max_compute_invocations_per_workgroup >= 256
-                && limits.max_storage_buffers_per_shader_stage >= 3
-        });
-        app.world_mut().resource_mut::<MapPostEffects>().compute = compute;
-        info!("map auto exposure compute support: {compute}");
+        app.add_plugins((
+            grading::GradingPlugin,
+            fog::FogPlugin,
+            tonemap::NativePostPlugin,
+        ));
     }
 }
 
@@ -70,6 +57,13 @@ pub fn install_post_effects(app: &mut App, dir: &std::path::Path) -> anyhow::Res
         no_grading: args.iter().any(|a| a == "--no-grading"),
         no_bloom: args.iter().any(|a| a == "--no-bloom"),
         no_auto: args.iter().any(|a| a == "--no-auto-exposure"),
+        tone_override: if args.iter().any(|a| a == "--native-tone-reinhard") {
+            Some(3)
+        } else if args.iter().any(|a| a == "--native-tone-filmic") {
+            Some(0)
+        } else {
+            None
+        },
         ..default()
     };
     if let Ok(entries) = std::fs::read_dir(dir.join("grading")) {
@@ -121,6 +115,17 @@ struct PostSettings {
     alpha: f32,
     threshold: f32,
     radius: f32,
+    glare: f32,
+    saturation: f32,
+    center: f32,
+    freeze: bool,
+    mode: u32,
+    light_adapt: f32,
+    dark_adapt: f32,
+    filmic: f32,
+    reinhard: f32,
+    white_balance: f32,
+    bloom_normalizer: f32,
 }
 
 impl PostSettings {
@@ -139,33 +144,93 @@ impl PostSettings {
                 .unwrap_or(0.)
                 .max(0.) as u32
         });
-        let min = get("Tone Map", "Adaption Min", -0.5).clamp(-2., 2.);
-        let max = get("Tone Map", "Adaption Max", 0.5).clamp(min, 2.);
+        let min = get("Tone Map", "Adaption Min", -8.);
+        let max = get("Tone Map", "Adaption Max", 8.).max(min);
+        let mode = g
+            .param("Tone Map", "ToneMapMode")
+            .or_else(|| g.param("Tone Map", "ToneMap-Mode"))
+            .and_then(|p| p.nearest(id, hour))
+            .and_then(|v| v.first().copied())
+            .unwrap_or(7.) as u32;
+        let mode = match mode {
+            0 | 3 | 7 | 8 => mode,
+            _ => {
+                warn!("unimplemented native tone mode {mode}; using sensitometric 7");
+                7
+            }
+        };
         Self {
-            exposure: get("Tone Map", "ToneMap-Exposure", 0.).clamp(-4., 4.),
-            middle: get("Tone Map", "Middle Gray", -4.).clamp(-12., 4.),
+            exposure: get("Tone Map", "ToneMap-Exposure", 0.),
+            middle: get("Tone Map", "Middle Gray", -2.),
             min,
             max,
             auto: get("Tone Map", "Enable AutoExposure", 0.) > 0.5,
             lut,
-            alpha: get("Bloom", "GlareBloom Alpha", 0.).clamp(0., 1.),
-            threshold: get("Bloom", "Glare Threshold", 0.).clamp(0., 1.),
-            radius: get("Bloom", "GaussianRadiusScale", 1.).clamp(0.25, 2.),
+            alpha: if get("Bloom", "Enable", 1.) > 0.5 {
+                get("Bloom", "GlareBloom Alpha", 0.).max(0.)
+            } else {
+                0.
+            },
+            threshold: get("Bloom", "Glare Threshold", 0.).max(0.),
+            radius: get("Bloom", "GaussianRadiusScale", 1.).max(0.),
+            glare: get("Bloom", "Glare Luminance", 1.).max(0.),
+            saturation: get("Bloom", "Sturate Ctrl", 0.).clamp(0., 1.),
+            center: get("Tone Map", "Center Weight", 4.).max(0.),
+            freeze: get("Tone Map", "FreezeAdaptionFade", 0.) > 0.5,
+            mode,
+            light_adapt: get("Tone Map", "LightAdapt", 1.).max(0.),
+            dark_adapt: get("Tone Map", "DarkAdapt", 0.5).max(0.),
+            filmic: get("Tone Map", "FilmicContrast", 0.5),
+            reinhard: get("Tone Map", "ReinhardContrast", 1.6),
+            white_balance: get("Tone Map", "ReinhardWhiteBalance", 1.7),
+            bloom_normalizer: (0..(get("Bloom", "GlareNumLevels", 7.) as i32).clamp(1, 16))
+                .map(|i| get("Bloom", "GlareBloom Smooth", 0.8).clamp(0., 1.).powi(i))
+                .sum(),
         }
     }
-    fn correction(&self, luminance_ev: f32) -> f32 {
-        BASE_EV + self.exposure + (self.middle + METER_EV - luminance_ev).clamp(self.min, self.max)
-    }
-    fn compensation_points(&self) -> Vec<Vec2> {
-        // A dense linear spline avoids duplicate knees and floating-point discontinuities.
-        // All control points are exact multiples of 1/64, including y.
-        (-768..=768)
-            .step_by(16)
-            .map(|i| {
-                let x = i as f32 / 64.;
-                Vec2::new(x, ((x + self.correction(x)) * 64.).round() / 64.)
-            })
-            .collect()
+    fn upload(&self, effects: &MapPostEffects) -> tonemap::GamePost {
+        use tonemap::*;
+        GamePost {
+            exposure: Vec4::new(
+                self.exposure.exp2() * BEVY_HDR_TO_NATIVE_RADIANCE,
+                BEVY_HDR_TO_NATIVE_RADIANCE,
+                self.middle,
+                f32::from(self.auto && !effects.no_auto),
+            ),
+            adaptation: Vec4::new(self.min, self.max, 0., 0.),
+            bloom: Vec4::new(
+                self.threshold,
+                if effects.no_bloom {
+                    0.
+                } else {
+                    self.alpha * self.glare * BLOOM_QUALITY_SCALE / self.bloom_normalizer
+                },
+                self.radius,
+                1.,
+            ),
+            transfer: Vec4::new(
+                1.,
+                1. / OUTPUT_GAMMA,
+                effects.tone_override.unwrap_or(self.mode) as f32,
+                self.center,
+            ),
+            curve: Vec4::new(
+                self.light_adapt,
+                self.dark_adapt,
+                self.filmic,
+                self.reinhard,
+            ),
+            reinhard: Vec4::new(self.white_balance, 0., 0., 0.),
+            controls: Vec4::new(
+                self.saturation,
+                f32::from(self.freeze),
+                f32::from(
+                    !effects.no_grading
+                        && self.lut.is_some_and(|id| effects.luts.contains_key(&id)),
+                ),
+                0.,
+            ),
+        }
     }
 }
 
@@ -176,7 +241,6 @@ fn apply_post_effects(
     mut commands: Commands,
     lighting: Res<MapLighting>,
     effects: Res<MapPostEffects>,
-    mut curves: ResMut<Assets<AutoExposureCompensationCurve>>,
     cameras: Query<(Entity, Option<&AppliedPost>), With<Camera3d>>,
 ) {
     let pending: Vec<_> = cameras
@@ -188,61 +252,20 @@ fn apply_post_effects(
         return;
     }
     let set = PostSettings::from_gparam(&lighting.gparam, lighting.light_set, lighting.hour);
-    let auto = effects.compute && !effects.no_auto && set.auto;
-    let curve = auto.then(|| {
-        curves.add(
-            AutoExposureCompensationCurve::from_curve(LinearSpline::new(set.compensation_points()))
-                .expect("snapped monotonic compensation spline"),
-        )
-    });
     info!(
-        "map post effects: ACES fitted, {set:?}, auto={auto}, grading={}",
-        !effects.no_grading
+        "map native post: {set:?}, upload={:?}; CPU mappings from SHADER-INPUTS.md",
+        set.upload(&effects)
     );
     for entity in pending {
         let mut camera = commands.entity(entity);
         camera.insert((
             Hdr,
-            Tonemapping::AcesFitted,
-            DebandDither::Enabled,
+            Tonemapping::None,
+            DebandDither::Disabled,
             AppliedPost(lighting.light_set, lighting.hour),
         ));
-        // Camera physical exposure remains Bevy's daylight default. These offsets are
-        // applied by tonemapping, matching the buffer that the histogram meters.
-        camera.insert(ColorGrading {
-            global: bevy::render::view::ColorGradingGlobal {
-                exposure: if auto { 0. } else { BASE_EV + set.exposure },
-                ..default()
-            },
-            ..default()
-        });
-        if let Some(curve) = &curve {
-            camera.insert(AutoExposure {
-                range: -12.0..=12.0,
-                speed_brighten: 3.,
-                speed_darken: 2.,
-                exponential_transition_distance: 1.,
-                compensation_curve: curve.clone(),
-                ..default()
-            });
-        } else {
-            camera.remove::<AutoExposure>();
-        }
-        if !effects.no_bloom && set.alpha > 0. {
-            camera.insert(Bloom {
-                intensity: (set.alpha * 0.08).clamp(0., 0.08),
-                low_frequency_boost: 0.,
-                prefilter: BloomPrefilter {
-                    threshold: set.threshold,
-                    threshold_softness: 0.5,
-                },
-                composite_mode: BloomCompositeMode::Additive,
-                scale: Vec2::splat(set.radius),
-                ..default()
-            });
-        } else {
-            camera.remove::<Bloom>();
-        }
+        camera.insert((ColorGrading::default(), set.upload(&effects)));
+        camera.remove::<(AutoExposure, Bloom)>();
         if !effects.no_grading
             && let Some(lut) = set.lut.and_then(|id| effects.luts.get(&id))
         {
@@ -687,14 +710,21 @@ mod probe_tests {
             luts: [(30, lut)].into(),
             ..default()
         })
-        .init_resource::<Assets<AutoExposureCompensationCurve>>()
         .add_systems(Update, apply_post_effects);
         let scene = app.world_mut().spawn(Camera3d::default()).id();
         let hud = app.world_mut().spawn(Camera2d).id();
         app.update();
         assert!(app.world().get::<Hdr>(scene).is_some());
+        assert_eq!(
+            *app.world().get::<Tonemapping>(scene).unwrap(),
+            Tonemapping::None
+        );
+        assert!(app.world().get::<tonemap::GamePost>(scene).is_some());
+        assert!(app.world().get::<Bloom>(scene).is_none());
+        assert!(app.world().get::<AutoExposure>(scene).is_none());
         assert!(app.world().get::<grading::GradingLut>(scene).is_some());
         assert!(app.world().get::<Hdr>(hud).is_none());
+        assert!(app.world().get::<tonemap::GamePost>(hud).is_none());
         assert!(app.world().get::<Bloom>(hud).is_none());
         assert!(app.world().get::<AutoExposure>(hud).is_none());
         assert!(app.world().get::<grading::GradingLut>(hud).is_none());
@@ -704,28 +734,53 @@ mod probe_tests {
         assert!(app.world().get::<grading::GradingLut>(scene).is_none());
     }
     #[test]
-    fn exposure_curve_is_snapped_continuous_and_caps_night_gain() {
-        let settings = PostSettings {
-            exposure: 0.,
-            middle: -3.,
-            min: -0.4,
-            max: 2.,
+    fn recovered_post_preserves_authored_bounds_and_disables_stages() {
+        let set = PostSettings {
+            exposure: 0.4,
+            middle: -4.2,
+            min: -0.01,
+            max: 8.,
             auto: true,
             lut: None,
-            alpha: 1.,
-            threshold: 0.075,
-            radius: 1.,
+            alpha: 0.5,
+            threshold: 1.5,
+            radius: 3.,
+            glare: 1.,
+            saturation: 0.,
+            center: 1.,
+            freeze: false,
+            mode: 7,
+            light_adapt: 1.,
+            dark_adapt: 0.5,
+            filmic: 0.5,
+            reinhard: 1.6,
+            white_balance: 1.7,
+            bloom_normalizer: 3.951424,
         };
-        assert!((settings.correction(-12.) - (BASE_EV + 2.)).abs() < 1e-6);
-        assert!((settings.correction(12.) - (BASE_EV - 0.4)).abs() < 1e-6);
-        let points = settings.compensation_points();
-        assert!(points.windows(2).all(|w| w[0].x < w[1].x));
-        for p in &points {
-            assert_eq!((p.x * 64.).fract(), 0.);
-            assert_eq!((p.y * 64.).fract(), 0.);
-            assert!((p.y - p.x - settings.correction(p.x)).abs() <= 1. / 128.);
-        }
-        AutoExposureCompensationCurve::from_curve(LinearSpline::new(points)).unwrap();
+        let upload = set.upload(&MapPostEffects::default());
+        assert_eq!(upload.adaptation.y, 8.);
+        assert_eq!(upload.bloom.x, 1.5);
+        assert_eq!(upload.bloom.z, 3.);
+        assert_eq!(upload.bloom.y, 0.5 / 3.951424);
+        let disabled = set.upload(&MapPostEffects {
+            no_auto: true,
+            no_bloom: true,
+            ..default()
+        });
+        assert_eq!(disabled.exposure.w, 0.);
+        assert_eq!(disabled.bloom.y, 0.);
+    }
+    #[test]
+    fn native_constructor_defaults_and_bloom_normalization() {
+        let set = PostSettings::from_gparam(&Gparam::default(), 0, 12.);
+        assert_eq!((set.mode, set.middle, set.min, set.max), (7, -2., -8., 8.));
+        assert_eq!((set.light_adapt, set.dark_adapt, set.center), (1., 0.5, 4.));
+        assert!((set.bloom_normalizer - 3.951424).abs() < 0.000001);
+        let upload = set.upload(&MapPostEffects::default());
+        assert_eq!(upload.exposure.x, tonemap::BEVY_HDR_TO_NATIVE_RADIANCE);
+        assert_eq!(upload.exposure.z, -2.);
+        assert_eq!(upload.transfer.x, 1.);
+        assert_eq!(upload.transfer.y, 1. / 2.2);
     }
     #[test]
     fn extracted_hdr_cube_loads_as_six_layers() {

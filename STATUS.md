@@ -4,6 +4,18 @@ Last updated 11 October 2026.
 Read this first in a new session, then `AGENTS.md` and `docs/DESIGN.md`.
 How much of the game is done overall: `docs/PROGRESS.md`.
 
+## Native ordinary post chain (2026-10-11)
+
+Original GPU passes replace Bevy AutoExposure, Bloom and ACES; the 3D camera uses Tonemapping None and HUD cameras stay outside the chain.
+The newly delivered SHADER-INPUTS trace supplies weighted biased-log adaptation, natural-exponential soft EV limits, authored/default native tone operators and bloom normalization; sensitometric mode 7 and gamma 2.2 are the default.
+The existing Bevy lighting/camera units use one explicit 0.5 HDR-to-native radiance calibration shared by metering, bright extraction and tone input; the old BASE_EV/METER_EV offsets and alpha*0.08 mapping are removed.
+Native luminance-subtractive extraction, seven-tap blur and three-level composition precede tone transfer and the confirmed trilinear grading LUT.
+All seven requested v6 before/final scene pairs and stage controls were inspected, with retained snow detail, subtle halos and zero pure-white pixels in the final world crops.
+Native post GPU time is 0.06-0.08 ms; noon viewer frame snapshots are 22.222 ms before and 25.381 ms after, with shared-machine noise preventing an isolated overhead claim.
+Formatting, workspace/all-target Clippy, the requested release game/formats/extract suite (104 passed, two existing ignored) and the release game build pass offline with six jobs in target/alt.
+Artifacts and save backup are in target/alt/visuals; this session made no commits, network calls or protected-path writes.
+GIIV, full bloom/temporal scheduling, exact tap/reduction/table layouts, HDR output, matrix/vignette and LUT blending remain gaps; newly resolved fog/light CPU uploads remain a follow-up.
+
 ## Shader fog and arena scenery (2026-10-11)
 
 Bevy DistanceFog is replaced by an original HDR depth pass implementing recovered height density, directional colours, independent source gates, midpoint integration and analytical far continuation, with MSAA and `--no-fog` preserved.

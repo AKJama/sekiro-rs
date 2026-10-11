@@ -881,7 +881,8 @@ fn visual_stats(pending: Res<Pending>, diagnostics: Res<DiagnosticsStore>, mut l
         .unwrap_or(0.);
     info!("visual stats: {seconds} s after loading, frame {frame:.3} ms");
     for d in diagnostics.iter().filter(|d| {
-        d.path().as_str().contains("game_fog") && d.path().as_str().ends_with("elapsed_gpu")
+        (d.path().as_str().contains("game_fog") || d.path().as_str().contains("native_post"))
+            && d.path().as_str().ends_with("elapsed_gpu")
     }) {
         if let Some(ms) = d.smoothed() {
             info!("visual stats: {} {ms:.3} ms", d.path());

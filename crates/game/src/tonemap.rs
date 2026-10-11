@@ -1,0 +1,351 @@
+//! Recovered ordinary Yebis post operators and executable-derived CPU packing.
+use std::collections::HashMap;
+
+use bevy::asset::{embedded_asset, load_embedded_asset};
+use bevy::core_pipeline::{
+    FullscreenShader,
+    schedule::{Core3d, Core3dSystems},
+};
+use bevy::prelude::*;
+use bevy::render::{
+    Render, RenderApp, RenderStartup, RenderSystems,
+    extract_component::{
+        ComponentUniforms, DynamicUniformIndex, ExtractComponent, ExtractComponentPlugin,
+        UniformComponentPlugin,
+    },
+    render_resource::{binding_types::*, *},
+    renderer::{RenderContext, ViewQuery},
+    view::ViewTarget,
+};
+
+// Native renderer-global quality scale is unresolved; constructor G is one.
+pub const BLOOM_QUALITY_SCALE: f32 = 1.0;
+pub const OUTPUT_GAMMA: f32 = 2.2;
+// Bevy's existing 9000-lux/daylight exposure does not establish native radiance
+// units. A single shared conversion preserves snow detail in v6 comparisons.
+pub const BEVY_HDR_TO_NATIVE_RADIANCE: f32 = 0.5;
+// The native dt unit is presumed seconds; keep the assumption explicit.
+const NATIVE_DELTA_UNITS_PER_SECOND: f32 = 1.0;
+
+#[derive(Component, Clone, ExtractComponent, ShaderType, Debug)]
+pub struct GamePost {
+    // Exposure * radiance conversion, meter radiance conversion, MiddleGray, auto.
+    pub exposure: Vec4,
+    // Adaptation min/max EV, bright/dark base-10 rate arguments per frame.
+    pub adaptation: Vec4,
+    // Threshold, final colour gain, radius scale, glare luminance.
+    pub bloom: Vec4,
+    // Table power, ordinary output exponent, mode code, center weight.
+    pub transfer: Vec4,
+    // Bloom saturation interpolation, freeze adaptation, reserved.
+    pub controls: Vec4,
+    // LightAdapt, DarkAdapt, FilmicContrast, ReinhardContrast.
+    pub curve: Vec4,
+    // Reinhard white balance, reserved.
+    pub reinhard: Vec4,
+}
+
+pub struct NativePostPlugin;
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct NativePost;
+impl Plugin for NativePostPlugin {
+    fn build(&self, app: &mut App) {
+        embedded_asset!(app, "tonemap.wgsl");
+        embedded_asset!(app, "exposure.wgsl");
+        app.add_plugins((
+            ExtractComponentPlugin::<GamePost>::default(),
+            UniformComponentPlugin::<GamePost>::default(),
+        ))
+        .add_systems(Update, update_rates.after(super::apply_post_effects));
+        if let Some(render) = app.get_sub_app_mut(RenderApp) {
+            render
+                .init_resource::<PostViews>()
+                .add_systems(RenderStartup, init_pipeline)
+                .add_systems(Render, prune_views.in_set(RenderSystems::PrepareResources))
+                .add_systems(
+                    Core3d,
+                    native_post
+                        .in_set(Core3dSystems::PostProcess)
+                        .in_set(NativePost),
+                );
+        }
+    }
+}
+
+fn update_rates(time: Res<Time>, mut cameras: Query<&mut GamePost>) {
+    for mut post in &mut cameras {
+        post.adaptation.z = time.delta_secs() * NATIVE_DELTA_UNITS_PER_SECOND * post.curve.x;
+        post.adaptation.w = time.delta_secs() * NATIVE_DELTA_UNITS_PER_SECOND * post.curve.y;
+    }
+}
+
+#[derive(Resource)]
+struct PostPipeline {
+    layout: BindGroupLayoutDescriptor,
+    meter_layout: BindGroupLayoutDescriptor,
+    meter: CachedComputePipelineId,
+    passes: [CachedRenderPipelineId; 4],
+    sampler: Sampler,
+}
+
+fn init_pipeline(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    fullscreen: Res<FullscreenShader>,
+    cache: Res<PipelineCache>,
+    device: Res<bevy::render::renderer::RenderDevice>,
+) {
+    let layout = BindGroupLayoutDescriptor::new(
+        "native post",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::FRAGMENT,
+            (
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                sampler(SamplerBindingType::Filtering),
+                uniform_buffer::<GamePost>(true),
+                storage_buffer_read_only::<Vec4>(false),
+            ),
+        ),
+    );
+    let meter_layout = BindGroupLayoutDescriptor::new(
+        "native metering",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                texture_2d(TextureSampleType::Float { filterable: false }),
+                uniform_buffer::<GamePost>(true),
+                storage_buffer::<Vec4>(false),
+            ),
+        ),
+    );
+    let meter = cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("Sekiro log luminance adaptation".into()),
+        layout: vec![meter_layout.clone()],
+        shader: load_embedded_asset!(assets.as_ref(), "exposure.wgsl"),
+        ..default()
+    });
+    let passes = ["BRIGHT", "BLUR_H", "BLUR_V", "TONE"].map(|variant| {
+        cache.queue_render_pipeline(RenderPipelineDescriptor {
+            label: Some(format!("Sekiro {variant}").into()),
+            layout: vec![layout.clone()],
+            vertex: fullscreen.to_vertex_state(),
+            fragment: Some(FragmentState {
+                shader: load_embedded_asset!(assets.as_ref(), "tonemap.wgsl"),
+                shader_defs: vec![variant.into()],
+                targets: vec![Some(ColorTargetState {
+                    format: TextureFormat::Rgba16Float,
+                    blend: None,
+                    write_mask: ColorWrites::ALL,
+                })],
+                ..default()
+            }),
+            ..default()
+        })
+    });
+    let sampler = device.create_sampler(&SamplerDescriptor {
+        mag_filter: FilterMode::Linear,
+        min_filter: FilterMode::Linear,
+        ..default()
+    });
+    commands.insert_resource(PostPipeline {
+        layout,
+        meter_layout,
+        meter,
+        passes,
+        sampler,
+    });
+}
+
+struct ViewBuffers {
+    size: UVec2,
+    state: Buffer,
+    // Each level has extraction/vertical output and horizontal scratch.
+    levels: [(Texture, TextureView, Texture, TextureView); 3],
+}
+
+#[derive(Resource, Default)]
+struct PostViews(HashMap<Entity, ViewBuffers>);
+
+fn prune_views(mut buffers: ResMut<PostViews>, views: Query<(), With<GamePost>>) {
+    buffers.0.retain(|entity, _| views.contains(*entity));
+}
+
+fn native_post(
+    view: ViewQuery<(
+        Entity,
+        &ViewTarget,
+        &GamePost,
+        &DynamicUniformIndex<GamePost>,
+    )>,
+    pipeline: Res<PostPipeline>,
+    cache: Res<PipelineCache>,
+    uniforms: Res<ComponentUniforms<GamePost>>,
+    mut buffers: ResMut<PostViews>,
+    mut ctx: RenderContext,
+) {
+    let (entity, target, settings, index) = view.into_inner();
+    let (Some(meter), Some(binding)) = (
+        cache.get_compute_pipeline(pipeline.meter),
+        uniforms.uniforms().binding(),
+    ) else {
+        return;
+    };
+    let passes: Vec<_> = pipeline
+        .passes
+        .iter()
+        .filter_map(|id| cache.get_render_pipeline(*id))
+        .collect();
+    if passes.len() != 4 || target.main_texture_format() != TextureFormat::Rgba16Float {
+        return;
+    }
+    let size = UVec2::new(
+        target.main_texture().width(),
+        target.main_texture().height(),
+    );
+    let b = buffers
+        .0
+        .entry(entity)
+        .or_insert_with(|| new_buffers(size, ctx.render_device()));
+    if b.size != size {
+        let history = b.state.clone();
+        *b = new_buffers(size, ctx.render_device());
+        b.state = history;
+    }
+    let post = target.post_process_write();
+    let meter_bindings = ctx.render_device().create_bind_group(
+        "native metering",
+        &cache.get_bind_group_layout(&pipeline.meter_layout),
+        &BindGroupEntries::sequential((post.source, binding.clone(), b.state.as_entire_binding())),
+    );
+    use bevy::render::diagnostic::RecordDiagnostics;
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
+    let span = diagnostics.time_span(ctx.command_encoder(), "native_post");
+    {
+        let mut pass = ctx
+            .command_encoder()
+            .begin_compute_pass(&ComputePassDescriptor {
+                label: Some("native exposure"),
+                ..default()
+            });
+        pass.set_pipeline(meter);
+        pass.set_bind_group(0, &meter_bindings, &[index.index()]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+    let views = [&b.levels[0].1, &b.levels[1].1, &b.levels[2].1];
+    if settings.bloom.y > 0. {
+        for level in &b.levels {
+            for (step, source, destination) in [
+                (0, post.source, &level.1),
+                (1, &level.1, &level.3),
+                (2, &level.3, &level.1),
+            ] {
+                let bindings = ctx.render_device().create_bind_group(
+                    "native bloom",
+                    &cache.get_bind_group_layout(&pipeline.layout),
+                    &BindGroupEntries::sequential((
+                        source,
+                        source,
+                        source,
+                        source,
+                        &pipeline.sampler,
+                        binding.clone(),
+                        b.state.as_entire_binding(),
+                    )),
+                );
+                draw(
+                    &mut ctx,
+                    passes[step],
+                    &bindings,
+                    index.index(),
+                    destination,
+                );
+            }
+        }
+    }
+    let bindings = ctx.render_device().create_bind_group(
+        "native tone",
+        &cache.get_bind_group_layout(&pipeline.layout),
+        &BindGroupEntries::sequential((
+            post.source,
+            views[0],
+            views[1],
+            views[2],
+            &pipeline.sampler,
+            binding,
+            b.state.as_entire_binding(),
+        )),
+    );
+    draw(
+        &mut ctx,
+        passes[3],
+        &bindings,
+        index.index(),
+        post.destination,
+    );
+    span.end(ctx.command_encoder());
+}
+
+fn new_buffers(size: UVec2, device: &bevy::render::renderer::RenderDevice) -> ViewBuffers {
+    let state = device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("adapted biased log and gain"),
+        contents: &[0; 16],
+        usage: BufferUsages::STORAGE,
+    });
+    let levels = [2, 4, 8].map(|divisor| {
+        let make = || {
+            let texture = device.create_texture(&TextureDescriptor {
+                label: Some("native bloom level"),
+                size: Extent3d {
+                    width: (size.x / divisor).max(1),
+                    height: (size.y / divisor).max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Rgba16Float,
+                usage: TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&TextureViewDescriptor::default());
+            (texture, view)
+        };
+        let (a, av) = make();
+        let (b, bv) = make();
+        (a, av, b, bv)
+    });
+    ViewBuffers {
+        size,
+        state,
+        levels,
+    }
+}
+
+fn draw(
+    ctx: &mut RenderContext,
+    pipeline: &RenderPipeline,
+    bindings: &BindGroup,
+    index: u32,
+    destination: &TextureView,
+) {
+    let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
+        label: Some("native post stage"),
+        color_attachments: &[Some(RenderPassColorAttachment {
+            view: destination,
+            depth_slice: None,
+            resolve_target: None,
+            ops: Operations {
+                load: LoadOp::Load,
+                store: StoreOp::Store,
+            },
+        })],
+        ..default()
+    });
+    pass.set_render_pipeline(pipeline);
+    pass.set_bind_group(0, bindings, &[index]);
+    pass.draw(0..3, 0..1);
+}

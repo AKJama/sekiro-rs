@@ -258,7 +258,8 @@ The shader-input recovery above remains valid independently of these implementat
 All following files are in `gxposteffect.shaderbnd.d`.
 `ToneMap_ReinhardToneMapPS.ppo`, `ToneMap_WriteReinhardToneMappingTablePS.ppo`, `ToneMap_WriteFilmicToneMappingTablePS.ppo`, `ToneMap_TabledToneMapPS.ppo`, `ToneMap_TabledToneMapLUTPS.ppo`, `ToneMap_ColorToLuminancePS.ppo`, `ToneMap_AdaptedLuminancePS.ppo`, `ToneMapVS.vpo` and `ToneMapAdaptVS.vpo` were inspected.
 Other available variants include exponential, divide, direct filmic, sensitometric and extended Reinhard operators, reset passes and separate-begin/end passes.
-Their presence does not identify the active Sekiro mode.
+Their presence alone does not identify the active Sekiro mode.
+The subsequent executable trace in `SHADER-INPUTS.md` identifies native mode codes and constructor default 7 (sensitometric).
 
 For scaled per-channel scene input `x`, the directly evaluated Reinhard branch begins with:
 
@@ -328,7 +329,8 @@ Likewise the negative authored Middle Gray values are compatible with logarithmi
 ### Post constant-buffer mapping
 
 `cbToneMap`, typically cb1, packs controls into vectors rather than retaining GPARAM field names.
-These are candidate producer mappings; the component formulas above are recovered regardless of producer uncertainty.
+The following table retains the initial shader-only candidate mappings as research provenance.
+Executable-derived exposure, adaptation, mode/power and bloom uploads are now recorded in `SHADER-INPUTS.md` and implemented in the native post section below.
 
 | Variable, type and byte offset | GPARAM candidate | Status / units |
 |---|---|---|
@@ -353,9 +355,9 @@ These are candidate producer mappings; the component formulas above are recovere
 AutoExposure enable, ToneMapMode, AdaptionMin/Max, FreezeAdaptionFade and GlareNumLevels can select or configure passes on CPU without appearing as a direct pixel-shader variable.
 They must not be assigned invented component mappings.
 
-Current Bevy uses ACES fitted, `BASE_EV=-0.5`, `METER_EV=2`, correction `BASE_EV+Exposure+clamp(MiddleGray+METER_EV-L,min,max)`, capped adaptation bounds, and fixed brighten/darken speeds 3/2.
+The historical Bevy implementation used ACES fitted, `BASE_EV=-0.5`, `METER_EV=2`, correction `BASE_EV+Exposure+clamp(MiddleGray+METER_EV-L,min,max)`, capped adaptation bounds, and fixed brighten/darken speeds 3/2.
 Those choices differ from the recovered log reduction, biased-log gain, table operators and renderer pre-exposure contract.
-**Recommendation:** replace the calibrated compensation curve with the recovered reduction/adaptation and an explicitly selected native tone-table operator once mode/CPU packing is known.
+**Implemented:** the calibrated compensation curve is replaced by recovered reduction/adaptation and native transfer functions using the subsequently traced CPU packing.
 Keep raw scene scale, metering pre-exposure and output power separate rather than folding them into one guessed EV.
 
 ## Bloom and glare
@@ -384,8 +386,9 @@ Thus its smoothing is a motion-reprojected logarithmic filter, not merely anothe
 
 The GPARAM candidates and offsets are in the shared post table above.
 `Glare Threshold` belongs to exposure-scaled luminance, while `GlareBloom Alpha` cannot be equated to a Bevy intensity without recovering final-colour packing.
-Current Bevy instead uses threshold softness 0.5, additive bloom with `intensity=clamp(alpha*0.08,0,0.08)`, radius clamping and its own multiscale filters.
-**Recommendation:** implement luminance-subtractive extraction and the native seven-tap/level composition alongside the selected tone operator, then port CPU-generated kernels and temporal controls when their producers are available.
+The historical Bevy implementation used threshold softness 0.5, additive bloom with `intensity=clamp(alpha*0.08,0,0.08)`, radius clamping and its own multiscale filters.
+**Implemented:** luminance-subtractive extraction and the native seven-tap/three-level composition accompany the selected tone operator.
+Exact CPU tap offsets, the complete authored-level schedule and temporal controls remain to be ported.
 
 ## Colour grading
 
@@ -406,9 +409,58 @@ The HDR-flagged branch additionally reverses that power after LUT lookup and app
 
 `ColorGrading Enable` and `LutSourceId` are CPU resource/pass selectors, with no cbuffer in the standalone pass.
 The texture ID resolver, time blending policy and relationship to `g_ToneMapLUTParam.x` remain open.
-Current `grading.rs` schedules a 2D-strip lookup after Bevy tonemapping and before UI, using nearest authored LUT IDs.
-Its axis layout matches the recovered strip, but its colour domain inherits Bevy's ACES/output pipeline rather than the game's selected tone operator and power.
-**Recommendation:** preserve the proven strip layout, use a native 3D texture or equivalent exact trilinear sampling, and place grading after the recovered ordinary output power with optional authored LUT blending.
+`grading.rs` now schedules a 2D-strip lookup after the native tone pass and before UI, using nearest authored LUT IDs.
+Its axis layout matches the recovered strip, and its input is now the native ordinary output-power result.
+**Implemented:** the proven strip layout and equivalent exact trilinear sampling run after the recovered ordinary output power.
+Authored LUT blending remains open.
+
+### Native post implementation (2026-10-11)
+
+`lighting.rs`, `tonemap.rs`, `exposure.wgsl` and `tonemap.wgsl` replace Bevy AutoExposure, Bloom and ACES with original implementations of the recovered ordinary chain.
+The 3D camera uses `Tonemapping::None`; the separate 2D HUD never receives `GamePost` or `GradingLut`.
+Fog remains before the native HDR post pass, and grading runs after its output power.
+The executable formulas in `SHADER-INPUTS.md`, which arrived during implementation, supersede the former post-upload hypotheses and the first v6 calibration candidates.
+
+The meter averages `log2(Y+0.00001)+20`, with `Y=dot(scene,(0.299,0.587,0.114))`, over a deterministic 64x64 grid grouped into sixteen samples per reduction cell.
+It uses the recovered radial weight `1-(1-exp2(-r))^3`, with center axes `(CenterWeight,CenterWeight*height/width)`.
+The target is the weighted biased-log mean minus authored MiddleGray, with response `1-10^(-dt*LightAdapt)` when it rises and `1-10^(-dt*DarkAdapt)` when it falls.
+The first valid meter initializes history immediately, approximating the native reset argument 4.
+The previous adapted EV drives the recovered natural-exponential soft limit, retaining the CPU path's one-frame latency without CPU readback.
+For positive EV the limit is `Max*(1-exp(-EV/Max))`; for negative EV it is `abs(Min)*(exp(EV/abs(Min))-1)`.
+FreezeAdaptionFade forces this offset to zero, rather than freezing the GPU meter.
+The gain is `2^Exposure * 2^(-limitedEV)`, applied once to scene and bright-pass input.
+Shipped native pre-exposure and its inverse are one; no guessed BASE_EV or METER_EV remains.
+The existing Bevy 9000-lux/daylight camera scale is not native scene radiance, so `BEVY_HDR_TO_NATIVE_RADIANCE=0.5` converts both meter and exposure-scaled scene input consistently.
+This is an explicit renderer-unit calibration, separate from the verified GPARAM exposure transform.
+The unconverted native-tone candidate clipped about 1.03 percent of the noon world crop to pure white and was rejected.
+`--no-auto-exposure` retains only `2^Exposure`.
+
+Modes 0, 3, 7 and 8 evaluate the native filmic, Reinhard, sensitometric and extended-Reinhard table writers analytically.
+The native `x/(x+0.2)` address and writer reconstruction cancel, so this avoids lookup-table quantization while preserving the transfer function.
+Sensitometric uses `A=1-exp(-1.442695*x)`, `B=1-exp(-4.456669*x)` and `A+FilmicContrast*(B^3-A)`.
+AfterGamma uses table power one and final output power `1/2.2`, before the LUT.
+Missing authored controls use traced constructor defaults: mode 7, FilmicContrast 0.5, ReinhardContrast 1.6, ReinhardWhiteBalance 1.7, MiddleGray -2, LightAdapt 1, DarkAdapt 0.5, CenterWeight 4 and EV bounds -8/+8.
+`--native-tone-reinhard` and `--native-tone-filmic` provide diagnostic overrides.
+Unimplemented mode codes warn and fall back to mode 7.
+
+Bright extraction uses `c*max(Y-Threshold,0)/(Y+0.0001)`, the recovered luminance weights and saturation interpolation.
+Three spatial levels at half, quarter and eighth resolution receive separable seven-tap Gaussian filtering and the recovered `level0+0.5*level1+0.25*level2` composition.
+The final gain is the recovered `Alpha*Luminance/sum(Smooth^i)`, using authored GlareNumLevels, with native glare luminance one.
+The remaining renderer quality scale is explicitly named `BLOOM_QUALITY_SCALE=1`.
+The seven-tap kernel has sigma 1.4 with normalized weights; its exact CPU tap spacing remains unverified, and GaussianRadiusScale multiplies that spacing.
+The authored level count determines the verified normalization, but the full native level allocation/upscale schedule and temporal feedback are still unimplemented.
+`--no-bloom` skips extraction and blur work.
+
+The unorm 16x256 LUT retains the proven `(r,16*b+g)` layout and exact eight-cell trilinear lookup.
+The tone pass stores its display-power result through an sRGB-to-linear conversion because Bevy's final output expects linear pixels.
+Grading reverses that storage conversion before lookup and stores its result linearly again; this pair adds no semantic gamma stage.
+Half-LSB display dither runs after grading, or in the tone pass when grading is disabled.
+Per-view history is independent, retained across resize and released when its camera disappears.
+
+Remaining post gaps are the exact full-screen reduction/downsample layout, native table interpolation precision, reset-counter timing, frame-delta units, quality scale, full bloom/temporal schedule, colour matrix/vignette, LUT blending and HDR display branch.
+Bevy's existing daylight camera/light-unit calibration remains outside this post replacement.
+The newly traced fog and light colour/scale uploads are not ported in this session.
+GIIV remains recommendation 3 and is not implemented by this change.
 
 ## Deferred lighting, ambient and environment
 
@@ -498,7 +550,8 @@ ToneMapMode, Gamma, Middle Gray, AdaptionMin/Max and adaptation-speed names refe
 Bloom control strings reference `0x2AD1D0`, `0x228910` and `0x257FF0`.
 The pertinent decompiled function files are absent from `re/exports/decomp`, and searches for the relevant shader-upload names in the available decompiled text did not recover a producer.
 String references identify leads; they do not establish a transform formula.
-**No CPU-side upload transform is confirmed by the available exports.**
+This was the state of the initial shader-only research.
+`SHADER-INPUTS.md` now records executable-derived post, fog and light transforms; the post implementation above uses the resolved formulas.
 
 The transformed values that are demonstrably consumed by shaders include logarithmic depth coefficients, the affine view-to-height vector, derived light vectors, per-light Vec.w, exposure gains and irradiance-box/cascade matrices.
 Their existence is verified; their derivation from GPARAM is not.
@@ -532,7 +585,8 @@ No Cargo build or tests are required to validate this documentation-only researc
 ## Implementation priorities
 
 1. Replace the clamped exponential DistanceFog/glow approximation with native signed-height density, separate source start distances, channel extinction and midpoint integration, then share the volume with forward geometry.
-2. Reproduce the post chain as one consistent exposure-scale contract: biased-log metering/adaptation, native tone table, luminance-subtractive bloom and grading after the ordinary output power.
+2. Implemented for the ordinary post arithmetic and resolved CPU controls: biased-log metering/adaptation, native transfer functions, luminance-subtractive bloom and grading after output power.
+   Exact reduction, table interpolation, full bloom scheduling and temporal/HDR variants remain open implementation work.
 3. Add native GIIV directional irradiance and environment region blending/PCC, then preserve independent diffuse/specular light inputs and the tuned BRDF.
 
 These recommendations separate recovered shader behavior from the still-required CPU parameter recovery, so implementation can expose the unknown transforms explicitly instead of hiding them in new calibration constants.
