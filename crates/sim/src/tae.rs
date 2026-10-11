@@ -269,6 +269,7 @@ pub struct SpEffectInfo {
 /// A velocity change for jumps (`ChrPhysicsVelocityChangeParam`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VelocityChange {
+    pub fall_type: u8,
     pub horizontal_scale: f32,
     pub vertical_scale: f32,
     pub horizontal: f32,
@@ -345,6 +346,7 @@ impl TaeDb {
                 db.velocity_changes.insert(
                     row.id(),
                     VelocityChange {
+                        fall_type: row.int("fallType").unwrap_or(0) as u8,
                         horizontal_scale: row.f32("horizontalVelocityScale").unwrap_or(1.0),
                         vertical_scale: row.f32("verticalVelocityScale").unwrap_or(1.0),
                         horizontal: row.f32("horizontalVelocityChange").unwrap_or(0.0),

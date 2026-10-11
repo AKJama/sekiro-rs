@@ -41,7 +41,7 @@ Docs: [FORMATS.md](FORMATS.md), [PARAMS.md](PARAMS.md).
 | Jump | Done | Traced gravity: 23.52 m/s2. |
 | Lock-on and camera | Done | From LockCamParam/CameraParam. |
 | Input buffer | Done | Uses the engine's accept/execute flags. |
-| Air control | Not started | From the fall-control table. |
+| Air control | Implemented | Per-type fall table, stick steering/braking and speed cap; fall heights in cm, material fall death and map respawn. |
 | Upper/lower body animation layering | Not started | One clip shown at a time. |
 | Grappling hook | Not started | Grapple points found in data. |
 | Ledge hang, wall hug, swimming, climbing | Not started | |

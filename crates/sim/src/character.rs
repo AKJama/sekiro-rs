@@ -538,7 +538,9 @@ impl Character {
         env.move_cancel = Some(move_window);
         env.landed = self.body.grounded;
         env.falling = self.body.falling();
-        env.fall_height = self.body.last_fall_height;
+        // c0000_transition.lua multiplies env 224 by 0.01 and compares 2000 raw.
+        env.fall_height = self.body.last_fall_height * 100.0;
+        env.vertical_velocity = self.body.velocity[1] * 100.0;
         env.dt = dt;
         env.locked_on = self.lock_target.is_some();
         env.damage = self.pending_damage.take();
@@ -690,6 +692,15 @@ impl Character {
             ControlKind::Npc => self.npc.face_yaw,
         };
         let body_input = BodyInput {
+            stick: if self.kind == ControlKind::Player {
+                self.input
+                    .stick_world_yaw()
+                    .map_or(glam::Vec2::ZERO, |yaw| {
+                        glam::Vec2::new(-yaw.sin(), -yaw.cos()) * self.input.stick_level()
+                    })
+            } else {
+                glam::Vec2::ZERO
+            },
             root_motion,
             steer_to,
             turn_speed,

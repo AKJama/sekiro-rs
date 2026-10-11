@@ -31,6 +31,7 @@ pub const ENV_LANDED: i32 = 201;
 pub const ENV_ARM_STYLE: i32 = 207;
 pub const ENV_WEAPON_CATEGORY: i32 = 225;
 pub const ENV_REALLY_LANDED: i32 = 248;
+pub const ENV_VERTICAL_VELOCITY: i32 = 3003;
 pub const ENV_ANIM_END: i32 = 339;
 pub const ENV_HP: i32 = 1000;
 /// Remaining posture ("stamina"); the NPC script divides it by env 2010 for `GetStaminaRatio`.
@@ -109,8 +110,10 @@ pub struct PlayerEnv {
     pub unlocked: HashSet<i32>,
     /// Airborne and moving down (env 200).
     pub falling: bool,
-    /// Height of the last fall in metres (env 224).
+    /// Height of the last fall in centimetres (env 224).
     pub fall_height: f32,
+    /// Vertical velocity in centimetres per second (env 3003).
+    pub vertical_velocity: f32,
     /// Frame time in seconds; env 333 reports it in milliseconds (the script divides by 1000).
     pub dt: f32,
     /// Lock-on active (env 1118).
@@ -170,6 +173,7 @@ impl Default for PlayerEnv {
             unlocked: [0, 1, 2, 3, 4, 5].into_iter().collect(),
             falling: false,
             fall_height: 0.0,
+            vertical_velocity: 0.0,
             dt: 1.0 / 30.0,
             locked_on: false,
             standby: None,
@@ -249,6 +253,7 @@ impl Adapter<'_> {
             ENV_FALLING => truth(env.falling),
             ENV_LANDED | ENV_REALLY_LANDED => truth(env.landed),
             ENV_FALL_HEIGHT => env.fall_height,
+            ENV_VERTICAL_VELOCITY => env.vertical_velocity,
             ENV_DT => env.dt * 1000.0,
             ENV_LOCKED_ON => truth(env.locked_on),
             ENV_ARM_STYLE => env.arm_style as f32,
@@ -605,6 +610,40 @@ pub struct IncomingDamage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fall_queries_expose_centimetres_to_hks() {
+        let hkx = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../cache/raw/chr/c1010.behbnd.d/c9997.hkx");
+        let Ok(data) = std::fs::read(hkx) else {
+            return;
+        };
+        let graph = sekiro_formats::hkb::parse(&data).unwrap();
+        let mut runtime = BehaviorRuntime::new(Arc::new(graph), AnimOffsets::player_default());
+        let env = PlayerEnv {
+            fall_height: 1680.0,
+            vertical_velocity: -2100.0,
+            ..Default::default()
+        };
+        let mut events = Vec::new();
+        let mut host = Adapter {
+            rt: &mut runtime,
+            env: &env,
+            events: &mut events,
+            log: None,
+            hook_state: None,
+        };
+        assert_eq!(
+            host.env(CommandId::Number(ENV_FALL_HEIGHT), &[])
+                .as_number(),
+            Some(1680.0)
+        );
+        assert_eq!(
+            host.env(CommandId::Number(ENV_VERTICAL_VELOCITY), &[])
+                .as_number(),
+            Some(-2100.0)
+        );
+    }
 
     /// `act(110)` raises the recovery-disabled flag; nothing else does. Skips without `cache/`.
     #[test]

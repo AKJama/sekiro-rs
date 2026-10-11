@@ -1,0 +1,444 @@
+# Wolf's mobility: grapple, ledges, wall hug, air control, falls, swimming
+
+Research for the traversal rewrite, written so a coding agent can implement from it.
+Nothing here is code.
+Date of the research: 2026-10-11.
+Game build: Steam v1.6.0.0.
+
+Tags used on every claim:
+
+- **[V]** verified against a file, offset, id or tool run named next to it.
+- **[I]** inferred from patterns in the data; plausible but not proven.
+- **[?]** unknown.
+
+"HKS" below means the decompiled player script in `re/hks/c0000*.lua` (the extracted bytecode is `cache/raw/action/script/c0000*.hks`).
+Line numbers refer to those decompiled files.
+
+## 1. Summary
+
+- Grapple points are not MSB regions or events.
+  They are placed objects whose model carries a one-record `e<model>.edge` file [V: `cache/raw/obj/o003610.objbnd.d/e003610.edge`, 80 bytes].
+  We have the bytes in `cache/` but no reader that applies them.
+- Ledge hang and wall hug use the map's `.edgebhd/.edgebdt` edge files (record kind 2 and kind 3, see section 3).
+  The edge format is the same one the grapple objects use.
+- The player script already contains every transition for all five mechanics.
+  Our runtime answers `0` for every query that gates them, so none of them can start [V: `crates/sim/src/player.rs` `answer_env`, the `_ => 0.0` arm].
+- Fall control is an exe table, not a param.
+  FwLo's RustSekiro (MIT) already traced it; we have not wired it.
+- Fall death has real data: `HitMtrlParam.fallDeathDist`.
+  Fall damage amount does not.
+  The units of `env(224)` are centimetres, and our sim feeds metres [V: section 5].
+- FwLo's tree has nothing for grapple, ledge, climb, wall hug or swimming [V: section 8].
+
+## 2. What the runtime returns today
+
+Source: `crates/sim/src/player.rs`, `Adapter::answer_env`, `Adapter::act`.
+No env override is set anywhere outside tests [V: grep of `overrides` in `crates/`].
+
+| Query | Meaning (HKS name) | Today | Needed |
+|---|---|---|---|
+| env 200 | is falling | `body.falling()` (airborne and vy < 0) | ok |
+| env 201, 248 | landed, really landed | `body.grounded` | ok |
+| env 224 | fall height | metres from `Body::last_fall_height` | centimetres (section 5) |
+| env 3003 | vertical speed | falls to `0.0` | cm/s, negative when falling |
+| env 3000 | grapple can be fired | `0.0` | true when a target is in range |
+| env 3011 | docking end type | `0.0` | 0 none, 1 left end, 2 right end |
+| env 3017 | docking edge variation id | `0.0` | edge variation of the current edge |
+| env 3020 | touching a wall-jump wall | `0.0` | wall contact flag |
+| env 3025 | touching a swim volume | `0.0` | water plane contact |
+| env 3038, 3039 | can dive, can surface | `0.0` | water state |
+| env 3043, 3044, 3045 | can start wall hug, ground hang, air hang | `0.0` | edge tests |
+| env 3046 | candidate edge variation (arg 1 = hang) | `0.0` | edge variation |
+| env 3048, 3049, 3059, 3060 | hang corner moves | `0.0` | corner geometry |
+| env 3050 | can climb up from hang | `0.0` | top surface test |
+| env 3051, 3052 | obstacle at docking start, end | `0.0` | edge ends blocked |
+| env 3055, 3061 | init pose, safe-position return | `0.0` (which equals `STAND`, not `NONE` = -1) | see section 5 |
+| act 3016 | fall-prevention assist | recorded, no effect | ground edge stop |
+| act 3018 | set wire action in progress | recorded, no effect | wire state flag |
+| act 3023 | pre-computed movement (type, anim) | recorded, no effect | root-motion pre-evaluation |
+| act 3026, 3027, 3028 | run wall hug, ground hang, air hang start tests | recorded, no effect | trigger the env 3043 to 3045 searches |
+| act 3030 | show action guide | recorded, no effect | HUD prompt (ActionGuideParam 10, 11, 20 to 22) |
+| act 3035 | prefer grapple-able edges | recorded, no effect | grapple target bias |
+| act 3011, 3037 | underwater, on water | recorded, no effect | water flags |
+
+The grapple button already exists: `arm::GRAPPLE = 3` in `crates/sim/src/input.rs`, bound to key F in `crates/game/src/play.rs`, and `grapple` works in script files (`crates/sim/src/demo.rs`).
+`ACTION_ARM_WALL_HANG = 12` and `ACTION_ARM_SP_MOVE = 5` (dodge) are the other buttons the hang code reads; `arm 12` is not wired to any key [V: `re/hks/c0000_define.lua` lines 7 to 17].
+Action unlock 4 (`SUB_WEAPONE`) is in our default unlocked set, so env(3033, 4) passes; unlock 14 (wire move attack) does not [V: `PlayerEnv::default`].
+
+## 3. Edge data: the shared format
+
+### 3.1 The `.edge` record format
+
+Known from STATUS.md and re-verified here by parsing 284 map edge files and every object edge file.
+
+- 16-byte header: `u32 version = 4, u32 count, u32 owner number, u32 0` [V].
+  The owner number is the collision model number for map files (200 in `m11_00_00_00_000200.edge`) and the object number for object files (3610 in `e003610.edge`).
+- Then `count` records of 64 bytes [V: file size = 16 + 64 * count for every map file, no exceptions].
+  Layout: two vec4 endpoints (`x y z 1`), one vec4 (zero for map edges, a small offset vector for wire objects), `u32 chain id`, `u32 flags`, 8 bytes padding.
+- Flags byte 0 is the edge kind: 1, 2 or 3 [V: histogram below].
+- Flags byte 1 is the variation, and its value sets match HKS constants exactly:
+  - kind 2: values 0 and 1 only. These are `HANG_EDGE_TYPE_DISABLE_HOLD_FOOT` and `ENABLE_HOLD_FOOT` (`c0000_define.lua` lines 404 to 405) [I, strong: identical value set].
+  - kind 3: values 0 to 3, and 10. These are `COVER_EDGE_TYPE_*` disable look, free look, left only, right only, and peek-move (lines 446 to 453) [I, strong].
+  - kind 1 on objects: 0, 1, 2, 3, 5, 20, 24, 40, 41. These are `WireVariationParam` row ids [I, strong: ids 20, 24, 40, 41 exist and carry the matching `chrPhysicsHomingIdOffset`, section 4.2].
+- Flags bytes 2 and 3 (0, 1, 5, 10 to 14) are unknown [?].
+  On kites they run 1, 10, 11, 12, 13, 14, which is suggestive of per-end cover/peek variation.
+- Endpoints are in the owner's local space.
+  For map edges apply the collision part's MSB transform; for objects apply the placed part's transform.
+  The mirror convention of `cache/maps/<id>/layout.json` is `p' = rotate(q, (-px * sx, py * sy, pz * sz)) + t` [I: used to produce the coordinates in section 9; they land on the castle roof where the Owl arena is, so the convention looks right, but it was not checked against a screenshot].
+
+### 3.2 Counts from `cache/raw/map/<id>/<id>.edgebhd`
+
+Decoded with a scratch Python script that reads the BHF4 header and decompresses KRAK with the install's `oo2core_6_win64.dll` (read only).
+
+| Map | Edge files | Records | Chains | Kind 1 | Kind 2 (hang) | Kind 3 (cover) |
+|---|---:|---:|---:|---:|---:|---:|
+| m11_00_00_00 | 137 | 1562 | 503 | 4 | 584 | 974 |
+| m11_01_00_00 | 147 | 2289 | 838 | 0 | 963 | 1326 |
+
+STATUS.md's "16 files, 255 edges" is the partial extract under `re/edge/` (16 files of m11_00), not the whole map [V: `ls re/edge`, 16 entries].
+Kind 2 variation split on m11_01: 880 with variation 0, 83 with variation 1.
+The 4 kind-1 records on m11_00 sit in collision part `h060000` with variation 0 and 10 [V].
+
+### 3.3 `.wall` files
+
+`map/<id>/<id>.wallbhd/.wallbdt` holds one `h<number>.wall` per collision part (190 on m11_01) [V].
+Header: `u32 version = 3, u32 1, u32 0x48, u32 0, u32 number, ...` followed by sizes and sections [V: hex of `re/wall/h000100.wall.dcx`].
+The content is undecoded [?].
+HKS has `STYLE_TYPE_CLING = 10` and `DOCKING_TARGET_TYPE_CLING_POLYGON = 3` (`c0000_define.lua` line 409), so these are probably cling polygons for wall climbing, not wall hug [I].
+
+## 4. Grappling hook
+
+### 4.1 Player HKS
+
+States and events (from `re/hks/c0000_hkb_outline.txt`, `c0000_transition.lua`) [V]:
+
+- Start conditions: env(1106, 3) pressed (or the buffered add-action input), env(3033, 4) unlocked, **env(3000) true**, and `g_forceCrouch == FALSE` for the ground version (`BEH_A_GROUND_WIRE_SHOOT` at line 6251).
+  The air version (`BEH_A_AIR_WIRE_SHOOT`, line 6154) has the same without the crouch test.
+- Ground shot: `BEH_A_GROUND_WIRE_SHOOT` calls act(127), act(3018, 0), sets `WireMoveStartIndex`, then fires `W_GroundWireShoot` (or `W_SwimWireMoveReady` when swimming) (lines 4418 to 4426).
+  Hang and cover edge ends can also fire `W_AirWireShoot` after env(3000) (lines 3124 and 3165).
+- `WireMoveStartIndex` comes from `GetWireMoveStartIndex(state)`: 0 up slope, 1 vertical, 2 horizontal [V: define lines 382 to 384].
+  Its inputs are not visible in the script (engine side) [?].
+- Graph states [V]: `GroundWireShoot` (clip 202000), `GroundWireMoveStart` selector (202010 up slope, 202011 up, 202012 vertical), `AirWireShoot` (202100), `AirWireMoveStart` selector (202110, 202110, 202112), `WireMove` (CMSG 202020, plays the free-fall loop clip a000_201030), `LandWireMove` (202035), `WireFallLandReady` (202045), `WireMoveWireShoot` (202600) and `WireMoveWireMoveStart` (202610) for a chained second hook, `WireMoveWire2Shoot` (202700), `AirBreakFallWireShoot` (202300), `AirWireMoveStartFromBreakFall` (202310), `SwimWireMoveReady` (528000), `SwimWireMoveStart` (202410), `WireFallDeflect` (203400), `WireFallAttackCombo1` (309000), `LandWireFallAttackCombo1` (309050).
+- Style: `STYLE_TYPE_WIRE_FALL` (the airborne grapple travel) calls act(3032), act(3035) and act(3023, 5, 202600 or 202700) each frame, sets throw states and is kept alive by act(3018, 1) (lines 626 to 632, 815 to 818).
+- Landing: `BEH_R_LAND_WIRE` (and `LAND_WIRE_READY` when env(3003) <= -1000 and env(248)) fires the `LandWireMove` family.
+- Every shoot and move-start state calls **act(3023, type, anim)** with types 2 to 6 and the clip ids above.
+  The engine evaluates the clip's total root motion in advance so the travel can be scaled to reach the target [I: act name "pre-computed movement", types listed in `c0000_define.lua` lines 524 to 545].
+- Unused by `c0000.hks` but present in the exe's act list: act 3003 "face nearest wire point", act 3017 "wire obstacle check setting" [V: `re/ext/meow_act.txt`].
+
+### 4.2 TAE events on the grapple clips
+
+Dumped with `target/alt/release/examples/tae_probe.exe a000_<id>` [V].
+
+| TAE type | Name | Where | Arguments |
+|---|---|---|---|
+| 900 | WireSyncWithTarget_Start | 202000 at 0.467 to 0.633 s, 202100 at 0.367 to 0.600 s | float 50.0 |
+| 901 | WireSyncWithTarget_Travel | move-start clips 202010/11/12/110/112, 0 to 0.5 or 0.6 s | none |
+| 902 | WireLookAtTarget | shoot and travel windows | none |
+| 903 | WireEventUnk01 | 0.1 to 0.2 s on move starts | int 950 |
+| 904 | WireSlideToStartPoint | 202010 at 0.5 to 0.667 s | none |
+| 905 | WireDisableFalling | 202100 at 0 to 0.5 s | none |
+| 920 | ChrPhysicsVelocityChange | travel start: row **1100** (202010 at 0.667 s, 202011/12/110/112 at 0.167 to 0.5 s) | row id |
+| 921 | unnamed | shoot clips at 0 to 0.2 s | int 4, int 300000000 |
+| 700 | CustomLookAtTwistModifier | modifiers 140 and 150, `TargetType 5: Wire` | head and spine twist |
+| 715 | OverrideWeaponModelLocation | whole clip | `WeaponModelType 3: Grappling Hook`, dummy poly 144 |
+| 717 | WireModelEventUnk | whole clip | 1 |
+| ChrActionFlag 27 | SetNoGravity | 202000 over 0 to 0.633 s | none |
+
+Our TAE reader (`crates/sim/src/tae.rs`) only acts on 920 here; 900 to 905, 921, 715 (hook model) and 717 are not used [V: grep].
+
+### 4.3 Params
+
+- `ChrPhysicsVelocityChangeParam` row 1100 "wire": all velocity terms 0, `fallType` **2** (Wire), `homingTargetType` 4, `homingId` 300000000.
+  Rows 1101 "ground wire acceleration" (horizontal 30, vertical 30, fallType 2) and 1102 "aerial wire deceleration" (zeros) are system rows [V: `cache/params/ChrPhysicsVelocityChangeParam.json`].
+- `ChrPhysicsHomingParam` 300000000 "PC wire_default": offset (0, 0, 0), `fallCorrectionGuaranteeArrival` 2, `fallCorrectionTurn` 1, `initialVelocityCorrection` 1.
+  The per-target rows are `300000000 + WireVariationParam.chrPhysicsHomingIdOffset`: 300000020 "cannot ride default" offset (0, -2.5, 7.5), 300000024 offset (0, 3, 2), 300000040 kite valley offset (0, -30, 30), 300000041 kite castle offset (0, -22, 25) [V: ids and names match the variation rows].
+  `fallCorrectionGuaranteeArrival` 2 vs 1 is undefined in our data [?]; FwLo reads 1 as "re-aim the horizontal velocity each frame so the fall ends on the target" [V: his `src/player.rs` plunge code, used for the plunge deathblow].
+- `WireVariationParam` (45 rows): `targetMarkerType` (0 rideable marker, 1 not rideable), `extendWireActionDistance`, `recognitionAngleUp/Down/Left/Right`, `chrPhysicsHomingIdOffset`.
+  Rows used by m11 objects: 0, 1, 3, 5 (ride, extension 10), 20 (cannot ride), 24 (cannot ride, castle snake valley), 40 and 41 (kites, extension 30) [V].
+  Row 1 and 5: 90 degrees all round; row 3: 90 up and down, 180 left and right.
+- `WirePointSearchParam` (20 rows), default row 0: act near 3 m, act far 15 m, find far 25 m, filter box height 10.2 up and 10.2 down, width 14.3, soft-lock box 10.2 and 7.15 [V].
+  Castle rows: 11100 far 25 and find 50 (cavalry boss map), 11110 far 50, 11500 far 20, 11510 far 28, 11520 far 15 with filter height down 30.
+- `WireSetParam` (24 rows) lists up to 20 search-row ids per area; row 0 is `[0, 100, 10100]`, all identical to the default distances.
+  Rows for the castle: 1100200, 1100210, 1100220 (m11_00), 1101200, 1101210, 1101220 (m11_01) [V].
+  **How the engine selects a set is unknown** [?]: the ids appear nowhere in the m11_01 MSB or EMEVD (the hits in m11_00 are item and entity ids that collide by coincidence, checked by location).
+  The MSB does contain regions named "wire set change", "wire point switch" and "wire extension" in m11_01 (Event_ワイヤーセット変更領域_本城内堀 and similar), so sets are probably switched by EMEVD on region entry [I].
+- Exe tunables visible as debug-menu strings (values not extracted): `Game.Player.WireAction.RaycastElevationDeg`, `HitChangeDistance_XZ/_Y`, `WireLowOrbitHorizontalAcceleration`, `WireHighOrbitHorizontalAcceleration`, `WireAccelerationSphereCastRadius`, `ConsecutiveWire minDist/angleY/angleUp/angleDown/extraTime`, `WireDramaticAngle` [V: `re/exports/strings.tsv`, referenced by functions at 0x9771f0, 0xbb45c0, 0xbb5250, 0xefccc0].
+  Source files named in the exe: `Game/WireAction/EdgeDataMap.cpp`, `ActionEdgeMng.cpp`, `TempEdgeDataMap.cpp`, so the engine loads edge data into one edge manager shared by grapple and docking [V: strings at 0x2b45fb0 to 0x2b46c10].
+- Fall control for the travel: fall type 2 "Wire" (section 5).
+
+### 4.4 Where the grapple points are
+
+STATUS.md's lead said "object `o000100` carries dummy 90 and is very likely the grapple point".
+That is wrong: `ObjectParam` row 100 is "Item drawstring" (a loot pouch) [V: `cache/params/ObjectParam.json`].
+No grapple model carries a FLVER dummy at all [V: `dummy_census.exe` on `o003610`, `o003600`, `o003500`, `o003660`, `o003000` prints no dummies].
+
+The real data:
+
+- `ObjectParam` rows named "(wire Pt)" or "wire point": 45 rows, among them Root 3000, 3500, 3510, 3520, Shachi 3600, 3610, Wooden shark 3650, 3660, Fossil bone 3710 [V].
+- Their objbnds hold an `e<number>.edge` with one kind-1 record (a 4 cm segment, flags 0x101: kind 1, variation 1) [V].
+  Other models with kind-1 edges: snow pines 2500 to 2610 (rideable and not), kite 2700 (6 records, variations 40 and 41, flags byte 2 = 1 and 10 to 14), Takebashi bridges 115410 to 115430, decorative tiles 115750 to 115780, giant shachihoko 115790, snake fittings 3200 and 3210, 3250, turret ornaments 115720 and 115730 [V].
+- `o115500` "Root (wire point)" has no edge file, so it is not counted [V: listing shows only flver and hkx].
+- The object's model origin is the anchor; the first vec4 gives the point in model space (for `o003610`: (0.02, 0.315, -0.05) to (-0.02, 0.315, -0.05), third vec (0, -0.15, -0.3)) [V]; the third vector is probably the landing offset or reference direction [?].
+
+**Counts, from the MSB object parts plus object edge files** (placed objects whose model has a kind-1 edge; events may disable some at runtime [?]):
+
+| Map | Placed grapple objects | Kind-1 edges | Of which dedicated "wire Pt" models | Pines | Kites | Other |
+|---|---:|---:|---:|---:|---:|---:|
+| m11_01_00_00 (Ashina Castle) | 172 | 224 | 120 | 7 | 2 | 43 |
+| m11_00_00_00 (Ashina Outskirts) | 237 | 360 (+4 in collision `h060000`) | 187 | 31 | 0 | 19 |
+
+Edges by `WireVariationParam` id: m11_01 { 1: 196, 5: 2, 0: 4, 3: 10, 40: 8, 41: 4 }; m11_00 { 1: 343, 5: 5, 3: 6, 20: 3, 24: 3 } [V].
+Both counts include objects far from the player route; no reachability was checked.
+The 120 dedicated points on m11_01 are the 79 `o003610` and 26 `o003600` Shachi plus 11 `o003500`, 3 `o003000` and 1 `o003020` roots [V].
+
+### 4.5 What we extract and what is missing
+
+- Extracted today: MSB object parts (`crates/formats/src/msb.rs`, `crates/extract/src/maps/mod.rs`) with model name and transform in `layout.json`; the param tables including all three Wire tables (`cache/params/Wire*.json`) [V].
+- Missing: an `.edge` reader (nothing in `crates/formats/src` parses `.edge`; `lib.rs` has no module for it); an extractor step that writes object grapple points and map edges into `layout.json` or a new `edges.bin`; MSB events and regions are skipped by the loader (`msb.rs`: only `MODEL_PARAM_ST` and `PARTS_PARAM_ST` are read), so region-triggered wire-set changes are not available; TAE 900 to 905 and 921 decoding; edge-end semantics for kinds 1 to 3.
+
+## 5. Air control, falling, fall death and respawn
+
+### 5.1 Fall-control table (from FwLo)
+
+An exe table at `0x143b09ce0`, one row per `ChrPhysicsVelocityChangeParam.fallType`, found and verified live by FwLo (`docs/kb/movement.md`, `src/data.rs` `FALL_TYPES`, MIT) [V from his source and notes; not re-traced by us].
+
+| fallType | Name | Horizontal accel (m/s2) | Vertical accel (m/s2) | Stick accel | Stick max speed | Steerable |
+|---:|---|---:|---:|---:|---:|---|
+| 0 | Normal | -0.1 | -13.72 | 10 | 2 | yes |
+| 1 | Normal uncontrollable | -0.1 | -13.72 | 10 | 2 | no |
+| 2 | Wire | -15 | -9.8 | 9 | 6 | yes |
+| 3 | Decelerating | -0.1 | -13.72 | 10 | 2 | yes |
+
+Total gravity is Havok world gravity 9.8 plus the vertical term: 23.52 m/s2 for types 0, 1, 3 and 19.6 m/s2 for the wire type [V: FwLo measured 23.52 over five recorded jumps; `GRAVITY` in `crates/sim/src/body.rs` already uses it].
+Param usage: of 174 velocity-change rows, 63 use fallType 0, 108 use 1 and 3 use 2 (rows 1100 to 1102, the wire) [V: histogram].
+Row 3810 "air speed maintenance, not adjustable" (fallType 1) is applied by the fall-death clips 199100 and 199120 [V: TAE dump], so a falling death cannot be steered.
+
+FwLo's reading of the exe's fall module (`FUN_140bac120`) [V as his claim, unverified by us]:
+
+1. One horizontal air velocity `v` decays along its direction by `hAccel * dt` (skipped once slower than one step).
+2. The stick adds `a = stickAccel * stick * dt`, split along and across `v`.
+   The across part always applies; the along part applies in full when braking and, when accelerating, only up to `stickMax - |v|`.
+3. A fast launch can therefore be steered and braked but never pushed faster.
+
+His known gap: how stick input combines with the launch velocity is modelled, not traced [V: his movement.md].
+
+**Our gap** [V]: `crates/sim/src/body.rs` integrates only `GRAVITY` and the launch velocity.
+`VelocityChange` in `crates/sim/src/tae.rs` has no `fall_type` field.
+`BodyInput` has no stick.
+Horizontal air velocity is constant; PROGRESS.md lists "Air control: not started".
+
+Other jump rows with `fallType` 1 and homing: positioning jumps 111 to 118 (7.68 m/s, 7.712 up, homing id 10000 when locked on), wall jumps 1000 to 1011, 1111 to 1118, 1200 to 1218, storm jumps 980 to 982, kick jumps 2002 to 2111.
+Those belong to the wall-jump work, not here.
+
+### 5.2 Fall height, landing clips and thresholds
+
+- `env(224)` is multiplied by 0.01 before comparison with metres (`local fallHeight = env(224) * 0.01`, `c0000_transition.lua` lines 1770 and 2122) and compared raw with `WALL_JUMP_ENABLE_FALL_HEIGHT = 2000` (line 6023) [V].
+  So env 224 is in centimetres [I, strong].
+  Our sim returns metres [V: `character.rs` line 541], so `fallHeight` is 100 times too small and no stiff landing can ever trigger.
+- Thresholds in metres [V: `c0000_define.lua` lines 211 to 214]: short stiff landing 5 (3 after a positioned jump), long stiff landing 20, long stiff water landing 20.
+  Landing clips: `LandFreeFall` 200020, `LandFreeFallLongStiff` 200021, `FreeFall` loop 200010, `SelfFallStart` 200000.
+- env 3003 (vertical speed) is cm/s: `LAND_READY_ENABLE_FALL_SPEED = -2000`, `LAND_WIRE_READY_ENABLE_FALL_SPEED = -1000` (lines 312 to 313) [I, same logic].
+  `BEH_R_LAND` needs `env(3003) <= 0`, which our stub of 0 satisfies; the hard "land ready" states need a real value.
+- `BEH_R_FALL` (free fall start) requires env(200) and `g_beforeFireLand == -1` (line 5684).
+
+### 5.3 Fall death and fall damage
+
+- `HitMtrlParam` has `disableFallDamage` (u8), `fallDeathDist` (u32, default 40) and `fallDamageRate` (f32, 0 to 1).
+  The def descriptions say: landing on this material from a height at or above `fallDeathDist` kills the player instantly (PC only); `fallDamageRate` multiplies the fall damage (PC only); `disableFallDamage` removes it for PCs and enemies [V: `cache/refs/paramdex/Defs/HitMtrlParam.xml`].
+  Unit of `fallDeathDist` is not stated; the default 40 and the 20 m long-stiff threshold suggest metres [I].
+- Values [V: `cache/params/HitMtrlParam.json`]: every material 40 except water planes 22 (dive plane), 36 (swim slope) and 38 (water by grass swim) at 80 with `fallDamageRate` 0.5, and material 40 "cloud" with `disableFallDamage` 1.
+  Walkable water (20, 21, 35, 37) and swamp keep 40.
+  There are 34 hit materials in m11 collision, and `Ground::material()` already exposes them for footsteps (`crates/sim/src/body.rs`).
+- **The HP amount of fall damage is not in any param.**
+  The exe has a `FallDamage` function (strings.tsv: string at 0x2a28878, referenced by functions 0xa32e30 and 0xa15b20) and `GameData.DisableFallDamage` [V: names only; not decompiled in `re/exports/decomp/`] [?].
+  `SpEffectParam.fallDamageRate`, `NpcParam.fallDamageDump` and `CharaInitParam.red_Falldam` (defined as damage absorbed when another character is landed on) exist as multipliers [V].
+  FwLo has no fall damage [V: section 8].
+- Fall reactions in the graph: `FallHitDmgSmall` (clips 102100, 102101), `FallHitDmgLargeStart/Loop` (102300, 102310), `LandFallHitDmgLarge` (102320, 102321), `FallDeathDmgStart/Loop` (121000, 121010, 121011), `LandFallDeathDmg` (112020, 112021), `FallDeathStart/Loop` (199100, 199110), `DeadFallStart`, electro variants, plus `GroundFallReturn` (711210) and `FallDeadReturnStart` (199120) [V: outline].
+  The script never fires the entry events of `FallHitDmgSmall/Large`, so the engine sends them from fall-damage code [I].
+- Death routing in the script (`BEH_R_DEATH`, lines 761 to 835): `damageType == 6` (`DEATH_FALLING`) fires `W_FallDeathStart`; `14` (`FALL_DEAD_RETURN`) fires `W_FallDeadReturnStart`; `15` and `16` (`LAND_DEAD_RETURN`, `LAND_DEAD`) fire the land death starts (water variants when env(3025)); free-fall styles otherwise use damage level and direction to pick `W_FallDeathDmgStart` [V].
+  Return types after a fall-return death: `SAFE_POS_RETURN_TYPE_STAND/CROUCH/SWIM/DIVE` via env(3061), consumed by `InitState` (lines 175 to 200) [V].
+  How Sekiro decides a pit fall is a death (kill height, return volume) is not in the script [?].
+- Our current stand-in: `Duel::fall_respawn_depth` puts a character that falls a set depth below its start back at the start, standing, arena mode only (`crates/sim/src/duel.rs` lines 155 and 1397; `arena.rs` line 273) [V].
+  `docs/DEATHBLOW.md` and PROGRESS.md mark Wolf death and respawn done for combat deaths; the fall path is separate.
+- The exe also has debug-menu names for air docking: `AirDockingPredictionRadius`, `AirDockingPredictionStartTime`, `DockingTranslationOffset_Hang`, `DockingTranslationOffset_Cover`, `DockingStickAngle` [V: strings.tsv; values not extracted].
+
+## 6. Ledge hang, shimmy, climb up
+
+### 6.1 Player HKS
+
+All [V] from `c0000_transition.lua` unless marked.
+
+- Entry from the ground (`BEH_A_GROUND_HANG_START`, line 6199): `env(3044)` (can start ground hang), the wall-hang button (`env(1106, 12)`) or the add-action input, `env(3008)` (debug dash) false, not in sub-weapon guard.
+  The script first calls act(3027) every frame while the style allows it, which asks the engine to run the ground-hang test; env(3044) then reports the result; the HUD prompt is act(3030, 20, 12) "Hanging" (ActionGuideParam 20).
+  The event is chosen from `hkbGetVariable("HangStartEdgeAngle")` and `env(3046, 1)` (edge variation): back (-45 to 45 degrees), left (45 to 135), right (-135 to -45), else forward, each in a "foot hold" version when the variation is 1 (lines 4573 to 4603).
+  Events: `W_StandToHang`, `W_StandToHang1Back/Left/Right` and the `...FootHold...` forms.
+- Entry from the air (`BEH_A_AIR_HANG_START`): env(3045) is the air-hang type: 0 disabled, 1 short range, 2 long range [V: define 411 to 413].
+  Left side when the angle is in -180 to -45, right in 45 to 180 (define 306 to 309); events `W_FreeFallToHang[FootHold][LongRange][Left|Right]` (lines 4604 to 4650).
+  Gating: TAE SpEffect refs `ENABLE_AIR_HANG` (105) or `ENABLE_AIR_HANG_GRAB` (5), or env(1105), plus the wall-hang button held (`env(1108, 12) > 0`).
+  Air grab states: `AirHangGrabStart/Loop/End` (clips 217700, 217710, 217720).
+- Hang idle: `Hang` style (`STYLE_TYPE_HANG`), clip `HangIdle` 20000 (`HangFootHoldIdle` 20010).
+  Each frame the style calls act(3023, 11, 217500) when variation is 0 else act(3023, 11, 217600) [pre-computed root motion of the climb-up clip; line 584 to 589] and `SetVariable("Selector_DockingTargetEdgeType", 0 or 1)`.
+- Shimmy: `BEH_A_DOCKING_MOVE_START/STOP` with stick angle `DockingStickAngle` between 30 and 150 degrees (`DOCKING_MOVE_INPUT_ANGLE_MIN/MAX`), blocked by env(3051) (start end) or env(3052) (end end); `Selector_DockingMoveDir` 0 left, 1 right.
+  Hang moves: `HangMove` clips (20202, 20203, `HangMoveL/R`), `HangMoveStart/End`, `HangFootHoldMoveStart/Loop/End`.
+  The graph has 105 `CustomDockingGenerator` nodes [V: `hkb-dump.exe`], so the engine's docking module (`CSChrDockingModule`, exe string at 0x2a7f1f8) moves the body along the edge while the generator plays the clip [I].
+- Corners: `BEH_A_HANG_CORNER_MOVE` with env(3048) outer left, 3049 outer right, 3059 inner left, 3060 inner right; events `W_HangCornerMove[FootHold]Left/Right` and `W_HangInsideCornerMove...` (clips 20402, 20403, 20412, 20413, 20422, 20423, 20432, 20433).
+- Climb up: `BEH_A_HANG_CLIMB` on the wall-hang button or jump, requires env(3050); event `W_HangToStand` (variation 0, clip 217500) or `W_HangFootHoldToStand` (217600), then a buffered follow-up.
+- Drop: `BEH_A_HANG_FALL` on the dodge button (`env(1106, 5)`): `W_HangToFreeFall` (217520) or `W_HangFootHoldToFreeFall` (217620).
+- Hang jump: `HangJumpReady` (201304) and `HangFootHoldJumpReady` (201305), then wall-jump rows (`Selector_WallContactType` F).
+- Docking break (`BEH_R_DOCKING_BREAK`) exits the style on damage or contact.
+- Attacks from hang exist (`HangSubAttackCombo1`, `HangAttackCombo1` 314010, eavesdrop clips); out of scope for the first pass.
+
+### 6.2 TAE on the hang clips
+
+Probed `a000_217120`, `217130`, `217500`, `217600`, `217520`, `218103`, `218490` [V].
+Only i-frames (951), engine flags 910 `NewEngineFlag1` and 913 `NewEngineFlag4` (217600 over 0 to 0.167 s), and a turn-speed event (224) appear; there is no SetNoGravity and no 920.
+The climb-up clips have ChrActionFlags for cancels from 0.5 to 0.833 s [V: 217500 dump].
+So the vertical motion comes from the clip's root motion, which the engine reaches onto the ledge top using the act(3023) pre-computation [I].
+
+### 6.3 Data and params
+
+- Edge data: kind-2 records (section 3). Variation 0 vs 1 = foot hold [I, strong].
+- `ObjectParam.isEnableWallJump`, `doesStopPlayerDockedMove` apply to objects (155 and 686 of 1090 rows set) [V].
+- `EquipParamGoods.enable_Hang` and `enable_CantClimbHang` gate goods [V: columns exist].
+- Ledge reach heights: **[?]**.
+  No param gives them; the 3044 and 3045 tests (distance, angle, ledge height) live in the exe (docking module) [I].
+- FwLo has nothing here [V].
+
+## 7. Wall hug
+
+- Entry: `BEH_A_COVER_START` needs env(3043), env(3008) false, not force-crouch, SpEffect ref 9 (`DISABLE_COVER_START`) absent, and the wall-hang button (line 6194ff); act(3026) runs the test each frame; prompt act(3030, 10, 12) (ActionGuideParam 10 "Stick", 11 "Leave").
+  Style `STYLE_TYPE_COVER`; setting the variable `Selector_Environment` from env(3017): peek types 10 to 13 select `SELECTOR_COVER_ENVIRONMENT_PEAK`, others normal (lines 520 to 523) [V].
+- Entry events and clips: `StandToCover2Back` 218103, `StandToCover2Left` 218104, `StandToCover2Right` 218105, `...Left180` 218106, `...Right180` 218107, `MoveToCoverLeft/Right`; idle `CoverIdle` 21000; `CoverMoveStart`, `CoverMove`, `CoverWalkEnd`, `CoverRunEnd`; look-out `CoverActionStart/Loop/End` (peek, `BEH_A_COVER_LOOK_*`, direction from env(3011): 1 left end, else right); end `CoverEnd` 218490 and `CoverEndFromCoverLook` 218491 [V].
+- Edge variation rules: 0 no look, 1 free look, 2 left look only, 3 right look only, 10 to 13 the same with peek-move [V: define 446 to 453].
+  The look direction restrictions come from env(3011) and env(3017) (lines 6289 to 6300).
+- Cover actions: eavesdrop, throw stone, throw pottery, sub-weapon from cover (`CoverEavesdrop*`, `CoverActionItem*`, `CoverActionSubAttack*`).
+- Edge data: kind-3 records (section 3), 974 on m11_00 and 1326 on m11_01 [V].
+  Door objects carry kind-3 edges with their own variations (door objects 111300 to 111850: `(kind 3, var 0 to 3, hi 1 or 10)`), so door-side wall hug is part of the same data [V].
+- Collision: `ObjectParam.isDamageCover` (1 on chests) is a different "cover" meaning [V].
+- Unknown: the engine test for env(3043) (distance and facing to the edge); `DockingTranslationOffset_Cover` numeric offset [?].
+
+## 8. Climbing (ladders and cling)
+
+- The player script contains no ladder state [V: zero "ladder" matches in all four decompiled files and the graph outline].
+  `ObjectParam.isLadder` is set on 4 rows and none is placed on m11_00 or m11_01 [V].
+  Ladders are therefore probably `ObjActParam` interactions with their own animations, like doors [I].
+- `STYLE_TYPE_CLING` (10) exists with throw-state setters only; no CMSG states carry it [V].
+  `DOCKING_TARGET_TYPE_CLING_POLYGON` (3) and the `.wall` files are the likely data [I].
+- There is no free climbing in the script.
+  Treat "climbing" as ladders plus cling polygons and defer it.
+
+## 9. Swimming (brief)
+
+- Script styles: `STYLE_TYPE_SWIM` and `STYLE_TYPE_DIVE` (plus aging variants).
+  States: `SwimIdle/Move`, `SwimToDive`, `DiveMove*`, `DiveToSwim`, kick moves, `SwimBackStep`, attacks and guards in water (`HKB_STATE_SWIM_*`, `HKB_STATE_DIVE_*`) [V: outline and `c0000.lua` lines 647 to 695].
+  Transitions: `BEH_R_STAND_MOVE_TO_SWIM`, `BEH_R_LAND_WATER`, `BEH_R_SWIM_TO_STAND_MOVE`, `BEH_R_DIVE_TO_SWIM`.
+  Dive up and down use arms 29 and 30, acceleration arm 28, dive unlock `ACTION_UNLOCK_TYPE_DIVE = 0` [V].
+- Engine facts the script reads: env(3025) touching a swim volume, env(3038) can dive, env(3039) can surface, act(3011) underwater, act(3037) on water, SpEffect ref `IN_WATERSIDE_AREA` 110005; speeds come from `_DiveSpeedUpdate` and the clips [V].
+- Data: collision hit materials 20 and 21 (flat and walkable water), 22 (dive plane), 35 (walkable slope), 36 (swim slope), 37 and 38 (water with grass walkable and swim), 45 to 47 (underwater floors), 23 and 24 (poison swamp) [V: `HitMtrlParam`].
+  Jump rows for water: 221, 240, 241 (dolphin jumps).
+  Water landing fall height: 20 m for the long stiff water landing; 80 m death distance on dive planes [V].
+- Maps with water in our baseline: m10, m13, m15, m17 (MAP-BASELINE.md notes "water approximate") [V]; materials in `collision.bin` were not scanned [?].
+
+## 10. FwLo's RustSekiro
+
+Checked with `gh api` against `FFwLo/RustSekiro` (MIT; no part of `tools/sekiro-dearxan` was read) [V].
+
+- Has: the fall-control table (`src/data.rs` `FALL_TYPES`, exe 0x143b09ce0), the jump arc from TAE 920 plus fall type, the horizontal air-velocity model with stick (`src/player.rs` about lines 2560 to 2600), plunge deathblow homing (`ChrPhysicsHomingParam 200000300`, `fallCorrectionGuaranteeArrival`), exe-derived gravity 23.52 m/s2 and the 5-jump recording.
+- Does not have: grapple, wire, ledge, hang, climb, wall hug, swimming, fall damage, fall death.
+  `docs/HANDOFF.md` line 379 lists "wall hug, hanging (limit types)" as undone and `docs/HANDOFF_PLAN.md` line 140 tells agents to skip "swimming, hanging, wire".
+  A grep of `src/*.rs` and `docs/kb/*.md` for grapple, wire, ledge, hang, climb, swim, cling, cover and fall damage finds only unrelated hits.
+  His player falls to `ground_y + capsule` and has no kill height.
+
+Credit the table and the air-velocity description in `CREDITS.md` and in the code that uses them.
+
+## 11. Implementation plan
+
+Order: air control and fall respawn, ledge hang, grapple, wall hug, climbing, swimming.
+Every step: keep `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --check` clean; build with `CARGO_TARGET_DIR=target/alt` and `-j 6`.
+Scripted runs: `sekiro-rs --play --map <id> --no-enemy --script FILE --shots <step>:<path> --exit`, `--spawn x,y,z,yaw,pitch`; script lines are `frames stick_x stick_y button [yaw_offset]` with buttons `jump`, `dodge`, `grapple`, and `-` for none (`crates/game/scripts/m11_ledge_jump.txt`).
+Yaw convention: forward is `(-sin yaw, -cos yaw)`, positive yaw turns left [V: `Body::forward`].
+Spawn coordinates below are Bevy-space values from `layout.json`.
+
+### Step 1. Air control and fall respawn
+
+- Files: `crates/sim/src/tae.rs` (add `fall_type` to `VelocityChange`, read `fallType`), `crates/sim/src/body.rs` (fall table, stick, per-type gravity, horizontal air velocity), `crates/sim/src/character.rs` (feed the stick vector and fall type into `BodyInput`; env 224 in centimetres; env 3003 in cm/s), `crates/sim/src/player.rs` (env 3003 arm), `crates/sim/src/duel.rs` and `crates/game/src/play.rs` (fall death and respawn in play, not only arenas), `crates/sim/src/fight.rs` (inject damage type 6 or 14 for the death clips).
+- Reads: `ChrPhysicsVelocityChangeParam.fallType`, FwLo's four-row table, `HitMtrlParam` `fallDeathDist` and `disableFallDamage` through `Ground::material`.
+- Unknown or risky: how stick combines with the launch velocity (modelled, not traced); the unit of `fallDeathDist` (m assumed); the HP formula of fall damage (none; do not invent one, implement only instant death at `fallDeathDist` and the stiff-landing clips); what kills a fall into a void (use a placeholder kill depth below the lowest collision and mark it as such); when `FallHitDmgSmall/Large` fire.
+  Changing env 224 to centimetres will newly trigger `LandFreeFallLongStiff` and the 5 m short stiff landing, which existing tests may not expect.
+- Scripted tests:
+  1. Air steering, `--map m11_00_00_00 --spawn -142.6,-44.0,125.0,180,0 --no-enemy` with a copy of `m11_ledge_jump.txt` that holds the stick left for 20 frames after the jump.
+     Expected: landing point sideways from the straight jump by roughly 0.1 to 1 m, forward speed decays by 0.1 m/s2 only; a unit test in `body.rs` checks the table arithmetic.
+  2. Stiff landing, `--map m11_00_00_00 --start 4 --no-enemy`, walk off the ledge the audit found (about 16.8 m drop, MAP-BASELINE.md) with `PLAY_LOG_ALL=1`.
+     Expected: env 224 about 1680 on landing, `LandFreeFall` (200020) with the short stiff variant; a 20 m or higher drop plays `LandFreeFallLongStiff` (200021).
+  3. Fall death and respawn, `--map m25_00_00_00 --start 0` and walk into the ravine (MAP-BASELINE.md: no ground supports it).
+     Expected: Wolf enters `FallDeathStart` (199100) at the kill depth, the death flow runs, and he respawns at the start within the existing respawn delay.
+
+**Status (2026-10-11):** Step 1 is implemented in the simulation and map play.
+Velocity changes retain `fallType` for the airborne phase; the FwLo table drives gravity, decay, braking, across steering and the along-speed cap.
+HKS env 224 returns centimetres and env 3003 returns centimetres per second.
+Landing death reads the landing material's `fallDeathDist` and `disableFallDamage`, injects DEATH_FALLING (6), and uses the existing six-second respawn path.
+A fall into the void, past a clearly marked placeholder of 40 m below the lowest supporting collision (or below spawn without collision), returns Wolf to where he last stood on collision instead of killing him; the fall return's HP cost is untraced, so none is taken.
+The camera snaps back with Wolf on respawn.
+The m11 straight jump lands at (-142.60, -42.60, 131.24), while `m11_air_steer.txt` lands at (-141.82, -42.68, 131.20), a 0.78 m sideways offset.
+The steering replay waits through JumpReady and launch before holding left for 20 airborne frames, to avoid changing the launch direction.
+The start-4 replay `m11_stiff_landing.txt` walks backward for 180 frames and reaches `LandFreeFall` (200020) with env 224 = 1284.9 cm; the intermediate landing splits its 17.75 m total descent into separate falls.
+A deterministic 16.8 m sim fixture checks env 224 = 1680 and the same short landing clip.
+The original audit's 270-degree route continued to a roughly 169 m landing and lethal fall, so its 16.8 m intermediate drop is not a reproduced single landing height.
+The m25 start-0 replay `m25_fall_death.txt` falls into the ravine (about 35 m of void below the last ledge) and is returned to the last safe stance at (-68.25, 167.81, -7.61) without dying.
+Screenshots were reviewed under `target/alt/mobility/`: `straight.png`, `steer.png`, `stiff.png`, `fall-death.png` and `respawn.png`.
+Final captures add `--simple-ai` to bypass the default Lua driver's automatic session report writes.
+One concurrent map replay hit Vulkan DeviceLost; its steering capture was rerun alone and passed.
+The existing camera chase still lags during very fast descents; respawn now snaps the camera and starts a fresh pose at spawn.
+`fallDeathDist` in metres remains an assumption from the research, the air-stick combination remains modelled, and authored void kill/return volumes remain undecoded.
+The Owl arena fall test now expects the landing death on the ground 62 m below the roof and the respawn at the start.
+
+### Step 2. Ledge hang
+
+- Files: new `crates/formats/src/edge.rs` (parser), `crates/extract/src/maps/mod.rs` (write map edges transformed to Bevy space into `cache/maps/<id>/edges.bin` or `layout.json`), `crates/sim/src/` new `docking.rs` (edge manager: nearest hang edge, angle, tops, ends, corners), `crates/sim/src/player.rs` (env 3011, 3017, 3043 to 3052, 3059 to 3061; act 3026 to 3028 trigger the searches, 3030 raises a prompt), `crates/sim/src/input.rs` and `crates/game/src/play.rs` (bind arm 12), `crates/sim/src/body.rs` (docked body: position follows the edge, not collision).
+- Reads: kind-2 edge records (variation 0 and 1), collision floor above the edge for env 3050, `HangStartEdgeAngle` hkb variable (script reads it, engine writes it), clips 217xxx, 20xxx.
+- Unknown or risky: all distance and angle thresholds for env 3044 and 3045 (exe); the transform of docked position relative to the edge (`DockingTranslationOffset_Hang`); act(3023) root-motion scaling; whether kind 2 also carries "air hang" targets (env 3045 types 1 and 2); the meaning of flags bytes 2 and 3.
+  Start with variation 0, ground entry, no corners.
+- Scripted test: `--map m11_01_00_00 --spawn 82.9,29.8,254.3,15,0 --no-enemy` (start 2 of the castle map; the nearest hang edge `h019900` chain 7 runs from (77.7, 29.5, 242.8) to (83.8, 29.5, 249.3), 5 m ahead; geometry not yet checked on screen, so first log env 3044 along the walk).
+  Script: walk forward 60 frames, release, press arm 12, wait, press arm 12 again.
+  Expected: env 3044 true near the edge, `W_StandToHang*` fired, `HangIdle` (20000) active, the climb-up press plays `HangToStand` (217500) and Wolf ends standing within 0.3 m of the edge on the upper floor.
+
+### Step 3. Grappling hook
+
+- Files: `crates/formats/src/edge.rs` (shared with step 2), `crates/extract/src/maps/mod.rs` (write grapple points: object transform applied to the object edge, variation, model, placed name), `crates/sim/src/` new `wire.rs` (target search with `WirePointSearchParam`, recognition angles from `WireVariationParam`, travel), `crates/sim/src/tae.rs` (decode 900 to 905 and 921, hook visibility 715), `crates/sim/src/body.rs` (fall type 2, travel velocity), `crates/sim/src/player.rs` (env 3000, 3003, act 3018, 3023, 3035), `crates/game/src/` (a target marker for `targetMarkerType`, hook model on dummy 144, optional rope line).
+- Reads: object edge files, MSB object parts, `WireVariationParam`, `WirePointSearchParam` row 0 (3 to 15 m act, 25 m find), `ChrPhysicsHomingParam 300000000 + offset`, velocity rows 1100 to 1102, TAE of 202000 to 202710.
+- Unknown or risky: how the engine picks the search row and wire set (section 4.3); travel kinematics (what TAE 900 and 901 actually drive; the homing parameters need a fit to FwLo-style recordings); the `fallCorrectionGuaranteeArrival` 1 vs 2 difference; the screen-space filter box (needs the camera); target selection and soft lock; landing on rideable vs non-rideable points (variation 20 homes to an offset below and beyond the point); event-disabled objects; `GetWireMoveStartIndex` inputs.
+  Ship in two slices: (a) ground shot to a rideable Shachi with a scaled root-motion arrival, (b) air shot and chained hook.
+- Scripted test: `--arena owl --passive --god --spawn 103.5,54.0,243.6,139,0 --script crates/game/scripts/grapple_shachi.txt --shots ... --exit` (castle top, map within 60 m).
+  The point is `o003610_0014` at about (97.1, 52.8, 251.0), 9.9 m from the spawn (inside the 3 to 15 m window), yaw 139 faces it.
+  Script: `30 0 0 -`, `1 0 0 grapple`, `120 0 0 -`.
+  Expected: env 3000 true before the press, `W_GroundWireShoot` then `GroundWireMoveStart` (clip 202010 to 202012), TAE 901 window starts, and about 1.5 s later Wolf stands within 0.5 m of the point.
+  Negative test: `--spawn 103.5,54.0,243.6,-41,0` (facing away) must not fire.
+  Counts to assert in a unit test: `layout` reports 172 objects and 224 edges on m11_01, 237 and 360 plus 4 on m11_00.
+
+### Step 4. Wall hug
+
+- Files: shares `edge.rs` and `docking.rs` from step 2; `crates/sim/src/player.rs` (env 3043, 3011, 3051, 3052, 3017 for kind 3); `input.rs` arm 12 as in step 2.
+- Reads: kind-3 edge records and their variation (0 to 3, 10 to 13), the `Selector_Environment` and `Selector_CoverLookDir` variables, clips 218103 to 218107, 21000, 218490.
+- Unknown or risky: the engine test for env(3043); wall-contact placement; `DockingTranslationOffset_Cover`; peek (look) movement needs the camera; door edges (doors can open or close at runtime).
+  Start with idle and exit, then move along the edge, then look-out.
+- Scripted test: `--map m11_00_00_00 --spawn 174.4,-69.1,68.2,-33,0 --no-enemy`.
+  The nearest cover edge `h018700` chain 6 (variation 0) runs from (175.9, -68.7, 64.6) to (176.3, -68.7, 66.5), 2.6 m away.
+  Script: walk forward until the wall, press arm 12.
+  Expected: env 3043 true at the wall, `StandToCover2*` plays (218103 to 218107), then `CoverIdle` (21000) with `Selector_Environment` normal; a second press plays `CoverEnd` (218490).
+
+### Step 5. Climbing
+
+- Files: `crates/formats/src/` new `wall.rs` only after the `.wall` layout is decoded; ladders through the object-action path (`ObjActParam`) once a ladder placement is found.
+- Reads: `.wall` files, `ObjectParam.isLadder`, `ObjActParam`, ActionGuide.
+- Unknown or risky: everything; `STYLE_TYPE_CLING` has no states, ladders are absent from m11.
+  Do not start before steps 1 to 4 ship.
+- Scripted test: none until a ladder or cling surface is located in `m10`, `m13`, `m15`, `m17`, `m20` or `m25` (scan `ObjectParam.isLadder` models in each MSB first).
+
+### Step 6. Swimming
+
+- Files: `crates/sim/src/collision.rs` (water hit materials 20 to 24, 35 to 38, 45 to 47 as a volume and surface height), `crates/sim/src/player.rs` (env 3025, 3038, 3039, act 3011 and 3037), `crates/sim/src/body.rs` (buoyant movement, dive up and down), `crates/sim/src/character.rs`.
+- Reads: `HitMtrlParam`, clips for `SwimMove` and `DiveMove`, `SP_EF_REF_IN_WATERSIDE_AREA` 110005.
+- Unknown or risky: speeds (from root motion and `_DiveSpeedUpdate`), water surface height source (collision plane or a region), fall into water (`W_LandWaterFreeFall*`, long stiff at 20 m), underwater camera and fog.
+- Scripted test: pick the first start in `m13_00_00_00`, `m15_00_00_00` or `m17_00_00_00` whose collision under the feet reports material 22, 36 or 38 (not yet scanned), jump in, and expect `W_LandWaterFreeFall` then `SwimMove` states.
+
+Biggest unknowns overall: the wire set and search row per area, the travel model (TAE 900 and 901, act 3023), the exe tests behind env 3000 and 3043 to 3050, fall damage HP and the void kill height, edge flags bytes 2 and 3, and whether the object transform in section 3.1 matches the rendered map (check one point against a screenshot first).

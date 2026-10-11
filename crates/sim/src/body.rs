@@ -11,6 +11,75 @@
 
 use crate::input::angle_diff;
 use crate::tae::VelocityChange;
+use glam::Vec2;
+
+/// Exe fall-control table values from FwLo's RustSekiro (MIT), `src/data.rs`.
+#[derive(Debug, Clone, Copy)]
+pub struct FallControl {
+    pub horizontal_accel: f32,
+    pub vertical_accel: f32,
+    pub stick_accel: f32,
+    pub stick_max: f32,
+    pub steerable: bool,
+}
+
+pub const FALL_TYPES: [FallControl; 4] = [
+    FallControl {
+        horizontal_accel: -0.1,
+        vertical_accel: -13.72,
+        stick_accel: 10.0,
+        stick_max: 2.0,
+        steerable: true,
+    },
+    FallControl {
+        horizontal_accel: -0.1,
+        vertical_accel: -13.72,
+        stick_accel: 10.0,
+        stick_max: 2.0,
+        steerable: false,
+    },
+    FallControl {
+        horizontal_accel: -15.0,
+        vertical_accel: -9.8,
+        stick_accel: 9.0,
+        stick_max: 6.0,
+        steerable: true,
+    },
+    FallControl {
+        horizontal_accel: -0.1,
+        vertical_accel: -13.72,
+        stick_accel: 10.0,
+        stick_max: 2.0,
+        steerable: true,
+    },
+];
+
+/// Horizontal air integration described by FwLo's RustSekiro (MIT).
+fn air_velocity(mut v: Vec2, stick: Vec2, control: FallControl, dt: f32) -> Vec2 {
+    let decay = control.horizontal_accel.abs() * dt;
+    if v.length() > decay {
+        v -= v.normalize() * decay;
+    }
+    if control.steerable {
+        let a = stick.clamp_length_max(1.0) * control.stick_accel * dt;
+        let speed = v.length();
+        if speed > 1e-6 {
+            let direction = v / speed;
+            let along = a.dot(direction);
+            let across = a - direction * along;
+            v += across
+                + direction
+                    * if along <= 0.0 {
+                        along
+                    } else {
+                        along.min((control.stick_max - speed).max(0.0))
+                    };
+        } else {
+            v += a.clamp_length_max((control.stick_max - speed).max(0.0));
+        }
+    }
+    v
+}
 
 /// Downward acceleration in m/s²: Havok world gravity (9.8) plus the extra vertical
 /// acceleration of the normal fall type (13.72) from the exe's fall-control table. Measured
@@ -20,6 +89,17 @@ pub const GRAVITY: f32 = 9.8 + 13.72;
 
 /// Something the character can stand on.
 pub trait Ground {
+    /// Lowest walkable collision at this horizontal point, for the placeholder void boundary.
+    fn lowest_floor(&self, x: f32, z: f32) -> Option<f32> {
+        let mut lowest = self.height(x, z)?;
+        while let Some(next) = self.floor(x, z, lowest - 0.01) {
+            if next >= lowest {
+                break;
+            }
+            lowest = next;
+        }
+        Some(lowest)
+    }
     /// Height of the walkable surface below `(x, z)`, if any.
     fn height(&self, x: f32, z: f32) -> Option<f32>;
 
@@ -65,6 +145,8 @@ impl Ground for FlatGround {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Body {
+    /// Selected by the latest velocity change, reset on landing or walking off a ledge.
+    pub fall_type: u8,
     pub position: [f32; 3],
     pub yaw: f32,
     pub velocity: [f32; 3],
@@ -78,6 +160,7 @@ pub struct Body {
 impl Default for Body {
     fn default() -> Self {
         Self {
+            fall_type: 0,
             position: [0.0; 3],
             yaw: 0.0,
             velocity: [0.0; 3],
@@ -91,6 +174,8 @@ impl Default for Body {
 /// What moves the body this tick.
 #[derive(Debug, Clone, Default)]
 pub struct BodyInput {
+    /// World-space horizontal movement stick, with magnitude at most one.
+    pub stick: Vec2,
     /// Root-motion delta in the character's local source space: `[x, y, z, yaw]`.
     pub root_motion: [f32; 4],
     /// World yaw to steer toward, if the stick is pushed.
@@ -132,6 +217,7 @@ impl Body {
         self.yaw = angle_diff(self.yaw, 0.0);
 
         if let Some(v) = input.velocity_change {
+            self.fall_type = v.fall_type;
             let [fx, fz] = self.forward();
             let a = v.horizontal_angle.to_radians();
             let (sa, ca) = a.sin_cos();
@@ -148,6 +234,18 @@ impl Body {
         }
 
         if !self.grounded {
+            let control = FALL_TYPES
+                .get(self.fall_type as usize)
+                .copied()
+                .unwrap_or(FALL_TYPES[0]);
+            let v = air_velocity(
+                Vec2::new(self.velocity[0], self.velocity[2]),
+                input.stick,
+                control,
+                dt,
+            );
+            self.velocity[0] = v.x;
+            self.velocity[2] = v.y;
             travel[0] += self.velocity[0] * dt;
             travel[1] += self.velocity[2] * dt;
         }
@@ -164,6 +262,7 @@ impl Body {
             match floor {
                 Some(h) if self.position[1] - h < reach => self.position[1] = h,
                 _ => {
+                    self.fall_type = 0;
                     self.grounded = false;
                     self.fall_top = self.position[1];
                 }
@@ -174,8 +273,14 @@ impl Body {
         }
         // Exact constant-acceleration step, so the arc does not depend on the tick rate.
         let previous_y = self.position[1];
-        self.position[1] += self.velocity[1] * dt - 0.5 * GRAVITY * dt * dt;
-        self.velocity[1] -= GRAVITY * dt;
+        let gravity = 9.8
+            + FALL_TYPES
+                .get(self.fall_type as usize)
+                .unwrap_or(&FALL_TYPES[0])
+                .vertical_accel
+                .abs();
+        self.position[1] += self.velocity[1] * dt - 0.5 * gravity * dt * dt;
+        self.velocity[1] -= gravity * dt;
         self.fall_top = self.fall_top.max(self.position[1]);
         // Land on the highest floor the feet passed through this tick, or one up to a step
         // above them (a stair tread or ledge the body was carried into while airborne).
@@ -187,6 +292,7 @@ impl Body {
             self.position[1] = h;
             self.velocity = [0.0; 3];
             self.grounded = true;
+            self.fall_type = 0;
             self.last_fall_height = self.fall_top - h;
         }
     }
@@ -195,6 +301,109 @@ impl Body {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn close(actual: Vec2, expected: Vec2) {
+        assert!(
+            (actual - expected).length() < 1e-5,
+            "{actual:?} != {expected:?}"
+        );
+    }
+
+    #[test]
+    fn air_decay_does_not_flip_small_velocity() {
+        close(
+            air_velocity(Vec2::new(3.0, 4.0), Vec2::ZERO, FALL_TYPES[0], 1.0),
+            Vec2::new(2.94, 3.92),
+        );
+        close(
+            air_velocity(Vec2::new(0.05, 0.0), Vec2::ZERO, FALL_TYPES[0], 1.0),
+            Vec2::new(0.05, 0.0),
+        );
+    }
+
+    #[test]
+    fn grounded_stick_does_not_add_air_velocity() {
+        let mut b = Body::default();
+        b.step(
+            &BodyInput {
+                stick: Vec2::X,
+                root_motion: [0.0, 0.0, -1.0, 0.0],
+                ..Default::default()
+            },
+            0.1,
+            &FlatGround::default(),
+        );
+        assert_eq!(b.position, [0.0, 0.0, -1.0]);
+        assert_eq!(b.velocity, [0.0; 3]);
+    }
+
+    #[test]
+    fn air_braking_and_across_steer_apply_above_cap() {
+        close(
+            air_velocity(Vec2::new(6.0, 0.0), -Vec2::X, FALL_TYPES[0], 0.1),
+            Vec2::new(4.99, 0.0),
+        );
+        close(
+            air_velocity(Vec2::new(6.0, 0.0), Vec2::Y, FALL_TYPES[0], 0.1),
+            Vec2::new(5.99, 1.0),
+        );
+        close(
+            air_velocity(Vec2::new(6.0, 0.0), Vec2::Y, FALL_TYPES[1], 0.1),
+            Vec2::new(5.99, 0.0),
+        );
+    }
+
+    #[test]
+    fn air_along_acceleration_caps_only_speed_gain() {
+        close(
+            air_velocity(Vec2::new(1.9, 0.0), Vec2::X, FALL_TYPES[0], 0.1),
+            Vec2::new(2.0, 0.0),
+        );
+        close(
+            air_velocity(Vec2::new(6.0, 0.0), Vec2::X, FALL_TYPES[0], 0.1),
+            Vec2::new(5.99, 0.0),
+        );
+        close(
+            air_velocity(Vec2::ZERO, Vec2::X, FALL_TYPES[0], 1.0),
+            Vec2::new(2.0, 0.0),
+        );
+        close(
+            air_velocity(Vec2::new(8.0, 0.0), Vec2::X, FALL_TYPES[2], 0.1),
+            Vec2::new(6.5, 0.0),
+        );
+    }
+
+    #[test]
+    fn selected_fall_type_persists_until_landing() {
+        let mut b = Body {
+            position: [0.0, 10.0, 0.0],
+            grounded: false,
+            fall_top: 10.0,
+            ..Default::default()
+        };
+        let input = BodyInput {
+            stick: Vec2::X,
+            velocity_change: Some(VelocityChange {
+                fall_type: 2,
+                horizontal_scale: 0.0,
+                vertical_scale: 0.0,
+                horizontal: 0.0,
+                vertical: 0.0,
+                horizontal_angle: 0.0,
+            }),
+            ..Default::default()
+        };
+        let ground = FlatGround::default();
+        b.step(&input, 0.1, &ground);
+        assert!((b.velocity[1] + 1.96).abs() < 1e-5);
+        b.step(&BodyInput::default(), 0.1, &ground);
+        assert_eq!(b.fall_type, 2);
+        assert!((b.velocity[1] + 3.92).abs() < 1e-5);
+        while !b.grounded {
+            b.step(&BodyInput::default(), 0.1, &ground);
+        }
+        assert_eq!(b.fall_type, 0);
+    }
 
     #[test]
     fn root_motion_moves_forward_and_jump_lands() {
@@ -212,6 +421,7 @@ mod tests {
         assert!((b.position[2] + 1.0).abs() < 1e-5);
 
         let jump = VelocityChange {
+            fall_type: 0,
             horizontal_scale: 0.0,
             vertical_scale: 0.0,
             horizontal: 6.4,

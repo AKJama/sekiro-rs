@@ -27,6 +27,27 @@ pub const RESPAWN_DELAY: f32 = 6.0;
 /// Seed for the AI's random numbers (fixed, so runs repeat).
 const AI_SEED: u64 = 7;
 
+#[derive(serde::Deserialize)]
+struct FallMaterial {
+    id: u32,
+    #[serde(rename = "fallDeathDist")]
+    fall_death_dist: u32,
+    #[serde(rename = "disableFallDamage")]
+    disable_fall_damage: u8,
+}
+
+fn load_fall_materials(cache: &Path) -> std::collections::HashMap<u32, FallMaterial> {
+    #[derive(serde::Deserialize)]
+    struct Materials {
+        rows: Vec<FallMaterial>,
+    }
+    std::fs::read(cache.join("params/HitMtrlParam.json"))
+        .ok()
+        .and_then(|data| serde_json::from_slice::<Materials>(&data).ok())
+        .map(|table| table.rows.into_iter().map(|row| (row.id, row)).collect())
+        .unwrap_or_default()
+}
+
 /// TAE action flag on the player's attacks that tells the enemy AI to parry
 /// (`INTERUPT_ParryTiming`), traced by FwLo's RustSekiro (`docs/kb/guard-deflect.md`).
 pub const FLAG_PARRY_TIMING: i32 = 63;
@@ -152,9 +173,12 @@ pub struct Duel {
     last_steps: [StepReport; 2],
     /// Thrown and shot attacks in flight.
     pub bullets: crate::bullets::Bullets,
-    /// A character that falls this far below its start is put back there (a stand-in for
-    /// fall death, which is not modelled yet). `None` on the flat floor, where nobody falls.
+    /// Placeholder void depth below the lowest collision, or spawn without collision, past
+    /// which Wolf is returned to where he last stood; `None` disables the return.
     pub fall_respawn_depth: Option<f32>,
+    fall_materials: std::collections::HashMap<u32, FallMaterial>,
+    /// Where Wolf last stood on collision, for the return after a fall into the void.
+    last_safe: Option<([f32; 3], f32)>,
     /// The boss brain choosing the enemy's acts with its Lua AI (see [`crate::brain`]);
     /// `None` leaves the Lua AI alone.
     pub boss_brain: Option<crate::brain::BrainDriver>,
@@ -348,6 +372,8 @@ impl Duel {
             last_steps: Default::default(),
             bullets: Default::default(),
             fall_respawn_depth: None,
+            fall_materials: load_fall_materials(cache),
+            last_safe: None,
             boss_brain: None,
             god: false,
             immortal: false,
@@ -1392,20 +1418,81 @@ impl Duel {
         self.events = Some(ev);
     }
 
-    /// Puts a character that fell [`Duel::fall_respawn_depth`] below its start back at its
-    /// start, standing still.
-    fn respawn_fallen(&mut self) {
-        let (Some(depth), Some(spawn)) = (self.fall_respawn_depth, self.spawn) else {
-            return;
-        };
-        for (c, start) in [&mut self.player, &mut self.enemy].into_iter().zip(spawn) {
-            if c.body.position[1] < start.position[1] - depth {
-                c.body.position = start.position;
-                c.body.yaw = start.yaw;
-                c.body.velocity = [0.0; 3];
-                c.body.grounded = true;
-                c.body.fall_top = start.position[1];
+    /// Routes lethal landings through DEATH_FALLING and returns Wolf to where he last stood
+    /// after a fall into the void.
+    fn kill_fallen(&mut self, was_grounded: bool) {
+        // Keep the arena's existing NPC boundary reset; material fall death is PC-only.
+        if let Some((depth, spawn)) = self.fall_respawn_depth.zip(self.spawn) {
+            let start = spawn[1];
+            if self.enemy.body.position[1] < start.position[1] - depth {
+                self.enemy.body.position = start.position;
+                self.enemy.body.yaw = start.yaw;
+                self.enemy.body.velocity = [0.0; 3];
+                self.enemy.body.grounded = true;
+                self.enemy.body.fall_top = start.position[1];
+                self.enemy.body.fall_type = 0;
             }
+        }
+        if self.rules.fighters[0].dead() {
+            return;
+        }
+        let b = &self.player.body;
+        let [x, y, z] = b.position;
+        // Only a stance on real collision counts as safe ground.
+        let on_floor = self
+            .player
+            .ground
+            .floor(x, z, y + 0.5)
+            .is_some_and(|floor| (y - floor).abs() < 0.3);
+        if was_grounded && b.grounded && on_floor {
+            self.last_safe = Some((b.position, b.yaw));
+        }
+        // Placeholder void boundary until authored kill/return volumes are decoded.
+        // The lowest supporting collision takes precedence over spawn to allow deep paths.
+        let void_fall = !b.grounded
+            && self
+                .fall_respawn_depth
+                .zip(self.spawn)
+                .is_some_and(|(depth, spawn)| {
+                    let lowest = self
+                        .player
+                        .ground
+                        .lowest_floor(x, z)
+                        .unwrap_or(spawn[0].position[1]);
+                    y < lowest - depth
+                });
+        if void_fall {
+            // Sekiro returns Wolf to safe ground after a fall into the void instead of killing
+            // him (the script's FALL_DEAD_RETURN route). The HP cost is in the exe and not
+            // traced yet, so none is taken here.
+            let (position, yaw) = self
+                .last_safe
+                .or_else(|| self.spawn.map(|s| (s[0].position, s[0].yaw)))
+                .unwrap_or((b.position, b.yaw));
+            let body = &mut self.player.body;
+            body.position = position;
+            body.yaw = yaw;
+            body.velocity = [0.0; 3];
+            body.grounded = true;
+            body.fall_top = position[1];
+            body.fall_type = 0;
+            return;
+        }
+        if self.god || self.immortal {
+            return;
+        }
+        let lethal_landing = !was_grounded && b.grounded && {
+            let material = self.player.ground.material(x, z, y + 0.01).unwrap_or(1);
+            self.fall_materials.get(&material).is_some_and(|m| {
+                m.disable_fall_damage == 0 && b.last_fall_height >= m.fall_death_dist as f32
+            })
+        };
+        if lethal_landing {
+            self.rules.fighters[0].vitality.hp = 0;
+            self.player.pending_damage = Some(crate::player::IncomingDamage {
+                damage_type: 6,
+                ..Default::default()
+            });
         }
     }
 
@@ -1475,6 +1562,7 @@ impl Duel {
             (!self.rules.fighters[0].dead()).then_some(self.player.body.position);
         // Hit stop: each character advances only by what is left of the step after its freeze.
         let dts = [self.hit_stop[0].split(dt), self.hit_stop[1].split(dt)];
+        let was_grounded = self.player.body.grounded;
         let player = self.advance_character(0, &input, dt, dts[0]);
         let enemy = self.advance_character(1, &InputFrame::default(), dt, dts[1]);
         if self.deathblow.is_none() && !self.throw_held() {
@@ -1491,7 +1579,7 @@ impl Duel {
         if self.deathblow.is_none() && !self.throw_held() && enemy_alive {
             self.separate();
         }
-        self.respawn_fallen();
+        self.kill_fallen(was_grounded);
 
         if self.god {
             let f = &mut self.rules.fighters[0];

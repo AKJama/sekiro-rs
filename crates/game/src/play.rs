@@ -306,6 +306,8 @@ pub fn run(options: Options) -> Result<()> {
         );
         duel.player.ground = Box::new(world.clone());
         duel.enemy.ground = Box::new(world.clone());
+        // Placeholder until the map's authored void return volumes are decoded.
+        duel.fall_respawn_depth = Some(40.0);
         eprintln!(
             "{id}: start {} at {:?}, {} collision triangles",
             options.start,
@@ -784,7 +786,7 @@ fn orbit_camera(
 fn simulate(
     mut sim: NonSendMut<Sim>,
     live: Res<LiveInput>,
-    orbit: Res<Orbit>,
+    mut orbit: ResMut<Orbit>,
     rigs: Query<&Rig, With<Actor>>,
     mut sounds: ResMut<crate::audio::SoundLibrary>,
     mut cues: MessageWriter<crate::audio::SoundCue>,
@@ -833,6 +835,14 @@ fn simulate(
     }
     let before = sim.duel.player.body.position;
     let report = sim.duel.step(&frame, dt);
+    if report.respawned {
+        // A respawn teleports the camera with Wolf instead of chasing up from the ravine.
+        orbit.focus = Vec3::from_array(sim.duel.player.body.position)
+            + Vec3::Y * sim.duel.camera_director.focus_height;
+        orbit.yaw = sim.duel.player.body.yaw;
+        orbit.pitch = 0.25;
+        orbit.look = Default::default();
+    }
     sim.clock[0] += report.player.advanced;
     sim.clock[1] += report.enemy.advanced;
     if log_enabled() {
@@ -846,10 +856,12 @@ fn simulate(
         if !r.behavior.script_errors.is_empty() {
             warn!("script errors ({i}): {:?}", r.behavior.script_errors);
         }
-        if r.clip_started
+        if (r.clip_started || report.respawned)
             && let Some(name) = &r.animation
         {
-            sim.started[i] = Some((name.clone(), r.blend_in));
+            // Teleports start a fresh pose, without blending from the falling death clip.
+            let blend = if report.respawned { 0.0 } else { r.blend_in };
+            sim.started[i] = Some((name.clone(), blend));
         }
     }
     let step = sim.step;
@@ -880,13 +892,16 @@ fn simulate(
         && (step.is_multiple_of(30) || std::env::var_os("PLAY_LOG_ALL").is_some())
     {
         info!(
-            "step {step} wolf {} {} at {:.2?}{} | enemy {} {}",
+            "step {step} wolf {} {} at {:.2?}{} | enemy {} {} | fall_cm {:.1} vy_cm_s {:.1} respawn {}",
             report.player.behavior.state_path.join("/"),
             report.player.animation.as_deref().unwrap_or("-"),
             report.player.position,
             if report.player.grounded { "" } else { " AIR" },
             report.enemy.behavior.state_path.join("/"),
             report.enemy.animation.as_deref().unwrap_or("-"),
+            sim.duel.player.behavior.env.fall_height,
+            sim.duel.player.behavior.env.vertical_velocity,
+            report.respawned,
         );
     }
     sim.perilous_age = match (&report.perilous, sim.perilous_age) {

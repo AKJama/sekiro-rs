@@ -4,6 +4,15 @@ Last updated 11 October 2026.
 Read this first in a new session, then `AGENTS.md` and `docs/DESIGN.md`.
 How much of the game is done overall: `docs/PROGRESS.md`.
 
+## Mobility step 1 (2026-10-11)
+
+Air control uses the four fall types, world-space stick, per-type gravity, decay, braking and the along-speed cap (`docs/MOBILITY.md`, step 1).
+HKS fall height and vertical speed now use cm and cm/s, so the stiff landings play.
+Landing from at least `HitMtrlParam.fallDeathDist` (metres assumed) injects DEATH_FALLING and uses the six-second respawn path; falling off the Owl's roof onto the ground 62 m below is such a death.
+A fall into the void (a placeholder 40 m below the lowest collision) returns Wolf to where he last stood on collision, as Sekiro's fall return does; its HP cost is in the exe and not traced, so none is taken.
+Reviewed replays under `target/alt/mobility/` show a 0.78 m sideways landing offset and a 1284.9 cm short stiff landing at m11 start 4 (the route has an intermediate landing; a 16.8 m sim regression verifies 1680 cm and clip 200020).
+Formatting, workspace Clippy, all sim tests and the alternate release build pass; the game's pre-existing `map_tangents` failure remains.
+
 ## Boss brain token observability and budgets (2026-10-11)
 
 Tokens are the primary metric in fight summaries, session reports and the recording overlay.
