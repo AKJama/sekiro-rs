@@ -174,6 +174,7 @@ fn soldier_approaches_and_attacks_with_its_own_ai() {
             }),
             hit_radius: 0.4,
             current_anim: me.anim.map(|(a, _)| a),
+            current_anim_time: me.anim.map_or(0.0, |(_, t)| t),
             combo_window: me.anim.is_some_and(|(_, t)| t > 0.9),
             home: [0.0; 3],
             parry_timing,

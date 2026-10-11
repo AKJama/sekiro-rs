@@ -28,7 +28,7 @@ Lua choices display `Lua`.
 The last checkpoint shows its reason, set switch or keep decision, and age.
 Accepted coach notes appear as a highlighted pre-, mid- or post-fight card for eight seconds; boss and player principles remain beneath it, and `coach thinking…` shows while a coach request is pending.
 The last ban appears for five seconds, including the driver's actual whiff or failure evidence.
-A fight's scorecard appears for six seconds with the winner, time to kill Wolf, Wolf's posture breaks and deflect rate.
+A fight's scorecard appears for six seconds with the winner, time to kill Wolf, Wolf's posture breaks, deflect rate and mean break conversion delay.
 The view reads driver state directly and works without `--brain-log`.
 
 `--brain-stage <name>` selects one of these before/after presets:
@@ -964,7 +964,7 @@ An absent or empty list preserves the Lua follow-up.
 Owl's compiled `506001_battle.lua` maps its grab helper to `Act40` (source line 1513), which queues 3040 through `AttackTunableSpin`; normal plans preserve this reflex.
 The local response owns this one follow-up after the battle goal activates, replacing its queued Lua act and surviving the delayed replan from observed effects.
 A single attack uses the existing `ComboFinal` cancellation path, so the current clip's TAE still decides when it can start.
-Priority ends when the response's first attack starts or the 2.5-second reward window expires; an already active paired throw cannot be forced to cancel.
+Priority ends when the response's first attack starts or its queue deadline expires (at least 2.5 seconds, extended through a longer data-defined recovery); an already active paired throw cannot be forced to cancel.
 No model request is needed to execute the response.
 
 Response outcomes are counted by plan in coach input `on_wolf_break` and persisted in `Memory.coach.break_plans`.
@@ -1015,3 +1015,63 @@ The objective order is win and win faster (`time_to_kill_wolf`), Wolf posture br
 Passive share above 0.35 fails regardless of the other results, and retreats are attack setups.
 `engaged_time` remains informational and only a small tiebreaker for losing fights while landing hits.
 `boss_damage_taken_per_min` sums observed boss HP drops and posture rises, normalized to percent of a bar per minute, without subtracting healing or recovery.
+
+
+## Combo-aware move sheet and break log (2026-10-11)
+
+Installing the boss brain computes `move_sheet` once from the loaded character's clips, resolved TAE timelines and BehaviourParam/AtkParam rows.
+Every offered action, named combo and attack group inside a tactic plan has its hit windows, duration, recovery, NPC cancel windows and nominal melee reach.
+`hits` stores `[time_seconds, Wolf_guard_posture, Wolf_deflect_posture, behaviour_judge]`; its length is the hit count.
+Distinct judge/start windows follow the hit detector's identity, rather than counting individual hit capsules as separate blows.
+Counter-only dummy behaviours and inactive conditional weapon hits are excluded.
+Projectile-only tools have zero melee hits and `reach: null`; this sheet does not invent projectile contact times.
+The guard/deflect numbers use the same `CombatRules::posture_for_outcome` path as live resolution, including the loaded Wolf weapon, reinforcement, attack-power effects and the NPC's attack-time TAE effects.
+The AP1 and AP6 fixture verifies these forecasts against real guard and deflect resolution; these Owl-to-Wolf values are identical at both powers.
+
+`duration` is the decoded clip duration, and `recovery` is the time from the last hit window's opening to the first unconditional attack cancel or natural end.
+`cancels` stores `[start_seconds, end_seconds, ChrActionFlag, stateInfo]`, retaining conditional requirements instead of claiming they are always available.
+NPC attack windows are ChrActionFlag 23 (combo) and 86 (attack); flag 79 permits a step and flag 11 permits movement.
+NPC HKS env queries 107, 120 and 118 read the queued combo, attack and step actions respectively, through `Character::fill_env`.
+They are query numbers, not new TAE flags or invented cancel windows.
+A combo's nominal timeline chains at each component's first attack window; a zero-length interval in its sheet marks the consumed chaining point.
+The final component retains its natural duration and recovery.
+These nominal times omit hit stop and frame rounding, which remain part of actual execution.
+Reach samples animated dummy capsules at 60 Hz, includes Wolf's radius and accumulated root translation/yaw across a combo, and assumes neutral steering and root travel.
+TAE 760 target-dependent travel scaling, target movement and facing can change real contact, so reach is an envelope rather than a guaranteed hit distance.
+
+Generated Owl example from `owl_move_sheet_matches_guard_and_deflect_resolution_at_current_power` (seconds; posture points per hit; nominal reach in metres):
+
+| action | hits | hit times | guard / deflect posture | duration | recovery | first combo / attack cancel | reach |
+|---|---:|---|---|---:|---:|---|---:|
+| 3000 | 1 | 0.567 | 29 / 14 | 2.500 | 0.333 | 0.900 / 1.700 | 6.666 |
+| 3001 | 1 | 0.333 | 23 / 11 | 2.733 | 0.334 | 0.667 / 1.767 | 5.033 |
+| 3002 | 1 | 0.700 | 41 / 20 | 2.900 | 0.233 | 0.933 / 1.867 | 6.832 |
+| 3005 | 1 | 0.467 | 29 / 14 | 2.033 | 0.066 | 0.533 / 1.533 | 4.360 |
+| 3017 | 1 | 1.133 | 59 / 29 | 3.500 | 1.734 | 2.867 / 2.867 | 7.840 |
+| 3063 | 2 | 0.467, 0.767 | 11 / 5; 17 / 8 | 2.667 | 0.066 | 0.833 / 1.767 | 7.657 |
+| 3000+3001 | 2 | 0.567, 1.233 | 29 / 14; 23 / 11 | 3.633 | 0.334 | chain at 0.900; final 1.567 / 2.667 | 6.849 |
+| 3000+3001+3002 | 3 | 0.567, 1.233, 2.267 | 29 / 14; 23 / 11; 41 / 20 | 4.467 | 0.233 | chain at 0.900, 1.567; final 2.500 / 3.434 | 10.095 |
+
+Every Wolf break now records the boss action or offered combo, hit index/count, attacking/recovering/free state, remaining clip-clock wait, whether the response actually started, its start delay and outcome.
+Actual clip starts supply the start delay; queuing an AI goal is not counted as starting the punish.
+Breaks from a counter or other source with no matching boss hit use index zero.
+`break_log` supplies recent records to both post-fight coaching and mid-fight review, and `break_summary` retains per-action/hit `[breaks, converted]` totals when older detail is trimmed.
+Outcomes are `hit`, `guarded` (including deflects), `whiffed`, or `missed window`; an unresolved live record is `pending`.
+A landed hit within 2.5 seconds, excluding the breaking hit, converts the break, including a continued combo hit or a Lua follow-up.
+`break_conversion_delay` is the mean delay to the first landed conversion for each converted break, not the queue delay; it is null without conversions.
+It appears in persisted metrics, the trend, coach result, scorecard and session report.
+Session reports show individual break records and per-action/hit conversion totals.
+Old memory defaults the new metric to null and the log to an empty list.
+
+The local response replaces the remaining combo goals and queues an attack with NPC combo cancellation enabled.
+The character's existing HKS/TAE gates start it at the first compatible window, or at the first free frame if no such window exists.
+Repeating the current attack waits for a new clip clock rather than treating the old swing as the response.
+The repeated-3001 regression reproduced a 14.8-second late start before that distinction; after the fix both a 3005 punish and a repeated 3001 start 0.300 seconds after a middle-hit break at clip time 0.383 seconds, using the 0.667-second window before the 2.733-second natural end.
+The no-window fixture removes only cancel flags from a copy of 3001's in-memory TAE, retains its timings and hit stop, and starts the punish at the first free frame (2.400 seconds after the same break).
+All three assert the previous clip clock against the allowed boundary and verify the logged break is hit 2 of 3.
+
+Coach and mid-review instructions ask for breaks on the last combo hit or a fast single move near breaking, a short `finisher` set for `wolf_posture_75`, and inspection of failed conversions.
+The input still fits 4096 bytes: trimming prefers the current plan's moves and the most-used other actions, keeps recent break detail and aggregate totals, then uses the existing summary trimming.
+The four Owl fixtures measured 3916 to 4067 bytes for the complete fitted coach JSON, including the move sheet, break log and aggregate totals.
+The mixed `walk_in4>3000+3001` fixture also checks that the current attack group remains in the fitted sheet and that its break is logged as hit 2 of 2.
+No hosted calls or real model CLIs are needed for these tests.

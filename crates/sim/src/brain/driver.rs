@@ -225,6 +225,7 @@ impl Checkpoints {
 /// What is counted about the fight in progress.
 #[derive(Debug, Clone, Default)]
 struct FightState {
+    cost_at_start: super::cost::CostTotals,
     break_plans: CountMap,
     action_ranges: BTreeMap<String, (u32, f32, f32)>,
     uses: Vec<PlanUse>,
@@ -355,6 +356,7 @@ pub struct BrainDriver {
     pub history: Vec<Plan>,
     /// Seconds since each side last landed an unguarded hit `[boss, wolf]`.
     since_hit: [Option<f32>; 2],
+    pub move_sheet: super::moves::MoveSheet,
     boss_open: Option<i32>,
     wolf_open: Option<String>,
     /// A tactic's exchange is open in the tally.
@@ -400,6 +402,8 @@ pub struct BrainDriver {
 /// Text and transient cards for the game's recording HUD.
 #[derive(Debug, Default, Clone)]
 pub struct BrainOverlay {
+    pub cost: String,
+    pub budget_notice: Option<String>,
     pub fight: u32,
     pub set: String,
     pub running: String,
@@ -490,6 +494,7 @@ impl BrainDriver {
             running: Plan::default(),
             history: Vec::new(),
             since_hit: [None, None],
+            move_sheet: Default::default(),
             boss_open: None,
             wolf_open: None,
             tactic_open: false,
@@ -578,6 +583,8 @@ impl BrainDriver {
                 .map(|(_, text)| text.clone())
         };
         BrainOverlay {
+            cost: self.brain.costs().totals.line("session"),
+            budget_notice: self.brain.costs().budget_notice,
             fight: self.overlay_events.fights_before + self.fight_no,
             set: set
                 .map(|s| format!("{}: {}", s.name, s.description))
@@ -875,6 +882,64 @@ impl BrainDriver {
                 m.break_punish_rate * 100.0,
                 m.wolf_posture_peak * 100.0, m.damage_per_min(), m.boss_damage_taken_per_min(), m.passive_share() * 100.0
             ));
+        }
+        report.push_str("\n| break action / hit | breaks | converted |\n|---|---:|---:|\n");
+        let mut breaks: Vec<_> = self
+            .session_records
+            .iter()
+            .flat_map(|r| r.breaks.clone())
+            .collect();
+        if !self.fight_over && self.fight.metrics.player_active(self.time) {
+            breaks.extend(self.fight.metrics.breaks.clone());
+        }
+        for (key, counts) in super::metrics::break_summary(&breaks) {
+            report.push_str(&format!(
+                "| {key} | {} | {} / {} |\n",
+                counts[0], counts[1], counts[0]
+            ));
+        }
+        report.push_str("\n| action | hit | state | wait (s) | on_wolf_break | start delay (s) | outcome |\n|---|---|---|---:|---|---:|---|\n");
+        for r in breaks {
+            report.push_str(&format!(
+                "| {} | {}/{} | {} | {:.3} | {} | {} | {} |\n",
+                r.action,
+                r.hit,
+                r.hits,
+                r.state,
+                r.wait,
+                r.started,
+                r.start_delay.map_or("-".into(), |d| format!("{d:.3}")),
+                r.outcome
+            ));
+        }
+        for (i, r) in self.session_records.iter().enumerate() {
+            report.push_str(&format!(
+                "\nFight {} break_conversion_delay: {} s.\n",
+                i + 1,
+                r.metrics
+                    .break_conversion_delay
+                    .map_or("-".into(), |d| format!("{d:.3}"))
+            ));
+        }
+        let costs = self.brain.costs();
+        report.push_str(&format!("\n## Cost\n\n{}\n\n| kind | model | calls | input | cached | output | reasoning | billed USD | API-equivalent USD |\n|---|---|---:|---:|---:|---:|---:|---:|---:|\n", costs.totals.line("session")));
+        for row in costs.rows {
+            let t = row.totals;
+            report.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                row.kind.replace('|', "/"),
+                row.model.replace('|', "/"),
+                t.calls,
+                t.input,
+                t.cached,
+                t.output,
+                t.reasoning,
+                super::cost::usd(t.billed_usd, t.unknown_billed),
+                super::cost::usd(t.api_equivalent_usd, t.unknown_prices)
+            ));
+        }
+        if let Some(notice) = costs.budget_notice {
+            report.push_str(&format!("\n{notice}\n"));
         }
         report
     }
@@ -1223,7 +1288,9 @@ impl BrainDriver {
                     first.params.truncate(6);
                 }
                 hook.break_followup = Some(choice.clone());
-                hook.break_until = ai.state.time + 2.5;
+                // Keep a queued response through long data-defined recoveries as well.
+                let wait = self.fight.metrics.breaks.last().map_or(0.0, |r| r.wait);
+                hook.break_until = ai.state.time + 2.5_f32.max(wait + 0.5);
                 hook.choice = Some(choice);
                 hook.break_response = true;
                 self.ready = Some(Ready {
@@ -1717,6 +1784,7 @@ impl BrainDriver {
             return;
         }
         let t = self.time;
+        self.fight.metrics.settle_break(t, false);
         self.fight.metrics.input_tick(input, t, self.step_dt);
         let mut events = Vec::new();
         // The boss's actions: his attack and step animations (guards and deflects are
@@ -1729,6 +1797,17 @@ impl BrainDriver {
             .and_then(|c| anim_id_from_clip(&c.animation))
             .filter(|a| (3000..3100).contains(a) || (5200..5300).contains(a));
         if boss != self.boss_open || (boss.is_some() && report.enemy.clip_started) {
+            let response = self
+                .fight
+                .runs
+                .last()
+                .is_some_and(|r| r.2 == "on_wolf_break");
+            if response
+                && report.enemy.clip_started
+                && boss.is_some_and(|a| self.running.actions().contains(&a))
+            {
+                self.fight.metrics.break_started(t);
+            }
             self.fight.close_range();
             events.push(match boss {
                 Some(a) => TallyEvent::Start {
@@ -1830,6 +1909,116 @@ impl BrainDriver {
         if wolf_broke && breaking_hit.is_none() {
             self.fight.metrics.wolf_break(t);
         }
+        if wolf_broke {
+            self.fight.metrics.settle_break(t, true);
+            let clip = duel.enemy.behavior.runtime.main_clip();
+            let time = clip.map_or(0.0, |c| c.time);
+            let action = boss.map(|a| a.to_string()).unwrap_or_else(|| "free".into());
+            let row = self.move_sheet.get(&action);
+            let judge = breaking_hit.map(|i| report.hits[i].0.judge);
+            let local_hit = row
+                .and_then(|m| {
+                    m.hits
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .find(|(_, h)| {
+                            h[0] <= time + 0.001 && judge.is_none_or(|j| h[3] as i32 == j)
+                        })
+                        .map(|(i, _)| i + 1)
+                })
+                .unwrap_or(0);
+            let step = self
+                .overlay_events
+                .step
+                .min(self.running.steps.len().saturating_sub(1));
+            let group_start = self.running.steps[..step]
+                .iter()
+                .rposition(|s| matches!(s, Step::Tactic(_)))
+                .map_or(0, |i| i + 1);
+            let ids: Vec<_> = self.running.steps[group_start..]
+                .iter()
+                .take_while(|s| matches!(s, Step::Act(_)))
+                .filter_map(|s| match s {
+                    Step::Act(id) => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            let plan = ids.iter().map(i32::to_string).collect::<Vec<_>>().join("+");
+            let combo = ids.len() > 1 && ids.contains(&boss.unwrap_or(0));
+            let actual_step = ids
+                .iter()
+                .enumerate()
+                .filter(|(_, id)| **id == boss.unwrap_or(0))
+                .min_by_key(|(i, _)| i.abs_diff(step - group_start))
+                .map_or(0, |(i, _)| i);
+            let hit_counts: Vec<_> = ids
+                .iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    self.move_sheet.get(&a.to_string()).map_or(0, |m| {
+                        let end = if i + 1 < ids.len() {
+                            m.wait(0.0)
+                        } else {
+                            m.duration
+                        };
+                        m.hits.iter().filter(|h| h[0] <= end).count()
+                    })
+                })
+                .collect();
+            let previous = hit_counts.iter().take(actual_step).sum::<usize>();
+            let recovering = row.is_some_and(|m| m.hits.last().is_some_and(|h| time > h[0]))
+                && duel.enemy.tae_frame().attacks.is_empty();
+            let frame = duel.enemy.tae_frame();
+            let attack_open = frame.flag(crate::character::ai_cancel::COMBO)
+                || frame.flag(crate::character::ai_cancel::ATTACK);
+            let free = !frame.restricted
+                || frame.flag(crate::tae::cancel::MOVE)
+                || clip.is_some_and(|c| c.at_end());
+            let wait = if attack_open || free {
+                0.0
+            } else {
+                row.map_or_else(
+                    || {
+                        clip.and_then(|c| {
+                            duel.enemy
+                                .clips
+                                .clip(&c.animation)
+                                .map(|data| (data.duration - time).max(0.0))
+                        })
+                        .unwrap_or(0.0)
+                    },
+                    |m| m.wait(time),
+                )
+            };
+            let record = super::metrics::BreakRecord {
+                time: t,
+                action: if combo { plan } else { action },
+                hit: if local_hit == 0 {
+                    0
+                } else {
+                    local_hit + if combo { previous } else { 0 }
+                },
+                hits: if combo {
+                    hit_counts.iter().sum()
+                } else {
+                    row.map_or(0, |m| m.hits.len())
+                },
+                state: if free {
+                    "free"
+                } else if recovering || boss.is_none() {
+                    "recovering"
+                } else {
+                    "attacking"
+                }
+                .into(),
+                wait,
+                outcome: "pending".into(),
+                ..Default::default()
+            };
+            self.write(json!({"ev": "wolf_break", "break": record}));
+            self.fight.metrics.breaks.push(record);
+        }
         if wolf_broke
             && !self.quiet(duel)
             && duel.deathblow.is_none()
@@ -1858,6 +2047,9 @@ impl BrainDriver {
                 self.since_hit[if attacker == Side::Boss { 0 } else { 1 }] = Some(0.0);
             }
             if attacker == Side::Boss {
+                if breaking_hit != Some(index) && (result.guarded || result.deflected) {
+                    self.fight.metrics.break_guarded(t);
+                }
                 // The blow that caused the break is not its follow-up.
                 if breaking_hit != Some(index) && !result.guarded && !result.deflected {
                     self.fight.metrics.post_break_hit(t);
@@ -2148,7 +2340,11 @@ impl BrainDriver {
             .finish(t, punishes, end == FightEnd::WolfWon);
         metrics.time_to_kill_wolf = (end == FightEnd::BossWon).then_some(metrics.duration);
         let usage = self.brain.usage();
+        self.fight.metrics.settle_break(t + 2.501, true);
         let record = FightRecord {
+            cost: self.brain.costs().totals.since(&self.fight.cost_at_start),
+            session_cost: self.brain.costs().totals,
+            breaks: self.fight.metrics.breaks.clone(),
             winner: winner.to_string(),
             metrics,
             decisions: self.fight.decisions,
@@ -2175,7 +2371,7 @@ impl BrainDriver {
         self.overlay_events.scorecard = Some((
             self.time,
             format!(
-                "{} wins · kill Wolf {} · {} posture breaks · deflect {}",
+                "{} wins - kill Wolf {} - {} posture breaks - deflect {} - conversion {}",
                 record.winner,
                 record
                     .metrics
@@ -2187,7 +2383,11 @@ impl BrainDriver {
                     .metrics
                     .deflect_rate()
                     .map(|r| format!("{:.0}%", r * 100.0))
-                    .unwrap_or_else(|| "n/a".into())
+                    .unwrap_or_else(|| "n/a".into()),
+                record
+                    .metrics
+                    .break_conversion_delay
+                    .map_or("n/a".into(), |d| format!("{d:.3} s"))
             ),
         ));
         self.write(json!({"ev": "fight_end", "t": ms(t), "winner": winner,
@@ -2253,6 +2453,9 @@ impl BrainDriver {
             sets.entry(name.clone()).or_default().secs = (s * 10.0).round() / 10.0;
         }
         let mut input = CoachInput {
+            move_sheet: self.move_sheet.clone(),
+            break_log: self.fight.metrics.breaks.clone(),
+            break_summary: super::metrics::break_summary(&self.fight.metrics.breaks),
             boss_knowledge: self.boss_knowledge.summary(),
             phase: "post".into(),
             elapsed: None,
@@ -2315,6 +2518,7 @@ impl BrainDriver {
                 wolf_posture_breaks: m.wolf_posture_breaks,
                 hits_after_break: m.hits_after_break,
                 break_punish_rate: m.break_punish_rate,
+                break_conversion_delay: m.break_conversion_delay,
                 wolf_posture_peak: m.wolf_posture_peak,
                 time_to_kill_wolf: m.time_to_kill_wolf,
                 won: record.winner.clone(),
@@ -2385,6 +2589,9 @@ impl BrainDriver {
     }
 
     fn submit_coach_input(&mut self, mut input: CoachInput, mid: bool) {
+        if self.brain.budget_exhausted() {
+            return;
+        }
         input.phase = if mid { "mid" } else { "post" }.into();
         let bytes = input.fit(INPUT_BUDGET);
         if bytes > INPUT_BUDGET {
@@ -2520,6 +2727,7 @@ impl BrainDriver {
         self.cancel_break = true;
         self.pending_why = Some("start");
         self.fight = FightState {
+            cost_at_start: self.brain.costs().totals,
             metrics: MetricsTracker::new(self.time),
             tokens_at_start: self.brain.usage(),
             stats_at_start: self.brain.call_stats(),
@@ -2535,7 +2743,14 @@ impl BrainDriver {
         self.staged_mid = None;
         self.set_banned_seen = false;
         self.pacing = Pacing::new(self.time);
-        if self.coach_mode {
+        if self.brain.budget_exhausted() {
+            self.game_plan = None;
+            self.next_plan = None;
+            self.opener = None;
+            self.active_set = None;
+            self.pending_why = None;
+            self.want_request = false;
+        } else if self.coach_mode {
             // The newest plan that has arrived plays; with none, the previous one stays.
             if let Some(plan) = self.next_plan.take() {
                 self.game_plan = Some(plan);

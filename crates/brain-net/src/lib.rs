@@ -3,10 +3,12 @@
 
 mod cli;
 mod config;
+mod prices;
 mod protocol;
 mod worker;
 
 pub use config::{ApiKey, Backend, CoachBackend, ConfigError, HostedConfig};
+pub use prices::PriceTable;
 pub use worker::{CoachStats, Failure, HostedBrain, HostedStats, StatsHandle, TokenUsage};
 
 use sekiro_sim::brain::{BossActions, BossBrain, BrainKind, LuaBrain};
@@ -22,6 +24,8 @@ pub fn is_hosted(name: &str) -> bool {
 /// The coach options of the game CLI (`--coach`, `--coach-model`, `--coach-effort`).
 #[derive(Debug, Clone, Default)]
 pub struct CoachCli {
+    pub budget_usd: Option<f64>,
+    pub token_budget: Option<u64>,
     /// `codex` (default), `claude` or `api`.
     pub backend: Option<String>,
     pub model: Option<String>,
@@ -88,6 +92,9 @@ pub fn from_cli_with(
             }
         })
         .and_then(|mut config| {
+            config.budget_usd = coach.budget_usd;
+            config.token_budget = coach.token_budget;
+            config.prices = PriceTable::load()?;
             if let Some(model) = model {
                 config.model = model;
             }

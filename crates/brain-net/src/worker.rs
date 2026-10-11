@@ -40,6 +40,7 @@ pub enum Failure {
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct TokenUsage {
+    pub cached_input_tokens: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
     /// Reasoning tokens (billed as output; `usage.output_tokens_details.reasoning_tokens`).
@@ -49,6 +50,10 @@ pub struct TokenUsage {
 impl TokenUsage {
     fn from_response(response: &Value) -> Self {
         Self {
+            cached_input_tokens: response["usage"]["input_tokens_details"]["cached_tokens"]
+                .as_u64()
+                .or_else(|| response["usage"]["cached_input_tokens"].as_u64())
+                .unwrap_or(0),
             input_tokens: response["usage"]["input_tokens"].as_u64().unwrap_or(0),
             output_tokens: response["usage"]["output_tokens"].as_u64().unwrap_or(0),
             reasoning_tokens: response["usage"]["output_tokens_details"]["reasoning_tokens"]
@@ -61,6 +66,7 @@ impl TokenUsage {
 /// Totals of the coach's calls.
 #[derive(Debug, Clone, Default)]
 pub struct CoachStats {
+    pub cached_input_tokens: u64,
     pub requests: u64,
     pub answered: u64,
     pub failed: BTreeMap<Failure, u64>,
@@ -75,6 +81,8 @@ pub struct CoachStats {
 /// the old Decisions and Responses requests); `coach` counts the coach's.
 #[derive(Debug, Clone, Default)]
 pub struct HostedStats {
+    pub cached_input_tokens: u64,
+    pub costs: sekiro_sim::brain::cost::CostSnapshot,
     pub requests: u64,
     pub answered: u64,
     pub failed: BTreeMap<Failure, u64>,
@@ -91,12 +99,77 @@ pub struct HostedStats {
 
 #[derive(Clone, Default)]
 pub struct StatsHandle {
+    /// Budgeted calls are serialized across both workers. Simulation never takes this lock.
+    gate: Arc<Mutex<()>>,
+    budget_usd: Option<f64>,
+    token_budget: Option<u64>,
     requests: Arc<AtomicU64>,
     coach_requests: Arc<AtomicU64>,
     completed: Arc<Mutex<HostedStats>>,
 }
 
 impl StatsHandle {
+    fn exhausted(&self) -> bool {
+        let mut s = self.completed.lock().unwrap_or_else(|e| e.into_inner());
+        let t = &s.costs.totals;
+        let reason = if self.token_budget.is_some_and(|n| t.tokens() >= n) {
+            Some("token budget reached")
+        } else if self.budget_usd.is_some_and(|n| t.billed_usd >= n) {
+            Some("billed USD budget reached")
+        } else if self.budget_usd.is_some() && t.unknown_billed > 0 {
+            Some("billed cost unknown; USD budget cannot be enforced")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            if s.costs.budget_notice.is_none() {
+                let notice =
+                    format!("Brain stopped: {reason}. Last plan this fight; own AI next fight.");
+                eprintln!("{notice}");
+                s.costs.budget_notice = Some(notice);
+            }
+            true
+        } else {
+            false
+        }
+    }
+    fn record_cost(
+        &self,
+        kind: &str,
+        model: &str,
+        usage: TokenUsage,
+        estimate: Option<f64>,
+        billed: bool,
+    ) {
+        let mut s = self.completed.lock().unwrap_or_else(|e| e.into_inner());
+        let add = |t: &mut sekiro_sim::brain::cost::CostTotals| {
+            t.calls += 1;
+            t.input += usage.input_tokens;
+            t.cached += usage.cached_input_tokens;
+            t.output += usage.output_tokens;
+            t.reasoning += usage.reasoning_tokens;
+            t.api_equivalent_usd += estimate.unwrap_or(0.0);
+            t.billed_usd += if billed { estimate.unwrap_or(0.0) } else { 0.0 };
+            t.unknown_prices += u64::from(estimate.is_none());
+            t.unknown_billed += u64::from(billed && estimate.is_none());
+        };
+        add(&mut s.costs.totals);
+        let rows = &mut s.costs.rows;
+        let index = rows
+            .iter()
+            .position(|r| r.kind == kind && r.model == model)
+            .unwrap_or_else(|| {
+                rows.push(sekiro_sim::brain::cost::CostRow {
+                    kind: kind.into(),
+                    model: model.into(),
+                    ..Default::default()
+                });
+                rows.len() - 1
+            });
+        add(&mut rows[index].totals);
+        drop(s);
+        self.exhausted();
+    }
     pub fn snapshot(&self) -> HostedStats {
         let mut stats = self
             .completed
@@ -139,6 +212,7 @@ pub struct HostedBrain {
 impl HostedBrain {
     pub fn new(config: HostedConfig, actions: &'static BossActions) -> Result<Self, ConfigError> {
         if config.model.trim().is_empty()
+            || config.budget_usd.is_some_and(|n| !n.is_finite() || n < 0.0)
             || config.coach_model.trim().is_empty()
             || config.api_key.0.trim().is_empty()
             || config.api_key.0.chars().any(char::is_control)
@@ -178,11 +252,16 @@ impl HostedBrain {
         let (reply, rx) = mpsc::channel();
         let (coach_tx, coach_work) = mpsc::channel();
         let (coach_reply, coach_rx) = mpsc::channel();
-        let stats = StatsHandle::default();
+        let stats = StatsHandle {
+            budget_usd: config.budget_usd,
+            token_budget: config.token_budget,
+            ..Default::default()
+        };
         let stopping = Arc::new(AtomicBool::new(false));
         let coach_is_cli = backend == Backend::Coach && config.coach_backend != CoachBackend::Api;
         let coach_log = log.as_ref().and_then(|f| f.try_clone().ok());
         let coach_config = (backend == Backend::Coach).then(|| CoachConfig {
+            prices: config.prices.clone(),
             backend: config.coach_backend,
             model: config.coach_model.clone(),
             effort: config.coach_effort.clone(),
@@ -260,6 +339,12 @@ impl HostedBrain {
 }
 
 impl BossBrain for HostedBrain {
+    fn costs(&self) -> sekiro_sim::brain::cost::CostSnapshot {
+        self.stats.snapshot().costs
+    }
+    fn budget_exhausted(&self) -> bool {
+        self.stats.exhausted()
+    }
     fn name(&self) -> &'static str {
         self.backend.name()
     }
@@ -482,6 +567,34 @@ fn log_line(log: &mut Option<File>, line: &Value) -> bool {
     failed
 }
 
+#[allow(clippy::too_many_arguments)]
+fn annotate(
+    line: &mut Value,
+    system: &str,
+    model: &str,
+    operation: &str,
+    usage: TokenUsage,
+    estimate: Option<f64>,
+    billed: bool,
+    phase: &str,
+    ms: f64,
+) {
+    let fields = json!({
+        "gen_ai.system": system, "gen_ai.request.model": model,
+        "gen_ai.operation.name": operation,
+        "gen_ai.usage.input_tokens": usage.input_tokens,
+        "gen_ai.usage.output_tokens": usage.output_tokens,
+        "sekiro.usage.cached_input_tokens": usage.cached_input_tokens,
+        "sekiro.usage.reasoning_tokens": usage.reasoning_tokens,
+        "sekiro.usd_estimate": estimate, "sekiro.billed": billed,
+        "sekiro.latency_ms": ms, "sekiro.kind": line["kind"], "sekiro.phase": phase,
+        "usd_estimate": estimate, "billed": billed, "phase": phase
+    });
+    line.as_object_mut()
+        .expect("telemetry object")
+        .extend(fields.as_object().expect("fields").clone());
+}
+
 fn run(
     config: HostedConfig,
     actions: &'static BossActions,
@@ -519,6 +632,15 @@ fn run(
             }
             continue;
         }
+        let _gate = (stats.budget_usd.is_some() || stats.token_budget.is_some())
+            .then(|| stats.gate.lock().unwrap_or_else(|e| e.into_inner()));
+        if stats.exhausted() {
+            let _ = reply.send(BrainReply {
+                id: work.id,
+                ..Default::default()
+            });
+            continue;
+        }
         let start = Instant::now();
         let mut usage = TokenUsage::default();
         let result = match &work.input {
@@ -531,13 +653,34 @@ fn run(
             Err(reason) => (None, Some(reason)),
         };
         let chosen = answer.as_ref().map(|a| config.redact(&a.value));
-        let line = json!({
+        let estimate = config
+            .prices
+            .estimate(&config.model, config.backend.endpoint(), usage);
+        let mut line = json!({
             "id": work.id, "kind": "decide", "backend": config.backend.name(),
             "model": config.redact(&config.model),
             "round_trip_ms": round_trip_ms, "status": if failure.is_some() {"failed"} else {"answered"},
             "failure": failure, "chosen": chosen, "usage": usage
         });
+        annotate(
+            &mut line,
+            "openai",
+            &config.redact(&config.model),
+            config.backend.endpoint(),
+            usage,
+            estimate,
+            true,
+            "mid",
+            round_trip_ms,
+        );
         let log_failed = log_line(&mut log, &line);
+        stats.record_cost(
+            "decide",
+            &config.redact(&config.model),
+            usage,
+            estimate,
+            true,
+        );
         completed += 1;
         total_ms += round_trip_ms;
         {
@@ -551,6 +694,7 @@ fn run(
             stats.total_round_trip_ms = total_ms;
             stats.max_round_trip_ms = stats.max_round_trip_ms.max(round_trip_ms);
             stats.input_tokens += usage.input_tokens;
+            stats.cached_input_tokens += usage.cached_input_tokens;
             stats.output_tokens += usage.output_tokens;
             stats.reasoning_tokens += usage.reasoning_tokens;
             stats.log_errors += u64::from(log_failed);
@@ -575,6 +719,7 @@ fn run(
 
 /// How the coach thread runs a call.
 struct CoachConfig {
+    prices: crate::PriceTable,
     backend: CoachBackend,
     model: String,
     effort: String,
@@ -612,6 +757,7 @@ fn api_coach(
     key: &crate::ApiKey,
     actions: &BossActions,
     input: &str,
+    usage: &mut TokenUsage,
 ) -> Result<CoachAnswer, Failure> {
     let url = format!("{}/v1/responses", base_url.trim_end_matches('/'));
     let probe = HostedConfig {
@@ -622,11 +768,11 @@ fn api_coach(
     };
     let body = protocol::coach_body(&probe, actions, input);
     let response = post(agent, &url, key, body)?;
-    let usage = TokenUsage::from_response(&response);
+    *usage = TokenUsage::from_response(&response);
     match protocol::coach_plan(&response) {
         Ok(plan) => Ok(CoachAnswer {
             plan,
-            usage,
+            usage: *usage,
             cost_usd: None,
         }),
         // Tokens were spent even when the answer is unusable.
@@ -656,11 +802,30 @@ fn run_coach(
         if stopping.load(Ordering::Acquire) {
             break;
         }
+        let _gate = (stats.budget_usd.is_some() || stats.token_budget.is_some())
+            .then(|| stats.gate.lock().unwrap_or_else(|e| e.into_inner()));
+        if stats.exhausted() {
+            let _ = reply.send(CoachReply {
+                id: work.id,
+                error: Some("session budget exhausted".into()),
+                ..Default::default()
+            });
+            continue;
+        }
         let start = Instant::now();
+        let mut spent = TokenUsage::default();
         let result: Result<CoachAnswer, Failure> = match (&http, config.backend) {
             (Some((base, key)), CoachBackend::Api) => {
                 let key = crate::ApiKey::new(key.clone());
-                api_coach(&agent, &config, base, &key, actions, &work.input)
+                api_coach(
+                    &agent,
+                    &config,
+                    base,
+                    &key,
+                    actions,
+                    &work.input,
+                    &mut spent,
+                )
             }
             (_, backend) => {
                 let prompt = format!(
@@ -682,6 +847,7 @@ fn run_coach(
                 .map(|a| CoachAnswer {
                     plan: a.plan,
                     usage: TokenUsage {
+                        cached_input_tokens: a.cached_tokens,
                         input_tokens: a.tokens[0],
                         output_tokens: a.tokens[1],
                         reasoning_tokens: a.tokens[2],
@@ -693,15 +859,37 @@ fn run_coach(
         let ms = start.elapsed().as_secs_f64() * 1000.0;
         let (plan, failure, usage, cost) = match result {
             Ok(a) => (Some(a.plan), None, a.usage, a.cost_usd),
-            Err(f) => (None, Some(f), TokenUsage::default(), None),
+            Err(f) => (None, Some(f), spent, None),
         };
-        let line = json!({
+        let estimate = config.prices.estimate(&config.model, "responses", usage);
+        let billed = config.backend == CoachBackend::Api;
+        let phase = serde_json::from_str::<Value>(&work.input)
+            .ok()
+            .and_then(|v| v["phase"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| "post".into());
+        let mut line = json!({
             "id": work.id, "kind": "coach", "phase": serde_json::from_str::<serde_json::Value>(&work.input).ok().and_then(|v| v.get("phase").cloned()), "backend": config.backend.name(),
             "model": config.model, "round_trip_ms": ms,
             "status": if failure.is_some() {"failed"} else {"answered"},
             "failure": failure, "usage": usage, "cost_usd": cost
         });
+        annotate(
+            &mut line,
+            if config.backend == CoachBackend::Claude {
+                "anthropic"
+            } else {
+                "openai"
+            },
+            &config.model,
+            "responses",
+            usage,
+            estimate,
+            billed,
+            &phase,
+            ms,
+        );
         let log_failed = log_line(&mut log, &line);
+        stats.record_cost("coach", &config.model, usage, estimate, billed);
         {
             let mut s = stats.completed.lock().unwrap_or_else(|e| e.into_inner());
             let c = &mut s.coach;
@@ -710,6 +898,7 @@ fn run_coach(
                 None => c.answered += 1,
             }
             c.input_tokens += usage.input_tokens;
+            c.cached_input_tokens += usage.cached_input_tokens;
             c.output_tokens += usage.output_tokens;
             c.reasoning_tokens += usage.reasoning_tokens;
             c.total_ms += ms;

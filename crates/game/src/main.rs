@@ -197,6 +197,16 @@ fn main() -> anyhow::Result<()> {
                 arg_value(&args, "--brain-model"),
                 &opponent.chr,
                 &sekiro_brain_net::CoachCli {
+                    budget_usd: arg_value(&args, "--brain-budget")
+                        .map(|v| v.parse::<f64>())
+                        .transpose()
+                        .map_err(|e| anyhow::anyhow!("--brain-budget wants USD: {e}"))?,
+                    token_budget: arg_value(&args, "--brain-token-budget")
+                        .map(|v| v.parse::<u64>())
+                        .transpose()
+                        .map_err(|e| {
+                            anyhow::anyhow!("--brain-token-budget wants a token count: {e}")
+                        })?,
                     backend: arg_value(&args, "--coach"),
                     model: arg_value(&args, "--coach-model"),
                     effort: arg_value(&args, "--coach-effort"),

@@ -411,6 +411,7 @@ impl Duel {
             ));
         }
         let mut driver = crate::brain::BrainDriver::new(brain, actions);
+        driver.move_sheet = crate::brain::moves::build(self, actions);
         let path = if log {
             Some(
                 driver
@@ -456,6 +457,7 @@ impl Duel {
             target: (!self.rules.fighters[0].dead()).then(|| actor(&self.player, 0)),
             hit_radius: self.fighters[1].radius,
             current_anim: main.and_then(|c| anim_id_from_clip(&c.animation)),
+            current_anim_time: main.map_or(0.0, |c| c.time),
             combo_window: COMBO_FLAGS.iter().any(|&f| frame.flag(f))
                 || main.is_some_and(|c| c.at_end()),
             home: self

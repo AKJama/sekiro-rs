@@ -533,6 +533,7 @@ pub struct FightLine {
     pub wolf_posture_breaks: u32,
     pub hits_after_break: u32,
     pub break_punish_rate: f32,
+    pub break_conversion_delay: Option<f32>,
     pub wolf_posture_peak: f32,
     pub secs: u32,
     /// Perfect-deflect percent, guard percent.
@@ -566,6 +567,9 @@ pub struct SetStat {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(into = "CoachWire")]
 pub struct CoachInput {
+    pub move_sheet: super::moves::MoveSheet,
+    pub break_log: Vec<super::metrics::BreakRecord>,
+    pub break_summary: std::collections::BTreeMap<String, [u32; 2]>,
     pub boss_knowledge: super::memory::BossSummary,
     pub phase: String,
     pub result: FightLine,
@@ -606,6 +610,8 @@ pub struct CoachInput {
 impl From<CoachInput> for serde_json::Value {
     fn from(i: CoachInput) -> Self {
         let mut value = serde_json::json!({
+            "move_sheet": i.move_sheet, "break_log": i.break_log,
+            "break_summary": i.break_summary,
             "boss_knowledge": i.boss_knowledge,
             "player_profile": {"fight": i.fight, "trend": i.trend, "habits": i.habits,
                 "player_principles": i.principles, "notes": i.notes, "overall": i.overall,
@@ -674,6 +680,27 @@ impl CoachInput {
     }
 
     fn trim_one(&mut self) -> bool {
+        if self.move_sheet.len() > 6 {
+            let used = self
+                .played
+                .as_ref()
+                .map(|p| p.summary_lines().join(" "))
+                .unwrap_or_default();
+            if let Some(key) = self
+                .move_sheet
+                .keys()
+                .filter(|k| !used.contains(k.as_str()))
+                .min_by_key(|k| self.actions.get(*k).map_or(0, |c| c.n))
+                .cloned()
+            {
+                self.move_sheet.remove(&key);
+                return true;
+            }
+        }
+        if self.break_log.len() > 4 {
+            self.break_log.remove(0);
+            return true;
+        }
         if self.boss_knowledge.trim() {
             return true;
         }
@@ -762,7 +789,14 @@ impl CoachInput {
         if self.failures.pop_last().is_some() {
             return true;
         }
-        self.banned.pop().is_some() || self.boss_knowledge.trim_last()
+        self.break_summary.pop_last().is_some()
+            || self.move_sheet.pop_last().is_some()
+            || (!self.break_log.is_empty() && {
+                self.break_log.remove(0);
+                true
+            })
+            || self.banned.pop().is_some()
+            || self.boss_knowledge.trim_last()
     }
 }
 

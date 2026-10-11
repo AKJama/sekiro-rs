@@ -1069,7 +1069,7 @@ fn trend_shows_the_last_three_fights() {
     assert_eq!(t.now, Some([50, 1]));
     assert_eq!(
         serde_json::to_string(&t).unwrap(),
-        r#"{"boss_damage_taken_per_min":[0.0,0.0,0.0],"duration":[0.0,0.0,0.0],"wolf_posture_breaks":[0,0,0],"hits_after_break":[0,0,0],"break_punish_rate":[0.0,0.0,0.0],"wolf_posture_peak":[0.0,0.0,0.0],"time_to_kill_wolf":[null,null,null],"defl":[50,100,80],"guard":[0,0,0],"hits":[5,0,2],"hp":[0,0,0],"kill_s":[30,20,null],"apm":[0,0,0],"dpm":[0,0,0],"passive":[0,0,0],"engaged_time":[0,0,0],"now":[50,1]}"#
+        r#"{"boss_damage_taken_per_min":[0.0,0.0,0.0],"duration":[0.0,0.0,0.0],"wolf_posture_breaks":[0,0,0],"hits_after_break":[0,0,0],"break_punish_rate":[0.0,0.0,0.0],"break_conversion_delay":[null,null,null],"wolf_posture_peak":[0.0,0.0,0.0],"time_to_kill_wolf":[null,null,null],"defl":[50,100,80],"guard":[0,0,0],"hits":[5,0,2],"hp":[0,0,0],"kill_s":[30,20,null],"apm":[0,0,0],"dpm":[0,0,0],"passive":[0,0,0],"engaged_time":[0,0,0],"now":[50,1]}"#
     );
 }
 
@@ -1823,4 +1823,55 @@ fn the_limits_force_attacks_and_rate_limit_retreats() {
         limits::lead_secs(&parse("retreat12>hold2>3003"), &SOLDIER),
         7.0
     );
+}
+
+#[test]
+fn break_log_outcomes_and_mean_conversion_delay() {
+    use metrics::{BreakRecord, MetricsTracker, break_summary};
+    let mut tracker = MetricsTracker::new(0.0);
+    let add = |tracker: &mut MetricsTracker, t| {
+        tracker.wolf_break(t);
+        tracker.breaks.push(BreakRecord {
+            time: t,
+            action: "3000+3001+3002".into(),
+            hit: 2,
+            hits: 3,
+            outcome: "pending".into(),
+            ..Default::default()
+        });
+    };
+    add(&mut tracker, 1.0);
+    tracker.break_started(1.2);
+    tracker.post_break_hit(1.5);
+    tracker.post_break_hit(1.6); // One conversion, even with two landed hits.
+    add(&mut tracker, 4.0);
+    tracker.break_started(4.1);
+    tracker.break_guarded(4.4);
+    tracker.settle_break(7.0, false);
+    add(&mut tracker, 8.0);
+    tracker.break_started(8.2);
+    tracker.settle_break(11.0, false);
+    add(&mut tracker, 12.0);
+    tracker.settle_break(15.0, false);
+    add(&mut tracker, 16.0);
+    tracker.break_started(16.1);
+    tracker.post_break_hit(16.3);
+    let m = tracker.snapshot(17.0);
+    assert!((m.break_conversion_delay.unwrap() - 0.4).abs() < 1e-5);
+    assert_eq!(m.break_punish_rate, 0.4);
+    assert_eq!(
+        tracker
+            .breaks
+            .iter()
+            .map(|r| r.outcome.as_str())
+            .collect::<Vec<_>>(),
+        ["hit", "guarded", "whiffed", "missed window", "hit"]
+    );
+    assert_eq!(
+        break_summary(&tracker.breaks)["3000+3001+3002 hit 2/3"],
+        [5, 2]
+    );
+    assert!(tracker.breaks[3].start_delay.is_none());
+    let old: FightMetrics = serde_json::from_str("{}").unwrap();
+    assert!(old.break_conversion_delay.is_none());
 }

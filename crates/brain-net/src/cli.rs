@@ -32,6 +32,7 @@ pub(crate) struct CliAnswer {
     /// Input (all kinds), output and reasoning tokens, when the CLI reports them.
     pub tokens: [u64; 3],
     pub cost_usd: Option<f64>,
+    pub cached_tokens: u64,
 }
 
 static RUNS: AtomicU64 = AtomicU64::new(0);
@@ -168,6 +169,7 @@ pub(crate) fn run(
                 args.push("--disable".into());
                 args.push(feature.into());
             }
+            args.push("--json".into());
             args.push("--output-schema".into());
             args.push(schema_file.to_string_lossy().into_owned());
             args.push("-o".into());
@@ -248,7 +250,8 @@ pub(crate) fn run(
             let text = std::fs::read_to_string(&answer_file).map_err(|_| Failure::InvalidAnswer)?;
             Ok(CliAnswer {
                 plan: protocol::plan_from_text(&text)?,
-                tokens: [0; 3],
+                tokens: codex_usage(&out).0,
+                cached_tokens: codex_usage(&out).1,
                 cost_usd: None,
             })
         }
@@ -277,7 +280,31 @@ pub(crate) fn parse_claude(out: &[u8]) -> Result<CliAnswer, Failure> {
             0,
         ],
         cost_usd: envelope["total_cost_usd"].as_f64(),
+        cached_tokens: n("cache_read_input_tokens"),
     })
+}
+
+/// Each completed turn has its own usage; item events and printed totals are not usage.
+fn codex_usage(out: &[u8]) -> ([u64; 3], u64) {
+    let mut tokens = [0; 3];
+    let mut cached = 0;
+    for line in out.split(|b| *b == b'\n') {
+        let Ok(event) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        if event["type"] != "turn.completed" {
+            continue;
+        }
+        let u = &event["usage"];
+        tokens[0] += u["input_tokens"].as_u64().unwrap_or(0);
+        tokens[1] += u["output_tokens"].as_u64().unwrap_or(0);
+        tokens[2] += u["reasoning_tokens"]
+            .as_u64()
+            .or_else(|| u["output_tokens_details"]["reasoning_tokens"].as_u64())
+            .unwrap_or(0);
+        cached += u["cached_input_tokens"].as_u64().unwrap_or(0);
+    }
+    (tokens, cached)
 }
 
 /// A TOML basic string, for a `-c key=value` override.

@@ -368,3 +368,227 @@ fn absent_break_plan_keeps_owls_lua_grab() {
     }
     panic!("Owl did not use his Lua grab after the break");
 }
+#[test]
+fn middle_combo_break_uses_tae_window() {
+    combo_break_fixture(false, "3005", "3000+3001+3002", 3);
+}
+
+#[test]
+fn middle_combo_break_without_window_waits_until_free() {
+    combo_break_fixture(true, "3005", "3000+3001+3002", 3);
+}
+
+#[test]
+fn middle_combo_break_can_repeat_the_current_attack() {
+    combo_break_fixture(false, "3001", "3000+3001+3002", 3);
+}
+
+#[test]
+fn break_log_knows_the_combo_inside_a_tactic_plan() {
+    combo_break_fixture(false, "3005", "walk_in4>3000+3001", 2);
+}
+
+fn combo_break_fixture(no_window: bool, punish: &str, opener: &str, hit_count: usize) {
+    use sekiro_sim::brain::ScriptedCoach;
+    use sekiro_sim::brain::coach::{GamePlan, WeightedChoice};
+    let Some(mut duel) = load(1.6) else { return };
+    duel.set_brain(Box::new(ScriptedCoach::new(Vec::new(), 0.0, 0.0)), false)
+        .unwrap();
+    if no_window {
+        let original = &duel.enemy.tae;
+        let mut db = sekiro_sim::tae::TaeDb::from_animations(original.anim_ids().map(|id| {
+            let name = sekiro_formats::tae::anim_name(id);
+            let mut anim = original.anim(&name).unwrap().clone();
+            if name == "a000_003001" {
+                anim.events = std::sync::Arc::new(
+                    anim.events
+                        .iter()
+                        .filter(|e| {
+                            !matches!(
+                                e.kind,
+                                sekiro_sim::tae::TaeKind::ActionFlag(23 | 86 | 79 | 11)
+                            )
+                        })
+                        .cloned()
+                        .collect(),
+                );
+            }
+            (id, anim)
+        }));
+        db.sp_effects = original.sp_effects.clone();
+        db.velocity_changes = original.velocity_changes.clone();
+        duel.enemy.tae = std::sync::Arc::new(db);
+        duel.boss_brain.as_mut().unwrap().move_sheet =
+            sekiro_sim::brain::moves::build(&duel, &sekiro_sim::brain::OWL);
+    }
+    duel.boss_brain.as_mut().unwrap().game_plan = Some(GamePlan {
+        opener: opener.into(),
+        on_wolf_break: vec![WeightedChoice {
+            plan: punish.into(),
+            weight: 1.0,
+        }],
+        ..Default::default()
+    });
+    duel.boss_brain.as_mut().unwrap().start_fight();
+    let positions = [duel.player.body.position, duel.enemy.body.position];
+    let mut broke = false;
+    let mut break_time = 0.0;
+    let mut waiting = 0.0;
+    let mut natural = 0.0;
+    let mut elapsed = 0.0;
+    let mut previous_clip_time = 0.0;
+    for tick in 0..1200 {
+        duel.player.body.position = positions[0];
+        duel.enemy.body.position = positions[1];
+        let anim = duel
+            .enemy
+            .behavior
+            .runtime
+            .main_clip()
+            .and_then(|c| sekiro_sim::lua_ai::anim_id_from_clip(&c.animation));
+        duel.rules.fighters[0].vitality.hp = duel.rules.fighters[0].vitality.max_hp;
+        if !broke {
+            duel.rules.fighters[0].posture.remaining = if anim == Some(3001) {
+                1
+            } else {
+                duel.rules.fighters[0].posture.max
+            };
+        }
+        let report = duel.step(&frame(false, false, tick == 0), DT);
+        if !broke && duel.rules.fighters[0].posture.broken() {
+            let c = duel.enemy.behavior.runtime.main_clip().unwrap();
+            assert_eq!(
+                sekiro_sim::lua_ai::anim_id_from_clip(&c.animation),
+                Some(3001)
+            );
+            let m = &duel.boss_brain.as_ref().unwrap().move_sheet["3001"];
+            waiting = m.wait(c.time);
+            natural = m.duration - c.time;
+            break_time = c.time;
+            previous_clip_time = c.time;
+            broke = true;
+            continue;
+        }
+        if broke {
+            elapsed += DT;
+            if report.enemy.clip_started
+                && report
+                    .enemy
+                    .animation
+                    .as_deref()
+                    .and_then(sekiro_sim::lua_ai::anim_id_from_clip)
+                    == punish.parse().ok()
+            {
+                eprintln!(
+                    "middle break clip time {break_time}, cancel wait {waiting}, natural remaining {natural}, punish delay {elapsed}"
+                );
+                let m = &duel.boss_brain.as_ref().unwrap().move_sheet["3001"];
+                let allowed = break_time + waiting;
+                assert!(
+                    previous_clip_time + DT + 0.001 >= allowed,
+                    "started before cancel/free: {previous_clip_time} < {allowed}"
+                );
+                assert!(
+                    previous_clip_time <= allowed + DT + 0.001,
+                    "missed first frame: {previous_clip_time} > {allowed}"
+                );
+                if no_window {
+                    assert!((allowed - m.duration).abs() < 0.002);
+                } else {
+                    assert!(previous_clip_time < m.duration);
+                }
+                let input = duel
+                    .boss_brain
+                    .as_ref()
+                    .unwrap()
+                    .coach_input(&Default::default());
+                let log = input.break_log.last().unwrap();
+                assert_eq!((log.hit, log.hits), (2, hit_count));
+                assert!(log.started && log.start_delay.is_some());
+                let mut fitted = input.clone();
+                let bytes = fitted.fit(4096);
+                assert!(bytes <= 4096);
+                assert!(
+                    fitted
+                        .move_sheet
+                        .contains_key(opener.rsplit('>').next().unwrap())
+                );
+                assert!(!fitted.break_log.is_empty() && !fitted.break_summary.is_empty());
+                eprintln!("request size {bytes} bytes");
+                return;
+            }
+            if let Some(c) = duel.enemy.behavior.runtime.main_clip()
+                && sekiro_sim::lua_ai::anim_id_from_clip(&c.animation) == Some(3001)
+            {
+                previous_clip_time = c.time;
+            }
+        }
+    }
+    panic!("middle combo break did not punish: broke={broke}");
+}
+
+#[test]
+fn owl_move_sheet_matches_guard_and_deflect_resolution_at_current_power() {
+    use sekiro_sim::brain::OWL;
+    use sekiro_sim::hits::HitEvent;
+    use sekiro_sim::progression::AttackPower;
+    let Some(mut duel) = load(1.6) else { return };
+    for power in [1, 6] {
+        duel.rules
+            .set_attack_power(AttackPower::new(power).unwrap())
+            .unwrap();
+        duel.set_brain(Box::new(LuaBrain), false).unwrap();
+        let sheet = duel.boss_brain.as_ref().unwrap().move_sheet.clone();
+        assert_eq!(sheet.len(), OWL.actions.len() + OWL.combos.len() + 1);
+        assert_eq!(sheet["3000+3001"].hits.len(), 2);
+        for action in [
+            "3000",
+            "3001",
+            "3002",
+            "3005",
+            "3017",
+            "3063",
+            "3000+3001",
+            "3000+3001+3002",
+        ] {
+            let row = &sheet[action];
+            eprintln!(
+                "Owl AP{power} {action}: {} hits {:?}, duration {}, recovery {}, reach {:?}, cancels {:?}",
+                row.hits.len(),
+                row.hits,
+                row.duration,
+                row.recovery,
+                row.reach,
+                row.cancels
+            );
+        }
+        let row = &sheet["3000"];
+        let attack = duel.fighters[1].attacks[&100].clone();
+        let forward = duel.player.body.forward();
+        let contact = HitEvent {
+            attacker: 1,
+            defender: 0,
+            judge: 100,
+            attack,
+            position: duel.player.body.position,
+            direction: [-forward[0], -forward[1]],
+        };
+        for (deflect, column) in [(false, 1), (true, 2)] {
+            keep_wolf_fresh(&mut duel);
+            let frame = &mut duel.player.tae_runtime.frame;
+            frame.flags.insert(sekiro_sim::hits::FLAG_GUARD);
+            frame.guard_judge = Some(90);
+            frame.sp_effects = if deflect { vec![105010] } else { Vec::new() };
+            let result = duel.rules.resolve(
+                &contact,
+                [&duel.player, &duel.enemy],
+                [&duel.fighters[0], &duel.fighters[1]],
+            );
+            assert!(result.guarded);
+            assert_eq!(result.deflected, deflect);
+            assert_eq!(result.posture_damage as f32, row.hits[0][column]);
+        }
+        // A new power forecast uses a fresh idle guard baseline, not the previous contact's effect.
+        duel.player.tae_runtime.frame = Default::default();
+    }
+}

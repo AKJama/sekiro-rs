@@ -23,6 +23,34 @@ How much of the game is done overall: `docs/PROGRESS.md`.
 | Audio | The game's own FMOD Ex runtime from the install plays the game's event projects (`main`, the enemy's `cXXXX`, the map area's): TAE sounds with floor-material footsteps and armour rustle, hit, block and deflect clangs from the hit-effect params, listener on the camera with the events' own 3D rolloff; decoded samples only as a fallback | `docs/AUDIO.md` |
 | Map | All ten archive maps extracted and loadable; 69 starts across nine gameplay maps walk; m89 is sky-only | `docs/MAP-BASELINE.md`, `docs/FORMATS.md` |
 
+## Combo-aware boss session (2026-10-11)
+
+Boss brain installation now computes a move sheet from the loaded TAE/clip/AtkParam data, including attack groups inside offered tactic plans.
+Coach and mid-review input contain hit times/counts, guard/deflect posture forecasts from the shared combat resolver, clip duration, recovery, conditional cancel windows and nominal capsule/root-motion reach.
+The generated Owl example and window-query mapping are in `docs/BRAIN.md`, "Combo-aware move sheet and break log".
+Complete fitted Owl coach inputs measured 3916 to 4067 bytes, within the 4096-byte budget, with the current combo and break evidence retained.
+
+Every Wolf posture break records the boss action/combo and hit index/count, state, remaining clip-clock wait, actual response start/delay and outcome.
+Per-action/hit conversion totals reach the coach and mid-fight review; session reports include the totals and individual break records.
+`break_conversion_delay` is mean seconds to the first landed conversion per converted break (null without one), in metrics, trend, coach result and scorecard.
+
+The normal middle-hit Owl response already used the real TAE window in the baseline.
+A repeated-current-attack response reproduced a 14.8-second late start because the runtime mistook the old clip for a new response.
+It now tracks the clip clock and keeps combo cancellation enabled until the new attack starts.
+Both the ordinary and repeated punish start 0.300 seconds after the middle hit, through the 0.667-second TAE window before the 2.733-second natural end.
+The fixture with cancel flags removed only from an in-memory timeline starts at the first free frame, 2.400 seconds after the break.
+Long data-defined recoveries also retain the queued response past the ordinary queue deadline.
+Coach guidance asks for last-hit or fast-single breaks, a `finisher` set for `wolf_posture_75`, and review of failed conversions.
+
+The final requested release sim/brain-net suite passed 360 tests across 37 targets, including the concurrent cost-accounting integration.
+Final targeted Owl verification passed all 12 cases after adding the attack group inside a tactic plan, including AP1/AP6 guard/deflect forecast equality and frame-boundary assertions.
+Unit regressions cover allowed/conditional/expired windows, all break outcomes, mean conversion delay and legacy defaults.
+Workspace Clippy with `-D warnings` and formatting are clean.
+Logs are `target/alt/combo-final-tests.log`, `combo-owl-tests.log`, `combo-unit.log` and `combo-clippy.log`.
+All Cargo commands used `target/alt` and six jobs (fmt uses `CARGO_BUILD_JOBS=6`).
+No model/API calls, real model CLIs, credential reads, protected memory/dataset writes, cache/re deletion or links, worktrees or commits were made.
+Attack timings, hit stop and Wolf's input buffer were unchanged.
+
 ## Recording brain overlay and stages (2026-10-11)
 
 `--brain-overlay` starts the top-right recording panel; it is off by default and F8 toggles it.

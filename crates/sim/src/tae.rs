@@ -291,6 +291,13 @@ pub struct TaeDb {
 }
 
 impl TaeDb {
+    /// Builds a timeline database from decoded animations (also useful for offline fixtures).
+    pub fn from_animations(anims: impl IntoIterator<Item = (i64, TaeAnim)>) -> Self {
+        Self {
+            anims: anims.into_iter().collect(),
+            ..Self::default()
+        }
+    }
     /// Loads timelines from an extracted `anibnd` directory, decoding them with the template, and
     /// the SpEffect and velocity-change params from the extracted `gameparam` directory.
     pub fn load(anibnd_dir: &Path, template: &Template, param_dir: &Path, defs_dir: &Path) -> Self {

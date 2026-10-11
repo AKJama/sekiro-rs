@@ -51,6 +51,15 @@ fn main() {
             .and_then(|i| args.get(i + 1))
             .expect("-o file");
         std::fs::write(out, plan).expect("write answer");
+        assert!(args.iter().any(|a| a == "--json"));
+        for event in [
+            serde_json::json!({"type":"thread.started", "thread_id":"fake-thread"}),
+            serde_json::json!({"type":"turn.started"}),
+            serde_json::json!({"type":"item.completed", "item":{"id":"item_0", "type":"agent_message", "text":"ignored: final answer is in -o"}}),
+            serde_json::json!({"type":"turn.completed", "usage":{"input_tokens":10000, "cached_input_tokens":2000, "output_tokens":1000}}),
+        ] {
+            println!("{event}");
+        }
     } else {
         let envelope = serde_json::json!({
             "type": "result", "subtype": "success", "is_error": false,

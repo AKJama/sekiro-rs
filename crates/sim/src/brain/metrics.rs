@@ -36,6 +36,8 @@ pub struct FightMetrics {
     pub hits_after_break: u32,
     /// Breaks followed by at least one landed hit, divided by breaks.
     pub break_punish_rate: f32,
+    /// Mean seconds from a break to a landed conversion, absent when none converted.
+    pub break_conversion_delay: Option<f32>,
     pub wolf_posture_peak: f32,
     pub time_to_kill_wolf: Option<f32>,
     pub duration: f32,
@@ -124,6 +126,8 @@ impl FightMetrics {
 /// Collects [`FightMetrics`] as a fight goes.
 #[derive(Debug, Clone, Default)]
 pub struct MetricsTracker {
+    pub breaks: Vec<BreakRecord>,
+    conversion_delay: f32,
     last_break: Option<f32>,
     break_punished: bool,
     punished_breaks: u32,
@@ -134,6 +138,33 @@ pub struct MetricsTracker {
     prev_boss: Option<[f32; 2]>,
     last_attack: Option<f32>,
     previous_input: [bool; 5],
+}
+
+/// One posture break, measured from real clip transitions and contacts.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BreakRecord {
+    pub time: f32,
+    pub action: String,
+    pub hit: usize,
+    pub hits: usize,
+    pub state: String,
+    pub wait: f32,
+    pub started: bool,
+    pub start_delay: Option<f32>,
+    pub outcome: String,
+}
+
+pub fn break_summary(records: &[BreakRecord]) -> BTreeMap<String, [u32; 2]> {
+    let mut out = BTreeMap::new();
+    for r in records {
+        let counts = out
+            .entry(format!("{} hit {}/{}", r.action, r.hit, r.hits))
+            .or_insert([0, 0]);
+        counts[0] += 1;
+        counts[1] += u32::from(r.outcome == "hit");
+    }
+    out
 }
 
 impl MetricsTracker {
@@ -162,9 +193,46 @@ impl MetricsTracker {
             if !self.break_punished {
                 self.punished_breaks += 1;
                 self.break_punished = true;
+                self.conversion_delay += now - self.last_break.unwrap();
+                self.metrics.break_conversion_delay =
+                    Some(self.conversion_delay / self.punished_breaks as f32);
+                if let Some(r) = self.breaks.last_mut() {
+                    r.outcome = "hit".into();
+                }
             }
             self.metrics.break_punish_rate =
                 self.punished_breaks as f32 / self.metrics.wolf_posture_breaks as f32;
+        }
+    }
+    pub fn break_started(&mut self, now: f32) {
+        if let Some(r) = self.breaks.last_mut()
+            && !r.started
+        {
+            r.started = true;
+            r.start_delay = Some(now - r.time);
+        }
+    }
+
+    pub fn break_guarded(&mut self, now: f32) {
+        if let Some(r) = self.breaks.last_mut()
+            && now - r.time <= 2.5
+            && r.outcome != "hit"
+        {
+            r.outcome = "guarded".into();
+        }
+    }
+
+    pub fn settle_break(&mut self, now: f32, ended: bool) {
+        if let Some(r) = self.breaks.last_mut()
+            && r.outcome == "pending"
+            && (ended || now - r.time > 2.5)
+        {
+            r.outcome = if r.started {
+                "whiffed"
+            } else {
+                "missed window"
+            }
+            .into();
         }
     }
     /// Raw input presses and held time, including during throws and hit stop.
@@ -272,6 +340,9 @@ impl MetricsTracker {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FightRecord {
+    pub cost: super::cost::CostTotals,
+    pub session_cost: super::cost::CostTotals,
+    pub breaks: Vec<BreakRecord>,
     pub mid_coach: [u64; 2],
     /// `boss`, `wolf` or `none` (unfinished).
     pub winner: String,
@@ -371,8 +442,11 @@ impl FightRecord {
             coach,
             sets,
         );
+        let conversion = m
+            .break_conversion_delay
+            .map_or("-".into(), |d| format!("{d:.3}s"));
         format!(
-            "time_to_kill_wolf {}; wolf_posture_breaks {} hits_after_break {}; boss_damage_taken_per_min {:.0}%; mid-coach {} reviews {} ms; {line}; engaged_time {:.1}s; wolf_posture_breaks {} hits_after_break {} break_punish_rate {:.0}% wolf_posture_peak {:.0}% time_to_kill_wolf {}",
+            "break_conversion_delay {conversion}; time_to_kill_wolf {}; wolf_posture_breaks {} hits_after_break {}; boss_damage_taken_per_min {:.0}%; mid-coach {} reviews {} ms; {line}; engaged_time {:.1}s; wolf_posture_breaks {} hits_after_break {} break_punish_rate {:.0}% wolf_posture_peak {:.0}% time_to_kill_wolf {}",
             m.time_to_kill_wolf
                 .map_or("-".into(), |t| format!("{t:.1}s")),
             m.wolf_posture_breaks,
@@ -410,6 +484,7 @@ pub struct Trend {
     pub wolf_posture_breaks: Vec<u32>,
     pub hits_after_break: Vec<u32>,
     pub break_punish_rate: Vec<f32>,
+    pub break_conversion_delay: Vec<Option<f32>>,
     pub wolf_posture_peak: Vec<f32>,
     pub time_to_kill_wolf: Vec<Option<f32>>,
     /// Perfect-deflect rate, percent.
@@ -454,6 +529,10 @@ impl Trend {
                 .collect(),
             hits_after_break: recent.iter().map(|r| r.metrics.hits_after_break).collect(),
             break_punish_rate: recent.iter().map(|r| r.metrics.break_punish_rate).collect(),
+            break_conversion_delay: recent
+                .iter()
+                .map(|r| r.metrics.break_conversion_delay)
+                .collect(),
             wolf_posture_peak: recent.iter().map(|r| r.metrics.wolf_posture_peak).collect(),
             time_to_kill_wolf: recent.iter().map(|r| r.metrics.time_to_kill_wolf).collect(),
             defl: recent
@@ -505,6 +584,7 @@ impl Trend {
         self.wolf_posture_breaks.remove(0);
         self.hits_after_break.remove(0);
         self.break_punish_rate.remove(0);
+        self.break_conversion_delay.remove(0);
         self.wolf_posture_peak.remove(0);
         self.time_to_kill_wolf.remove(0);
         self.guard.remove(0);

@@ -110,6 +110,7 @@ pub struct Goal {
     pub phase: u8,
     pub elapsed: f32,
     pub started_anim: bool,
+    pub restart_clock: Option<f32>,
     /// AI numbers and timers to set when this goal activates or succeeds
     /// (`TimingSetNumber`, `TimingSetTimer`).
     pub timing_sets: Vec<TimingSet>,
@@ -388,6 +389,7 @@ impl AiState {
             phase: 0,
             elapsed: 0.0,
             started_anim: false,
+            restart_clock: None,
             timing_sets: Vec::new(),
             timed: false,
             away: false,
@@ -1324,6 +1326,13 @@ fn update(vm: &mut Vm, st: &mut AiState, id: u32, depth: usize) -> i32 {
         if !st.act_hook.as_ref().unwrap().break_response
             && attack.is_some()
             && st.world.current_anim == attack
+            && st.goals.iter().flatten().any(|g| {
+                g.started_anim
+                    && g.params
+                        .first()
+                        .and_then(Value::num)
+                        .is_some_and(|p| Some(p as i32) == attack)
+            })
         {
             st.act_hook.as_mut().unwrap().break_followup = None;
         } else if st.act_hook.as_ref().unwrap().break_response
@@ -1567,9 +1576,22 @@ fn action_update(st: &mut AiState, id: u32, g: &Goal) -> i32 {
     }
     let playing = st.world.current_anim == Some(action);
     if !g.started_anim {
-        if playing {
+        let followup = st
+            .act_hook
+            .as_ref()
+            .is_some_and(|h| h.break_followup.is_some());
+        if g.phase == 0 && playing && followup {
+            st.goal_mut(id).restart_clock = Some(st.world.current_anim_time);
+        }
+        let restarted = g
+            .restart_clock
+            .is_none_or(|time| st.world.current_anim_time < time);
+        if playing && restarted && !(g.phase == 0 && followup) {
             st.goal_mut(id).started_anim = true;
             return RESULT_CONTINUE;
+        }
+        if !playing {
+            st.goal_mut(id).restart_clock = None;
         }
         let face_first = under_face_first(st, g);
         let wait = if face_first { FACE_FIRST_SECS } else { 0.0 };
@@ -1585,7 +1607,7 @@ fn action_update(st: &mut AiState, id: u32, g: &Goal) -> i32 {
             st.request.move_level = 0.5;
             return RESULT_CONTINUE;
         }
-        if g.elapsed > 2.0 + wait {
+        if !followup && g.elapsed > 2.0 + wait {
             return RESULT_FAILED;
         }
         if g.phase == 0 {
@@ -1596,6 +1618,12 @@ fn action_update(st: &mut AiState, id: u32, g: &Goal) -> i32 {
         st.request.action = action;
         let parent = g.parent.and_then(|p| st.goals.get(p as usize)?.as_ref());
         st.request.combo = parent.is_some_and(|p| st.combo_cancel.contains(&p.kind));
+        // A break follow-up uses the same NPC combo window even when its single-attack
+        // wrapper is not registered by this boss's Lua script.
+        st.request.combo |= st
+            .act_hook
+            .as_ref()
+            .is_some_and(|h| h.break_followup.is_some());
         st.request.endure = parent.is_some_and(|p| p.kind == GOAL_ENDURE_ATTACK);
         return RESULT_CONTINUE;
     }

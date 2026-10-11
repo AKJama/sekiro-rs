@@ -405,7 +405,7 @@ impl CombatRules {
         self.effects_for(i, character.tae_frame())
     }
 
-    fn effects_for(&self, i: usize, frame: &TaeFrame) -> Vec<ActiveEffect> {
+    pub(crate) fn effects_for(&self, i: usize, frame: &TaeFrame) -> Vec<ActiveEffect> {
         let f = &self.fighters[i];
         frame
             .sp_effects
@@ -496,8 +496,50 @@ impl CombatRules {
         f.posture.set(target, false, control);
     }
 
-    /// Resolves one contact between `chars[hit.attacker]` and `chars[hit.defender]`, applying
-    /// HP and posture damage to both fighters.
+    /// Forecast posture for a specified contact outcome using the live resolution path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn posture_for_outcome(
+        &self,
+        a: usize,
+        d: usize,
+        atk: &AttackProfile,
+        outcome: HitOutcome,
+        guard_row: Option<&AttackData>,
+        effects_a: &[ActiveEffect],
+        effects_d: &[ActiveEffect],
+    ) -> i32 {
+        let deflect = outcome == HitOutcome::Deflect;
+        let guard_profile = guard_row.and_then(|g| g.profile.as_ref());
+        let attack_rate = attacker_stamina_attack_rate(effects_a);
+        let mut defender_side = match &self.fighters[d].kind {
+            FighterKind::Player {
+                weapon, reinforce, ..
+            } => DefenderPosture::player(weapon, deflect, reinforce.stamina_guard_def),
+            FighterKind::Npc(npc) => DefenderPosture {
+                attribute_rate: npc.stamina_dmg_rates.get(atk.stamina_attribute),
+                guard_def: npc.stamina_guard_def as f32,
+                ..DefenderPosture::default()
+            },
+        };
+        if let Some(g) = guard_profile {
+            defender_side.guard_row_cut_rate = g.guard_stamina_cut_rate;
+        }
+        defender_side.guard_behavior_stamina = guard_row.map_or(0, |g| g.behavior_stamina);
+        match &self.fighters[a].kind {
+            FighterKind::Player {
+                weapon, reinforce, ..
+            } => {
+                let base =
+                    player_posture_base(outcome, atk, weapon, reinforce.stamina_atk, attack_rate);
+                defender_posture_damage_from_base(outcome, base, atk, &defender_side, effects_d)
+            }
+            FighterKind::Npc(_) => {
+                defender_posture_damage(outcome, atk, attack_rate, &defender_side, effects_d)
+            }
+        }
+    }
+
+    /// Resolves a contact, applying HP and posture damage to both fighters.
     pub fn resolve(
         &mut self,
         hit: &HitEvent,
@@ -552,33 +594,8 @@ impl CombatRules {
         let deflect = outcome == HitOutcome::Deflect;
 
         // 2. Posture damage to the defender.
-        let attack_rate = attacker_stamina_attack_rate(&effects_a);
-        let mut defender_side = match &self.fighters[d].kind {
-            FighterKind::Player {
-                weapon, reinforce, ..
-            } => DefenderPosture::player(weapon, deflect, reinforce.stamina_guard_def),
-            FighterKind::Npc(npc) => DefenderPosture {
-                attribute_rate: npc.stamina_dmg_rates.get(atk.stamina_attribute),
-                guard_def: npc.stamina_guard_def as f32,
-                ..DefenderPosture::default()
-            },
-        };
-        if let Some(g) = guard_profile {
-            defender_side.guard_row_cut_rate = g.guard_stamina_cut_rate;
-        }
-        defender_side.guard_behavior_stamina = guard_row.map_or(0, |g| g.behavior_stamina);
-        let posture_damage = match &self.fighters[a].kind {
-            FighterKind::Player {
-                weapon, reinforce, ..
-            } => {
-                let base =
-                    player_posture_base(outcome, &atk, weapon, reinforce.stamina_atk, attack_rate);
-                defender_posture_damage_from_base(outcome, base, &atk, &defender_side, &effects_d)
-            }
-            FighterKind::Npc(_) => {
-                defender_posture_damage(outcome, &atk, attack_rate, &defender_side, &effects_d)
-            }
-        };
+        let posture_damage =
+            self.posture_for_outcome(a, d, &atk, outcome, guard_row, &effects_a, &effects_d);
         let control_d = self.fighters[d].control_range(frame_d.stamina_type);
         let contact = apply_defender_posture(
             &mut self.fighters[d].posture,

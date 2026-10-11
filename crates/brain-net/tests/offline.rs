@@ -1126,7 +1126,8 @@ fn the_codex_coach_reads_the_last_message_file() {
     assert_eq!(args[n - 5], "--output-schema");
     assert_eq!(args[n - 3], "-o");
     assert_eq!(args[n - 1], "-");
-    assert_eq!(reply.tokens, [0, 0, 0], "codex reports no usage");
+    assert_eq!(reply.tokens, [10000, 1000, 0]);
+    assert_eq!(brain.stats().coach.input_tokens, 10000);
     let mut config = HostedConfig::new(Backend::Coach, ApiKey::new("none"));
     config.checkpoints = false;
     config.warm_up = false;

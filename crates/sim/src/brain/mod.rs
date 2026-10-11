@@ -16,11 +16,13 @@
 
 pub mod actions;
 pub mod coach;
+pub mod cost;
 pub mod driver;
 pub mod habits;
 pub mod limits;
 pub mod memory;
 pub mod metrics;
+pub mod moves;
 pub mod observation;
 pub mod plan;
 pub mod sampler;
@@ -184,6 +186,12 @@ impl RequestMode {
 /// A boss controller. Calls never block: a controller that needs time (a hosted model) works
 /// on a background thread and answers through [`BossBrain::poll`].
 pub trait BossBrain {
+    fn costs(&self) -> cost::CostSnapshot {
+        cost::CostSnapshot::default()
+    }
+    fn budget_exhausted(&self) -> bool {
+        false
+    }
     /// Short name for logs (`lua`, `scripted`).
     fn name(&self) -> &'static str;
     /// Whether it ever plans; `false` leaves every act to the Lua AI and sends no requests.

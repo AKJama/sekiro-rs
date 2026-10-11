@@ -52,6 +52,9 @@ impl fmt::Display for Backend {
 }
 
 pub struct HostedConfig {
+    pub budget_usd: Option<f64>,
+    pub token_budget: Option<u64>,
+    pub prices: crate::PriceTable,
     pub backend: Backend,
     pub model: String,
     pub base_url: String,
@@ -169,6 +172,9 @@ impl std::error::Error for ConfigError {}
 impl HostedConfig {
     pub fn new(backend: Backend, api_key: ApiKey) -> Self {
         Self {
+            budget_usd: None,
+            token_budget: None,
+            prices: crate::PriceTable::default(),
             backend,
             model: "gpt-6-luna".into(),
             base_url: "https://api.openai.com".into(),

@@ -31,6 +31,8 @@ pub struct AiWorld {
     /// Numeric id of the full-body animation playing now, as the action codes use it
     /// (3000 for `a000_003000`), if any.
     pub current_anim: Option<i32>,
+    /// Current clip clock, used to distinguish a repeated action from the previous swing.
+    pub current_anim_time: f32,
     /// The playing animation has reached a window where the next combo attack is accepted
     /// (the NPC's TAE cancel window for attacks), or has ended.
     pub combo_window: bool,
