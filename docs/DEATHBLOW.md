@@ -52,7 +52,8 @@ Field meanings, as implemented (from the values; not all confirmed against the e
 - `isTurnAtker`: the start row turns the attacker to face the defender.
 - `atkSorbDmyId`: the attacker dummy poly the defender is snapped ("absorbed") to; `defSorbDmyId` 0 means the defender's root.
 - `adsrobModelPosInterpolationTime`: seconds over which the defender slides onto the dummy (0.5).
-- `throwFollowingType` 1 on the body rows: the defender follows the attacker while the throw lasts.
+- `throwFollowingType`: 1 on the soldier and Genichiro body rows, 0 on Owl's body rows.
+  The sorb ids determine which side this implementation absorbs; continuous chasing is not established by that enum alone.
 
 ## Alignment
 
@@ -68,11 +69,33 @@ Until 2026-10-10 sekiro-rs instead held the defender on the dummy of Wolf's *liv
 Which side moves: with `atkSorbDmyId` set (the soldier) the defender goes onto Wolf's dummy; with `atkSorbDmyId` 0 and `defSorbDmyId` set (the Owl, dummy 230) Wolf goes onto the Owl's dummy.
 The second is inferred from the fields, not traced.
 
-Walls: every absorb step moves the character through its collision (`Ground::slide`), as root motion, knockback and the push-apart between the two do.
-What a wall stops, the other character gives way instead (through its own collision), so the pair keeps its spacing without either ending up inside geometry.
-That shift is ours; the engine's handling (shifting the pair, or failing the throw check) is not traced.
+Walls: at the paired body clip's start, compute the absorbed endpoint from the ThrowParam dummy frame and sweep each capsule from its starting position to that endpoint.
+Each rejected horizontal displacement becomes a translation of the whole pair, with both starts and endpoints rechecked until clear, including corner contacts.
+The reservation also probes both original root-motion tracks and the absorb interpolation at 60 Hz through the full paired body clip, so the wind-up and post-strike recovery do not carry either capsule back into the wall.
+The bounded solver tries 32 alternating projections within 4 m; exhaustion logs a diagnostic and retains authored alignment as a cramped-space placeholder.
+While the pair holds, both bodies bypass character-versus-wall push, and absorption applies its complete authored correction instead of allowing separate wall pushes to distort the strike.
+Ordinary collision resumes when the pair releases; floors remain active throughout.
+This clearance rule and temporary wall bypass are inferred engineering placeholders, not a recovered native engine algorithm.
+Each clearance sweep resolves the supporting floor at the translated sample, so stepped roof tiles do not invalidate a reservation made at the original height.
+The root-track predictor does not predict airborne velocity events, lethal defender-clip branches or motion after release; those can still enter geometry.
 While the enemy still plays the throw's defender clip, the push-apart moves only Wolf, so walking into the getting-up Owl does not shove him (ours, after FwLo's "throw pairs skip the push-apart").
 A knockback left over from the breaking hit is dropped when the deathblow starts; it used to resume when the pair ended and slide the defender 0.4 m in one step.
+
+### Genichiro and Owl placement audit (2026-10-11)
+
+Genichiro's front pair is 17100000 / 17100001, with Wolf's a227_500000 / a227_510000 and the defender's a000_012000.
+The start accepts horizontal distance 2.3 m, height +/-1.3819795 m, defender-back angle 90..180 degrees and attacker facing within 35 degrees.
+The body accepts 2.1 m, height +/-1.2618073 m, angles 0..180 and facing within 180 degrees.
+Its atkSorbDmyId is 266 and defSorbDmyId is 0: Genichiro is absorbed onto Wolf's dummy while Wolf anchors the pair, except for their common wall-clearance translation.
+Owl's 15060000 / 15060001 start distance is 2.4 m and height +/-1.4420655 m, with the same angle limits; its body has Genichiro's 2.1 m and height limits.
+Owl's body uses atkSorbDmyId 0 / defSorbDmyId 230: Wolf is absorbed into the inverse dummy frame while Owl anchors the pair.
+Owl's finishing body 15060181 uses defender dummy 235 instead.
+All these rows interpolate absorption over 0.5 s.
+The current throwFollowingType is 1 for Genichiro's body and 0 for Owl's body, consistent with opposite absorption ownership, without establishing continuous following semantics.
+The obsolete throwType_old is 8 for both ordinary body rows; throwKind 40000 / 40100 links start and body and is distinct from that obsolete type.
+Their start rows have isSkipSphereCast 0 and body rows 1, but that check flag alone does not prove that all native wall collision is disabled throughout a throw.
+Neither the available executable research nor FwLo's MIT notes establish a native pre-throw space search or wall-normal translation algorithm.
+FwLo's hand-off corroborates frame-zero absorption followed by each animation's original root motion; it is a facts reference only.
 
 ## The defender's side
 
@@ -177,6 +200,12 @@ Camera shake (TAE 144 to 147 `RumbleCam`, also in these clips) is not done yet.
 
 ## Tests
 
+`crates/sim/tests/combat_polish.rs` adds a synthetic wall/corner reservation with independent authored root travel, checking blade-to-hit-dummy contact within 5 mm at the strike and grounded capsules outside the wall.
+It also checks that ordinary wall collision returns when the paired-body exemption ends.
+The Genichiro replay uses `crates/game/scripts/genichiro_wall_polish.txt`, `--arena genichiro --god --simple-ai --brain-memory off --passive --break-posture --spawn 107.829,54.13,226.686,0,0 --enemy-distance 1.6`.
+Captures under `target/alt/polish/deathblow-wall-{windup,strike,recovery}.png` show connected body contact and intact pair spacing, with the recovery clear of the wooden wall.
+Capsule clearance does not reserve the complete animated mesh, weapons or camera; peripheral cloth/weapon intersection remains possible.
+
 `crates/sim/tests/deathblow_camera.rs`: the soldier's deathblow takes slot 41 and closes in to under 2 m, then returns to slot 1 and 4.5 m; the Owl's looks at dummy 142 for 0 to 2.5 s, and in the duel the dummy resolves on the moving camera bone; the look limits clamp pitch and leave yaw free.
 
 `crates/sim/tests/owl_grab.rs` (enemy throws on Wolf): the Owl's forced grabs catch a passive, guarding or deflecting Wolf with the data's rows, clips and damage, miss a stepping or jumping Wolf, kill into the death clip, and do not clip at the castle-top railing.
@@ -184,4 +213,4 @@ Camera shake (TAE 144 to 147 `RumbleCam`, also in these clips) is not done yet.
 `crates/sim/tests/deathblow_lock.rs` (Owl, castle roof):
 - `deathblow_ignores_player_steering`: stick and camera turning through the whole throw change nothing until Wolf's move cancel at 4.0 s, and nothing on the Owl at all.
 - `deathblow_keeps_owl_attached_to_the_throw`: no jumps in the pair's relative placement.
-- `deathblow_near_a_wall_does_not_clip`, `deathblow_with_wolf_backed_to_a_wall_does_not_clip`: no step crosses map geometry or jumps, both end on a floor, and with Wolf backed to the wall the pair keeps its 1.10 m spacing (the Owl gives way).
+- `deathblow_near_a_wall_does_not_clip`, `deathblow_with_wolf_backed_to_a_wall_does_not_clip`: no step crosses map geometry, body entry permits only a bounded shared relocation, subsequent steps stay smooth, both end on a floor, and with Wolf backed to the wall the pair keeps its 1.10 m spacing (the Owl gives way).

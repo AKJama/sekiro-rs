@@ -29,7 +29,7 @@ Genichiro's extracted c7100 clips are a000: his final castle phase is a differen
 The reviewed event rows in `arena.rs` are keyed by character and NpcParam row.
 Event 11115810 joins after its opening cutscene label and starts the c7100 boss bar and immortality.
 The first deathblow removes one mark, restores HP through the existing throw/TAE path, and Lua receives the remaining and maximum marks.
-After the second mark, event 11115820 waits for Wolf alive, completes the cutscene boundary, clears its temporary effects and disables 1110800 while enabling 1110801.
+After the second mark, event 11115820 waits for Wolf alive, requests cutscene 11010020, clears its temporary effects and disables 1110800 while enabling 1110801.
 The generic entity hand-over resolves that placed character from the registry and replaces the active opponent after the throw pair finishes.
 Wolf's simulation, health and arena survive, and resetting restores the original c7100 fight.
 The renderer reloads the enemy model, draw groups and animation library when the selected opponent changes.
@@ -79,7 +79,7 @@ No model/API or real coach CLI call was used, and saves were backed up under `ta
 ## Remaining gaps
 
 Lightning uses the installed attacks and HKS states; the unresolved collision and status details are listed below.
-Cutscenes are treated as completed boundaries; their playback, region warp and story rewards are not implemented.
+Cutscene playback and story rewards remain unimplemented; the castle hand-over uses the timed fade placeholder and authored MSB warp described below.
 Only one enemy is active at a time, with sequential event hand-over; simultaneous enemies and allies remain future work.
 Castle c7100 supports the planning brain through `brain::actions::GENICHIRO`, including sword combos, perilous finishers, bow shots, jumping arrow volleys and existing tactics.
 See `docs/BRAIN.md`, "Genichiro Ashina (c7100)", for the data-derived act table and exclusions.
@@ -88,6 +88,25 @@ Lua still reports unimplemented `GetHpLastTarget` and `IsInsideTargetRegion` que
 Boss event discovery and all-boss arena generation remain incomplete; this session adds reviewed event and arena rows.
 
 FwLo's MIT notes supplied the donor, animation-set and castle hand-over facts; the implementation here is original Rust.
+
+## Hand-over cinematic placeholder (2026-10-11)
+
+The EMEVD PlayCutsceneAndWarpPlayer instruction requests cutscene 11010020, method 16, player 10000 and point 1112813 in m11_01_00_00.
+The point's MSB region base data gives Wolf position [115.906, 54.03, 234.886] and world yaw 126.6 degrees after the usual mirrored-X conversion.
+The queued cinematic waits for any playing deathblow pair to release, fades to black over 0.5 s, applies the warp and event continuation while fully black, holds black for 0.75 s, then fades back over 0.5 s.
+Enabling Tomoe uses his authored MSB part placement [103.509, 53.989, 243.125], yaw -52 degrees.
+Combat, AI, status timers, animation clocks and gameplay input are paused for the full fade; input buffers are cleared at its boundaries.
+Keyboard, mouse and gamepad buttons, including pause, are suppressed during the fade, and camera input is ignored.
+The renderer requires two black presentation updates before synchronously loading the replacement opponent, then holds the fade until the new rig is ready.
+That loading stall may lengthen wall-clock black time; the simulation's cinematic timing stays deterministic.
+A cutscene without a resolved warp keeps both characters' positions, with a diagnostic if the requested point cannot be resolved.
+This is a cinematic placeholder, not native cutscene playback or a recovered native camera sequence.
+Owl event 11115870 has no cutscene instruction: its HKS heat-up, kneeling and escape continue playing normally rather than receiving this fade.
+
+The hand-over replay uses `crates/game/scripts/genichiro_tomoe_fade.txt` with `--arena genichiro --god --simple-ai --brain-memory off --passive --break-posture --spawn 107.829,54.044,237.04,0,0 --enemy-distance 1.6`.
+The inspected `target/alt/polish/tomoe-final-{before,fade-out,black,fade-in,after}.png` sequence shows the old boss before fading, complete black including the HUD, and Wolf facing Tomoe at the authored placements afterward.
+The swap is hidden; the earlier deathblow camera can still approach the roof eaves before the cinematic starts.
+The real-data regression holds movement/attack/jump/lock input throughout the pause, verifies no combat or animation advancement, and checks that a cinematic without a warp keeps both positions.
 
 ## Castle lightning (2026-10-11)
 

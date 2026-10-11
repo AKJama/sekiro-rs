@@ -191,6 +191,8 @@ impl Default for Body {
 /// What moves the body this tick.
 #[derive(Debug, Clone, Default)]
 pub struct BodyInput {
+    /// Paired throws reserve space once, then keep authored relative root motion intact.
+    pub ignore_walls: bool,
     /// HKS act 3037 = surface, act 3011 = dive. None uses ordinary physics.
     pub water_mode: Option<bool>,
     /// World-space horizontal movement stick, with magnitude at most one.
@@ -268,7 +270,11 @@ impl Body {
             travel[0] += self.velocity[0] * dt;
             travel[1] += self.velocity[2] * dt;
         }
-        let [mx, mz] = ground.slide(self.position, travel);
+        let [mx, mz] = if input.ignore_walls {
+            travel
+        } else {
+            ground.slide(self.position, travel)
+        };
         self.position[0] += mx;
         self.position[2] += mz;
 

@@ -28,6 +28,73 @@ use crate::body::{Ground, WaterSurface};
 /// Body radius in metres: the player's physics capsule is 1.5 m tall with a 0.4 m radius, read
 /// from the running game by FwLo's RustSekiro (`docs/kb/movement.md`).
 pub const RADIUS: f32 = 0.4;
+
+/// Reserves a throw's aligned endpoint and interpolation path using the ordinary capsule
+/// sweep. Every rejected displacement becomes a common translation of both characters.
+/// This bounded alternating projection is an inferred wall-clearance rule, not an exe trace.
+pub fn throw_pair_shift(
+    grounds: [&dyn Ground; 2],
+    starts: [[f32; 3]; 2],
+    aligned: [[f32; 3]; 2],
+) -> Option<[f32; 2]> {
+    throw_pair_path_shift(grounds, &[starts, aligned])
+}
+
+/// As above, also reserving authored paired root-motion samples through the whole body clip.
+pub fn throw_pair_path_shift(
+    grounds: [&dyn Ground; 2],
+    path: &[[[f32; 3]; 2]],
+) -> Option<[f32; 2]> {
+    let mut shift = [0.0; 2];
+    for _ in 0..32 {
+        let mut clear = true;
+        for segment in path.windows(2) {
+            let [starts, aligned] = [segment[0], segment[1]];
+            for i in 0..2 {
+                let mut from = [
+                    starts[i][0] + shift[0],
+                    starts[i][1],
+                    starts[i][2] + shift[1],
+                ];
+                from[1] = grounds[i]
+                    .floor(from[0], from[2], from[1] + grounds[i].max_step())
+                    .unwrap_or(from[1]);
+                let want = [aligned[i][0] - starts[i][0], aligned[i][2] - starts[i][2]];
+                let got = grounds[i].slide(from, want);
+                // The sweep's rejection points along the blocking surface normal, including
+                // corner contacts. Moving both by it preserves the dummy-to-dummy relation.
+                let correction = [got[0] - want[0], got[1] - want[1]];
+                if correction[0].hypot(correction[1]) > 1e-4 {
+                    shift[0] += correction[0];
+                    shift[1] += correction[1];
+                    clear = false;
+                }
+                // Also keep the unabsorbed character and the start of the slide outside walls.
+                let mut from = [
+                    starts[i][0] + shift[0],
+                    starts[i][1],
+                    starts[i][2] + shift[1],
+                ];
+                from[1] = grounds[i]
+                    .floor(from[0], from[2], from[1] + grounds[i].max_step())
+                    .unwrap_or(from[1]);
+                let correction = grounds[i].slide(from, [0.0; 2]);
+                if correction[0].hypot(correction[1]) > 1e-4 {
+                    shift[0] += correction[0];
+                    shift[1] += correction[1];
+                    clear = false;
+                }
+            }
+        }
+        if clear {
+            return Some(shift);
+        }
+        if shift[0].hypot(shift[1]) > 4.0 {
+            return None;
+        }
+    }
+    None
+}
 /// Highest ledge a walking body steps onto, and the furthest it follows the floor down.
 pub const STEP_HEIGHT: f32 = 0.5;
 /// Steepest walkable surface.

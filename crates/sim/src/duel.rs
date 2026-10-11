@@ -154,6 +154,8 @@ pub struct Duel {
     pub spec: EnemySpec,
     initial_spec: EnemySpec,
     pending_handover: Option<(i32, Option<i32>)>,
+    /// Map-event cinematic boundary, queued until any active deathblow releases.
+    pub cinematic: Option<crate::events::Cinematic>,
     /// Steps since the deathblow switched the enemy to its death animation (0: not yet).
     defender_dying: u8,
     spawn: Option<[Placement; 2]>,
@@ -283,6 +285,12 @@ impl EventView<'_> {
 }
 
 impl EventHost for EventView<'_> {
+    fn cutscene_finished(&self, id: i32) -> bool {
+        self.duel
+            .cinematic
+            .as_ref()
+            .is_none_or(|c| c.id != id || c.applied)
+    }
     fn has_sp_effect(&self, entity: i32, id: i32) -> Option<bool> {
         let i = self.who(entity)?;
         Some(
@@ -372,6 +380,7 @@ impl Duel {
             cache: cache.to_path_buf(),
             initial_spec: spec.clone(),
             pending_handover: None,
+            cinematic: None,
             spec,
             defender_dying: 0,
             spawn: None,
@@ -587,6 +596,7 @@ impl Duel {
             self.switch_enemy(self.initial_spec.clone(), spot)?;
         }
         self.pending_handover = None;
+        self.cinematic = None;
         let (mut player, mut enemy) = Self::load_characters(&self.cache, 4.0, &self.spec)?;
         std::mem::swap(&mut player.ground, &mut self.player.ground);
         player.docking.edges = std::mem::take(&mut self.player.docking.edges);
@@ -640,6 +650,12 @@ impl Duel {
             events.scripts.flags.extend(flags);
         }
         self.enemy = next.enemy;
+        self.last_steps[1] = StepReport {
+            position: self.enemy.body.position,
+            yaw: self.enemy.body.yaw,
+            grounded: self.enemy.body.grounded,
+            ..Default::default()
+        };
         let [_, enemy] = next.fighters;
         self.fighters[1] = enemy;
         self.rules = next.rules;
@@ -883,6 +899,21 @@ impl Duel {
             return;
         };
         let step = db.step(dt, &placement(&self.player), &placement(&self.enemy));
+        let pair_start = step.attacker_clip.is_some() && db.phase == Phase::Body;
+        let alignment = pair_start.then(|| {
+            let p = placement(&self.player);
+            let e = placement(&self.enemy);
+            let mut aligned = [p.position, e.position];
+            match db.absorbed {
+                Absorbed::Defender => aligned[1] = db.sorb.placement(&p).position,
+                Absorbed::Attacker => aligned[0] = db.sorb.inverse().placement(&e).position,
+            }
+            // Sorb helper Y is a model offset; the existing floor placement stays authoritative.
+            aligned[0][1] = p.position[1];
+            aligned[1][1] = e.position[1];
+            aligned
+        });
+        let path = pair_start.then(|| throw_body_path(db, &self.player, &self.enemy));
         if let Some(clip) = step.attacker_clip.as_deref().and_then(anim_id) {
             let rt = &mut self.player.behavior.runtime;
             rt.offsets
@@ -936,15 +967,47 @@ impl Duel {
         if matches!(db.phase, Phase::Done | Phase::Missed) {
             self.deathblow = None;
         }
+        if let Some(aligned) = alignment {
+            let starts = [self.player.body.position, self.enemy.body.position];
+            let mut checks = vec![aligned, starts];
+            // Include the fully absorbed endpoint even if the strike occurs before its end.
+            checks.extend(path.unwrap_or_default());
+            self.reserve_pair_path(&checks);
+        }
         if let Some(a) = step.absorb {
             self.absorb(&a);
         }
     }
 
-    /// Moves the absorbed character its share of the way onto the other's sorb dummy, through
-    /// its collision. What a wall stops, the other character gives way instead (through its own
-    /// collision), so the pair keeps its relation without either ending up inside geometry.
-    /// That shift of the pair is inferred: the engine's handling is not traced.
+    fn reserve_pair(&mut self, mut aligned: [[f32; 3]; 2]) {
+        let starts = [self.player.body.position, self.enemy.body.position];
+        for i in 0..2 {
+            aligned[i][1] = starts[i][1];
+        }
+        self.reserve_pair_path(&[starts, aligned]);
+    }
+
+    fn reserve_pair_path(&mut self, path: &[[[f32; 3]; 2]]) {
+        if let Some(shift) = crate::collision::throw_pair_path_shift(
+            [self.player.ground.as_ref(), self.enemy.ground.as_ref()],
+            path,
+        ) {
+            if shift[0].hypot(shift[1]) > 0.01 {
+                eprintln!(
+                    "throw pair wall clearance: x={:.3} z={:.3}",
+                    shift[0], shift[1]
+                );
+            }
+            for c in [&mut self.player, &mut self.enemy] {
+                c.body.position[0] += shift[0];
+                c.body.position[2] += shift[1];
+            }
+        } else {
+            eprintln!("throw pair clearance exhausted; retaining authored alignment");
+        }
+    }
+
+    /// Applies authored absorption without independent wall pushes after reserving pair space.
     fn absorb(&mut self, a: &AbsorbStep) {
         // Wolf is the deathblow's attacker.
         self.slide_pair(a.who == Absorbed::Attacker, a);
@@ -952,22 +1015,14 @@ impl Duel {
 
     /// [`Self::absorb`] for either character: `player_moves` says whether Wolf is the absorbed one.
     fn slide_pair(&mut self, player_moves: bool, a: &AbsorbStep) {
-        let (moved, other) = if player_moves {
-            (&mut self.player, &mut self.enemy)
+        let moved = if player_moves {
+            &mut self.player
         } else {
-            (&mut self.enemy, &mut self.player)
+            &mut self.enemy
         };
-        let want = [a.delta[0], a.delta[2]];
-        let got = moved.ground.slide(moved.body.position, want);
-        moved.body.position[0] += got[0];
-        moved.body.position[2] += got[1];
+        moved.body.position[0] += a.delta[0];
+        moved.body.position[2] += a.delta[2];
         moved.body.yaw = angle_diff(moved.body.yaw + a.yaw, 0.0);
-        let rest = [got[0] - want[0], got[1] - want[1]];
-        if rest[0].hypot(rest[1]) > 1e-5 {
-            let back = other.ground.slide(other.body.position, rest);
-            other.body.position[0] += back[0];
-            other.body.position[2] += back[1];
-        }
     }
 
     /// Whether an enemy throw holds Wolf.
@@ -1017,6 +1072,10 @@ impl Duel {
             &placement(&self.enemy),
             row.interpolation_time,
         );
+        self.reserve_pair([
+            self.player.body.position,
+            sorb.placement(&placement(&self.player)).position,
+        ]);
         self.rules.fighters[1].posture.take(damage, None);
         self.player
             .behavior
@@ -1137,6 +1196,15 @@ impl Duel {
             &defender,
         )?;
         self.enemy.body.yaw = attacker.yaw;
+        let aligned = if row.atk_sorb_dummy <= 0 && row.def_sorb_dummy > 0 {
+            [
+                defender.position,
+                sorb.inverse().placement(&defender).position,
+            ]
+        } else {
+            [sorb.placement(&attacker).position, attacker.position]
+        };
+        self.reserve_pair(aligned);
         let rt = &mut self.enemy.behavior.runtime;
         rt.offsets
             .by_type
@@ -1558,6 +1626,29 @@ impl Duel {
         };
         for c in commands {
             match c {
+                EventCommand::Cutscene {
+                    id,
+                    point,
+                    area,
+                    block,
+                    player,
+                } => {
+                    let warp = (player == PLAYER_ENTITY && point > 0)
+                        .then(|| crate::events::warp_point(&self.cache, area, block, point))
+                        .flatten();
+                    if point > 0 && warp.is_none() {
+                        eprintln!(
+                            "cutscene {id}: unresolved MSB warp point {point}; keeping position"
+                        );
+                    }
+                    self.cinematic = Some(crate::events::Cinematic {
+                        id,
+                        elapsed: 0.0,
+                        warp,
+                        applied: false,
+                    });
+                    self.player.input.reset_requests();
+                }
                 EventCommand::SetSpEffect { entity, id } => {
                     if let Some(i) = who(entity) {
                         let c = if i == 0 {
@@ -1647,7 +1738,10 @@ impl Duel {
                     },
                 ))
             });
-            if let Some((spec, spot)) = handover {
+            if let Some((spec, mut spot)) = handover {
+                if self.cinematic.as_ref().is_some_and(|c| c.warp.is_none()) {
+                    spot = placement(&self.enemy);
+                }
                 match self.switch_enemy(spec, spot) {
                     Ok(()) => {
                         if let Some(events) = self.events.as_mut() {
@@ -1739,6 +1833,58 @@ impl Duel {
     }
 
     pub fn step(&mut self, input: &InputFrame, dt: f32) -> DuelReport {
+        // Let an already playing pair finish before beginning a queued cinematic. Otherwise
+        // pausing the pair would prevent the map's hand-over from ever becoming eligible.
+        if self.deathblow.is_none() && self.cinematic.is_some() {
+            let cinematic = self.cinematic.as_mut().unwrap();
+            let was_black = cinematic.elapsed >= crate::events::Cinematic::FADE;
+            cinematic.elapsed += dt;
+            let apply = !cinematic.applied && was_black;
+            if apply {
+                cinematic.applied = true;
+                if let Some(warp) = cinematic.warp {
+                    self.player.body.position = warp.position;
+                    self.player.body.yaw = warp.yaw;
+                    self.player.body.velocity = [0.0; 3];
+                    self.player.body.fall_top = warp.position[1];
+                    self.player.body.grounded = true;
+                }
+                self.step_events(dt);
+            }
+            for c in [&mut self.player, &mut self.enemy] {
+                c.tae_runtime.frame.sounds.clear();
+                c.tae_runtime.frame.velocity_changes.clear();
+            }
+            let reports: [StepReport; 2] = std::array::from_fn(|i| {
+                let mut r = self.last_steps[i].clone();
+                let c = if i == 0 { &self.player } else { &self.enemy };
+                r.position = c.body.position;
+                r.yaw = c.body.yaw;
+                r.advanced = 0.0;
+                r.clip_started = false;
+                r.requested.clear();
+                r.behavior.events.clear();
+                r.behavior.hooks.clear();
+                r.behavior.script_errors.clear();
+                r
+            });
+            if self
+                .cinematic
+                .as_ref()
+                .is_some_and(|c| c.elapsed >= crate::events::Cinematic::DURATION)
+            {
+                self.cinematic = None;
+                self.player.input = Default::default();
+                self.attack_button = false;
+                self.lock_button = false;
+            }
+            let [player, enemy] = reports;
+            return DuelReport {
+                player,
+                enemy,
+                ..Default::default()
+            };
+        }
         let raw_input = *input;
         if self.spawn.is_none() {
             self.spawn = Some([placement(&self.player), placement(&self.enemy)]);
@@ -1811,6 +1957,13 @@ impl Duel {
         // Hit stop: each character advances only by what is left of the step after its freeze.
         let dts = [self.hit_stop[0].split(dt), self.hit_stop[1].split(dt)];
         let was_grounded = self.player.body.grounded;
+        let held = self
+            .deathblow
+            .as_ref()
+            .is_some_and(|d| d.phase == Phase::Body)
+            || self.throw_held();
+        self.player.throw_ignore_walls = held;
+        self.enemy.throw_ignore_walls = held;
         let player = self.advance_character(0, &input, dt, dts[0]);
         let enemy = self.advance_character(1, &InputFrame::default(), dt, dts[1]);
         if self.deathblow.is_none() && !self.throw_held() {
@@ -2048,4 +2201,73 @@ impl Duel {
         }
         report
     }
+}
+
+/// Predicts the authored capsule paths through the paired clip, including its absorption.
+/// Uses the same reference-frame delta integration as Character, without advancing scripts.
+/// Floors and airborne velocity events are not predicted by this probe.
+fn throw_body_path(db: &Deathblow, player: &Character, enemy: &Character) -> Vec<[[f32; 3]; 2]> {
+    use crate::body::{Body, BodyInput, FlatGround};
+    let placements = [placement(player), placement(enemy)];
+    let clips = [
+        player.clips.clip(&db.body.attacker_anim()),
+        db.body
+            .defender_anim()
+            .and_then(|name| enemy.clips.clip(&name)),
+    ];
+    let mut bodies = placements.map(|p| Body {
+        position: p.position,
+        yaw: p.yaw,
+        ..Body::default()
+    });
+    let mut slide = crate::deathblow::AbsorbSlide::new(
+        db.absorbed,
+        &db.sorb,
+        &placements[0],
+        &placements[1],
+        db.body.interpolation_time,
+    );
+    let mut path = vec![bodies.clone().map(|b| b.position)];
+    let end = db.body_duration;
+    let mut time = 0.0;
+    while time < end {
+        let dt = (end - time).min(1.0 / 60.0);
+        for i in 0..2 {
+            let motion = clips[i]
+                .as_ref()
+                .and_then(|c| c.root_motion.as_ref())
+                .map_or([0.0; 4], |rm| {
+                    let a = rm.sample(time);
+                    let b = rm.sample(time + dt);
+                    let (sin, cos) = (-a[3]).sin_cos();
+                    let (dx, dz) = (b[0] - a[0], b[2] - a[2]);
+                    [
+                        cos * dx + sin * dz,
+                        b[1] - a[1],
+                        -sin * dx + cos * dz,
+                        b[3] - a[3],
+                    ]
+                });
+            bodies[i].step(
+                &BodyInput {
+                    root_motion: motion,
+                    ignore_walls: true,
+                    ..Default::default()
+                },
+                dt,
+                &FlatGround {
+                    height: placements[i].position[1],
+                },
+            );
+        }
+        if let Some(a) = slide.advance(dt) {
+            let i = if a.who == Absorbed::Attacker { 0 } else { 1 };
+            bodies[i].position[0] += a.delta[0];
+            bodies[i].position[2] += a.delta[2];
+            bodies[i].yaw += a.yaw;
+        }
+        time += dt;
+        path.push(bodies.clone().map(|b| b.position));
+    }
+    path
 }

@@ -4,6 +4,28 @@ Last updated 11 October 2026.
 Read this first in a new session, then `AGENTS.md` and `docs/DESIGN.md`.
 How much of the game is done overall: `docs/PROGRESS.md`.
 
+## Deathblow wall clearance and Tomoe fade (2026-10-11)
+
+ThrowParam dummy frames now drive one shared, floor-aware capsule reservation through the full paired body clip; both characters bypass independent wall pushes while held.
+Genichiro absorbs onto Wolf dummy 266; Owl absorbs Wolf onto his dummy 230 instead.
+The bounded wall search is inferred, with a diagnostic fallback for exhausted space and no full-mesh clearance claim.
+Genichiro's EMEVD cinematic now fades out over 0.5 s, swaps and applies the MSB warp under black, holds 0.75 s and fades in over 0.5 s with simulation and input paused.
+Owl's phase-2 event has no cutscene and keeps its playable HKS heat-up.
+Inspected `target/alt/polish/deathblow-wall-{windup,strike,recovery}.png` show connected contact and clear recovery; `tomoe-final-{before,fade-out,black,fade-in,after}.png` show the swap hidden under complete black and authored placement afterward.
+The combined sim/brain-net release suite passes all 439 tests, including synthetic contact, real-data transition, Owl wall deathblow and grab regressions.
+Formatting, workspace/all-target Clippy and the release game build pass offline with six jobs in `target/alt`.
+No commits, network, worktrees or protected-path writes.
+
+## FXR sampling groundwork, player blocked (2026-10-11)
+
+Added named appearance IDs 603/604/606-609, documented blend operations and allocation-free property sampling with explicit caller-selected linear/stepped policies.
+Native function-ID/clock mapping is not asserted; unsupported modifiers, loops and cubic evaluators fail explicitly.
+The supplied offline notes lack action field/property layouts, and their referenced action-schema checkout is absent; requested a local schema location without accessing the network.
+The particle player, wiring, `--no-fxr`, real-effect captures and frame-cost measurements remain undone; all effects still use stand-ins.
+Formatting, workspace/all-target Clippy, 115 formats/game release tests and the release game build pass offline with six jobs in `target/alt`.
+The simulation retry passes all 399 tests, including the concurrently repaired wall-clearance deathblows; reports are under `target/alt/fxr/player-*`.
+No commits, dependencies, protected-path writes or combat-job edits.
+
 ## Sky exposure and silhouette fog follow-up (2026-10-11)
 
 Sky now uses the same scene-radiance bridge and camera exposure as diffuse sun/ambient instead of independent gains with missing exposure.

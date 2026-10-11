@@ -31,6 +31,14 @@ pub const PLAYER_ENTITY: i32 = 10000;
 /// What an event asks of the world.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EventCommand {
+    /// The arena placeholder replaces this cinematic with a timed black-screen boundary.
+    Cutscene {
+        id: i32,
+        point: i32,
+        area: u8,
+        block: u8,
+        player: i32,
+    },
     /// `SetSpEffect` (2004[8]).
     SetSpEffect {
         entity: i32,
@@ -84,6 +92,9 @@ pub enum EventCommand {
 /// What the events may ask about the world. Unknown entities answer `None`, which makes the
 /// condition false.
 pub trait EventHost {
+    fn cutscene_finished(&self, _id: i32) -> bool {
+        true
+    }
     fn has_sp_effect(&self, entity: i32, id: i32) -> Option<bool>;
     /// Whether the character's animation raises event message `id` (TAE 231
     /// `SetEzStateRequestID`), the condition `IfCharacterHasEventMessage` (4[8]) waits for.
@@ -308,8 +319,7 @@ impl EventScripts {
             (4, 37) => host
                 .health_bars(i(1) as i32)
                 .is_some_and(|bars| compare(i(2), bars as i64, i(3))),
-            // Arena events join after the opening cutscene; no cutscene player is running.
-            (3, 31) => true,
+            (3, 31) => host.cutscene_finished(i(1) as i32),
             _ => false,
         }
     }
@@ -374,6 +384,23 @@ impl EventScripts {
             let mut next = r.pc + 1;
             let mut command = None;
             match ins.code() {
+                (2002, 4) | (2002, 13) => {
+                    let command = EventCommand::Cutscene {
+                        id: i(0) as i32,
+                        point: i(2) as i32,
+                        area: i(3) as u8,
+                        block: i(4) as u8,
+                        player: i(5) as i32,
+                    };
+                    self.log.push(EventLog::Command {
+                        event: r.id,
+                        command: command.clone(),
+                    });
+                    out.push(command);
+                    r.pc = next;
+                    // The host must see the request before IfOngoingCutsceneFinished is tested.
+                    return;
+                }
                 // EndUnconditionally(end type).
                 (1000, 4) => {
                     self.end(r, i(0));
@@ -528,6 +555,92 @@ impl EventScripts {
                 out.push(c);
             }
             r.pc = next;
+        }
+    }
+}
+
+/// Reads an event warp point directly from the local MSB, whose exported layout currently
+/// contains parts rather than gameplay regions. Region base data stores entity id at +4.
+/// Positions/yaw use the same mirrored-X convention as the map's exported parts.
+pub fn warp_point(
+    cache: &Path,
+    area: u8,
+    block: u8,
+    entity: i32,
+) -> Option<crate::deathblow::Placement> {
+    use sekiro_formats::reader::{Reader, utf16z};
+    let bytes =
+        std::fs::read(cache.join(format!("raw/map/MapStudio/m{area:02}_{block:02}_00_00.msb")))
+            .ok()?;
+    if !bytes.starts_with(b"MSB ") {
+        return None;
+    }
+    let mut table = 0x10;
+    for _ in 0..32 {
+        if table == 0 {
+            return None;
+        }
+        let mut r = Reader::at(&bytes, table);
+        r.i32().ok()?;
+        let count = usize::try_from(r.i32().ok()?).ok()?;
+        if !(1..=100_000).contains(&count) {
+            return None;
+        }
+        let name = r.offset64().ok()?;
+        let mut entries = Vec::with_capacity(count - 1);
+        for _ in 1..count {
+            entries.push(r.offset64().ok()?);
+        }
+        table = r.offset64().ok()?;
+        if utf16z(&bytes, name).ok()? != "POINT_PARAM_ST" {
+            continue;
+        }
+        for entry in entries {
+            let base = Reader::at(&bytes, entry.checked_add(0x50)?)
+                .offset64()
+                .ok()?;
+            if base == 0
+                || Reader::at(&bytes, entry.checked_add(base)?.checked_add(4)?)
+                    .i32()
+                    .ok()?
+                    != entity
+            {
+                continue;
+            }
+            let mut r = Reader::at(&bytes, entry.checked_add(0x14)?);
+            let [x, y, z] = r.vec3().ok()?;
+            let rotation = r.vec3().ok()?;
+            return Some(crate::deathblow::Placement {
+                position: [-x, y, z],
+                yaw: -rotation[1].to_radians(),
+            });
+        }
+        return None;
+    }
+    None
+}
+
+/// Fixed-tick cinematic placeholder. Combat and input remain paused for its full lifetime.
+#[derive(Debug, Clone)]
+pub struct Cinematic {
+    pub id: i32,
+    pub elapsed: f32,
+    pub warp: Option<crate::deathblow::Placement>,
+    pub applied: bool,
+}
+
+impl Cinematic {
+    pub const FADE: f32 = 0.5;
+    pub const HOLD: f32 = 0.75;
+    pub const DURATION: f32 = 2.0 * Self::FADE + Self::HOLD;
+
+    pub fn alpha(&self) -> f32 {
+        if self.elapsed < Self::FADE {
+            self.elapsed / Self::FADE
+        } else if self.elapsed < Self::FADE + Self::HOLD {
+            1.0
+        } else {
+            ((Self::DURATION - self.elapsed) / Self::FADE).clamp(0.0, 1.0)
         }
     }
 }

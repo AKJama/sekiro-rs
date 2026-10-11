@@ -47,6 +47,8 @@ use crate::draw_mask::{DrawMask, MaskSource, apply_draw_masks};
 use crate::map::{self, MapFocus, MapScene};
 use sekiro_sim::arena::{Arena, ArenaSpec};
 use sekiro_sim::collision::CollisionWorld;
+#[path = "cinematic_fade.rs"]
+mod cinematic_fade;
 #[path = "rope.rs"]
 mod rope;
 
@@ -458,6 +460,7 @@ pub fn run(options: Options) -> Result<()> {
         unicode_font: false,
     })
     .init_resource::<crate::bullet_fx::BulletFx>()
+    .add_plugins(cinematic_fade::CinematicFadePlugin)
     .add_plugins(crate::audio::GameAudioPlugin {
         cache: cache.clone(),
         map: on_map.as_ref().map(|(_, id, _)| id.clone()),
@@ -757,7 +760,9 @@ struct MouseCapture {
     grab_click: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn gather_input(
+    fade: Res<cinematic_fade::Fade>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     gamepads: Query<&Gamepad>,
@@ -766,6 +771,10 @@ fn gather_input(
     mut windows: Query<(&mut Window, &mut CursorOptions)>,
     mut capture: Local<MouseCapture>,
 ) {
+    if fade.alpha > 0.0 {
+        live.frame = InputFrame::default();
+        return;
+    }
     if !capture.focus_requested
         && let Ok((mut window, mut c)) = windows.single_mut()
     {
@@ -835,6 +844,7 @@ fn gather_input(
 }
 
 fn orbit_camera(
+    fade: Res<cinematic_fade::Fade>,
     time: Res<Time>,
     motion: Res<AccumulatedMouseMotion>,
     cursor: Query<&CursorOptions>,
@@ -842,6 +852,9 @@ fn orbit_camera(
     sim: NonSend<Sim>,
     mut orbit: ResMut<Orbit>,
 ) {
+    if fade.alpha > 0.0 {
+        return;
+    }
     // Locked on, the camera swings behind Wolf toward the target. The rates are the camera
     // slot's (TAE 155: CameraParam 4000 in deathblows).
     let director = &sim.duel.camera_director;
@@ -888,6 +901,7 @@ fn orbit_camera(
 #[allow(clippy::too_many_arguments)]
 fn simulate(
     mut sim: NonSendMut<Sim>,
+    mut fade: ResMut<cinematic_fade::Fade>,
     live: Res<LiveInput>,
     mut orbit: ResMut<Orbit>,
     rigs: Query<&Rig, With<Actor>>,
@@ -905,6 +919,15 @@ fn simulate(
         || map_pending
             .as_ref()
             .is_some_and(|p| !p.loaded() || (sim.step == 0 && p.loaded_for() < MAP_SETTLE_SECS))
+    {
+        return;
+    }
+    if sim
+        .duel
+        .cinematic
+        .as_ref()
+        .is_some_and(|c| !c.applied && c.elapsed >= sekiro_sim::events::Cinematic::FADE)
+        && fade.black_frames < 2
     {
         return;
     }
@@ -932,7 +955,7 @@ fn simulate(
         (sim.duel.player.body.position, sim.duel.player.visual_yaw()),
         (sim.duel.enemy.body.position, sim.duel.enemy.visual_yaw()),
     ];
-    if sim.break_posture && sim.duel.deathblow.is_none() {
+    if sim.break_posture && sim.duel.deathblow.is_none() && sim.duel.cinematic.is_none() {
         let posture = &mut sim.duel.rules.fighters[1].posture;
         posture.remaining = posture.remaining.min(1);
     }
@@ -941,7 +964,33 @@ fn simulate(
         sim.duel.enemy_active = false;
     }
     sim.duel.player.wire.view_pitch = orbit.pitch;
+    let cinematic_applied = sim.duel.cinematic.as_ref().is_some_and(|c| c.applied);
     let report = sim.duel.step(&frame, dt);
+    fade.alpha = sim.duel.cinematic.as_ref().map_or(0.0, |c| c.alpha());
+    if !cinematic_applied && sim.duel.cinematic.as_ref().is_some_and(|c| c.applied) {
+        orbit.focus = Vec3::from_array(sim.duel.player.body.position)
+            + Vec3::Y * sim.duel.camera_director.focus_height;
+        orbit.yaw = sim.duel.player.body.yaw;
+        orbit.pitch = 0.25;
+        orbit.look = Default::default();
+        sim.previous = [
+            (sim.duel.player.body.position, sim.duel.player.visual_yaw()),
+            (sim.duel.enemy.body.position, sim.duel.enemy.visual_yaw()),
+        ];
+    }
+    if std::env::var_os("PLAY_LOG_COMBO").is_some()
+        && sim.step.is_multiple_of(15)
+        && let Some(c) = &sim.duel.cinematic
+    {
+        eprintln!(
+            "cinematic step={} elapsed={:.3} alpha={:.3} applied={} boss={}",
+            sim.step,
+            c.elapsed,
+            c.alpha(),
+            c.applied,
+            sim.duel.spec.chr
+        );
+    }
     if std::env::var_os("PLAY_LOG_WIRE").is_some() {
         let wolf = &sim.duel.player;
         let target = wolf.wire.active.as_ref().or(wolf.wire.candidate.as_ref());

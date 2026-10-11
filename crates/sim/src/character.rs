@@ -127,6 +127,8 @@ pub struct Character {
     /// The Havok skeleton the clips animate (source space).
     pub skeleton: Arc<Skeleton>,
     pub ground: Box<dyn Ground>,
+    /// The duel owns this flag while a paired throw holds both characters.
+    pub throw_ignore_walls: bool,
     /// The lower-body twist in degrees (the engine's `TwistLowerRootAngle`, positive after a
     /// turn to the left): how far the visible body still lags behind [`Body::yaw`] after a
     /// free move start turned the character to the stick. Unwinds at the default turn speed.
@@ -250,6 +252,7 @@ impl Character {
             pending_damage: None,
             skeleton: load_skeleton(cache, chr),
             ground: Box::new(FlatGround::default()),
+            throw_ignore_walls: false,
             twist: 0.0,
             walk_twist: 0.0,
             walk_twist_target: 0.0,
@@ -879,6 +882,7 @@ impl Character {
             ControlKind::Npc => self.npc.face_yaw,
         };
         let body_input = BodyInput {
+            ignore_walls: self.throw_ignore_walls,
             water_mode: self.behavior.env.water_mode.get(),
             stick: if self.kind == ControlKind::Player {
                 self.input
