@@ -290,6 +290,7 @@ impl FightState {
 }
 
 pub struct BrainDriver {
+    overlay_events: OverlayEvents,
     session_records: Vec<FightRecord>,
     session_actions: CountMap,
     session_ranges: BTreeMap<String, (u32, f32, f32)>,
@@ -396,6 +397,31 @@ pub struct BrainDriver {
     set_banned_seen: bool,
 }
 
+/// Text and transient cards for the game's recording HUD.
+#[derive(Debug, Default, Clone)]
+pub struct BrainOverlay {
+    pub fight: u32,
+    pub set: String,
+    pub running: String,
+    pub label: String,
+    pub checkpoint: Option<String>,
+    pub coach: Option<String>,
+    pub thinking: bool,
+    pub principles: Vec<String>,
+    pub ban: Option<String>,
+    pub scorecard: Option<String>,
+}
+
+#[derive(Default)]
+struct OverlayEvents {
+    fights_before: u32,
+    step: usize,
+    checkpoint: Option<(f32, String)>,
+    coach: Option<(f32, String)>,
+    ban: Option<(f32, String)>,
+    scorecard: Option<(f32, String)>,
+}
+
 impl BrainDriver {
     pub fn new(brain: Box<dyn BossBrain>, actions: &'static BossActions) -> Self {
         let env = |name: &str| std::env::var(name).ok();
@@ -419,6 +445,7 @@ impl BrainDriver {
                     .map_or(1, |d| d.as_nanos() as u64)
             });
         Self {
+            overlay_events: OverlayEvents::default(),
             session_records: Vec::new(),
             session_actions: Default::default(),
             session_ranges: Default::default(),
@@ -498,6 +525,93 @@ impl BrainDriver {
         self.brain.name()
     }
 
+    /// A read-only recording view, independent of logging and persistence.
+    pub fn overlay(&self) -> BrainOverlay {
+        let events = &self.overlay_events;
+        let plan = self.memory.coach.plan.as_ref().or(self.game_plan.as_ref());
+        let set = self
+            .game_plan
+            .as_ref()
+            .and_then(|p| p.sets.get(self.active_set?));
+        let step = self.running.steps.get(events.step);
+        let label = match step {
+            Some(Step::Act(id)) => self
+                .actions
+                .actions
+                .iter()
+                .find(|a| a.id == self.boss_open.unwrap_or(*id))
+                .or_else(|| self.actions.actions.iter().find(|a| a.id == *id))
+                .map(|a| a.label.to_string())
+                .unwrap_or_default(),
+            Some(Step::Tactic(t)) => t.label(),
+            None => self
+                .boss_open
+                .and_then(|id| self.actions.actions.iter().find(|a| a.id == id))
+                .map(|a| a.label.to_string())
+                .unwrap_or_default(),
+        };
+        let running = if self.running.is_empty() {
+            "Lua".into()
+        } else {
+            self.running
+                .steps
+                .iter()
+                .enumerate()
+                .map(|(i, s)| {
+                    let text = match s {
+                        Step::Act(id) => id.to_string(),
+                        Step::Tactic(t) => t.token(),
+                    };
+                    if i == events.step {
+                        format!("[{text}]")
+                    } else {
+                        text
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" > ")
+        };
+        let recent = |event: &Option<(f32, String)>, seconds: f32| {
+            event
+                .as_ref()
+                .filter(|(t, _)| self.time - t < seconds)
+                .map(|(_, text)| text.clone())
+        };
+        BrainOverlay {
+            fight: self.overlay_events.fights_before + self.fight_no,
+            set: set
+                .map(|s| format!("{}: {}", s.name, s.description))
+                .unwrap_or_else(|| {
+                    if self.brain.name() == "scripted" {
+                        "scripted: deterministic test plans".into()
+                    } else if self.set.is_empty() {
+                        "Lua".into()
+                    } else {
+                        "Controller plan set".into()
+                    }
+                }),
+            running,
+            label,
+            checkpoint: events
+                .checkpoint
+                .as_ref()
+                .map(|(t, text)| format!("{text} · {:.1} s ago", self.time - t)),
+            coach: recent(&events.coach, 8.0),
+            thinking: !self.coach_flights.is_empty(),
+            principles: plan
+                .map(|p| {
+                    p.boss_principles
+                        .iter()
+                        .map(|s| format!("Boss · {s}"))
+                        .chain(p.principles.iter().map(|s| format!("Player · {s}")))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            ban: recent(&events.ban, 5.0),
+            scorecard: recent(&events.scorecard, 6.0),
+        }
+    }
+
     pub fn actions(&self) -> &'static BossActions {
         self.actions
     }
@@ -560,6 +674,7 @@ impl BrainDriver {
             ),
         }
         self.memory = memory;
+        self.overlay_events.fights_before = self.memory.fights;
         self.apply_boss_bans();
         for (text, f) in &self.memory.coach.failures {
             if f.banned() {
@@ -588,6 +703,10 @@ impl BrainDriver {
                     eprintln!("coach: saved game plan: {w}");
                 }
                 if v.usable() {
+                    self.overlay_events.coach = Some((
+                        self.time,
+                        format!("coach (pre-fight, 0 s): {}", v.plan.notes),
+                    ));
                     self.memory.coach.plan = Some(v.plan.clone());
                     self.game_plan = Some(v.plan);
                 }
@@ -671,7 +790,16 @@ impl BrainDriver {
 
     fn apply_boss_bans(&mut self) {
         for ban in &self.boss_knowledge.bans {
-            self.banned.insert(ban.choice.clone());
+            if self.banned.insert(ban.choice.clone()) {
+                self.overlay_events.ban = Some((
+                    self.time,
+                    format!(
+                        "banned {}: {}",
+                        ban.choice,
+                        ban.reason.trim_start_matches("shared: ")
+                    ),
+                ));
+            }
             for choice in self.actions.choices() {
                 if choice
                     .value
@@ -948,6 +1076,19 @@ impl BrainDriver {
             return;
         }
         self.newest_coach = reply.id;
+        self.overlay_events.coach = Some((
+            self.time,
+            format!(
+                "coach ({}, {:.0} s): {}",
+                if flight.mid {
+                    "mid-fight"
+                } else {
+                    "post-fight"
+                },
+                waited,
+                v.plan.notes
+            ),
+        ));
         self.boss_knowledge.learn(&v.plan);
         for retry in &v.plan.retry {
             if self
@@ -1158,7 +1299,20 @@ impl BrainDriver {
         if self.coach_mode {
             // The chooser's answer: a set name, or `keep`. A failed call keeps the set too.
             let chosen = reply.choice.as_deref().unwrap_or(KEEP);
+            let previous = self.active_set;
             let switched = chosen != KEEP && self.switch_set(chosen);
+            if let Some((time, checkpoint)) = self.overlay_events.checkpoint.as_mut() {
+                *time = self.time;
+                *checkpoint = format!(
+                    "{} -> {}",
+                    checkpoint.split(" -> ").next().unwrap_or("checkpoint"),
+                    if switched && previous != self.active_set {
+                        format!("set {chosen}")
+                    } else {
+                        "keep".into()
+                    }
+                );
+            }
             self.write(json!({
                 "ev": "reply", "t": ms(self.time), "id": reply.id, "choice": chosen,
                 "switched": switched, "set": self.active_set_name(),
@@ -1181,6 +1335,14 @@ impl BrainDriver {
             "options": set.len(), "latency": ms(latency / 1000.0),
         }));
         self.persist = self.mode == RequestMode::Checkpoints;
+        if let Some((time, checkpoint)) = self.overlay_events.checkpoint.as_mut() {
+            *time = self.time;
+            *checkpoint = format!(
+                "{} -> plan set ({} choices)",
+                checkpoint.split(" -> ").next().unwrap_or("checkpoint"),
+                set.len()
+            );
+        }
         self.set = set;
         self.set_time = sent.sent;
         self.ready = None;
@@ -1353,6 +1515,7 @@ impl BrainDriver {
                     let ready = self.ready.take();
                     let label = ready.as_ref().map(|r| r.label.clone()).unwrap_or_default();
                     self.running = ready.map(|r| r.plan).unwrap_or_default();
+                    self.overlay_events.step = 0;
                     if limits::is_retreat(&self.running, self.actions) {
                         self.pacing.last_retreat = Some(self.time);
                     }
@@ -1420,6 +1583,7 @@ impl BrainDriver {
             }
         }
         for (_, step) in started {
+            self.overlay_events.step = step;
             if quiet {
                 continue;
             }
@@ -1515,6 +1679,9 @@ impl BrainDriver {
             sent: self.time,
             fight: self.fight_no,
         });
+        if let Some(why) = request.why {
+            self.overlay_events.checkpoint = Some((self.time, format!("{why} -> thinking")));
+        }
         self.brain.submit(&request);
         if self.log.is_some() {
             self.write_line(&RequestLine {
@@ -1872,6 +2039,17 @@ impl BrainDriver {
                 f.failed = f.failed.saturating_sub(base.failed);
             }
             if f.banned() && self.banned.insert(text.clone()) {
+                let reasons = [
+                    (f.deflected_all, "fully deflected"),
+                    (f.fatal, "fatal"),
+                    (f.failed, "whiffed/punished"),
+                ]
+                .into_iter()
+                .filter(|(n, _)| *n > 0)
+                .map(|(n, reason)| format!("{n}/{} {reason}", f.uses))
+                .collect::<Vec<_>>()
+                .join(", ");
+                self.overlay_events.ban = Some((self.time, format!("banned {text}: {reasons}")));
                 eprintln!(
                     "banned: {text} ({} uses, {:.0}% deflected/fatal/break failure)",
                     f.uses,
@@ -1994,6 +2172,24 @@ impl BrainDriver {
             sets: self.fight.set_secs.clone(),
         };
         eprintln!("{}", record.summary_line());
+        self.overlay_events.scorecard = Some((
+            self.time,
+            format!(
+                "{} wins · kill Wolf {} · {} posture breaks · deflect {}",
+                record.winner,
+                record
+                    .metrics
+                    .time_to_kill_wolf
+                    .map(|s| format!("{s:.1} s"))
+                    .unwrap_or_else(|| "n/a".into()),
+                record.metrics.wolf_posture_breaks,
+                record
+                    .metrics
+                    .deflect_rate()
+                    .map(|r| format!("{:.0}%", r * 100.0))
+                    .unwrap_or_else(|| "n/a".into())
+            ),
+        ));
         self.write(json!({"ev": "fight_end", "t": ms(t), "winner": winner,
             "void": record.metrics.void, "fights": self.memory.fights + u32::from(!record.metrics.void), "summary": record.summary_line()}));
         self.write_line(&json!({"ev": "fight_summary", "t": ms(t), "record": record}));
@@ -2434,6 +2630,94 @@ struct OutcomeLine<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlay_tracks_steps_and_expires_cards_without_logging() {
+        let mut d = learning_driver();
+        d.running = d.actions.parse("walk_in4>hold2>3013").unwrap();
+        d.overlay_events.step = 1;
+        d.overlay_events.checkpoint = Some((3.0, "wolf_posture_50 -> keep".into()));
+        d.overlay_events.ban = Some((5.0, "banned 3010: 9/9 whiffs".into()));
+        d.overlay_events.scorecard = Some((5.0, "boss wins".into()));
+        d.memory.coach.plan = Some(GamePlan {
+            principles: vec!["Wolf guards after a kick".into()],
+            boss_principles: vec!["Kick closes distance".into()],
+            ..Default::default()
+        });
+        d.overlay_events.coach = Some((5.0, "coach (mid-fight, 14 s): press".into()));
+        d.coach_flights.push(CoachFlight {
+            id: 1,
+            sent: 5.0,
+            mid: true,
+            fight: 1,
+        });
+        let view = d.overlay();
+        assert_eq!(view.running, "walk_in4 > [hold2] > 3013");
+        assert!(view.checkpoint.unwrap().ends_with("2.0 s ago"));
+        assert!(view.thinking && view.coach.is_some() && view.ban.is_some());
+        assert!(view.principles[0].starts_with("Boss ·"));
+        assert!(view.principles[1].starts_with("Player ·"));
+        d.time = 10.0;
+        assert!(d.overlay().ban.is_none());
+        assert!(d.overlay().scorecard.is_some());
+        d.time = 11.0;
+        assert!(d.overlay().scorecard.is_none());
+        d.time = 13.0;
+        assert!(d.overlay().coach.is_none());
+        assert_eq!(d.overlay().principles.len(), 2);
+        d.running = Plan::default();
+        assert_eq!(d.overlay().running, "Lua");
+        let mut owl = BrainDriver::new(Box::new(crate::brain::LuaBrain), &crate::brain::OWL);
+        owl.running = owl.actions.parse("3009").unwrap();
+        owl.boss_open = Some(3014);
+        assert_eq!(owl.overlay().label, "second shuriken");
+    }
+
+    #[test]
+    fn overlay_uses_newest_accepted_coach_note_and_shared_ban_reason() {
+        let mut d = learning_driver();
+        d.coach_flights.push(CoachFlight {
+            id: 2,
+            sent: 1.0,
+            mid: true,
+            fight: 1,
+        });
+        d.take_coach_reply(CoachReply {
+            id: 2,
+            plan: Some(GamePlan {
+                opener: "3005".into(),
+                notes: "new lesson".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert_eq!(
+            d.overlay().coach.as_deref(),
+            Some("coach (mid-fight, 4 s): new lesson")
+        );
+        d.coach_flights.push(CoachFlight {
+            id: 1,
+            sent: 1.0,
+            mid: true,
+            fight: 1,
+        });
+        d.take_coach_reply(CoachReply {
+            id: 1,
+            plan: Some(GamePlan {
+                opener: "3005".into(),
+                notes: "old lesson".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert!(d.overlay().coach.unwrap().contains("new lesson"));
+        d.boss_knowledge.bans.push(super::super::coach::Avoid {
+            choice: "3000".into(),
+            reason: "shared: 9/9 whiffs".into(),
+        });
+        d.apply_boss_bans();
+        assert_eq!(d.overlay().ban.as_deref(), Some("banned 3000: 9/9 whiffs"));
+    }
 
     fn layer_test_path() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

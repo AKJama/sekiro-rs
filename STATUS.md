@@ -23,6 +23,37 @@ How much of the game is done overall: `docs/PROGRESS.md`.
 | Audio | The game's own FMOD Ex runtime from the install plays the game's event projects (`main`, the enemy's `cXXXX`, the map area's): TAE sounds with floor-material footsteps and armour rustle, hit, block and deflect clangs from the hit-effect params, listener on the camera with the events' own 3D rolloff; decoded samples only as a fallback | `docs/AUDIO.md` |
 | Map | All ten archive maps extracted and loadable; 69 starts across nine gameplay maps walk; m89 is sky-only | `docs/MAP-BASELINE.md`, `docs/FORMATS.md` |
 
+## Recording brain overlay and stages (2026-10-11)
+
+`--brain-overlay` starts the top-right recording panel; it is off by default and F8 toggles it.
+It shows the controller/model, fight/player, active set and description, current plan step and move label, checkpoint choice and age, coach thinking/notes/principles, recent bans and the post-fight scorecard.
+Coach notes last eight seconds, bans five seconds and scorecards six seconds.
+The wrapped, fixed-width panel uses a dark translucent background and Segoe UI, hides the debug readout while visible, and reserves space from the floating boss bars.
+The driver view is independent of decision logging.
+
+`--brain-stage lua|early|alive|outsmarted` selects the recording baseline or an isolated coach snapshot.
+Lua has no memory; early uses `owl-2026-10-11-golden`, alive uses `owl-2026-10-11-alive`, and outsmarted uses `owl-2026-10-11-outsmarted`, each from `logs/datasets/<dataset>/c5060.json`.
+Coach stages copy and migrate into a unique retained temporary directory, print its path, and direct all memory writes there, overriding normal brain and memory flags.
+Missing/invalid datasets produce a clear error.
+Named players receive the snapshot's habits/history without counting its boss evidence twice.
+`--window-size WIDTHxHEIGHT` sets the play window size (default 1600x900, minimum 800x600).
+PowerShell commands for each stage are in `docs/BRAIN.md`, "Recording overlay and stage presets".
+
+Final workspace Clippy with `-D warnings`, formatting and diff whitespace checks passed.
+The requested release sim/brain-net library, binary and integration suite passed all 353 tests, and all 11 game binary tests passed.
+Offline tests cover transient card timing, newest coach notes, actual move labels, shared ban reasons, missing datasets, source preservation and migration of all three real stage snapshots into temporary copies.
+The pre-existing game `map_tangents` test was not part of the requested suite and was left alone.
+All Cargo commands used `target/alt` and six jobs; fmt uses `CARGO_BUILD_JOBS=6` because it has no `-j` option.
+The final release executable is `target/alt/release/sekiro-rs.exe`; the user's release and preview executables were not replaced.
+
+Scripted Owl fights with memory off were checked at 1920x1080 and 1280x720; every run completed under a 90-second cap.
+Reviewed final screenshots: `target/alt/overlay-review/brain-1080-final-150.png`, `brain-1080-final-300.png`, `brain-720-final-150.png` and `brain-720-final-300.png` in that directory.
+The raw-input F8 replay (`crates/game/scripts/brain_overlay_toggle.txt`) verified default off, on and off again, reviewed in `target/alt/overlay-review/toggle-off.png`, `toggle-on.png` and `toggle-off-again.png`.
+Initial flat-floor screenshots `target/alt/overlay-review/brain-1080-150.png` and `brain-1080-300.png` were also reviewed before the font and debug-readout polish.
+The requested suite log is `target/alt/overlay-review/final-sim-net-tests.log`.
+No real model/API calls, real model CLIs, credential reads, protected memory/dataset writes, cache/re deletions or links, worktrees or commits were made.
+Live hosted coach calls were deliberately not exercised; coach events were tested offline.
+
 ## Map baseline commands
 
 Use `target/alt/release/sekiro-rs.exe --map <id>` for the viewer and add `--play` to walk.

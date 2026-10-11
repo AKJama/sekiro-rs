@@ -49,6 +49,9 @@ use sekiro_sim::arena::{Arena, ArenaSpec};
 use sekiro_sim::collision::CollisionWorld;
 
 pub struct Options {
+    pub brain_overlay: bool,
+    pub brain_label: String,
+    pub window_size: (u32, u32),
     pub attack_power: sekiro_sim::progression::AttackPower,
     pub cache: PathBuf,
     /// Input script to play instead of live input (`builtin` for the demo).
@@ -225,6 +228,7 @@ pub fn run(options: Options) -> Result<()> {
             driver.enable_session_report(Path::new("logs"));
         }
         if let Some(driver) = duel.boss_brain.as_mut() {
+            driver.player.clone_from(&options.player);
             driver.coach_interval = options.coach_interval;
         }
         if let (Some(path), Some(driver)) = (options.brain_memory, duel.boss_brain.as_mut()) {
@@ -341,7 +345,7 @@ pub fn run(options: Options) -> Result<()> {
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "sekiro-rs".into(),
-                    resolution: (1600, 900).into(),
+                    resolution: options.window_size.into(),
                     // Make the first input frame's request a false -> true transition.
                     // Bevy's winit backend only calls focus_window on that transition.
                     focused: false,
@@ -409,6 +413,13 @@ pub fn run(options: Options) -> Result<()> {
         perilous_age: None,
     })
     .init_resource::<combat_hud::Gauges>()
+    .insert_resource(crate::brain_overlay::RecordingBrain {
+        enabled: options.brain_overlay,
+        mode: options.brain_label,
+        player: options.player,
+        view: Default::default(),
+        unicode_font: false,
+    })
     .init_resource::<crate::bullet_fx::BulletFx>()
     .add_plugins(crate::audio::GameAudioPlugin {
         cache: cache.clone(),
@@ -416,6 +427,7 @@ pub fn run(options: Options) -> Result<()> {
         enemy: Some((options.opponent.chr.clone(), options.opponent.npc_param)),
     })
     .add_systems(Startup, setup)
+    .add_systems(Startup, crate::brain_overlay::spawn)
     .add_systems(FixedUpdate, simulate)
     .add_systems(
         Update,
@@ -425,12 +437,14 @@ pub fn run(options: Options) -> Result<()> {
             orbit_camera,
             gather_input,
             brain_report,
+            recording_brain,
             bind_rigs,
             apply_draw_masks,
             sync_actors,
             sync_bullets,
             animate,
             follow_camera,
+            crate::brain_overlay::update,
             hud,
             combat_hud::update,
             combat_hud::update_status,
@@ -1105,6 +1119,7 @@ fn status_line(status: &sekiro_sim::status::Status, states: &[String]) -> String
 
 fn hud(
     sim: NonSend<Sim>,
+    recording: Res<crate::brain_overlay::RecordingBrain>,
     mut text: Query<&mut Text, With<Hud>>,
     mut gauges: ResMut<combat_hud::Gauges>,
 ) {
@@ -1135,6 +1150,10 @@ fn hud(
     let Ok(mut text) = text.single_mut() else {
         return;
     };
+    if recording.enabled {
+        text.0.clear();
+        return;
+    }
     let r = &sim.last;
     let mut flags = r.player.action_flags.clone();
     flags.retain(|f| [3, 7, 11, 26, 115, 117, 119].contains(f));
@@ -1328,6 +1347,12 @@ fn brain_report(keys: Res<ButtonInput<KeyCode>>, sim: NonSend<Sim>) {
         && let Err(e) = driver.print_session_report()
     {
         eprintln!("brain session report: {e}");
+    }
+}
+
+fn recording_brain(sim: NonSend<Sim>, mut brain: ResMut<crate::brain_overlay::RecordingBrain>) {
+    if let Some(driver) = sim.duel.boss_brain.as_ref() {
+        brain.view = driver.overlay();
     }
 }
 

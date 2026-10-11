@@ -18,6 +18,51 @@ Three environment variables tune the driver (no flags): `SEKIRO_BRAIN_MODE=slot|
 
 The baseline to compare a model against is the Lua brain with memory on: `--brain lua --brain-memory on` keeps `logs/memory/<chr>.lua.boss.json` and `<chr>.lua.player-default.json` with the same per-fight metrics ("The score to beat"), apart from the model's boss knowledge and player profiles.
 
+## Recording overlay and stage presets
+
+`--brain-overlay` starts a recording panel at the top right; it is off by default and F8 toggles it during play.
+While the panel is visible, the debug state and key-help readout is hidden, leaving the combat bars visible.
+The fixed-width dark panel wraps text, uses the HUD's warm colours and Windows Segoe UI, and moves the floating boss bars beside it if they would overlap.
+The panel shows the controller and coach model, fight number (including the snapshot's earlier fights), selected player, active set and description, running plan with its current step in brackets, and the current move's label.
+Lua choices display `Lua`.
+The last checkpoint shows its reason, set switch or keep decision, and age.
+Accepted coach notes appear as a highlighted pre-, mid- or post-fight card for eight seconds; boss and player principles remain beneath it, and `coach thinking…` shows while a coach request is pending.
+The last ban appears for five seconds, including the driver's actual whiff or failure evidence.
+A fight's scorecard appears for six seconds with the winner, time to kill Wolf, Wolf's posture breaks and deflect rate.
+The view reads driver state directly and works without `--brain-log`.
+
+`--brain-stage <name>` selects one of these before/after presets:
+
+| Stage | Controller | Snapshot |
+|---|---|---|
+| `lua` | Lua, no memory | None |
+| `early` | Coach | `logs/datasets/owl-2026-10-11-golden/c5060.json` |
+| `alive` | Coach | `logs/datasets/owl-2026-10-11-alive/c5060.json` |
+| `outsmarted` | Coach | `logs/datasets/owl-2026-10-11-outsmarted/c5060.json` |
+
+The stage overrides `--brain` and `--brain-memory`, so even an explicit normal memory path cannot receive stage writes.
+The coach stages require Owl and fail clearly if their dataset is absent or invalid.
+Each run copies only the snapshot into a unique `%TEMP%\sekiro-brain-stage-...` directory, validates and migrates that copy into boss/player layers, and prints the directory before play.
+All subsequent memory writes use that temporary directory; `logs/memory/` and the source dataset stay untouched.
+The temporary copy is retained after exit for inspection.
+`--player <name>` selects the profile name and seeds it with the snapshot's habits and history, without duplicating its boss evidence.
+`--coach`, `--coach-model`, `--coach-effort` and `--coach-interval` still configure the coach normally.
+
+PowerShell 5.1, from the repo root, using the normal release executable after it contains these changes:
+
+```powershell
+.\target\release\sekiro-rs.exe --arena owl --progression castle-roof --brain-stage lua --brain-overlay
+.\target\release\sekiro-rs.exe --arena owl --progression castle-roof --brain-stage early --brain-overlay --coach codex --coach-model gpt-6.1-sol
+.\target\release\sekiro-rs.exe --arena owl --progression castle-roof --brain-stage alive --brain-overlay --coach codex --coach-model gpt-6.1-sol
+.\target\release\sekiro-rs.exe --arena owl --progression castle-roof --brain-stage outsmarted --brain-overlay --coach codex --coach-model gpt-6.1-sol
+```
+
+This session built only `target/alt/release/sekiro-rs.exe`; substitute `target\alt\release` in those commands to use the verified build without replacing the executable in use.
+`--window-size 1920x1080` selects the recording window size; the default remains 1600x900, and 1280x720 was also visually checked.
+The minimum accepted size is 800x600.
+All visual checks used `--brain scripted --brain-memory off`, with no model calls.
+The raw input replay `crates/game/scripts/brain_overlay_toggle.txt` checks F8 off/on/off; use it with `--input`, the scripted brain and repository-local `--shots` paths.
+
 ## Design
 
 The controller sets the **plan**, the game keeps the **reflexes**.

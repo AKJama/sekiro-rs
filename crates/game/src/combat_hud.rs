@@ -195,6 +195,10 @@ fn posture_color(fraction: f32) -> Color {
 #[allow(clippy::type_complexity)]
 pub fn update(
     gauges: Res<Gauges>,
+    (recording, overlay_size): (
+        Option<Res<crate::brain_overlay::RecordingBrain>>,
+        Query<&ComputedNode, With<crate::brain_overlay::Panel>>,
+    ),
     camera: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     mut fills: Query<(&Fill, &mut Node, &mut BackgroundColor), Without<EnemyPanel>>,
     mut labels: Query<(&Label, &mut Text)>,
@@ -248,7 +252,22 @@ pub fn update(
         });
     match screen {
         Some(p) => {
-            node.left = px(p.x - ENEMY_WIDTH * 0.5);
+            let mut left = p.x - ENEMY_WIDTH * 0.5;
+            if recording.as_ref().is_some_and(|r| r.enabled)
+                && let Ok(size) = overlay_size.single()
+                && let Ok((cam, _)) = camera.single()
+                && let Some(viewport) = cam.logical_viewport_size()
+            {
+                let overlay_left = viewport.x - 24.0 - 344.0;
+                let overlay_bottom = 24.0 + size.size().y * size.inverse_scale_factor;
+                if left + ENEMY_WIDTH > overlay_left - 12.0
+                    && p.y > 24.0
+                    && p.y - 46.0 < overlay_bottom
+                {
+                    left = overlay_left - ENEMY_WIDTH - 12.0;
+                }
+            }
+            node.left = px(left);
             node.top = px(p.y - 46.0);
             *vis = Visibility::Inherited;
         }

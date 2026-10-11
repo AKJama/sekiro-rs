@@ -14,6 +14,8 @@
 
 mod arena;
 mod audio;
+mod brain_overlay;
+mod brain_stage;
 mod bullet_fx;
 mod character;
 mod combat_hud;
@@ -47,7 +49,12 @@ fn arg_f32(args: &[String], name: &str, default: f32) -> anyhow::Result<f32> {
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    for flag in ["--attack-power", "--progression"] {
+    for flag in [
+        "--attack-power",
+        "--progression",
+        "--brain-stage",
+        "--window-size",
+    ] {
         if args.iter().any(|a| a == flag)
             && arg_value(&args, flag).is_none_or(|v| v.starts_with("--"))
         {
@@ -118,8 +125,53 @@ fn main() -> anyhow::Result<()> {
             (None, Some(arena)) => arena.enemy_spec(),
             (None, None) => sekiro_sim::enemy::EnemySpec::soldier(),
         };
-        let brain_name = arg_value(&args, "--brain").unwrap_or_else(|| "lua".into());
+        let player = sekiro_sim::brain::memory::player_name(
+            &arg_value(&args, "--player").unwrap_or_else(|| "default".into()),
+        )
+        .map_err(anyhow::Error::msg)?;
+        let stage = arg_value(&args, "--brain-stage")
+            .map(|name| {
+                brain_stage::load(
+                    &name,
+                    &opponent.chr,
+                    &player,
+                    std::path::Path::new("logs/datasets"),
+                )
+            })
+            .transpose()?;
+        let brain_name = stage
+            .as_ref()
+            .map(|s| s.brain.to_string())
+            .unwrap_or_else(|| arg_value(&args, "--brain").unwrap_or_else(|| "lua".into()));
+        let coach_backend = arg_value(&args, "--coach").unwrap_or_else(|| "codex".into());
+        let brain_label = if brain_name.eq_ignore_ascii_case("coach") {
+            let backend = sekiro_brain_net::CoachBackend::by_name(&coach_backend)
+                .ok_or_else(|| anyhow::anyhow!("unknown --coach {coach_backend}"))?;
+            format!(
+                "coach · {}",
+                arg_value(&args, "--coach-model").unwrap_or_else(|| backend.default_model().into())
+            )
+        } else {
+            brain_name.clone()
+        };
+        let window_size = arg_value(&args, "--window-size")
+            .map(|s| -> anyhow::Result<(u32, u32)> {
+                let (w, h) = s
+                    .split_once('x')
+                    .ok_or_else(|| anyhow::anyhow!("--window-size wants WIDTHxHEIGHT"))?;
+                let size = (w.parse()?, h.parse()?);
+                anyhow::ensure!(
+                    size.0 >= 800 && size.1 >= 600,
+                    "--window-size minimum is 800x600"
+                );
+                Ok(size)
+            })
+            .transpose()?
+            .unwrap_or((1600, 900));
         return play::run(play::Options {
+            brain_overlay: args.iter().any(|a| a == "--brain-overlay"),
+            brain_label,
+            window_size,
             attack_power,
             cache: PathBuf::from(arg_value(&args, "--cache").unwrap_or_else(|| "cache".into())),
             script: arg_value(&args, "--script"),
@@ -152,17 +204,18 @@ fn main() -> anyhow::Result<()> {
             )
             .map_err(|e| anyhow::anyhow!("--brain: {e}"))?,
             coach_interval: arg_f32(&args, "--coach-interval", 30.0)?.max(0.0),
-            player: sekiro_sim::brain::memory::player_name(
-                &arg_value(&args, "--player").unwrap_or_else(|| "default".into()),
-            )
-            .map_err(anyhow::Error::msg)?,
+            player,
             brain_log: args.iter().any(|a| a == "--brain-log"),
-            brain_memory: sekiro_sim::brain::memory::resolve_for(
-                arg_value(&args, "--brain-memory").as_deref(),
-                &opponent.chr,
-                &brain_name.to_ascii_lowercase(),
-                sekiro_brain_net::is_hosted(&brain_name),
-            ),
+            brain_memory: if let Some(stage) = stage {
+                stage.memory
+            } else {
+                sekiro_sim::brain::memory::resolve_for(
+                    arg_value(&args, "--brain-memory").as_deref(),
+                    &opponent.chr,
+                    &brain_name.to_ascii_lowercase(),
+                    sekiro_brain_net::is_hosted(&brain_name),
+                )
+            },
             opponent,
             map: arg_value(&args, "--map"),
             start: arg_f32(&args, "--start", 0.0)? as usize,
@@ -191,6 +244,9 @@ fn main() -> anyhow::Result<()> {
         "                 [--simple-ai] [--passive] [--god] [--immortal] [--force-act <id>] [--enemy c1010|c5060] [--brain lua|scripted|decisions|responses|coach] [--brain-model <name>] [--coach claude|codex|api] [--coach-model <name>] [--coach-effort <level>] [--coach-interval <secs>] [--brain-log] [--brain-memory off|on|<path>] [--player <name>]"
     );
     eprintln!("       sekiro-rs --arena owl [--full-map] [--play options] (a boss on his own map)");
+    eprintln!(
+        "                 [--brain-overlay] [--brain-stage lua|early|alive|outsmarted] [--window-size WIDTHxHEIGHT] (F8 toggles overlay)"
+    );
     eprintln!("usage: sekiro-rs --arena [--deathblow] [--screenshot <out.png> --at <seconds>]");
     eprintln!("       sekiro-rs --map <id> [--start <n>] [--camera x,y,z,yaw,pitch] [--collision]");
     eprintln!("                 [--screenshot <out.png> --at <seconds>] (see src/map.rs)");
