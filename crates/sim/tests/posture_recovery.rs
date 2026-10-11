@@ -143,6 +143,28 @@ fn guarding_soldier_under_pressure_breaks() {
     );
 }
 
+#[test]
+fn guarding_owl_at_castle_roof_progression() {
+    let Some(cache) = cache() else { return };
+    let mut owl = Duel::load_with(&cache, 1.6, EnemySpec::owl()).unwrap();
+    owl.rules
+        .set_attack_power(sekiro_sim::progression::AttackPower::CASTLE_ROOF)
+        .unwrap();
+    let run = pressure(&mut owl, "owl AP6", 36, 600);
+    eprintln!(
+        "owl AP6: {} guarded hits, lowest {}, after hits {:?}, guard rate {}",
+        run.guarded_hits, run.lowest, run.after_hits, run.guard_rate
+    );
+    assert!(run.guarded_hits >= 5);
+    assert_eq!(run.guard_rate, 60.0);
+    assert_eq!(run.guarded_hits, 11);
+    assert_eq!(run.lowest, 512);
+    assert_eq!(
+        run.after_hits,
+        [628, 611, 613, 559, 560, 565, 566, 512, 513, 522, 523]
+    );
+}
+
 /// `act(110)` (`SetStaminaRecoveryDisabled`) skips the whole recovery update: no gain, no carry.
 /// No shipped script calls it, so this only covers the engine rule.
 #[test]

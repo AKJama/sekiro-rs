@@ -49,6 +49,7 @@ use sekiro_sim::arena::{Arena, ArenaSpec};
 use sekiro_sim::collision::CollisionWorld;
 
 pub struct Options {
+    pub attack_power: sekiro_sim::progression::AttackPower,
     pub cache: PathBuf,
     /// Input script to play instead of live input (`builtin` for the demo).
     pub script: Option<String>,
@@ -199,6 +200,9 @@ pub fn run(options: Options) -> Result<()> {
     ];
     let mut duel = Duel::load_with(&cache, 6.0, options.opponent.clone())
         .map_err(|e| anyhow::anyhow!("loading the simulation: {e}"))?;
+    duel.rules
+        .set_attack_power(options.attack_power)
+        .map_err(anyhow::Error::msg)?;
     duel.enemy_active = options.enemy;
     duel.god = options.god;
     duel.immortal = options.immortal;

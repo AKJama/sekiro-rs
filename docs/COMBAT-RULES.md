@@ -56,6 +56,58 @@ For player weapon attacks it is `trunc(guardAtkRateCorrection / 100 * weapon att
 The Kusabimaru (`attackBaseRepel` 10) with the common correction 300 (349 of 443 AtkParam_Pc rows) gives 30.
 Record slot +0x188 multiplies all three posture bases again in `844070` and `8439a0`; its writer was not found.
 
+## Wolf's attack power
+
+`--attack-power N` selects 1 to 99, default 1, in both the game and `duel-sim`.
+`--progression castle-roof` selects AP 6; an explicit `--attack-power` overrides it regardless of argument order.
+Invalid values, unknown presets and missing values are rejected before loading the fight.
+
+**data**: attack power selects `SpEffectParam` row `160000 + N`, named Player Growth_Core Level N.
+The row's `physicsAttackRate`, `magicAttackRate`, `fireAttackRate`, `thunderAttackRate`, `darkAttackRate` and `staminaAttackRate` all contain the same multiplier M.
+The runtime reads these rows directly; it does not encode the following piecewise summary as a replacement table:
+
+| AP | M |
+|---|---|
+| 1 to 14 | `1 + 0.25 * (AP - 1)` |
+| 15 to 27 | `4.25 + 0.10 * (AP - 14)` |
+| 28 to 51 | `5.55 + 0.05 * (AP - 27)` |
+| 52 | `6.775` (data exception) |
+| 53 to 99 | `6.75 + 0.01 * (AP - 51)` |
+
+For HP, each element starts with `AtkParam.attackPower + weapon.attackBase * reinforce.attackRate * AtkParam.correction / 100`, then the active element attack rates multiply it before guard cuts and final integer truncation.
+For posture, `staminaAttackRate` enters the existing player weapon posture base before defender cuts, attribute rates and integer truncation, including the checkpoint damage estimate.
+The selected effect is resident, survives fighter resets, and replaces the previous AP effect rather than stacking.
+Its `defStaminaAttackRate` also participates in the already-traced deflect feedback formula.
+
+The starting CharaInitParam 10010 weapon is EquipParamWeapon 5100, with element bases 40, reinforceTypeId 1000 and zero `correctStrength`, `correctAgility`, `correctMagic`, `correctFaith` and `correctType_*`.
+ReinforceParamWeapon 1000 has physical and stamina attack rates 1; reinforcement and weapon stat-correction graphs do not implement Memory progression.
+The first slash's AtkParam_Pc physical correction is 200%, giving base HP damage 80, and its direct posture base is 30.
+A 300% physical correction instead gives 120, as on the thrust.
+CalcCorrectGraph 500/501/504 remains at Prayer Necklace growth 1 (320 HP, 120 posture, 30/s recovery); attack power must not feed those capacity/recovery graphs.
+Prayer Necklace progression remains outside this setting.
+
+**community cross-check**: [Attack Power](https://sekiro-shadows-die-twice.fandom.com/wiki/Attack_Power) reports the opening slash as 80 at AP1 and 340 at AP14, matching these rows.
+[Memories](https://sekiro-shadows-die-twice.fandom.com/wiki/Memories) identifies the boss Memories that raise AP.
+The AP6 castle-roof preset represents consuming the five required-route Memories (Gyoubu, Genichiro, Folding Screen Monkeys, Guardian Ape and Corrupted Monk).
+Optional Lady Butterfly and Headless Ape Memories can put Wolf at AP7 or AP8 before Great Shinobi Owl; the preset is a reproducible route choice, not a universal measured average or a full save-state preset.
+FwLo's local RustSekiro clone was checked (`docs/kb/damage.md`, `src/player.rs`); it leaves the attack-power graph unknown and supplies no traced AP formula to borrow.
+The effect selection is supported by the extracted row names and the community cross-check; the progression-to-effect attachment has not been independently traced in the executable.
+
+Real HKS/TAE slash regression (`crates/sim/tests/attack_power.rs`):
+
+| AP | Soldier HP / posture | Guarding Owl HP / posture |
+|---|---|---|
+| 1 | 80 / 30 | 0 / 15 |
+| 5 | 160 / 60 | 0 / 30 |
+| 10 | 260 / 97 | 0 / 48 |
+
+The soldier normally has 195 HP, so AP10 actually removes at most 195 HP; the formula regression raises his HP to avoid this existing `keep_hp` cap.
+Posture damage is the computed hit amount before the posture meter clamps it to its floor.
+The AP6 guarded-pressure regression requests one slash every 36 ticks for 600 ticks: 11 guarded contacts, remaining posture after hits `[628, 611, 613, 559, 560, 565, 566, 512, 513, 522, 523]`, lowest 512 of 660.
+AP1's same cadence bottoms at 624, so progression now builds Owl's posture under this scripted pressure, but does not break it within 10 seconds.
+Guard recovery remains the extracted 60/s; reaction clips, deflects and combo variation account for the varying per-contact loss and recovery intervals.
+All 99 extracted growth rows are checked against the piecewise summary in a separate regression.
+
 ## Order of one hit
 
 The defender's damage module runs `b6f690` per hit record, which calls in order:
@@ -290,7 +342,7 @@ The Kusabimaru (`physGuardCutRate` and `physJustGuardCutRate` 100) lets none thr
 | CalcCorrectGraph evaluation: input capped at the last breakpoint, the first segment whose upper breakpoint is at least the input, output `g0 + t^e * (g1 - g0)` for `e >= 0` or `g0 + (1 - (1 - t)^(-e)) * (g1 - g0)` for `e < 0`, clamped to the segment. | `850b10` | code |
 | Each frame the engine adds `speed * dt` to a float carry, applies the whole part through the posture setter and keeps the fraction. | `a04850`, `5460b0`, `9e6bf0` | code |
 | The update is skipped while an action-state flag (bit 21 of +0x88) is set. The only writer in the executable (a scan of every `OR [reg + 0x88], 0x200000`, `BTS` and `AND 0xffdfffff` against that word) is the HKS command handler `b32410` case 0x6e, reached from `b4e520`: `act(110)`, community name `SetStaminaRecoveryDisabled`. The TAE ChrActionFlag handler `b51b70` writes +0x88 bits 1, 2, 4 to 12, 15 to 20 and 22 to 24, never 21. None of the shipped HKS chunks (`c0000`, `c9997`, `c1010`, `c5060` and the other 77 in `action/script`) calls `act(110)`, so no vanilla character is ever affected. Sim: `CombatRules::recover_with_state`, `PlayerEnv::recovery_disabled`. That the engine clears the flag every frame is inferred. | `a04850`, `b32410`, `b4e520`, `b51b70`; script disassembly | code; per-frame clearing inferred |
-| A guarding character with neither TAE 225 nor a StaminaControlParam type on the guard clip recovers at full speed. The Owl's `a000_003100` and `a000_003101` carry neither, so at full HP he recovers at his `staminaRecoverBaseVel` of 60 per second while guarding, after 0.3 s of type 0 (0%) in the guard-hit reaction `a000_008501`. A guarded Wolf slash costs him 14 to 15 of 660, so a slash every 0.6 s is refunded within about 0.25 s of each hit (`guarding_owl_under_pressure`). The soldier's guard has TAE 225 at 25%, so the same pressure breaks him in three hits (`guarding_soldier_under_pressure_breaks`). | NpcParam 50600000, c5060 and c1010 TAE | data |
+| A guarding character with neither TAE 225 nor a StaminaControlParam type on the guard clip recovers at full speed. The Owl's `a000_003100` and `a000_003101` carry neither, so at full HP he recovers at his `staminaRecoverBaseVel` of 60 per second while guarding, after 0.3 s of type 0 (0%) in the guard-hit reaction `a000_008501`. At AP1 a guarded Wolf slash costs him 14 to 15 of 660, so a slash every 0.6 s is refunded within about 0.25 s of each hit (`guarding_owl_under_pressure`). The soldier's guard has TAE 225 at 25%, so the same pressure breaks him in three hits (`guarding_soldier_under_pressure_breaks`). | NpcParam 50600000, c5060 and c1010 TAE | data |
 | The StaminaControl row is NpcParam `staminaControlParamId` for NPCs and row 0 for the player. | `bd58c0` | code |
 | The type comes from the current animation (TAE event 960). | Smithbox annotation | community |
 | No separate post-damage delay timer exists in this path; pauses come from the animation's type (type 0 is 0% in rows 0 and 1000100). | `a04850` | code for the absence in this function |

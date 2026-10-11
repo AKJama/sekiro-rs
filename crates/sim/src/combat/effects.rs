@@ -37,6 +37,8 @@ impl Default for StaminaRates {
 /// The combat-relevant fields of one active SpEffect (SpEffectParam row).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActiveEffect {
+    /// `physics/magic/fire/thunder/darkAttackRate`, applied before HP truncation.
+    pub hp_attack_rates: [f32; 5],
     pub id: i32,
     pub state_info: u16,
     /// `defFlickPower`: overrides the owner's repel defence when higher (def: "上書き").
@@ -62,6 +64,7 @@ pub struct ActiveEffect {
 impl Default for ActiveEffect {
     fn default() -> Self {
         Self {
+            hp_attack_rates: [1.0; 5],
             id: -1,
             state_info: 0,
             def_flick_power: 0,

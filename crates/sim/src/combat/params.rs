@@ -282,6 +282,13 @@ impl ActiveEffect {
         Ok(Self {
             id: row.id(),
             state_info: row.u16("stateInfo")?,
+            hp_attack_rates: [
+                row.f32("physicsAttackRate")?,
+                row.f32("magicAttackRate")?,
+                row.f32("fireAttackRate")?,
+                row.f32("thunderAttackRate")?,
+                row.f32("darkAttackRate")?,
+            ],
             def_flick_power: row.u8("defFlickPower")?,
             guard_def_flick_power_rate: row.f32("guardDefFlickPowerRate")?,
             guard_stamina_cut_rate: row.f32("guardStaminaCutRate")?,

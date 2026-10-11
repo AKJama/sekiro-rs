@@ -47,6 +47,18 @@ fn arg_f32(args: &[String], name: &str, default: f32) -> anyhow::Result<f32> {
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    for flag in ["--attack-power", "--progression"] {
+        if args.iter().any(|a| a == flag)
+            && arg_value(&args, flag).is_none_or(|v| v.starts_with("--"))
+        {
+            anyhow::bail!("{flag} requires a value");
+        }
+    }
+    let attack_power = sekiro_sim::progression::AttackPower::from_options(
+        arg_value(&args, "--attack-power").as_deref(),
+        arg_value(&args, "--progression").as_deref(),
+    )
+    .map_err(anyhow::Error::msg)?;
     if let Some(glb) = arg_value(&args, "--viewer") {
         let options = viewer::Options {
             glb: PathBuf::from(glb),
@@ -108,6 +120,7 @@ fn main() -> anyhow::Result<()> {
         };
         let brain_name = arg_value(&args, "--brain").unwrap_or_else(|| "lua".into());
         return play::run(play::Options {
+            attack_power,
             cache: PathBuf::from(arg_value(&args, "--cache").unwrap_or_else(|| "cache".into())),
             script: arg_value(&args, "--script"),
             input: arg_value(&args, "--input"),
@@ -164,7 +177,9 @@ fn main() -> anyhow::Result<()> {
             deathblow: args.iter().any(|a| a == "--deathblow"),
         });
     }
-    eprintln!("usage: sekiro-rs --play [--script FILE|builtin] [--shots step:path,...] [--exit]");
+    eprintln!(
+        "usage: sekiro-rs --play [--attack-power 1..99] [--progression castle-roof] [--script FILE|builtin] [--shots step:path,...] [--exit]"
+    );
     eprintln!(
         "                 [--map <id> [--start <n> | --spawn x,y,z,yaw,0]] [--no-enemy] [--lock-on]"
     );

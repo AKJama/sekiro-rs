@@ -1,4 +1,5 @@
 //! `duel-sim [--script FILE] [--steps N] [--passive] [--enemy c1010|c5060] [--simple-ai]
+//! [--attack-power 1..99] [--progression castle-roof]
 //! [--brain lua|scripted] [--brain-log] [--brain-memory off|on|PATH]`: Wolf (input script,
 //! default: guard on and off) against an enemy (default the Ashina soldier) and its own AI.
 //! Prints state changes, AI actions, unknown AI calls and every hit; `--goals` adds goal starts
@@ -37,9 +38,17 @@ fn main() {
     let mut brain = None;
     let mut brain_log = false;
     let mut brain_memory = None;
+    let mut attack_power = None;
+    let mut progression = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--attack-power" => {
+                attack_power = Some(args.next().expect("--attack-power requires a value"))
+            }
+            "--progression" => {
+                progression = Some(args.next().expect("--progression requires a value"))
+            }
             "--script" => script = Some(std::fs::read_to_string(args.next().unwrap()).unwrap()),
             "--steps" => steps = args.next().and_then(|s| s.parse().ok()),
             "--passive" => passive = true,
@@ -53,7 +62,16 @@ fn main() {
         }
     }
     let frames = demo::parse(script.as_deref().unwrap_or(DEFAULT)).unwrap();
+    let power = sekiro_sim::progression::AttackPower::from_options(
+        attack_power.as_deref(),
+        progression.as_deref(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
     let mut duel = Duel::load_with(Path::new("cache"), 4.0, spec).expect("load");
+    duel.rules
+        .set_attack_power(power)
+        .expect("attack power data");
+    println!("Wolf attack power {}", power.value());
     duel.enemy_active = !passive;
     if simple {
         duel.use_simple_ai();

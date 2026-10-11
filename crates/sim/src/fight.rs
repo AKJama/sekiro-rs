@@ -22,7 +22,8 @@
 //! - The player's physical attack power is EquipParamWeapon `attackBasePhysics` times
 //!   ReinforceParamWeapon `physicsAtkRate` times AtkParam_Pc `atkPhysCorrection / 100` (the
 //!   Dark Souls convention; AtkParam_Pc `atkPhys` is 0). The Kusabimaru's slash is 40 * 300% =
-//!   120. The attack-power stat, which scales this in the game, is not modelled.
+//!   120 for a 300% row (the opening slash uses 200%, giving 80). Attack power selects
+//!   SpEffectParam 160000 + N; its element attack rates and staminaAttackRate scale damage.
 //! - Wolf's maximum HP, posture and posture recovery are CalcCorrectGraph 500, 501 and 504 at
 //!   [`PLAYER_GROWTH_LEVEL`]; which progression value the engine feeds them is open.
 //! - The NPC's per-attribute `<attr>DamageCutRate` on unguarded hits is not applied (all 1.0 on
@@ -62,7 +63,7 @@ use sekiro_formats::param::Table;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// The progression value fed to CalcCorrectGraph 500/501/504 for Wolf (inferred: 1 is the
+/// The Prayer Necklace growth value fed to CalcCorrectGraph 500/501/504 for Wolf (inferred: 1 is the
 /// graphs' first breakpoint, giving 320 HP, 120 posture and 30 posture per second).
 pub const PLAYER_GROWTH_LEVEL: f32 = 1.0;
 
@@ -190,6 +191,26 @@ fn row_f32(t: Option<&Table>, id: i32, field: &str) -> Option<f32> {
 }
 
 impl CombatRules {
+    /// Selects the extracted player-growth SpEffect; survives resets and replaces prior AP.
+    pub fn set_attack_power(
+        &mut self,
+        power: crate::progression::AttackPower,
+    ) -> Result<(), String> {
+        let id = power.effect_id();
+        if !self.effects.contains_key(&id) {
+            return Err(format!(
+                "missing SpEffectParam {id} for attack power {}",
+                power.value()
+            ));
+        }
+        let wolf = self.fighters.first_mut().ok_or("missing Wolf")?;
+        if !matches!(wolf.kind, FighterKind::Player { .. }) {
+            return Err("first fighter is not Wolf".into());
+        }
+        wolf.resident.retain(|id| !(160000..=160099).contains(id));
+        wolf.resident.push(id);
+        Ok(())
+    }
     /// Direct-hit posture estimate using the same weapon, defence and effects as resolution.
     /// Used for checkpoint lead time, without applying damage or changing either fighter.
     pub fn wolf_posture_per_hit(&self, attack: &AttackData, chars: [&Character; 2]) -> Option<f32> {
@@ -583,7 +604,14 @@ impl CombatRules {
         self.fighters[a].posture.take(attacker_damage, control_a);
 
         // 4. HP damage.
-        let hp_damage = self.hp_damage(a, d, &atk, &hit.attack, outcome, guard_profile);
+        let hp_damage = self.hp_damage(
+            (a, d),
+            &atk,
+            &hit.attack,
+            outcome,
+            guard_profile,
+            &effects_a,
+        );
         let fd = &mut self.fighters[d];
         let hp_damage = keep_hp(fd.vitality.hp, hp_damage, atk.excess_dmg_keep_hp);
         fd.vitality.take(hp_damage, false);
@@ -708,13 +736,14 @@ impl CombatRules {
     /// HP damage of `atk` from fighter `a` on fighter `d` for `outcome`.
     fn hp_damage(
         &self,
-        a: usize,
-        d: usize,
+        sides: (usize, usize),
         atk: &AttackProfile,
         data: &AttackData,
         outcome: HitOutcome,
         guard: Option<&AttackProfile>,
+        effects: &[ActiveEffect],
     ) -> i32 {
+        let (a, d) = sides;
         let attack = match &self.fighters[a].kind {
             FighterKind::Player {
                 attack_base,
@@ -761,6 +790,12 @@ impl CombatRules {
                     )
                 }
             };
+        }
+        for (i, rate) in mult.iter_mut().enumerate() {
+            *rate *= effects
+                .iter()
+                .map(|e| e.hp_attack_rates[i])
+                .product::<f32>();
         }
         let total = element_damage(attack, [0.0; 5], mult, 1.0);
         final_hp_damage(total, 1.0, 1.0)

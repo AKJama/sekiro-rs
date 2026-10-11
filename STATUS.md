@@ -60,7 +60,7 @@ cargo run --release -p sekiro-game -- --play --map m11_00_00_00 --start 3
 cargo run --release -p sekiro-game -- --arena owl
 ```
 
-Useful flags: `--play` alone uses a flat floor; `--enemy owl` (or `c5060`) fights the Great Shinobi Owl instead of the soldier; `--arena owl` fights him on the castle top where the game places him (only the map within 60 m; `--full-map` loads all of it; `docs/OWL.md`, "The castle top"); in play, `--hide <model prefixes>` skips map piece models and `--objects` adds MSB objects; `--lock-on`, `--no-enemy`, `--simple-ai`, `--script FILE --shots step:path --exit` for scripted runs with screenshots; `--input FILE` replays raw keys and mouse through the live input path and logs camera and movement per frame and step (`crates/game/src/input_replay.rs`); `--arena --deathblow` for the deathblow demo; `--viewer <glb>` and `--map <id>` for inspection; `--game <dir>` (or `SEKIRO_DIR`) points at the install whose FMOD DLLs play the sounds; `--volume 0.0..1.0` sets the master volume (default 0.5), and in play minus and equals (or `[` and `]`) change it in 10% steps with a short on-screen readout.
+Useful flags: `--attack-power N` selects Wolf's Memory attack power (1 to 99, default 1); `--progression castle-roof` selects AP6, overridden by explicit `--attack-power`; both also work in `duel-sim`; `--play` alone uses a flat floor; `--enemy owl` (or `c5060`) fights the Great Shinobi Owl instead of the soldier; `--arena owl` fights him on the castle top where the game places him (only the map within 60 m; `--full-map` loads all of it; `docs/OWL.md`, "The castle top"); in play, `--hide <model prefixes>` skips map piece models and `--objects` adds MSB objects; `--lock-on`, `--no-enemy`, `--simple-ai`, `--script FILE --shots step:path --exit` for scripted runs with screenshots; `--input FILE` replays raw keys and mouse through the live input path and logs camera and movement per frame and step (`crates/game/src/input_replay.rs`); `--arena --deathblow` for the deathblow demo; `--viewer <glb>` and `--map <id>` for inspection; `--game <dir>` (or `SEKIRO_DIR`) points at the install whose FMOD DLLs play the sounds; `--volume 0.0..1.0` sets the master volume (default 0.5), and in play minus and equals (or `[` and `]`) change it in 10% steps with a short on-screen readout.
 Testing aids: `--break-posture` holds the enemy's posture at 1 point outside deathblows, so Wolf's next landed hit breaks it (quick deathblow tests, also for the Owl's second life); `--spawn x,y,z,yaw,pitch` now also works in an arena, putting Wolf there and the enemy `--enemy-distance` metres (default 5) in front of him, for example next to the castle-top railing (`--arena owl --passive --god --break-posture --spawn 101.23,53.95,247.33,135,0 --enemy-distance 1.6`); `--god` makes Wolf take no HP or posture damage (hits, reactions, hit stop and knockback unchanged), so long replays are not cut short by his death; `--passive` (same as `--no-enemy`) keeps the enemy standing there with his AI off; `--force-act <id>` makes the enemy request that act whenever he is free (with `--passive`, only that act; `--force-act 3040` is the Owl's grab, script `crates/game/scripts/owl_grab.txt`); the Owl's tools on demand: `--arena owl --passive --god --force-act 3010 --spawn 104.5,54.0,244.06,135,0 --enemy-distance 4 --script crates/game/scripts/owl_tools.txt --shots ... --exit` (3010 firecrackers, 3017 explosive slash, 3030 poison, 3031 recovery seal, 3069 smoke; always give `--shots` paths under the repo, a shot that cannot be saved keeps the run from exiting); `PLAY_LOG_COMBO=1` logs one `combo` line per step (attack button, buffered presses, Wolf's state, clip and clip time, both hit stops, the step's hits, the enemy's state and clip, distance).
 
 ## In progress when the session paused
@@ -408,3 +408,26 @@ All Cargo work used target/alt and six jobs; logs are target/mid-final.log and t
 The worst-case input regression fitted 4078 bytes under the 4096-byte limit.
 The all-banned check excludes Lua fallback choices so they cannot hide a failed coached set.
 No commits, real model/API/CLI calls, credential reads, protected log edits, combat edits, worktrees, cache/re links or cache/re deletions were made by this task.
+
+## Wolf's attack power (2026-10-11)
+
+Both the game and `duel-sim` accept `--attack-power 1..99` (default 1) and `--progression castle-roof` (AP6, required-route Memories); explicit AP overrides the preset.
+Damage reads the real `SpEffectParam` Player Growth_Core row `160000 + AP`: element `*AttackRate` fields for HP and `staminaAttackRate` for posture before truncation.
+All 99 rows are checked, including the AP52 exception (6.775, followed by 6.77 at AP53); no hand-written progression table drives gameplay.
+CalcCorrectGraph 500/501/504 still describes Wolf's separate Prayer Necklace growth, fixed at 1, rather than being fed Memory attack power.
+The local RustSekiro clone was checked and leaves its AP formula unresolved; the extracted rows and community Attack Power/Memory references are documented in `docs/COMBAT-RULES.md`.
+Combat fundamentals mismatch 3 is resolved for attack power; full Prayer Necklace progression and live-game parity remain outside this setting.
+Real-script opening slash HP/posture at AP1/5/10: soldier 80/30, 160/60, 260/97 before the remaining-HP cap (195 actual HP damage at AP10 on a fresh soldier); guarding Owl 0/15, 0/30, 0/48.
+At AP6, the existing ten-second pressure cadence (one attack press every 0.6 s) lands 11 guarded contacts and lowers Owl's remaining posture to 512/660, versus 624/660 at AP1, without changing his 60/s guard recovery.
+The posture builds but does not break within this run.
+Validation: workspace/all-targets Clippy with -D warnings, cargo fmt --all and its check, and the full requested release sim/brain-net lib/bin/integration suite passed (344 tests).
+The alternate release game executable was built; actual CLI checks rejected invalid/missing values, and duel-sim confirmed explicit AP5 overrides castle-roof with a one-tick passive run.
+Logs: target/alt/ap-baseline.log, ap-focused.log, ap-focused-final.log, ap-suite.log, ap-clippy-final.log, ap-game-build.log and ap-cli.log.
+All Cargo commands used CARGO_TARGET_DIR=target/alt and six jobs; fmt uses CARGO_BUILD_JOBS=6 because it has no -j flag.
+No commits, real model/API calls, authenticated CLI runs, credential reads, protected-log edits, game sessions, game-install writes, worktrees, or cache/re links, junctions or deletions were made.
+
+```powershell
+$env:CARGO_TARGET_DIR = 'target/alt'
+$env:CARGO_BUILD_JOBS = '6'
+& "$env:USERPROFILE\.cargo\bin\cargo.exe" run --release -j 6 -p sekiro-game -- --arena owl --progression castle-roof
+```
