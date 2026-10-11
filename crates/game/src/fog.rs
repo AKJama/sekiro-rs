@@ -305,57 +305,105 @@ fn configure(
 }
 
 #[derive(Resource)]
-struct FogPipeline(Vec<FogVariant>);
+struct FogPipeline(Vec<Option<FogVariant>>);
 struct FogVariant {
     layout: BindGroupLayoutDescriptor,
-    pipeline: CachedRenderPipelineId,
+    pipelines: Vec<CachedRenderPipelineId>,
 }
 fn init_pipeline(
     mut commands: Commands,
     assets: Res<AssetServer>,
     fullscreen: Res<FullscreenShader>,
     cache: Res<PipelineCache>,
+    adapter: Res<bevy::render::renderer::RenderAdapter>,
 ) {
-    let variants = [false, true]
+    let supported = adapter
+        .get_texture_format_features(TextureFormat::Rgba16Float)
+        .flags;
+    let variants = [1, 2, 4, 8]
         .into_iter()
-        .map(|multisampled| {
+        .map(|samples| {
+            if !supported.sample_count_supported(samples) {
+                return None;
+            }
+            let multisampled = samples > 1;
             let layout = BindGroupLayoutDescriptor::new(
                 "game fog",
-                &BindGroupLayoutEntries::sequential(
-                    ShaderStages::FRAGMENT,
-                    (
-                        texture_2d(TextureSampleType::Float { filterable: false }),
-                        if multisampled {
-                            texture_depth_2d_multisampled()
-                        } else {
-                            texture_depth_2d()
-                        },
-                        uniform_buffer::<ViewUniform>(true),
-                        uniform_buffer::<GameFog>(true),
-                    ),
-                ),
+                &if multisampled {
+                    BindGroupLayoutEntries::sequential(
+                        ShaderStages::FRAGMENT,
+                        (
+                            texture_depth_2d_multisampled(),
+                            uniform_buffer::<ViewUniform>(true),
+                            uniform_buffer::<GameFog>(true),
+                        ),
+                    )
+                    .to_vec()
+                } else {
+                    BindGroupLayoutEntries::sequential(
+                        ShaderStages::FRAGMENT,
+                        (
+                            texture_2d(TextureSampleType::Float { filterable: false }),
+                            texture_depth_2d(),
+                            uniform_buffer::<ViewUniform>(true),
+                            uniform_buffer::<GameFog>(true),
+                        ),
+                    )
+                    .to_vec()
+                },
             );
-            let pipeline = cache.queue_render_pipeline(RenderPipelineDescriptor {
-                label: Some("Sekiro global fog".into()),
-                layout: vec![layout.clone()],
-                vertex: fullscreen.to_vertex_state(),
-                fragment: Some(FragmentState {
-                    shader: load_embedded_asset!(assets.as_ref(), "fog.wgsl"),
-                    shader_defs: if multisampled {
-                        vec!["MULTISAMPLED_DEPTH".into()]
-                    } else {
-                        vec![]
-                    },
-                    targets: vec![Some(ColorTargetState {
-                        format: TextureFormat::Rgba16Float,
-                        blend: None,
-                        write_mask: ColorWrites::ALL,
-                    })],
-                    ..default()
-                }),
-                ..default()
-            });
-            FogVariant { layout, pipeline }
+            let pipelines = (0..if multisampled { 2 } else { 1 })
+                .map(|step| {
+                    let blend = multisampled.then_some(BlendState {
+                        color: BlendComponent {
+                            src_factor: if step == 0 {
+                                BlendFactor::Zero
+                            } else {
+                                BlendFactor::One
+                            },
+                            dst_factor: if step == 0 {
+                                BlendFactor::Src
+                            } else {
+                                BlendFactor::One
+                            },
+                            operation: BlendOperation::Add,
+                        },
+                        alpha: BlendComponent {
+                            src_factor: BlendFactor::Zero,
+                            dst_factor: BlendFactor::One,
+                            operation: BlendOperation::Add,
+                        },
+                    });
+                    let mut shader_defs = Vec::new();
+                    if multisampled {
+                        shader_defs.push("MULTISAMPLED_DEPTH".into());
+                        if step == 0 {
+                            shader_defs.push("FOG_ATTENUATION".into());
+                        }
+                    }
+                    cache.queue_render_pipeline(RenderPipelineDescriptor {
+                        label: Some("Sekiro global fog".into()),
+                        layout: vec![layout.clone()],
+                        vertex: fullscreen.to_vertex_state(),
+                        fragment: Some(FragmentState {
+                            shader: load_embedded_asset!(assets.as_ref(), "fog.wgsl"),
+                            shader_defs,
+                            targets: vec![Some(ColorTargetState {
+                                format: TextureFormat::Rgba16Float,
+                                blend,
+                                write_mask: ColorWrites::ALL,
+                            })],
+                            ..default()
+                        }),
+                        multisample: MultisampleState {
+                            count: samples,
+                            ..default()
+                        },
+                        ..default()
+                    })
+                })
+                .collect();
+            Some(FogVariant { layout, pipelines })
         })
         .collect();
     commands.insert_resource(FogPipeline(variants));
@@ -375,15 +423,51 @@ fn fog(
     mut ctx: RenderContext,
 ) {
     let (target, depth, msaa, offset, index) = view.into_inner();
-    let pipeline = &pipeline.0[usize::from(msaa.samples() > 1)];
-    let (Some(pso), Some(view_binding), Some(fog_binding)) = (
-        cache.get_render_pipeline(pipeline.pipeline),
-        views.uniforms.binding(),
-        uniforms.uniforms().binding(),
-    ) else {
+    let multisampled = msaa.samples() > 1;
+    let Some(pipeline) = &pipeline.0[msaa.samples().ilog2() as usize] else {
+        return;
+    };
+    let (Some(view_binding), Some(fog_binding)) =
+        (views.uniforms.binding(), uniforms.uniforms().binding())
+    else {
         return;
     };
     if target.main_texture_format() != TextureFormat::Rgba16Float {
+        return;
+    }
+    let psos: Vec<_> = pipeline
+        .pipelines
+        .iter()
+        .filter_map(|id| cache.get_render_pipeline(*id))
+        .collect();
+    if psos.len() != pipeline.pipelines.len() {
+        return;
+    }
+    use bevy::render::diagnostic::RecordDiagnostics;
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
+    let span = diagnostics.time_span(ctx.command_encoder(), "game_fog");
+    if multisampled {
+        // Preserve per-sample colour/depth correspondence through attenuation and
+        // inscattering, then let the existing main attachment resolve the result.
+        let bindings = ctx.render_device().create_bind_group(
+            "game fog samples",
+            &cache.get_bind_group_layout(&pipeline.layout),
+            &BindGroupEntries::sequential((depth.view(), view_binding, fog_binding)),
+        );
+        for pso in psos {
+            let mut attachment = target.get_color_attachment();
+            attachment.ops.load = LoadOp::Load;
+            let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
+                label: Some("game fog samples"),
+                color_attachments: &[Some(attachment)],
+                ..default()
+            });
+            pass.set_render_pipeline(pso);
+            pass.set_bind_group(0, &bindings, &[offset.offset, index.index()]);
+            pass.draw(0..3, 0..1);
+        }
+        span.end(ctx.command_encoder());
         return;
     }
     let post = target.post_process_write();
@@ -392,10 +476,6 @@ fn fog(
         &cache.get_bind_group_layout(&pipeline.layout),
         &BindGroupEntries::sequential((post.source, depth.view(), view_binding, fog_binding)),
     );
-    use bevy::render::diagnostic::RecordDiagnostics;
-    let diagnostics = ctx.diagnostic_recorder();
-    let diagnostics = diagnostics.as_deref();
-    let span = diagnostics.time_span(ctx.command_encoder(), "game_fog");
     let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("game fog"),
         color_attachments: &[Some(RenderPassColorAttachment {
@@ -409,7 +489,7 @@ fn fog(
         })],
         ..default()
     });
-    pass.set_render_pipeline(pso);
+    pass.set_render_pipeline(psos[0]);
     pass.set_bind_group(0, &bindings, &[offset.offset, index.index()]);
     pass.draw(0..3, 0..1);
     drop(pass);

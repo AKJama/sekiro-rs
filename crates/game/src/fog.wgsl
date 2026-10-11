@@ -7,14 +7,16 @@ struct Fog {
     slices: vec4<f32>,
     sky_blend: vec4<f32>,
 }
-@group(0) @binding(0) var scene: texture_2d<f32>;
 #ifdef MULTISAMPLED_DEPTH
-@group(0) @binding(1) var depth_texture: texture_depth_multisampled_2d;
+@group(0) @binding(0) var depth_texture: texture_depth_multisampled_2d;
+@group(0) @binding(1) var<uniform> view: View;
+@group(0) @binding(2) var<uniform> fog: Fog;
 #else
+@group(0) @binding(0) var scene: texture_2d<f32>;
 @group(0) @binding(1) var depth_texture: texture_depth_2d;
-#endif
 @group(0) @binding(2) var<uniform> view: View;
 @group(0) @binding(3) var<uniform> fog: Fog;
+#endif
 
 // Renderer quality and background distance choices, not recovered CPU uploads.
 const SKY_DISTANCE_METRES: f32 = 20000.0;
@@ -50,14 +52,17 @@ fn source_at(h: f32, z0: f32, z1: f32, ray: vec3<f32>) -> vec3<f32> {
 }
 
 @fragment
-fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
-    let pixel = vec2<i32>(in.position.xy);
-    let surface = textureLoad(scene,pixel,0);
-    var depth = textureLoad(depth_texture,pixel,0);
+fn fragment(in: FullscreenVertexOutput,
 #ifdef MULTISAMPLED_DEPTH
-    for (var sample = 1u; sample < textureNumSamples(depth_texture); sample += 1u) {
-        depth = max(depth,textureLoad(depth_texture,pixel,i32(sample)));
-    }
+    @builtin(sample_index) sample: u32,
+#endif
+) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(in.position.xy);
+#ifdef MULTISAMPLED_DEPTH
+    let depth = textureLoad(depth_texture,pixel,i32(sample));
+#else
+    let surface = textureLoad(scene,pixel,0);
+    let depth = textureLoad(depth_texture,pixel,0);
 #endif
     let ndc = vec2(in.uv.x*2.0-1.0,1.0-in.uv.y*2.0);
     let reconstructed = view.world_from_clip*vec4(ndc,max(depth,0.000001),1.0);
@@ -104,10 +109,22 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         light += exp(-fog.extinction.xyz*tau)*terminal_light*integral;
         tau += delta;
     }
-    let fogged=surface.rgb*exp(-fog.extinction.xyz*tau)+light;
+    var transmission = exp(-fog.extinction.xyz*tau);
     if depth <= 0.0 && fog.sky_blend.x > 0.5 {
         // Keep the recovered 20 km background integration at the horizon; sky overhead is unattenuated.
-        return vec4(mix(fogged,surface.rgb,smoothstep(fog.sky_blend.y,fog.sky_blend.z,ray.y)),surface.a);
+        let sky_weight = smoothstep(fog.sky_blend.y,fog.sky_blend.z,ray.y);
+        transmission = mix(transmission,vec3(1.0),sky_weight);
+        light *= 1.0-sky_weight;
     }
-    return vec4(fogged,surface.a);
+#ifdef MULTISAMPLED_DEPTH
+#ifdef FOG_ATTENUATION
+    // Multiply the existing sample colour using destination * source blending.
+    return vec4(transmission,1.0);
+#else
+    // Add inscattering to that same sample before the render attachment resolves.
+    return vec4(light,0.0);
+#endif
+#else
+    return vec4(surface.rgb*transmission+light,surface.a);
+#endif
 }

@@ -31,28 +31,36 @@ fn native_post_shaders_compose_and_validate() {
     let id = assets.add(view.clone()).id();
     cache.set_shader(id, view);
     for (name, source, variants) in [
-        ("exposure", include_str!("../src/exposure.wgsl"), vec![None]),
+        (
+            "exposure",
+            include_str!("../src/exposure.wgsl"),
+            vec![vec![]],
+        ),
         (
             "fog",
             include_str!("../src/fog.wgsl"),
-            vec![None, Some("MULTISAMPLED_DEPTH")],
+            vec![
+                vec![],
+                vec!["MULTISAMPLED_DEPTH"],
+                vec!["MULTISAMPLED_DEPTH", "FOG_ATTENUATION"],
+            ],
         ),
         (
             "tonemap",
             include_str!("../src/tonemap.wgsl"),
-            vec![Some("BRIGHT"), Some("BLUR_H"), Some("BLUR_V"), Some("TONE")],
+            vec![vec!["BRIGHT"], vec!["BLUR_H"], vec!["BLUR_V"], vec!["TONE"]],
         ),
         (
             "grading",
             include_str!("../src/grading_lut.wgsl"),
-            vec![None],
+            vec![vec![]],
         ),
     ] {
         let shader = Shader::from_wgsl(source, format!("{name}.wgsl"));
         let id = assets.add(shader.clone()).id();
         cache.set_shader(id, shader);
         for variant in variants {
-            let defs: Vec<_> = variant.into_iter().map(Into::into).collect();
+            let defs: Vec<_> = variant.iter().copied().map(Into::into).collect();
             cache
                 .get(0, id, &defs)
                 .unwrap_or_else(|e| panic!("{name} {variant:?}: {e:?}"));

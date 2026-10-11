@@ -844,12 +844,68 @@ No commits, network access or protected-path writes were made by this work, and 
 
 ### Step 10. FXR reader in Rust
 
+**2026-10-11 status: structural reader implemented; action semantics and asset-reference decoding remain open.**
+`crates/formats/src/fxr.rs` reads little-endian version 5, states/transitions, raw conditions, node children, emitter configurations, action IDs/variants, both fixed-field/property groups, modifier records and sequence descriptors.
+All nonempty references are checked against the appropriate table, including the raw-value pool; 64-bit links retain their full width.
+Unknown fields retain their integer bits rather than being forced into floats.
+Property constants and sequence arrays (argument, component bounds, key times, component values and cubic controls) are decoded without asserting native interpolation or random-modifier semantics.
+The read-only `fxr_dump` example prints one effect for further field mapping.
+No npm, downloaded library, new dependency or shader-disassembly copy was used.
+
+Installed-data coverage parses both the binders and unpacked entries and checks that their FXR counts agree.
+The installed common binder contains 1,856 FXRs, correcting the earlier 2,349 claim for this cache.
+There are no separate c5060/c7100/c7110 effect binders in `cache/raw/sfx`; the test includes every installed map binder, including m11.
+These counts include repeated effect IDs in different bundles, not unique IDs.
+
+| Bundle | FXRs parsed |
+| --- | ---: |
+| commoneffects | 1856 |
+| m10 | 141 |
+| m11 | 450 |
+| m13 | 33 |
+| m15 | 73 |
+| m17 | 112 |
+| m20 | 69 |
+| m25 | 179 |
+| Total | 2913 |
+
+| Appearance action ID | Action records across these bundles | Runtime support |
+| --- | ---: | --- |
+| 600 | 587 | None |
+| 601 | 29 | None |
+| 602 | 103 | None |
+| 603 | 7638 | None |
+| 604 | 1600 | None |
+| 605 | 1010 | None |
+| 606 | 282 | None |
+| 607 | 167 | None |
+| 608 | 485 | None |
+| 609 | 834 | None |
+| 10000 | 47 | None |
+| 10012 | 2123 | None |
+
+The other encountered raw action IDs are 0, 1, 15, 34, 35, 36, 46, 55, 60, 64, 65, 75, 83, 84, 105, 106, 113, 120, 121, 122, 128, 129, 130, 131, 132, 133, 199, 200, 201, 300, 301, 399, 400, 401, 402, 403, 404, 405, 500, 501, 502, 503, 732, 733, 734, 10013, 10100, 10300, 10301, 10400, 10500 and 11000.
+Every action remains semantically raw in this reader, including the named appearances; parsing coverage must not be mistaken for playback coverage.
+There are 64 distinct raw action IDs in this installed-data inventory.
+Run `crates/game/scripts/fxr_audit.ps1` for the complete action/property frequency report in `target/alt/fxr/coverage.txt`.
+Coverage, four reader tests, two TAE effect tests, formatting, workspace/all-target Clippy and the release game build pass offline with six jobs in `target/alt`.
+The combined release suite fails the two `deathblow_lock` wall regressions, reporting an abrupt vertical step and wall/floor violations in the concurrently edited combat paths.
+
 - Files: new `crates/formats/src/fxr.rs`, `crates/extract` (an `fxr-dump` command that writes JSON or a compact binary for a chosen set of ids, from `cache/raw/sfx`), tests with fixtures generated at test time from the cache (never committed).
 - Method: write the reader from the Unlicense library's definitions, validate on a few effects by one-off comparison against `@cccode/fxr` run outside the repo, and record the action ids encountered across all 2349 files (a coverage table).
 - Check: a unit test that parses every FXR in `sfxbnd_commoneffects` without error and reports unknown action ids, no screenshot yet.
 - Risk: effort is in the long tail of action ids, the coverage table keeps that visible.
 
 ### Step 11. FXR player, then wire to TAE events
+
+**2026-10-11 status: TAE visual-request decoding implemented; player and replacements not implemented.**
+`tae.rs` now retains event types 96, 99, 100 and 118-121 as `TaeEffect`, with effect IDs, dummy source/base/tip, slot, follow/angle/restriction flags and repeat metadata where the template defines them.
+`TaeFrame.effects` reports requests active or starting during the current tick and obeys the existing StateInfo gate.
+Tests cover body and blade decoding, truncation, start edges, StateInfo and event-end behavior.
+Event 122/123 SpEffect-specific semantics, Bullet sfxId fields and HitEffectSfxParam routing remain open.
+No game renderer consumes these cues yet, so every combat effect remains its existing stand-in.
+There is no `--no-fxr` switch, GPU particle batching, depth-copy pass, capture sequence or effects frame-cost measurement yet.
+Steps 10 and 11 are not complete.
 
 - Files: new `crates/game/src/fxr.rs` (nodes, emitters, particles, blend modes, batched meshes), `fx_*.wgsl` as needed (multi-texture billboards, soft particles, distortion), hooks in `play.rs` and `bullet_fx.rs`, `crates/sim` TAE events 96, 118 and bullet `sfxId_*`.
 - Order inside the step: billboards (603) and multi-texture (604) first because most tool effects use them, then lights (609), tracers (606), then distortion (607) and radial blur (608).
@@ -874,6 +930,33 @@ No commits, network access or protected-path writes were made by this work, and 
 - Files: `map.rs` (variant choice, unlit fog-exempt dome material), a LightShaft pass if the look needs it.
 - Check: m89 viewer captures listed in `MAP-BASELINE.md`.
 
+#### Step 14 follow-up: scene units and MSAA fog (2026-10-11, v9)
+
+The confirmed sky bug was an independent Ver2 gain of eight with no Bevy camera exposure, whereas sun, hemisphere and GIIV enter HDR through `SCENE_TO_BEVY/pi * view.exposure`.
+SkyDome, Ver2 and companion Cloud now share that radiance bridge and camera exposure before native metering, bloom and tone mapping.
+This removes the separate gain calibration without altering authored colours, intensities, sun-lobe width or cloud masks; SAT CPU colour packing is still unresolved.
+The native evening shader uses the authored exponent 15, and the inspected evening primitive is one opaque dome with repeating samplers.
+The supplied view and bloom/fog/grading controls did not reproduce a discontinuous vertical pixel step; the steep warm-to-blue lobe transition was continuous, so no mesh, alpha or sampler seam fix is claimed.
+The former excessive gain amplified that transition and the sky's contribution to exposure metering.
+
+The silhouette halo had a separate confirmed cause: the old fog pass used the closest MSAA depth to fog an already resolved colour that included uncovered sky samples.
+MSAA fog now attenuates and adds inscattering to each original colour sample using its matching depth, then resolves the main attachment.
+Multiplicative RGB attenuation and additive inscattering use two blend passes, preserve alpha and support adapter-supported sample counts; single-sample fog retains its ordinary post pass.
+This also avoids applying world-depth fog to the background portion of a silhouette pixel.
+
+The ambient audit found no duplicate exponent decoding, extra division by pi or actor-specific ambient scale.
+GIIV remains linear RGBA8 until its single interpolated exponent decode, and actors and map surfaces share the same coefficient shader, scene scale and camera exposure.
+Native log metering and authored soft EV limits remain unchanged; no ambient intensity was raised by eye.
+Outskirts has no complete variant-00 GILM cube pairs in the current cache, so midnight legitimately falls back to variant 04 at 22 h.
+That fallback and the authored night LightSet/exposure remain limits on claims about the bright night world; they do not establish a simple intensity bug.
+
+All 32 `target/alt/visuals/v9-sky-{outskirts,castle}-{6,12,18,0}-{0,90,180,270}.png` horizon views were inspected individually, with continuous sun glow and no visible vertical dome joins.
+The matched `v9-ambient-before.png`/`v9-ambient-after.png` roof views retain the same dark but readable actor and floor shade, while the bright fog fringe on the railing disappears.
+Midnight still has a dark horizontal background band and bright distant snow, so night-world parity remains unresolved.
+The matched noon upward view `v9-sky-noon-after.png` removes the thin white terrain outline visible in `v8-sky-outskirts12-up.png`.
+The ordinary midnight view `v9-sky-nightworld-after.png` confirms the world remains too bright relative to its sky, without establishing a simple shader-scale bug.
+Formatting, workspace/all-target Clippy with warnings denied, the requested release game/extract tests (55 passed) and the release game build pass offline with six jobs in `target/alt`.
+
 #### Step 14 status (2026-10-11)
 
 The renderer selects the game's co-located m89 meshes using the entity-group mapping verified in local `common.emevd` event 100 and the m89 MSB.
@@ -882,7 +965,8 @@ Castle/Outskirts use nearest authored 0/2/6/12/18/22 hour keys; Hirata and Fount
 The existing GLBs are reused; the m89 extractor writes only supplemental material/mask metadata under `cache/maps/` through `SEKIRO_MAP_SKY_ONLY=1` or a normal m89 export.
 The custom `sky.rs`/`sky.wgsl` material is camera-centred, unlit, shadowless, prepass-free and at reverse-Z infinity with no depth writes.
 SkyDome_Ver2 gradient/cloud operators and both static branches follow the local shader inventory/disassembly, with authored colours, intensities, tiling and channel masks.
-SAT CPU colour packing remains unresolved: gamma two and Ver2 radiance gain eight are documented calibrations against the native-light scene, while the original Fountainhead dome and companion Cloud layer use unit gain.
+SAT CPU colour packing remains unresolved: gamma two is a documented calibration against the native-light scene.
+The initial Ver2 gain eight and original dome/Cloud unit gain were superseded by the shared scene-radiance bridge in the v9 follow-up above.
 Sky shares native HDR exposure, bloom and tone mapping with the world.
 Native fog supplies the horizon colour through its existing 20 km background integration; a smooth ray-Y 0..0.22 blend preserves the dome above the horizon.
 `--no-sky-dome` restores the previous clear colour and its fog behavior.

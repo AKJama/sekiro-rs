@@ -59,6 +59,8 @@ pub mod cancel {
 /// One decoded event of interest.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TaeKind {
+    /// A visual FXR request. The renderer decides whether its format is supported.
+    Effect(TaeEffect),
     /// Wire timing and raw arguments; semantics beyond the travel window remain untraced.
     Wire {
         kind: i32,
@@ -154,6 +156,24 @@ pub enum TaeKind {
     /// `SetLockParamID` (155): the camera uses CameraSetParam slot `n` (1 is the default) while
     /// active: its LockCamParam and CameraParam rows, blended in over the slot's `beginTime`.
     CameraSlot(i32),
+}
+
+/// Template-defined visual effect parameters, independent of rendering.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaeEffect {
+    pub event_type: i32,
+    pub id: i32,
+    pub dummy: i32,
+    pub blade_tip: Option<i32>,
+    /// TAE 118: 0 body, 1 left weapon, 2 right weapon.
+    pub dummy_source: i32,
+    pub slot: i32,
+    pub follow_dummy: bool,
+    pub ignore_dummy_angle: bool,
+    pub restrict_to_dummy: bool,
+    pub extra_condition: i32,
+    pub repeat: bool,
+    pub repeat_type: i32,
 }
 
 /// The sound event name for a TAE sound type and id: the type letter followed by the id padded
@@ -433,6 +453,32 @@ fn decode(template: &Template, e: &tae::TaeEvent) -> Option<TimedEvent> {
     let d = template.decode(e)?;
     let int = |name: &str| d.field(name).and_then(|v| v.as_int()).map(|v| v as i32);
     let kind = match e.event_type {
+        96 | 99 | 100 | 118..=121 => TaeKind::Effect(TaeEffect {
+            event_type: e.event_type,
+            id: int(if e.event_type == 120 {
+                "FFXID_MAIN"
+            } else {
+                "FFXID"
+            })?,
+            dummy: int(if e.event_type == 118 {
+                "DummyPolyBladeBaseID"
+            } else {
+                "DummyPolyID"
+            })?,
+            blade_tip: if e.event_type == 118 {
+                int("DummyPolyBladeTipID")
+            } else {
+                None
+            },
+            dummy_source: int("DummyPolySource").unwrap_or(0),
+            slot: int("SlotID").unwrap_or(-1),
+            follow_dummy: int("IsFollowDummyPoly").unwrap_or(0) != 0,
+            ignore_dummy_angle: int("IsIgnoreDummyPolyAngle").unwrap_or(0) != 0,
+            restrict_to_dummy: int("IsRestrictToDummyPoly").unwrap_or(0) != 0,
+            extra_condition: int("ExtraSpawnCondition").unwrap_or(0),
+            repeat: e.event_type == 99 || int("IsRepeat").unwrap_or(0) != 0,
+            repeat_type: int("RepeatType").unwrap_or(0),
+        }),
         0 if int("FlagType")? == 3 => TaeKind::Guard {
             judge: int("ArgB").unwrap_or(-1),
         },
@@ -532,6 +578,8 @@ pub struct PlayingClip {
 /// The TAE state for this tick.
 #[derive(Debug, Clone, Default)]
 pub struct TaeFrame {
+    /// Visual events active or started this tick. They do not change gameplay rules.
+    pub effects: Vec<EffectCue>,
     pub flags: HashSet<i32>,
     /// SpEffects applied by active events plus timed effects still running.
     pub sp_effects: Vec<i32>,
@@ -568,6 +616,14 @@ pub struct TaeFrame {
     pub fixed_rotation: bool,
     /// TAE 225 as a fraction; `None` is normal posture recovery.
     pub posture_regen_scale: Option<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectCue {
+    pub effect: TaeEffect,
+    pub started: bool,
+    pub start: f32,
+    pub end: f32,
 }
 
 impl TaeFrame {
@@ -635,6 +691,12 @@ impl TaeRuntime {
                     continue;
                 }
                 match &e.kind {
+                    TaeKind::Effect(effect) => f.effects.push(EffectCue {
+                        effect: effect.clone(),
+                        started,
+                        start: e.start,
+                        end: e.end,
+                    }),
                     TaeKind::Wire { .. } => {}
                     TaeKind::ActionFlag(flag) => {
                         f.flags.insert(*flag);
@@ -749,5 +811,117 @@ impl TaeRuntime {
             .map(|info| info.state_info)
             .filter(|&s| s != 0)
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod fxr_event_tests {
+    use super::*;
+
+    const TEMPLATE: &str = r#"<action_template game="SDT">
+    <action id="96" name="SpawnOneShotFFX">
+    <s32 name="FFXID"/><s32 name="DummyPolyID"/><s32 name="SlotID"/>
+    <b name="IsIgnoreDummyPolyAngle"/><b name="IsFollowDummyPoly"/>
+    <b name="IsRestrictToDummyPoly"/><u8 name="ExtraSpawnCondition"/>
+    <s16 name="StateInfo"/><s16 assert="0"/>
+    </action>
+    <action id="118" name="SpawnFFX_Blade">
+    <s32 name="FFXID"/><s16 name="DummyPolySource"/>
+    <s16 name="DummyPolyBladeBaseID"/><s16 name="DummyPolyBladeTipID"/>
+    <s16 name="SlotID"/><s32 assert="0"/>
+    </action></action_template>"#;
+
+    fn event(kind: i32, params: Vec<u8>) -> tae::TaeEvent {
+        tae::TaeEvent {
+            event_type: kind,
+            start: 0.0,
+            end: 1.0,
+            unk04: 0,
+            group: None,
+            params,
+        }
+    }
+
+    #[test]
+    fn fxr_decoding_retains_dummy_flags_slots_and_blade_pair() {
+        let template = Template::parse_xml(TEMPLATE).unwrap();
+        let mut bytes = Vec::new();
+        for value in [220505i32, 800, -1] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&[1, 1, 1, 2, 7, 0, 0, 0]);
+        let decoded = decode(&template, &event(96, bytes)).unwrap();
+        assert_eq!(decoded.state_info, 7);
+        let TaeKind::Effect(effect) = decoded.kind else {
+            panic!("expected FXR request")
+        };
+        assert_eq!((effect.id, effect.dummy, effect.slot), (220505, 800, -1));
+        assert!(effect.follow_dummy && effect.ignore_dummy_angle && effect.restrict_to_dummy);
+        assert_eq!(effect.extra_condition, 2);
+        let mut bytes = 401000i32.to_le_bytes().to_vec();
+        for value in [2i16, 300, 301, 4] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        let decoded = decode(&template, &event(118, bytes)).unwrap();
+        let TaeKind::Effect(effect) = decoded.kind else {
+            panic!("expected blade FXR request")
+        };
+        assert_eq!(
+            (
+                effect.dummy_source,
+                effect.dummy,
+                effect.blade_tip,
+                effect.slot
+            ),
+            (2, 300, Some(301), 4)
+        );
+        assert!(decode(&template, &event(118, vec![0; 3])).is_none());
+    }
+
+    #[test]
+    fn fxr_cues_obey_start_edges_state_info_and_event_end() {
+        let template = Template::parse_xml(TEMPLATE).unwrap();
+        let mut bytes = Vec::new();
+        for value in [220505i32, 800, -1] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&[0; 8]);
+        let mut decoded = decode(&template, &event(96, bytes)).unwrap();
+        decoded.state_info = 7;
+        let mut db = TaeDb::from_animations([(
+            3000,
+            TaeAnim {
+                hkx_source: 3000,
+                events: Arc::new(vec![decoded]),
+            },
+        )]);
+        db.sp_effects.insert(
+            123,
+            SpEffectInfo {
+                behavior_ref: 0,
+                duration: 0.0,
+                state_info: 7,
+                vfx: 0,
+            },
+        );
+        let mut runtime = TaeRuntime::default();
+        let clip = |prev_time, time| {
+            [PlayingClip {
+                animation: "a000_003000".into(),
+                prev_time,
+                time,
+            }]
+        };
+        runtime.update(&db, &clip(0.0, 0.1), 0.1);
+        assert!(runtime.frame.effects.is_empty());
+        runtime.resident.push(123);
+        runtime.update(&db, &clip(0.0, 0.1), 0.1);
+        assert_eq!(runtime.frame.effects.len(), 1);
+        assert!(runtime.frame.effects[0].started);
+        runtime.update(&db, &clip(0.1, 0.2), 0.1);
+        assert!(!runtime.frame.effects[0].started);
+        runtime.update(&db, &clip(0.9, 1.0), 0.1);
+        assert!(runtime.frame.effects.is_empty());
     }
 }

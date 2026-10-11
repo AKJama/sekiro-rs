@@ -410,3 +410,26 @@ cargo run -p sekiro-formats --example emevd_dump -- cache/raw/event/m11_01_00_00
 ```
 
 The interpreter that runs them in a fight is `crates/sim/src/events.rs` (`docs/OWL.md`, "Phase 2").
+
+## FXR effects
+
+`crates/formats/src/fxr.rs` reads the little-endian version 5 files in the installed `sfxbnd_*.ffxbnd` BND4 bundles.
+The 144-byte header contains eleven offset/count pairs, two flags, three further offset/count pairs and trailing padding.
+The primary record strides are 16 bytes for states/transitions, 96 for conditions, 48 for nodes, 32 for emitter configurations, 64 for actions, 40 for properties, 32 for modifiers, 24 for the preserved ninth table, 16 for sequence descriptors and 4 for raw values.
+Record links are 64-bit even though the header table offsets are 32-bit.
+Node links select contiguous ranges of configurations, actions and children.
+Actions retain the low-16-bit ID, full tag, variant, two fixed-field groups, two property groups and sequence references.
+Properties preserve the evaluator, raw payload bits and modifier range.
+Constants and curve payload arrays are available separately; native cubic interpolation, random modifiers, action field names and texture/model-reference semantics are not implemented.
+The original bytes preserve remaining condition and extension-table fields.
+Unknown actions are never rejected solely for their IDs.
+
+`cargo run --offline --release -p sekiro-formats -j 6 --example fxr_dump -- cache/raw/sfx/sfxbnd_commoneffects.ffxbnd.d/f000220505.fxr` prints a read-only inspection.
+Set `CARGO_TARGET_DIR=target/alt` and `CARGO_BUILD_JOBS=6` before running it.
+`crates/game/scripts/fxr_audit.ps1` checks every installed binder and unpacked FXR, without proprietary fixtures in source.
+The current cache has 2,913 FXR entries across eight bundles, including 1,856 common effects and 450 m11 effects.
+There is no FXR player yet; the structural coverage is not a rendering-fidelity claim.
+
+TAE effect requests 96/99/100/118-121 now decode into `TaeEffect` in the simulation, preserving body/weapon dummy IDs, slots, flags, repeat metadata and StateInfo gating.
+The tick's `TaeFrame.effects` distinguishes start edges from still-active requests.
+The renderer does not consume them yet.

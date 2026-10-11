@@ -39,7 +39,7 @@ fn fragment(v: VertexOutput) -> @location(0) vec4<f32> {
         let b=textureSample(low,low_sampler,v.uv_b*sky.uv[3].xy+sky.uv[2].xy*drift).rgb;
         let mask=clamp(dot(a,vec3(0.333333))+dot(b,vec3(0.333333))-f(0u),0.0,1.0);
         let lit=mix(c(0u),c(1u),mask)+c(4u)*power(sun,max(f(5u),1.0))*mask;
-        return vec4(lit*sky.control.y,mask);
+        return vec4(lit*sky.control.y*view.exposure,mask);
     }
     if sky.control.x>0.5 {
         // Authored Ver2 gradient and sun lobe; colour slots carry their own intensity.
@@ -100,6 +100,6 @@ fn fragment(v: VertexOutput) -> @location(0) vec4<f32> {
             color=h+stars+weight*(vec3(galaxy)+c(9u));
         }
     }
-    // Native SC_PreExposure is one; skies enter the same HDR exposure/tone pipeline.
-    return vec4(max(color,vec3(0.0))*sky.control.y,1.0);
+    // Match the scene's radiance bridge and camera exposure before native post metering.
+    return vec4(max(color,vec3(0.0))*sky.control.y*view.exposure,1.0);
 }

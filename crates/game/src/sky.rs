@@ -18,9 +18,9 @@ use bevy::{
 };
 use serde_json::Value;
 
-// Calibration against the native-light Bevy scene; SAT colour CPU packing is unresolved.
-const SKY_RADIANCE_SCALE: f32 = 8.0;
-const ORIGINAL_SKY_RADIANCE_SCALE: f32 = 1.0;
+// Native sky output is scene radiance, like the diffuse lighting accumulator.
+// Share its lux-to-radiance bridge; the shader applies the camera exposure once.
+const SKY_RADIANCE_SCALE: f32 = crate::lighting::ENV_PER_UNIT;
 
 #[derive(Resource)]
 pub(crate) struct SkyEnabled;
@@ -176,11 +176,7 @@ fn inputs(row: &Value) -> SkyInputs {
             } else {
                 0.
             },
-            if prefix == "M_Sky__SkyDome_snp_0_" {
-                ORIGINAL_SKY_RADIANCE_SCALE
-            } else {
-                SKY_RADIANCE_SCALE
-            },
+            SKY_RADIANCE_SCALE,
             0.,
             values("GXFT_SATStaticSwitch")
                 .first()
@@ -442,6 +438,21 @@ fn update(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sky_radiance_uses_the_same_bridge_as_white_diffuse_sunlight() {
+        let exposure = bevy::camera::Exposure::default().exposure();
+        // Native white sky radiance and a white Lambert surface at normal incidence
+        // have equal native scene values. Their Bevy HDR values must still match.
+        let diffuse = crate::lighting::SCENE_TO_BEVY * exposure / std::f32::consts::PI;
+        for shader in ["SkyDome_Ver2", "SkyDome", "M[Sky]_Cloud.spx"] {
+            let row = serde_json::json!({"shader":shader, "params":{}});
+            let hdr = inputs(&row).control.y * exposure;
+            assert!(
+                (hdr - diffuse).abs() < 0.00001,
+                "{shader}: {hdr} != {diffuse}"
+            );
+        }
+    }
     #[test]
     fn native_common_event_and_msb_agree_on_selected_groups() {
         use sekiro_formats::{emevd::Emevd, msb};

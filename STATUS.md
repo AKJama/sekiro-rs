@@ -4,6 +4,27 @@ Last updated 11 October 2026.
 Read this first in a new session, then `AGENTS.md` and `docs/DESIGN.md`.
 How much of the game is done overall: `docs/PROGRESS.md`.
 
+## Sky exposure and silhouette fog follow-up (2026-10-11)
+
+Sky now uses the same scene-radiance bridge and camera exposure as diffuse sun/ambient instead of independent gains with missing exposure.
+MSAA fog uses each original colour sample's matching depth before resolving, removing the noon silhouette and roof-railing fringes.
+All 32 v9 horizon captures across Outskirts/Castle at 6/12/18/0 h were inspected; glow fades continuously, but the reported discontinuous vertical seam could not be established.
+The matched v9 ambient roof pair remains dark but readable; no duplicate GIIV exponent/pi/exposure or actor-scale bug was found, and no intensity was tuned by eye.
+Night-world parity remains unresolved, including the variant-04 GILM fallback and horizontal background band.
+Requested release tests pass (55 tests), workspace/all-target Clippy and formatting pass, and the release game build passes offline with six jobs in `target/alt`.
+No commits, network, worktrees or protected-path writes.
+
+## FXR reader foundation (2026-10-11)
+
+Added a bounds-checked Rust version 5 FXR table reader and read-only inspector, preserving action fields, properties, modifiers, sequence descriptors and original bits.
+Installed-data coverage parses 2,913 FXRs across all eight binders and checks their unpacked counts, including 1,856 common effects and 450 m11 effects; no separate character effect binders are present in this cache.
+TAE 96/99/100/118-121 now preserve visual effect requests and tick start edges with StateInfo gating.
+VISUALS-PLAN steps 10-11 remain incomplete: action/asset semantics and the particle renderer, bullet/hit routing, stand-in replacement, `--no-fxr`, screenshots and frame-cost measurements are still outstanding.
+No combat effect has been replaced and no rendering-fidelity claim is made.
+Installed-data coverage, four reader tests and two TAE effect tests pass, along with formatting, workspace/all-target Clippy and the release game build, offline with six jobs in `target/alt`.
+The combined release suite fails `deathblow_near_a_wall_does_not_clip` and `deathblow_with_wolf_backed_to_a_wall_does_not_clip`; the collision/throw code is reserved for the concurrent combat job.
+No commits, network, new dependencies or protected-path edits.
+
 ## GIIV bounce and spatial probe blending (2026-10-11)
 
 Re-extracted all four requested maps with linear BC7 X/Y/Z/W coefficients, preserving independent resolutions and signed/exponent packing in RGBA8 volume exports.
