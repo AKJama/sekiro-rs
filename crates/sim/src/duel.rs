@@ -521,6 +521,7 @@ impl Duel {
     pub fn reset(&mut self) -> Result<(), LoadError> {
         let (mut player, mut enemy) = Self::load_characters(&self.cache, 4.0, &self.spec)?;
         std::mem::swap(&mut player.ground, &mut self.player.ground);
+        player.docking.edges = std::mem::take(&mut self.player.docking.edges);
         std::mem::swap(&mut enemy.ground, &mut self.enemy.ground);
         if let Some([p, e]) = self.spawn {
             (player.body.position, player.body.yaw) = (p.position, p.yaw);

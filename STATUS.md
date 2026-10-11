@@ -4,6 +4,28 @@ Last updated 11 October 2026.
 Read this first in a new session, then `AGENTS.md` and `docs/DESIGN.md`.
 How much of the game is done overall: `docs/PROGRESS.md`.
 
+## Visuals steps 0 and 1 (2026-10-11)
+
+Read-only GPARAM/MSB dumps and hour comparisons are in `target/alt/visuals/`.
+MSB probe regions, HDR BC6H extraction, Lambert cubes, spatial selection, hour variants and camera environment lighting are implemented and all three requested maps re-extracted.
+The intensity is 9000/pi cd/m2; `--no-env-probe` preserves the old ambient fallback.
+Six matched screenshot pairs show warmer evening and cooler interior shade; the probes contain nearby scenery, so they light the world but are not shown as the sky (`--probe-sky` shows them for debugging).
+See `docs/VISUALS-PLAN.md` step 1 for approximations and the capture names.
+Formatting, workspace Clippy, 64 release formats/extract tests (two ignored), 14 game unit tests and the alternate release build pass.
+The pre-existing map_tangents regression still fails with direction agreement 0.004.
+Matched frame medians stay at 16.6-16.8 ms with a 60 Hz cap; measured probe deltas range from -0.034 to +0.076 ms.
+No commit or protected-path write was made.
+## Mobility step 2: ledge hang (2026-10-11)
+
+Kind-2 variation-0 map ledges now support ground grab, HangIdle, root-track-fitted climb up and drop through the existing HKS transitions.
+The new edge reader and extractor write placed `edges.json` records for m11_00 and m11_01; collision confirms the researched h019900 chain-7 roof edge.
+E / gamepad Y is the action button; play scripts accept `action`.
+The original start-2 route stayed outside reach; the verified upper-side route at (83.307, 30.6, 243.649), yaw 133.216, finishes at (80.9384, 29.5759, 245.8745), 0.255 m from the edge.
+Reviewed captures are `target/alt/mobility/hang-side.png` and `hang-climbed-side.png`; `docs/MOBILITY.md` records the route, placeholders and remaining docking gaps.
+The drop replay fires HangToFreeFall and lands on the lower roof; `target/alt/mobility/hang-drop.png` shows the released fall.
+Formatting, workspace Clippy, 401 release sim/formats tests (two existing ignored tests) and the alternate release game build pass; game unit tests pass and the pre-existing map_tangents failure remains.
+All commands use `target/alt` and four jobs; no commits or protected-path writes were made.
+
 ## Mobility step 1 (2026-10-11)
 
 Air control uses the four fall types, world-space stick, per-type gravity, decay, braking and the along-speed cap (`docs/MOBILITY.md`, step 1).

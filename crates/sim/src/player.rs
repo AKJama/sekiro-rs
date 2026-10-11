@@ -90,6 +90,13 @@ pub mod arm {
 /// The engine-side facts the script asks about that the behaviour runtime cannot answer.
 #[derive(Debug, Clone)]
 pub struct PlayerEnv {
+    pub hang_candidate: bool,
+    pub docking_variation: u8,
+    pub docking_end: u8,
+    pub docking_active: bool,
+    pub hang_can_climb: bool,
+    pub docking_searches: std::cell::Cell<u8>,
+    pub action_guide: std::cell::Cell<Option<(i32, i32)>>,
     pub hp: f32,
     /// Remaining and maximum posture (env 1001, 2010).
     pub posture: f32,
@@ -160,6 +167,13 @@ pub struct PlayerEnv {
 impl Default for PlayerEnv {
     fn default() -> Self {
         Self {
+            hang_candidate: false,
+            docking_variation: 0,
+            docking_end: 0,
+            docking_active: false,
+            hang_can_climb: false,
+            docking_searches: std::cell::Cell::new(0),
+            action_guide: std::cell::Cell::new(None),
             hp: 100.0,
             posture: 100.0,
             max_posture: 100.0,
@@ -250,6 +264,16 @@ impl Adapter<'_> {
         }
         let env = self.env;
         match id {
+            3011 => env.docking_end as f32,
+            3017 => env.docking_variation as f32,
+            3029 => 0.0,
+            3044 => truth(env.hang_candidate && env.docking_searches.get() & 2 != 0),
+            3046 if arg == Some(1) => env.docking_variation as f32,
+            3050 => truth(env.hang_can_climb),
+            // Shimmy and corners are deferred. Both ends block docking movement.
+            3051 | 3052 => truth(env.docking_active),
+            3043 | 3045 | 3048 | 3049 | 3059 | 3060 => 0.0,
+            3061 => -1.0,
             ENV_FALLING => truth(env.falling),
             ENV_LANDED | ENV_REALLY_LANDED => truth(env.landed),
             ENV_FALL_HEIGHT => env.fall_height,
@@ -339,6 +363,16 @@ impl Host for Adapter<'_> {
     }
 
     fn act(&mut self, id: CommandId<'_>, args: &[Value]) -> Value {
+        if let CommandId::Number(id @ 3026..=3028) = id {
+            self.env
+                .docking_searches
+                .set(self.env.docking_searches.get() | (1 << (id - 3026)));
+        }
+        if id == CommandId::Number(3030) {
+            self.env
+                .action_guide
+                .set(num(args.first()).zip(num(args.get(1))));
+        }
         if id == CommandId::Number(ACT_FACE_DIRECTION)
             && let Some(deg) = args.first().and_then(Value::as_number)
         {

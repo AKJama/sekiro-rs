@@ -2,7 +2,7 @@
 //! place them (map pieces, objects, enemies, player start points, collision).
 //!
 //! Layout knowledge from SoulsFormatsNEXT `MSBS` (ModelParam, PartsParam), reimplemented. Only
-//! what the map loader needs is decoded; events, regions and routes are skipped over.
+//! what the map loader needs is decoded; events and routes are skipped over.
 //!
 //! Part transforms are in FromSoftware's left-handed space: position in metres, rotation in
 //! degrees about X, Y and Z, composed like FLVER nodes (`T * Ry * Rz * Rx * S` in
@@ -142,6 +142,19 @@ impl Part {
 pub struct Msb {
     pub models: Vec<Model>,
     pub parts: Vec<Part>,
+    pub env_regions: Vec<EnvRegion>,
+}
+
+/// Environment probe placement, in the same space and rotation convention as parts.
+#[derive(Debug, Clone)]
+pub struct EnvRegion {
+    pub name: String,
+    pub probe: u32,
+    pub position: [f32; 3],
+    pub rotation: [f32; 3],
+    /// Full box dimensions (width, height, depth); position is the bottom centre.
+    /// None for an environment point.
+    pub size: Option<[f32; 3]>,
 }
 
 impl Msb {
@@ -191,11 +204,57 @@ pub fn parse(data: &[u8]) -> Result<Msb> {
                     msb.parts.push(read_part(data, e)?);
                 }
             }
+            "POINT_PARAM_ST" => {
+                for &e in &entries {
+                    if let Some(region) = read_env_region(data, e)? {
+                        msb.env_regions.push(region);
+                    }
+                }
+            }
             _ => {}
         }
         pos = next;
     }
     Ok(msb)
+}
+
+fn read_env_region(data: &[u8], start: usize) -> Result<Option<EnvRegion>> {
+    let mut r = Reader::at(data, start);
+    let name_offset = r.offset64()?;
+    let kind = r.u32()?;
+    if kind != 2 && kind != 17 {
+        return Ok(None);
+    }
+    r.skip(4);
+    let shape = r.u32()?;
+    let position = r.vec3()?;
+    let rotation = r.vec3()?;
+    let name = utf16z(data, start + name_offset)?;
+    let prefix = if kind == 17 { "Env_Box" } else { "Env_Point" };
+    let Some(suffix) = name.strip_prefix(prefix) else {
+        return Ok(None);
+    };
+    let digits: String = suffix.chars().take_while(char::is_ascii_digit).collect();
+    let probe = digits
+        .parse()
+        .map_err(|_| crate::reader::Error::Format("invalid environment probe name".into()))?;
+    let size = if kind == 17 {
+        if shape != 5 {
+            return bail(format!("environment box {name} has shape {shape}"));
+        }
+        let offset = Reader::at(data, start + 0x48).offset64()?;
+        let [width, depth, height] = Reader::at(data, start + offset).vec3()?;
+        Some([width, height, depth])
+    } else {
+        None
+    };
+    Ok(Some(EnvRegion {
+        name,
+        probe,
+        position,
+        rotation,
+        size,
+    }))
 }
 
 fn read_model(data: &[u8], start: usize) -> Result<Model> {
@@ -328,4 +387,29 @@ fn read_part(data: &[u8], start: usize) -> Result<Part> {
         _ => {}
     }
     Ok(part)
+}
+
+#[cfg(test)]
+mod env_tests {
+    #[test]
+    fn castle_probe_regions() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../cache/raw/map/mapstudio/m11_01_00_00.msb");
+        if !path.exists() {
+            return;
+        }
+        let msb = super::parse(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            msb.env_regions.iter().filter(|r| r.size.is_some()).count(),
+            107
+        );
+        assert_eq!(
+            msb.env_regions.iter().filter(|r| r.size.is_none()).count(),
+            107
+        );
+        assert!(msb.env_regions.iter().all(|r| {
+            r.size
+                .is_none_or(|s| s.iter().all(|x| x.is_finite() && *x > 0.))
+        }));
+    }
 }

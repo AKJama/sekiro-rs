@@ -84,7 +84,9 @@ Known from STATUS.md and re-verified here by parsing 284 map edge files and ever
   On kites they run 1, 10, 11, 12, 13, 14, which is suggestive of per-end cover/peek variation.
 - Endpoints are in the owner's local space.
   For map edges apply the collision part's MSB transform; for objects apply the placed part's transform.
-  The mirror convention of `cache/maps/<id>/layout.json` is `p' = rotate(q, (-px * sx, py * sy, pz * sz)) + t` [I: used to produce the coordinates in section 9; they land on the castle roof where the Owl arena is, so the convention looks right, but it was not checked against a screenshot].
+  In Bevy space, mirror local X first, then apply the mirrored part matrix: `p' = (S * part.matrix() * S) * (S * p)`, where `S = scale(-1, 1, 1)` [V: the edge extractor uses exactly the collision exporter transform].
+  This equals `rotate(q, (-px * sx, py * sy, pz * sz)) + t` with the layout's mirrored transform.
+  The m11_01 `h019900` chain-7 segment from (77.7366, 29.5121, 242.8321) to (83.7762, 29.5392, 249.2599) has upper collision 0.0505 m above its midpoint and a drop on its outward side [V: `crates/sim/tests/docking.rs` and reviewed `target/alt/mobility/hang-side.png`].
 
 ### 3.2 Counts from `cache/raw/map/<id>/<id>.edgebhd`
 
@@ -97,6 +99,8 @@ Decoded with a scratch Python script that reads the BHF4 header and decompresses
 
 STATUS.md's "16 files, 255 edges" is the partial extract under `re/edge/` (16 files of m11_00), not the whole map [V: `ls re/edge`, 16 entries].
 Kind 2 variation split on m11_01: 880 with variation 0, 83 with variation 1.
+The new extractor places all 2289 m11_01 records, but only 1486 m11_00 records (579 hang, 907 cover) have a collision owner placed by its MSB.
+Unplaced collision models are omitted from `edges.json`; the binder parser tests still verify the complete raw counts above.
 The 4 kind-1 records on m11_00 sit in collision part `h060000` with variation 0 and 10 [V].
 
 ### 3.3 `.wall` files
@@ -401,6 +405,47 @@ The Owl arena fall test now expects the landing death on the ground 62 m below t
 - Scripted test: `--map m11_01_00_00 --spawn 82.9,29.8,254.3,15,0 --no-enemy` (start 2 of the castle map; the nearest hang edge `h019900` chain 7 runs from (77.7, 29.5, 242.8) to (83.8, 29.5, 249.3), 5 m ahead; geometry not yet checked on screen, so first log env 3044 along the walk).
   Script: walk forward 60 frames, release, press arm 12, wait, press arm 12 again.
   Expected: env 3044 true near the edge, `W_StandToHang*` fired, `HangIdle` (20000) active, the climb-up press plays `HangToStand` (217500) and Wolf ends standing within 0.3 m of the edge on the upper floor.
+
+**Status (2026-10-11):** Ground entry, idle, climb and drop are implemented for kind 2, variation 0.
+The parser retains both endpoints, the third vector, chain, owner and all flag bytes.
+The extractor writes placed map records to `cache/maps/<id>/edges.json`; normals are absent in the source map records, so the runtime derives the outward side from collision.
+For an edges-only refresh, set `SEKIRO_EDGES_ONLY=1` and run `target/alt/release/sekiro-extract.exe map <id>`.
+The normal map export also writes edges.
+Ground entry supports approaching the edge from the upper floor, or from a lower floor with hands near the top.
+The upper-floor case is necessary for the researched roof edge, whose top is near the standing player's feet.
+HKS still selects the entry event using `HangStartEdgeAngle`, enters `HangIdle`, and selects climb or drop.
+Acts 3026 to 3028 enable the corresponding precomputed search answers for that tick; cover and air entry remain disabled.
+Env 3011 reports the selected segment's endpoint proximity, 3017 and 3046 report variation, 3044 reports the ground search, and 3050 requires collision above the active edge.
+Both docking movement ends are blocked, all corner queries return false, and safe-position return 3061 returns NONE (-1).
+While docked, position follows the selected closest point and hang offset, with gravity and collision pushes bypassed.
+Ground entry immediately anchors the body; the entry clip's root warp timing and rotational alignment are not traced.
+Climb progress comes from the real 217500 root track projected onto its total displacement and fitted to the upper floor; the body settles on that floor when the clip exits.
+This is an approximation of act 3023 precomputation, not a traced docking generator.
+Drop releases docking at `HangToFreeFall` (217520) and resumes normal gravity.
+HangIdle accepts action, jump and dodge through its HKS style even though its TAE carries only turn/prosthetic flags rather than ground execute windows.
+Arm 12 has no traced TAE execute-window mapping, so its request is offered directly to HKS.
+Live action is E or gamepad Y; scripts use `action` through the play/input extension.
+Act 3030 supplies the Hang, Climb and Drop HUD guides.
+
+Placeholder constants, not traced from the exe: horizontal reach 1.0 m, upper-floor height tolerance 0.4 m, lower-entry hand height 1.5 m with the same tolerance, facing limit 45 degrees, hang offset 1.5 m down and 0.35 m outward, climb destination 0.25 m inward, floor-top tolerance 0.3 m, endpoint margin 0.2 m, outward floor probe 0.6 m, minimum outward drop 0.5 m, upper-side tolerance 0.1 m, and fallback climb duration 0.833 s when root motion is missing.
+The constant offset is the untraced `DockingTranslationOffset_Hang` approximation; no corners, shimmy, variation-1 foot hold, or air grabs are claimed.
+Upper floor presence is checked, but full standing-capsule and hand IK clearance are not implemented.
+
+The requested start-2 replay with yaw 15 and 60 forward frames never set env 3044 and stopped at (83.0565, 29.0828, 251.6671), outside the researched segment's range.
+The successful route uses the upper side of the same segment: `--spawn 83.307,30.6,243.649,133.216,0` and `crates/game/scripts/m11_01_ledge_hang.txt` (30 forward frames, 15 released, action, 150 idle, action, 120 released).
+Env 3044 becomes true at steps 43 to 45; step 45 fires `W_StandToHang` (217100), the idle clip is 020000, and step 196 fires `W_HangToStand` (217500).
+The selected point is (80.7562, 29.5256, 246.0457), the hang body position is (80.5011, 28.0256, 246.2854), and the final standing position is (80.9384, 29.5759, 245.8745), 0.255 m from the edge.
+Logs: `target/alt/docking-original-play.log`, `docking-hang-play.log` and `docking-side-fallback-play.log`.
+The final prompt-enabled replay is `target/alt/docking-final-play.log`.
+The companion `m11_01_ledge_drop.txt` fires `W_HangToFreeFall` at step 196, releases docking immediately, and ends standing on the lower roof at (80.5011, 20.9834, 246.2854); see `target/alt/docking-drop-play.log` and `target/alt/mobility/hang-drop.png`.
+Reviewed screenshots: `target/alt/mobility/hang-side.png` and `hang-climbed-side.png` show hands on the eave, the body outside the wall, and feet on the upper floor after climbing.
+The real-data regression also checks both hand bones are within 0.1 m of collision at the grab.
+The approach-side `hang-idle.png` is obscured by the roof; `--extra hang-view` supplies an outside inspection camera through play.rs only.
+One capture attempt encountered a concurrent environment-probe cubemap validation error (one layer supplied to a six-layer view); the successful outside captures use `--no-env-probe`.
+The exported player model still carries its sword in the hand while hanging; weapon location changes are outside this docking slice.
+Validation: `cargo fmt --all --check`, workspace Clippy with `-D warnings`, and the alternate release game build pass with four jobs.
+The final release sim/formats suite passes 401 tests with two pre-existing ignored tests, including edge counts, docking, mobility and owl_arena.
+Game unit tests pass; the full game suite retains the permitted pre-existing `map_tangents` failure (only 0.004 of tangent directions agree).
 
 ### Step 3. Grappling hook
 

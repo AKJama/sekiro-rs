@@ -31,7 +31,10 @@ use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::world_serialization::WorldInstanceReady;
 use serde_json::Value;
 
-use crate::lighting::{MapLighting, apply_lighting, spawn_lights};
+use crate::lighting::{
+    MapLighting, MapProbes, ProbeRegion, apply_lighting, apply_probes, nearest_available_variant,
+    nearest_variant, spawn_lights,
+};
 
 pub struct Options {
     pub cache: PathBuf,
@@ -396,6 +399,61 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
             .with_context(|| format!("reading {}", gparam_path.display()))?,
     )?;
     let hour = scene.hour;
+    let mut probes = MapProbes {
+        prefix: scene.prefix.clone(),
+        variant: nearest_variant(hour),
+        ..default()
+    };
+    // This flag is shared by viewer and play without changing the play-mode options.
+    if !std::env::args().any(|a| a == "--no-env-probe")
+        && let Ok(bytes) = std::fs::read(dir.join("env.json"))
+    {
+        let env: Value = serde_json::from_slice(&bytes).context("reading env.json")?;
+        for r in env["regions"].as_array().into_iter().flatten() {
+            let probe = r["probe"].as_u64().context("probe index")? as u32;
+            let vector = |key: &str| -> Result<Vec3> {
+                let values: [f32; 3] = serde_json::from_value(r[key].clone())?;
+                Ok(Vec3::from_array(values))
+            };
+            let rotation: [f32; 4] = serde_json::from_value(r["rotation"].clone())?;
+            probes.regions.push(ProbeRegion {
+                probe,
+                position: vector("position")?,
+                rotation: Quat::from_array(rotation),
+                size: if r["size"].is_null() {
+                    None
+                } else {
+                    Some(vector("size")?)
+                },
+            });
+        }
+        let exists = |probe: u32, variant: u32| {
+            dir.join(format!("env/gilm{probe}_{variant:02}.dds"))
+                .exists()
+                && dir
+                    .join(format!("env/gilm{probe}_{variant:02}_diffuse.dds"))
+                    .exists()
+        };
+        if let Some(variant) = nearest_available_variant(
+            hour,
+            (0..6).filter(|v| probes.regions.iter().any(|r| exists(r.probe, *v))),
+        ) {
+            probes.variant = variant;
+        }
+        for r in &probes.regions {
+            let probe = r.probe;
+            if dir
+                .join(format!("env/gilm{probe}_{:02}.dds", probes.variant))
+                .exists()
+                && dir
+                    .join(format!("env/gilm{probe}_{:02}_diffuse.dds", probes.variant))
+                    .exists()
+            {
+                probes.available.insert(probe);
+            }
+        }
+    }
+    app.insert_resource(probes);
     app.add_plugins(WireframePlugin::default())
         .insert_resource(ClearColor(SKY))
         .insert_resource(GlobalAmbientLight {
@@ -434,7 +492,7 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
                 camera_environment,
                 toggle_collision,
                 track_loading,
-                (pick_groups, apply_groups, apply_lighting).chain(),
+                (pick_groups, apply_groups, apply_lighting, apply_probes).chain(),
             ),
         );
     Ok(())

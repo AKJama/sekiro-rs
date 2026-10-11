@@ -11,6 +11,9 @@
 //!   [--start <n>] [--collision] [--no-pieces] [--objects] [--hide m9,m8]
 //!   [--groups draw|display|off] [--uncapped]`: fly through an area exported by
 //!   `sekiro-extract map`.
+//!
+//! Map lighting: `--hour H` (default 12), `--no-env-probe` for hemisphere fallback,
+//! `--probe-sky` to show the environment probe capture as the sky (debug only).
 
 mod arena;
 mod audio;
@@ -54,6 +57,7 @@ fn main() -> anyhow::Result<()> {
         "--progression",
         "--brain-stage",
         "--window-size",
+        "--hour",
     ] {
         if args.iter().any(|a| a == flag)
             && arg_value(&args, flag).is_none_or(|v| v.starts_with("--"))
@@ -96,7 +100,7 @@ fn main() -> anyhow::Result<()> {
             uncapped: args.iter().any(|a| a == "--uncapped"),
             groups: map::GroupMode::parse(arg_value(&args, "--groups").as_deref())?,
             objects: args.iter().any(|a| a == "--objects"),
-            hour: arg_f32(&args, "--hour", 16.0)?,
+            hour: arg_f32(&args, "--hour", 12.0)?,
             gparam: arg_value(&args, "--gparam"),
         });
     }
@@ -232,7 +236,7 @@ fn main() -> anyhow::Result<()> {
             spawn: map::parse_camera(arg_value(&args, "--spawn").as_deref())?
                 .map(|[x, y, z, yaw, _]| [x, y, z, yaw]),
             enemy_distance: arg_f32(&args, "--enemy-distance", 5.0)?,
-            hour: arg_f32(&args, "--hour", 16.0)?,
+            hour: arg_f32(&args, "--hour", 12.0)?,
             gparam: arg_value(&args, "--gparam"),
         });
     }

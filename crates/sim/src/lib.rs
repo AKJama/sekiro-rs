@@ -19,6 +19,7 @@ pub mod collision;
 pub mod combat;
 pub mod deathblow;
 pub mod demo;
+pub mod docking;
 pub mod duel;
 pub mod enemy;
 pub mod events;

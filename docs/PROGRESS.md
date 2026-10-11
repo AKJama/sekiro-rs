@@ -29,7 +29,7 @@ This is a high-level view of how much of Sekiro is reimplemented.
 | Map layout and collision | Done | MSB layout and hknp collision. |
 | Lua 5.0 AI scripts | Done | Own interpreter. |
 | Sound banks and event files | Partial | FSB5 and FEV; 112 of 174 banks decode, 62 encrypted. |
-| Ledge and wall files | Partial | `.edge` ledge format decoded, not used yet. |
+| Ledge and wall files | Partial | `.edge` parsed and placed map records extracted; `.wall` remains undecoded. |
 
 Docs: [FORMATS.md](FORMATS.md), [PARAMS.md](PARAMS.md).
 
@@ -44,7 +44,8 @@ Docs: [FORMATS.md](FORMATS.md), [PARAMS.md](PARAMS.md).
 | Air control | Implemented | Per-type fall table, stick steering/braking and speed cap; fall heights in cm, material fall death and map respawn. |
 | Upper/lower body animation layering | Not started | One clip shown at a time. |
 | Grappling hook | Not started | Grapple points found in data. |
-| Ledge hang, wall hug, swimming, climbing | Not started | |
+| Ledge hang | Partial | Ground grab, idle, climb up and drop for variation 0; real-data replay and synthetic HKS tests; docking thresholds remain placeholders. |
+| Wall hug, swimming, climbing | Not started | |
 
 Docs: [HKS-COMBAT.md](HKS-COMBAT.md), [FORMATS.md](FORMATS.md).
 

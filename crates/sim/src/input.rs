@@ -28,6 +28,7 @@ pub mod arm {
     pub const JUMP: i32 = 4;
     pub const DODGE: i32 = 5;
     pub const ITEM: i32 = 7;
+    pub const ACTION: i32 = 12;
     pub const CROUCH: i32 = 15;
     pub const COMBAT_ART: i32 = 32;
 }
@@ -42,6 +43,7 @@ pub struct Buttons {
     pub dodge: bool,
     pub crouch: bool,
     pub grapple: bool,
+    pub action: bool,
     pub prosthetic: bool,
     pub item: bool,
     pub combat_art: bool,
@@ -49,7 +51,7 @@ pub struct Buttons {
 }
 
 impl Buttons {
-    fn arms(&self) -> [(i32, bool); 9] {
+    fn arms(&self) -> [(i32, bool); 10] {
         [
             (arm::ATTACK, self.attack),
             (arm::GUARD, self.guard),
@@ -57,6 +59,7 @@ impl Buttons {
             (arm::DODGE, self.dodge),
             (arm::CROUCH, self.crouch),
             (arm::GRAPPLE, self.grapple),
+            (arm::ACTION, self.action),
             (arm::PROSTHETIC, self.prosthetic),
             (arm::ITEM, self.item),
             (arm::COMBAT_ART, self.combat_art),
@@ -72,6 +75,40 @@ pub struct InputFrame {
     /// Camera yaw in radians: the camera looks along `rotate_y(camera_yaw) * -Z`.
     pub camera_yaw: f32,
     pub buttons: Buttons,
+}
+
+/// Script extension for docking's action button, without changing the common demo format.
+pub fn parse_action_script(text: &str) -> Result<Vec<InputFrame>, String> {
+    let mut frames = Vec::new();
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("");
+        let mut fields: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
+        let mut action = false;
+        if let Some(buttons) = fields.get_mut(3) {
+            let kept: Vec<&str> = buttons
+                .split(',')
+                .filter(|b| {
+                    if *b == "action" {
+                        action = true;
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect();
+            *buttons = if kept.is_empty() {
+                "-".into()
+            } else {
+                kept.join(",")
+            };
+        }
+        let mut segment = crate::demo::parse(&fields.join(" "))?;
+        for frame in &mut segment {
+            frame.buttons.action = action;
+        }
+        frames.extend(segment);
+    }
+    Ok(frames)
 }
 
 /// `ChrActionFlag` that accepts a press of every action (`AttackAction_Complex`).
@@ -111,6 +148,7 @@ pub fn execute_flags(action: i32) -> &'static [i32] {
         arm::JUMP => &[cancel::JUMP],
         arm::DODGE => &[cancel::DODGE],
         arm::ITEM => &[cancel::ITEM],
+        arm::ACTION => &[],
         _ => &[cancel::MOVE],
     }
 }
@@ -171,7 +209,10 @@ impl InputState {
         if action == arm::GUARD && !self.frame.buttons.guard {
             return false;
         }
-        !tae.restricted || execute_flags(action).iter().any(|&f| tae.flag(f))
+        // Arm 12 has no traced TAE execute flag. HKS owns its state gating.
+        action == arm::ACTION
+            || !tae.restricted
+            || execute_flags(action).iter().any(|&f| tae.flag(f))
     }
 
     pub fn pending_actions(&self) -> impl Iterator<Item = i32> + '_ {

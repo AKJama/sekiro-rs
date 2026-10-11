@@ -10,6 +10,9 @@
 //!
 //! Every position and transform is mirrored across X like the model export (docs/FORMATS.md).
 
+mod bc6_hdr;
+mod edges;
+mod env;
 mod pieces;
 mod textures;
 
@@ -150,6 +153,10 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
     std::fs::create_dir_all(out.join("models/tex"))?;
     let oodle = Oodle::load(game).context("the map export needs the game's Oodle DLL")?;
     let msb = read_msb(cache, id)?;
+    env::export(&raw, &out, id, &msb)?;
+    if edges::export(cache, id, &msb, oodle)? {
+        return Ok(());
+    }
     let mtds = load_mtds(&raw)?;
 
     // Map piece and object models actually placed, with their FLVER (and object TPF).

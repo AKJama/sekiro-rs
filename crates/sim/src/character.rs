@@ -98,6 +98,7 @@ pub enum ControlKind {
 }
 
 pub struct Character {
+    pub docking: crate::docking::Docking,
     pub chr: String,
     pub kind: ControlKind,
     pub behavior: PlayerBehavior,
@@ -235,6 +236,7 @@ impl Character {
             tae,
             tae_runtime: TaeRuntime::default(),
             body: Body::default(),
+            docking: crate::docking::Docking::default(),
             input: InputState::default(),
             npc: NpcControl::default(),
             lock_target: None,
@@ -549,12 +551,54 @@ impl Character {
 
     /// Runs one step of `dt` seconds. `frame` is the player's input; NPCs read [`Self::npc`].
     pub fn tick(&mut self, frame: &InputFrame, dt: f32) -> StepReport {
+        // HangIdle carries turn/prosthetic flags but no step/jump cancel windows.
+        // Docking's idle actions are gated by HKS, not the ground combat buffer.
+        let docking_idle = self.docking.active.is_some()
+            && self
+                .behavior
+                .runtime
+                .main_clip()
+                .is_some_and(|c| c.animation == "a000_020000");
         if self.kind == ControlKind::Player {
-            self.input.update(frame, dt, &self.tae_runtime.frame);
+            let mut input_tae = self.tae_runtime.frame.clone();
+            if docking_idle {
+                input_tae.restricted = false;
+            }
+            self.input.update(frame, dt, &input_tae);
             self.free_move_start_turn();
         }
         self.set_engine_variables();
         self.fill_env(dt);
+        if docking_idle {
+            self.behavior.env.standby = Some(true);
+            self.behavior.env.requested = self
+                .input
+                .pending_actions()
+                .filter(|a| self.input.requested(*a, &TaeFrame::default()))
+                .collect();
+        }
+        self.docking.search(&self.body, self.ground.as_ref());
+        let dock = self
+            .docking
+            .active
+            .as_ref()
+            .or(self.docking.candidate.as_ref());
+        let env = &mut self.behavior.env;
+        env.docking_searches.set(0);
+        env.action_guide.set(None);
+        env.hang_candidate = self.docking.candidate.is_some();
+        env.docking_active = self.docking.active.is_some();
+        env.docking_variation = dock.map_or(0, |t| self.docking.edges[t.edge].variation);
+        env.docking_end = dock.map_or(0, |t| t.end);
+        env.hang_can_climb = self.docking.active.as_ref().is_some_and(|t| {
+            self.docking
+                .target(t.edge, t.point, self.ground.as_ref())
+                .is_some()
+        });
+        self.behavior
+            .runtime
+            .set_variable("HangStartEdgeAngle", dock.map_or(0.0, |t| t.angle));
+        self.behavior.runtime.set_variable("DockingStickAngle", 0.0);
         let requested: Vec<i32> = self.behavior.env.requested.iter().copied().collect();
         let resets_before = self.behavior.env.input_resets.get();
 
@@ -711,7 +755,27 @@ impl Character {
         let [rx, _, rz, _] = root_motion;
         self.heading = (rx.hypot(rz) > HEADING_MIN_SPEED * dt && self.body.grounded)
             .then(|| angle_diff(self.body.yaw + rx.atan2(-rz), 0.0));
-        self.body.step(&body_input, dt, self.ground.as_ref());
+        let root_progress = main
+            .as_ref()
+            .filter(|c| c.animation == "a000_217500")
+            .and_then(|c| {
+                let clip = self.clips.clip(&c.animation)?;
+                let rm = clip.root_motion.as_ref()?;
+                let start = glam::Vec3::from_array(rm.sample(0.0)[..3].try_into().ok()?);
+                let end = glam::Vec3::from_array(rm.sample(clip.duration)[..3].try_into().ok()?);
+                let current = glam::Vec3::from_array(rm.sample(c.time)[..3].try_into().ok()?);
+                let delta = end - start;
+                (delta.length_squared() > 1e-6)
+                    .then(|| (current - start).dot(delta) / delta.length_squared())
+            });
+        if !self.docking.step(
+            &mut self.body,
+            main.as_ref().map(|c| c.animation.as_str()),
+            main.as_ref().map_or(0.0, |c| c.time),
+            root_progress,
+        ) {
+            self.body.step(&body_input, dt, self.ground.as_ref());
+        }
         // The lower body catches up with the facing at the default turn speed.
         let unwind = DEFAULT_TURN_SPEED * dt;
         self.twist -= self.twist.clamp(-unwind, unwind);

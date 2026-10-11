@@ -9,6 +9,7 @@ pub mod bnd4;
 pub mod bxf4;
 pub mod dcx;
 pub mod dvd;
+pub mod edge;
 pub mod emedf;
 pub mod emevd;
 pub mod fev;

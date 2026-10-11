@@ -120,3 +120,10 @@ The ending measured cache size was 43,670,034,031 bytes.
 Concurrent work may also have written cache artifacts, so this is measured repository cache growth rather than perfect per-task attribution.
 Per-map output sizes are recorded in `cache/screens/maps/final_inventory.json`.
 The eight newly extracted map directories total 6,723,090,910 bytes (6.26 GiB), excluding the two pre-existing m11 directories and the screenshot/diagnostic directory.
+
+## Sky and GI probe follow-up (2026-10-11)
+
+The three requested maps now export HDR probe cubes, diffuse cubes and spatial regions under `cache/maps/<id>/env/` and `env.json`.
+Reviewed before/after captures are in `target/alt/visuals/`; shaded surfaces respond to local radiance and the hour variant.
+The probe Skybox still contains captured architecture, especially through Castle windows, so the sky fidelity check remains open.
+Layered materials and foliage remain the baseline issues listed above.

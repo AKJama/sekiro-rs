@@ -317,12 +317,20 @@ pub fn run(options: Options) -> Result<()> {
         on_map = Some((dir, id.clone(), world));
         map::raise_io_stack();
     }
+    if let Some((dir, _, _)) = &on_map
+        && dir.join("edges.json").exists()
+    {
+        duel.player.docking = sekiro_sim::docking::Docking::load(&dir.join("edges.json"))
+            .map_err(anyhow::Error::msg)?;
+    }
     let script = match options.script.as_deref() {
         None => None,
         Some("builtin") => Some(demo::parse(demo::DEMO).map_err(anyhow::Error::msg)?),
         Some(path) => Some(
-            demo::parse(&std::fs::read_to_string(path).with_context(|| path.to_string())?)
-                .map_err(anyhow::Error::msg)?,
+            sekiro_sim::input::parse_action_script(
+                &std::fs::read_to_string(path).with_context(|| path.to_string())?,
+            )
+            .map_err(anyhow::Error::msg)?,
         ),
     };
     let scripted = script.is_some();
@@ -701,6 +709,7 @@ fn gather_input(
         dodge: key(KeyCode::ShiftLeft) || key(KeyCode::ShiftRight),
         crouch: key(KeyCode::KeyC),
         grapple: key(KeyCode::KeyF),
+        action: key(KeyCode::KeyE),
         prosthetic: key(KeyCode::ControlLeft) || mouse.pressed(MouseButton::Middle),
         item: key(KeyCode::KeyR),
         combat_art: false,
@@ -717,6 +726,7 @@ fn gather_input(
         b.dodge |= pad.pressed(GamepadButton::East);
         b.crouch |= pad.pressed(GamepadButton::LeftThumb);
         b.grapple |= pad.pressed(GamepadButton::LeftTrigger2);
+        b.action |= pad.pressed(GamepadButton::North);
         b.prosthetic |= pad.pressed(GamepadButton::RightTrigger2);
         b.item |= pad.pressed(GamepadButton::West);
         b.lock_on |= pad.pressed(GamepadButton::RightThumb);
@@ -835,6 +845,28 @@ fn simulate(
     }
     let before = sim.duel.player.body.position;
     let report = sim.duel.step(&frame, dt);
+    if std::env::var_os("PLAY_LOG_DOCKING").is_some() {
+        let wolf = &sim.duel.player;
+        let target = wolf
+            .docking
+            .active
+            .as_ref()
+            .or(wolf.docking.candidate.as_ref());
+        eprintln!(
+            "DOCK step={} env3044={} env3050={} pos={:?} edge={:?} point={:?} anim={:?} events={:?}",
+            sim.step,
+            wolf.behavior.env.hang_candidate && wolf.behavior.env.docking_searches.get() & 2 != 0,
+            wolf.behavior.env.hang_can_climb,
+            wolf.body.position,
+            target.map(|t| (
+                &wolf.docking.edges[t.edge].source_part,
+                wolf.docking.edges[t.edge].chain
+            )),
+            target.map(|t| t.point.to_array()),
+            report.player.animation,
+            report.player.behavior.events
+        );
+    }
     if report.respawned {
         // A respawn teleports the camera with Wolf instead of chasing up from the ravine.
         orbit.focus = Vec3::from_array(sim.duel.player.body.position)
@@ -1076,6 +1108,13 @@ fn follow_camera(
         return;
     };
     let wolf = shown(&sim, WOLF, fixed.overstep_fraction()).0;
+    // Scripted inspection angle: `--extra hang-view`, parsed here to avoid main.rs.
+    if std::env::args().any(|a| a == "hang-view")
+        && let Some(target) = &sim.duel.player.docking.active
+    {
+        orbit.yaw = target.yaw() - 30.0f32.to_radians();
+        orbit.pitch = 0.1;
+    }
     let director = &sim.duel.camera_director;
     let params = director.params();
     let mut wanted = wolf + Vec3::Y * director.focus_height;
@@ -1189,6 +1228,16 @@ fn hud(
     for line in &sim.hit_log {
         s += line;
         s.push('\n');
+    }
+    match sim.duel.player.behavior.env.action_guide.get() {
+        Some((20, 12)) => s += "E / Y: Hang\n",
+        Some((21, 12) | (22, 5)) => {
+            if sim.duel.player.behavior.env.hang_can_climb {
+                s += "E / Y: Climb up   ";
+            }
+            s += "Shift / B: Drop\n";
+        }
+        _ => {}
     }
     s += "WASD move, mouse look, LMB attack, RMB guard, Space jump, Shift step/sprint, C crouch, Q lock-on, Esc mouse, -/= volume";
     text.0 = s;

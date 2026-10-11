@@ -300,6 +300,31 @@ Use three fixed hours (`--hour 6`, `12`, `18`) for lighting steps, and keep the 
 - Check: a text diff of two hours shows the expected sun, sky and LUT changes (not a screenshot).
 - Why first: removes guessing about light banks, ShadowParam fields and Bloom ranges.
 
+#### Step 0 status (2026-10-11)
+
+Implemented `crates/formats/examples/gparam_dump.rs` as a read-only dump of every matching draw-param file for the three requested maps, including every group, param, id, time key and value, distinct `LightBankId` values and MSB config tuples.
+The complete output and the 6 h versus 12 h text comparison are under `target/alt/visuals/`.
+The following facts describe each map's default `_0000` GPARAM; override files are also dumped rather than assumed equivalent.
+
+The m11 maps use a warm low morning sun, a high blue-grey noon sun, a warm low evening sun and blue moonlight at 2/22 h; the 0 h sun RGB is zero.
+Sky colour changes from nearly black at 0 h through blue at 6/12 h to muted blue-grey at 18/22 h.
+Both use LUT 0 at 0/6/18 h, LUT 20 at 2/22 h and LUT 30 at 12 h.
+Fountainhead's default sun, sky, LUT 20 and tone settings are constant at every sampled hour.
+
+| Hour | Outskirts exposure / middle grey / adaptation min..max | Castle exposure / middle grey / adaptation min..max | Bloom threshold / alpha, Outskirts; Castle |
+| --- | --- | --- | --- |
+| 0 | 0 / -3 / -0.4..8 | 0 / -3 / -0.4..8 | 0.075 / 1; 0.075 / 1 |
+| 2 | 0.2 / -4.9 / -0.5..0.5 | 0.2 / -4.9 / -0.5..0.5 | 0.075 / 1; 0.075 / 1 |
+| 6 | 1.4 / -6.8 / -0.5..2 | 0.5 / -5.2 / -0.7..2 | 0.015 / 0.4; 0 / 0.4 |
+| 12 | 0.4 / -4.2 / -0.01..0.5 | 0.5 / -5.4 / -0.01..0.01 | 0 / 0.5; 0 / 0.5 |
+| 18 | 0.2 / -4.2 / -0.5..0.5 | 0.8 / -6.6 / -0.5..1 | 0 / 0.4; 0 / 0.3 |
+| 22 | -0.2 / -4.9 / -0.5..0.5 | 0.3 / -4.9 / -0.5..0.5 | 0 / 0.5; 0.05 / 0.3 |
+
+Gaussian radius scale is 1 in these sampled default files.
+Fountainhead has exposure 1.1, middle grey -4.5, adaptation -0.5..0.5 and bloom threshold/alpha 0.075/0.4 at every sampled hour.
+The default light-bank values are 111000000, 111010000 and 125000000 respectively; their meaning remains unresolved.
+MSB environment-map IDs in these maps are 0 or -1 and do not identify the many spatial probe regions.
+
 ### Step 1. Sky and GI probe lighting (largest win)
 
 - Files: `crates/formats/src/msb.rs` (read regions: type 17 `Env_Box`, type 2 `Env_Point`), a BC6H decode in `crates/extract` (small, own or the `bcdec_rs` crate, licence to check), `crates/extract/src/maps/` (write cube DDS and irradiance), `crates/game/src/lighting.rs` and `map.rs` (add `EnvironmentMapLight` and `Skybox` to the cameras, set ambient to zero when a probe is present).
@@ -311,6 +336,33 @@ Use three fixed hours (`--hour 6`, `12`, `18`) for lighting steps, and keep the 
 - Risk: interior probes selected wrongly look worse than flat ambient.
   Mitigation: a debug flag to force fallback.
 
+#### Step 1 status (2026-10-11)
+
+Implemented MSB Env_Point/Env_Box parsing, including rotated bottom-centred boxes and numeric probe IDs.
+Castle cache tests confirm 107 points and 107 boxes.
+The extractor writes mirrored RGBA16F 128-pixel cube DDS files with box-filtered mips, 16-pixel cosine-weighted Lambert diffuse cubes and `env.json`.
+The HDR decoder adapts the locally available texture2ddecoder MIT implementation because its public BC6H API quantizes to RGBA8; the complete upstream licence is retained in the source.
+Re-extraction produced 275 Outskirts, 696 Castle and 49 Fountainhead probe variants.
+Outskirts has no variant 00 and Fountainhead only has variant 04, so runtime chooses the nearest actually available hour.
+
+The camera focus selects the smallest containing box, otherwise the nearest point, with an immediate cut.
+Each 3D camera uses that probe for Skybox and EnvironmentMapLight, and flat ambient becomes zero only after both images load.
+`--hour` defaults to 12 and `--no-env-probe` retains the existing hemisphere fallback.
+`ENV_PER_UNIT = LUX_PER_UNIT / pi = 9000 / pi = 2864.8 cd/m2`, following FwLo's scale relation without an additional eye-tuned multiplier.
+
+All six requested views and their fallback pairs are under `target/alt/visuals/`, named `outskirts-h6`, `outskirts-h12`, `outskirts-h18`, `castle-h12`, `castle-h18` and `interior-h12`, with `-probe.png` and `-fallback.png` suffixes.
+Morning/evening shade becomes warmer and noon/interior shade cooler; Castle evening is substantially darker than the flat ambient fallback.
+Material layering and foliage still look approximate, as expected before steps 6 and 8.
+The source GI cubes contain nearby scenery and ceilings, so using them as an infinite sky visibly duplicates architecture through Castle windows.
+Sky-only colour clustering was tried and rejected because it produced artifacts; the final implementation uses the unchanged local probe radiance.
+So the probes drive lighting and reflections only; the sky stays the GPARAM clear colour until the sky dome meshes (step 14), and `--probe-sky` shows the capture as a sky for debugging.
+The X mirror and cube axes are unit tested, DDS loading verifies six layers, and the Outskirts morning/noon brightest direction is within 6.7/8.3 degrees of GPARAM sun direction; brightest pixels in other captures may be walls, so these are supporting evidence rather than exact sun verification.
+
+Specular mip filtering is a box-filter approximation rather than a GGX convolution, diffuse integration uses 256 samples, and probe transitions do not blend.
+The runtime frame measurements are capped at 60 Hz; `perf-summary.csv` records matched medians of 16.6-16.8 ms, with probe deltas from -0.034 to +0.076 ms, and cannot establish uncapped GPU cost.
+Final formatting, workspace Clippy, release formats/extract tests (64 passed, two ignored), 14 game unit tests and the alternate release game build pass.
+The permitted pre-existing map_tangents failure remains: direction agreement 0.004 and handedness agreement 0.953 across 1,288,976 vertices.
+Unused `sky_*.dds` experiment outputs may remain in the ignored cache but are never loaded by the final implementation.
 ### Step 2. HDR camera, tonemapper, GPARAM bloom, colour-grading LUT
 
 - Files: `crates/game/src/lighting.rs` (camera components), a new `crates/game/src/grading.rs` and `grading_lut.wgsl` (post pass after tonemapping, our own code using Bevy's post-process pattern), `crates/extract/src/maps/textures.rs` (export `m11_cgrading` strips as small DDS).
