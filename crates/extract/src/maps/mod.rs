@@ -381,6 +381,7 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
                     row["map_name_id"] = json!(c.map_name_id);
                     row["display_groups"] = json!(groups(p, 0));
                     row["light_set"] = json!(p.gparam.map_or(-1, |g| g[0]));
+                    row["fog_set"] = json!(p.gparam.map_or(-1, |g| g[1]));
                     row["draw_groups"] = json!(groups(p, 1));
                 }
                 row

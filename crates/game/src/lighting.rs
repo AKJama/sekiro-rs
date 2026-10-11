@@ -9,13 +9,14 @@
 //!
 //! What maps onto Bevy is approximated: the engine's units and tone mapping are not known, so
 //! intensities scale by [`LUX_PER_UNIT`]; ambient light is the average of the hemisphere colours;
-//! volumetric fog becomes exponential distance fog. Angles are (pitch, yaw) in radians in the
+//! fog uses the recovered global shader profile in an HDR post pass. Angles are (pitch, yaw) in radians in the
 //! game's space: the vector `Ry(yaw) * Rx(pitch) * +Z` points toward the light, and is mirrored
 //! on X into Bevy space like everything else.
 
 use anyhow::Context;
 use bevy::light::{EnvironmentMapLight, GlobalAmbientLight, Skybox};
-use bevy::pbr::{DistanceFog, FogFalloff};
+#[path = "fog.rs"]
+pub(crate) mod fog;
 use bevy::prelude::*;
 use sekiro_formats::gparam::Gparam;
 
@@ -46,7 +47,7 @@ struct MapPostEffects {
 struct PostEffectsPlugin;
 impl Plugin for PostEffectsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((grading::GradingPlugin, AutoExposurePlugin));
+        app.add_plugins((grading::GradingPlugin, fog::FogPlugin, AutoExposurePlugin));
     }
     fn finish(&self, app: &mut App) {
         let compute = app.get_sub_app(bevy::render::RenderApp).is_some_and(|r| {
@@ -520,8 +521,6 @@ pub struct LightSet {
     pub ambient: Color,
     pub ambient_brightness: f32,
     pub sky: Color,
-    pub fog_density: f32,
-    pub fog_sun_color: Color,
 }
 
 fn colour(v: &[f32]) -> (Color, f32) {
@@ -553,7 +552,6 @@ impl LightSet {
         let (up, up_w) = colour(&get("Hemi Color Up").unwrap_or(vec![0.6, 0.7, 0.8, 0.5]));
         let (down, down_w) = colour(&get("Hemi Color Down").unwrap_or(vec![0.4, 0.4, 0.4, 0.2]));
         let (sky, _) = colour(&fog("SkyColor").unwrap_or(vec![0.5, 0.55, 0.65, 1.0]));
-        let (fog_sun, fog_sun_w) = colour(&fog("DirectColor").unwrap_or(vec![1.0, 0.8, 0.6, 1.0]));
         let up_l = up.to_linear();
         let down_l = down.to_linear();
         let ambient = Color::linear_rgb(
@@ -571,11 +569,6 @@ impl LightSet {
             ambient,
             ambient_brightness: AMBIENT_PER_UNIT,
             sky,
-            fog_density: fog("FixedDensity")
-                .and_then(|v| v.first().copied())
-                .unwrap_or(0.002)
-                .max(0.0003),
-            fog_sun_color: fog_sun.with_alpha((fog_sun_w * 0.4).clamp(0.0, 1.0)),
         }
     }
 }
@@ -619,11 +612,8 @@ pub fn apply_lighting(
     mut clear: ResMut<ClearColor>,
     mut sun: Query<(&mut DirectionalLight, &mut Transform), (With<Sun>, Without<FillLight>)>,
     mut fill: Query<(&mut DirectionalLight, &mut Transform), (With<FillLight>, Without<Sun>)>,
-    mut fogs: Query<&mut DistanceFog>,
 ) {
-    // Reading the change ticks through `iter_mut` does not mark the fog changed.
-    let new_fog = fogs.iter_mut().any(|f| f.is_added());
-    if lighting.applied == Some(lighting.light_set) && !new_fog {
+    if lighting.applied == Some(lighting.light_set) {
         return;
     }
     let set = LightSet::from_gparam(&lighting.gparam, lighting.light_set, lighting.hour);
@@ -647,14 +637,6 @@ pub fn apply_lighting(
     ambient.color = set.ambient;
     ambient.brightness = set.ambient_brightness;
     clear.0 = set.sky;
-    for mut f in &mut fogs {
-        f.color = set.sky;
-        f.directional_light_color = set.fog_sun_color;
-        f.directional_light_exponent = 16.0;
-        f.falloff = FogFalloff::Exponential {
-            density: set.fog_density,
-        };
-    }
 }
 
 #[cfg(test)]

@@ -4,6 +4,53 @@ Last updated 11 October 2026.
 Read this first in a new session, then `AGENTS.md` and `docs/DESIGN.md`.
 How much of the game is done overall: `docs/PROGRESS.md`.
 
+## Shader fog and arena scenery (2026-10-11)
+
+Bevy DistanceFog is replaced by an original HDR depth pass implementing recovered height density, directional colours, independent source gates, midpoint integration and analytical far continuation, with MSAA and `--no-fog` preserved.
+Named provisional CPU conversions use height scale 0.01 and `world_y+offset`; castle FarDepth is 400 and authored GameScale 2.5 is retained pending verified packing.
+Owl and Genichiro retain 60 m collision and objects while rendering map pieces to 1500 m, including all 3622 castle pieces versus 1553 cropped; `--no-far-scenery` restores the render control.
+Matched Owl runs add about 2.1 GiB peak working set and 1.0-1.4 s loading; fog costs about 0.34 ms GPU, while paced frame medians near 16.7 ms do not isolate distant-geometry cost.
+All requested v5 screenshot combinations were inspected, with smooth distance haze, warmer dusk and no arena crop edge; additional Fountainhead lake captures expose the existing flat water limitation.
+Native CPU transforms, local fog/shadows, fog cards and transparent-depth handling remain documented gaps in `docs/SHADERS.md` and `docs/VISUALS-PLAN.md`.
+Workspace formatting, all-target Clippy with `-D warnings`, the requested release game/sim/formats/extract tests and release game build pass offline with six jobs in `target/alt`.
+Artifacts and save backup are under `target/alt/visuals/`; no commits, network calls or protected-path writes were made.
+
+## Mobility step 6: swimming and cover sword (2026-10-11)
+
+Water material planes now drive HKS swimming, diving, root-motion up/down movement, surface buoyancy, water landing and shore exit, with solid underwater floors retained.
+The m13 Abandoned Dungeon replay reaches SwimMove, SwimToDive, DiveMoveDown, DiveJump / DiveToAir, water landing and ground movement after a shore jump; synthetic tests also reach DiveToSwim and shallow-water exit.
+Cover docking now uses the hang fix's scabbard attachment; the matched `target/alt/mobility/cover-sword-{before,after}.png` captures show a clear right hand.
+All five `target/alt/mobility/swim-*.png` captures were inspected: the dive position lowers and the shore exit stands on terrain, but pale water leaves visible immersion unverified and the resurface camera is too close.
+Native water rendering/body offsets, volume bounds, underwater optics and camera remain documented gaps in docs/MOBILITY.md; concurrently owned map/material files were not edited.
+Formatting, workspace/all-target Clippy with `-D warnings`, the full release sim/formats suite and the release game build pass, including all six swimming tests and existing mobility/cover/hang/grapple tests.
+Validation logs are under `target/alt/mobility/swim-*`.
+The complete sim/formats suite reports 445 passed and two existing ignored.
+All Cargo work uses offline mode, target/alt and six jobs; saves were backed up under `target/alt/mobility/save-backup-20261011-swim` before game runs.
+No commits, network calls or protected-path writes were made.
+
+## Castle Genichiro boss brain (2026-10-11)
+
+Castle c7100 row 71001000 now uses the shared coach/scripted/Decisions/Responses controller lookup, with 24 Lua/TAE/AtkParam-derived actions, seven named combos, all seventeen existing tactics and fifteen mixed chains.
+The new offline suite records 52 brain-chosen attack starts in 60 seconds across 18 plans, arrow bullets 71000500 and 71000530 through 71000533, real combo move sheets, unchanged Lua choices, posture checkpoints, six-second pacing and isolated c7100 boss/player memory paths.
+The first deathblow keeps the driver; the second hands castle c7110 row 71100000 back to its separate Lua goal, with no c7100 plan or memory carried across.
+Grabs, automatic downed-Wolf/counter reactions, predictive arrow 3013 and unavailable lightning remain excluded from the offered vocabulary; reset after the hand-over needs a new run to reinstall the brain.
+The forty-second scripted god-mode replay keeps memory off, and all four `target/alt/genichiro/brain-{005,010,020,040}.png` captures were inspected.
+The overlay clearly shows Genichiro's active combo and move label; dark armor and excessive close framing after knockback at the roof edge remain gaps outside this brain change.
+Formatting, workspace/all-target Clippy with `-D warnings`, the full release sim/brain-net suite (417 passed) and the release game build pass offline with six jobs in `target/alt`.
+Check logs and screenshots are under `target/alt/genichiro/`; no commits, real model/coach calls, network access or protected-path writes were made, and saves were backed up before game runs.
+See `docs/BRAIN.md` and `docs/GENICHIRO.md` for the complete table, derivation and exclusions.
+
+## Visuals steps 6 and 8 (2026-10-11)
+
+Original layered map materials support `M[Multiple]` and `M[MultipleGround]`, with overlay/snow/layer C from the first byte of FLVER packed blend streams 0/4/2, repeat samplers and `--no-layers` / `--show-blend` controls.
+Foliage cutouts are two-sided, Wind/Gradient sampler mismatches have an MTD fallback, and previously discarded decal vertex alpha is retained with neutral RGB.
+Hirata's suffixed envmap contains 148 GILM cubes; full extraction now succeeds and writes edges, grapple points and lights.
+All ten maps were regenerated sequentially, and all four requested `target/alt/visuals/v4-*-{before,after}.png` pairs were inspected: snow tops, moss patches and open foliage silhouettes improve without obvious tiling seams.
+Sunken Valley retains an isolated opaque SnowGround triangular patch; native coverage, secondary masks, UV transforms and gloss remain gaps documented in `docs/VISUALS-PLAN.md`.
+Two uncapped timing series disagree under concurrent jobs: Outskirts layer-on wall cost ranges from -4.81 to +3.93 ms; matched short opaque GPU samples are 2.25 ms off / 2.20 ms on, so no reliable isolated cost is claimed.
+Formatting, workspace/all-target Clippy with `-D warnings`, the requested release game/formats/extract suite (99 passed, two existing ignored, including `map_tangents`) and the release game build pass offline with six jobs in `target/alt`.
+FwLo receives one facts-only credit clause; this work made no commits or network calls, and saves were backed up before game runs.
+
 ## Mobility step 4: wall hug (2026-10-11)
 
 Kind-3 cover supports all eight variations, HKS entry/idle, authored-root-distance sliding with endpoint clamps, restricted look-out states and action/away-stick exits, using the existing E / Y action button.

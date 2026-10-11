@@ -602,9 +602,52 @@ Only the base mask is bound, and normal layers use our existing BC5 conversion w
 
 - Files: `lighting.rs`, `map.rs`, a small WGSL addition or Bevy fog extension for height fog, exporter change to keep fog card materials instead of dropping them.
 - Behaviour: `HeightFogDensity Scale`, `HeightFogOffset`, `HeightFogDistribution`, `StartDist`, `OppositeColor`.
-  Start with the existing exponential model and add one term, not a volumetric solver.
+  The shader recovery in `SHADERS.md` supersedes the earlier exponential-model proposal.
 - Check: m10_00_00_00 (Hirata, foggy) and m17_00_00_00 start views at 12 h.
 - Risk: `GameScale` and the real distance units are unverified [I], keep a tuning knob.
+
+#### Step 7 status (2026-10-11)
+
+Bevy `DistanceFog` is replaced with the recovered global density, directional blend, independent source gates, midpoint integration and analytical far continuation in `fog.rs` and `fog.wgsl`.
+This is an HDR depth-based pass before bloom and tone mapping, using the main depth texture with MSAA preserved.
+Sky/background and map/character scene pixels share the same integration.
+`--no-fog` disables the pass, and `--visual-stats` reports frame and fog GPU timing.
+The named provisional conversions are documented in `SHADERS.md`, including height scale `0.01` and affine height `world_y+offset`.
+Native CPU GameScale packing, bank resolution, pre-exposure, local fog sources, shadowed fog and independent transparent depth remain gaps.
+MSB FogParamID is preserved independently of LightSetID; the tested draw-param files contain no separate Fog group.
+
+Arena collision and objects still use the existing 60 m radius.
+Map pieces now render within a separate 1500 m radius, which includes all 3622 exported castle instances in these captures, versus 1553 with `--no-far-scenery`.
+Far pieces bypass the local collision draw-group mask and remain subject to the existing focus-based shadow-caster budget.
+They never become simulation collision, and `--full-map` retains its explicit full-collision meaning.
+The cache contains only LOD0 GLBs; keeping the full pieces avoids inventing or regenerating LODs, and the measured working set fits the 32 GiB machine.
+
+The v5 captures and measurements live under `target/alt/visuals/`, not the historical cache screenshot path above.
+The matrix covers Owl and Genichiro with `--god --simple-ai`, hours 12 and 18, fog on/off and far scenery on/off, plus Outskirts start 3 and Fountainhead start 1 at noon.
+Scripts and measured peak CPU working sets are retained with the captures.
+All matrix images were inspected: noon haze increases with distance, dusk is warmer toward the sun, the far-scene crop edge disappears and the horizon joins the fog without visible banding.
+The additional `v5-*-18-*-*-sun.png` views face the dusk sun.
+Outskirts start 3 retains clear foreground silhouettes while its gate recedes into haze.
+Fountainhead start 1 is inside a porch, so `v5-m25-lake-clear-12-{on,off}.png` supplements it with an unobstructed lake view.
+Fog softens the distant terrain and sky seams there; the pale flat water surface remains the existing water-rendering gap.
+
+Matched Owl noon measurements use a twenty-second idle script, `--god --simple-ai --uncapped --visual-stats`, 1600 x 900, RTX 5070 Ti and Ryzen 5700X3D with 32 GiB RAM.
+Peak working set includes CPU assets and the renderer, not dedicated GPU memory.
+
+| Fog | Scenery | Map load | Peak working set | Median frame after 12 s | Fog GPU mean |
+| --- | --- | --- | --- | --- | --- |
+| Off | 60 m crop | 1.8 s | 3.17 GiB | 16.688 ms | Disabled |
+| Off | 1500 m | 3.2 s | 5.17 GiB | 16.669 ms | Disabled |
+| On | 60 m crop | 2.3 s | 3.15 GiB | 16.674 ms | 0.344 ms |
+| On | 1500 m | 3.3 s | 5.26 GiB | 16.652 ms | 0.343 ms |
+
+Far scenery adds about 2.0-2.1 GiB and 1.0-1.4 s of warm loading; the simulation still loads the same 470455 collision triangles.
+Frame medians remain near 16.7 ms despite `--uncapped`, and another job compiled during the measurements, so these wall timings do not isolate the far-geometry GPU cost.
+The fog GPU timestamp does establish approximately 0.34 ms for this view.
+Run logs, scripts, `v5-bench-metrics.json` and `v5-bench-summary.json` retain the measurements.
+Workspace formatting, all-target Clippy with `-D warnings`, release tests for game/sim/formats/extract and the release game build pass offline with six jobs in `target/alt`.
+Final check logs are `v5-{fmt,clippy,tests,build}-final.txt`.
+The final release executable also exits successfully after saving `v5-final-validation.png`; the inspected Owl valley view preserves clear foreground edges and smooth distant haze, with fog GPU timestamps of 0.340-0.341 ms.
 
 ### Step 8. Foliage and alpha correctness
 

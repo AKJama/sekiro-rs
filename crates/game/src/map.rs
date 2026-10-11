@@ -27,7 +27,6 @@ use bevy::light::GlobalAmbientLight;
 use bevy::light::NotShadowCaster;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::pbr::wireframe::{Wireframe, WireframeColor, WireframePlugin};
-use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::world_serialization::WorldInstanceReady;
@@ -103,6 +102,10 @@ impl GroupMode {
 #[derive(Component)]
 struct DrawGroups([u32; 8]);
 
+/// Distant render-only scenery is independent of the local collision's draw groups.
+#[derive(Component)]
+struct FarScenery;
+
 struct CollisionPart {
     name: String,
     first: usize,
@@ -113,6 +116,7 @@ struct CollisionPart {
     draw: [u32; 8],
     /// Light set id of the collision's gparam config (-1 when none).
     light_set: i32,
+    fog_set: i32,
 }
 
 #[derive(Resource)]
@@ -270,8 +274,8 @@ pub struct MapScene {
     pub hour: f32,
     /// Draw param file stem (`param/drawparam/<stem>.gparam`); default `<mXX>_<YY>_0000`.
     pub gparam: Option<String>,
-    /// Only spawn pieces, objects and collision that reach within this horizontal radius of
-    /// this point (a boss arena); `None` spawns the whole map.
+    /// Arena collision and object radius. Map pieces use ARENA_VISUAL_RADIUS unless
+    /// --no-far-scenery is set; `None` loads the whole map.
     pub within: Option<(Vec3, f32)>,
 }
 
@@ -367,6 +371,7 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
                 display: groups8(&row["display_groups"]),
                 draw: groups8(&row["draw_groups"]),
                 light_set: row["light_set"].as_i64().unwrap_or(-1) as i32,
+                fog_set: row["fog_set"].as_i64().unwrap_or(-1) as i32,
             });
         }
     }
@@ -381,6 +386,23 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
         .parent()
         .and_then(Path::parent)
         .context("map folder has no cache above it")?;
+    // Older extractor output lacks FogParamID; read the installed-data copy without rewriting it.
+    if group_parts.iter().any(|p| p.fog_set < 0)
+        && let Ok(bytes) = std::fs::read(cache.join(format!("raw/map/mapstudio/{id}.msb")))
+        && let Ok(msb) = sekiro_formats::msb::parse(&bytes)
+    {
+        for part in &mut group_parts {
+            if let Some(g) = msb
+                .parts
+                .iter()
+                .find(|p| p.name == part.name)
+                .and_then(|p| p.gparam)
+            {
+                part.fog_set = g[1];
+            }
+        }
+    }
+    app.init_resource::<crate::lighting::fog::FogSelection>();
     let stem = scene.gparam.clone().unwrap_or_else(|| {
         let standard = default_gparam(&id);
         if cache
@@ -461,6 +483,15 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
     }
     app.insert_resource(probes);
     let args: Vec<_> = std::env::args().collect();
+    if args.iter().any(|a| a == "--visual-stats") {
+        if !app.is_plugin_added::<FrameTimeDiagnosticsPlugin>() {
+            app.add_plugins(FrameTimeDiagnosticsPlugin::default());
+        }
+        if !app.is_plugin_added::<bevy::render::diagnostic::RenderDiagnosticsPlugin>() {
+            app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin);
+        }
+        app.add_systems(Update, visual_stats);
+    }
     map_material::install(app, &scene.prefix, &args);
     app.insert_resource(ShadowSettings::from_args(&gparam, hour, &args)?);
     app.insert_resource(LocalLights::load(dir, &args)?);
@@ -518,30 +549,17 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
     Ok(())
 }
 
-/// Sky-coloured distance fog and a far plane for every new 3D camera.
-fn camera_environment(
-    mut commands: Commands,
-    cameras: Query<Entity, (Added<Camera3d>, Without<DistanceFog>)>,
-) {
+/// A far plane for every new 3D camera; lighting installs shader fog separately.
+fn camera_environment(mut commands: Commands, cameras: Query<Entity, Added<Camera3d>>) {
     for e in &cameras {
-        commands.entity(e).insert((
-            Projection::Perspective(PerspectiveProjection {
+        commands
+            .entity(e)
+            .insert(Projection::Perspective(PerspectiveProjection {
                 fov: 60f32.to_radians(),
                 near: 0.1,
                 far: 20_000.0,
                 ..default()
-            }),
-            DistanceFog {
-                color: SKY,
-                directional_light_color: Color::srgba(1.0, 0.92, 0.75, 0.4),
-                directional_light_exponent: 24.0,
-                falloff: FogFalloff::from_visibility_colors(
-                    2_500.0,
-                    Color::srgb(0.55, 0.58, 0.62),
-                    Color::srgb(0.75, 0.78, 0.82),
-                ),
-            },
-        ));
+            }));
     }
 }
 
@@ -691,6 +709,7 @@ fn spawn_map(
     spawn_lights(&mut commands, &shadow);
 
     let scene = &layout.scene;
+    let far_enabled = !std::env::args().any(|a| a == "--no-far-scenery");
     if !scene.no_pieces {
         let models = &layout.json["models"];
         let mut spawned = 0;
@@ -715,7 +734,12 @@ fn spawn_map(
             };
             let glb = format!("{}{glb}", scene.prefix);
             let Some(p) = pose(row) else { continue };
-            if let Some((center, radius)) = scene.within {
+            if let Some((center, collision_radius)) = scene.within {
+                let radius = if model.starts_with('m') && far_enabled {
+                    sekiro_sim::arena::ARENA_VISUAL_RADIUS
+                } else {
+                    collision_radius
+                };
                 let inside = placed_box(&models[model], &p).is_some_and(|(lo, hi)| {
                     sekiro_sim::arena::box_within(lo, hi, center.xz(), radius)
                 });
@@ -728,7 +752,12 @@ fn spawn_map(
                     .handles
                     .push(assets.load::<Gltf>(glb.clone()).untyped());
             }
-            commands.spawn((
+            let far_scenery = scene.within.is_some_and(|(center, radius)| {
+                placed_box(&models[model], &p).is_some_and(|(lo, hi)| {
+                    !sekiro_sim::arena::box_within(lo, hi, center.xz(), radius)
+                })
+            });
+            let mut entity = commands.spawn((
                 DrawGroups(groups8(&row["draw_groups"])),
                 WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(glb))),
                 Transform {
@@ -737,6 +766,9 @@ fn spawn_map(
                     scale: p.scale,
                 },
             ));
+            if far_scenery {
+                entity.insert(FarScenery);
+            }
             spawned += 1;
         }
         pending.instances = spawned;
@@ -833,6 +865,27 @@ fn spawn_map(
             ));
         }
         info!("collision: {} triangles", c.indices.len() / 3);
+    }
+}
+
+/// Opt-in reproducible render measurements, including arena sessions.
+fn visual_stats(pending: Res<Pending>, diagnostics: Res<DiagnosticsStore>, mut last: Local<u32>) {
+    let seconds = pending.loaded_for() as u32;
+    if seconds < 2 || seconds == *last {
+        return;
+    }
+    *last = seconds;
+    let frame = diagnostics
+        .get(&FrameTimeDiagnosticsPlugin::FRAME_TIME)
+        .and_then(|d| d.smoothed())
+        .unwrap_or(0.);
+    info!("visual stats: {seconds} s after loading, frame {frame:.3} ms");
+    for d in diagnostics.iter().filter(|d| {
+        d.path().as_str().contains("game_fog") && d.path().as_str().ends_with("elapsed_gpu")
+    }) {
+        if let Some(ms) = d.smoothed() {
+            info!("visual stats: {} {ms:.3} ms", d.path());
+        }
     }
 }
 
@@ -934,6 +987,7 @@ fn pick_groups(
     layout: Res<Layout>,
     mut groups: ResMut<Groups>,
     mut lighting: ResMut<MapLighting>,
+    mut fog: ResMut<crate::lighting::fog::FogSelection>,
     focus: Query<&Transform, With<MapFocus>>,
 ) {
     if keys.just_pressed(KeyCode::KeyG) {
@@ -977,6 +1031,9 @@ fn pick_groups(
         _ => part.draw,
     };
     let light_set = part.light_set;
+    if part.fog_set >= 0 {
+        fog.0 = part.fog_set;
+    }
     groups.current = Some(pi);
     if light_set >= 0 && lighting.light_set != light_set {
         lighting.light_set = light_set;
@@ -1007,7 +1064,7 @@ fn vertical_hit(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
 
 fn apply_groups(
     mut groups: ResMut<Groups>,
-    mut pieces: Query<(&DrawGroups, &mut Visibility)>,
+    mut pieces: Query<(&DrawGroups, &mut Visibility), Without<FarScenery>>,
     added: Query<(), Added<DrawGroups>>,
 ) {
     if !groups.dirty && added.is_empty() {

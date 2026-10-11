@@ -221,9 +221,35 @@ The complete layouts and binding differences are in the reflection index.
 For the first Outskirts noon row, the dump gives FixedDensity 0.0015, height distribution 0.1, height offset -150, height scale 0.25, GameScale 2.5, NearDepth 0.01 and FarDepth 400.
 These numbers do not justify substituting raw metres for every uploaded coordinate.
 
-Current `lighting.rs` instead clamps FixedDensity to at least 0.0003, feeds Bevy exponential `DistanceFog`, uses SkyColor and a DirectColor glow with exponent 16, and drops the signed height term, OppositeColor and separate source start distances.
-**Recommendation:** implement a custom fog volume/post process with the recovered profile, source clipping and midpoint march, retaining explicit upload-conversion parameters until CPU packing is recovered.
-Use the channel extinction and far continuation consistently for forward materials.
+### Implementation status (2026-10-11)
+
+`crates/game/src/fog.rs` and original `fog.wgsl` replace Bevy `DistanceFog` with an HDR scene pass before bloom and tone mapping.
+The pass reconstructs camera-relative rays from the main depth buffer, preserving MSAA without an extra depth prepass.
+It applies the recovered bounded height profile, independent sky/directional source gates, linear DirectColor/OppositeColor angular interpolation, optional vertical-column attenuation, RGB extinction and 48 logarithmic midpoint segments.
+The far path uses the piecewise height primitive, crossing/near-horizontal cases, the terminal accumulated light and the documented `(1-Tend)` scaling of added optical depth.
+The same pass treats clear-depth background as a 20 km ray, so geometry and horizon use the same source colours.
+Application follows the demonstrated forward `Csurface*T^E+L` expression; the native scene-composite blend state remains open.
+`--no-fog` removes this pass.
+
+GPARAM values come from the active LightSet row and interpolated map/hour keys, including Enable, NearDepth, FarDepth, FixedDensity, height fields, both source StartDist values, SkyColor, DirectColor, OppositeColor and channel AbsorptionScale when present.
+GameScale is retained in the uploaded record but is not arbitrarily multiplied into density or distances.
+The MSB FogParamID is exported independently and selected from the collision under the focus, with read-only MSB fallback for older exports.
+Separate Fog rows are read and reported, but the three tested map draw-param files have no separate Fog group to apply.
+No unproven distance-fog formula is introduced for that selector.
+
+CPU upload calibration remains provisional: fixed density is per metre, height density scale multiplies `0.01`, height distribution multiplies `1.0` per metre, affine height is `world_y + HeightFogOffset*1.0`, and source RGB multiplies authored W and radiance scale `1.0`.
+These conversions are named constants in `fog.rs`, rather than claims about native GameScale or height packing.
+At castle noon the resulting parameters are FixedDensity `0.0015`, height coefficient `0.1`, height density `0.0025`, offset `-150`, FarDepth `400` and retained GameScale `2.5`.
+Near the roof the density is approximately `0.0065/m`, giving transmittance about `0.27` over a horizontal 200 m path.
+The inverse directional cosine uses a provisional `abs(sun.y)` denominator with a `0.01` floor.
+The main sun is the provisional directional bank resolver; native LightBankId-to-bank/light routing remains open.
+
+This is global shader-derived fog rather than the complete native froxel renderer.
+Local density boxes and point/spot fog sources are currently zero, and shadowed/reprojected source variants, native pre-exposure packing and local/global write ordering are not implemented.
+The cached exporter still omits fog cards.
+Transparent surfaces share the opaque scene depth used by this post pass, so they do not yet receive an independent forward-material fog lookup.
+The fixed 48-slice evaluation is a renderer quality choice, not a recovered native allocation or VolumeDepth mapping.
+The shader-input recovery above remains valid independently of these implementation approximations.
 
 ## Tone mapping and exposure
 

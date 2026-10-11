@@ -7,6 +7,9 @@
 //!
 //! Adding a boss is one new row in [`ARENAS`].
 
+/// Render-only map scenery radius; collision remains ArenaSpec::radius.
+pub const ARENA_VISUAL_RADIUS: f32 = 1500.0;
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -31,8 +34,8 @@ pub struct ArenaSpec {
     pub boss_part: &'static str,
     /// The enemy (see [`EnemySpec::by_name`]).
     pub enemy: &'static str,
-    /// Horizontal radius in metres around the boss: map pieces, objects and collision that
-    /// reach inside it are loaded.
+    /// Horizontal collision and object radius in metres around the boss.
+    /// Render-only map pieces use ARENA_VISUAL_RADIUS in the game crate.
     pub radius: f32,
     /// Where Wolf starts: an MSB player start part, or `None` for [`FALLBACK_DISTANCE`]
     /// metres in front of the boss.
