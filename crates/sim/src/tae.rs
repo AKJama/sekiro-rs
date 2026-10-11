@@ -417,7 +417,7 @@ impl TaeDb {
 }
 
 fn decode(template: &Template, e: &tae::TaeEvent) -> Option<TimedEvent> {
-    if matches!(e.event_type, 900..=905 | 921) {
+    if matches!(e.event_type, 715 | 720 | 900..=905 | 921) {
         return Some(TimedEvent {
             start: e.start,
             end: e.end,
@@ -593,6 +593,12 @@ impl TaeRuntime {
     pub fn add_timed(&mut self, id: i32, seconds: f32) {
         let r = self.timed.entry(id).or_insert(0.0);
         *r = r.max(seconds);
+    }
+
+    /// Removes an externally applied effect when a map event clears it.
+    pub fn clear_timed(&mut self, id: i32) {
+        self.timed.remove(&id);
+        self.frame.sp_effects.retain(|effect| *effect != id);
     }
 
     /// Computes the frame for `clips` (the main clip first) after they advanced by `dt`.

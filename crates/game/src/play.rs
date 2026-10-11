@@ -47,6 +47,8 @@ use crate::draw_mask::{DrawMask, MaskSource, apply_draw_masks};
 use crate::map::{self, MapFocus, MapScene};
 use sekiro_sim::arena::{Arena, ArenaSpec};
 use sekiro_sim::collision::CollisionWorld;
+#[path = "rope.rs"]
+mod rope;
 
 pub struct Options {
     pub brain_overlay: bool,
@@ -123,6 +125,15 @@ struct MapCollision(Arc<CollisionWorld>);
 #[derive(Resource)]
 struct ModelPath(&'static str);
 
+#[derive(Resource)]
+struct EnemyDrawGroups(Option<[bool; 32]>);
+
+#[derive(Resource)]
+struct EnemyScene {
+    cache: PathBuf,
+    spec: EnemySpec,
+}
+
 const STEP_HZ: f64 = 60.0;
 /// Seconds the fight waits after the map has loaded. About 1.9 s after the map's textures and
 /// meshes are uploaded, presentation stalls once for 50 to 70 ms: the render world waits that
@@ -162,6 +173,7 @@ struct Sim {
     step: usize,
     lock_requested: bool,
     break_posture: bool,
+    passive: bool,
     /// Each actor's position and drawn yaw before the last step, to draw between steps.
     previous: [([f32; 3], f32); 2],
     /// Each actor's own clock after the last step: the sum of the time it advanced, which stops
@@ -198,9 +210,12 @@ struct Captures {
 
 pub fn run(options: Options) -> Result<()> {
     let cache = options.cache.canonicalize().context("cache directory")?;
+    let roster = sekiro_sim::registry::Registry::load(&cache).map_err(anyhow::Error::msg)?;
+    let anim_chr = roster.anim_chr(&options.opponent.chr, options.opponent.npc_param);
+    let enemy_draw_groups = roster.draw_mask(&cache, &options.opponent);
     let libraries = [
         AnimLibrary::load(&cache, "c0000")?,
-        AnimLibrary::load(&cache, &options.opponent.chr)?,
+        AnimLibrary::load(&cache, &anim_chr)?,
     ];
     let mut duel = Duel::load_with(&cache, 6.0, options.opponent.clone())
         .map_err(|e| anyhow::anyhow!("loading the simulation: {e}"))?;
@@ -399,6 +414,11 @@ pub fn run(options: Options) -> Result<()> {
     .insert_resource(bevy::winit::WinitSettings::continuous())
     .insert_resource(Time::<Fixed>::from_hz(STEP_HZ))
     .insert_resource(Libraries(libraries))
+    .insert_resource(EnemyScene {
+        cache: cache.clone(),
+        spec: duel.spec.clone(),
+    })
+    .insert_resource(EnemyDrawGroups(enemy_draw_groups))
     .insert_resource(LiveInput::default())
     .insert_resource(Orbit {
         focus: Vec3::from_array(duel.player.body.position) + Vec3::Y * duel.camera.chr_org_offset_y,
@@ -422,6 +442,7 @@ pub fn run(options: Options) -> Result<()> {
         step: 0,
         lock_requested: options.lock_on,
         break_posture: options.break_posture,
+        passive: !options.enemy,
         previous: [([0.0; 3], 0.0); 2],
         clock: [0.0; 2],
         faded: [false; 2],
@@ -442,6 +463,7 @@ pub fn run(options: Options) -> Result<()> {
         enemy: Some((options.opponent.chr.clone(), options.opponent.npc_param)),
     })
     .add_systems(Startup, setup)
+    .insert_resource(rope::RopeCache(cache.clone()))
     .add_systems(Startup, crate::brain_overlay::spawn)
     .add_systems(FixedUpdate, simulate)
     .add_systems(
@@ -453,11 +475,12 @@ pub fn run(options: Options) -> Result<()> {
             gather_input,
             brain_report,
             recording_brain,
+            reload_enemy,
             bind_rigs,
             apply_draw_masks,
             sync_actors,
             sync_bullets,
-            animate,
+            (rope::pose, animate, rope::draw, sheath_sword).chain(),
             follow_camera,
             crate::brain_overlay::update,
             hud,
@@ -512,6 +535,58 @@ pub fn run(options: Options) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn reload_enemy(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    mut scene: ResMut<EnemyScene>,
+    mut libraries: ResMut<Libraries>,
+    model_path: Res<ModelPath>,
+    sim: NonSend<Sim>,
+    actors: Query<(Entity, &Actor)>,
+) {
+    if scene.spec == sim.duel.spec {
+        return;
+    }
+    let Ok(roster) = sekiro_sim::registry::Registry::load(&scene.cache) else {
+        return;
+    };
+    let donor = roster.anim_chr(&sim.duel.spec.chr, sim.duel.spec.npc_param);
+    let Ok(mut lib) = AnimLibrary::load(&scene.cache, &donor) else {
+        return;
+    };
+    let Ok(clip) = lib.clip("a000_000000") else {
+        return;
+    };
+    let mut idle = Animator::new(clip, false);
+    idle.apply_root_motion = false;
+    idle.speed = 0.0;
+    for (entity, actor) in &actors {
+        if actor.0 == ENEMY {
+            commands.entity(entity).despawn();
+        }
+    }
+    let mask = roster
+        .draw_mask(&scene.cache, &sim.duel.spec)
+        .map_or_else(|| DrawMask::new(MaskSource::Combat), DrawMask::with_groups);
+    commands.spawn((
+        Actor(ENEMY),
+        WorldAssetRoot(
+            assets.load(
+                GltfAssetLabel::Scene(0)
+                    .from_asset(format!("{}{}.glb", model_path.0, sim.duel.spec.chr)),
+            ),
+        ),
+        Transform::IDENTITY,
+        Visibility::Inherited,
+        Rig::new(Arc::new(lib.skeleton.clone())),
+        idle,
+        mask,
+    ));
+    libraries.0[ENEMY] = lib;
+    scene.spec = sim.duel.spec.clone();
+}
+
+#[allow(clippy::too_many_arguments)]
 fn setup(
     mut commands: Commands,
     assets: Res<AssetServer>,
@@ -519,9 +594,12 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     model_path: Res<ModelPath>,
+    enemy_draw_groups: Res<EnemyDrawGroups>,
     on_map: Option<Res<MapCollision>>,
     sim: NonSend<Sim>,
+    rope_cache: Res<rope::RopeCache>,
 ) {
+    rope::spawn(&mut commands, &assets, &rope_cache.0, model_path.0);
     commands.spawn((
         FollowCamera,
         Camera3d::default(),
@@ -574,7 +652,10 @@ fn setup(
             idle,
         ));
         if actor == ENEMY {
-            e.insert(DrawMask::new(MaskSource::Combat));
+            let groups = enemy_draw_groups.0;
+            e.insert(
+                groups.map_or_else(|| DrawMask::new(MaskSource::Combat), DrawMask::with_groups),
+            );
         }
         if actor == WOLF && on_map {
             // Draw groups follow Wolf.
@@ -864,13 +945,16 @@ fn simulate(
         posture.remaining = posture.remaining.min(1);
     }
     let before = sim.duel.player.body.position;
+    if sim.passive {
+        sim.duel.enemy_active = false;
+    }
     sim.duel.player.wire.view_pitch = orbit.pitch;
     let report = sim.duel.step(&frame, dt);
     if std::env::var_os("PLAY_LOG_WIRE").is_some() {
         let wolf = &sim.duel.player;
         let target = wolf.wire.active.as_ref().or(wolf.wire.candidate.as_ref());
         eprintln!(
-            "WIRE step={} env3000={} pos={:?} target={:?} arrival={:?} distance={:?} anim={:?} events={:?} precompute={:?}",
+            "WIRE step={} env3000={} pos={:?} target={:?} arrival={:?} distance={:?} anim={:?} events={:?} precompute={:?} flight={:?} grounded={}",
             sim.step,
             wolf.behavior.env.wire_candidate,
             wolf.body.position,
@@ -879,7 +963,9 @@ fn simulate(
             target.map(|t| Vec3::from_array(wolf.body.position).distance(t.arrival)),
             report.player.animation,
             report.player.behavior.events,
-            wolf.behavior.env.wire_precompute.get()
+            wolf.behavior.env.wire_precompute.get(),
+            wolf.wire.flight_time(),
+            wolf.body.grounded,
         );
         if report.player.clip_started
             && let Some(anim) = report
@@ -1238,6 +1324,11 @@ fn hud(
         ),
         // Hidden with him while a warp fades him out.
         enemy_alive: !f[1].dead() && sim.duel.enemy_bar_shown() && !sim.faded[1],
+        boss_bar: sim
+            .duel
+            .events
+            .as_ref()
+            .is_some_and(|events| events.boss_bar.is_some()),
         deathblow: sim.duel.deathblow_available(),
         enemy_name: sim.duel.spec.display_name(),
         enemy_marks: sekiro_sim::deathblow::deathblow_marks(f[1].vitality.deathblows_left),
@@ -1472,6 +1563,59 @@ fn recording_brain(sim: NonSend<Sim>, mut brain: ResMut<crate::brain_overlay::Re
 
 #[derive(Component)]
 struct GrappleMarker;
+
+/// TAE 720's right-hand sheath window frees both hands for docking.
+fn sheath_sword(
+    sim: NonSend<Sim>,
+    actors: Query<(Entity, &Actor)>,
+    children: Query<&Children>,
+    names: Query<&Name>,
+    globals: Query<&GlobalTransform>,
+    mut attachments: Query<(&ChildOf, &mut Transform)>,
+    mut original: Local<std::collections::HashMap<Entity, Transform>>,
+) {
+    let Some((root, _)) = actors.iter().find(|(_, a)| a.0 == WOLF) else {
+        return;
+    };
+    let descendants: Vec<_> = children.iter_descendants(root).collect();
+    let find = |name: &str| {
+        descendants
+            .iter()
+            .copied()
+            .find(|e| names.get(*e).is_ok_and(|n| n.as_str() == name))
+    };
+    let Some(blade) = find("dmyblade:1") else {
+        return;
+    };
+    let Some(sheath) = find("dmy:147") else {
+        return;
+    };
+    let Ok((parent, mut local)) = attachments.get_mut(blade) else {
+        return;
+    };
+    let saved = *original.entry(blade).or_insert(*local);
+    let report = &sim.last.player;
+    let sheathed = report
+        .animation
+        .as_ref()
+        .and_then(|n| sim.duel.player.tae.anim(n))
+        .is_some_and(|a| {
+            a.events.iter().any(|e| {
+                e.start <= report.anim_time
+                    && report.anim_time < e.end
+                    && matches!(&e.kind, sekiro_sim::tae::TaeKind::Wire { kind: 720, args }
+                if args.get(..2) == Some(&[0, 1]))
+            })
+        });
+    if sheathed {
+        if let (Ok(parent), Ok(sheath)) = (globals.get(parent.parent()), globals.get(sheath)) {
+            *local =
+                Transform::from_matrix(Mat4::from(parent.affine().inverse() * sheath.affine()));
+        }
+    } else {
+        *local = saved;
+    }
+}
 
 fn grapple_marker(
     sim: NonSend<Sim>,

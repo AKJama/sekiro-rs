@@ -247,7 +247,12 @@ pub fn bind_rigs(
                 by_name.entry(n.as_str().to_string()).or_insert(e);
             }
         }
-        if !by_name.contains_key("Master") {
+        if !rig
+            .skeleton
+            .bones
+            .first()
+            .is_some_and(|b| by_name.contains_key(&b.name))
+        {
             continue; // scene not spawned yet
         }
         let index: HashMap<Entity, usize> = rig

@@ -444,7 +444,7 @@ pub fn export(cache: &Path, chrs: &[String]) -> Result<()> {
         }
     };
     let chrs: Vec<String> = if chrs.is_empty() {
-        vec!["c0000".into(), "c1010".into(), "c5060".into()]
+        crate::roster_ids(cache, true)?
     } else {
         chrs.to_vec()
     };

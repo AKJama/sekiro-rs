@@ -125,6 +125,8 @@ pub struct PlayerEnv {
     pub fall_height: f32,
     /// Vertical velocity in centimetres per second (env 3003).
     pub vertical_velocity: f32,
+    /// Floor contact predicted for this tick's downward movement (land-ready reactions).
+    pub landing_ready: bool,
     /// Frame time in seconds; env 333 reports it in milliseconds (the script divides by 1000).
     pub dt: f32,
     /// Lock-on active (env 1118).
@@ -196,6 +198,7 @@ impl Default for PlayerEnv {
             falling: false,
             fall_height: 0.0,
             vertical_velocity: 0.0,
+            landing_ready: false,
             dt: 1.0 / 30.0,
             locked_on: false,
             standby: None,
@@ -284,7 +287,8 @@ impl Adapter<'_> {
             3043 | 3045 | 3048 | 3049 | 3059 | 3060 => 0.0,
             3061 => -1.0,
             ENV_FALLING => truth(env.falling),
-            ENV_LANDED | ENV_REALLY_LANDED => truth(env.landed),
+            ENV_LANDED => truth(env.landed),
+            ENV_REALLY_LANDED => truth(env.landed || env.landing_ready),
             ENV_FALL_HEIGHT => env.fall_height,
             ENV_VERTICAL_VELOCITY => env.vertical_velocity,
             ENV_DT => env.dt * 1000.0,

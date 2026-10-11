@@ -461,6 +461,22 @@ No commits, network requests, worktrees, protected-path writes or changes to the
   Record frame time from `perf_log.rs` for each, and accept only if the budget holds.
 - Risk: shadow acne or peter-panning on thin geometry, tune bias per map.
 
+#### Step 4 implementation (2026-10-11)
+
+The default sun budget is two cascades over 60 m, with map meshes outside 45 m of the focus tagged `NotShadowCaster`.
+Distance is measured to the nearest point of each transformed mesh bounding box, so a large nearby wall is retained even when its instance origin is distant.
+The budget refreshes twice a second and follows the focus; Wolf and enemy meshes are outside the map hierarchy and keep their shadows.
+The counts include all loaded map meshes, including meshes currently hidden by draw groups, rather than promising a count of GPU draws.
+No cells or additional map entities are created.
+
+`--shadow cascades,distance`, `--shadow-casters metres`, `--shadow-bias depth,normal` and `--no-shadow` provide controls.
+Normal bias is 0.6 shadow texels, reduced from Bevy's 1.8, and depth bias remains 0.02.
+The first split reads GPARAM `ShadowParam` `Cascade Dist 0->1`, clamped below half the configured range, or falls back to 15 m when absent.
+The dumped m25 base file has 5/25/100 m splits; the m11 base files do not supply these splits.
+The two-cascade/60 m range and 45 m caster distance are an explicit renderer budget following FwLo's measured approach, not recovered Sekiro cascade settings.
+GPARAM's slope-scaled depth bias of 3.0 and kernel scale of 1.5 are retained as research facts because Bevy's depth/normal biases and filtering have different units and no verified direct conversion.
+`--uncapped` now also configures play-mode windows from `map.rs`; scripted play measurements remain near 60 fps, while the Castle viewer reaches 112.7 fps with the new budget.
+
 ### Step 5. Local point lights from BTL
 
 - Files: new `crates/formats/src/btl.rs` (own reader, layout cross-checked against SoulsFormatsNEXT, with a test that decodes `m11_01_00_00_0000.btl` from the cache), `crates/extract/src/maps/mod.rs` (write lights into `layout.json` or a sidecar), `crates/game/src/map.rs` (spawn Bevy `PointLight` or `SpotLight` within a radius of the focus, despawn outside).
@@ -469,7 +485,95 @@ No commits, network requests, worktrees, protected-path writes or changes to the
 - Check: m11_01 start 1 and an interior corridor, light counts logged, shots with lights on and off.
 - Risk: BTL has types (point, spot, directional) and some flags, unknown ones must be logged rather than guessed.
 
+#### Step 5 implementation and byte census (2026-10-11)
+
+The original bounds-checked `btl.rs` reader accepts the observed Sekiro version-2 layout and retains all 232 bytes of every record.
+All 18 installed BTL files satisfy `file_size = 0x3c + string_bytes + count * 0xe8`, with no trailing bytes.
+Castle `_0000` has a 1520-byte name block, records starting at 1580, 34 lights and a total length of 9468 bytes.
+Its first light has RGB 255/121/12, intensity 0.3, position (-344.742, -31.3559, 258.093) and range 1 m.
+Cache-backed tests cover this light, malformed offsets and truncations, and every installed map's records; they skip when the cache is absent.
+
+| Field | Byte offset | Representation |
+| --- | --- | --- |
+| Version / header marker | Header +0 / +4 | u32 2 / 16 |
+| Record count / name bytes | Header +8 / +12 | u32 |
+| Reserved / record size | Header +16 / +20 | u32 0 / 232 |
+| Names | File +0x3c | NUL-terminated UTF-16LE |
+| Name offset | Record +0x10 | u32 relative to names |
+| Observed light kind / RGB | Record +0x1c / +0x1d | u8 1 / three u8 |
+| Intensity | Record +0x20 | f32 |
+| Position / rotation | Record +0x38 / +0x44 | Three f32 each |
+| Influence range | Record +0x58 | f32 metres |
+
+| Map | Records by ascending bank suffix | Total |
+| --- | --- | --- |
+| m10_00_00_00 | 0000: 177, 0001: 25, 0002: 12, 0003: 19, 0004: 28 | 261 |
+| m11_00_00_00 | 0000: 16, 0002: 6 | 22 |
+| m11_01_00_00 | 0000: 34, 0002: 26, 0004: 34 | 94 |
+| m11_02_00_00 | 0000: 6 | 6 |
+| m13_00_00_00 | 0000: 36 | 36 |
+| m15_00_00_00 | 0000: 112, 0001: 5 | 117 |
+| m17_00_00_00 | 0000: 37 | 37 |
+| m20_00_00_00 | 0000: 117 | 117 |
+| m25_00_00_00 | 0000: 38, 0001: 7 | 45 |
+
+The extractor writes versioned `cache/maps/<id>/lights.json` with separate banks, X-mirrored positions and raw record bytes.
+The three requested maps and the many-light Hirata map were re-extracted using `SEKIRO_MAP_LIGHTS_ONLY=1` with our extractor.
+This incremental mode writes the light sidecar and returns before unrelated probe, edge and model work; a normal map extraction also writes the sidecar.
+Runtime selects the first bank, or an explicit `--light-bank number`, because the event-driven bank selection is not traced.
+Banks are never combined, which avoids double-lighting shared placements.
+All 735 observed kind bytes are 1 and render as `PointLight`; unsupported kinds are logged and skipped rather than assigned a guessed spotlight cone.
+Shadow/cone/attenuation flags remain in the raw record and are not interpreted.
+
+The provisional intensity mapping is `lumens = authored_intensity * 9000 * 0.1 * 4*pi`, or 900 candela per authored unit before isotropic conversion.
+This shares the sun's calibration basis and preserves relative BTL powers, with a separate local calibration because native attenuation and photometric units are untraced.
+The uncalibrated 9000 candela mapping flooded Castle's tower cyan and was rejected after inspecting its captures.
+RGB bytes use the same linear convention as GPARAM RGB; native BTL colour space remains untraced.
+`--local-light-scale multiplier` provides a calibration control, and `--no-local-lights` disables the feature.
+Lights refresh twice a second, spawn within 60 m plus their authored range, and despawn outside it; the nearest 64 are retained and all local shadows are off.
+`VolumetricFog.LocalLightScale` is not applied to surface lighting because its name locates it in volumetric scattering, and the proposed global surface multiplier was only an inference.
+
+The bytes were checked locally without network access, but no local SoulsFormatsNEXT BTL source was found, so the requested independent library cross-check remains a gap.
+Native bank activation, spot/directional kinds, exact attenuation, light occlusion and local shadow flags remain unresolved.
+
+#### Steps 4 and 5 validation (2026-10-11)
+
+Matched play controls use `--shadow 4,250 --shadow-casters 1000000 --shadow-bias 0.02,1.8 --no-local-lights`; the after run uses the default shadow budget and local lights.
+Both use `--simple-ai --no-enemy --brain-memory off --uncapped`, hour 12, Outskirts start 3 or Castle start 2, and the same idle script.
+Each median uses 80 pipeline-ready frames at simulation steps 130-169 and 190-229, excluding screenshot stalls and loading.
+These scripted captures remain at approximately 60 Hz, so their wall times do not establish an uncapped speedup.
+
+| Play view | Wall median before / after | Main-thread median before / after | Eligible map casters before / after |
+| --- | --- | --- | --- |
+| m11_00 start 3 | 16.635 / 16.637 ms | 4.239 / 3.831 ms | 18027 / 1260 |
+| m11_01 start 2 | 16.705 / 16.686 ms | 4.650 / 2.971 ms | 15933 / 2958 |
+
+The matching uncapped viewer controls and after views disable local lights, wait five seconds after loading, and report 59.8 / 62.6 fps in Outskirts and 60.2 / 112.7 fps in Castle.
+Their reciprocal frame times are 16.72 / 15.97 ms and 16.61 / 8.87 ms respectively; these are short smoothed diagnostic samples, not long benchmark distributions.
+The available main-opaque GPU timings are 2.07 / 2.48 ms and 0.97 / 0.92 ms respectively.
+No shadow-pass timestamp appears among the six reported GPU passes, so these opaque timings do not measure the shadow savings.
+Parallel jobs share this machine, which further limits comparisons of absolute cost.
+Logs, CSV references and final play metrics are under `target/alt/visuals/v3-final-metrics.json` and the corresponding capture logs.
+
+Every generated `v3-*.png` was opened and inspected, including the 120/180/240-step variants.
+`v3-outskirts-final-control.png` / `v3-outskirts-final-after.png` and the corresponding Castle pair show no obvious shadow acne or new material seams; distant geometry is brighter after the deliberate shadow range reduction.
+`v3-wolf-outdoor-shadow-on.png` / `v3-wolf-outdoor-shadow-off.png`, at hour 18, visibly retain Wolf's ground shadow to the right with shadows on and remove it with shadows off, without an obvious detached contact edge.
+The temple `v3-wolf-shadow-*` pair is mostly roof-occluded and is not used to prove Wolf's cast shadow.
+`v3-tower-night-off.png` / `v3-tower-final-on.png`, at hour 0, show a restrained blue/teal local contribution with wall, wood and cloth detail retained; 24 of bank 0000's 34 lights are active near the tower.
+`v3-corridor-off.png` / `v3-corridor-final-on.png` show a subtle warm contribution with 25 active lights and no blown-out wood or Wolf highlights.
+The initial `v3-tower-night-on*` captures are rejected for excessive cyan illumination; the intermediate `v3-tower-night-calibrated*` captures use the weaker 180 candela experiment, not the final 900 candela calibration.
+The `v3-torch-*` view is obstructed by a foreground banner and does not establish a useful warm pool; the Castle start-1 night pair has little visible local contribution.
+Existing oversized foliage cards, flat snow coverage and the absence of local occlusion remain visible limitations.
+
+Workspace formatting and all-target Clippy with `-D warnings`, the requested release tests (89 passed including the doctest and `map_tangents`, two existing ignored), and the release game build pass offline with `CARGO_TARGET_DIR=target/alt` and six build jobs.
+The verified command exit codes and logs are `v3-{fmt,clippy,tests,build}-exit.txt` and `v3-{fmt,clippy,tests,build}-verified.log`.
+Saves were backed up under `target/alt/visuals/v3-save-backup` before running the game.
+No commits, network access or protected-path writes were made.
+
 ### Step 6. Multi-layer map materials
+
+Not attempted in this session after completing steps 4 and 5 validation.
+The existing single-layer materials remain in use; no layered-material flag or m17 comparison is claimed.
 
 - Files: `crates/extract/src/maps/pieces.rs` (export layer textures and blend bytes for `M[Multiple]` and `M[MultipleGround]`), a new Bevy `ExtendedMaterial` and WGSL in `crates/game`, `map.rs` (swap material on load for layered meshes).
 - Behaviour: reproduce the layer semantics from FwLo's data findings: byte 0 overlay, byte 4 snow with up-facing, byte 2 layer C, `_3m` R as height for coverage with a softness constant.

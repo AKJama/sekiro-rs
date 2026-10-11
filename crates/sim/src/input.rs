@@ -149,6 +149,7 @@ pub fn execute_flags(action: i32) -> &'static [i32] {
         arm::DODGE => &[cancel::DODGE],
         arm::ITEM => &[cancel::ITEM],
         arm::ACTION => &[],
+        arm::GRAPPLE => &[cancel::MOVE, cancel::JUMP],
         _ => &[cancel::MOVE],
     }
 }

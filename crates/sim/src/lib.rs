@@ -32,6 +32,7 @@ pub mod lua_ai;
 pub mod perilous;
 pub mod player;
 pub mod progression;
+pub mod registry;
 pub mod scenario;
 pub mod sound;
 pub mod status;

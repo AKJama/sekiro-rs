@@ -167,7 +167,7 @@ fn line_of_sight_blocks_wall() {
     use sekiro_formats::hknp::CollisionMesh;
     let mut wire = synthetic(10.0);
     wire.collision = Some(CollisionWorld::from_mesh(&CollisionMesh {
-        vertices: vec![[-5.0, -5.0, -5.0], [5.0, -5.0, -5.0], [0.0, 5.0, -5.0]],
+        vertices: vec![[-50.0, -50.0, -5.0], [50.0, -50.0, -5.0], [0.0, 50.0, -5.0]],
         indices: vec![0, 1, 2],
         ..CollisionMesh::default()
     }));
@@ -189,7 +189,7 @@ fn obstruction_during_travel_releases_wire() {
         &FlatGround::default()
     ));
     wire.collision = Some(CollisionWorld::from_mesh(&CollisionMesh {
-        vertices: vec![[-5.0, -5.0, -5.0], [5.0, -5.0, -5.0], [0.0, 5.0, -5.0]],
+        vertices: vec![[-50.0, -50.0, -5.0], [50.0, -50.0, -5.0], [0.0, 50.0, -5.0]],
         indices: vec![0, 1, 2],
         ..CollisionMesh::default()
     }));
@@ -237,6 +237,8 @@ fn nonrideable_offset_and_release() {
         );
     }
     body.velocity[1] = -3.0;
+    assert!(body.position[2] < -10.0, "swing-through must pass the hook");
+    assert!(wire.perch.is_none());
     assert!(!wire.step(
         &mut body,
         Some("a000_201030"),
@@ -306,11 +308,352 @@ fn castle_shachi_clear_approach_and_blocked_original_spawn() {
         }
         if positive {
             assert!(shot && move_start);
-            assert_eq!(arrival_tick, Some(90));
+            assert_eq!(arrival_tick, Some(140));
             assert!(Vec3::from(duel.player.body.position).distance(anchor) < 0.5);
             assert!(duel.player.body.grounded);
         } else {
             assert!(!shot);
         }
     }
+}
+
+#[test]
+fn solved_arc_arrives_ten_metres_away_five_up_at_point_eight_three() {
+    let mut wire = synthetic(10.0);
+    wire.points[0].position = Some([0.0, 5.0, -10.0]);
+    let mut body = Body::default();
+    wire.search(&body, 0.0);
+    wire.step(
+        &mut body,
+        Some("a000_202000"),
+        None,
+        1.0 / 60.0,
+        &FlatGround::default(),
+    );
+    let mut apex = 0.0_f32;
+    for tick in 0..50 {
+        wire.step(
+            &mut body,
+            Some("a000_202011"),
+            Some((0.0, 0.83)),
+            1.0 / 60.0,
+            &FlatGround::default(),
+        );
+        apex = apex.max(body.position[1]);
+        if tick == 24 {
+            assert!(body.position[1] > 2.5);
+        }
+    }
+    let distance = Vec3::from(body.position).distance(Vec3::new(0.0, 5.0, -10.0));
+    eprintln!("arc flight=0.83 s distance={distance} apex={apex}");
+    assert!(distance < 0.2);
+    assert!(apex > 5.0);
+}
+
+fn synthetic_duel() -> Option<Duel> {
+    if !cache().join("raw/chr/c1010.behbnd.d/c9997.hkx").exists() {
+        return None;
+    }
+    let mut duel = Duel::load(&cache(), 4.0).unwrap();
+    duel.use_simple_ai();
+    duel.enemy_active = false;
+    duel.player.ground = Box::new(FlatGround::default());
+    duel.player.body = Body::default();
+    duel.player.wire = synthetic(10.0);
+    for _ in 0..30 {
+        duel.step(&InputFrame::default(), 1.0 / 60.0);
+    }
+    Some(duel)
+}
+
+#[test]
+fn jump_fires_air_wire_and_holds_during_905() {
+    let Some(mut duel) = synthetic_duel() else {
+        return;
+    };
+    let jump = InputFrame {
+        buttons: Buttons {
+            jump: true,
+            ..Buttons::default()
+        },
+        ..InputFrame::default()
+    };
+    duel.step(&jump, 1.0 / 60.0);
+    let mut fired = false;
+    let mut held: Option<f32> = None;
+    for tick in 0..180 {
+        let input = InputFrame {
+            buttons: Buttons {
+                grapple: tick == 24,
+                ..Buttons::default()
+            },
+            ..InputFrame::default()
+        };
+        let r = duel.step(&input, 1.0 / 60.0);
+        if tick % 10 == 0 {
+            eprintln!(
+                "air tick={tick} anim={:?} pos={:?} events={:?}",
+                r.player.animation, r.player.position, r.player.behavior.events
+            );
+        }
+        fired |= r
+            .player
+            .behavior
+            .events
+            .iter()
+            .any(|e| e == "W_AirWireShoot");
+        if r.player.animation.as_deref() == Some("a000_202100") && r.player.anim_time < 0.49 {
+            if let Some(y) = held {
+                assert!((r.player.position[1] - y).abs() < 0.001);
+            }
+            held = Some(r.player.position[1]);
+        }
+    }
+    assert!(fired && held.is_some());
+    assert!(Vec3::from(duel.player.body.position).distance(Vec3::new(0.0, 0.0, -10.0)) < 0.5);
+}
+
+#[test]
+fn wire_fall_chains_to_a_second_synthetic_hook() {
+    let Some(mut duel) = synthetic_duel() else {
+        return;
+    };
+    // Shoot again during the first arc, before the ridden point becomes a perch.
+    duel.player.wire.points[0].position = Some([0.0, 6.0, -10.0]);
+    let mut second = duel.player.wire.points[0].clone();
+    second.position = Some([0.0, 8.0, -20.0]);
+    second.source_part = "second".into();
+    duel.player.wire.points.push(second);
+    let mut chain = false;
+    let mut shot = false;
+    for tick in 0..240 {
+        let in_fall = duel.player.wire.active.is_some() && duel.player.body.position[2] < -8.0;
+        let press = tick == 0 || (in_fall && !shot);
+        if in_fall && !shot {
+            shot = true;
+        }
+        let r = duel.step(
+            &InputFrame {
+                buttons: Buttons {
+                    grapple: press,
+                    ..Buttons::default()
+                },
+                ..InputFrame::default()
+            },
+            1.0 / 60.0,
+        );
+        chain |= r
+            .player
+            .animation
+            .as_deref()
+            .is_some_and(|a| matches!(a, "a000_202600" | "a000_202700"));
+        if tick % 15 == 0 {
+            eprintln!(
+                "chain tick={tick} anim={:?} pos={:?} events={:?}",
+                r.player.animation, r.player.position, r.player.behavior.events
+            );
+        }
+    }
+    assert!(chain);
+    assert!(duel.player.body.position[2] < -18.0);
+}
+
+#[test]
+fn castle_roof_chain_route() {
+    let dir = cache().join("maps/m11_01_00_00");
+    let Some(mut duel) = synthetic_duel() else {
+        return;
+    };
+    duel.player.ground = Box::new(CollisionWorld::load(&dir.join("collision.bin")).unwrap());
+    duel.player.wire = Wire::load(&cache(), &dir).unwrap();
+    duel.player.wire.view_pitch = 0.25;
+    duel.player.body = Body {
+        position: [104.03038, 53.234768, 254.9751],
+        yaw: 60f32.to_radians(),
+        ..Body::default()
+    };
+    let script = sekiro_sim::input::parse_action_script(include_str!(
+        "../../game/scripts/grapple2_chain.txt"
+    ))
+    .unwrap();
+    let mut chain = false;
+    for (tick, mut frame) in script.into_iter().enumerate() {
+        frame.camera_yaw = 60f32.to_radians();
+        let r = duel.step(&frame, 1.0 / 60.0);
+        chain |= r
+            .player
+            .animation
+            .as_deref()
+            .is_some_and(|a| matches!(a, "a000_202600" | "a000_202700"));
+        if tick % 15 == 0 || tick == 120 {
+            eprintln!(
+                "roof chain tick={tick} anim={:?} pos={:?} candidate={:?} active={:?} events={:?}",
+                r.player.animation,
+                r.player.position,
+                duel.player
+                    .wire
+                    .candidate
+                    .as_ref()
+                    .map(|t| &duel.player.wire.points[t.index].source_part),
+                duel.player
+                    .wire
+                    .active
+                    .as_ref()
+                    .map(|t| &duel.player.wire.points[t.index].source_part),
+                r.player.behavior.events
+            );
+        }
+    }
+    assert!(chain);
+    assert!(duel.player.body.grounded);
+    assert!(
+        Vec3::from(duel.player.body.position).distance(Vec3::new(93.31853, 53.092392, 254.30566))
+            < 0.6
+    );
+}
+
+#[test]
+fn third_hook_uses_wire_move_wire_two_shoot() {
+    let Some(mut duel) = synthetic_duel() else {
+        return;
+    };
+    for (distance, height) in [(10.0, 6.0), (20.0, 8.0), (30.0, 10.0)] {
+        let mut point = duel.player.wire.points[0].clone();
+        point.position = Some([0.0, height, -distance]);
+        if distance == 10.0 {
+            duel.player.wire.points[0] = point;
+        } else {
+            duel.player.wire.points.push(point);
+        }
+    }
+    let mut second = false;
+    let mut third = false;
+    let mut wire_two = false;
+    for tick in 0..300 {
+        let z = duel.player.body.position[2];
+        let press = if tick == 0 {
+            true
+        } else if z < -8.0 && !second {
+            second = true;
+            true
+        } else if z < -16.0 && !third {
+            third = true;
+            true
+        } else {
+            false
+        };
+        let r = duel.step(
+            &InputFrame {
+                buttons: Buttons {
+                    grapple: press,
+                    ..Buttons::default()
+                },
+                ..InputFrame::default()
+            },
+            1.0 / 60.0,
+        );
+        wire_two |= r.player.animation.as_deref() == Some("a000_202700");
+        if press {
+            eprintln!(
+                "third tick={tick} anim={:?} events={:?}",
+                r.player.animation, r.player.behavior.events
+            );
+        }
+    }
+    assert!(wire_two);
+    assert!(duel.player.body.position[2] < -28.0);
+}
+
+#[test]
+fn wire_attack_and_guard_cancel_flight_through_hks() {
+    for guard in [false, true] {
+        let Some(mut duel) = synthetic_duel() else {
+            return;
+        };
+        duel.player.behavior.env.unlocked.insert(14);
+        duel.player.behavior.env.unlocked.insert(15);
+        duel.player.wire.points[0].position = Some([0.0, 6.0, -10.0]);
+        let expected = if guard {
+            "W_WireMoveDeflectGuardStart"
+        } else {
+            "W_WireFallAttackCombo1"
+        };
+        let mut cancelled = false;
+        for tick in 0..160 {
+            let r = duel.step(
+                &InputFrame {
+                    buttons: Buttons {
+                        grapple: tick == 0,
+                        attack: !guard && tick == 90,
+                        guard: guard && (90..130).contains(&tick),
+                        ..Buttons::default()
+                    },
+                    ..InputFrame::default()
+                },
+                1.0 / 60.0,
+            );
+            cancelled |= r.player.behavior.events.iter().any(|e| e == expected);
+            if guard && (tick % 10 == 0 || !r.player.behavior.events.is_empty()) {
+                eprintln!(
+                    "guard tick={tick} anim={:?} flags={:?} events={:?}",
+                    r.player.animation, r.player.action_flags, r.player.behavior.events
+                );
+            }
+        }
+        assert!(cancelled, "{expected} did not fire");
+        assert!(duel.player.wire.active.is_none());
+    }
+}
+
+#[test]
+fn fast_wire_fall_uses_land_ready_before_land_wire_move() {
+    let Some(mut duel) = synthetic_duel() else {
+        return;
+    };
+    duel.player.wire.points[0].position = Some([0.0, 10.0, -10.0]);
+    duel.player
+        .wire
+        .variations
+        .get_mut(&1)
+        .unwrap()
+        .target_marker_type = 1;
+    let mut ready = false;
+    let mut landed = false;
+    for tick in 0..360 {
+        let r = duel.step(
+            &InputFrame {
+                buttons: Buttons {
+                    grapple: tick == 0,
+                    ..Buttons::default()
+                },
+                ..InputFrame::default()
+            },
+            1.0 / 60.0,
+        );
+        ready |= r.player.animation.as_deref() == Some("a000_202045");
+        landed |= r.player.animation.as_deref() == Some("a000_202035");
+        if r.player.clip_started {
+            eprintln!(
+                "landing tick={tick} anim={:?} grounded={} vy={} events={:?}",
+                r.player.animation,
+                r.player.grounded,
+                duel.player.behavior.env.vertical_velocity,
+                r.player.behavior.events
+            );
+        }
+    }
+    assert!(ready && landed);
+}
+
+#[test]
+fn perch_support_ends_outside_point_six_metres() {
+    use sekiro_sim::{body::Ground, wire::PerchGround};
+    let terrain = FlatGround::default();
+    let ground = PerchGround {
+        terrain: &terrain,
+        perch: Some(Vec3::new(0.0, 5.0, 0.0)),
+    };
+    assert_eq!(ground.floor(0.59, 0.0, 6.0), Some(5.0));
+    assert_eq!(ground.floor(0.61, 0.0, 6.0), Some(0.0));
+    assert_eq!(ground.floor(0.0, 0.0, 4.0), Some(0.0));
 }

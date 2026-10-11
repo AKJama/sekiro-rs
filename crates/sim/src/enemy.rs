@@ -26,52 +26,58 @@ pub struct EnemySpec {
 impl EnemySpec {
     /// The Ashina soldier with a one-handed sword (NpcParam and NpcThinkParam 10100000).
     pub fn soldier() -> Self {
-        Self {
-            chr: "c1010".into(),
-            npc_param: 10_100_000,
-            think: 10_100_000,
-            ai_bundle: "m11_00_00_00.luabnd.d".into(),
-            starts_in_battle: false,
-        }
+        Self::from_cache(&Self::default_cache(), "c1010:10100000")
+            .expect("soldier placement is extracted")
     }
 
-    /// The Great Shinobi Owl on the Ashina Castle roof (忍軍の長, "chief of the shinobi army"):
+    /// The Great Shinobi Owl on the Ashina Castle roof:
     /// NpcParam 50600000, NpcThinkParam 50601000 (logic 506000, battle goal 506001), as part
     /// `c5060_0000` of `m11_01_00_00` places him.
     pub fn owl() -> Self {
-        Self {
-            chr: "c5060".into(),
-            npc_param: 50_600_000,
-            think: 50_601_000,
-            ai_bundle: "m11_01_00_00.luabnd.d".into(),
-            starts_in_battle: true,
-        }
+        Self::from_cache(&Self::default_cache(), "c5060:50600000")
+            .expect("Owl placement is extracted")
     }
 
-    /// The enemy for a command-line name: a character id (`c1010`, `c5060`) or `soldier` /
-    /// `owl`. `c5070` is the Owl's pet bird, not the Owl, and is refused with a hint.
+    /// A placed character id, optional NpcParam row, or the soldier/Owl compatibility aliases.
     pub fn by_name(name: &str) -> Result<Self, String> {
         match name.to_ascii_lowercase().as_str() {
             "c1010" | "soldier" => Ok(Self::soldier()),
             "c5060" | "owl" => Ok(Self::owl()),
-            "c5070" => Err(
-                "c5070 is the Owl's bird (長の梟, NpcParam 50700000, placed only in \
-                 the Hirata Estate fight); the Great Shinobi Owl is c5060"
-                    .into(),
-            ),
-            other => Err(format!(
-                "unknown enemy {other}: known are c1010 (soldier), c5060 (owl)"
-            )),
+            other => crate::registry::Registry::load(&Self::default_cache())?.resolve(other),
         }
+    }
+
+    /// Resolve a selection using the caller's cache rather than the repository default.
+    pub fn from_cache(cache: &std::path::Path, name: &str) -> Result<Self, String> {
+        let name = name.to_ascii_lowercase();
+        let selection = match name.as_str() {
+            "soldier" => "c1010:10100000",
+            "owl" => "c5060:50600000",
+            _ => &name,
+        };
+        crate::registry::Registry::load(cache)?.resolve(selection)
     }
 
     /// The enemy's name for the HUD.
     pub fn display_name(&self) -> &'static str {
+        static ROSTER: std::sync::OnceLock<Option<crate::registry::Registry>> =
+            std::sync::OnceLock::new();
+        if let Some(name) = ROSTER
+            .get_or_init(|| crate::registry::Registry::load(&Self::default_cache()).ok())
+            .as_ref()
+            .and_then(|r| r.display_name(&self.chr, self.npc_param))
+        {
+            return name;
+        }
         match self.chr.as_str() {
             "c1010" => "Ashina Soldier",
             "c5060" => "Great Shinobi Owl",
             _ => "Enemy",
         }
+    }
+
+    fn default_cache() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache")
     }
 
     /// The model number ThrowParam's `defChrId` uses (`c1010` -> 1010).
@@ -94,7 +100,7 @@ mod tests {
     fn names_resolve() {
         assert_eq!(EnemySpec::by_name("owl").unwrap().chr, "c5060");
         assert_eq!(EnemySpec::by_name("C1010").unwrap(), EnemySpec::soldier());
-        assert!(EnemySpec::by_name("c5070").unwrap_err().contains("c5060"));
+        assert_eq!(EnemySpec::by_name("c5070").unwrap().chr, "c5070");
         assert_eq!(EnemySpec::owl().throw_chr(), 5060);
     }
 }

@@ -284,6 +284,8 @@ pub struct AiState {
     pub top: u32,
     pub replan: bool,
     pub world: AiWorld,
+    /// Remaining and initial deathblow marks, supplied by the fight's NpcParam vitality.
+    pub ninsatsu: (i32, i32),
     pub request: Request,
     pub numbers: HashMap<i32, f64>,
     pub string_numbers: HashMap<String, f64>,
@@ -327,6 +329,7 @@ impl AiState {
             top: 0,
             replan: false,
             world: AiWorld::default(),
+            ninsatsu: (0, 0),
             request: Request::default(),
             numbers: HashMap::new(),
             string_numbers: HashMap::new(),
@@ -918,6 +921,8 @@ impl AiState {
             "GetMapHitRadius" => num(self.world.hit_radius as f64),
             "GetExcelParam" => num(self.excel(t(0))),
             "GetNpcThinkParamID" => num(self.think.id as f64),
+            "GetNinsatsuNum" => num(self.ninsatsu.0 as f64),
+            "GetNinsatsuMaxNum" => num(self.ninsatsu.1 as f64),
             "GetNumber" => num(*self.numbers.get(&t(0)).unwrap_or(&0.0)),
             "SetNumber" => {
                 self.numbers.insert(t(0), n(1));

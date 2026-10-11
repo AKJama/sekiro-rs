@@ -152,6 +152,8 @@ pub struct Duel {
     cache: PathBuf,
     /// Which enemy this duel loaded.
     pub spec: EnemySpec,
+    initial_spec: EnemySpec,
+    pending_handover: Option<(i32, Option<i32>)>,
     /// Steps since the deathblow switched the enemy to its death animation (0: not yet).
     defender_dying: u8,
     spawn: Option<[Placement; 2]>,
@@ -300,6 +302,14 @@ impl EventHost for EventView<'_> {
     fn hp(&self, entity: i32) -> Option<i32> {
         Some(self.duel.rules.fighters[self.who(entity)?].vitality.hp)
     }
+    fn health_bars(&self, entity: i32) -> Option<i32> {
+        Some(
+            self.duel.rules.fighters[self.who(entity)?]
+                .vitality
+                .deathblows_left
+                .max(0),
+        )
+    }
 }
 
 fn placement(c: &Character) -> Placement {
@@ -359,6 +369,8 @@ impl Duel {
             respawn_in: None,
             throws,
             cache: cache.to_path_buf(),
+            initial_spec: spec.clone(),
+            pending_handover: None,
             spec,
             defender_dying: 0,
             spawn: None,
@@ -380,7 +392,7 @@ impl Duel {
             events: None,
         })
         .map(|mut duel| {
-            duel.events = crate::arena::boss_events(&duel.spec.chr).and_then(|spec| {
+            duel.events = crate::arena::boss_events(&duel.spec).and_then(|spec| {
                 FightEvents::load(cache, spec)
                     .map_err(|e| eprintln!("{}: map events not loaded: {e}", duel.spec.chr))
                     .ok()
@@ -428,6 +440,9 @@ impl Duel {
         brain: Box<dyn crate::brain::BossBrain>,
         log: bool,
     ) -> Result<Option<PathBuf>, String> {
+        if crate::brain::BossActions::for_chr(&self.spec.chr).is_none() && !brain.plans() && !log {
+            return Ok(None);
+        }
         let actions = crate::brain::BossActions::for_chr(&self.spec.chr)
             .ok_or_else(|| format!("no boss brain action list for {}", self.spec.chr))?;
         if self.ai.is_none() {
@@ -464,6 +479,31 @@ impl Duel {
             let f = &self.rules.fighters[i];
             let mut sp_effects = c.tae_frame().sp_effects.clone();
             sp_effects.extend_from_slice(f.resident());
+            if c.kind == crate::character::ControlKind::Npc
+                && sp_effects.iter().any(|id| {
+                    c.tae
+                        .sp_effects
+                        .get(id)
+                        .is_some_and(|info| (270..=274).contains(&info.state_info))
+                })
+            {
+                let group = c.behavior.runtime.offsets.offset(15) / 100;
+                sp_effects.retain(|id| {
+                    c.tae.sp_effects.get(id).is_none_or(|info| {
+                        !(270..=274).contains(&info.state_info)
+                            || info.state_info as u32 == 270 + group
+                    })
+                });
+                if let Some((&id, _)) = c
+                    .tae
+                    .sp_effects
+                    .iter()
+                    .find(|(_, info)| info.state_info as u32 == 270 + group)
+                    && !sp_effects.contains(&id)
+                {
+                    sp_effects.push(id);
+                }
+            }
             AiActor {
                 position: c.body.position,
                 yaw: c.body.yaw,
@@ -507,7 +547,28 @@ impl Duel {
         spec: &EnemySpec,
     ) -> Result<(Character, Character), LoadError> {
         let mut player = Character::load_from_cache(cache)?;
-        let mut enemy = Character::load_npc(cache, &spec.chr)?;
+        let registry = crate::registry::Registry::load(cache).ok();
+        let anim_chr = registry.as_ref().map_or_else(
+            || spec.chr.clone(),
+            |r| r.anim_chr(&spec.chr, spec.npc_param),
+        );
+        let mut enemy = Character::load_npc_with_anim(cache, &spec.chr, &anim_chr)?;
+        if let Some(row) = registry.as_ref().and_then(|r| r.npc_row(spec.npc_param)) {
+            for i in 0..32 {
+                if let Some(id) = row[format!("spEffectID{i}")]
+                    .as_i64()
+                    .and_then(|id| enemy.tae.sp_effects.get(&(id as i32)))
+                    .filter(|info| (270..=274).contains(&info.state_info))
+                {
+                    enemy
+                        .behavior
+                        .runtime
+                        .offsets
+                        .by_type
+                        .insert(15, (id.state_info as u32 - 270) * 100);
+                }
+            }
+        }
         enemy.body.position = [0.0, 0.0, -distance];
         enemy.body.yaw = std::f32::consts::PI;
         let dt = 1.0 / 60.0;
@@ -519,6 +580,11 @@ impl Duel {
     /// Puts both characters back where they stood on the first step, with fresh scripts, full
     /// HP and posture. Each keeps its ground.
     pub fn reset(&mut self) -> Result<(), LoadError> {
+        if self.spec != self.initial_spec {
+            let spot = self.spawn.map_or(placement(&self.enemy), |s| s[1]);
+            self.switch_enemy(self.initial_spec.clone(), spot)?;
+        }
+        self.pending_handover = None;
         let (mut player, mut enemy) = Self::load_characters(&self.cache, 4.0, &self.spec)?;
         std::mem::swap(&mut player.ground, &mut self.player.ground);
         player.docking.edges = std::mem::take(&mut self.player.docking.edges);
@@ -553,6 +619,41 @@ impl Duel {
         if let Some(ev) = self.events.as_mut() {
             ev.restart();
         }
+        Ok(())
+    }
+
+    /// A map event hands the single active opponent slot to a separately placed character.
+    /// Wolf, his health/status, the arena and the original reset point survive the hand-over.
+    fn switch_enemy(&mut self, spec: EnemySpec, spot: Placement) -> Result<(), LoadError> {
+        let mut next = Self::load_with(&self.cache, 6.0, spec)?;
+        std::mem::swap(&mut next.enemy.ground, &mut self.enemy.ground);
+        next.enemy.body.position = spot.position;
+        next.enemy.body.yaw = spot.yaw;
+        next.rules.fighters[0] = self.rules.fighters[0].clone();
+        let flags = self.events.as_ref().map(|e| e.scripts.flags.clone());
+        if let Some(events) = next.events.as_mut()
+            && let Some(flags) = flags
+        {
+            events.scripts.flags.extend(flags);
+        }
+        self.enemy = next.enemy;
+        let [_, enemy] = next.fighters;
+        self.fighters[1] = enemy;
+        self.rules = next.rules;
+        self.ai = if self.ai.is_some() { next.ai } else { None };
+        self.spec = next.spec;
+        self.events = next.events;
+        self.throws = next.throws;
+        self.enemy_active = true;
+        self.last_throw_def_clip = None;
+        self.enemy_damaged = false;
+        self.detector = HitDetector::default();
+        self.knockback[1] = None;
+        self.hit_stop[1] = HitStop::default();
+        self.bullets.clear();
+        self.respawn_in = None;
+        self.defender_dying = 0;
+        self.boss_brain = None;
         Ok(())
     }
 
@@ -1393,6 +1494,16 @@ impl Duel {
                         c.tae_runtime.add_timed(id, seconds);
                     }
                 }
+                EventCommand::ClearSpEffect { entity, id } => {
+                    if let Some(i) = who(entity) {
+                        let character = if i == 0 {
+                            &mut self.player
+                        } else {
+                            &mut self.enemy
+                        };
+                        character.tae_runtime.clear_timed(id);
+                    }
+                }
                 EventCommand::EzStateRequest {
                     entity,
                     command,
@@ -1417,11 +1528,56 @@ impl Duel {
                 EventCommand::BossDefeat { entity } if who(entity) == Some(1) => {
                     ev.defeated = true;
                 }
-                // Clearing a SpEffect and invincibility are not used by the events we run.
+                EventCommand::CharacterEnabled { entity, enabled } if who(entity) == Some(1) => {
+                    self.enemy_active = enabled;
+                }
+                EventCommand::CharacterEnabled {
+                    entity,
+                    enabled: true,
+                } if who(entity).is_none() => {
+                    self.pending_handover = Some((entity, None));
+                }
+                EventCommand::BossBar {
+                    shown: true,
+                    entity,
+                    name,
+                    ..
+                } if self
+                    .pending_handover
+                    .is_some_and(|(next, _)| next == entity) =>
+                {
+                    self.pending_handover = Some((entity, Some(name)));
+                }
+                // Remaining commands require world or cinematic systems outside the duel.
                 _ => {}
             }
         }
         self.events = Some(ev);
+        if self.deathblow.is_none()
+            && let Some((entity, bar)) = self.pending_handover.take()
+        {
+            let handover = crate::arena::boss_events(&self.spec).and_then(|events| {
+                let roster = crate::registry::Registry::load(&self.cache).ok()?;
+                let (spec, p) = roster.entity(events.map, entity).ok()?;
+                Some((
+                    spec,
+                    Placement {
+                        position: p.position,
+                        yaw: p.yaw,
+                    },
+                ))
+            });
+            if let Some((spec, spot)) = handover {
+                match self.switch_enemy(spec, spot) {
+                    Ok(()) => {
+                        if let Some(events) = self.events.as_mut() {
+                            events.boss_bar = bar;
+                        }
+                    }
+                    Err(error) => eprintln!("map hand-over to {entity} failed: {error}"),
+                }
+            }
+        }
     }
 
     /// Routes lethal landings through DEATH_FALLING and returns Wolf to where he last stood
@@ -1539,6 +1695,12 @@ impl Duel {
                     if let Some(d) = driver.as_mut() {
                         d.before_think(&mut ai, self.fighters[1].radius);
                     }
+                    let max_marks = match &self.rules.fighters[1].kind {
+                        crate::fight::FighterKind::Npc(n) => n.deathblows,
+                        _ => 0,
+                    };
+                    ai.state.ninsatsu =
+                        (self.rules.fighters[1].vitality.deathblows_left, max_marks);
                     self.enemy.npc = ai.think(world);
                     endure_action = ai.state.request.endure.then_some(self.enemy.npc.action);
                     if let Some(d) = driver.as_mut() {

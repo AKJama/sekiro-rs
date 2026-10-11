@@ -147,6 +147,7 @@ pub struct Character {
     /// Clip times before the last step, by clip node.
     last_times: HashMap<NodeId, (String, f32)>,
     last_main: Option<PlayingClip>,
+    last_anim_effects: Vec<i32>,
 }
 
 /// The locked-on strafe class for a stick `angle` degrees from the facing (positive right),
@@ -256,6 +257,7 @@ impl Character {
             free_move_pending: false,
             last_times: HashMap::new(),
             last_main: None,
+            last_anim_effects: Vec::new(),
         })
     }
 
@@ -275,15 +277,22 @@ impl Character {
     /// Loads an NPC such as `c1010` (Ashina soldier): the shared NPC script `c9997.hks`, then
     /// its own script, driven by the shared NPC behaviour graph its `behbnd` references.
     pub fn load_npc(cache: &Path, chr: &str) -> Result<Self, LoadError> {
-        let own = format!("{chr}.hks");
-        Self::assemble(
+        Self::load_npc_with_anim(cache, chr, chr)
+    }
+
+    /// Model variants keep their own identity and use the NpcParam animation donor.
+    pub fn load_npc_with_anim(cache: &Path, chr: &str, anim_chr: &str) -> Result<Self, LoadError> {
+        let own = format!("{anim_chr}.hks");
+        let mut character = Self::assemble(
             cache,
-            chr,
+            anim_chr,
             ControlKind::Npc,
             &["c9997.hks", &own],
-            &format!("{chr}.behbnd.d/c9997.hkx"),
+            &format!("{anim_chr}.behbnd.d/c9997.hkx"),
             AnimOffsets::default(),
-        )
+        )?;
+        character.chr = chr.into();
+        Ok(character)
     }
 
     /// The TAE state computed by the last step.
@@ -541,6 +550,13 @@ impl Character {
         env.standby = Some(move_window);
         env.move_cancel = Some(move_window);
         env.landed = self.body.grounded;
+        let [x, y, z] = self.body.position;
+        env.landing_ready = self.wire.active.is_some()
+            && self.body.falling()
+            && self
+                .ground
+                .floor(x, z, y)
+                .is_some_and(|floor| y - floor <= -self.body.velocity[1] * dt);
         env.falling = self.body.falling();
         // c0000_transition.lua multiplies env 224 by 0.01 and compares 2000 raw.
         env.fall_height = self.body.last_fall_height * 100.0;
@@ -582,6 +598,17 @@ impl Character {
         self.docking.search(&self.body, self.ground.as_ref());
         self.wire.search(&self.body, frame.camera_yaw);
         self.behavior.env.wire_candidate = self.wire.candidate.is_some();
+        let wire_target = if frame.buttons.grapple {
+            self.wire.candidate.as_ref()
+        } else {
+            self.wire.active.as_ref().or(self.wire.candidate.as_ref())
+        };
+        if let Some(t) = wire_target {
+            let d = t.point - glam::Vec3::from(self.body.position);
+            self.behavior
+                .runtime
+                .set_variable("WireDramaticAngle", d.y.atan2(d.x.hypot(d.z)).to_degrees());
+        }
         self.behavior.env.wire_precompute.set(None);
         self.behavior.env.wire_prefer.set(false);
         let dock = self
@@ -653,6 +680,35 @@ impl Character {
             &playing.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>(),
             dt,
         );
+        // NPC animation-set effects persist after the TAE window, replacing the resident
+        // category-100 choice. CMSG offset type 15 selects a000/a100/... (FwLo's notes).
+        if self.kind == ControlKind::Npc {
+            for id in &self.tae_runtime.frame.sp_effects {
+                if let Some(info) = self.tae.sp_effects.get(id)
+                    && (270..=274).contains(&info.state_info)
+                    && !self.last_anim_effects.contains(id)
+                {
+                    self.behavior
+                        .runtime
+                        .offsets
+                        .by_type
+                        .insert(15, (info.state_info as u32 - 270) * 100);
+                }
+            }
+        }
+        self.last_anim_effects = self
+            .tae_runtime
+            .frame
+            .sp_effects
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.tae
+                    .sp_effects
+                    .get(id)
+                    .is_some_and(|info| (270..=274).contains(&info.state_info))
+            })
+            .collect();
         self.last_times = playing
             .iter()
             .map(|(n, c)| (*n, (c.animation.clone(), c.time)))
@@ -798,9 +854,11 @@ impl Character {
                     .find(|e| matches!(e.kind, crate::tae::TaeKind::Wire { kind: 901, .. }))
                     .map(|e| (e.start, e.end))
             });
-        if !self.wire.step(
+        if !self.wire.advance(
             &mut self.body,
             main.as_ref().map(|c| c.animation.as_str()),
+            main.as_ref().map_or(0.0, |c| c.time),
+            main.as_ref().and_then(|c| self.tae.anim(&c.animation)),
             travel_window,
             dt,
             self.ground.as_ref(),
@@ -810,7 +868,14 @@ impl Character {
             main.as_ref().map_or(0.0, |c| c.time),
             root_progress,
         ) {
-            self.body.step(&body_input, dt, self.ground.as_ref());
+            self.body.step(
+                &body_input,
+                dt,
+                &crate::wire::PerchGround {
+                    terrain: self.ground.as_ref(),
+                    perch: self.wire.perch,
+                },
+            );
         }
         if self.wire.active.is_none() {
             self.behavior.env.wire_action.set(false);

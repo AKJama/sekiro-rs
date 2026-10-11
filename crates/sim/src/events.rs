@@ -32,13 +32,23 @@ pub const PLAYER_ENTITY: i32 = 10000;
 #[derive(Debug, Clone, PartialEq)]
 pub enum EventCommand {
     /// `SetSpEffect` (2004[8]).
-    SetSpEffect { entity: i32, id: i32 },
+    SetSpEffect {
+        entity: i32,
+        id: i32,
+    },
     /// `ClearSpEffect` (2004[21]).
-    ClearSpEffect { entity: i32, id: i32 },
+    ClearSpEffect {
+        entity: i32,
+        id: i32,
+    },
     /// `EzstateInstructionRequest` (2004[6]): a command the character's HKS script reads with
     /// `env(105, slot)` (the NPC script's `ExecEventTrandition` plays the matching event
     /// animation: 506000 is the Owl's heat-up `W_Event20005`).
-    EzStateRequest { entity: i32, command: i32, slot: u8 },
+    EzStateRequest {
+        entity: i32,
+        command: i32,
+        slot: u8,
+    },
     /// `DisplayBossHealthBar` (2003[11]): shows or hides the boss bar with an NpcName text id.
     BossBar {
         shown: bool,
@@ -47,13 +57,28 @@ pub enum EventCommand {
         name: i32,
     },
     /// `SetCharacterImmortality` (2004[12]): HP stops at 1.
-    Immortality { entity: i32, on: bool },
+    Immortality {
+        entity: i32,
+        on: bool,
+    },
     /// `SetCharacterInvincibility` (2004[15]): no damage at all.
-    Invincibility { entity: i32, on: bool },
+    Invincibility {
+        entity: i32,
+        on: bool,
+    },
     /// `SetCharacterHPBarDisplay` (2004[30]): the small bar over the character's head.
-    HpBarDisplay { entity: i32, on: bool },
+    HpBarDisplay {
+        entity: i32,
+        on: bool,
+    },
     /// `HandleBossDefeat` (2003[12]): the boss is beaten (banner, music end, rewards).
-    BossDefeat { entity: i32 },
+    BossDefeat {
+        entity: i32,
+    },
+    CharacterEnabled {
+        entity: i32,
+        enabled: bool,
+    },
 }
 
 /// What the events may ask about the world. Unknown entities answer `None`, which makes the
@@ -65,6 +90,9 @@ pub trait EventHost {
     fn has_event_message(&self, entity: i32, id: i32) -> Option<bool>;
     fn is_dead(&self, entity: i32) -> Option<bool>;
     fn hp(&self, entity: i32) -> Option<i32>;
+    fn health_bars(&self, _entity: i32) -> Option<i32> {
+        None
+    }
 }
 
 /// What happened, for logs and tests.
@@ -277,6 +305,11 @@ impl EventScripts {
             (4, 14) => host
                 .hp(i(1) as i32)
                 .is_some_and(|hp| compare(i(2), hp as i64, i(3))),
+            (4, 37) => host
+                .health_bars(i(1) as i32)
+                .is_some_and(|bars| compare(i(2), bars as i64, i(3))),
+            // Arena events join after the opening cutscene; no cutscene player is running.
+            (3, 31) => true,
             _ => false,
         }
     }
@@ -284,7 +317,7 @@ impl EventScripts {
     fn is_condition(ins: &Instruction) -> bool {
         matches!(
             ins.code(),
-            (0, 0) | (3, 0) | (4, 0) | (4, 5) | (4, 8) | (4, 14)
+            (0, 0) | (3, 0) | (3, 31) | (4, 0) | (4, 5) | (4, 8) | (4, 14) | (4, 37)
         )
     }
 
@@ -432,6 +465,12 @@ impl EventScripts {
                 (2003, 12) => {
                     command = Some(EventCommand::BossDefeat {
                         entity: i(0) as i32,
+                    })
+                }
+                (2004, 5) => {
+                    command = Some(EventCommand::CharacterEnabled {
+                        entity: i(0) as i32,
+                        enabled: i(1) != 0,
                     })
                 }
                 (2004, 6) => {

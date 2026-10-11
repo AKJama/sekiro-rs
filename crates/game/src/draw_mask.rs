@@ -29,6 +29,14 @@ pub struct DrawMask {
 }
 
 impl DrawMask {
+    pub fn with_groups(groups: [bool; GROUPS]) -> Self {
+        Self {
+            source: MaskSource::Combat,
+            groups: Some(groups),
+            dirty: true,
+        }
+    }
+
     pub fn new(source: MaskSource) -> Self {
         Self {
             source,

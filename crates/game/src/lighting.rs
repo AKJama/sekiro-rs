@@ -13,6 +13,7 @@
 //! game's space: the vector `Ry(yaw) * Rx(pitch) * +Z` points toward the light, and is mirrored
 //! on X into Bevy space like everything else.
 
+use anyhow::Context;
 use bevy::light::{EnvironmentMapLight, GlobalAmbientLight, Skybox};
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
@@ -254,6 +255,89 @@ fn apply_post_effects(
 /// Bevy illuminance (lux) per unit of gparam light intensity. Tuned by eye so the noon sun of
 /// m11 lands near Bevy's default outdoor exposure.
 const LUX_PER_UNIT: f32 = 9_000.0;
+/// Local-light candela starts from the sun scale, with a provisional 0.1 calibration.
+/// The unscaled mapping flooded Castle's tower cyan; 900 cd/unit retains local detail.
+/// Bevy takes lumens, so an isotropic source emits 4*pi times the candela.
+pub const LOCAL_LUMENS_PER_UNIT: f32 = LUX_PER_UNIT * 0.1 * 4.0 * std::f32::consts::PI;
+
+#[derive(Resource, Clone, Debug)]
+pub struct ShadowSettings {
+    pub enabled: bool,
+    pub cascades: usize,
+    pub distance: f32,
+    pub caster_distance: f32,
+    pub first_split: f32,
+    pub depth_bias: f32,
+    pub normal_bias: f32,
+}
+
+impl ShadowSettings {
+    pub fn from_args(g: &Gparam, hour: f32, args: &[String]) -> anyhow::Result<Self> {
+        let mut settings = Self {
+            enabled: !args.iter().any(|a| a == "--no-shadow"),
+            cascades: 2,
+            distance: 60.,
+            caster_distance: 45.,
+            depth_bias: 0.02,
+            normal_bias: 0.6,
+            first_split: g
+                .param("ShadowParam", "Cascade Dist 0->1")
+                .and_then(|p| p.at(0, hour))
+                .and_then(|v| v.first().copied())
+                .filter(|v| v.is_finite() && *v > 0.)
+                .unwrap_or(15.),
+        };
+        for (i, arg) in args.iter().enumerate() {
+            if arg == "--shadow" {
+                let value = args
+                    .get(i + 1)
+                    .context("--shadow needs cascades,distance")?;
+                let (count, distance) = value
+                    .split_once(',')
+                    .context("--shadow needs cascades,distance")?;
+                settings.cascades = count.parse()?;
+                settings.distance = distance.parse()?;
+            }
+            if arg == "--shadow-casters" {
+                settings.caster_distance = args
+                    .get(i + 1)
+                    .context("--shadow-casters needs metres")?
+                    .parse()?;
+            }
+            if arg == "--shadow-bias" {
+                let value = args
+                    .get(i + 1)
+                    .context("--shadow-bias needs depth,normal")?;
+                let (depth, normal) = value
+                    .split_once(',')
+                    .context("--shadow-bias needs depth,normal")?;
+                settings.depth_bias = depth.parse()?;
+                settings.normal_bias = normal.parse()?;
+            }
+        }
+        anyhow::ensure!(
+            (1..=4).contains(&settings.cascades),
+            "shadow cascades must be 1..4"
+        );
+        anyhow::ensure!(
+            settings.distance.is_finite() && settings.distance >= 1.,
+            "shadow distance must be finite and >= 1 m"
+        );
+        anyhow::ensure!(
+            settings.caster_distance.is_finite() && settings.caster_distance > 0.,
+            "caster distance must be finite and positive"
+        );
+        settings.first_split = settings.first_split.min(settings.distance * 0.5);
+        anyhow::ensure!(
+            settings.depth_bias.is_finite()
+                && settings.depth_bias >= 0.
+                && settings.normal_bias.is_finite()
+                && settings.normal_bias >= 0.,
+            "shadow bias must be finite and nonnegative"
+        );
+        Ok(settings)
+    }
+}
 /// Ambient brightness per unit of hemisphere intensity.
 const AMBIENT_PER_UNIT: f32 = 1_800.0;
 /// FwLo's ENV_PER_UNIT = LUX_PER_UNIT / pi, in cd/m2.
@@ -497,17 +581,20 @@ impl LightSet {
 }
 
 /// Spawns the sun and fill lights; [`apply_lighting`] sets them from the light set.
-pub fn spawn_lights(commands: &mut Commands) {
+pub fn spawn_lights(commands: &mut Commands, settings: &ShadowSettings) {
+    info!("map shadow budget: {settings:?}; normal bias in shadow texels");
     commands.spawn((
         Sun,
         DirectionalLight {
-            shadow_maps_enabled: true,
+            shadow_maps_enabled: settings.enabled,
+            shadow_depth_bias: settings.depth_bias,
+            shadow_normal_bias: settings.normal_bias,
             ..default()
         },
         bevy::light::CascadeShadowConfigBuilder {
-            num_cascades: 4,
-            maximum_distance: 250.0,
-            first_cascade_far_bound: 15.0,
+            num_cascades: settings.cascades,
+            maximum_distance: settings.distance,
+            first_cascade_far_bound: settings.first_split,
             ..default()
         }
         .build(),
@@ -573,6 +660,17 @@ pub fn apply_lighting(
 #[cfg(test)]
 mod probe_tests {
     use super::*;
+    #[test]
+    fn shadow_options_reject_unbounded_or_unsupported_configurations() {
+        let g = Gparam { groups: vec![] };
+        let args = |value: &str| vec!["--shadow".into(), value.into()];
+        assert!(ShadowSettings::from_args(&g, 12., &args("0,60")).is_err());
+        assert!(ShadowSettings::from_args(&g, 12., &args("5,60")).is_err());
+        assert!(ShadowSettings::from_args(&g, 12., &args("2,NaN")).is_err());
+        let s = ShadowSettings::from_args(&g, 12., &args("4,250")).unwrap();
+        assert_eq!(s.cascades, 4);
+        assert_eq!(s.distance, 250.);
+    }
     #[test]
     fn post_effects_only_mark_3d_cameras_and_disabled_lut_is_removed() {
         use sekiro_formats::gparam::{Entry, Group, Param, Value};

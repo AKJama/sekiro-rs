@@ -101,29 +101,83 @@ pub const OWL_EVENTS: BossEvents = BossEvents {
 };
 
 /// The fight events of an enemy, by character id (also used off the arena, on the flat floor).
-pub fn boss_events(chr: &str) -> Option<&'static BossEvents> {
-    match chr {
-        "c5060" => Some(&OWL_EVENTS),
-        _ => None,
-    }
+pub fn boss_events(spec: &EnemySpec) -> Option<&'static BossEvents> {
+    BOSS_EVENT_ROWS
+        .iter()
+        .find(|(character, row, _)| *character == spec.chr && *row == spec.npc_param)
+        .map(|(_, _, events)| events)
 }
 
+/// Reviewed map-event rows, keyed by boss identity instead of dispatch code.
+pub const BOSS_EVENT_ROWS: &[(&str, i32, BossEvents)] = &[
+    ("c5060", 50_600_000, OWL_EVENTS),
+    (
+        "c7100",
+        71_001_000,
+        BossEvents {
+            map: "m11_01_00_00",
+            boss_entity: 1_110_800,
+            flags: &[],
+            events: &[
+                EventEntry {
+                    id: 11_115_810,
+                    from_label: Some(3),
+                },
+                EventEntry {
+                    id: 11_115_820,
+                    from_label: None,
+                },
+            ],
+        },
+    ),
+    (
+        "c7110",
+        71_100_000,
+        BossEvents {
+            map: "m11_01_00_00",
+            boss_entity: 1_110_801,
+            flags: &[11_115_802],
+            events: &[
+                EventEntry {
+                    id: 11_115_800,
+                    from_label: None,
+                },
+                EventEntry {
+                    id: 11_115_831,
+                    from_label: None,
+                },
+            ],
+        },
+    ),
+];
+
 /// Every arena. The player start choices are documented in `docs/OWL.md` ("The castle roof").
-pub const ARENAS: &[ArenaSpec] = &[ArenaSpec {
-    name: "owl",
-    map: "m11_01_00_00",
-    boss_part: "c5060_0000",
-    enemy: "owl",
-    radius: 60.0,
-    // On the same roof, 18.9 m from the Owl; the other start on the roof (`c0000_0010`) is 1 m
-    // from him.
-    player_start: Some("c0000_0003"),
-    // The burnt floor of the castle top (entity 1114551, group 1117551) overlaps the tatami
-    // floor m015070 (1114550, group 1117550). Event 11115943 activates the burnt one only once
-    // flag 11115921 is set (after cutscene 11010080, which starts the later fight with c5430 on
-    // this roof) and the tatami again with 11110100; the Owl fight shows the tatami.
-    hidden_models: &["m015072"],
-}];
+pub const ARENAS: &[ArenaSpec] = &[
+    ArenaSpec {
+        name: "owl",
+        map: "m11_01_00_00",
+        boss_part: "c5060_0000",
+        enemy: "owl",
+        radius: 60.0,
+        // On the same roof, 18.9 m from the Owl; the other start on the roof (`c0000_0010`) is 1 m
+        // from him.
+        player_start: Some("c0000_0003"),
+        // The burnt floor of the castle top (entity 1114551, group 1117551) overlaps the tatami
+        // floor m015070 (1114550, group 1117550). Event 11115943 activates the burnt one only once
+        // flag 11115921 is set (after cutscene 11010080, which starts the later fight with c5430 on
+        // this roof) and the tatami again with 11110100; the Owl fight shows the tatami.
+        hidden_models: &["m015072"],
+    },
+    ArenaSpec {
+        name: "genichiro",
+        map: "m11_01_00_00",
+        boss_part: "c7100_0000",
+        enemy: "c7100:71001000",
+        radius: 60.0,
+        player_start: Some("c0000_0003"),
+        hidden_models: &["m015072"],
+    },
+];
 
 /// Distance in front of the boss where Wolf starts when the arena names no player start.
 pub const FALLBACK_DISTANCE: f32 = 6.0;

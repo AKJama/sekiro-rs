@@ -6,6 +6,18 @@ Nine are gameplay maps; m89 is a library of sky domes with no collision terrain.
 This is a baseline inspection, not a claim that materials, event state or lighting match the original game exactly.
 No commits were made, and the install and default release executable were left untouched.
 
+## Shadow and BTL follow-up (11 October 2026)
+
+Visuals steps 4 and 5 add a two-cascade/60 m sun budget, a 45 m map-caster bounds cull and extracted BTL point lights.
+Wolf and enemy meshes retain shadow eligibility; the hour-18 Outskirts shadow on/off pair visibly confirms Wolf's ground shadow.
+Eligible map casters fall from 18027 to 1260 in Outskirts start 3 and from 15933 to 2958 in Castle start 2.
+Matched scripted noon medians are 16.635 / 16.637 ms and 16.705 / 16.686 ms before/after at approximately 60 Hz.
+The uncapped viewer's short diagnostic samples are 59.8 / 62.6 fps and 60.2 / 112.7 fps; available opaque GPU timings do not isolate shadow cost.
+BTL sidecars were exported for Outskirts (22 records), Castle (94), Fountainhead (45) and many-light Hirata (261), preserving separate banks.
+The final Castle hour-0 tower and corridor comparisons retain surface detail without the rejected initial cyan wash; point shadows remain off and native attenuation/bank activation are unresolved.
+Every generated `target/alt/visuals/v3-*.png` was inspected, with capture judgements, the complete nine-map BTL census and validation commands in `docs/VISUALS-PLAN.md`.
+Layered map materials remain pending.
+
 ## HDR, grading and tangent follow-up (11 October 2026)
 
 Visuals steps 2 and 3 add HDR/ACES fitted, conservative GPARAM bloom, display-space map LUTs and compute auto exposure to map cameras.

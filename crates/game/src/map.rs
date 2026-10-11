@@ -19,10 +19,12 @@ use anyhow::{Context, Result};
 use bevy::app::AppExit;
 use bevy::asset::RenderAssetUsages;
 use bevy::asset::{AssetPlugin, LoadState, UntypedAssetId};
+use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::light::GlobalAmbientLight;
+use bevy::light::NotShadowCaster;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::pbr::wireframe::{Wireframe, WireframeColor, WireframePlugin};
 use bevy::pbr::{DistanceFog, FogFalloff};
@@ -32,8 +34,8 @@ use bevy::world_serialization::WorldInstanceReady;
 use serde_json::Value;
 
 use crate::lighting::{
-    MapLighting, MapProbes, ProbeRegion, apply_lighting, apply_probes, nearest_available_variant,
-    nearest_variant, spawn_lights,
+    MapLighting, MapProbes, ProbeRegion, ShadowSettings, apply_lighting, apply_probes,
+    nearest_available_variant, nearest_variant, spawn_lights,
 };
 
 pub struct Options {
@@ -455,6 +457,17 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
         }
     }
     app.insert_resource(probes);
+    let args: Vec<_> = std::env::args().collect();
+    app.insert_resource(ShadowSettings::from_args(&gparam, hour, &args)?);
+    app.insert_resource(LocalLights::load(dir, &args)?);
+    if args.iter().any(|a| a == "--uncapped") {
+        app.insert_resource(bevy::winit::WinitSettings::continuous());
+        app.add_systems(Startup, |mut windows: Query<&mut Window>| {
+            for mut window in &mut windows {
+                window.present_mode = bevy::window::PresentMode::AutoNoVsync;
+            }
+        });
+    }
     app.add_plugins(WireframePlugin::default())
         .insert_resource(ClearColor(SKY))
         .insert_resource(GlobalAmbientLight {
@@ -493,6 +506,8 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
                 camera_environment,
                 toggle_collision,
                 track_loading,
+                budget_map_shadows,
+                update_local_lights,
                 (pick_groups, apply_groups, apply_lighting, apply_probes).chain(),
             ),
         );
@@ -667,8 +682,9 @@ fn spawn_map(
     mut pending: ResMut<Pending>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    shadow: Res<ShadowSettings>,
 ) {
-    spawn_lights(&mut commands);
+    spawn_lights(&mut commands, &shadow);
 
     let scene = &layout.scene;
     if !scene.no_pieces {
@@ -1011,6 +1027,245 @@ fn apply_groups(
     }
 }
 
+#[derive(Clone)]
+struct LocalLight {
+    position: Vec3,
+    color: Color,
+    intensity: f32,
+    range: f32,
+}
+
+#[derive(Resource, Default)]
+struct LocalLights {
+    lights: Vec<LocalLight>,
+    active: std::collections::BTreeMap<usize, Entity>,
+}
+
+impl LocalLights {
+    fn load(dir: &Path, args: &[String]) -> Result<Self> {
+        let mut result = Self::default();
+        if args.iter().any(|a| a == "--no-local-lights") {
+            return Ok(result);
+        }
+        let scale = args
+            .iter()
+            .position(|a| a == "--local-light-scale")
+            .map(|i| {
+                args.get(i + 1)
+                    .context("--local-light-scale needs a multiplier")?
+                    .parse::<f32>()
+                    .context("invalid local light scale")
+            })
+            .transpose()?
+            .unwrap_or(1.);
+        anyhow::ensure!(
+            scale.is_finite() && scale >= 0.,
+            "local light scale must be finite and nonnegative"
+        );
+        let path = dir.join("lights.json");
+        if !path.exists() {
+            warn!("no BTL sidecar: {} (re-extract map)", path.display());
+            return Ok(result);
+        }
+        let value: Value = serde_json::from_slice(&std::fs::read(path)?)?;
+        anyhow::ensure!(value["version"] == 1, "unsupported lights.json version");
+        let banks = value["banks"].as_array().context("BTL banks array")?;
+        let bank = args
+            .iter()
+            .position(|a| a == "--light-bank")
+            .map(|i| {
+                args.get(i + 1)
+                    .context("--light-bank needs a bank number")?
+                    .parse::<u32>()
+                    .context("invalid BTL bank")
+            })
+            .transpose()?;
+        let selected = if let Some(bank) = bank {
+            banks
+                .iter()
+                .find(|b| {
+                    b["source"]
+                        .as_str()
+                        .is_some_and(|s| s.ends_with(&format!("_{bank:04}.btl")))
+                })
+                .with_context(|| format!("BTL bank {bank:04} is absent"))?
+        } else {
+            let Some(first) = banks.first() else {
+                return Ok(result);
+            };
+            first
+        };
+        for row in selected["lights"].as_array().context("BTL lights array")? {
+            if row["kind"] != 1 {
+                warn!("unsupported BTL kind {} ({})", row["kind"], row["name"]);
+                continue;
+            }
+            let vector = |key: &str| -> Result<[f32; 3]> {
+                let a = row[key].as_array().context("BTL vector")?;
+                anyhow::ensure!(a.len() == 3, "BTL vector length");
+                let values = [0, 1, 2].map(|i| a[i].as_f64().map(|v| v as f32));
+                let [Some(x), Some(y), Some(z)] = values else {
+                    anyhow::bail!("BTL vector values")
+                };
+                anyhow::ensure!([x, y, z].iter().all(|v| v.is_finite()), "BTL finite vector");
+                Ok([x, y, z])
+            };
+            let color = vector("color")?;
+            let intensity = row["intensity"].as_f64().context("BTL intensity")? as f32;
+            let range = row["range"].as_f64().context("BTL range")? as f32;
+            anyhow::ensure!(
+                intensity.is_finite() && intensity >= 0. && range.is_finite() && range >= 0.,
+                "BTL range/intensity"
+            );
+            result.lights.push(LocalLight {
+                position: Vec3::from(vector("position")?),
+                // Match GPARAM's linear RGB convention; BTL's colour space is untraced.
+                color: Color::linear_rgb(color[0] / 255., color[1] / 255., color[2] / 255.),
+                intensity: intensity * scale,
+                range,
+            });
+        }
+        info!(
+            "BTL bank {}: {} lights, scale {scale}, 60 m focus cull, cap 64, no shadows",
+            selected["source"],
+            result.lights.len()
+        );
+        Ok(result)
+    }
+}
+
+fn update_local_lights(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut lights: ResMut<LocalLights>,
+    focus: Query<&GlobalTransform, With<MapFocus>>,
+    mut last: Local<f32>,
+) {
+    if time.elapsed_secs() - *last < 0.5 {
+        return;
+    }
+    *last = time.elapsed_secs();
+    let Some(focus) = focus.iter().next() else {
+        return;
+    };
+    let position = focus.translation();
+    let mut candidates: Vec<_> = lights
+        .lights
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| {
+            let distance = l.position.distance_squared(position);
+            (l.intensity > 0. && l.range > 0. && distance <= (60. + l.range).powi(2))
+                .then_some((i, distance))
+        })
+        .collect();
+    candidates.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+    let wanted: std::collections::BTreeSet<_> =
+        candidates.into_iter().take(64).map(|(i, _)| i).collect();
+    let old_count = lights.active.len();
+    let removed: Vec<_> = lights
+        .active
+        .keys()
+        .copied()
+        .filter(|i| !wanted.contains(i))
+        .collect();
+    for i in removed {
+        commands.entity(lights.active.remove(&i).unwrap()).despawn();
+    }
+    for i in wanted {
+        if lights.active.contains_key(&i) {
+            continue;
+        }
+        let light = &lights.lights[i];
+        let entity = commands
+            .spawn((
+                PointLight {
+                    color: light.color,
+                    intensity: light.intensity * crate::lighting::LOCAL_LUMENS_PER_UNIT,
+                    range: light.range,
+                    radius: 0.,
+                    shadow_maps_enabled: false,
+                    ..default()
+                },
+                Transform::from_translation(light.position),
+            ))
+            .id();
+        lights.active.insert(i, entity);
+    }
+    if lights.active.len() != old_count {
+        info!("BTL active lights: {}", lights.active.len());
+    }
+}
+
+/// Only map descendants are budgeted; character meshes always retain their shadows.
+/// Use the world-space bounds, not the instance origin, to retain large nearby walls.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn budget_map_shadows(
+    mut commands: Commands,
+    time: Res<Time>,
+    settings: Res<ShadowSettings>,
+    focus: Query<&GlobalTransform, With<MapFocus>>,
+    meshes: Query<(Entity, &GlobalTransform, &Aabb, Option<&NotShadowCaster>), With<Mesh3d>>,
+    parents: Query<&ChildOf>,
+    roots: Query<(), With<DrawGroups>>,
+    mut last: Local<f32>,
+    mut counts: Local<Option<(usize, usize)>>,
+) {
+    if time.elapsed_secs() - *last < 0.5 {
+        return;
+    }
+    *last = time.elapsed_secs();
+    let Some(focus) = focus.iter().next() else {
+        return;
+    };
+    let position = focus.translation();
+    let mut total = 0;
+    let mut casting = 0;
+    for (entity, transform, bounds, excluded) in &meshes {
+        let mut ancestor = entity;
+        while !roots.contains(ancestor) {
+            let Ok(parent) = parents.get(ancestor) else {
+                break;
+            };
+            ancestor = parent.parent();
+        }
+        if !roots.contains(ancestor) {
+            continue;
+        }
+        let mut lo = Vec3::splat(f32::INFINITY);
+        let mut hi = Vec3::splat(f32::NEG_INFINITY);
+        for x in [-1., 1.] {
+            for y in [-1., 1.] {
+                for z in [-1., 1.] {
+                    let corner = Vec3::from(bounds.center)
+                        + Vec3::from(bounds.half_extents) * Vec3::new(x, y, z);
+                    let corner = transform.transform_point(corner);
+                    lo = lo.min(corner);
+                    hi = hi.max(corner);
+                }
+            }
+        }
+        let cast = settings.enabled
+            && position.distance_squared(position.clamp(lo, hi))
+                <= settings.caster_distance.powi(2);
+        total += 1;
+        casting += usize::from(cast);
+        if cast && excluded.is_some() {
+            commands.entity(entity).remove::<NotShadowCaster>();
+        }
+        if !cast && excluded.is_none() {
+            commands.entity(entity).insert(NotShadowCaster);
+        }
+    }
+    if *counts != Some((casting, total)) {
+        info!(
+            "map shadow casters: {casting}/{total} meshes within {} m of focus",
+            settings.caster_distance
+        );
+        *counts = Some((casting, total));
+    }
+}
+
 fn toggle_collision(
     keys: Res<ButtonInput<KeyCode>>,
     mut collision: Query<&mut Visibility, (With<CollisionView>, Without<Marker>)>,
@@ -1181,8 +1436,7 @@ pub fn parse_camera(arg: Option<&str>) -> Result<Option<[f32; 5]>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cinematic_gparam, default_gparam, viewer_eye};
-    use bevy::prelude::Vec3;
+    use super::*;
 
     #[test]
     fn draw_param_stems_preserve_cinematic_suffix() {
@@ -1208,5 +1462,122 @@ mod tests {
         let clear = sekiro_formats::hknp::CollisionMesh::default();
         let requested = Vec3::new(0.0, 2.2, 3.5);
         assert_eq!(viewer_eye(Vec3::ZERO, requested, &clear), requested);
+    }
+
+    #[test]
+    fn shadow_budget_preserves_characters_and_large_walls_and_follows_focus() {
+        let mut app = App::new();
+        let settings =
+            ShadowSettings::from_args(&sekiro_formats::gparam::Gparam { groups: vec![] }, 12., &[])
+                .unwrap();
+        app.insert_resource(settings)
+            .insert_resource(Time::<()>::default())
+            .add_systems(Update, budget_map_shadows);
+        let root = app.world_mut().spawn(DrawGroups([0; 8])).id();
+        let focus = app
+            .world_mut()
+            .spawn((MapFocus, GlobalTransform::default()))
+            .id();
+        let bounds = Aabb {
+            center: Vec3::ZERO.into(),
+            half_extents: Vec3::ONE.into(),
+        };
+        let character = app
+            .world_mut()
+            .spawn((
+                Mesh3d::default(),
+                GlobalTransform::from_translation(Vec3::X * 100.),
+                bounds,
+            ))
+            .id();
+        let far = app
+            .world_mut()
+            .spawn((
+                Mesh3d::default(),
+                ChildOf(root),
+                GlobalTransform::from_translation(Vec3::X * 100.),
+                bounds,
+            ))
+            .id();
+        let wall = app
+            .world_mut()
+            .spawn((
+                Mesh3d::default(),
+                ChildOf(root),
+                GlobalTransform::from_translation(Vec3::X * 100.),
+                Aabb {
+                    center: Vec3::ZERO.into(),
+                    half_extents: Vec3::splat(80.).into(),
+                },
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs(1));
+        app.update();
+        assert!(app.world().get::<NotShadowCaster>(character).is_none());
+        assert!(app.world().get::<NotShadowCaster>(far).is_some());
+        assert!(app.world().get::<NotShadowCaster>(wall).is_none());
+        *app.world_mut().get_mut::<GlobalTransform>(focus).unwrap() =
+            GlobalTransform::from_translation(Vec3::X * 100.);
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs(1));
+        app.update();
+        assert!(app.world().get::<NotShadowCaster>(far).is_none());
+    }
+
+    #[test]
+    fn local_lights_cap_nearest_and_despawn_outside_range() {
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(LocalLights {
+                lights: (0..100)
+                    .map(|i| LocalLight {
+                        position: Vec3::X * i as f32 * 0.1,
+                        color: Color::WHITE,
+                        intensity: 1.,
+                        range: 4.,
+                    })
+                    .collect(),
+                active: default(),
+            })
+            .add_systems(Update, update_local_lights);
+        let focus = app
+            .world_mut()
+            .spawn((MapFocus, GlobalTransform::default()))
+            .id();
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs(1));
+        app.update();
+        let lights = app.world().resource::<LocalLights>();
+        assert_eq!(lights.active.len(), 64);
+        assert_eq!(
+            lights.active.keys().copied().collect::<Vec<_>>(),
+            (0..64).collect::<Vec<_>>()
+        );
+        for entity in lights.active.values() {
+            assert!(
+                !app.world()
+                    .get::<PointLight>(*entity)
+                    .unwrap()
+                    .shadow_maps_enabled
+            );
+        }
+        *app.world_mut().get_mut::<GlobalTransform>(focus).unwrap() =
+            GlobalTransform::from_translation(Vec3::X * 1000.);
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs(1));
+        app.update();
+        assert!(app.world().resource::<LocalLights>().active.is_empty());
+        assert_eq!(
+            app.world_mut()
+                .query::<&PointLight>()
+                .iter(app.world())
+                .count(),
+            0
+        );
     }
 }

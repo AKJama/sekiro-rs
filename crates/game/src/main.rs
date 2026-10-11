@@ -5,7 +5,7 @@
 //!   [--distance <m>] [--height <m>] [--hide m12,hair] [--only m68,m69]`: inspect an exported
 //!   model in bind pose; `--hide`/`--only` filter primitives by material name, `--combat` shows
 //!   enemies with weapons drawn.
-//! - `sekiro-rs --arena owl [--full-map] [--script FILE ...]`: Wolf against a boss where the
+//! - `sekiro-rs --arena owl|genichiro [--full-map] [--script FILE ...]`: Wolf against a boss where the
 //!   game places him (`sekiro_sim::arena`); a play mode, see `play.rs`.
 //! - `sekiro-rs --map <id> [--screenshot <out.png>] [--at <s>] [--camera x,y,z,yaw,pitch]
 //!   [--start <n>] [--collision] [--no-pieces] [--objects] [--hide m9,m8]
@@ -125,10 +125,16 @@ fn main() -> anyhow::Result<()> {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         let opponent = match (arg_value(&args, "--enemy"), boss_arena) {
-            (Some(name), _) => sekiro_sim::enemy::EnemySpec::by_name(&name)
-                .map_err(|e| anyhow::anyhow!("--enemy: {e}"))?,
-            (None, Some(arena)) => arena.enemy_spec(),
-            (None, None) => sekiro_sim::enemy::EnemySpec::soldier(),
+            (Some(name), _) => sekiro_sim::enemy::EnemySpec::from_cache(
+                &PathBuf::from(arg_value(&args, "--cache").unwrap_or_else(|| "cache".into())),
+                &name,
+            )
+            .map_err(|e| anyhow::anyhow!("--enemy: {e}"))?,
+            (None, arena) => sekiro_sim::enemy::EnemySpec::from_cache(
+                &PathBuf::from(arg_value(&args, "--cache").unwrap_or_else(|| "cache".into())),
+                arena.map_or("soldier", |arena| arena.enemy),
+            )
+            .map_err(|e| anyhow::anyhow!("--enemy: {e}"))?,
         };
         let player = sekiro_sim::brain::memory::player_name(
             &arg_value(&args, "--player").unwrap_or_else(|| "default".into()),
@@ -256,9 +262,11 @@ fn main() -> anyhow::Result<()> {
         "                 [--map <id> [--start <n> | --spawn x,y,z,yaw,0]] [--no-enemy] [--lock-on]"
     );
     eprintln!(
-        "                 [--simple-ai] [--passive] [--god] [--immortal] [--force-act <id>] [--enemy c1010|c5060] [--brain lua|scripted|decisions|responses|coach] [--brain-model <name>] [--coach claude|codex|api] [--coach-model <name>] [--coach-effort <level>] [--coach-interval <secs>] [--brain-log] [--brain-memory off|on|<path>] [--player <name>]"
+        "                 [--simple-ai] [--passive] [--god] [--immortal] [--force-act <id>] [--enemy cXXXX[:npcrow]|soldier|owl] [--brain lua|scripted|decisions|responses|coach] [--brain-model <name>] [--coach claude|codex|api] [--coach-model <name>] [--coach-effort <level>] [--coach-interval <secs>] [--brain-log] [--brain-memory off|on|<path>] [--player <name>]"
     );
-    eprintln!("       sekiro-rs --arena owl [--full-map] [--play options] (a boss on his own map)");
+    eprintln!(
+        "       sekiro-rs --arena owl|genichiro [--full-map] [--play options] (a boss on his own map)"
+    );
     eprintln!(
         "                 [--brain-overlay] [--brain-stage lua|early|alive|outsmarted] [--window-size WIDTHxHEIGHT] (F8 toggles overlay)"
     );

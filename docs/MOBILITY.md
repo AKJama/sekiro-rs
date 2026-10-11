@@ -506,6 +506,84 @@ The captures show the ornament, airborne movement and arrival on the roof, thoug
 Validation passes with `CARGO_TARGET_DIR=target/alt` and four jobs: formatting, workspace/all-target Clippy with `-D warnings`, all requested release sim/formats/extract tests (418 passed, two existing ignored) and the release game build.
 The final test log is `target/alt/mobility/grapple-suite-v2.log`; final scripted logs are `grapple-final-v2.log` and `grapple-negative-v2.log` in the same directory.
 
+### Step 3(b). Solved flight, air shots, chains and equipment (2026-10-11)
+
+This section supersedes slice (a)'s linear travel and its air/chain/equipment limitations.
+FwLo's MIT research in `target/alt/fwlo/grapple.md`, sections 3 and 6, supplies the engine facts used here; `target/alt/fwlo/docking.md` supplies docking context.
+Our implementation is original Rust, with no FwLo source copied.
+The existing FwLo credit in `CREDITS.md` includes these facts.
+
+TAE 920 row 1100 launches the solved arc under fall type 2's total gravity of 19.6 m/s2.
+The initial velocity is displacement divided by flight time plus half the gravity times flight time in Y.
+Each tick recomputes horizontal velocity from the remaining displacement and remaining time, and integrates Y with the exact constant-acceleration displacement.
+The arrival time comes from the playing clip's TAE CameraSlot 19 start minus its row-1100 launch time: 0.833333 s on 202011/202012, 0.666667 s on 202010 and the air/chain starts.
+This preserves the authored camera-slot boundary without fitting flight to TAE 901.
+The synthetic 10 m horizontal / 5 m upward fixture arrives within 0.000005 m at 0.83 s and rises above the straight-line midpoint.
+Collision rays at the four existing capsule heights stop both the 904 slide and arc movement; the ray endpoint has a 1 mm numerical allowance to prevent crossing a wall at an exact tick boundary.
+This remains a set of ray sweeps, not a complete swept capsule.
+
+TAE 900 moves the rope tip using its float speed in m/s; the authored value is 50.
+TAE 901 holds the tip at the hook, and TAE 902 re-aims Wolf during its active window.
+The chain shots use the authored 2700 deg/s turn rate, versus 1080 deg/s for ordinary shoot windows.
+TAE 904 applies row 1101's +30 horizontal / +30 vertical blend before launch.
+Its horizontal curve is linear; the EaseIn curve id 10 is currently fitted with a quadratic, since the copied notes identify the curve id but do not give its evaluation formula.
+TAE 905 suppresses falling only during its active air/chain shoot window.
+TAE 921's wire homing selection uses the selected variation's 300000000-based homing row and its retained offset.
+No-ride offsets are transformed in the approach frame; variation 20 flies 7.5 m beyond and 2.5 m below the hook and retains its velocity for the subsequent wire fall.
+
+Search now runs while jumping, falling and flying, excludes the currently hooked point, and offers the next candidate to HKS.
+The engine writes WireDramaticAngle from the hook elevation; HKS retains its >50 / >15 degree WireMoveStartIndex selection rule and stores the ground selector at shoot entry.
+Air grapple requests can execute in the jump's TAE 119 window as well as the existing movement window.
+HKS drives AirWireShoot, WireMoveWireShoot and WireMoveWire2Shoot, and their real move-start selectors.
+The tests reach both chain shoot clips, 202600 and 202700, without injected behavior events.
+Leaving wire movement for an attack, guard or jump clip releases wire control and preserves the current momentum for the ordinary body path.
+Attack and guard tests enable their actual unlocks 14 and 15; the controller does not grant these skills.
+Env 3003 remains cm/s, while env 248 can predict contact during the next downward tick independently of env 201's completed landing.
+The fast no-ride fixture reaches WireFallLandReady at -2078 cm/s, then LandWireMove on contact.
+
+A ridden landing supplies a virtual perch within 0.6 m horizontally of its landing spot, because the object is often absent from terrain collision.
+When terrain is within 0.6 m vertically of the spot it supplies the perch height instead, so ordinary roof landings settle onto collision.
+Walking outside the perch footprint resumes falling.
+This is the documented object-collision approximation, not an extracted object collider.
+
+The model exporter now writes `cache/models/wp_a_9500.glb` and `cache/anim/wp_a_9500/` when exporting Wolf.
+It exports the original WP_A_9500 model, its 80-bone skeleton, 77 mesh joints and all 16 available anibnd clips, including 202000 through 202710 and a999.
+The actual decoded chain ends at BornEnd; the copied notes' Born79 name is not present in our skeleton.
+TAE 715 model type 3 supplies dummy 144 and visibility.
+An opt-in `--extra skinned-rope` preview samples the matching equipment animation, aims the sampled chain and scales the complete model by distance / 4.0.
+Visual QA found that this does not correctly warp the animated cable to the hook: the hook size changes and large curls remain beside Wolf.
+The default renderer therefore draws the allowed simple line directly from dummy 144 to the simulated tip during the TAE 715 window.
+The full model and clips remain exported for completing native chain-only deformation and TAE 717 placement later.
+Native skinned rope placement is an explicit gap, and the rejected model preview captures are not evidence of fidelity.
+
+HangIdle 020000 carries TAE 720 byte pairs 01/01 and 00/01 throughout the clip, with the same sheath windows in the early climb; it carries no 233 draw-mask or 715 weapon-location event.
+The exported katana was permanently attached to dmyblade:1, explaining the blade across the roof in the original screenshot.
+The renderer now applies the right-hand sheath window to the existing dmy:147 scabbard frame and restores the hand attachment outside it.
+This is an interpretation of the authored 720 sheath command; its full CultType enum and all equipment states are not traced.
+The matched before/after files are `target/alt/mobility/grapple2-hang-before.png` and `grapple2-hang-after.png`.
+The after view has clear hands and no sword across the tiles; the climb replay still finishes on the upper roof.
+
+The scripted ground, jump-air and chain routes use `--arena owl --simple-ai --passive --god --objects --enemy-distance 1000 --spawn 104.03038,53.234768,254.9751,60,0` and the three `grapple2_*.txt` scripts.
+The chain's second hook is o115790_7001 at (93.31853, 53.09239, 254.30566), found in the exported m11_01 grapple points.
+Final run logs and screenshots use the `target/alt/mobility/grapple2-` prefix.
+The ground and air routes land on the Shachi roof at (97.10218, 52.56432, 250.97510), 0.279 m from the anchor.
+The chain reaches the second ornament and remains perched within 0.05 m of its landing spot.
+The ground replay enters 202000 at tick 30, 202012 at tick 61 and LandWireMove / 202035 at tick 141.
+The air replay jumps at tick 30, enters AirWireShoot / 202100 at tick 55, 202112 at tick 84 and LandWireMove at tick 134.
+The chain replay enters WireMoveWireShoot / 202600 at tick 120, 202610 at tick 139 and LandWireMove at tick 189.
+The final line-renderer logs are `grapple2-ground-line.log`, `grapple2-air-line.log` and `grapple2-chain-line.log`.
+All nine matching `grapple2-{ground,air,chain}-{rope,flight,roof,perch}.png` captures were inspected.
+The chain's rope and flight views show the cable leaving the prosthetic and reaching the ornament, with a plausible airborne arc.
+The ground and air views show plausible flight above the tiles and stable roof landings; their cable is mostly occluded by the roof and Wolf from this camera.
+The perch view shows Wolf standing on the second ornament, without drifting onto the lower roof.
+The remaining search-box, region-driven wire-set, object enablement, enemy hook, break-fall and swim-wire gaps are unchanged.
+
+Final validation passes with `CARGO_TARGET_DIR=target/alt`, `CARGO_BUILD_JOBS=6`, `-j 6` where supported and offline Cargo: `cargo fmt --all --check`, workspace/all-target Clippy with `-D warnings`, the release sim/formats/extract suite and the release game build.
+The suite reports 433 passed and two existing ignored tests, including all 15 wire tests; the standalone wire diagnostic replay also passes all 15.
+Final logs are `grapple2-fmt-pass.log`, `grapple2-clippy-final-v3.log`, `grapple2-suite-pass.log`, `grapple2-build-pass.log` and `grapple2-wire-final.log` under `target/alt/mobility/`.
+Concurrent Genichiro and shadow-budget failures cleared on retry without modifying their implementation files.
+Integration edits outside the assigned files are limited to `sim/src/character.rs` (wire advance, angle, landing-ready and perch hooks), `game/src/character.rs` (bind a rig by its own first bone rather than Wolf's Master) and `extract/src/models/mod.rs` (tool module declaration and Wolf-export call).
+
 ### Step 4. Wall hug
 
 - Files: shares `edge.rs` and `docking.rs` from step 2; `crates/sim/src/player.rs` (env 3043, 3011, 3051, 3052, 3017 for kind 3); `input.rs` arm 12 as in step 2.
@@ -532,4 +610,4 @@ The final test log is `target/alt/mobility/grapple-suite-v2.log`; final scripted
 - Unknown or risky: speeds (from root motion and `_DiveSpeedUpdate`), water surface height source (collision plane or a region), fall into water (`W_LandWaterFreeFall*`, long stiff at 20 m), underwater camera and fog.
 - Scripted test: pick the first start in `m13_00_00_00`, `m15_00_00_00` or `m17_00_00_00` whose collision under the feet reports material 22, 36 or 38 (not yet scanned), jump in, and expect `W_LandWaterFreeFall` then `SwimMove` states.
 
-Biggest unknowns overall: the wire set and search row per area, the travel model (TAE 900 and 901, act 3023), the exe tests behind env 3000 and 3043 to 3050, fall damage HP and the void kill height, edge flags bytes 2 and 3, and whether the object transform in section 3.1 matches the rendered map (check one point against a screenshot first).
+Biggest unknowns overall: the wire set and search row per area, native rope chain deformation and the EaseIn curve formula, the exe tests behind env 3000 and 3043 to 3050, fall damage HP and the void kill height, edge flags bytes 2 and 3, and whether the object transform in section 3.1 matches the rendered map (check one point against a screenshot first).

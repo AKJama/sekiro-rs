@@ -11,7 +11,7 @@ This is a high-level view of how much of Sekiro is reimplemented.
 | Player movement | Partial | `######----` 60% |
 | Combat rules | Partial | `#######---` 65% |
 | Deathblows and death | Partial | `######----` 60% |
-| Enemies and bosses | Partial | `#---------` ~5% |
+| Enemies and bosses | Partial | 102 placed types load; soldier, Owl and castle Genichiro fights verified |
 | Enemy AI | Partial | `#####-----` 50% |
 | Maps and world | Partial | All 10 maps extracted; 9 gameplay maps walkable at baseline |
 | Audio | Partial | `###-------` 30% |
@@ -43,7 +43,7 @@ Docs: [FORMATS.md](FORMATS.md), [PARAMS.md](PARAMS.md).
 | Input buffer | Done | Uses the engine's accept/execute flags. |
 | Air control | Implemented | Per-type fall table, stick steering/braking and speed cap; fall heights in cm, material fall death and map respawn. |
 | Upper/lower body animation layering | Not started | One clip shown at a time. |
-| Grappling hook | Ground shot and arrival implemented | Authored points, param search, collision LOS, HKS shoot/move/landing and target ring; air/chained hooks remain. |
+| Grappling hook | Mobility slice (b) implemented | Solved arrival arc, air shots, two chain shoot states, HKS cancels and landing, no-ride homing offsets, 0.6 m perch, exported rope, line fallback and target ring; native skinned rope placement and search boxes remain gaps. |
 | Ledge hang | Partial | Ground grab, idle, climb up and drop for variation 0; real-data replay and synthetic HKS tests; docking thresholds remain placeholders. |
 | Wall hug, swimming, climbing | Not started | |
 
@@ -77,15 +77,16 @@ Docs: [DEATHBLOW.md](DEATHBLOW.md).
 
 ## Enemies and bosses
 
-1 of about 128 character models is working (~5%).
+102 placed character types load from data across 1754 placements; combat is verified for the soldier, Owl and castle Genichiro.
 
 | Item | Status | Notes |
 | --- | --- | --- |
 | Ashina soldier (c1010) | Done | Own HKS script and real Lua AI. |
-| Great Shinobi Owl (c5070) | Partial | In progress. |
-| All other enemies and bosses | Not started | The same pipeline should load them. |
+| Great Shinobi Owl (c5060) | Working | Lua, tools, two deathblows and map phase events. |
+| Castle Genichiro (c7100, c7110) | Working with gaps | Castle rows, Lua attacks, arrows, marks and event hand-over; lightning remains. |
+| Placed roster | Loads | 102/102 resource smoke; donor and animation-set support; combat fidelity needs per-enemy verification. |
 
-Docs: [AI.md](AI.md), [OWL.md](OWL.md) (being written).
+Docs: [AI.md](AI.md), [OWL.md](OWL.md), [GENICHIRO.md](GENICHIRO.md).
 
 ## Enemy AI
 

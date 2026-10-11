@@ -46,7 +46,7 @@ enum Command {
     },
     /// Convert character models in cache/raw to skinned, textured GLB files in cache/models.
     Models {
-        /// Model ids to export (e.g. c1010, c0000). Defaults to the milestone set.
+        /// Model ids, optionally with an NpcParam row (c7100:71001000). Defaults to the placed roster.
         ids: Vec<String>,
         /// Print which FLVER mesh each glTF primitive came from.
         #[arg(long)]
@@ -63,7 +63,7 @@ enum Command {
     Params,
     /// Decode Havok skeletons, animation clips and TAE events into cache/anim/<chr>/.
     Anims {
-        /// Character ids (e.g. c0000 c1010). Defaults to c0000, c1010 and c5060 (the Owl).
+        /// Character ids (e.g. c0000 c1010). Defaults to Wolf and the placed roster's animation donors.
         chrs: Vec<String>,
     },
     /// Export one map area (e.g. m11_00_00_00) to cache/maps/<id>: map piece GLBs, layout JSON
@@ -124,6 +124,42 @@ fn main() -> Result<()> {
         | Command::Sound { .. } => unreachable!(),
     }
     Ok(())
+}
+
+/// Character ids placed by extracted maps; animation defaults include each row's donor.
+pub(crate) fn roster_ids(cache: &Path, donors: bool) -> Result<Vec<String>> {
+    let params: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(cache.join("params/NpcParam.json"))?)?;
+    let rows: HashMap<i64, &serde_json::Value> = params["rows"]
+        .as_array()
+        .context("NpcParam rows")?
+        .iter()
+        .filter_map(|r| Some((r["id"].as_i64()?, r)))
+        .collect();
+    let mut ids = std::collections::BTreeSet::from(["c0000".to_string()]);
+    for dir in std::fs::read_dir(cache.join("maps"))? {
+        let path = dir?.path().join("layout.json");
+        if !path.exists() {
+            continue;
+        }
+        let layout: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
+        for p in layout["enemies"].as_array().into_iter().flatten() {
+            let Some(chr) = p["model"].as_str().filter(|c| c.starts_with('c')) else {
+                continue;
+            };
+            let donor = p["npc_param"]
+                .as_i64()
+                .and_then(|id| rows.get(&id))
+                .and_then(|r| r["normalChangeAnimChrId"].as_i64())
+                .filter(|id| *id > 0);
+            ids.insert(if donors {
+                donor.map_or_else(|| chr.into(), |id| format!("c{id:04}"))
+            } else {
+                chr.into()
+            });
+        }
+    }
+    Ok(ids.into_iter().collect())
 }
 
 fn open_vfs(game: &Path, cache: &Path) -> Result<Vfs> {

@@ -20,6 +20,8 @@ pub struct Gauges {
     /// The enemy's bars are shown: it is alive and, in a boss fight run by the map events,
     /// the events show its health bar (the Owl's is hidden during his heat-up).
     pub enemy_alive: bool,
+    /// A map-script boss bar stays on screen rather than following the character's head.
+    pub boss_bar: bool,
     pub deathblow: bool,
     /// The enemy's name over its bars.
     pub enemy_name: &'static str,
@@ -76,7 +78,11 @@ fn bar(parent: &mut ChildSpawnerCommands, fill: Fill, width: f32, height: f32, c
     parent
         .spawn((
             Node {
-                width: px(width),
+                width: if matches!(fill, Fill::Hp(1) | Fill::Posture(1)) {
+                    percent(100.0)
+                } else {
+                    px(width)
+                },
                 height: px(height),
                 padding: UiRect::all(px(2)),
                 justify_content: if centred {
@@ -232,8 +238,12 @@ pub fn update(
         text.0 = if l.0 == 0 {
             format!("Wolf   {hp} / {max}")
         } else {
-            let marks = if gauges.enemy_marks > 1 {
-                format!("   {} deathblows", gauges.enemy_marks)
+            let marks = if gauges.enemy_marks > 0 {
+                format!(
+                    "   {} deathblow{}",
+                    gauges.enemy_marks,
+                    if gauges.enemy_marks == 1 { "" } else { "s" }
+                )
             } else {
                 String::new()
             };
@@ -243,6 +253,24 @@ pub fn update(
     let Ok((mut node, mut vis)) = panel.single_mut() else {
         return;
     };
+    node.width = px(if gauges.boss_bar { 350.0 } else { ENEMY_WIDTH });
+    if gauges.boss_bar {
+        node.left = px(28.0);
+        node.top = px(190.0);
+        *vis = if gauges.enemy_alive {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if let Ok(mut mark) = mark.single_mut() {
+            *mark = if gauges.deathblow {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+        }
+        return;
+    }
     let screen = gauges
         .enemy_head
         .filter(|_| gauges.enemy_alive)

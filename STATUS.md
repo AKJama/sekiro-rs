@@ -4,6 +4,41 @@ Last updated 11 October 2026.
 Read this first in a new session, then `AGENTS.md` and `docs/DESIGN.md`.
 How much of the game is done overall: `docs/PROGRESS.md`.
 
+## Visuals steps 4 and 5 (2026-10-11)
+
+Sun shadows now use two cascades over 60 m and exclude map mesh bounds beyond 45 m, with 0.02 depth bias and 0.6-texel normal bias; characters retain shadows.
+Outskirts/Castle eligible map casters drop from 18027/15933 to 1260/2958; matched scripted medians remain approximately 16.64/16.69 ms at 60 Hz.
+Short uncapped viewer samples improve from 59.8 to 62.6 fps and 60.2 to 112.7 fps; opaque GPU timings do not isolate shadow cost.
+The original version-2 BTL reader validates all 735 records in 18 banks; light sidecars were exported for m11_00, m11_01, m25_00 and many-light m10_00, preserving banks and Bevy-space positions.
+Distance-culled point lights use provisional 900 candela per authored unit, a nearest-64 cap and no local shadows; native attenuation, colour space and bank activation remain gaps.
+Every generated `target/alt/visuals/v3-*.png` was inspected; Wolf's outdoor shadow persists, and calibrated tower/corridor lights preserve detail without the rejected cyan wash.
+Workspace formatting, Clippy with `-D warnings`, the requested release suite (89 passed including `map_tangents`, two existing ignored) and the release game build pass offline with six jobs in `target/alt`.
+Mappings, counts, measurements and capture judgements are in `docs/VISUALS-PLAN.md`; optional step 6 layered materials remains pending.
+No commits, network access or protected-path writes were made; saves were backed up before game runs.
+
+## Mobility step 3(b): solved grapple (2026-10-11)
+
+Grapple flight now solves the authored 0.833333 / 0.666667 s arrival under 19.6 m/s2 gravity, with horizontal homing, collision stops, air shots, both chain shots, HKS cancels, wire landing and a 0.6 m ornament perch.
+WP_A_9500 exports with 80 bones and 16 clips; play uses the permitted dummy-144 cable line after the skinned preview failed visual review.
+TAE 720 now sheaths the katana during hang and early climb; matched before/after captures show clear hands and no blade on the tiles.
+The three `--simple-ai` castle replays land on the roof at 0.279 m from the anchor or perch on the second ornament at 0.045 m; reviewed captures and logs are under `target/alt/mobility/grapple2-*`.
+All required checks pass with `CARGO_TARGET_DIR=target/alt`, six jobs and offline Cargo: formatting, workspace/all-target Clippy with `-D warnings`, the release game build and the release sim/formats/extract suite (433 passed, two existing ignored), including all 15 wire tests.
+Native skinned cable deformation, exact EaseIn curve evaluation and the prior target-search gaps remain documented in `docs/MOBILITY.md`.
+No commits or protected-path writes were made.
+
+## Enemy registry and castle Genichiro (2026-10-11)
+
+Placed enemies now resolve NpcParam, think, Lua bundle, animation donors and names from extracted data, with generic `--enemy cXXXX[:row]` selection and roster extraction defaults.
+The smoke loads 102/102 character types across 1754 placements; this is loading coverage, not a claim of complete combat fidelity.
+Castle Genichiro uses c7100 row 71001000, 1598 HP, 660 posture and two marks, with 17 Lua attacks in the idle-Wolf 60-second test and seven arrow contacts from Bullet 71000500.
+The first mark restores HP and continues Lua; the second drives EMEVD 11115820's sequential hand-over to castle c7110 row 71100000, 2556 HP, 900 posture and one mark.
+The c7110 move set, final deathblow victory event and reset to c7100 are tested, and the renderer reloads the model and animation library at hand-over.
+Generic a000-a400 animation-set selection is tested separately on Isshin because Genichiro changes character rather than clip group.
+Lightning and Lightning Reversal, cinematic playback/region warp, simultaneous actors and automatic all-boss event discovery remain gaps.
+See `docs/GENICHIRO.md` and `docs/ENEMIES-PLAN.md`; reviewed screenshots and run/check logs are under `target/alt/genichiro` and `target/alt/genichiro-*.log`.
+Fmt, workspace clippy, the release game build and the final full sim/brain-net release suite pass (404 tests), including unchanged brain, Owl and soldier regressions.
+No commits or network were used.
+
 ## Visuals steps 2 and 3 (2026-10-11)
 
 Map cameras now use HDR/ACES fitted, conservative GPARAM bloom, nearest-hour display-space LUTs and compute auto exposure; the HUD is unaffected and probe captures remain lighting only.

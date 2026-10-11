@@ -6,6 +6,7 @@
 pub mod anim;
 pub mod bhd;
 pub mod bnd4;
+pub mod btl;
 pub mod bxf4;
 pub mod dcx;
 pub mod dvd;

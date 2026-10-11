@@ -9,6 +9,7 @@
 pub(crate) mod glb;
 mod info;
 pub(crate) mod textures;
+mod tool;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -24,25 +25,26 @@ pub use info::info;
 use glb::Glb;
 use textures::{TextureStore, Usage};
 
-/// Models exported when no ids are given.
-const DEFAULT_IDS: &[&str] = &["c1010", "c0000", "c5060"];
-
 pub fn export(cache: &Path, ids: &[String], verbose: bool) -> Result<()> {
     let raw = cache.join("raw");
     let out = cache.join("models");
     std::fs::create_dir_all(&out)?;
     let ids: Vec<String> = if ids.is_empty() {
-        DEFAULT_IDS.iter().map(|s| s.to_string()).collect()
+        crate::roster_ids(cache, false)?
     } else {
         ids.to_vec()
     };
     let params = Params::open(cache)?;
-    for id in &ids {
+    for selection in &ids {
+        let (id, row) = selection
+            .split_once(':')
+            .map_or((selection.as_str(), None), |(id, row)| (id, Some(row)));
+        let row = row.map(str::parse::<i32>).transpose()?;
         eprintln!("{id}:");
         let model = if id == "c0000" {
             wolf(&raw, &params)?
         } else {
-            npc(&raw, &params, id)?
+            npc(&raw, &params, id, row)?
         };
         for note in &model.notes {
             eprintln!("  {note}");
@@ -51,6 +53,9 @@ pub fn export(cache: &Path, ids: &[String], verbose: bool) -> Result<()> {
         let path = out.join(format!("{id}.glb"));
         std::fs::write(&path, &bytes)?;
         eprintln!("  wrote {} ({} KiB)", path.display(), bytes.len() / 1024);
+        if id == "c0000" {
+            tool::export(cache, verbose)?;
+        }
     }
     Ok(())
 }
@@ -123,8 +128,31 @@ impl Params {
     }
 }
 
-/// NpcParam row used for an enemy model's default look: `<model number> * 10000`.
-fn npc_row(id: &str) -> Result<i32> {
+/// Prefer the most frequently placed row, with the lowest row breaking ties.
+fn npc_row(cache: &Path, id: &str) -> Result<i32> {
+    let mut counts = std::collections::BTreeMap::<i32, usize>::new();
+    if let Ok(maps) = std::fs::read_dir(cache.join("maps")) {
+        for map in maps {
+            let path = map?.path().join("layout.json");
+            if !path.exists() {
+                continue;
+            }
+            let layout: Value = serde_json::from_slice(&std::fs::read(path)?)?;
+            for enemy in layout["enemies"].as_array().into_iter().flatten() {
+                if enemy["model"].as_str() == Some(id)
+                    && let Some(row) = enemy["npc_param"].as_i64()
+                {
+                    *counts.entry(row as i32).or_default() += 1;
+                }
+            }
+        }
+    }
+    if let Some((&row, _)) = counts
+        .iter()
+        .max_by_key(|&(row, count)| (count, std::cmp::Reverse(row)))
+    {
+        return Ok(row);
+    }
     Ok(id.trim_start_matches('c').parse::<i32>()? * 10000)
 }
 
@@ -155,11 +183,14 @@ fn combat_draw_mask_event(cache: &Path, id: &str) -> Option<Vec<u8>> {
 /// Every variant mesh is exported. Which `#NN#` groups show is game state: the scene extras
 /// carry `drawMask` (NpcParam `modelDispMask0..31`, the out-of-combat look) and
 /// `combatDrawMask` (that plus the weapon-draw TAE event), and `sekiro-game` applies them.
-fn npc(raw: &Path, params: &Params, id: &str) -> Result<Model> {
+fn npc(raw: &Path, params: &Params, id: &str, selected_row: Option<i32>) -> Result<Model> {
     let chrbnd = raw.join(format!("chr/{id}.chrbnd.d"));
     let flver = read_flver(&chrbnd.join(format!("{id}.flver")))?;
     let mut notes = Vec::new();
-    let row_id = npc_row(id)?;
+    let row_id = match selected_row {
+        Some(row) => row,
+        None => npc_row(raw.parent().unwrap_or(raw), id)?,
+    };
     let npc_param = params.load("NpcParam")?;
     let mut mask = [false; 32];
     match npc_param.find(row_id) {
@@ -197,6 +228,23 @@ fn npc(raw: &Path, params: &Params, id: &str) -> Result<Model> {
     let visible = vec![true; flver.meshes.len()];
     let mut tpfs = vec![raw.join(format!("chr/{id}.texbnd.d/{id}.tpf"))];
     tpfs.push(chrbnd.join(format!("{id}.tpf")));
+    let tex_chr = npc_param
+        .find(row_id)
+        .and_then(|r| r.int("normalChangeTexChrId").ok())
+        .filter(|id| *id > 0);
+    let mut texture_ids = vec![format!("{}8", &id[..4]), format!("{}9", &id[..4])];
+    if let Some(tex) = tex_chr {
+        texture_ids.push(format!("c{tex:04}"));
+    }
+    for tex in texture_ids {
+        if let Ok(files) = std::fs::read_dir(raw.join(format!("chr/{tex}.texbnd.d"))) {
+            tpfs.extend(
+                files
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("tpf"))),
+            );
+        }
+    }
     Ok(Model {
         skeleton: flver.clone(),
         parts: vec![Part {

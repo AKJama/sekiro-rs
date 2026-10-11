@@ -1,12 +1,29 @@
 # Enemies and bosses: generalisation plan
 
 Goal: any enemy or boss runs the way the Ashina soldier (c1010) and the Great Shinobi Owl (c5060) do now, from the game's own data, with no per-character code.
-This is research only: no code was changed to write it.
+The audit below records the original baseline; implementation status follows.
 Dated 2026-10-11.
 
 Claim markers: **[V]** verified in our data or code (source named), **[F]** taken from FwLo's repo (not re-checked against the exe), **[I]** inferred.
 FwLo's repo is `FFwLo/RustSekiro` (MIT), read through `gh api` only; `tools/sekiro-dearxan` was not opened.
 Facts below are recorded in our own words; credit belongs in `CREDITS.md` when a value is used.
+
+## Implementation status (2026-10-11)
+
+Implementation research used the local MIT notes in `target/alt/fwlo/enemy.md` and `HANDOFF.md`, without network access.
+
+- Steps 0-1: implemented a placed registry and load smoke; 102/102 characters load across 1754 placements.
+- Step 2: animation donors and persistent a000-a400 set selection implemented; grouped clip/TAE test passes.
+- Steps 3-4: roster-based extraction defaults, texture donors, per-row draw groups and generic enemy selection implemented.
+- Step 5: reviewed arena/event rows now include castle Genichiro; automatic event and arena discovery remains open.
+- Step 6: both c7100 marks and c7110's final mark use the shared deathblow path; Lua receives mark counts.
+- Step 7: load smoke is implemented; all-roster combat fight-through remains open.
+- Step 8: unchanged; hostility and teams remain open.
+- Step 9: sequential map-entity hand-over implemented for the castle transition; simultaneous actors remain open.
+
+See [GENICHIRO.md](GENICHIRO.md) for exact rows, events, verification and gaps.
+The original audit's fixed enemy selection, names, extractor defaults and animation-donor omissions are resolved in the touched paths.
+The Owl heat-up rule, brain action tables and weapon-draw clip convention remain known special cases.
 
 ## 1. What is generic and what is hardcoded today
 

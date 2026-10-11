@@ -13,6 +13,7 @@
 mod bc6_hdr;
 mod edges;
 mod env;
+mod lights;
 mod pieces;
 mod textures;
 
@@ -153,6 +154,10 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
     std::fs::create_dir_all(out.join("models/tex"))?;
     let oodle = Oodle::load(game).context("the map export needs the game's Oodle DLL")?;
     let msb = read_msb(cache, id)?;
+    lights::export(&raw, &out, id)?;
+    if std::env::var_os("SEKIRO_MAP_LIGHTS_ONLY").is_some() {
+        return Ok(());
+    }
     env::export(&raw, &out, id, &msb)?;
     if edges::export(cache, id, &msb, oodle)? {
         return Ok(());
