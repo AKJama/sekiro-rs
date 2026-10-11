@@ -47,7 +47,7 @@ pub struct StepReport {
     pub requested: Vec<i32>,
     /// True when the full-body clip started (or restarted) this step.
     pub clip_started: bool,
-    /// Crossfade into the full-body clip in seconds (TAE `Blend`), when it just started.
+    /// Authored crossfade into the full-body clip in seconds (TAE `Blend`).
     pub blend_in: f32,
     /// Seconds this character's own clock advanced in the step: the step's length, less while a
     /// hit stop holds or eases it (0 while held). The renderer draws between steps with it.
@@ -983,7 +983,6 @@ impl Character {
         let clip_started = main.as_ref().is_some_and(|c| c.prev_time == 0.0);
         let blend_in = main
             .as_ref()
-            .filter(|_| clip_started)
             .and_then(|c| self.tae.blend_in(&c.animation))
             .unwrap_or(0.0);
         self.last_main = main.clone();

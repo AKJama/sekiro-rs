@@ -1131,10 +1131,15 @@ fn sync_actors(
         let alpha = fixed.overstep_fraction();
         anim.clock = Some(sim.clock[i] - behind(report, alpha));
         let time = drawn_clip_time(report, alpha);
+        let blend_in = report.blend_in;
         let started = sim.started[i].take();
         let restart = started.as_ref().is_some_and(|(n, _)| *n == name);
         if anim.clip_name() != name || restart {
-            let blend = started.map_or(0.0, |(_, b)| b);
+            // A previously active layered clip can become the main clip without restarting.
+            // Use its own TAE, including when several fixed ticks preceded this draw.
+            let blend = started
+                .filter(|(n, _)| *n == name)
+                .map_or(blend_in, |(_, b)| b);
             match libraries.0[i].clip(&name) {
                 Ok(clip) => {
                     anim.play_named(&name, clip, false, blend);

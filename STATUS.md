@@ -4,6 +4,20 @@ Last updated 11 October 2026.
 Read this first in a new session, then `AGENTS.md` and `docs/DESIGN.md`.
 How much of the game is done overall: `docs/PROGRESS.md`.
 
+## Animation blend continuity (2026-10-11)
+
+Wolf and NPC fades now retain the displayed local pose when interrupted, including any unfinished crossfade, with character-clock hit-stop freezing.
+The renderer also uses the incoming clip's TAE blend when a previously active clip becomes the displayed main clip without restarting.
+Graph and TAE values for Owl, soldier and Genichiro are documented in `docs/FORMATS.md`, with a reproducible data audit and two pose regression tests.
+All installed transition effects audited have duration 0 and curve 0; Owl 3000/3003/3004 blend for 0.2 s, 3005 for 0.233333 s, while 3001/3002/3006/3007 lack a start Blend event.
+Native research confirms curve 0 is smoothstep, now used in playback, and the loaded-clip callback returns 0 for a missing Blend event.
+The effect's temporary 0.05 s initialization is overwritten by that callback; no invented positive fallback was added.
+The reported late combo-continuation snap is not claimed fixed without a matching replay.
+The scripted roof replay deflects at tick 61 and replaces recoil 8600 with attack 3003 at tick 98; before images already blend smoothly.
+Before/after frames in `target/alt/blending/frames.png` were inspected; the after sequence eases continuously, and all 251 simulation entries and both contacts match.
+Formatting, workspace/all-target Clippy, the combined release test suite (430 tests) and the release game build pass with `CARGO_TARGET_DIR=target/alt` and four build jobs.
+No commits, network or protected-path edits.
+
 ## CPU frame regression (2026-10-11)
 
 Restored bindless material slabs and multi-draw batching for all map surfaces, retaining layered textures, hemisphere lighting and every visual feature.
@@ -763,3 +777,23 @@ Castle c7100 has the clips but lacks matching Lua acts and attack rows, so its l
 Formatting, workspace/all-target Clippy, the full release sim/brain-net suite including doctests, and the release game build passed with `target/alt` and six jobs.
 Validation logs are `target/alt/lightning-suite-final.log`, `lightning-clippy-final2.log` and `lightning-game-final.log`.
 No commits, network/model calls or protected data writes were made; scripted app runs used simple AI and brain memory off, with saves backed up locally first.
+
+## Projectile guard ownership (2026-10-11)
+
+Reproduced Owl act 3014 and Genichiro act 3009 through real TAE launches, bullet flight and Wolf's installed HKS guard scripts: deflect sent owner recoil 1008 and block sent 1019 despite zero attacker posture damage.
+Projectile contacts now resolve through a separate entry point: the shooter supplies damage scaling but receives no recoil, hit stop, posture feedback or attacker break result.
+Melee resolution and Wolf's guard damage, reaction, status and lightning paths retain their existing arithmetic.
+The source is the actual Bullet contact, since all 249 referenced existing NPC attack rows have isArrowAtk 0.
+Owl AtkParam 50600150 has deflect/block posture bases 6/12 and all attacker feedback fields zero; Genichiro 71000500 has 9/18, also zero feedback.
+Both have guardAtkRate 30, katana guard/just-guard permissions enabled and zero guarded attacker reaction selectors.
+The 6 m regression records Wolf posture 5/11 for Owl and 8/17 for Genichiro after existing cuts and truncation, with zero guarded HP loss and unchanged shooter clips.
+Coverage also uses Owl fan row 50600131's nonzero 30 feedback, an already empty shooter meter, the character-contact recoil control, and guarded lightning still electrifying Wolf.
+The short rule is in docs/COMBAT-RULES.md; docs/PROJECTILE-GUARD.md contains the complete Owl/Genichiro parameter audit and local citations.
+Native bullet-to-owner notification dispatch remains inferred, explicitly distinguished from the extracted parameter facts and Paramdex descriptions.
+Formatting and workspace/all-target Clippy with -D warnings passed.
+The final full release sekiro-sim/sekiro-brain-net suite, including doctests, passed: 433 tests across 50 targets.
+The required release game build was attempted but remains blocked by Windows access denied while the other job's target/alt/release/sekiro-rs.exe is running; permission to close that playtest was requested, and it was left running.
+Validation logs: target/alt/projectile-baseline.log, projectile-focused.log, projectile-suite-final.log, projectile-clippy-final.log and projectile-game-build.log.
+A superseded overlapping rebuild encountered a Windows lock on a running Owl test executable; the final sequential rerun passed.
+All Cargo commands used CARGO_TARGET_DIR=target/alt and four jobs, with CARGO_BUILD_JOBS=4 for formatting.
+No commits, network calls, live game sessions, protected data writes, worktrees, links or deletions were made by this task.

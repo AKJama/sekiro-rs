@@ -180,6 +180,74 @@ The reader is `crates/formats/src/hkb.rs`, built on the generic tagfile reader; 
 - `hkbBlenderGenerator`, `hkbScriptGenerator` (named script callbacks such as `ModifiersLayer_onGenerate()`), `hkbModifierGenerator` and `CustomDockingGenerator` (kept generically) complete the tree.
 - Transition effects are `CustomTransitionEffect` / `hkbBlendingTransitionEffect` (all with duration 0 in the player graph; blending is TAE-driven) and `hkbManualSelectorTransitionEffect`, which picks among effects by a bound variable.
 
+### Blending
+
+TAE event 16 (`Blend`) supplies the incoming clip's fade interval when it starts at time zero.
+The template exposes no curve parameter for this event.
+The effect's curve 0 is smoothstep, `w = t * t * (3 - 2 * t)`, confirmed in the executable at RVA `1408650` (constants 3 and 1 at `3289230` and `328919c`).
+The runtime interpolates translation and scale and uses shortest-path quaternion slerp for rotations with that weight, using the character clock so hit stop also freezes the fade.
+An interrupted fade now freezes the displayed local pose, including the unfinished fade, rather than reverting to the outgoing clip's raw pose.
+Both Wolf and NPCs use this renderer path.
+
+The installed c0000 graph's blending effects have duration 0 and curve 0, including the effects selected by `hkbManualSelectorTransitionEffect`.
+The c9997 graphs in Owl c5060, soldier c1010 and Genichiro c7100 bind the attack wildcards to `CustomTransitionEffect` named `DefaultTransition`, with duration 0, curve 0 and flags 0.
+Their other effects (`ThrowTransition`, `MovementResetTransition`, `AddBlendSyncTransition`) also have duration 0 and curve 0.
+The attack CMSG `generatorChangedTransitionEffect` references are null.
+These graph fields therefore supply no positive fallback duration for an attack that lacks event 16.
+Native activation at RVA `11ee170` saves the authored duration and initially raises durations below 0.05 s to 0.05 s.
+The duration calculation at `11ee2c0` then resolves the target clip and calls through `11e9180`, `1017f80`, `b5c170` and `b5c0f0` into the animation's duration lookup at `9840f0`.
+The TAE metadata builder at `984230` initializes the clip duration to 0 and replaces it with the nonzero end time of event 16, or stores per-key overrides from event 17.
+The lookup returns that default when no per-key override exists; all four audited characters have no event 17 and all their event 16 entries start at zero.
+Thus a loaded target clip with no Blend event supplies 0, replacing the initial 0.05 s value; there is no positive clip fallback on this traced path.
+If the callback cannot supply a duration it returns -1 and the effect restores the authored graph duration, also 0 in these graphs.
+The temporary 0.05 s value is not a justified general-purpose fade for missing event 16.
+FwLo's MIT visuals notes supplied the zero-duration/TAE interpretation; the values below were independently read from this install with our readers.
+
+Incoming attack blend lengths, in seconds (`none` means no start event, not an authored positive duration):
+
+| Incoming animation id | Owl c5060 | Soldier c1010 | Genichiro c7100 |
+|---|---:|---:|---:|
+| 3000 | 0.2 | 0.2 | 0.2 |
+| 3001 | none | 0.2 | 0.333333 |
+| 3002 | none | 0.2 | 0.133333 |
+| 3003 | 0.2 | 0.2 | 0.3 |
+| 3004 | 0.2 | none | 0.2 |
+| 3005 | 0.233333 | 0.2 | 0.2 |
+| 3006 | none | none | 0.266667 |
+| 3007 | none | 0.2 | 0.333333 |
+| 3008 | 0.233333 | 0.2 | 0.2 |
+| 3009 | 0.233333 | 0.2 | 0.2 |
+| 3010 | 0.2 | 0.2 | none |
+| 3011 | 0.233333 | 0.2 | 0.333333 |
+| 3012 | 0.166667 | 0.3 | 0.166667 |
+| 3013 | 0.233333 | 0.2 | 0.166667 |
+
+Complete Owl attack-entry inventory, grouped by the incoming duration (each id has prefix `a000_`):
+
+| Seconds | Owl animation ids |
+|---|---|
+| 0, no event | 3001, 3002, 3006, 3007, 3014, 3016, 3017, 3030, 3032, 3035, 3036, 3046, 3090 |
+| 0.1 | 3020, 3021, 3022, 3023, 3027, 3037, 3039, 3044, 3092, 3093 |
+| 0.133333 | 3029 |
+| 0.166667 | 3012, 3018, 3019, 3025, 3026, 3028, 3038, 3040, 3047, 3049, 3065, 3069, 3091 |
+| 0.2 | 3000, 3003, 3004, 3010, 3015, 3024, 3031, 3033, 3034, 3041, 3042, 3043, 3045, 3048, 3060, 3061, 3064, 3066, 3068 |
+| 0.233333 | 3005, 3008, 3009, 3011, 3013, 3063 |
+
+Owl's bound reactions 8600 and 8700 each specify 0.033333 s; attack-to-attack and recoil-to-attack entry use the incoming attack's event above.
+TAE events remain on the requested animation's timeline, including aliases that borrow another HKX; pose weights never gate hit windows or cancel flags.
+Root displacement and yaw continue to come exclusively from the incoming simulated clip.
+This preserves combat and movement timing; the native engine's root blending is still unverified (FwLo's hand-off also records it as untraced).
+
+`crates/sim/tests/blending_data.rs` dumps the transition effects, attack wildcards, CMSG references and event lengths without writing extracted files.
+The local full dump is `target/alt/blending/data-audit.txt`.
+Read-only native research ran against a copy of the existing Ghidra project; outputs and the copy stay in `target/alt/blending/`.
+The scripted roof replay `crates/game/scripts/owl_blending.txt` deflects at step 61 and replaces recoil 8600 with attack 3003 at step 98.
+Before/after images at steps 97, 99, 101, 103, 105 and 107 are in `target/alt/blending/`.
+The inspected contact sheet is `target/alt/blending/frames.png`; the after sequence eases the arms into the new attack without an abrupt position change.
+The before sequence already blends, so this replay does not establish that the reported late deflect into a different combo continuation has been fixed.
+Screenshot scheduling captured the final after image one fixed tick later than its before counterpart (HUD clip time 0.17 versus 0.15 s).
+All 251 state/position entries in the two simulation traces match exactly, as do the deflect at tick 61 and the next contact at tick 159.
+
 ### How the player graph is organised
 
 The root machine has one state, `Master`, whose script and modifier generators lead to `Master LayerGenerator`.
@@ -191,7 +259,7 @@ HKS state hooks are named after the state, not the CMSG: `StandToDeflectGuard_on
 ### Runtime
 
 `crates/sim/src/behavior.rs` (`BehaviorRuntime`) runs a graph: current state per machine, event matching (active machines first, then global wildcards of inactive ones), the active clip set with times, layer enable rules, clip-end events and state hooks.
-Blends are not modelled; transitions switch instantly.
+Simulation transitions switch immediately; the game renderer crossfades the full-body pose using the incoming TAE Blend duration.
 `crates/sim/src/player.rs` (`PlayerBehavior`) wires it to the HKS VM; `cargo run -p sekiro-sim --bin player-sim -- hold` (or `repeat`) prints state and animation per frame.
 
 ## Maps: MSB layouts, map pieces and hit collision

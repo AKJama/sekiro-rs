@@ -5,13 +5,14 @@
 //! glTF joint (matched by bone name) gets the transform relative to its glTF parent. Root motion
 //! moves the character entity itself.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use bevy::prelude::*;
-use sekiro_formats::anim::{AnimClip, Skeleton, to_bevy};
+use sekiro_formats::anim::{AnimClip, Skeleton, Trs, to_bevy};
 
 /// Loaded skeleton and clip cache for one character id (`c0000`, `c1010`).
 pub struct AnimLibrary {
@@ -148,8 +149,9 @@ pub struct Animator {
     last_root: [f32; 4],
     /// The animation name that was asked for (an alias may play another clip's data).
     name: String,
-    /// Crossfade from the previous pose: (clip, its time when replaced, duration, elapsed).
-    blend: Option<(Arc<AnimClip>, f32, f32, f32)>,
+    /// The last displayed local pose, including any unfinished crossfade.
+    displayed_pose: Option<Vec<Trs>>,
+    blend: Option<PoseBlend>,
     /// The locked-on walk twist in degrees, positive with the legs turned right
     /// (`sekiro_sim::Character::walk_twist`), applied to the pose by [`apply_walk_twist`].
     pub walk_twist: f32,
@@ -159,6 +161,18 @@ pub struct Animator {
     pub clock: Option<f32>,
     /// `clock` at the previous frame.
     last_clock: Option<f32>,
+}
+
+struct PoseBlend {
+    source: BlendSource,
+    duration: f32,
+    elapsed: f32,
+}
+
+enum BlendSource {
+    Pose(Vec<Trs>),
+    /// Before the first draw there is no displayed pose to freeze.
+    Clip(Arc<AnimClip>, f32),
 }
 
 impl Animator {
@@ -171,6 +185,7 @@ impl Animator {
             last_root: [0.0; 4],
             name: clip_name_of(&clip),
             blend: None,
+            displayed_pose: None,
             walk_twist: 0.0,
             clock: None,
             last_clock: None,
@@ -181,6 +196,7 @@ impl Animator {
     pub fn play(&mut self, clip: Arc<AnimClip>, looping: bool) {
         self.name = clip_name_of(&clip);
         self.blend = None;
+        self.displayed_pose = None;
         self.clip = clip;
         self.time = 0.0;
         self.looping = looping;
@@ -194,18 +210,59 @@ impl Animator {
     /// Plays `clip` under the requested animation `name`, crossfading from the current pose over
     /// `blend_secs` (0 cuts).
     pub fn play_named(&mut self, name: &str, clip: Arc<AnimClip>, looping: bool, blend_secs: f32) {
-        let from = (self.clip.clone(), self.time);
+        let from = self.displayed_pose.take().map_or_else(
+            || {
+                let time = if self.looping && self.clip.duration > 0.0 {
+                    self.time.rem_euclid(self.clip.duration)
+                } else {
+                    self.time.min(self.clip.duration)
+                };
+                BlendSource::Clip(self.clip.clone(), time)
+            },
+            BlendSource::Pose,
+        );
         self.play(clip, looping);
         self.name = name.to_string();
-        if blend_secs > 0.0 {
-            self.blend = Some((from.0, from.1, blend_secs, 0.0));
+        if blend_secs.is_finite() && blend_secs > 0.0 {
+            self.blend = Some(PoseBlend {
+                source: from,
+                duration: blend_secs,
+                elapsed: 0.0,
+            });
         }
+    }
+
+    /// Blends local bones only; clip time, TAE and root motion remain independent.
+    fn sample_pose(&mut self, skeleton: &Skeleton, time: f32, dt: f32) -> Vec<Trs> {
+        let mut pose = self.clip.sample(time, skeleton);
+        if let Some(blend) = &mut self.blend {
+            blend.elapsed += dt.max(0.0);
+            let weight = smooth_blend_weight(blend.elapsed / blend.duration);
+            let old = match &blend.source {
+                BlendSource::Pose(pose) => Cow::Borrowed(pose.as_slice()),
+                BlendSource::Clip(clip, time) => Cow::Owned(clip.sample(*time, skeleton)),
+            };
+            for (bone, from) in pose.iter_mut().zip(old.iter()) {
+                *bone = from.lerp(bone, weight);
+            }
+        }
+        if self.blend.as_ref().is_some_and(|b| b.elapsed >= b.duration) {
+            self.blend = None;
+        }
+        self.displayed_pose = Some(pose.clone());
+        pose
     }
 
     /// The requested animation name (which may be an alias of the clip data playing).
     pub fn clip_name(&self) -> &str {
         &self.name
     }
+}
+
+/// Havok curve 0 (SMOOTH), traced at sekiro.exe RVA 0x1408650.
+fn smooth_blend_weight(fraction: f32) -> f32 {
+    let t = fraction.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// Havok skeleton plus the glTF joint entity for each bone (filled once the scene spawns).
@@ -343,22 +400,7 @@ pub fn animate(
             body.rotate_y(delta[3]);
         }
 
-        let mut pose = clip.sample(t, &rig.skeleton);
-        // Crossfade from the previous clip's pose, frozen where it was replaced.
-        if let Some((from, from_t, dur, elapsed)) = anim.blend.as_mut() {
-            *elapsed += clock_dt;
-            let w = (1.0 - *elapsed / *dur).clamp(0.0, 1.0);
-            if w > 0.0 {
-                let from_t = from_t.min(from.duration);
-                let old = from.sample(from_t, &rig.skeleton);
-                for (p, o) in pose.iter_mut().zip(&old) {
-                    *p = p.lerp(o, w);
-                }
-            }
-        }
-        if anim.blend.as_ref().is_some_and(|(_, _, d, e)| e >= d) {
-            anim.blend = None;
-        }
+        let pose = anim.sample_pose(&rig.skeleton, t, clock_dt);
         let mut model = rig.skeleton.model_space(&pose);
         apply_walk_twist(&rig.skeleton, &mut model, anim.walk_twist);
         for (i, joint) in rig.joints.iter().enumerate() {
@@ -426,6 +468,79 @@ fn clip_name_of(clip: &AnimClip) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sekiro_formats::anim::{BlendHint, Bone, BoneTrack};
+
+    fn fixture(x: f32, angle: f32) -> (Skeleton, Arc<AnimClip>) {
+        let skeleton = Skeleton {
+            name: "test".into(),
+            bones: vec![Bone {
+                name: "arm".into(),
+                parent: None,
+                local: Trs::IDENTITY,
+            }],
+        };
+        let clip = Arc::new(AnimClip {
+            name: format!("clip{x}"),
+            duration: 1.0,
+            frame_count: 2,
+            frame_duration: 1.0,
+            blend: BlendHint::Normal,
+            skeleton_bones: 1,
+            tracks: vec![BoneTrack {
+                bone: 0,
+                translation: vec![[x, 0.0, 0.0]],
+                rotation: vec![Quat::from_rotation_y(angle).to_array()],
+                scale: vec![[1.0 + x; 3]],
+            }],
+            root_motion: None,
+        });
+        (skeleton, clip)
+    }
+
+    #[test]
+    fn pose_blend_interpolates_translation_scale_and_shortest_rotation() {
+        assert_eq!(smooth_blend_weight(-1.0), 0.0);
+        assert_eq!(smooth_blend_weight(0.25), 0.15625);
+        assert_eq!(smooth_blend_weight(0.5), 0.5);
+        assert_eq!(smooth_blend_weight(0.75), 0.84375);
+        assert_eq!(smooth_blend_weight(2.0), 1.0);
+        let from = Trs::IDENTITY;
+        let to = Trs {
+            translation: [2.0, 4.0, 6.0],
+            rotation: (-Quat::from_rotation_y(2.0)).to_array(),
+            scale: [3.0; 3],
+        };
+        let mid = from.lerp(&to, 0.5);
+        assert_eq!(mid.translation, [1.0, 2.0, 3.0]);
+        assert_eq!(mid.scale, [2.0; 3]);
+        assert!(mid.quat().dot(Quat::from_rotation_y(1.0)).abs() > 0.99999);
+    }
+
+    #[test]
+    fn clip_change_has_intermediate_bones_and_preserves_interrupted_pose() {
+        let (skeleton, first) = fixture(0.0, 0.0);
+        let (_, second) = fixture(2.0, 2.0);
+        let (_, third) = fixture(4.0, 0.0);
+        let mut anim = Animator::new(first, false);
+        anim.sample_pose(&skeleton, 0.9, 0.0);
+        anim.play_named("second", second, false, 0.2);
+        let halfway = anim.sample_pose(&skeleton, 0.1, 0.1)[0];
+        assert_eq!(halfway.translation[0], 1.0);
+        assert!(halfway.quat().dot(Quat::from_rotation_y(1.0)).abs() > 0.99999);
+        anim.play_named("third", third.clone(), false, 0.2);
+        // Interrupting a blend starts at the displayed pose, not second's raw x=2 pose.
+        assert_eq!(anim.sample_pose(&skeleton, 0.0, 0.0)[0], halfway);
+        assert_eq!(anim.sample_pose(&skeleton, 0.1, 0.1)[0].translation[0], 2.5);
+        // Hit stop freezes the entire blend.
+        assert_eq!(anim.sample_pose(&skeleton, 0.1, 0.0)[0].translation[0], 2.5);
+        assert_eq!(
+            anim.sample_pose(&skeleton, 0.2, 0.1),
+            third.sample(0.2, &skeleton)
+        );
+        assert!(anim.blend.is_none());
+        anim.play_named("cut", fixture(0.0, 0.0).1, false, 0.0);
+        assert_eq!(anim.sample_pose(&skeleton, 0.0, 0.0)[0].translation[0], 0.0);
+    }
 
     /// With the legs twisted 45 degrees right, the hips turn right with them while the
     /// shoulders still face where they did.
