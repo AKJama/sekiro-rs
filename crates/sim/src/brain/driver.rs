@@ -111,6 +111,8 @@ struct InFlight {
 /// Which checkpoint events have fired this fight (see [`RequestMode::Checkpoints`]).
 #[derive(Debug, Clone, Default)]
 struct Checkpoints {
+    posture_half: bool,
+    posture_critical: bool,
     half_hp: bool,
     marks: Option<i32>,
     punish_run: u32,
@@ -120,6 +122,26 @@ struct Checkpoints {
 }
 
 impl Checkpoints {
+    fn on_vitals(&mut self, posture: f32, hp: f32) -> Option<&'static str> {
+        if posture < 0.25 {
+            self.posture_half = false;
+            self.posture_critical = false;
+        }
+        if !self.posture_critical && posture >= 0.85 {
+            self.posture_critical = true;
+            self.posture_half = true;
+            Some("posture_critical")
+        } else if !self.posture_half && posture >= 0.5 {
+            self.posture_half = true;
+            Some("posture_half")
+        } else if !self.half_hp && hp <= 0.5 {
+            self.half_hp = true;
+            Some("half_hp")
+        } else {
+            None
+        }
+    }
+
     /// A hit resolved: the checkpoint it raises, if any.
     fn on_hit(&mut self, attacker: Side, guarded: bool, deflected: bool) -> Option<&'static str> {
         match attacker {
@@ -1082,9 +1104,20 @@ impl BrainDriver {
             .wolf(wolf.hp_fraction(), wolf.posture_fraction());
         self.fight.metrics.passive_tick(t, self.step_dt);
         let boss_fighter = &duel.rules.fighters[1];
-        if !self.checkpoints.half_hp && boss_fighter.hp_fraction() <= 0.5 {
-            self.checkpoints.half_hp = true;
-            self.pending_why.get_or_insert("half_hp");
+        if let Some(why) = self
+            .checkpoints
+            .on_vitals(boss_fighter.posture_fraction(), boss_fighter.hp_fraction())
+        {
+            // A request may still be in flight when pressure grows. Keep the newest
+            // posture warning instead of sending an obsolete half-meter/HP warning later.
+            if (why == "posture_critical"
+                && matches!(self.pending_why, Some("posture_half" | "half_hp")))
+                || (why == "posture_half" && self.pending_why == Some("half_hp"))
+            {
+                self.pending_why = Some(why);
+            } else {
+                self.pending_why.get_or_insert(why);
+            }
         }
         let marks = deathblow_marks(boss_fighter.vitality.deathblows_left);
         if self.checkpoints.marks.is_some_and(|m| marks < m) {
@@ -1430,6 +1463,21 @@ struct OutcomeLine<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn posture_checkpoints_rearm_below_a_quarter_and_prefer_critical() {
+        let mut c = Checkpoints::default();
+        assert_eq!(c.on_vitals(0.49, 1.0), None);
+        assert_eq!(c.on_vitals(0.5, 1.0), Some("posture_half"));
+        assert_eq!(c.on_vitals(0.84, 1.0), None);
+        assert_eq!(c.on_vitals(0.85, 1.0), Some("posture_critical"));
+        assert_eq!(c.on_vitals(0.25, 1.0), None);
+        assert_eq!(c.on_vitals(0.9, 1.0), None);
+        assert_eq!(c.on_vitals(0.24, 1.0), None);
+        assert_eq!(c.on_vitals(0.9, 0.4), Some("posture_critical"));
+        assert_eq!(c.on_vitals(0.9, 0.4), Some("half_hp"));
+        assert_eq!(c.on_vitals(0.9, 0.4), None);
+    }
 
     #[test]
     fn wolf_landing_two_hits_in_a_row_raises_one_checkpoint() {

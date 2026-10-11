@@ -25,12 +25,17 @@ fn main() {
             .open(path)
     {
         let cwd = std::env::current_dir().unwrap_or_default();
+        let mcp = args
+            .iter()
+            .position(|a| a == "--mcp-config")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|p| std::fs::read_to_string(p).ok());
         let _ = writeln!(
             f,
             "{}",
             serde_json::json!({"args": args, "stdin_len": stdin.len(),
                 "stdin_head": stdin.chars().take(40).collect::<String>(),
-                "cwd": cwd.to_string_lossy()})
+                "cwd": cwd.to_string_lossy(), "mcp": mcp})
         );
     }
     match cfg["mode"].as_str().unwrap_or("ok") {

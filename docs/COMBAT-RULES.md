@@ -385,3 +385,18 @@ Before 2026-10-10 every direct hit by Wolf froze both characters fully for 0.1 s
 
 `tools/ghidra/Callers.java` lists callers and callees, `tools/ghidra/ReadData.java` prints values at RVAs, `tools/ghidra/FindScalar.java` finds instructions using given constants and `tools/ghidra/Disasm.java` dumps a function's instructions.
 All four write only under `re/`.
+
+## Lock release on target death (2026-10-11)
+
+The duel already cleared a dead target, and env 1118 correctly became false, but a held stick kept MoveDirection from the last locked strafe.
+HKS seeds this selector on movement start; the free movement steering then turned the body while its old sideways clip kept moving it sideways.
+release_lock now clears the target, sets the move selector to forward, clears walk twist and publishes the released HKS lock flag together.
+Deathblow start uses the same release, lethal deathblows reject relocking during the finishing pair, and an HP death releases the target in the contact step before the camera reads it.
+The next character tick follows the free movement path; act 2018 still releases only the facing angle of a living held lock, as before.
+The game orbit reads player.lock_target, so it also stops following the dead enemy without a separate camera flag.
+No attack timing, buffering, cancels, hit stop or other movement tuning changed.
+
+The real-script regression holds a sideways stick across an HP death for 0.5 s, checks the HKS lock query, refuses a dead lock and locks again after reset.
+Before the fix the displacement was [0.545, 1.543] m in X/Z; after it, [2.165, -0.308] m, aligned with the camera-relative right stick.
+Test: dead_target_releases_lock_and_camera_relative_movement in crates/sim/tests/duel.rs.
+The soldier pressure regression and its one landed hit, one block and one deflect are documented in docs/AI.md; it does not reproduce a posture break in four seconds and requires no forced guard rule.

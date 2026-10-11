@@ -109,7 +109,7 @@ impl CoachBackend {
     /// The model used when `--coach-model` is not given.
     pub fn default_model(self) -> &'static str {
         match self {
-            Self::Claude => "haiku",
+            Self::Claude => "claude-haiku-5-5",
             Self::Codex | Self::Api => "gpt-6-luna",
         }
     }
@@ -118,7 +118,7 @@ impl CoachBackend {
     pub fn timeout(self) -> Duration {
         match self {
             Self::Claude | Self::Codex => Duration::from_secs(120),
-            Self::Api => Duration::from_secs(60),
+            Self::Api => Duration::from_secs(45),
         }
     }
 }
@@ -175,8 +175,8 @@ impl HostedConfig {
             warm_up: true,
             api_key,
             coach_model: "gpt-6-luna".into(),
-            coach_effort: "medium".into(),
-            coach_timeout: Duration::from_secs(60),
+            coach_effort: "low".into(),
+            coach_timeout: Duration::from_secs(45),
             coach_max_output_tokens: 6000,
             coach_backend: CoachBackend::Api,
             coach_cmd: None,
@@ -231,6 +231,17 @@ pub(crate) fn key_from_dotenv(reader: impl BufRead) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coach_defaults_are_small_and_fast() {
+        let c = HostedConfig::new(Backend::Coach, ApiKey::new("fake"));
+        assert_eq!(c.coach_backend, CoachBackend::Api);
+        assert_eq!(c.coach_model, "gpt-6-luna");
+        assert_eq!(c.coach_effort, "low");
+        assert_eq!(c.coach_timeout, Duration::from_secs(45));
+        assert_eq!(CoachBackend::Api.timeout(), c.coach_timeout);
+        assert_eq!(CoachBackend::Claude.default_model(), "claude-haiku-5-5");
+    }
 
     #[test]
     fn key_sources_are_lazy_and_dotenv_reads_only_the_named_line() {

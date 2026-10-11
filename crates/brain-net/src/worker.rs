@@ -664,15 +664,17 @@ fn run_coach(
             }
             (_, backend) => {
                 let prompt = format!(
-                    "{}\n\nInput (the fight just over):\n{}\n\nReply with only the game plan as one JSON object matching the schema, no other text.",
-                    protocol::coach_instructions(actions),
+                    "Input (the fight just over):\n{}\n\nReply with only the game plan as one JSON object matching the schema, no other text.",
                     work.input
                 );
                 cli::run(
                     backend,
                     &config.model,
                     config.cmd.as_deref(),
-                    &prompt,
+                    &cli::Prompt {
+                        input: &prompt,
+                        instructions: &protocol::coach_instructions(actions),
+                    },
                     &schema,
                     config.timeout,
                     &stopping,

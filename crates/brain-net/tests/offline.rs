@@ -763,7 +763,7 @@ fn the_coach_request_has_the_structured_output_shape_and_reports_reasoning_token
     assert!(plan.validate(&SOLDIER).usable());
     let body = mock.requests.recv().unwrap();
     assert_eq!(body["model"], "coach-test-model");
-    assert_eq!(body["reasoning"], json!({"effort": "medium"}));
+    assert_eq!(body["reasoning"], json!({"effort": "low"}));
     assert_eq!(body["store"], false);
     assert_eq!(body["max_output_tokens"], 6000);
     assert_eq!(
@@ -975,19 +975,35 @@ fn the_claude_coach_runs_the_cli_with_the_prompt_on_stdin_and_reads_its_envelope
     let calls = fake.calls();
     assert_eq!(calls.len(), 1);
     let args = args_of(&calls[0]);
-    for want in [
-        "-p",
-        "--model",
-        "model-x",
-        "--output-format",
-        "json",
-        "--tools",
-        "",
-        "--json-schema",
-        "--no-session-persistence",
-    ] {
-        assert!(args.iter().any(|a| a == want), "{want} in {args:?}");
-    }
+    let instructions = args[11].clone();
+    let mcp_file = args[14].clone();
+    assert!(instructions.starts_with("You are the coach"));
+    assert_eq!(
+        args,
+        vec![
+            "-p",
+            "--model",
+            "model-x",
+            "--output-format",
+            "json",
+            "--no-session-persistence",
+            "--tools",
+            "",
+            "--json-schema",
+            &args[9],
+            "--system-prompt",
+            &instructions,
+            "--strict-mcp-config",
+            "--mcp-config",
+            &mcp_file,
+            "--setting-sources",
+            "",
+            "--safe-mode",
+            "--effort",
+            "low"
+        ]
+    );
+    assert_eq!(calls[0]["mcp"], r#"{"mcpServers":{}}"#);
     let at = args.iter().position(|a| a == "--json-schema").unwrap();
     let schema: Value = serde_json::from_str(&args[at + 1]).unwrap();
     assert_eq!(schema["required"][1], "opener");
@@ -995,11 +1011,11 @@ fn the_claude_coach_runs_the_cli_with_the_prompt_on_stdin_and_reads_its_envelope
         calls[0]["stdin_head"]
             .as_str()
             .unwrap()
-            .starts_with("You are the coach")
+            .starts_with("Input (the fight just over):")
     );
     assert!(
-        calls[0]["stdin_len"].as_u64().unwrap() > 4000,
-        "instructions and input on stdin"
+        calls[0]["stdin_len"].as_u64().unwrap() < 300,
+        "only the tiny fight summary and output reminder on stdin"
     );
     // Run from a scratch directory, not the repo, and cleaned up afterwards.
     let cwd = std::path::PathBuf::from(calls[0]["cwd"].as_str().unwrap());
@@ -1017,19 +1033,26 @@ fn the_codex_coach_reads_the_last_message_file() {
     assert_eq!(reply.error, None);
     assert_eq!(reply.plan.unwrap().start_set, "a");
     let args = args_of(&fake.calls()[0]);
-    assert_eq!(args[0], "exec");
-    for want in [
-        "--skip-git-repo-check",
-        "-s",
-        "read-only",
-        "-m",
-        "model-x",
-        "--output-schema",
-        "-o",
-        "-",
-    ] {
-        assert!(args.iter().any(|a| a == want), "{want} in {args:?}");
-    }
+    assert_eq!(
+        args,
+        vec![
+            "exec",
+            "--ignore-user-config",
+            "-c",
+            "model_reasoning_effort=\"low\"",
+            "--skip-git-repo-check",
+            "-s",
+            "read-only",
+            "-m",
+            "model-x",
+            "--ephemeral",
+            "--output-schema",
+            &args[11],
+            "-o",
+            &args[13],
+            "-"
+        ]
+    );
     assert_eq!(reply.tokens, [0, 0, 0], "codex reports no usage");
 }
 

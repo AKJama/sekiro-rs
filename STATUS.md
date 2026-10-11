@@ -108,7 +108,7 @@ No commits, links, junctions, protected brain edits or game-install writes were 
 
 ## Known issues
 
-- Done 2026-10-11, to be tried in play: the boss **coach** (`--brain coach`, `docs/BRAIN.md` "The coach"). Between fights a reasoning model (`--coach claude|codex|api`, default `claude` = `claude -p --model haiku`, no API key; `api` = Responses, `gpt-6-luna`, `--coach-model`, `--coach-effort`) reads the fight summary (about 4 KB: result, trend, per-plan and per-set outcomes, Wolf's habits, the plan played, its own notes) and writes a versioned game plan (opener, 2 to 4 named plan sets, start set, avoid, notes), validated against the boss's actions. Fight 1 with no memory is his own Lua AI with no model call; the plan arriving during the respawn plays from fight 2 (opener, then the start set), a late one a fight later, a failure keeps the old plan, and the newest plan is saved in `logs/memory/<chr>.json`. In the fight only the Decisions API picks a set at the checkpoints, with a tiny request (about 100 tokens of numbers plus the set names). The console prints the request and a 3 to 5 line summary of each plan. Against reward hacking: kill time is not a goal; new metrics `attacks/min`, `damage/min` and `passive_share` (a fight above 35% passive failed), and hard limits in the driver (an attack at least every 6 s, one retreat per 8 s, plans need an attack). Also fixed: an attack after `retreat12` or a strafe swung at empty air; it now turns to face Wolf first (30 degree rule). Tests `crates/sim/tests/coach.rs`, `crates/sim/src/brain/tests.rs`, `crates/brain-net/tests/offline.rs` (mock servers and a fake CLI only). Not verified: any real API, `claude` or `codex` call (flag names are from `--help` output), that the strict schema with `$defs` is accepted, that 6000 output tokens suffice for `medium` reasoning, how the plans look in play.
+- Done 2026-10-11, to be tried in play: the boss **coach** (`--brain coach`, `docs/BRAIN.md` "The coach"). Between fights a reasoning model (`--coach claude|codex|api`, default `api` = Responses, `gpt-6-luna`, low effort, 45 s; `claude` = slim `claude -p --model claude-haiku-5-5`, no API key, `--coach-model`, `--coach-effort`) reads the fight summary (about 4 KB: result, trend, per-plan and per-set outcomes, Wolf's habits, the plan played, its own notes) and writes a versioned game plan (opener, 2 to 4 named plan sets, start set, avoid, notes), validated against the boss's actions. Fight 1 with no memory is his own Lua AI with no model call; the plan arriving during the respawn plays from fight 2 (opener, then the start set), a late one a fight later, a failure keeps the old plan, and the newest plan is saved in `logs/memory/<chr>.json`. In the fight only the Decisions API picks a set at the checkpoints, with a tiny request (about 100 tokens of numbers plus the set names). The console prints the request and a 3 to 5 line summary of each plan. Against reward hacking: kill time is not a goal; new metrics `attacks/min`, `damage/min` and `passive_share` (a fight above 35% passive failed), and hard limits in the driver (an attack at least every 6 s, one retreat per 8 s, plans need an attack). Also fixed: an attack after `retreat12` or a strafe swung at empty air; it now turns to face Wolf first (30 degree rule). Tests `crates/sim/tests/coach.rs`, `crates/sim/src/brain/tests.rs`, `crates/brain-net/tests/offline.rs` (mock servers and a fake CLI only). Not verified: any real API, `claude` or `codex` call (flag names are from `--help` output), that the strict schema with `$defs` is accepted, that 6000 output tokens suffice for `medium` reasoning, how the plans look in play.
 
 - Done 2026-10-10, to be confirmed in play: three features after FwLo's RustSekiro video (his code adapted under MIT, `CREDITS.md`). (1) The deathblow camera: Wolf's deathblow clips drive it through TAE 155 (CameraSetParam slot 41, CameraParam 4000), 153 (distance, 1.5 m at the soldier's blow) and 151 (focus on dummy 142 of his animated camera bone, with look limits; the Owl's deathblow), and it hands back on the params' own chase rates (`docs/DEATHBLOW.md`, "Camera"). (2) The perilous kanji: the warning dummy bullet (judge 980 to 989) is made at Wolf within 5 m (soldier) or 9 m (Owl), its SpEffect 211000 shows VFX 48100 "å±" at Wolf's dummy 220, and the HUD draws a red å± over Wolf with a Windows Japanese font (the game's FXR is not decoded; no sound found). (3) The jump counter: Wolf's jumps carry sweep i-frames (TAE 954 type 1), his air kick (PCBehavior 901, anti-ground) is now a real attack, the sweeps' SpEffect 400200 multiplies its posture damage by 8 (the soldier's posture breaks), and env 2004 lets his script kick off the enemy (`docs/COMBAT-RULES.md`, "Perilous attacks"). Tests `crates/sim/tests/perilous.rs`, `deathblow_camera.rs`; scripts `crates/game/scripts/soldier_deathblow.txt`, `soldier_jump_counter.txt`; screenshots `cache/screens/dbcam_soldier_*.png`, `dbcam_owl2_*.png`, `kanji_soldier_*.png`.
 
@@ -221,3 +221,36 @@ Tracked task changes are the new example, dev-only Rayon dependency in `crates/s
 No collision engine code, protected brain files, game-install files, links, junctions or commits were changed by this audit.
 
 The concurrent brain agent's commit 9809964 included this shared status section; this audit issued no commit, and the collision tool, dependency changes and report remain uncommitted.
+
+## Playtest fixes (2026-10-11)
+
+No commits were made.
+Coach selection now defaults to the Responses API with gpt-6-luna, configurable low reasoning effort and a 45 s timeout; strict schema, store:false and usage accounting are retained.
+Claude receives our replacement system prompt separately from its compact stdin summary, an empty strict MCP config, no settings sources, safe mode to skip CLAUDE.md/customizations without changing subscription authentication, low effort, no tools or persistence, and model claude-haiku-5-5.
+Codex ignores user config (including configured MCP servers), uses low reasoning effort and retains its ephemeral read-only invocation.
+All flags were checked only against installed CLI help; Claude's dynamic-section flag is ignored with a replacement system prompt and was omitted.
+Exact argument vectors and the empty MCP file are checked through the fake CLI; no real API requests, real authenticated CLI runs or credential reads were performed.
+Live coach latency, context size and provider acceptance remain unverified.
+
+Checkpoint requests now prefer posture_half at 50% posture damage and posture_critical at 85%, re-arming below 25%, with half_hp retained as a once-per-fight fallback.
+A critical crossing supersedes an unsent half-posture or HP warning; a jump over both thresholds requests critical directly.
+Coach hints, instructions and docs include these events; regression tests cover two cycles, exact boundaries and fallback.
+
+Lock-on already dropped its target on HP death, but MoveDirection retained the last strafe while a stick stayed held, steering a sideways clip along the free body's facing.
+The common release now resets that selector and walk twist, publishes the HKS lock flag and is used on deathblow start as well as death, manual unlock and smoke lock breaks.
+Lethal finishing pairs reject relocking, and HP deaths release the camera target in the contact step.
+The failing real-script replay moved [0.545, 1.543] m in X/Z over 0.5 s after death; the fix moves [2.165, -0.308] m for a camera-relative right stick.
+Tests cover the HKS lock query, dead-target refusal, held-stick free movement, locking after reset and relock attempts during/after a lethal deathblow.
+
+The normal-Lua soldier pressure replay at 1.6 m with attack presses every eight frames for four seconds already passes before a gameplay change: one landed hit (tick 26), one block (64), one deflect (98), no posture break.
+His Lua requests EndureAttack guard 3100 and deflect 3101, the guard reactions expose guardLevel 4 and SpEffect 200250, and his next counter request is 3008.
+There are no unanswered AI calls in the replay; baseline evidence is logs/soldier-pressure-before.log, and soldier_guards_mashed_slashes retains the regression.
+No forced guard, input, attack timing, hit stop or combo/cancel change was added.
+The reported soldier stun lock remains unreproduced in this setup; an exact failing replay is needed to establish any remaining root cause.
+Details are in docs/BRAIN.md, docs/AI.md and docs/COMBAT-RULES.md.
+
+Validation: cargo fmt --all and its check, workspace/all-targets Clippy with -D warnings, and the requested release sekiro-sim plus sekiro-brain-net lib/bin/integration suites passed (304 tests).
+All Cargo invocations used target/alt and six build jobs; fmt uses CARGO_BUILD_JOBS because it has no -j option.
+Logs: logs/playtest-fixes-tests.log and logs/playtest-fixes-clippy.log.
+No rendered game session was run; real scripts, graphs, Lua AI, TAE and params were exercised through the deterministic duel tests.
+No cache/re links, junctions, worktrees, deletions or game-install writes were made.

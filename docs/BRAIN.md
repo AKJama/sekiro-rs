@@ -284,12 +284,12 @@ The request carries a compact summary (`HabitSummary`): only entries with at lea
 ## The request and its size
 
 ```json
-{"id":12,"why":"half_hp","obs":{...},"tally":{"boss":{...},"wolf":{...}},
+{"id":12,"why":"posture_half","obs":{...},"tally":{"boss":{...},"wolf":{...}},
  "memory":{"fights":2,"boss_wins":1,"wolf_wins":0,"boss":{...},"wolf":{...},"habits":{...},
            "trend":{"defl":[100,100,80],"guard":[0,0,10],"hits":[0,1,2],"hp":[0,7,12],"kill_s":[38,31,null],"now":[67,1]}}}
 ```
 
-`why` is the checkpoint that made the request (`start`, `half_hp`, `mark_lost`, `punished_twice`, `deflected_thrice`); it is left out in the other modes.
+`why` is the checkpoint that made the request (`start`, `posture_half`, `posture_critical`, `half_hp` (fallback), `mark_lost`, `punished_twice`, `deflected_thrice`); it is left out in the other modes.
 `memory` counts the earlier fights (`fights`, `boss_wins`, `wolf_wins`; the rest were unfinished) and sums the counts and habits over every fight, this one included.
 `memory.trend` is Wolf's play over the last 3 finished fights, oldest first (see "The score to beat"): perfect-deflect percent (`defl`), guard percent, hits the boss landed, his HP lost in percent of max, and seconds he took to kill the boss (`null`: the boss won); `now` is this fight so far, `[deflect percent, hits landed]`.
 The whole request is kept within 1400 bytes of compact JSON (`REQUEST_BUDGET`): `BrainRequest::fit` drops the least telling entries (fewest samples) until it fits, in this order, each map down to 4, 3, 2, 1 and 0 entries: `memory.boss`, `memory.wolf`, the habits' `punish_s`, `vs` and `after`, then `tally.wolf` and `tally.boss`; last the single habit values, the older fights of the trend and the memory itself.
@@ -309,7 +309,10 @@ Per duel step (`BrainDriver`):
    At most one is in flight, and an event that arrives while one is out waits for it:
    - `slot` (the default for `scripted` and other brains; today's behaviour): after any slot, so the controller thinks while the current act runs. The answer is used for one plan.
    - `plan_end`: when the last step of the running plan starts, so a fresh answer is ready as the plan ends; also at slots where the Lua AI acted. The answer is used for one plan.
-   - `checkpoints` (the default for hosted brains): only at events, each at most once per fight, except a lost mark. `start` (the fight begins or restarts), `half_hp` (the boss at half HP), `mark_lost` (he loses a deathblow mark: a phase change; once per mark), `punished_twice` (Wolf lands two hits in a row on him without his landing one), `deflected_thrice` (Wolf deflects three of his hits in a row). Between requests the boss keeps cycling through the last answer: its plan set stays and a plan is sampled from it at every slot, so a fight takes 1 to 5 requests (`a_checkpoints_fight_makes_only_a_handful_of_requests`: the soldier ran 4 plans and the Owl 24 on the one `start` request each; `checkpoint_events_ask_once_each` covers the others).
+   - `checkpoints` (the default for hosted brains): `start`, `posture_half` at 50% posture damage, `posture_critical` at 85%, `half_hp` as an HP fallback, `mark_lost`, `punished_twice` and `deflected_thrice`.
+     Both posture checkpoints re-arm only when posture damage recovers below 25%; crossing both in one step prefers critical, with no delayed half event.
+     HP fallback fires once per fight, lost marks once per mark, and the hit streak events once per fight.
+     Between requests the set persists and plans are sampled at each slot; the request count depends on posture recovery cycles.
 4. After the step, action changes and hits feed the tally, the habits and the metrics; a death ends the fight, a respawn starts the next.
 
 A single-shot plan (`slot`, `plan_end`) whose answer is older than `max_staleness` (6 s) when it would run is dropped and a fresh request goes out; a set's plan is picked when its slot nears, so it does not go stale.
@@ -592,9 +595,9 @@ FromSoftware players fight the same enemy dozens of times, so the boss learns *b
 
 - **Coach (between fights, full reasoning).** When a fight ends (a death, a win, a respawn that restarts it), the driver sends the coach a compact summary of it (`CoachInput` in `crates/sim/src/brain/coach.rs`, kept near 4 KB, measured in `the_coach_input_is_trimmed_to_4kb_and_keeps_the_notes_and_the_played_plan`).
   The coach writes a **game plan** for the next fight.
-  It runs on its own thread in `sekiro-brain-net` (never the game thread), so latency does not matter: the plan is used from the next fight if it arrived by then (it usually does, during the 6 s respawn), else from the fight after; a failed or empty answer keeps the previous plan.
+  It runs on its own thread in `sekiro-brain-net` (never the game thread), so latency does not matter: the plan is used from the next fight if it arrived by then (during the 6 s respawn), else from the fight after; a failed or empty answer keeps the previous plan.
 - **Fighter (in the fight, cheap).** The driver runs the plan's sets locally with the sampler (`sampler.rs`, with the repelled-plan penalty and the untried bonus).
-  At the checkpoints (`start`, `half_hp`, `mark_lost`, `punished_twice`, `deflected_thrice`) the Decisions API picks which set to play, or `keep`.
+  At the checkpoints (`start`, `posture_half`, `posture_critical`, `half_hp` (fallback), `mark_lost`, `punished_twice`, `deflected_thrice`) the Decisions API picks which set to play, or `keep`.
   No per-move calls.
 - **Phases across fights.** Fight 1 against an enemy with no memory is his own Lua AI with no model call at all; the coach runs after it.
   From fight 2 on the coach's plan drives him: the opener runs first, then plans sampled from the start set.
@@ -604,15 +607,15 @@ FromSoftware players fight the same enemy dozens of times, so the boss learns *b
 ```powershell
 .\target\release\sekiro-rs.exe --arena owl --enemy soldier --brain coach --god
 .\target\release\sekiro-rs.exe --play --enemy soldier --brain coach --coach codex
-.\target\release\sekiro-rs.exe --play --enemy soldier --brain coach --coach api --coach-model gpt-6-luna --coach-effort medium
+.\target\release\sekiro-rs.exe --play --enemy soldier --brain coach --coach api --coach-model gpt-6-luna --coach-effort low
 ```
 
 | Flag | Meaning |
 |---|---|
 | `--brain coach` | The coach plus the Decisions checkpoint chooser. Memory is on by default (`logs/memory/<chr>.json`); `--brain-memory off` turns it off. `decisions` and `responses` stay as they were |
-| `--coach claude\|codex\|api` | Who writes the plan. `claude` (default) runs `claude -p --model haiku --output-format json --tools "" --no-session-persistence --json-schema <schema>` with the prompt on stdin; `codex` runs `codex exec --skip-git-repo-check -s read-only -m <model> --ephemeral --output-schema <file> -o <file> -` with the prompt on stdin; `api` is the Responses call below. Only `api` needs an API key |
-| `--coach-model <name>` | Default `haiku` (claude), `gpt-6-luna` (codex, api) |
-| `--coach-effort <level>` | `api` only, default `medium` |
+| `--coach claude\|codex\|api` | Who writes the plan. `api` (default) uses Responses with `gpt-6-luna`, low effort, strict schema, `store:false` and a 45 s deadline. `claude` uses `claude-haiku-5-5`, our replacement system prompt, empty settings and MCP configuration, safe mode to skip CLAUDE.md and customizations while retaining subscription auth, low effort, no tools or session persistence, and the JSON schema. `codex exec` ignores user config, uses low reasoning effort, read-only sandbox, ephemeral sessions and the output schema. Only `api` needs an API key |
+| `--coach-model <name>` | Default `claude-haiku-5-5` (claude), `gpt-6-luna` (codex, api) |
+| `--coach-effort <level>` | `api` only, default `low` |
 | `SEKIRO_COACH_CMD` | Replaces the program of the `claude` and `codex` coaches (the tests point it at a fake) |
 
 The CLI coaches run from their own temporary directory with no tools, are killed through their own child handle at the 120 s deadline and when the game exits, and never have their output echoed (it may contain the prompt).
@@ -635,7 +638,7 @@ Plans in sets must contain an attack and may not be in `avoid` (see "Hard limits
    "plans": [{"plan": "3000+3001", "weight": 2.0}, {"plan": "run_in3>3008", "weight": 1.0}], "when": null},
   {"name": "bait", "description": "slow walk-ins and holds before the thrust to break his timing",
    "plans": [{"plan": "walk_in4>hold1>3013", "weight": 1.0}, {"plan": "hold2>3002", "weight": 1.0}],
-   "when": "half_hp"}],
+   "when": "posture_half"}],
  "start_set": "press",
  "avoid": [{"choice": "3003", "reason": "deflected 5 of 5"}],
  "notes": "He deflects thrusts early but never the kick; he backs off after a deflect."}
@@ -643,7 +646,7 @@ Plans in sets must contain an attack and may not be in `avoid` (see "Hard limits
 
 The Responses request uses strict structured output (`text.format` `json_schema`, name `game_plan`) with every property required and the choice strings enum-constrained through one `$defs` entry; counts and lengths are validated after the answer.
 Sources, read 2026-10-11: [Responses create reference](https://developers.openai.com/api/reference/resources/responses/methods/create), [Structured outputs guide](https://developers.openai.com/api/docs/guides/structured-outputs) (nullable fields as `["string", "null"]` with `null` in the enum), [Reasoning guide](https://developers.openai.com/api/docs/guides/reasoning) (`reasoning.effort`, reasoning tokens in `usage.output_tokens_details.reasoning_tokens`, `status: "incomplete"` with `incomplete_details.reason: "max_output_tokens"`).
-Not live-verified: that the model accepts `$defs`/`$ref`, the null enum and `medium` effort with this schema.
+Not live-verified: that the model accepts `$defs`/`$ref`, the null enum and `low` effort with this schema.
 After a valid plan arrives the console shows 3 to 5 lines:
 
 ```
@@ -666,16 +669,16 @@ The instructions (`protocol::coach_instructions`, followed by every choice with 
 
 > You are the coach of {name}, who fights the player (Wolf) again and again. After each fight you write the game plan for the next one. Your goal: make Wolf play worse by fighting him. You are scored on the damage you deal to Wolf (HP and posture) per minute (dpm), your attacks per minute (apm), fewer perfect deflects (defl) and fewer of your actions he punishes. How long the fight lasts, and how fast he kills you, are NOT goals (kill time is information only). Stalling, running away or passivity counts as failure: passive = the percent of the fight with no attack of yours started in the last 4 s, and a fight with passive above 35 failed regardless of every other number; if the last fight failed this way, make the next plan attack more. Movement tactics exist to set up attacks (baits, spacing, timing mixups such as a hold or a slow walk-in before a strike), not to avoid fighting. Think like a swordsman: turning your back or retreating while the opponent is in sword range leaves you open, so tactics should set up attacks safely. The fighter enforces limits you cannot override: a plan in a set must contain an attack (plans without one are dropped), an attack must start at least every 6 s, and back_off, retreat or back-step plans run at most once per 8 s. Players learn patterns, so probe with untried tactics, exploit the habits you see and retire what keeps failing. Test one idea at a time and write down what you learn.\n\
 > Input (compact JSON about the fight just over): fight = fights so far; result = Wolf's result (won = who won, secs, defl/guard = Wolf's perfect-deflect and guard percent, hits = hits you landed, hp/posture = percent of his bars lost, punishes = your actions he hit, apm, dpm = percent of a bar per minute, passive percent); trend = his deflect%, guard%, hits, hp%, kill seconds (information only), apm, dpm and passive over the last fights; plans = this fight per plan text, as [exchanges, hit, blocked, deflected, whiffed, punished] (lua = your own AI's acts); sets = this fight per set of the game plan played: secs and the same counts (opener = the opener, lua = own AI); wolf = his attacks this fight, same counts; overall = every fight per plan text; habits = how Wolf behaves; played = the game plan this fight ran; notes = your own notes from last time. With no played plan this fight was your plain AI, the baseline.\n\
-> Output: one game plan. opener = a plan run first in the fight (may be tactics such as hold3.5>walk_in4, or lua for none). sets = 2 to 4 named sets (name of letters, digits, _ or -, at most 24 characters), each with a one-line description for the fighter who picks the set (what it does and when it suits), 2 to 6 weighted plans from the choices below (weights relative), and when = the checkpoint it suits or null. start_set = the set played from the start. avoid = choices not to use, each with a short reason. notes = at most 400 characters: your hypotheses about this player, kept and shown to you next time so your reasoning accumulates; revise them with the new evidence. In the fight a cheap model only picks which set to switch to at the checkpoints (start, half_hp, mark_lost, punished_twice, deflected_thrice, or keep), and your plans run locally, sampled by weight with a penalty for plans that keep being deflected, so spread weights over good options and make the sets clearly different. Reflexes (guarding, deflecting, counters, reactions) are automatic. Use only the choices listed; lua leaves an act to the boss's own AI. A choice is a single action, a movement tactic (distances from Wolf, left and right are the boss's) or a plan of up to {max} steps joined with > (consecutive attacks joined with +). Choices:
+> Output: one game plan. opener = a plan run first in the fight (may be tactics such as hold3.5>walk_in4, or lua for none). sets = 2 to 4 named sets (name of letters, digits, _ or -, at most 24 characters), each with a one-line description for the fighter who picks the set (what it does and when it suits), 2 to 6 weighted plans from the choices below (weights relative), and when = the checkpoint it suits or null. start_set = the set played from the start. avoid = choices not to use, each with a short reason. notes = at most 400 characters: your hypotheses about this player, kept and shown to you next time so your reasoning accumulates; revise them with the new evidence. In the fight a cheap model only picks which set to switch to at the checkpoints (start, posture_half, posture_critical, half_hp (fallback), mark_lost, punished_twice, deflected_thrice, or keep), and your plans run locally, sampled by weight with a penalty for plans that keep being deflected, so spread weights over good options and make the sets clearly different. posture_half means 50% posture damage, posture_critical 85%; both re-arm below 25% damage. half_hp is the backup event at 50% HP left. Reflexes (guarding, deflecting, counters, reactions) are automatic. Use only the choices listed; lua leaves an act to the boss's own AI. A choice is a single action, a movement tactic (distances from Wolf, left and right are the boss's) or a plan of up to {max} steps joined with > (consecutive attacks joined with +). Choices:
 
 The checkpoint chooser (coach mode) gets only a few numbers and the set names, about 100 input tokens plus the choice list (the sets' descriptions and `keep`):
 
 ```json
 {"model": "gpt-6-luna",
- "input": "{\"why\":\"half_hp\",\"set\":\"bait\",\"boss_hp\":0.48,\"boss_posture\":0.2,\"wolf_hp\":0.91,\"wolf_posture\":0.12,\"dist\":3.4}",
+ "input": "{\"why\":\"posture_half\",\"set\":\"bait\",\"boss_hp\":0.48,\"boss_posture\":0.55,\"wolf_hp\":0.91,\"wolf_posture\":0.12,\"dist\":3.4}",
  "questions": [{"type": "choice", "name": "plan_set",
    "instructions": "You are an Ashina soldier with a one-handed sword's fighting instinct. The coach prepared these plan sets; pick one for what just happened, or keep the current one.",
-   "choices": [{"value": "press", "description": "..."}, {"value": "bait", "description": "... (suits: half_hp)"}, {"value": "keep", "description": "stay on the current set"}]}]}
+   "choices": [{"value": "press", "description": "..."}, {"value": "bait", "description": "... (suits: posture_half)"}, {"value": "keep", "description": "stay on the current set"}]}]}
 ```
 
 No memory, habits, tally or 73-choice list goes in; those are the coach's.
@@ -707,7 +710,7 @@ Test `an_attack_after_retreat12_turns_to_face_wolf_first`: `retreat12>3005` with
 
 `HostedStats` counts per call kind: the checkpoint chooser (`requests`, `answered`, tokens, `reasoning_tokens`, round trip) and the coach (`coach.*`); the telemetry log line has `"kind": "decide"` or `"coach"`, the backend, the usage (input tokens per call) and, for a CLI, `cost_usd`.
 The fight summary line ends with the reasoning tokens, the coach calls that finished during the fight, and the seconds each set was played.
-Reasoning tokens count against `max_output_tokens` (the reasoning guide recommends reserving at least 25000 while experimenting); the default here is 6000 for `medium` and unverified, raise it if calls come back `incomplete`.
+Reasoning tokens count against `max_output_tokens` (the reasoning guide recommends reserving at least 25000 while experimenting); the default here is 6000 for `low` and unverified, raise it if calls come back `incomplete`.
 Estimate per fight with `--coach api`: one coach call of about 3 KB input plus the 6 KB instructions (3000 to 4000 input tokens) and 1000 to 3000 output tokens including reasoning, plus up to 5 chooser calls of about 250 input tokens each; with `--coach claude` or `codex` the coach runs on the subscription.
 All prices are unverified; the first session's Decisions calls cost $0.01 at 4200 input tokens each.
 
@@ -724,3 +727,12 @@ All prices are unverified; the first session's Decisions calls cost $0.01 at 420
 - The tactic distances, caps and speeds, the checkpoint events, the sampling weights (0.5 per repelled exchange in a row, 1.5 for untried, exclusion at 3), what counts as a repelled tactic, and the metric definitions are ours.
 - Move levels: a plan walks at 0.5 and runs at 1.0, as the AI runtime does for his acts (the NPC script runs above 0.75); the soldier covers only about 1 m/s over a short run, so `run_in3` from 9 m does not reach 3 m within its cap.
 - The warm-up opens a TCP connection only; the TLS handshake cost is not removed.
+
+
+### Playtest verification (2026-10-11)
+
+The API default and configurable effort are checked offline; strict output, store:false and usage including reasoning tokens are unchanged.
+Fake CLI tests assert the complete ordered argument vectors, Claude's empty MCP file and its summary-only stdin.
+Installed CLI help confirms all flags used; --exclude-dynamic-system-prompt-sections explicitly does nothing with --system-prompt and is omitted.
+Codex --ignore-user-config removes user-configured MCP servers without relying on a possibly merged mcp_servers override.
+No real API request or authenticated CLI execution was made, so provider latency and total context size remain unverified.

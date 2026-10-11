@@ -1,15 +1,19 @@
 //! The coach through a subscription CLI: `claude -p` (Claude Code headless) or `codex exec`,
 //! so the game plan costs no API key.
 //!
-//! The child runs from its own temporary directory with no tools, the prompt (the coach
-//! instructions and the fight summary) goes in on stdin, and the answer is read from the
+//! The child runs from its own temporary directory with no tools. Claude uses our instructions
+//! as its replacement system prompt and only the summary on stdin; Codex takes both on stdin.
+//! User settings and configured MCP servers are disabled. The answer is read from the
 //! CLI's JSON envelope (`claude`) or its last-message file (`codex`). The child is killed
 //! through its own handle at the deadline and when the game exits. Nothing the child prints is
 //! ever echoed into a diagnostic, since it may contain the prompt.
 //!
 //! Flags come from `claude --help` and `codex exec --help` (read, never run, on 2026-10-11):
 //! `-p`, `--model`, `--output-format json`, `--tools ""`, `--no-session-persistence`,
-//! `--json-schema`; `exec --skip-git-repo-check -s read-only -m --ephemeral --output-schema -o -`.
+//! `--json-schema`, `--system-prompt`, `--strict-mcp-config`, `--mcp-config`,
+//! `--setting-sources ""`, `--safe-mode`, `--effort low`; Codex `exec --ignore-user-config
+//! -c model_reasoning_effort="low" --skip-git-repo-check -s read-only -m --ephemeral
+//! --output-schema -o -`. Claude's dynamic-section flag is ignored with --system-prompt.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -31,6 +35,11 @@ pub(crate) struct CliAnswer {
 }
 
 static RUNS: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) struct Prompt<'a> {
+    pub instructions: &'a str,
+    pub input: &'a str,
+}
 
 /// A fresh empty directory under the system temp dir, removed when dropped (only the files this
 /// run made in it).
@@ -73,16 +82,20 @@ pub(crate) fn run(
     backend: CoachBackend,
     model: &str,
     cmd: Option<&Path>,
-    prompt: &str,
+    prompt: &Prompt<'_>,
     schema: &Value,
     timeout: Duration,
     stopping: &AtomicBool,
 ) -> Result<CliAnswer, Failure> {
+    let instructions = prompt.instructions;
+    let input = prompt.input;
     let scratch = Scratch::new().map_err(|_| Failure::CliFailed)?;
     let answer_file = scratch.0.join("answer.txt");
     let mut args: Vec<String> = Vec::new();
     match backend {
         CoachBackend::Claude => {
+            let mcp_file = scratch.0.join("mcp.json");
+            std::fs::write(&mcp_file, r#"{"mcpServers":{}}"#).map_err(|_| Failure::CliFailed)?;
             args.extend(
                 [
                     "-p",
@@ -98,6 +111,19 @@ pub(crate) fn run(
                 .map(String::from),
             );
             args.push(schema.to_string());
+            args.extend(
+                [
+                    "--system-prompt",
+                    instructions,
+                    "--strict-mcp-config",
+                    "--mcp-config",
+                ]
+                .map(String::from),
+            );
+            args.push(mcp_file.to_string_lossy().into_owned());
+            args.extend(
+                ["--setting-sources", "", "--safe-mode", "--effort", "low"].map(String::from),
+            );
         }
         CoachBackend::Codex => {
             let schema_file = scratch.0.join("schema.json");
@@ -105,6 +131,9 @@ pub(crate) fn run(
             args.extend(
                 [
                     "exec",
+                    "--ignore-user-config",
+                    "-c",
+                    "model_reasoning_effort=\"low\"",
                     "--skip-git-repo-check",
                     "-s",
                     "read-only",
@@ -145,7 +174,11 @@ pub(crate) fn run(
     };
     // Feed stdin and drain stdout on threads, so a full pipe never stalls the deadline loop.
     let mut stdin = child.stdin.take();
-    let prompt = prompt.to_owned();
+    let prompt = if backend == CoachBackend::Codex {
+        format!("{instructions}\n\n{input}")
+    } else {
+        input.to_owned()
+    };
     let writer = std::thread::spawn(move || {
         if let Some(mut stdin) = stdin.take() {
             let _ = stdin.write_all(prompt.as_bytes());

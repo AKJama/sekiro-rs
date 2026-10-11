@@ -8,6 +8,48 @@ use std::path::PathBuf;
 
 const DT: f32 = 1.0 / 60.0;
 
+#[test]
+fn dead_target_releases_lock_and_camera_relative_movement() {
+    let Some(mut duel) = load_at(4.0) else {
+        return;
+    };
+    duel.enemy_active = false;
+    let input = InputFrame {
+        buttons: Buttons {
+            lock_on: true,
+            ..Buttons::default()
+        },
+        ..InputFrame::default()
+    };
+    assert!(duel.step(&input, DT).locked_on);
+    // Move sideways while locked, then kill the target without releasing the stick.
+    let moving = InputFrame {
+        move_stick: [1.0, 0.0],
+        camera_yaw: 0.0,
+        ..InputFrame::default()
+    };
+    for _ in 0..30 {
+        duel.step(&moving, DT);
+    }
+    duel.rules.fighters[1].vitality.hp = 0;
+    let start = duel.player.body.position;
+    for _ in 0..30 {
+        let r = duel.step(&moving, DT);
+        assert!(!r.locked_on);
+        assert!(!duel.player.behavior.env.locked_on);
+    }
+    let end = duel.player.body.position;
+    eprintln!(
+        "after death movement: {:?}",
+        [end[0] - start[0], end[2] - start[2]]
+    );
+    assert!(end[0] - start[0] > 0.2 && (end[2] - start[2]).abs() < (end[0] - start[0]).abs() * 0.3);
+    assert!(!duel.step(&input, DT).locked_on);
+    duel.reset().unwrap();
+    duel.step(&InputFrame::default(), DT);
+    assert!(duel.step(&input, DT).locked_on);
+}
+
 fn load() -> Option<Duel> {
     load_at(4.0)
 }
@@ -249,8 +291,17 @@ fn deflect_chain_breaks_the_soldier_then_deathblow() {
     let mut soldier_states = Vec::new();
     for i in 0..400 {
         // The soldier is in AttackBoundEmptyStamina, posture 0; Wolf (locked on) presses attack.
-        let r = duel.step(&frame(false, (10..14).contains(&i)), DT);
+        let mut input = frame(false, (10..14).contains(&i));
+        input.buttons.lock_on = i == 20 || i == 200;
+        let r = duel.step(&input, DT);
         started = started.or(r.deathblow.started);
+        if started.is_some() {
+            assert!(
+                !r.locked_on,
+                "lethal deathblow must not reacquire the target"
+            );
+            assert!(!duel.player.behavior.env.locked_on);
+        }
         killed |= r.deathblow.killed;
         for (states, s) in [
             (&mut wolf_states, &r.player),

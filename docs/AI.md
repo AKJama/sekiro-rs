@@ -172,3 +172,26 @@ Interrupts, the deflect counters and everything before the act pick still run in
 - Kengeki (sword clash) acts, platoon and team behaviour, navigation, sound targets, non-battle behaviour, home return.
 - The engine's exact goal update order, lifetime rules and interrupt order are ours; checking them against the native goal classes in the executable is the next step.
 - The scripts use the engine's random numbers; ours are a seeded xorshift, so act choices differ from the game run for run.
+
+## Soldier pressure playtest (2026-10-11)
+
+The requested normal-Lua replay at 1.6 m presses attack every eight fixed frames for four seconds, holding forward to stay in range.
+It already passes on the current runtime before any gameplay edit: direct hit at tick 26, block at tick 64, deflect at tick 98, and no posture break.
+The first hit lands during notice action 401040.
+At ticks 55 and 90, parry-timing interrupts queue EndureAttack 2260 and CommonAttack 2200 with actions 3100 and 3101.
+The observed guard effect raises interrupt 43, updates the shared consecutive-guard count, and the soldier then requests counter action 3008 at tick 101.
+No unanswered AI calls occur in this replay; the trace is logs/soldier-pressure-before.log.
+
+Evidence is in the local scripts: 101000_battle.lua Goal.Interrupt calls Common_Parry for INTERUPT_ParryTiming, while its observed effects drive replanning and Kengeki counters.
+It has no dedicated INTERUPT_Damaged or INTERUPT_GuardBreak branch that unconditionally guards after a fixed number of direct hits.
+Common_Parry checks battle effect 200004, parry rank 221002, a 0.1 s interval, facing cones and weapon reach before requesting guard.
+GOAL_COMMON_Guard 2101 with action 9910 also appears in Act23, but the mid-string reflex uses EndureAttack with action 3100 instead.
+The NPC request reaches env 123 without an extra TAE cancel gate, as described above.
+IncomingDamage reports NpcParam guardLevel 4 on both guarded contacts; env 258 is already wired by the earlier Owl stun-lock fix.
+The guard reactions activate SpEffect 200250, so the consecutive-guard feedback also works.
+The soldier's guard TAE recovery scaling and NpcParam guard rates are already covered by combat_rules tests, and both hit-stop scales are zero for this row.
+No guard probability, reaction timing, hit stop or player input logic was changed.
+
+Regression: soldier_guards_mashed_slashes in crates/sim/tests/combo_on_hit.rs.
+This does not reproduce the reported stun lock and does not prove every approach angle or playtest configuration works.
+A matching replay from the failing setup is still needed to locate any remaining defect; the extracted data does not support saying the soldier never guards mid-string.

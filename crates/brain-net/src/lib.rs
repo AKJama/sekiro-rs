@@ -22,10 +22,20 @@ pub fn is_hosted(name: &str) -> bool {
 /// The coach options of the game CLI (`--coach`, `--coach-model`, `--coach-effort`).
 #[derive(Debug, Clone, Default)]
 pub struct CoachCli {
-    /// `claude` (default), `codex` or `api`.
+    /// `api` (default), `claude` or `codex`.
     pub backend: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
+}
+
+impl CoachCli {
+    fn resolved_backend(&self) -> Result<CoachBackend, String> {
+        match self.backend.as_deref() {
+            None => Ok(CoachBackend::Api),
+            Some(b) => CoachBackend::by_name(b)
+                .ok_or_else(|| format!("unknown --coach {b}: known are claude, codex, api")),
+        }
+    }
 }
 
 /// Game CLI boundary for the enemy `chr` (the hosted brain offers that enemy's actions).
@@ -58,11 +68,7 @@ pub fn from_cli_with(
                 });
         }
     };
-    let coach_backend = match coach.backend.as_deref() {
-        None => CoachBackend::Claude,
-        Some(b) => CoachBackend::by_name(b)
-            .ok_or_else(|| format!("unknown --coach {b}: known are claude, codex, api"))?,
-    };
+    let coach_backend = coach.resolved_backend()?;
     let Some(actions) = BossActions::for_chr(chr) else {
         eprintln!("--brain {backend}: no action list for {chr}; falling back to Lua AI");
         return Ok(Box::new(LuaBrain));
@@ -131,6 +137,14 @@ fn fallback(backend: Backend, result: Result<HostedBrain, ConfigError>) -> Box<d
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn game_cli_defaults_to_api() {
+        assert_eq!(
+            CoachCli::default().resolved_backend().unwrap(),
+            CoachBackend::Api
+        );
+    }
 
     #[test]
     fn missing_key_falls_back_without_opening_real_credential_sources() {

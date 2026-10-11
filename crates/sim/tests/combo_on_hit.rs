@@ -293,3 +293,55 @@ fn owl_blocks_mashed_slashes_with_guard_reactions() {
          {guard_reactions}\n{log}"
     );
 }
+
+#[test]
+fn soldier_guards_mashed_slashes() {
+    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    if !cache.join("anim/c1010/tae.json").exists() {
+        return;
+    }
+    let mut duel = Duel::load(&cache, 1.6).unwrap();
+    duel.god = true;
+    let mut counts = [0; 3];
+    let mut broken = false;
+    for i in 0..240 {
+        let r = duel.step(
+            &InputFrame {
+                move_stick: [0.0, 1.0],
+                buttons: Buttons {
+                    attack: i % 8 == 0,
+                    lock_on: i == 0,
+                    ..Buttons::default()
+                },
+                ..InputFrame::default()
+            },
+            DT,
+        );
+        for (h, result) in &r.hits {
+            if h.attacker == 0 {
+                counts[if result.deflected {
+                    2
+                } else if result.guarded {
+                    1
+                } else {
+                    0
+                }] += 1;
+                broken |= result.posture_broke;
+                eprintln!("tick {i}: {result:?}, enemy {:?}", r.enemy.animation);
+            }
+        }
+        for e in duel.ai.as_mut().unwrap().drain_log() {
+            eprintln!("tick {i}: {e:?}");
+        }
+    }
+    eprintln!("soldier landed/blocked/deflected: {counts:?}");
+    assert!(
+        counts.iter().sum::<i32>() >= 3,
+        "too few contacts: {counts:?}"
+    );
+    assert!(
+        counts[1] + counts[2] > 0,
+        "soldier never guarded: {counts:?}"
+    );
+    assert!(!broken, "mashing broke posture: {counts:?}");
+}

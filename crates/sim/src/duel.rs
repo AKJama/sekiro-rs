@@ -511,7 +511,9 @@ impl Duel {
     fn update_lock(&mut self, input: &InputFrame) {
         let pressed = input.buttons.lock_on && !self.lock_button;
         self.lock_button = input.buttons.lock_on;
-        let enemy_alive = !self.rules.fighters[1].dead();
+        let enemy_alive = !self.rules.fighters[1].dead()
+            && !self.deathblow.as_ref().is_some_and(|d| d.lethal)
+            && self.defender_dying == 0;
         // SpEffect stateInfo 350 "cannot be locked on" (the Owl's smoke screen adds 200602 for
         // 1 s) drops the lock and refuses a new one (that it releases a held lock is inferred).
         let unlockable = self.enemy.tae_frame().sp_effects.iter().any(|id| {
@@ -521,8 +523,8 @@ impl Duel {
                 .get(id)
                 .is_some_and(|e| e.state_info == STATE_INFO_NO_LOCK)
         });
-        if unlockable {
-            self.player.lock_target = None;
+        if unlockable || !enemy_alive {
+            self.release_lock();
             return;
         }
         if !pressed {
@@ -533,7 +535,7 @@ impl Duel {
             return;
         }
         if self.player.lock_target.is_some() {
-            self.player.lock_target = None;
+            self.release_lock();
             return;
         }
         let p = self.player.body.position;
@@ -542,6 +544,21 @@ impl Duel {
         if dist <= self.camera.lock_range && enemy_alive {
             self.player.lock_target = Some(e);
         }
+    }
+
+    /// Drop the target and its strafe selector together. The HKS move loop only seeds
+    /// MoveDirection when movement starts, so a held stick otherwise keeps the dead-target
+    /// strafe clip while the body starts steering freely.
+    fn release_lock(&mut self) {
+        if self.player.lock_target.take().is_some() {
+            self.player
+                .behavior
+                .runtime
+                .set_variable("MoveDirection", 0.0);
+            self.player.walk_twist = 0.0;
+            self.player.walk_twist_target = 0.0;
+        }
+        self.player.behavior.env.locked_on = false;
     }
 
     /// Keeps the two bodies from overlapping: pushes both apart along the line between them,
@@ -695,7 +712,7 @@ impl Duel {
                 .insert(THROW_ATK_OFFSET_TYPE, start.atk_anim_offset as u32);
             rt.fire_event(&format!("W_ThrowAtk{clip}"));
         }
-        self.player.lock_target = None;
+        self.release_lock();
         // The throw takes over both bodies: a knockback left from the breaking hit must not
         // resume (and shove the enemy) once the pair ends.
         self.knockback = [None, None];
@@ -1584,6 +1601,9 @@ impl Duel {
             self.respawn_in = Some(RESPAWN_DELAY);
         }
         self.step_events(dt);
+        if self.rules.fighters[1].dead() {
+            self.release_lock();
+        }
         let report = DuelReport {
             locked_on: self.player.lock_target.is_some(),
             player,

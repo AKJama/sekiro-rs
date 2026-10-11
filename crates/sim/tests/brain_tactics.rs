@@ -560,7 +560,7 @@ fn a_checkpoints_fight_makes_only_a_handful_of_requests() {
             record.lua_acts,
             record.choices
         );
-        assert!((1..=5).contains(&record.requests), "{record:?}");
+        assert!((1..=7).contains(&record.requests), "{record:?}");
         assert_eq!(whys[0], Some("start"));
         assert!(
             whys.iter().filter(|w| **w == Some("start")).count() <= 2,
@@ -569,7 +569,7 @@ fn a_checkpoints_fight_makes_only_a_handful_of_requests() {
         // One answer, many plans: the set persists and is sampled at every slot.
         assert!(record.decisions >= 3, "{record:?}");
         assert!(
-            record.decisions > record.requests * 2,
+            record.decisions > record.requests,
             "plans without asking again: {record:?}"
         );
     }
@@ -744,7 +744,14 @@ fn checkpoint_events_ask_once_each() {
     duel.boss_brain.as_mut().unwrap().anti_stall = false;
     for i in 0..60 * 40 {
         keep_wolf_fresh(&mut duel);
-        if i == 60 * 8 {
+        let boss = &mut duel.rules.fighters[1];
+        let damage = match i / 60 {
+            8..=11 | 20..=23 => 0.55,
+            12..=15 | 24..=27 => 0.90,
+            _ => 0.0,
+        };
+        boss.posture.remaining = (boss.posture.max as f32 * (1.0 - damage)) as i32;
+        if i == 60 * 28 {
             // The boss drops below half HP, and stays there.
             let boss = &mut duel.rules.fighters[1];
             boss.vitality.hp = boss.vitality.max_hp * 2 / 5;
@@ -754,7 +761,17 @@ fn checkpoint_events_ask_once_each() {
     }
     let whys: Vec<_> = seen.borrow().iter().map(|r| r.2).collect();
     eprintln!("{whys:?}");
-    assert_eq!(whys, [Some("start"), Some("half_hp")]);
+    assert_eq!(
+        whys,
+        [
+            Some("start"),
+            Some("posture_half"),
+            Some("posture_critical"),
+            Some("posture_half"),
+            Some("posture_critical"),
+            Some("half_hp")
+        ]
+    );
     let d = duel.boss_brain.as_ref().unwrap();
     assert!(d.stats.planned >= 8, "{:?}", d.stats);
 }

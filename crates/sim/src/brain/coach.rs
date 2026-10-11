@@ -43,8 +43,10 @@ pub const REASON_MAX: usize = 80;
 /// The coach input's size target, bytes of compact JSON.
 pub const INPUT_BUDGET: usize = 4096;
 /// The checkpoint events a set's `when` hint may name.
-pub const CHECKPOINTS: [&str; 5] = [
+pub const CHECKPOINTS: [&str; 7] = [
     "start",
+    "posture_half",
+    "posture_critical",
     "half_hp",
     "mark_lost",
     "punished_twice",

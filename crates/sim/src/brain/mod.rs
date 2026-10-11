@@ -57,7 +57,7 @@ pub struct BrainRequest {
     pub tally: TallySummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemorySummary>,
-    /// Why this request is sent now (checkpoint mode: `start`, `half_hp`, `mark_lost`,
+    /// Why this request is sent now (checkpoint mode: `start`, `posture_half`, `posture_critical`, `half_hp`, `mark_lost`,
     /// `punished_twice`, `deflected_thrice`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub why: Option<&'static str>,
