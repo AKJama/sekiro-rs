@@ -483,7 +483,10 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
     }
     app.insert_resource(probes);
     let args: Vec<_> = std::env::args().collect();
-    if args.iter().any(|a| a == "--visual-stats") {
+    if args
+        .iter()
+        .any(|a| a == "--visual-stats" || a == "--profile-systems")
+    {
         if !app.is_plugin_added::<FrameTimeDiagnosticsPlugin>() {
             app.add_plugins(FrameTimeDiagnosticsPlugin::default());
         }
@@ -491,6 +494,15 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
             app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin);
         }
         app.add_systems(Update, visual_stats);
+    }
+    if args.iter().any(|a| a == "--profile-systems") {
+        app.add_plugins((
+            bevy::diagnostic::EntityCountDiagnosticsPlugin::default(),
+            bevy::diagnostic::SystemInformationDiagnosticsPlugin,
+        ));
+        let probe = crate::perf_log::RenderProbe::default();
+        crate::perf_log::add_render_probe(app, probe.clone());
+        app.insert_resource(probe);
     }
     map_material::install(app, &scene.prefix, &args);
     app.insert_resource(ShadowSettings::from_args(&gparam, hour, &args)?);
@@ -869,7 +881,12 @@ fn spawn_map(
 }
 
 /// Opt-in reproducible render measurements, including arena sessions.
-fn visual_stats(pending: Res<Pending>, diagnostics: Res<DiagnosticsStore>, mut last: Local<u32>) {
+fn visual_stats(
+    pending: Res<Pending>,
+    diagnostics: Res<DiagnosticsStore>,
+    probe: Option<Res<crate::perf_log::RenderProbe>>,
+    mut last: Local<u32>,
+) {
     let seconds = pending.loaded_for() as u32;
     if seconds < 2 || seconds == *last {
         return;
@@ -880,12 +897,28 @@ fn visual_stats(pending: Res<Pending>, diagnostics: Res<DiagnosticsStore>, mut l
         .and_then(|d| d.smoothed())
         .unwrap_or(0.);
     info!("visual stats: {seconds} s after loading, frame {frame:.3} ms");
+    if let Some(ref probe) = probe {
+        let (max, sum, frames, _, _, sets) = probe.take();
+        info!(
+            "profile render: mean {:.3} ms, max {max:.3} ms, sets {sets}",
+            sum / frames.max(1) as f64
+        );
+        crate::perf_log::report_systems();
+    }
     for d in diagnostics.iter().filter(|d| {
-        (d.path().as_str().contains("game_fog") || d.path().as_str().contains("native_post"))
-            && d.path().as_str().ends_with("elapsed_gpu")
+        let path = d.path().as_str();
+        if probe.is_some() {
+            path.ends_with("elapsed_gpu")
+                || path.ends_with("elapsed_cpu")
+                || path.contains("cpu_usage")
+                || path == "entity_count"
+        } else {
+            (path.contains("game_fog") || path.contains("native_post"))
+                && path.ends_with("elapsed_gpu")
+        }
     }) {
         if let Some(ms) = d.smoothed() {
-            info!("visual stats: {} {ms:.3} ms", d.path());
+            info!("visual stats: {} {ms:.3} {}", d.path(), d.suffix);
         }
     }
 }
@@ -991,6 +1024,7 @@ fn pick_groups(
     mut fog: ResMut<crate::lighting::fog::FogSelection>,
     focus: Query<&Transform, With<MapFocus>>,
 ) {
+    let _timer = crate::perf_log::SystemTimer::start("pick_groups");
     if keys.just_pressed(KeyCode::KeyG) {
         groups.mode = groups.mode.next();
         groups.dirty = true;
@@ -1068,6 +1102,7 @@ fn apply_groups(
     mut pieces: Query<(&DrawGroups, &mut Visibility), Without<FarScenery>>,
     added: Query<(), Added<DrawGroups>>,
 ) {
+    let _timer = crate::perf_log::SystemTimer::start("apply_groups");
     if !groups.dirty && added.is_empty() {
         return;
     }
@@ -1203,6 +1238,7 @@ fn update_local_lights(
     focus: Query<&GlobalTransform, With<MapFocus>>,
     mut last: Local<f32>,
 ) {
+    let _timer = crate::perf_log::SystemTimer::start("update_local_lights");
     if time.elapsed_secs() - *last < 0.5 {
         return;
     }
@@ -1273,6 +1309,7 @@ fn budget_map_shadows(
     mut last: Local<f32>,
     mut counts: Local<Option<(usize, usize)>>,
 ) {
+    let _timer = crate::perf_log::SystemTimer::start("budget_map_shadows");
     if time.elapsed_secs() - *last < 0.5 {
         return;
     }
@@ -1389,6 +1426,7 @@ fn hud(
 }
 
 fn track_loading(assets: Res<AssetServer>, mut pending: ResMut<Pending>) {
+    let _timer = crate::perf_log::SystemTimer::start("track_loading");
     if pending.loaded_at.is_some() {
         return;
     }

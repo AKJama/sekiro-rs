@@ -11,6 +11,49 @@ use bevy::prelude::*;
 use std::io::{BufWriter, Write};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+type SystemSamples = std::collections::BTreeMap<&'static str, (usize, f64, f64)>;
+static SYSTEM_SAMPLES: std::sync::Mutex<SystemSamples> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+pub struct SystemTimer(Option<(&'static str, Instant)>);
+
+impl SystemTimer {
+    pub fn start(name: &'static str) -> Self {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        Self(
+            ENABLED
+                .get_or_init(|| std::env::args().any(|a| a == "--profile-systems"))
+                .then(|| (name, Instant::now())),
+        )
+    }
+}
+
+impl Drop for SystemTimer {
+    fn drop(&mut self) {
+        if let Some((name, start)) = self.0
+            && let Ok(mut samples) = SYSTEM_SAMPLES.lock()
+        {
+            let ms = start.elapsed().as_secs_f64() * 1000.;
+            let sample = samples.entry(name).or_default();
+            sample.0 += 1;
+            sample.1 += ms;
+            sample.2 = sample.2.max(ms);
+        }
+    }
+}
+
+pub fn report_systems() {
+    if let Ok(mut samples) = SYSTEM_SAMPLES.lock() {
+        for (name, (count, sum, max)) in samples.iter() {
+            info!(
+                "profile system {name}: mean {:.3} ms, max {max:.3} ms",
+                sum / *count as f64
+            );
+        }
+        samples.clear();
+    }
+}
+
 #[derive(Resource)]
 pub struct PerfLog {
     output: BufWriter<std::fs::File>,

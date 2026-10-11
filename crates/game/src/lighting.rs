@@ -243,6 +243,7 @@ fn apply_post_effects(
     effects: Res<MapPostEffects>,
     cameras: Query<(Entity, Option<&AppliedPost>), With<Camera3d>>,
 ) {
+    let _timer = crate::perf_log::SystemTimer::start("apply_post_effects");
     let pending: Vec<_> = cameras
         .iter()
         .filter(|(_, p)| p.is_none_or(|p| p.0 != lighting.light_set || p.1 != lighting.hour))
@@ -445,6 +446,7 @@ pub fn apply_probes(
     cameras: Query<(Entity, Option<&EnvironmentMapLight>, Option<&Skybox>), With<Camera3d>>,
     mut probe_sky: Local<Option<bool>>,
 ) {
+    let _timer = crate::perf_log::SystemTimer::start("apply_probes");
     // The probes are captures from points inside the level, so as a sky they show nearby
     // scenery blown up behind the world; the real sky is the map's dome meshes. Lighting only,
     // unless `--probe-sky` asks to see the capture for debugging.
@@ -656,6 +658,7 @@ pub fn apply_lighting(
     mut sun: Query<(&mut DirectionalLight, &mut Transform), (With<Sun>, Without<FillLight>)>,
     mut fill: Query<(&mut DirectionalLight, &mut Transform), (With<FillLight>, Without<Sun>)>,
 ) {
+    let _timer = crate::perf_log::SystemTimer::start("apply_lighting");
     if lighting.applied == Some(lighting.light_set) {
         return;
     }

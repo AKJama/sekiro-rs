@@ -840,3 +840,46 @@ No commits, network access or protected-path writes were made by this work, and 
 - How map ambient effects (sfxbnd_mXX) and grass instances are placed.
 - Whether the shader bundles (`gxflvershader`, `grass.shaderbnd`) are worth disassembling the way FwLo did for FFX shaders (his method: D3DDisassemble on the DXBC `.ppo` and `.vpo` files).
   This is the only reliable way to settle layered-material and water formulas, and it is time boxed to one material family.
+
+## 8. CPU frame regression fixed (2026-10-11)
+
+The `f602bfa` hemisphere change wrapped all map surfaces in `ExtendedMaterial<StandardMaterial, MapLayers>`.
+`MapLayers` did not implement bindless bindings, so Bevy disabled bindless rendering for the entire extended material, losing material-slab multi-draw batching across thousands of map meshes.
+The preceding version wrapped only surfaces with layer metadata, which limited the impact.
+The fix supplies a packed layer-data array and a separate bindless index table, with unchanged shading calculations and a non-bindless fallback for unsupported adapters.
+No meshes, layers, shadows, lights, probes, fog, post effects or far scenery were removed.
+
+Runs used the release binary in `target/alt`, 1600x900, `--uncapped --visual-stats`, one process at a time with no concurrent builds.
+The table averages the six smoothed frame-time samples from seconds 6 through 11 after loading, excluding startup and screenshots.
+
+| Run | Before, ms | After, ms | Before, fps | After, fps |
+| --- | ---: | ---: | ---: | ---: |
+| `--map m11_00_00_00` viewer | 23.751 | 16.654 | 42.1 | 60.0 |
+| `--play --map m11_00_00_00 --start 3 --no-enemy --simple-ai` | 37.162 | 16.930 | 26.9 | 59.1 |
+| `--arena owl --simple-ai --god` | 36.631 | 16.821 | 27.3 | 59.4 |
+
+Play and Owl used `--script target/alt/perf/idle.txt --exit --shots 720:target/alt/perf/<mode>-<phase>.png`, with `900 0 0 -` as the script.
+The viewer used `--screenshot target/alt/perf/viewer-<phase>.png --at 15`.
+The shared map installer already supports periodic play-mode frame logs through `--visual-stats`; no separate play logger was needed.
+
+Independent viewer flag runs retained the regression: disabling fog, layers, local lights, probes, exposure, bloom, grading, shadows or far scenery did not restore the baseline.
+In particular, `--no-layers` still uses the extended material for hemisphere lighting, so it cannot isolate the bindless regression.
+Some initial flag runs overlapped compilation and were discarded; the `idle-no-*.txt` runs repeat all nine controls without concurrent compilation.
+
+`--profile-systems` now adds Bevy frame/entity/system-information diagnostics, existing render-schedule probes and opt-in `Instant` timers for the map systems.
+Those systems together average below 0.1 ms per frame in the idle viewer, including amortized shadow budgeting, whose individual updates peak below 1 ms.
+Probe inserts, material conversion, lighting changes and asset dependency checks are not recurring frame bottlenecks.
+The render schedule averaged about 25-27 ms before the fix, with roughly 12-15 ms each in preparation and rendering/submission intervals.
+Afterward those intervals are about 1.5-2.5 ms each, while the interval containing swapchain acquisition waits about 12 ms.
+This suggests the remaining approximately 60 fps ceiling is presentation pacing even with `--uncapped`, rather than GPU saturation; it does not establish an unrestricted maximum frame rate.
+The viewer's opaque-pass CPU time fell from about 1.4 ms to 0.022 ms, and GPU bin unpacking from about 2.8 ms to 0.05 ms.
+Opaque shading remains about 2.8 ms GPU, fog about 0.22 ms and native post about 0.06 ms.
+An after-fix play counter sample showed about 27% GPU 3D-engine utilization.
+
+Before/after screenshots for viewer, play and Owl are in `target/alt/perf` and were visually inspected.
+The static viewer world crop, excluding its first 50 HUD rows, has a mean absolute channel difference of 0.327/255; the captures are visually equivalent, not byte-identical.
+Play and Owl retain the same scene shading with small render-interpolation differences in actor pose.
+The regression test ensures the extended material continues to advertise bindless batching.
+The hardware fallback shader branch is retained but was not exercised on this bindless-capable adapter.
+Remaining costs are presentation waiting, ordinary opaque shading, render preparation and the existing large static entity population; the map viewer still contains 18,424 mesh entities.
+Validation passed offline in `target/alt` with six jobs: `cargo fmt --all --check`, workspace/all-target Clippy with warnings denied, all 423 requested release game/sim tests and the release game build.

@@ -6,55 +6,82 @@ use bevy::gltf::GltfMaterialExtras;
 use bevy::image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor};
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
-use bevy::render::render_resource::AsBindGroup;
+use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
 use serde_json::Value;
 
 type LayeredMaterial = ExtendedMaterial<StandardMaterial, MapLayers>;
 
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
+#[data(50, MapLayersUniform, binding_array(101))]
+#[bindless(index_table(range(50..65), binding(100)))]
 struct MapLayers {
     // xyz: enabled albedo layers; w: mask present.
-    #[uniform(100)]
     enabled: Vec4,
-    #[uniform(100)]
     albedo_enabled: Vec4,
-    #[uniform(100)]
     albedo_uv: Vec4,
-    #[uniform(100)]
     normal_uv: Vec4,
-    #[uniform(100)]
     normal_enabled: Vec4,
-    #[uniform(100)]
     hemi_axis: Vec4,
-    #[uniform(100)]
     hemi_delta: Vec4,
-    #[texture(101)]
-    #[sampler(102)]
+    #[texture(51)]
+    #[sampler(52)]
     overlay: Option<Handle<Image>>,
-    #[texture(103)]
-    #[sampler(104)]
+    #[texture(53)]
+    #[sampler(54)]
     snow: Option<Handle<Image>>,
-    #[texture(105)]
-    #[sampler(106)]
+    #[texture(55)]
+    #[sampler(56)]
     c: Option<Handle<Image>>,
-    #[texture(107)]
-    #[sampler(108)]
+    #[texture(57)]
+    #[sampler(58)]
     overlay_normal: Option<Handle<Image>>,
-    #[texture(109)]
-    #[sampler(110)]
+    #[texture(59)]
+    #[sampler(60)]
     snow_normal: Option<Handle<Image>>,
-    #[texture(111)]
-    #[sampler(112)]
+    #[texture(61)]
+    #[sampler(62)]
     c_normal: Option<Handle<Image>>,
-    #[texture(113)]
-    #[sampler(114)]
+    #[texture(63)]
+    #[sampler(64)]
     mask: Option<Handle<Image>>,
+}
+
+// Packed once per material; bindless slabs preserve Bevy's multi-draw batching.
+#[derive(Clone, ShaderType)]
+struct MapLayersUniform {
+    enabled: Vec4,
+    albedo_enabled: Vec4,
+    albedo_uv: Vec4,
+    normal_uv: Vec4,
+    normal_enabled: Vec4,
+    hemi_axis: Vec4,
+    hemi_delta: Vec4,
+}
+
+impl From<&MapLayers> for MapLayersUniform {
+    fn from(layers: &MapLayers) -> Self {
+        Self {
+            enabled: layers.enabled,
+            albedo_enabled: layers.albedo_enabled,
+            albedo_uv: layers.albedo_uv,
+            normal_uv: layers.normal_uv,
+            normal_enabled: layers.normal_enabled,
+            hemi_axis: layers.hemi_axis,
+            hemi_delta: layers.hemi_delta,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_extension_preserves_standard_material_bindless_batching() {
+        use bevy::render::render_resource::AsBindGroup;
+        assert!(<LayeredMaterial as AsBindGroup>::bindless_slot_count().is_some());
+    }
 
     #[test]
     fn hemisphere_wraps_unlayered_map_surfaces_but_preserves_actor_materials() {
@@ -173,6 +200,7 @@ fn update_hemisphere(
     mut materials: ResMut<Assets<LayeredMaterial>>,
     mut last: Local<Option<(i32, f32, bool)>>,
 ) {
+    let _timer = crate::perf_log::SystemTimer::start("update_hemisphere");
     let key = (lighting.light_set, lighting.hour, ambient.brightness > 0.);
     if *last == Some(key) {
         return;
@@ -203,6 +231,7 @@ fn replace_materials(
     mut settings: ResMut<LayerSettings>,
     environment: MapEnvironment,
 ) {
+    let _timer = crate::perf_log::SystemTimer::start("replace_materials");
     let MapEnvironment {
         lighting,
         ambient,

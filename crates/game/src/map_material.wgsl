@@ -16,21 +16,101 @@ struct Layers {
     hemi_axis: vec4<f32>,
     hemi_delta: vec4<f32>,
 }
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> layers: Layers;
-@group(#{MATERIAL_BIND_GROUP}) @binding(101) var overlay: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(102) var overlay_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(103) var snow: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(104) var snow_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(105) var layer_c: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(106) var c_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(107) var overlay_normal: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(108) var overlay_normal_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(109) var snow_normal: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(110) var snow_normal_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(111) var c_normal: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(112) var c_normal_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(113) var height_mask: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(114) var height_sampler: sampler;
+#ifdef BINDLESS
+#import bevy_render::bindless::{bindless_textures_2d, bindless_samplers_filtering}
+#import bevy_pbr::mesh_bindings::mesh
+struct LayerIndices {
+    layers: u32,
+    overlay: u32,
+    overlay_sampler: u32,
+    snow: u32,
+    snow_sampler: u32,
+    layer_c: u32,
+    c_sampler: u32,
+    overlay_normal: u32,
+    overlay_normal_sampler: u32,
+    snow_normal: u32,
+    snow_normal_sampler: u32,
+    c_normal: u32,
+    c_normal_sampler: u32,
+    height_mask: u32,
+    height_sampler: u32,
+}
+@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<storage> layer_indices: array<LayerIndices>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(101) var<storage> layer_array: array<Layers>;
+#else
+@group(#{MATERIAL_BIND_GROUP}) @binding(50) var<uniform> layers: Layers;
+@group(#{MATERIAL_BIND_GROUP}) @binding(51) var overlay: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(52) var overlay_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(53) var snow: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(54) var snow_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(55) var layer_c: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(56) var c_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(57) var overlay_normal: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(58) var overlay_normal_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(59) var snow_normal: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(60) var snow_normal_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(61) var c_normal: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(62) var c_normal_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(63) var height_mask: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(64) var height_sampler: sampler;
+#endif
+
+fn sample_overlay(uv: vec2<f32>, slot: u32) -> vec4<f32> {
+#ifdef BINDLESS
+    return textureSample(bindless_textures_2d[layer_indices[slot].overlay], bindless_samplers_filtering[layer_indices[slot].overlay_sampler], uv);
+#else
+    return textureSample(overlay, overlay_sampler, uv);
+#endif
+}
+
+fn sample_snow(uv: vec2<f32>, slot: u32) -> vec4<f32> {
+#ifdef BINDLESS
+    return textureSample(bindless_textures_2d[layer_indices[slot].snow], bindless_samplers_filtering[layer_indices[slot].snow_sampler], uv);
+#else
+    return textureSample(snow, snow_sampler, uv);
+#endif
+}
+
+fn sample_layer_c(uv: vec2<f32>, slot: u32) -> vec4<f32> {
+#ifdef BINDLESS
+    return textureSample(bindless_textures_2d[layer_indices[slot].layer_c], bindless_samplers_filtering[layer_indices[slot].c_sampler], uv);
+#else
+    return textureSample(layer_c, c_sampler, uv);
+#endif
+}
+
+fn sample_overlay_normal(uv: vec2<f32>, slot: u32) -> vec4<f32> {
+#ifdef BINDLESS
+    return textureSample(bindless_textures_2d[layer_indices[slot].overlay_normal], bindless_samplers_filtering[layer_indices[slot].overlay_normal_sampler], uv);
+#else
+    return textureSample(overlay_normal, overlay_normal_sampler, uv);
+#endif
+}
+
+fn sample_snow_normal(uv: vec2<f32>, slot: u32) -> vec4<f32> {
+#ifdef BINDLESS
+    return textureSample(bindless_textures_2d[layer_indices[slot].snow_normal], bindless_samplers_filtering[layer_indices[slot].snow_normal_sampler], uv);
+#else
+    return textureSample(snow_normal, snow_normal_sampler, uv);
+#endif
+}
+
+fn sample_c_normal(uv: vec2<f32>, slot: u32) -> vec4<f32> {
+#ifdef BINDLESS
+    return textureSample(bindless_textures_2d[layer_indices[slot].c_normal], bindless_samplers_filtering[layer_indices[slot].c_normal_sampler], uv);
+#else
+    return textureSample(c_normal, c_normal_sampler, uv);
+#endif
+}
+
+fn sample_height_mask(uv: vec2<f32>, slot: u32) -> vec4<f32> {
+#ifdef BINDLESS
+    return textureSample(bindless_textures_2d[layer_indices[slot].height_mask], bindless_samplers_filtering[layer_indices[slot].height_sampler], uv);
+#else
+    return textureSample(height_mask, height_sampler, uv);
+#endif
+}
 
 fn layer_uv(in: VertexOutput, channel: f32) -> vec2<f32> {
 #ifdef VERTEX_UVS_B
@@ -54,6 +134,12 @@ fn unpack_normal(sample: vec2<f32>) -> vec3<f32> {
 
 @fragment
 fn fragment(vertex: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
+#ifdef BINDLESS
+    let slot = mesh[vertex.instance_index].material_and_lightmap_bind_group_slot & 0xffffu;
+    let layers = layer_array[layer_indices[slot].layers];
+#else
+    let slot = 0u;
+#endif
     var input = vertex;
     var weights = vec3(0.0);
 #ifdef VERTEX_COLORS
@@ -66,20 +152,20 @@ fn fragment(vertex: VertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     var pbr = pbr_input_from_standard_material(input, is_front);
     var height = 0.5;
     if layers.enabled.w > 0.0 {
-        height = textureSample(height_mask, height_sampler, layer_uv(input, layers.albedo_uv.w)).r;
+        height = sample_height_mask(layer_uv(input, layers.albedo_uv.w), slot).r;
     }
     let facing = smoothstep(0.2, 0.7, normalize(input.world_normal).y);
     let w = vec3(coverage(weights.x, height), coverage(weights.y, 1.0-height) * facing, coverage(weights.z, height)) * layers.enabled.xyz;
     var color = pbr.material.base_color.rgb;
-    if layers.albedo_enabled.x > 0.0 { color = mix(color, textureSample(overlay, overlay_sampler, layer_uv(input, layers.albedo_uv.x)).rgb, w.x); }
-    if layers.albedo_enabled.z > 0.0 { color = mix(color, textureSample(layer_c, c_sampler, layer_uv(input, layers.albedo_uv.z)).rgb, w.z); }
-    if layers.albedo_enabled.y > 0.0 { color = mix(color, textureSample(snow, snow_sampler, layer_uv(input, layers.albedo_uv.y)).rgb, w.y); }
+    if layers.albedo_enabled.x > 0.0 { color = mix(color, sample_overlay(layer_uv(input, layers.albedo_uv.x), slot).rgb, w.x); }
+    if layers.albedo_enabled.z > 0.0 { color = mix(color, sample_layer_c(layer_uv(input, layers.albedo_uv.z), slot).rgb, w.z); }
+    if layers.albedo_enabled.y > 0.0 { color = mix(color, sample_snow(layer_uv(input, layers.albedo_uv.y), slot).rgb, w.y); }
     pbr.material.base_color = vec4(color, pbr.material.base_color.a);
 #ifdef VERTEX_TANGENTS
     let tbn = calculate_tbn_mikktspace(input.world_normal, input.world_tangent);
-    if layers.normal_enabled.x > 0.0 { pbr.N = normalize(mix(pbr.N, normalize(tbn * unpack_normal(textureSample(overlay_normal, overlay_normal_sampler, layer_uv(input, layers.normal_uv.x)).rg)), w.x)); }
-    if layers.normal_enabled.z > 0.0 { pbr.N = normalize(mix(pbr.N, normalize(tbn * unpack_normal(textureSample(c_normal, c_normal_sampler, layer_uv(input, layers.normal_uv.z)).rg)), w.z)); }
-    if layers.normal_enabled.y > 0.0 { pbr.N = normalize(mix(pbr.N, normalize(tbn * unpack_normal(textureSample(snow_normal, snow_normal_sampler, layer_uv(input, layers.normal_uv.y)).rg)), w.y)); }
+    if layers.normal_enabled.x > 0.0 { pbr.N = normalize(mix(pbr.N, normalize(tbn * unpack_normal(sample_overlay_normal(layer_uv(input, layers.normal_uv.x), slot).rg)), w.x)); }
+    if layers.normal_enabled.z > 0.0 { pbr.N = normalize(mix(pbr.N, normalize(tbn * unpack_normal(sample_c_normal(layer_uv(input, layers.normal_uv.z), slot).rg)), w.z)); }
+    if layers.normal_enabled.y > 0.0 { pbr.N = normalize(mix(pbr.N, normalize(tbn * unpack_normal(sample_snow_normal(layer_uv(input, layers.normal_uv.y), slot).rg)), w.y)); }
 #endif
     pbr.material.base_color = alpha_discard(pbr.material, pbr.material.base_color);
     var out: FragmentOutput;

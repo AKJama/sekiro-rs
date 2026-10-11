@@ -16,6 +16,8 @@
 //! `--probe-sky` to show the environment probe capture as the sky (debug only).
 //! `--no-grading`, `--no-bloom`, `--no-auto-exposure` disable individual map post effects.
 //! `--native-tone-reinhard` / `--native-tone-filmic` override the authored/default sensitometric operator.
+//! `--visual-stats` logs periodic map frame times in viewer and play modes.
+//! `--profile-systems` also logs map-system CPU timers and render-schedule/pass diagnostics.
 
 mod arena;
 mod audio;

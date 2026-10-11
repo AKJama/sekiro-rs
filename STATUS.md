@@ -4,6 +4,18 @@ Last updated 11 October 2026.
 Read this first in a new session, then `AGENTS.md` and `docs/DESIGN.md`.
 How much of the game is done overall: `docs/PROGRESS.md`.
 
+## CPU frame regression (2026-10-11)
+
+Restored bindless material slabs and multi-draw batching for all map surfaces, retaining layered textures, hemisphere lighting and every visual feature.
+The latest hemisphere change had extended a non-bindless material wrapper to the whole map, making render preparation/submission the bottleneck.
+Uncapped frame means at seconds 6-11 after loading: m11 viewer 23.751 -> 16.654 ms, play/start 3 37.162 -> 16.930 ms, Owl 36.631 -> 16.821 ms.
+Opt-in `--profile-systems` exposes map-system CPU timers and Bevy/render diagnostics; periodic `--visual-stats` already works in play.
+Before/after screenshots in `target/alt/perf` were inspected with equivalent scene shading; the viewer world-crop difference averages 0.327/255 per channel.
+Remaining viewer time is largely swapchain waiting, with opaque shading and the 18,424 static mesh entities as further costs.
+Details and reproduction commands are in `docs/VISUALS-PLAN.md` section 8.
+Formatting, workspace/all-target Clippy, 423 release game/sim tests and the release game build pass offline with six jobs in `target/alt`.
+No commits, network, worktrees or protected-path changes.
+
 ## Exe-traced renderer CPU uploads (2026-10-11)
 
 Fog now uses verified GameScale lengths/inverse densities, raw signed height, geometric slices, byte/gamma colours, extinction and directional slant from `docs/SHADER-INPUTS.md`.
