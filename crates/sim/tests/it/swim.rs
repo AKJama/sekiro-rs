@@ -111,7 +111,7 @@ fn dungeon_water_route() {
     duel.player.body.yaw = yaw;
     duel.player.ground = Box::new(world);
     let script =
-        sekiro_sim::input::parse_action_script(include_str!("../../game/scripts/m13_swim.txt"))
+        sekiro_sim::input::parse_action_script(include_str!("../../../game/scripts/m13_swim.txt"))
             .unwrap();
     let mut events = Vec::new();
     for (tick, mut frame) in script.into_iter().enumerate() {

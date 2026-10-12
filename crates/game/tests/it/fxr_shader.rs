@@ -34,8 +34,8 @@ fn position_world_to_clip(p: vec3<f32>) -> vec4<f32> { return vec4(p, 1.0); }",
             "#define_import_path bevy_pbr::mesh_functions
 fn get_world_from_local(i: u32) -> mat4x4<f32> { return mat4x4<f32>(); }",
         ),
-        ("fxr", include_str!("../src/fxr.wgsl")),
-        ("fxr_multi", include_str!("../src/fxr_multi.wgsl")),
+        ("fxr", include_str!("../../src/fxr.wgsl")),
+        ("fxr_multi", include_str!("../../src/fxr_multi.wgsl")),
     ] {
         let shader = Shader::from_wgsl(source, format!("{name}.wgsl"));
         let id = assets.add(shader.clone()).id();

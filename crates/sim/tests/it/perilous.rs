@@ -82,21 +82,26 @@ fn forward_step_counters_the_thrust() {
 #[test]
 fn mikiri_requires_a_timed_forward_step_and_a_thrust() {
     let Some(cache) = cache() else { return };
-    for (spec, act, step, stick) in [
-        (EnemySpec::soldier(), 3013, 0, [0.0, 1.0]),
-        (EnemySpec::soldier(), 3013, 60, [0.0, 1.0]),
-        (EnemySpec::owl(), 3033, 10, [0.0, 1.0]),
-        (EnemySpec::owl(), 3033, 115, [0.0, 1.0]),
-        (EnemySpec::soldier(), 3013, 35, [0.0, -1.0]),
-        (EnemySpec::soldier(), 3013, 35, [1.0, 0.0]),
-        (EnemySpec::owl(), 3033, 75, [0.0, -1.0]),
-        (EnemySpec::owl(), 3033, 75, [-1.0, 0.0]),
-        (EnemySpec::soldier(), 3020, 55, [0.0, 1.0]),
-        (EnemySpec::owl(), 3004, 40, [0.0, 1.0]),
-        (EnemySpec::soldier(), 3000, 35, [0.0, 1.0]),
-        (EnemySpec::owl(), 3000, 35, [0.0, 1.0]),
-    ] {
-        let mut d = Duel::load_with(&cache, 2.0, spec).unwrap();
+    use rayon::prelude::*;
+    // Each case builds its own duel, so they run side by side.
+    let soldier: fn() -> EnemySpec = EnemySpec::soldier;
+    let owl: fn() -> EnemySpec = EnemySpec::owl;
+    let cases = [
+        (soldier, 3013, 0, [0.0, 1.0]),
+        (soldier, 3013, 60, [0.0, 1.0]),
+        (owl, 3033, 10, [0.0, 1.0]),
+        (owl, 3033, 115, [0.0, 1.0]),
+        (soldier, 3013, 35, [0.0, -1.0]),
+        (soldier, 3013, 35, [1.0, 0.0]),
+        (owl, 3033, 75, [0.0, -1.0]),
+        (owl, 3033, 75, [-1.0, 0.0]),
+        (soldier, 3020, 55, [0.0, 1.0]),
+        (owl, 3004, 40, [0.0, 1.0]),
+        (soldier, 3000, 35, [0.0, 1.0]),
+        (owl, 3000, 35, [0.0, 1.0]),
+    ];
+    cases.par_iter().for_each(|&(spec, act, step, stick)| {
+        let mut d = Duel::load_with(&cache, 2.0, spec()).unwrap();
         d.enemy_active = false;
         for i in 0..150 {
             d.force_act = (i < 10).then_some(act);
@@ -118,7 +123,7 @@ fn mikiri_requires_a_timed_forward_step_and_a_thrust() {
             );
             assert!(!d.player.state().starts_with("ThrowAtk511"));
         }
-    }
+    });
 }
 
 #[test]

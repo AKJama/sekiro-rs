@@ -42,8 +42,11 @@ fn castle_genichiro_attacks_idle_wolf() {
                 _ => {}
             }
         }
+        if attacks >= 5 {
+            break;
+        }
     }
-    eprintln!("Genichiro: {attacks} attacks, {hits} melee contacts in 60 seconds");
+    eprintln!("Genichiro: {attacks} attacks, {hits} melee contacts");
     assert!(attacks >= 5);
 }
 
@@ -87,10 +90,13 @@ fn castle_genichiro_loses_two_marks_and_reaches_map_handover() {
                         _ => {}
                     }
                 }
+                if attacks >= 5 {
+                    break;
+                }
             }
             assert_eq!(duel.ai.as_ref().unwrap().state.ninsatsu, (1, 2));
             assert!(attacks >= 5, "no attacks after the first mark: {attacks}");
-            eprintln!("Genichiro after first mark: {attacks} attacks in 60 seconds");
+            eprintln!("Genichiro after first mark: {attacks} attacks");
         }
     }
     assert!(duel.events.as_ref().unwrap().scripts.flag(11115802));
@@ -111,9 +117,12 @@ fn castle_genichiro_loses_two_marks_and_reaches_map_handover() {
                 _ => {}
             }
         }
+        if attacks >= 5 {
+            break;
+        }
     }
     assert!(attacks >= 5, "Tomoe did not attack: {attacks}");
-    eprintln!("Castle Tomoe: {attacks} attacks in 60 seconds");
+    eprintln!("Castle Tomoe: {attacks} attacks");
     take_mark(&mut duel);
     for _ in 0..600 {
         duel.step(&InputFrame::default(), 1.0 / 60.0);

@@ -72,7 +72,7 @@ That earlier failure was its own range check rejecting `|translation| > 5`, whic
 ```powershell
 ./tools/fetch-refs.ps1
 cargo run --release -p sekiro-extract -- anims c0000 c1010
-cargo test -p sekiro-formats --test anim_data
+cargo test -p sekiro-formats --test it -- anim_data::
 ```
 
 ## Models: FLVER, TPF, MTD and the GLB export

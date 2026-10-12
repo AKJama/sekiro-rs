@@ -242,18 +242,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn coach_defaults_are_small_and_fast() {
-        let c = HostedConfig::new(Backend::Coach, ApiKey::new("fake"));
-        assert_eq!(c.coach_backend, CoachBackend::Codex);
-        assert_eq!(c.coach_model, "gpt-6.1-sol");
-        assert_eq!(c.coach_effort, "medium");
-        assert_eq!(c.coach_timeout, Duration::from_secs(45));
-        assert_eq!(CoachBackend::Api.timeout(), c.coach_timeout);
-        assert_eq!(CoachBackend::Claude.default_model(), "claude-haiku-5-5");
-        assert_eq!(CoachBackend::Codex.default_model(), "gpt-6.1-sol");
-    }
-
-    #[test]
     fn key_sources_are_lazy_and_dotenv_reads_only_the_named_line() {
         let fake = "test-key-not-real";
         let key = read_key(Some(fake.into()), || {

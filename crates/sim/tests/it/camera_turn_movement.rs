@@ -360,23 +360,12 @@ fn check_locked_sprint(x: f32, y: f32) {
 }
 
 #[test]
-fn locked_step_goes_where_the_stick_points_left() {
-    check_locked_step(-1.0, 0.0);
-}
-
-#[test]
-fn locked_step_goes_where_the_stick_points_right() {
-    check_locked_step(1.0, 0.0);
-}
-
-#[test]
-fn locked_step_goes_where_the_stick_points_back() {
-    check_locked_step(0.0, -1.0);
-}
-
-#[test]
-fn locked_step_goes_where_the_stick_points_forward() {
-    check_locked_step(0.0, 1.0);
+fn locked_step_goes_where_the_stick_points() {
+    use rayon::prelude::*;
+    // Left, right, back and forward; each case builds its own Wolf.
+    [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)]
+        .par_iter()
+        .for_each(|&(x, y)| check_locked_step(x, y));
 }
 
 /// A diagonal stick picks the nearest of the four steps and tilts it onto the stick
@@ -390,23 +379,11 @@ fn locked_step_tilts_onto_a_diagonal_stick() {
 }
 
 #[test]
-fn locked_sprint_goes_where_the_stick_points_left() {
-    check_locked_sprint(-1.0, 0.0);
-}
-
-#[test]
-fn locked_sprint_goes_where_the_stick_points_right() {
-    check_locked_sprint(1.0, 0.0);
-}
-
-#[test]
-fn locked_sprint_goes_where_the_stick_points_back() {
-    check_locked_sprint(0.0, -1.0);
-}
-
-#[test]
-fn locked_sprint_goes_where_the_stick_points_forward() {
-    check_locked_sprint(0.0, 1.0);
+fn locked_sprint_goes_where_the_stick_points() {
+    use rayon::prelude::*;
+    [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)]
+        .par_iter()
+        .for_each(|&(x, y)| check_locked_sprint(x, y));
 }
 
 #[test]
@@ -490,49 +467,17 @@ fn check_locked_diagonal(move_stick: [f32; 2]) {
 }
 
 #[test]
-fn locked_diagonal_forward_left_run() {
-    check_locked_diagonal([-DIAGONAL, DIAGONAL]);
-}
-
-#[test]
-fn locked_diagonal_forward_right_run() {
-    check_locked_diagonal([DIAGONAL, DIAGONAL]);
-}
-
-#[test]
-fn locked_diagonal_back_left_run() {
-    check_locked_diagonal([-DIAGONAL, -DIAGONAL]);
-}
-
-#[test]
-fn locked_diagonal_back_right_run() {
-    check_locked_diagonal([DIAGONAL, -DIAGONAL]);
-}
-
-#[test]
-fn locked_diagonal_forward_left_walk() {
-    check_locked_diagonal([-DIAGONAL * 0.4, DIAGONAL * 0.4]);
-}
-
-#[test]
-fn locked_diagonal_forward_right_walk() {
-    check_locked_diagonal([DIAGONAL * 0.4, DIAGONAL * 0.4]);
-}
-
-#[test]
-fn locked_diagonal_back_left_walk() {
-    check_locked_diagonal([-DIAGONAL * 0.4, -DIAGONAL * 0.4]);
-}
-
-#[test]
-fn locked_diagonal_back_right_walk() {
-    check_locked_diagonal([DIAGONAL * 0.4, -DIAGONAL * 0.4]);
-}
-
-#[test]
-fn locked_diagonal_keyboard_w_a() {
-    // play.rs gather_input subtracts opposing WASD keys, then normalizes lengths > 1.
-    // With no gamepad override, W+A therefore produces a unit diagonal, not [-1, 1].
+fn locked_diagonals_twist_the_legs_onto_the_stick() {
+    use rayon::prelude::*;
+    // Runs and walks (a 0.4 stick) in all four diagonals, plus the keyboard's W+A: play.rs
+    // gather_input subtracts opposing WASD keys, then normalizes lengths > 1, so with no gamepad
+    // override W+A is a unit diagonal, not [-1, 1].
+    let mut cases = Vec::new();
+    for scale in [1.0, 0.4] {
+        for (x, y) in [(-1.0, 1.0), (1.0, 1.0), (-1.0, -1.0), (1.0, -1.0)] {
+            cases.push([x * DIAGONAL * scale, y * DIAGONAL * scale]);
+        }
+    }
     let (w, a, s, d) = (true, true, false, false);
     let mut keyboard = [(d as i32 - a as i32) as f32, (w as i32 - s as i32) as f32];
     let length = keyboard[0].hypot(keyboard[1]);
@@ -540,5 +485,8 @@ fn locked_diagonal_keyboard_w_a() {
         keyboard[0] /= length;
         keyboard[1] /= length;
     }
-    check_locked_diagonal(keyboard);
+    cases.push(keyboard);
+    cases
+        .par_iter()
+        .for_each(|&stick| check_locked_diagonal(stick));
 }

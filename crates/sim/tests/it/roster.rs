@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use sekiro_sim::duel::Duel;
 use sekiro_sim::registry::Registry;
 
+/// Every placed character must load; the sweep builds a `Duel` for each one, so it is slow.
 #[test]
+#[ignore = "slow: builds a Duel for every placed character (about a minute)"]
 fn placed_roster_load_smoke() {
     let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
     if !cache.join("params/NpcParam.json").exists() {
@@ -48,6 +50,32 @@ fn placed_roster_load_smoke() {
     }
     for chr in ["c1010", "c5060", "c7100"] {
         assert!(loaded.contains(&chr), "{chr} failed to load");
+    }
+    let genichiro = roster.resolve("c7100:71001000").unwrap();
+    assert_eq!(genichiro.think, 71_000_000);
+    assert_eq!(roster.anim_chr("c1011", 10_110_000), "c1010");
+}
+
+/// The characters the project is built around, plus the registry's name resolution.
+#[test]
+fn key_characters_load_and_resolve() {
+    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    if !cache.join("params/NpcParam.json").exists() {
+        eprintln!("skipping roster: cache not extracted");
+        return;
+    }
+    let roster = Registry::load(&cache).unwrap();
+    for chr in ["c1010", "c5060", "c7100"] {
+        let spec = roster.resolve(chr).unwrap_or_else(|e| panic!("{chr}: {e}"));
+        let anim = roster.anim_chr(chr, spec.npc_param);
+        assert!(cache.join(format!("anim/{anim}/skeleton.bin")).exists());
+        let duel = Duel::load_with(&cache, 6.0, spec).unwrap();
+        assert!(
+            duel.ai.is_some()
+                && !duel.enemy.tae.is_empty()
+                && !duel.enemy.skeleton.bones.is_empty(),
+            "{chr}: missing AI, TAE or skeleton"
+        );
     }
     let genichiro = roster.resolve("c7100:71001000").unwrap();
     assert_eq!(genichiro.think, 71_000_000);

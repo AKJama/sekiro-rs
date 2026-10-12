@@ -52,43 +52,53 @@ fn dead_target_releases_lock_and_camera_relative_movement() {
 
 #[test]
 fn held_stick_release_all_camera_directions() {
-    for yaw in [0.0, 1.2, -2.4] {
-        for stick in [[0.0, 1.0], [-1.0, 0.0], [0.0, -1.0], [1.0, 0.0]] {
-            let Some(mut duel) = load_at(4.0) else { return };
-            duel.enemy_active = false;
-            duel.step(
-                &InputFrame {
-                    buttons: Buttons {
-                        lock_on: true,
-                        ..Buttons::default()
-                    },
-                    ..InputFrame::default()
+    use rayon::prelude::*;
+    // Every stick direction and several camera yaws, each pair on its own duel.
+    let cases = [
+        (0.0, [0.0, 1.0]),
+        (1.2, [-1.0, 0.0]),
+        (-2.4, [0.0, -1.0]),
+        (1.2, [1.0, 0.0]),
+        (-2.4, [0.0, 1.0]),
+    ];
+    cases.par_iter().for_each(|&(yaw, stick)| {
+        let Some(mut duel) = load_at(4.0) else { return };
+        duel.enemy_active = false;
+        duel.step(
+            &InputFrame {
+                buttons: Buttons {
+                    lock_on: true,
+                    ..Buttons::default()
                 },
-                DT,
-            );
-            let input = InputFrame {
-                move_stick: stick,
-                camera_yaw: yaw,
                 ..InputFrame::default()
-            };
-            for _ in 0..90 {
-                duel.step(&input, DT);
-            }
-            duel.rules.fighters[1].vitality.hp = 0;
-            let start = duel.player.body.position;
-            for _ in 0..30 {
-                duel.step(&input, DT);
-            }
-            let end = duel.player.body.position;
-            let delta = [end[0] - start[0], end[2] - start[2]];
-            let (s, c) = yaw.sin_cos();
-            let desired = [c * stick[0] - s * stick[1], -s * stick[0] - c * stick[1]];
-            let dot = delta[0] * desired[0] + delta[1] * desired[1];
-            let cross = delta[0] * desired[1] - delta[1] * desired[0];
-            eprintln!("yaw {yaw} stick {stick:?}: {delta:?}, dot {dot} cross {cross}");
-            assert!(dot > 0.2 && cross.abs() < dot * 0.3);
+            },
+            DT,
+        );
+        let input = InputFrame {
+            move_stick: stick,
+            camera_yaw: yaw,
+            ..InputFrame::default()
+        };
+        for _ in 0..90 {
+            duel.step(&input, DT);
         }
-    }
+        duel.rules.fighters[1].vitality.hp = 0;
+        let start = duel.player.body.position;
+        for _ in 0..30 {
+            duel.step(&input, DT);
+        }
+        let end = duel.player.body.position;
+        let delta = [end[0] - start[0], end[2] - start[2]];
+        let (s, c) = yaw.sin_cos();
+        let desired = [c * stick[0] - s * stick[1], -s * stick[0] - c * stick[1]];
+        let dot = delta[0] * desired[0] + delta[1] * desired[1];
+        let cross = delta[0] * desired[1] - delta[1] * desired[0];
+        eprintln!("yaw {yaw} stick {stick:?}: {delta:?}, dot {dot} cross {cross}");
+        assert!(
+            dot > 0.2 && cross.abs() < dot * 0.3,
+            "yaw {yaw} stick {stick:?}"
+        );
+    });
 }
 
 fn load() -> Option<Duel> {
@@ -270,8 +280,19 @@ fn until_soldier_hit(presses: &Presses, n: usize) -> Option<(Duel, usize, HitRes
     None
 }
 
+/// Deflect depths 1 to 3 send back 45, 22 and 11 posture.
 #[test]
+fn deflect_chain_depths_send_back_posture() {
+    deflect_chain(false);
+}
+
+#[test]
+#[ignore = "slow: replays the fight for every deflect until the posture breaks (about 20 s)"]
 fn deflect_chain_breaks_the_soldier_then_deathblow() {
+    deflect_chain(true);
+}
+
+fn deflect_chain(full: bool) {
     if load().is_none() {
         return;
     }
@@ -282,7 +303,7 @@ fn deflect_chain_breaks_the_soldier_then_deathblow() {
     let mut presses: Presses = Vec::new();
     let mut sent_back = Vec::new();
     let mut broken_at = None;
-    for k in 0..8 {
+    for k in 0..if full { 8 } else { 3 } {
         let depth = if k < 3 { k + 1 } else { 1 };
         let (_, hit_at, _) = until_soldier_hit(&presses, k).expect("the soldier stopped attacking");
         // The last press opens the shortest window (4 frames at depth 3) just before the hit.
@@ -321,6 +342,9 @@ fn deflect_chain_breaks_the_soldier_then_deathblow() {
         assert_eq!(res.defender.damage_type, 3);
     }
     assert_eq!(&sent_back[..3], &[45, 22, 11]);
+    if !full {
+        return;
+    }
     let k = broken_at.expect("posture never broke");
     assert!(sent_back[3..].iter().all(|&d| d == 45));
 

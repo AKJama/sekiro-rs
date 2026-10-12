@@ -1,7 +1,7 @@
 # The Great Shinobi Owl
 
 Notes for the Owl fight: Wolf against the Great Shinobi Owl, with the Owl running his own HKS script, behaviour graph, TAE, params and Lua battle AI, on the flat floor (milestone 1) and on the Ashina Castle top where the game places him (milestone 2, "The castle top" below).
-Run it with `cargo run --release -p sekiro-game -- --play --enemy owl` (or `--enemy c5060`); `duel-sim --enemy c5060` and `cargo test -p sekiro-sim --test owl` run it headless.
+Run it with `cargo run --release -p sekiro-game -- --play --enemy owl` (or `--enemy c5060`); `duel-sim --enemy c5060` and `cargo test -p sekiro-sim --test it -- owl::` run it headless.
 
 ## Which character he is
 
@@ -164,7 +164,7 @@ The death clips `a221_600111` (3.17 s) and `600121` (3.0 s) are reached through 
 7. Testing aid `--force-act <id>` (`Duel::force_act`): the enemy requests the act whenever it is free, on top of its AI or alone with `--passive`.
 
 ```powershell
-cargo test -p sekiro-sim --test owl_grab
+cargo test -p sekiro-sim --test it -- owl_grab::
 cargo run --release -p sekiro-game -- --arena owl --passive --god --force-act 3040 --spawn 101.23,53.95,247.33,135,0 --enemy-distance 1.6 --script crates/game/scripts/owl_grab.txt --shots 36:cache/screens/grab_rail_036.png,120:cache/screens/grab_rail_120.png,330:cache/screens/grab_rail_330.png --exit
 ```
 
@@ -277,7 +277,7 @@ Five of his clips fade him out (TAE 193 `SetOpacityKeyframe`): each fade is thre
 - Root motion, TAE 760, lock-on, collision and his AI are unchanged.
 
 ```powershell
-cargo test -p sekiro-sim --release --test owl_warp
+cargo test -p sekiro-sim --release --test it -- owl_warp::
 cargo run --release -p sekiro-game -- --arena owl --passive --god --force-act 3044 --spawn 104.5,54.0,244.06,135,0 --enemy-distance 8 --script crates/game/scripts/owl_tools.txt --shots 30:cache/screens/warp_3044_030.png,60:cache/screens/warp_3044_060.png,95:cache/screens/warp_3044_095.png --exit
 ```
 
@@ -492,7 +492,7 @@ Tests: `crates/sim/tests/owl_phase2.rs` (the first deathblow starts the heat-up 
 Screenshots: `cache/screens/phase2_420.png` (heat-up pose, no boss bar), `phase2_1100.png` (kneeling loop on the tatami), `phase2_2200.png` (after the escape: 1916 HP, bar back).
 
 ```powershell
-cargo test -p sekiro-sim --test owl_phase2
+cargo test -p sekiro-sim --test it -- owl_phase2::
 cargo run --release -p sekiro-game -- --arena owl --god --break-posture --spawn 101.23,53.95,247.33,135,0 --enemy-distance 1.6 --script <lock on, attack every 20 steps> --shots ... --exit
 ```
 
@@ -515,7 +515,7 @@ cargo run --release -p sekiro-extract -- map m11_01_00_00
 cargo run --release -p sekiro-game -- --arena owl
 cargo run --release -p sekiro-game -- --arena owl --full-map
 cargo run --release -p sekiro-game -- --arena owl --script crates/game/scripts/owl_arena.txt --shots 25:cache/screens/arena_owl_start.png,120:cache/screens/arena_owl_approach.png,400:cache/screens/arena_owl_fight.png --exit
-cargo test -p sekiro-sim --test owl_arena
+cargo test -p sekiro-sim --test it -- owl_arena::
 ```
 
 `--arena owl` implies `--play` and `--enemy owl`; the other play flags (`--lock-on`, `--script`, `--hide`, `--objects`, ...) work as usual.

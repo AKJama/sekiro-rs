@@ -35,3 +35,12 @@ A Rust/Bevy reimplementation of Sekiro: Shadows Die Twice (Steam, v1.6.0.0, buil
 - Cargo: `cargo`. Keep `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --check` clean.
 - No em dashes. One sentence per line in long Markdown.
 - Update `STATUS.md` at the end of each working session.
+
+## Tests
+
+- The normal run is `cargo test --release --workspace`.
+  Integration tests live in one binary per crate (`crates/<crate>/tests/it/main.rs`, one module per file), so a new test file is a `mod` line there, not a new binary.
+- The normal run holds tests that guard distinct behaviour and finish in a few seconds, including one end-to-end fight per boss (Owl, Genichiro).
+  Anything slower, such as full-roster sweeps or long parameter sweeps, is marked `#[ignore = "slow: <reason>"]`; run that tier with `cargo test --release --workspace -- --include-ignored`.
+- Prefer one focused test per behaviour, table-driven when only the inputs differ; don't add tests that restate the code (constants, defaults, getters, serde round-trips of a type already covered).
+- Tests that build many independent `Duel`s can spread the cases over cores with `rayon` (a dev-dependency of `sekiro-sim`).

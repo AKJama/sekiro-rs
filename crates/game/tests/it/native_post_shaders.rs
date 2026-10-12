@@ -33,12 +33,12 @@ fn native_post_shaders_compose_and_validate() {
     for (name, source, variants) in [
         (
             "exposure",
-            include_str!("../src/exposure.wgsl"),
+            include_str!("../../src/exposure.wgsl"),
             vec![vec![]],
         ),
         (
             "fog",
-            include_str!("../src/fog.wgsl"),
+            include_str!("../../src/fog.wgsl"),
             vec![
                 vec![],
                 vec!["MULTISAMPLED_DEPTH"],
@@ -47,12 +47,12 @@ fn native_post_shaders_compose_and_validate() {
         ),
         (
             "tonemap",
-            include_str!("../src/tonemap.wgsl"),
+            include_str!("../../src/tonemap.wgsl"),
             vec![vec!["BRIGHT"], vec!["BLUR_H"], vec!["BLUR_V"], vec!["TONE"]],
         ),
         (
             "grading",
-            include_str!("../src/grading_lut.wgsl"),
+            include_str!("../../src/grading_lut.wgsl"),
             vec![vec![]],
         ),
     ] {

@@ -52,9 +52,11 @@ fn clip(dir: &str, name: &str, bones: usize) -> Option<AnimClip> {
 }
 
 #[test]
-#[ignore = "debug dump: HKX=<dir>/<file> cargo test --test anim_data dump -- --ignored"]
+#[ignore = "debug dump: HKX=<dir>/<file> cargo test -p sekiro-formats --test it -- anim_data::dump --ignored --nocapture"]
 fn dump() {
-    let path = std::env::var("HKX").unwrap();
+    let Ok(path) = std::env::var("HKX") else {
+        return;
+    };
     let (dir, file) = path.rsplit_once('/').unwrap();
     let f = tagfile_in(dir, file).unwrap();
     println!("{f:?}");
@@ -64,12 +66,15 @@ fn dump() {
 }
 
 /// Converts decoded clips in cache/anim to JSON for cross-checking with the Python decoder:
-/// `BINS=c0000/a000_000200,... OUT=<dir> cargo test --test anim_data bin_to_json -- --ignored`.
+/// `BINS=c0000/a000_000200,... OUT=<dir> cargo test -p sekiro-formats --test it -- anim_data::bin_to_json --ignored`.
 #[test]
 #[ignore = "debug export"]
 fn bin_to_json() {
-    let out = PathBuf::from(std::env::var("OUT").unwrap());
-    for rel in std::env::var("BINS").unwrap().split(',') {
+    let (Ok(out), Ok(bins)) = (std::env::var("OUT"), std::env::var("BINS")) else {
+        return;
+    };
+    let out = PathBuf::from(out);
+    for rel in bins.split(',') {
         let p = chr().join("../../anim").join(format!("{rel}.bin"));
         let clip = AnimClip::from_bytes(&std::fs::read(&p).unwrap()).unwrap();
         std::fs::write(

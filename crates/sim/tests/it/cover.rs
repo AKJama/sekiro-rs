@@ -66,10 +66,22 @@ fn cover_search_facing_variations_and_slide_clamps() {
 }
 #[test]
 fn hks_cover_enter_idle_slide_peek_and_exit() {
-    for variation in [0, 1, 2, 3, 10, 11, 12, 13] {
-        hks_cover(variation, false);
-    }
-    hks_cover(1, true);
+    use rayon::prelude::*;
+    // Each case builds its own duel, so they run side by side.
+    let cases = [
+        (0, false),
+        (1, false),
+        (2, false),
+        (3, false),
+        (10, false),
+        (11, false),
+        (12, false),
+        (13, false),
+        (1, true),
+    ];
+    cases
+        .par_iter()
+        .for_each(|&(variation, away)| hks_cover(variation, away));
 }
 
 fn hks_cover(variation: u8, away: bool) {

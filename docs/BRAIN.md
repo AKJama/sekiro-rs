@@ -8,7 +8,7 @@ The code is in `crates/sim/src/brain/`, with a small hook in the Lua goal runtim
 cargo run --release -p sekiro-game -- --arena owl --brain scripted --brain-log
 cargo run --release -p sekiro-game -- --play --enemy soldier --brain scripted --brain-memory on
 cargo run --release -p sekiro-sim --bin duel-sim -- --enemy soldier --brain scripted --brain-log --steps 1800
-cargo test -p sekiro-sim --test owl_brain --test soldier_brain --test brain_tactics
+cargo test -p sekiro-sim --test it -- owl_brain:: soldier_brain:: brain_tactics::
 ```
 
 `--brain coach` runs a CLI coach with a free local checkpoint chooser by default (see "The coach" and "Local checkpoint chooser"); `--brain lua` (the default) leaves his Lua AI unchanged; `--brain scripted` runs the deterministic test controller with that enemy's own test plans; `--brain-log` writes a JSONL log to `cache/brain_logs/`; `--brain-memory off|on|<path>` keeps the memory of every fight (on by default for hosted brains, see "Memory across fights").
@@ -281,7 +281,7 @@ Tomoe therefore runs Lua, with no c7100 plans or brain memory applied to him; re
 $env:CARGO_TARGET_DIR='target/alt'
 $env:CARGO_BUILD_JOBS='6'
 target/alt/release/sekiro-rs.exe --arena genichiro --brain scripted --brain-memory off --brain-overlay --god
-cargo test --offline --release -p sekiro-sim -j 6 --test genichiro_brain
+cargo test --offline --release -p sekiro-sim -j 6 --test it -- genichiro_brain::
 ```
 
 The same table is selected by `--brain coach|decisions|responses` and the menu's AI choice through the existing character lookup.

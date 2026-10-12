@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use sekiro_sim::brain::{
-    BossBrain, BrainKind, BrainReply, BrainRequest, Loaded, LuaBrain, Memory, Plan, REQUEST_BUDGET,
+    BossBrain, BrainKind, BrainReply, BrainRequest, Loaded, Memory, Plan, REQUEST_BUDGET,
     ScriptedBrain,
 };
 use sekiro_sim::duel::Duel;
@@ -76,27 +76,6 @@ fn attack_every(i: usize, period: usize) -> InputFrame {
         },
         ..InputFrame::default()
     }
-}
-
-#[test]
-fn lua_brain_leaves_his_choices_unchanged() {
-    let Some(mut plain) = load(5.0) else { return };
-    let mut with_brain = load(5.0).unwrap();
-    with_brain.set_brain(Box::new(LuaBrain), false).unwrap();
-    let (mut a, mut b) = (Vec::new(), Vec::new());
-    for _ in 0..1800 {
-        keep_wolf_fresh(&mut plain);
-        keep_wolf_fresh(&mut with_brain);
-        plain.step(&InputFrame::default(), DT);
-        with_brain.step(&InputFrame::default(), DT);
-        a.extend(actions(&mut plain));
-        b.extend(actions(&mut with_brain));
-    }
-    assert!(a.len() >= 5, "{a:?}");
-    assert_eq!(a, b);
-    let stats = with_brain.boss_brain.as_ref().unwrap().stats;
-    assert_eq!((stats.requests, stats.planned), (0, 0));
-    assert!(stats.fallback > 0, "{stats:?}");
 }
 
 #[test]

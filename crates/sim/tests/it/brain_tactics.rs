@@ -153,104 +153,129 @@ fn run_tactic(who: Who, start: f32, text: &str, kind: i32) -> Option<TacticRun> 
 
 const WHO: [Who; 2] = [Who::Soldier, Who::Owl];
 
-#[test]
-fn plan_attack_range_reproduction() {
-    let mut failures = Vec::new();
-    for distance in [1.6, 2.5, 4.0, 6.0] {
-        let mut plans: Vec<String> = table(Who::Soldier)
+/// Plans that move first and then attack, next to the soldier's own attack actions.
+fn range_plans(with_attacks: bool) -> Vec<String> {
+    let mut plans: Vec<String> = if with_attacks {
+        table(Who::Soldier)
             .actions
             .iter()
             .filter(|a| a.kind == sekiro_sim::brain::actions::ActionKind::Attack)
             .map(|a| a.id.to_string())
-            .collect();
-        plans.extend(
-            [
-                "walk_in4>3013",
-                "walk_in2.5>3013",
-                "keep_range>3013",
-                "walk_in6>3013",
-                "strafe_right>3005+3007",
-                "walk_in4>3000+3001",
-                "keep_range>3000",
-                "back_off6>3000",
-                "retreat12>3000",
-            ]
-            .map(str::to_string),
-        );
-        for text in &plans {
-            let Some(mut duel) = load(Who::Soldier, distance) else {
-                return;
-            };
-            let ai = duel.ai.as_mut().unwrap();
-            ai.start_in_battle();
-            ai.enable_act_hook(&[]);
-            ai.state.act_hook.as_mut().unwrap().choice = Some(
-                table(Who::Soldier)
-                    .act_for_plan(
-                        &table(Who::Soldier).parse(text).unwrap(),
-                        duel.fighters[1].radius,
-                    )
-                    .unwrap(),
+            .collect()
+    } else {
+        Vec::new()
+    };
+    plans.extend(
+        [
+            "walk_in4>3013",
+            "walk_in2.5>3013",
+            "keep_range>3013",
+            "walk_in6>3013",
+            "strafe_right>3005+3007",
+            "walk_in4>3000+3001",
+            "keep_range>3000",
+            "back_off6>3000",
+            "retreat12>3000",
+        ]
+        .map(str::to_string),
+    );
+    plans
+}
+
+/// Plays `text` against the soldier from `distance` until its last action ends; reports a
+/// failure when no hit of his ever connected. `None` when the soldier is not extracted.
+fn range_contact(distance: f32, text: &str) -> Option<Option<String>> {
+    let mut duel = load(Who::Soldier, distance)?;
+    let ai = duel.ai.as_mut().unwrap();
+    ai.start_in_battle();
+    ai.enable_act_hook(&[]);
+    ai.state.act_hook.as_mut().unwrap().choice = Some(
+        table(Who::Soldier)
+            .act_for_plan(
+                &table(Who::Soldier).parse(text).unwrap(),
+                duel.fighters[1].radius,
+            )
+            .unwrap(),
+    );
+    let mut contacts = 0;
+    let mut active = Vec::new();
+    let mut previous = false;
+    let last = *table(Who::Soldier)
+        .parse(text)
+        .unwrap()
+        .actions()
+        .last()
+        .unwrap();
+    let mut last_started = false;
+    let mut start = None;
+    let mut reach = 0.0f32;
+    let wolf_position = duel.player.body.position;
+    for _ in 0..600 {
+        keep_both_fresh(&mut duel);
+        duel.player.body.position = wolf_position;
+        let r = duel.step(&InputFrame::default(), DT);
+        let anim = duel
+            .enemy
+            .behavior
+            .runtime
+            .main_clip()
+            .and_then(|c| sekiro_sim::lua_ai::anim_id_from_clip(&c.animation));
+        if last_started && anim != Some(last) {
+            break;
+        }
+        last_started |= anim == Some(last);
+        if start.is_none() && anim.is_some_and(|id| (3000..3100).contains(&id)) {
+            start = Some(duel.enemy.body.position);
+        }
+        if let Some(start) = start {
+            reach = reach.max(
+                duel.fighters[1]
+                    .active_reach(&duel.enemy, start, duel.fighters[0].radius)
+                    .unwrap_or(0.0),
             );
-            let mut contacts = 0;
-            let mut active = Vec::new();
-            let mut previous = false;
-            let last = *table(Who::Soldier)
-                .parse(text)
-                .unwrap()
-                .actions()
-                .last()
-                .unwrap();
-            let mut last_started = false;
-            let mut start = None;
-            let mut reach = 0.0f32;
-            let wolf_position = duel.player.body.position;
-            for _ in 0..600 {
-                keep_both_fresh(&mut duel);
-                duel.player.body.position = wolf_position;
-                let r = duel.step(&InputFrame::default(), DT);
-                let anim = duel
-                    .enemy
-                    .behavior
-                    .runtime
-                    .main_clip()
-                    .and_then(|c| sekiro_sim::lua_ai::anim_id_from_clip(&c.animation));
-                if last_started && anim != Some(last) {
-                    break;
-                }
-                last_started |= anim == Some(last);
-                if start.is_none() && anim.is_some_and(|id| (3000..3100).contains(&id)) {
-                    start = Some(duel.enemy.body.position);
-                }
-                if let Some(start) = start {
-                    reach = reach.max(
-                        duel.fighters[1]
-                            .active_reach(&duel.enemy, start, duel.fighters[0].radius)
-                            .unwrap_or(0.0),
-                    );
-                }
-                let now = !duel.enemy.tae_frame().attacks.is_empty();
-                if now && !previous {
-                    active.push(dist(&duel));
-                }
-                previous = now;
-                contacts += r.hits.iter().filter(|(h, _)| h.attacker == 1).count();
-                let events = duel.ai.as_mut().unwrap().drain_log();
-                if events
-                    .iter()
-                    .any(|e| matches!(e, AiEvent::GoalEnd { kind: 101000, .. }))
-                {
-                    break;
-                }
-            }
-            eprintln!(
-                "RANGE {distance} {text}: active={active:.2?} reach={reach:.2} contacts={contacts}"
-            );
-            if contacts == 0 {
-                failures.push(format!("{distance} {text}: {active:?}"));
-            }
+        }
+        let now = !duel.enemy.tae_frame().attacks.is_empty();
+        if now && !previous {
+            active.push(dist(&duel));
+        }
+        previous = now;
+        contacts += r.hits.iter().filter(|(h, _)| h.attacker == 1).count();
+        let events = duel.ai.as_mut().unwrap().drain_log();
+        if events
+            .iter()
+            .any(|e| matches!(e, AiEvent::GoalEnd { kind: 101000, .. }))
+        {
+            break;
         }
     }
+    eprintln!("RANGE {distance} {text}: active={active:.2?} reach={reach:.2} contacts={contacts}");
+    Some((contacts == 0).then(|| format!("{distance} {text}: {active:?}")))
+}
+
+fn range_failures(distances: &[f32], plans: &[String]) -> Vec<String> {
+    use rayon::prelude::*;
+    // Every run builds its own `Duel`, so the sweep spreads over the cores.
+    let jobs: Vec<(f32, &String)> = distances
+        .iter()
+        .flat_map(|d| plans.iter().map(move |p| (*d, p)))
+        .collect();
+    jobs.par_iter()
+        .filter_map(|(d, p)| range_contact(*d, p).flatten())
+        .collect()
+}
+
+/// Each tactic-then-attack plan lands a hit from a mid distance.
+#[test]
+fn plan_attack_range_reproduction() {
+    let failures = range_failures(&[2.5], &range_plans(false));
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+/// The same for every soldier attack and four starting distances.
+#[test]
+#[ignore = "slow: about a hundred duels (every soldier attack at four distances)"]
+fn plan_attack_range_reproduction_full_sweep() {
+    let failures = range_failures(&[1.6, 2.5, 4.0, 6.0], &range_plans(true));
     assert!(failures.is_empty(), "{failures:?}");
 }
 

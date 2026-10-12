@@ -77,7 +77,9 @@ fn short_interval_waits_for_twenty_seconds_and_answer_waits_for_slot() {
 
 #[test]
 fn long_fight_reviews_at_45_and_90_then_post_and_zero_disables() {
-    for interval in [45.0, 0.0] {
+    use rayon::prelude::*;
+    // Each interval is its own two-minute fight, so they run side by side.
+    [45.0, 0.0].par_iter().for_each(|&interval| {
         let Some((mut duel, coach)) = coached(vec![Some(plan("mid")); 4], 2.0) else {
             return;
         };
@@ -107,11 +109,11 @@ fn long_fight_reviews_at_45_and_90_then_post_and_zero_disables() {
             driver(&duel).last_record.as_ref().unwrap().mid_coach[0],
             if interval == 0.0 { 0 } else { 2 }
         );
-    }
+    });
 }
 
 #[test]
-fn mark_lost_at_30_resets_timer_and_slow_call_serializes_post_review() {
+fn mark_lost_at_30_resets_timer() {
     let Some((mut duel, coach)) = coached(vec![Some(plan("mid")); 4], 2.0) else {
         return;
     };
@@ -123,8 +125,10 @@ fn mark_lost_at_30_resets_timer_and_slow_call_serializes_post_review() {
     assert_eq!(c.coach_inputs.len(), 2);
     assert!((c.coach_times[0] - 30.0).abs() < 0.1);
     assert!((c.coach_times[1] - 60.0).abs() < 0.1);
-    drop(c);
+}
 
+#[test]
+fn slow_call_serializes_post_review() {
     let Some((mut duel, coach)) = coached(vec![Some(plan("slow")); 4], 60.0) else {
         return;
     };

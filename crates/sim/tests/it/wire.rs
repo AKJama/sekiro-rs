@@ -282,7 +282,7 @@ fn castle_shachi_clear_approach_and_blocked_original_spawn() {
             ..Body::default()
         };
         let script = sekiro_sim::input::parse_action_script(include_str!(
-            "../../game/scripts/grapple_shachi.txt"
+            "../../../game/scripts/grapple_shachi.txt"
         ))
         .unwrap();
         let mut shot = false;
@@ -473,7 +473,7 @@ fn castle_roof_chain_route() {
         ..Body::default()
     };
     let script = sekiro_sim::input::parse_action_script(include_str!(
-        "../../game/scripts/grapple2_chain.txt"
+        "../../../game/scripts/grapple2_chain.txt"
     ))
     .unwrap();
     let mut chain = false;
