@@ -61,6 +61,12 @@ pub mod cancel {
 pub enum TaeKind {
     /// A visual FXR request. The renderer decides whether its format is supported.
     Effect(TaeEffect),
+    /// `DecalParamID_DummyPoly` (138) and `_CenterBody` (137, `dummy` -1): a DecalParam stain
+    /// where the dummy is (a deathblow's blood on the floor).
+    Decal {
+        id: i32,
+        dummy: i32,
+    },
     /// Wire timing and raw arguments; semantics beyond the travel window remain untraced.
     Wire {
         kind: i32,
@@ -479,6 +485,10 @@ fn decode(template: &Template, e: &tae::TaeEvent) -> Option<TimedEvent> {
             repeat: e.event_type == 99 || int("IsRepeat").unwrap_or(0) != 0,
             repeat_type: int("RepeatType").unwrap_or(0),
         }),
+        137 | 138 => TaeKind::Decal {
+            id: int("DecalParamID")?,
+            dummy: int("DummyPolyID").unwrap_or(-1),
+        },
         0 if int("FlagType")? == 3 => TaeKind::Guard {
             judge: int("ArgB").unwrap_or(-1),
         },
@@ -580,6 +590,8 @@ pub struct PlayingClip {
 pub struct TaeFrame {
     /// Visual events active or started this tick. They do not change gameplay rules.
     pub effects: Vec<EffectCue>,
+    /// Floor stains (DecalParam id, dummy) whose event started this tick.
+    pub decals: Vec<(i32, i32)>,
     pub flags: HashSet<i32>,
     /// SpEffects applied by active events plus timed effects still running.
     pub sp_effects: Vec<i32>,
@@ -697,6 +709,11 @@ impl TaeRuntime {
                         start: e.start,
                         end: e.end,
                     }),
+                    TaeKind::Decal { id, dummy } => {
+                        if started {
+                            f.decals.push((*id, *dummy));
+                        }
+                    }
                     TaeKind::Wire { .. } => {}
                     TaeKind::ActionFlag(flag) => {
                         f.flags.insert(*flag);

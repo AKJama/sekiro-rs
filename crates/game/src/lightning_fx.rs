@@ -7,14 +7,22 @@ pub struct LightningFx {
     bolts: std::collections::HashMap<u64, (Vec3, Vec3, f32)>,
 }
 
-pub fn draw(duel: &Duel, time: f32, dt: f32, fx: &mut LightningFx, gizmos: &mut Gizmos) {
+/// `covered`: serials of bullets the FXR player draws, which get no stand-in bolt.
+pub fn draw(
+    duel: &Duel,
+    time: f32,
+    dt: f32,
+    fx: &mut LightningFx,
+    gizmos: &mut Gizmos,
+    covered: &[u64],
+) {
     let blue = Color::srgb(0.3, 0.7, 1.0);
     let white = Color::srgb(1.0, 1.0, 1.0);
     for entry in fx.bolts.values_mut() {
         entry.2 += dt;
     }
     for b in &duel.bullets.live {
-        if b.look() != BulletLook::Lightning {
+        if b.look() != BulletLook::Lightning || covered.contains(&b.serial) {
             continue;
         }
         let end = Vec3::from_array(b.position.to_array());

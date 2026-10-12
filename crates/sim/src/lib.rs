@@ -25,6 +25,7 @@ pub mod enemy;
 pub mod events;
 pub mod fight;
 pub mod grab;
+pub mod hit_fx;
 pub mod hits;
 pub mod homing;
 pub mod input;

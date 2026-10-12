@@ -178,6 +178,31 @@ impl DummyRig {
             .collect()
     }
 
+    /// World frames of every dummy with `id`: position, forward (+Z) and up (+Y), same inputs as
+    /// [`DummyRig::positions`]. The body placement mirrors X, so the axes are mirrored too.
+    pub fn frames(&self, id: i16, model: &[Mat4], to_world: Mat4) -> Vec<[Vec3; 3]> {
+        self.dummies
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .filter_map(|(b, off)| {
+                let m = if *b == ROOT {
+                    Some(Mat4::IDENTITY)
+                } else {
+                    model.get(*b).copied()
+                };
+                m.map(|m| {
+                    let frame = m * *off;
+                    [
+                        to_world.transform_point3(frame.w_axis.truncate()),
+                        to_world.transform_vector3(frame.z_axis.truncate()),
+                        to_world.transform_vector3(frame.y_axis.truncate()),
+                    ]
+                })
+            })
+            .collect()
+    }
+
     pub fn len(&self) -> usize {
         self.dummies.len()
     }

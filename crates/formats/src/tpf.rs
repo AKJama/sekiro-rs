@@ -251,6 +251,50 @@ impl Dds {
         crate::reader::slice(data, self.data_offset, len)
     }
 
+    /// Mip level 0 as RGBA8 (BC1, BC4 as grey with alpha 255, and the 8-bit formats). Other
+    /// formats return `None`; this exists for the few small textures a game system needs on the
+    /// CPU (decal masks), not as a general decoder.
+    #[allow(clippy::chunks_exact_to_as_chunks)]
+    pub fn decode_rgba8(&self, data: &[u8]) -> Option<Vec<u8>> {
+        let mip = self.top_mip(data).ok()?;
+        let (w, h) = (self.width as usize, self.height as usize);
+        let mut out = vec![0u8; w * h * 4];
+        match self.format {
+            DdsFormat::Bc1 => {
+                for (b, block) in mip.chunks_exact(8).enumerate() {
+                    let colors = bc1_colors(block);
+                    let bits = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
+                    put_block(&mut out, w, h, b, |i| {
+                        colors[(bits >> (2 * i) & 3) as usize]
+                    });
+                }
+            }
+            DdsFormat::Bc4 => {
+                for (b, block) in mip.chunks_exact(8).enumerate() {
+                    let values = bc4_values(block);
+                    let bits = u64::from_le_bytes([
+                        block[2], block[3], block[4], block[5], block[6], block[7], 0, 0,
+                    ]);
+                    put_block(&mut out, w, h, b, |i| {
+                        let v = values[(bits >> (3 * i) & 7) as usize];
+                        [v, v, v, 255]
+                    });
+                }
+            }
+            DdsFormat::Rgba8 => out.copy_from_slice(mip.get(..w * h * 4)?),
+            DdsFormat::Bgra8 => {
+                for (o, p) in out.chunks_exact_mut(4).zip(mip.chunks_exact(4)) {
+                    *o.first_mut()? = p[2];
+                    o[1] = p[1];
+                    o[2] = p[0];
+                    o[3] = p[3];
+                }
+            }
+            _ => return None,
+        }
+        Some(out)
+    }
+
     /// Contiguous Z slices of mip zero, before the smaller volume mips.
     pub fn top_volume_mip<'a>(&self, data: &'a [u8]) -> Result<&'a [u8]> {
         let len = self
@@ -260,5 +304,109 @@ impl Dds {
             return bail("unsupported or overflowing DDS volume");
         };
         crate::reader::slice(data, self.data_offset, len)
+    }
+}
+
+/// The four colours of a BC1 block.
+fn bc1_colors(block: &[u8]) -> [[u8; 4]; 4] {
+    let c0 = u16::from_le_bytes([block[0], block[1]]);
+    let c1 = u16::from_le_bytes([block[2], block[3]]);
+    let expand = |c: u16| {
+        let (r, g, b) = ((c >> 11) & 31, (c >> 5) & 63, c & 31);
+        [
+            (r * 255 / 31) as u8,
+            (g * 255 / 63) as u8,
+            (b * 255 / 31) as u8,
+        ]
+    };
+    let (a, b) = (expand(c0), expand(c1));
+    let mix = |x: [u8; 3], y: [u8; 3], wx: u32, wy: u32, d: u32| {
+        [0, 1, 2].map(|i| ((u32::from(x[i]) * wx + u32::from(y[i]) * wy) / d) as u8)
+    };
+    let (c2, c3) = if c0 > c1 {
+        (mix(a, b, 2, 1, 3), mix(a, b, 1, 2, 3))
+    } else {
+        (mix(a, b, 1, 1, 2), [0, 0, 0])
+    };
+    let alpha = |a: u8| if c0 <= c1 && a == 3 { 0 } else { 255 };
+    [
+        [a[0], a[1], a[2], 255],
+        [b[0], b[1], b[2], 255],
+        [c2[0], c2[1], c2[2], 255],
+        [c3[0], c3[1], c3[2], alpha(3)],
+    ]
+}
+
+/// The eight values of a BC4 block's first two bytes.
+fn bc4_values(block: &[u8]) -> [u8; 8] {
+    let (a, b) = (u32::from(block[0]), u32::from(block[1]));
+    let mut v = [0u8; 8];
+    v[0] = a as u8;
+    v[1] = b as u8;
+    if a > b {
+        for i in 1..7u32 {
+            v[i as usize + 1] = (((7 - i) * a + i * b) / 7) as u8;
+        }
+    } else {
+        for i in 1..5u32 {
+            v[i as usize + 1] = (((5 - i) * a + i * b) / 5) as u8;
+        }
+        v[6] = 0;
+        v[7] = 255;
+    }
+    v
+}
+
+/// Writes the 4x4 block `index` (row-major blocks) through `pixel(i)`, i the texel in the block.
+fn put_block(out: &mut [u8], w: usize, h: usize, index: usize, pixel: impl Fn(usize) -> [u8; 4]) {
+    let blocks_x = w.div_ceil(4);
+    let (bx, by) = (index % blocks_x, index / blocks_x);
+    for i in 0..16 {
+        let (x, y) = (bx * 4 + i % 4, by * 4 + i / 4);
+        if x < w && y < h {
+            let at = (y * w + x) * 4;
+            out[at..at + 4].copy_from_slice(&pixel(i));
+        }
+    }
+}
+
+#[cfg(test)]
+mod decode_tests {
+    use super::*;
+
+    fn dds(format_code: &[u8; 4], w: u32, h: u32, payload: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![0u8; 128];
+        bytes[..4].copy_from_slice(b"DDS ");
+        for (offset, value) in [(4, 124u32), (12, h), (16, w), (28, 1)] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes[80..84].copy_from_slice(&4u32.to_le_bytes());
+        bytes[84..88].copy_from_slice(format_code);
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    #[test]
+    fn bc1_block_decodes_its_two_endpoint_colours() {
+        // c0 = pure red (0xF800), c1 = pure blue (0x001F); texels 0 and 1 pick c0 and c1.
+        let payload = [0x00, 0xF8, 0x1F, 0x00, 0b0000_0100, 0, 0, 0];
+        let data = dds(b"DXT1", 4, 4, &payload);
+        let header = Dds::parse(&data).unwrap();
+        let rgba = header.decode_rgba8(&data).unwrap();
+        assert_eq!(&rgba[0..4], &[255, 0, 0, 255]);
+        assert_eq!(&rgba[4..8], &[0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn bc4_block_decodes_endpoints_and_the_interpolated_ramp() {
+        // 255 / 0 endpoints (8-value ramp); texel 0 = index 0, texel 1 = index 1, texel 2 = index 2.
+        let payload = [255, 0, 0b1000_1000, 0, 0, 0, 0, 0];
+        let data = dds(b"ATI1", 4, 4, &payload);
+        let header = Dds::parse(&data).unwrap();
+        assert_eq!(header.format, DdsFormat::Bc4);
+        let rgba = header.decode_rgba8(&data).unwrap();
+        assert_eq!(rgba[0], 255);
+        assert_eq!(rgba[4], 0);
+        assert_eq!(rgba[8], 218);
     }
 }

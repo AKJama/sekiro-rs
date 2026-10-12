@@ -19,6 +19,7 @@
 //! `--visual-stats` logs periodic map frame times in viewer and play modes.
 //! `--profile-systems` also logs map-system CPU timers and render-schedule/pass diagnostics.
 //! `--no-fxr` disables authored FXR playback and keeps the existing effect stand-ins.
+//! `--no-cloth` disables the Havok cloth simulation (characters keep their rigid skin).
 //! `--fxr-preview <id>` repeats an installed effect between the actors every two seconds.
 
 mod arena;
@@ -27,10 +28,13 @@ mod brain_overlay;
 mod brain_stage;
 mod bullet_fx;
 mod character;
+mod cloth;
 mod combat_hud;
 mod deathblow_demo;
+mod decals;
 mod draw_mask;
 mod fxr;
+mod fxr_tree;
 mod input_replay;
 mod lighting;
 mod lightning_fx;
@@ -158,6 +162,9 @@ fn dispatch() -> anyhow::Result<()> {
         "                 [--map <id> [--start <n> | --spawn x,y,z,yaw,0]] [--no-enemy] [--lock-on]"
     );
     eprintln!(
+        "                 [--checkpoint local|decisions|off] (coach default: local, no API key)"
+    );
+    eprintln!(
         "                 [--simple-ai] [--passive] [--god] [--immortal] [--force-act <id>] [--enemy cXXXX[:npcrow]|soldier|owl] [--brain lua|scripted|decisions|responses|coach] [--brain-model <name>] [--coach claude|codex|api] [--coach-model <name>] [--coach-effort <level>] [--coach-interval <secs>] [--brain-log] [--brain-memory off|on|<path>] [--player <name>]"
     );
     eprintln!(
@@ -229,6 +236,11 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
         .map(|s| s.brain.to_string())
         .unwrap_or_else(|| arg_value(args, "--brain").unwrap_or_else(|| "lua".into()));
     let coach_backend = arg_value(args, "--coach").unwrap_or_else(|| "codex".into());
+    let checkpoint = arg_value(args, "--checkpoint").unwrap_or_else(|| "local".into());
+    anyhow::ensure!(
+        sekiro_sim::brain::bandit::CheckpointChooser::by_name(&checkpoint).is_some(),
+        "unknown --checkpoint {checkpoint}: known are local, decisions, off"
+    );
     if sekiro_brain_net::is_hosted(&brain_name) {
         anyhow::ensure!(
             sekiro_brain_net::CoachBackend::by_name(&coach_backend).is_some(),
@@ -291,6 +303,7 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
             model: arg_value(args, "--brain-model"),
             chr: opponent.chr.clone(),
             coach: sekiro_brain_net::CoachCli {
+                checkpoint: Some(checkpoint),
                 budget_usd: arg_value(args, "--brain-budget")
                     .map(|v| v.parse::<f64>())
                     .transpose()

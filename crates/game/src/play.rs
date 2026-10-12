@@ -460,15 +460,24 @@ pub fn run(options: Options) -> Result<()> {
         unicode_font: false,
     })
     .init_resource::<crate::bullet_fx::BulletFx>()
+    .add_plugins(crate::decals::DecalPlugin {
+        cache: cache.clone(),
+    })
     .add_plugins(crate::fxr::plugin(cache.clone(), |app| {
         app.add_systems(
             FixedUpdate,
-            (|sim: NonSend<Sim>, mut fx: ResMut<crate::fxr::FxrPlayer>| fx.observe(&sim.duel))
-                .after(simulate)
-                .run_if(crate::menu::active),
+            (|sim: NonSend<Sim>,
+              mut fx: ResMut<crate::fxr::FxrPlayer>,
+              mut stains: MessageWriter<crate::decals::Stain>| {
+                fx.observe(&sim.duel);
+                crate::decals::forward(&mut fx, &sim.duel, &sim.last, &mut stains);
+            })
+            .after(simulate)
+            .run_if(crate::menu::active),
         );
     }))
     .add_plugins(cinematic_fade::CinematicFadePlugin)
+    .add_plugins(crate::cloth::plugin(cache.clone()))
     .add_plugins(crate::audio::GameAudioPlugin {
         cache: cache.clone(),
         map: on_map.as_ref().map(|(_, id, _)| id.clone()),
@@ -1143,6 +1152,7 @@ fn sync_actors(
     fixed: Res<Time<Fixed>>,
     mut libraries: ResMut<Libraries>,
     mut fx: ResMut<crate::bullet_fx::BulletFx>,
+    mut fxr: ResMut<crate::fxr::FxrPlayer>,
     mut q: Query<(&Actor, &mut Animator, &mut Transform, &mut Visibility)>,
 ) {
     for (actor, mut anim, mut tf, mut vis) in &mut q {
@@ -1161,7 +1171,10 @@ fn sync_actors(
         let faded = fade >= 0.5;
         if faded != sim.faded[i] {
             sim.faded[i] = faded;
-            fx.puff(position + Vec3::Y * 1.0);
+            // The game's own warp effects (FFX 650680 / 650682) play through the FXR player.
+            if !fxr.has(650680) {
+                fx.puff(position + Vec3::Y * 1.0);
+            }
         }
         *vis = if faded {
             Visibility::Hidden
@@ -1287,6 +1300,7 @@ fn sync_lightning_tint(
 }
 
 /// Draws the bullets in flight and their areas (see [`crate::bullet_fx`]).
+#[allow(clippy::too_many_arguments)]
 fn sync_bullets(
     sim: NonSend<Sim>,
     time: Res<Time>,
@@ -1295,21 +1309,35 @@ fn sync_bullets(
     mut q: Query<(&crate::bullet_fx::Marker, &mut Transform, &mut Visibility)>,
     mut gizmos: Gizmos,
     mut lightning: Local<crate::lightning_fx::LightningFx>,
+    mut fxr: ResMut<crate::fxr::FxrPlayer>,
 ) {
+    // Bullets whose own effect is installed draw through the FXR player; the stand-ins stay for
+    // the rest (and for `--no-fxr`).
+    let covered: Vec<u64> = sim
+        .duel
+        .bullets
+        .live
+        .iter()
+        .filter(|b| fxr.covers_bullet(b.def.id, b.look()))
+        .map(|b| b.serial)
+        .collect();
+    let shown: Vec<_> = sim
+        .duel
+        .bullets
+        .live
+        .iter()
+        .filter(|b| !covered.contains(&b.serial))
+        .cloned()
+        .collect();
     crate::lightning_fx::draw(
         &sim.duel,
         time.elapsed_secs(),
         time.delta_secs(),
         &mut lightning,
         &mut gizmos,
+        &covered,
     );
-    crate::bullet_fx::sync(
-        &sim.duel.bullets.live,
-        time.delta_secs(),
-        &mut fx,
-        &mut materials,
-        &mut q,
-    );
+    crate::bullet_fx::sync(&shown, time.delta_secs(), &mut fx, &mut materials, &mut q);
 }
 
 /// TAE 151 (deathblows): the camera's pitch and yaw stay within the event's limits around the

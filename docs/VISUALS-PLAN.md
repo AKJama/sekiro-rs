@@ -30,6 +30,17 @@ This historical v7 renderer retained mean ambient on actors/FX; v8 now gives rig
 Native GIIV CPU scale/fade/PCC uploads, froxel allocation/local shadows, transparent fog, bloom scheduling and exact tone tables remain gaps; the separate sky work has its own status.
 Formatting, workspace/all-target Clippy, release game/formats/extract tests and the release game build pass offline with six jobs in `target/alt`.
 
+## Status 2026-10-12: cloth (step 13) done for characters
+
+Havok cloth runs from the game's own `*_c.hkx` on Wolf, both Genichiro phases, the Owl and the soldier, using FwLo's solver structure (MIT) on our reader (`crates/formats/src/hkx/cloth.rs`, `crates/game/src/cloth.rs`).
+All constraint kinds including bend stiffness are solved; transition sets are not (they only blend to animation).
+Open: cloth against cloth and body meshes (layers can interpenetrate), a mesh driven by two cloths, the second sim cloth of two-sim containers, and cloth on enemies other than the five checked.
+
+## Status 2026-10-12: FXR player ported
+
+The FXR player now follows FwLo's node-tree design (MIT) on our reader: sprites, flipbooks, multi-texture sprites, lines, tracers, soft particles, hit sparks and blood from the HitEffectSfx tables, and DecalParam floor stains.
+Open: model particles (605), distortion and radial blur (607/608), light particles (609), GPU particles (10000), lit-particle lighting, cheaper property sampling (typed tree instead of JSON values).
+
 ## 1. Where we are today
 
 ### 1.1 What renders now **[V]**
@@ -1084,3 +1095,11 @@ The regression test ensures the extended material continues to advertise bindles
 The hardware fallback shader branch is retained but was not exercised on this bindless-capable adapter.
 Remaining costs are presentation waiting, ordinary opaque shading, render preparation and the existing large static entity population; the map viewer still contains 18,424 mesh entities.
 Validation passed offline in `target/alt` with six jobs: `cargo fmt --all --check`, workspace/all-target Clippy with warnings denied, all 423 requested release game/sim tests and the release game build.
+
+## Status: character materials (2026-10-12)
+
+Ported from FwLo's MIT notes: shininess lives in the blue channel of the character `_n` map (confirmed in the compiled `Character_AMSN` G-buffer shader: B is saturated into the shininess target, RG is the normal), roughness is 1 - gloss, the `_m` mask is metallic.
+We pack both into the exported glTF metallic-roughness texture (`crates/extract/src/models/textures.rs`), so no new character shader is needed and the actor GIIV path in `map_material.wgsl` lights them.
+Fur and hair cards take the shared strand albedo and its alpha cutout (the Owl face fix); `_e` materials are cutouts.
+Open: DetailBlend and SSS layers, `g_DiffuseMapColor`, alpha-to-coverage (shadow pass would treat it as opaque), the recovered shininess-to-specular curve.
+

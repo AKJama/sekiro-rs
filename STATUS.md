@@ -1,8 +1,45 @@
 # Status
 
-Last updated 11 October 2026.
+Last updated 12 October 2026.
 Read this first in a new session, then `AGENTS.md` and `docs/DESIGN.md`.
 How much of the game is done overall: `docs/PROGRESS.md`.
+
+## Local checkpoint chooser (2026-10-12)
+
+Coach brains now default to a free local Beta Thompson sampler over the coach's offered sets and existing combat checkpoints; a signed-in Codex or Claude CLI needs no API key.
+Optional `checkpoint_prefs` seed four pseudo-counts, and rewards use four-second damage/break/counter windows with passivity and void-fight safeguards.
+Version-3 player profiles and shared boss contribution snapshots retain phase-specific discounted evidence without duplicate saves; pooled transfer is capped, and `--checkpoint decisions|off` preserves the alternatives.
+The overlay shows the selected set/context/posterior mean, session reports list choices and rewards, and coach reviews receive a fitted per-context/set summary.
+See `docs/BRAIN.md` and the updated README and `.env.example` for setup, flags, reward formula and memory layout.
+Verified in `target/alt` with four build jobs: full release tests for sim and brain-net, the release game build, workspace formatting, and scoped brain Clippy with warnings denied.
+Workspace Clippy remains blocked by concurrent changes in `crates/game/src/cloth.rs` and `crates/extract/src/models/textures.rs`; these files were left untouched.
+The headless soldier duel selected a set and retained a reward with zero controller requests or memory writes; all provider/CLI checks used offline fakes and temporary files.
+
+## Havok cloth (2026-10-12)
+
+Ported FwLo's cloth solver (MIT) onto a new reader: `crates/formats/src/hkx/cloth.rs` flattens every `*_c.hkx` cloth (reference skin, display deform, driven bones, constraint sets, capsules), `sekiro-extract models` writes `cache/models/<id>.cloth.bin`, and `crates/game/src/cloth.rs` simulates it (`--no-cloth` turns it off).
+Cloth now moves on Wolf (scarf, coat flaps, hair), castle Genichiro (cape, sash rope, skirt plates, helmet fur), Tomoe Genichiro, the Owl (coat, haori, ponytail, breech) and the soldier (haori, sash, straw cape, hair, spear cloth); every deformer reproduces the FLVER rest pose to 0.0000.
+Two findings beyond his notes: position-only (`...DeformPOperator`) displays use a unit-length triangle normal axis (found per display from the rest pose), and bone-space PN blocks carry packed normals he left zero (zero normals showed as dark stippling until read).
+Cost: 0.85 ms of CPU a frame for Wolf plus a boss (11 and 5 cloths), 0.04 ms to apply; frames stay at the 16.6 ms vsync.
+Gaps: a mesh driven by two cloths keeps only the first; cloths on hidden variants and the second sim cloth of two-sim containers are skipped; no cloth-against-cloth or body-mesh collision, so layers can interpenetrate.
+Frames are in `target/alt/cloth/`.
+
+## FXR effects, hit sparks, blood and stains (2026-10-12)
+
+Ported FwLo's node-tree FXR player (MIT) onto our own reader: `crates/formats/src/fxr_json.rs` (with the generated `fxr_schema.rs` and `tools/gen_fxr_schema.py`) turns an installed effect into the named tree, `crates/game/src/fxr_tree.rs` runs nodes, emitters and particles, and `crates/game/src/fxr.rs` batches sprites, flipbooks, 604 multi-texture layers, lines and tracers with soft particles.
+Real effects now: deflect and guard sparks and hit sparks and blood from the HitEffectSfx tables (`crates/sim/src/hit_fx.rs`), the deathblow blood spray (220505), the firecracker bang and flames, Owl warp puffs, Genichiro's lightning bolts, plus DecalParam floor stains from hits and TAE 138 (`crates/game/src/decals.rs`, CPU BC1/BC4 decode in `formats::tpf`).
+Stand-ins stay where an effect needs a model (605: arrows, shuriken, the smoke ball) and under `--no-fxr`.
+Frames are in `target/alt/fx/`; heavy firecracker bursts cost about 2-4 ms of CPU in draw collection and 2 ms in stepping (JSON-tree lookups, first-use parse spikes of 10 ms).
+Gaps: 605 models, 607/608 distortion and radial blur, 609 lights, GPU particles (10000), hit-point placement for deflects (held on the body), stain blend is untraced.
+
+## Character materials (2026-10-12)
+
+The extractor now bakes each character material's gloss and metallic data into the glTF metallic-roughness texture: roughness is 1 - the shininess in the blue channel of `_n` (floor 0.089), metallic comes from the `_m` mask, so armour and the katana catch the map's specular GIIV light and cloth stays matte.
+Hair and fur cards (`Fur_NTC*` shaders) now use the shared strand texture with its alpha cutout instead of the fur-coat colour map, and `_e` (edge) materials without an alpha reference are cutouts.
+That was the cause of the Owl's odd face: his beard, brows and hair rendered as grey opaque flaps; the soldier and Genichiro hair use the same fix.
+c0000, c5060, c7100, c7110 and c1010 were re-extracted; no game code changed, since actors already share the map shader.
+Gaps: DetailBlend layers, SSS skin, per-material colour multipliers, alpha-to-coverage and the game's own shininess-to-specular curve are not modelled.
+Checks: see `docs/VISUALS-PLAN.md`; pairs in `D:/sekiro-rs-media/progress/2026-10-12/`.
 
 ## Continuous Genichiro brain and counter learning (2026-10-11)
 

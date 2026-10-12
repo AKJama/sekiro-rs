@@ -13,6 +13,8 @@ pub enum Usage {
     Color,
     /// Tangent-space normal map; converted to glTF's convention.
     Normal,
+    /// glTF metallic-roughness map packed from a character's `_n` shininess and `_m` mask.
+    MetalRough,
 }
 
 /// Lazily loads TPF files and indexes their textures by lower-case name.
@@ -127,6 +129,112 @@ impl TextureStore {
         self.png_cache.insert((name, usage), result.clone());
         Ok(result)
     }
+
+    /// Mip 0 of a texture as `(width, height, RGBA8)` without any channel conversion.
+    fn raw_rgba(&mut self, game_path: &str) -> Result<Option<(usize, usize, Vec<u8>)>> {
+        let name = texture_stem(game_path).to_ascii_lowercase();
+        if name.is_empty() {
+            return Ok(None);
+        }
+        if !self.index.contains_key(&name) {
+            self.load_for_path(game_path)?;
+        }
+        let Some((file, i)) = self.index.get(&name) else {
+            return Ok(None);
+        };
+        let tex = &tpf::parse(&self.loaded[file])?[*i];
+        let header = tex.header()?;
+        match decode_rgba(&header, tex.dds) {
+            Ok(rgba) => Ok(Some((header.width as usize, header.height as usize, rgba))),
+            Err(e) => {
+                eprintln!("  warning: {name}: {e:#}");
+                Ok(None)
+            }
+        }
+    }
+
+    /// The glTF metallic-roughness PNG of a character material: roughness (green) from the
+    /// shininess in the blue channel of the `_n` map, metallic (blue) from the `_m` mask.
+    /// None when neither texture exists.
+    pub fn metal_rough_png(
+        &mut self,
+        normal: Option<&str>,
+        metallic: Option<&str>,
+    ) -> Result<Option<Vec<u8>>> {
+        let stem = |p: Option<&str>| p.map(|p| texture_stem(p).to_ascii_lowercase());
+        let key = (
+            format!(
+                "{}+{}",
+                stem(normal).unwrap_or_default(),
+                stem(metallic).unwrap_or_default()
+            ),
+            Usage::MetalRough,
+        );
+        if let Some(cached) = self.png_cache.get(&key) {
+            return Ok(cached.clone());
+        }
+        let n = match normal {
+            Some(p) => self.raw_rgba(p)?,
+            None => None,
+        };
+        let m = match metallic {
+            Some(p) => self.raw_rgba(p)?,
+            None => None,
+        };
+        let result = match pack_metal_rough(
+            n.as_ref().map(|t| (t.0, t.1, &t.2[..])),
+            m.as_ref().map(|t| (t.0, t.1, &t.2[..])),
+        ) {
+            Some((w, h, px)) => Some(encode_png(w as u32, h as u32, &px)?),
+            None => None,
+        };
+        self.png_cache.insert(key, result.clone());
+        Ok(result)
+    }
+}
+
+/// Lowest perceptual roughness the engine's specular lobe uses.
+const MIN_ROUGHNESS: f32 = 0.089;
+
+/// Packs a character material's glTF metallic-roughness texture (R unused, G roughness, B
+/// metallic). Sekiro's `Character_AMSN` shaders keep the shininess (gloss) in the blue channel of
+/// the normal map (cloth 0-36 of 255, armour up to 128) and a single-channel metallic mask in
+/// `_m`; roughness is 1 - gloss. The output has the size of the larger input; the smaller one is
+/// sampled nearest. Without a normal map the roughness stays at the exporter's default 0.75.
+pub fn pack_metal_rough(
+    normal: Option<(usize, usize, &[u8])>,
+    metallic: Option<(usize, usize, &[u8])>,
+) -> Option<(usize, usize, Vec<u8>)> {
+    let (w, h) = match (normal, metallic) {
+        (None, None) => return None,
+        (Some(n), None) => (n.0, n.1),
+        (None, Some(m)) => (m.0, m.1),
+        (Some(n), Some(m)) => {
+            if n.0 * n.1 >= m.0 * m.1 {
+                (n.0, n.1)
+            } else {
+                (m.0, m.1)
+            }
+        }
+    };
+    let at = |t: (usize, usize, &[u8]), x: usize, y: usize, c: usize| -> u8 {
+        let (tx, ty) = (x * t.0 / w, y * t.1 / h);
+        t.2[(ty * t.0 + tx) * 4 + c]
+    };
+    let default_rough = (0.75f32 * 255.0).round() as u8;
+    let min_rough = (MIN_ROUGHNESS * 255.0).round() as u8;
+    let mut out = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            let rough = match normal {
+                Some(n) => (255 - at(n, x, y, 2)).max(min_rough),
+                None => default_rough,
+            };
+            let metal = metallic.map_or(0, |m| at(m, x, y, 0));
+            out.extend_from_slice(&[255, rough, metal, 255]);
+        }
+    }
+    Some((w, h, out))
 }
 
 /// `N:\a\b\c1010_body_a.tif` -> `c1010_body_a`.
@@ -204,4 +312,32 @@ pub fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
         w.write_image_data(rgba)?;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roughness_is_inverse_gloss_and_metal_is_the_mask() {
+        // One texel: gloss 36 in blue of the normal map, metallic 255 in the mask.
+        let n = [128u8, 128, 36, 255];
+        let m = [255u8, 255, 255, 255];
+        let (w, h, px) = pack_metal_rough(Some((1, 1, &n)), Some((1, 1, &m))).unwrap();
+        assert_eq!((w, h), (1, 1));
+        assert_eq!(px, vec![255, 219, 255, 255]);
+    }
+
+    #[test]
+    fn full_gloss_clamps_to_the_minimum_roughness_and_masks_are_resampled() {
+        let n = [
+            0u8, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255,
+        ];
+        let m = [200u8, 0, 0, 255];
+        let (w, h, px) = pack_metal_rough(Some((2, 2, &n)), Some((1, 1, &m))).unwrap();
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(&px[..4], &[255, 23, 200, 255]);
+        assert_eq!(&px[12..], &[255, 23, 200, 255]);
+        assert!(pack_metal_rough(None, None).is_none());
+    }
 }

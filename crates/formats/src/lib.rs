@@ -17,6 +17,8 @@ pub mod fev;
 pub mod flver;
 pub mod fsb;
 pub mod fxr;
+pub mod fxr_json;
+pub mod fxr_schema;
 pub mod gparam;
 pub mod hkb;
 pub mod hknp;

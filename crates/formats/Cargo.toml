@@ -17,6 +17,6 @@ glam.workspace = true
 serde.workspace = true
 roxmltree = "0.21"
 postcard.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true

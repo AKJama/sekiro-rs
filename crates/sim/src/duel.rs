@@ -1380,6 +1380,23 @@ impl Duel {
             .map(|p| p.to_array())
     }
 
+    /// A dummy poly's world frame as of the last step: position, forward and up (unit length).
+    /// Effects ride on these (a blood spray leaves along its dummy's forward).
+    pub fn dummy_frame(&self, i: usize, id: i16) -> Option<([f32; 3], [f32; 3], [f32; 3])> {
+        let c = self.chr(i);
+        self.fighters[i]
+            .rig
+            .frames(id, &c.bone_source_matrices(), c.source_to_world())
+            .first()
+            .map(|f| {
+                (
+                    f[0].to_array(),
+                    f[1].normalize_or(glam::Vec3::Z).to_array(),
+                    f[2].normalize_or(glam::Vec3::Y).to_array(),
+                )
+            })
+    }
+
     fn publish_vitals(&mut self) {
         // The script sees HP 0 one step after the death event, once its graph is in the death state.
         let held = self.deathblow.is_some() && self.defender_dying < 2;

@@ -23,12 +23,24 @@ fn billboard_shader_composes_and_validates() {
             "view",
             "#define_import_path bevy_pbr::mesh_view_bindings\nstruct View { clip_from_world:mat4x4<f32>, exposure:f32 }\n@group(0) @binding(0) var<uniform> view:View;",
         ),
+        (
+            "transforms",
+            "#define_import_path bevy_pbr::view_transformations
+fn depth_ndc_to_view_z(z: f32) -> f32 { return z; }
+fn position_world_to_clip(p: vec3<f32>) -> vec4<f32> { return vec4(p, 1.0); }",
+        ),
+        (
+            "mesh_functions",
+            "#define_import_path bevy_pbr::mesh_functions
+fn get_world_from_local(i: u32) -> mat4x4<f32> { return mat4x4<f32>(); }",
+        ),
         ("fxr", include_str!("../src/fxr.wgsl")),
+        ("fxr_multi", include_str!("../src/fxr_multi.wgsl")),
     ] {
         let shader = Shader::from_wgsl(source, format!("{name}.wgsl"));
         let id = assets.add(shader.clone()).id();
         cache.set_shader(id, shader);
-        if name == "fxr" {
+        if name == "fxr" || name == "fxr_multi" {
             for additive in [false, true] {
                 let mut definitions = vec![
                     ShaderDefVal::UInt("MATERIAL_BIND_GROUP".into(), 3),

@@ -3,6 +3,7 @@
 //! [`tagfile`] is a generic reflected-object reader; this module pulls the animation types out of
 //! it and decodes them into [`crate::anim`] types.
 
+pub mod cloth;
 pub mod spline;
 pub mod tagfile;
 

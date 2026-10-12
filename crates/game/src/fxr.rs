@@ -1,12 +1,21 @@
-//! Authored FXR billboard playback. Unsupported emitters never suppress a stand-in.
-//! Layout facts: EvenTorset (Unlicense); orientation/batching facts: FwLo (MIT).
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+//! The game's own visual effects (FXR), played from the installed files.
+//!
+//! Our reader ([`sekiro_formats::fxr`]) parses an effect and [`sekiro_formats::fxr_json`] turns it
+//! into a named tree; [`crate::fxr_tree`] runs that tree (nodes, emitters, particles) and this
+//! module draws it: sprites (600, 602, 603), flipbooks, multi-texture sprites (604), tracers
+//! (606, 10012) batched into one dynamic mesh per texture and blend mode, with soft edges where a
+//! sprite meets the scene. The player, its batching and soft particles follow FwLo's RustSekiro
+//! (MIT, see `CREDITS.md`); the field layouts come from EvenTorset's FXR library (Unlicense).
+//!
+//! Effects are requested by the simulation: TAE events ([`FxrPlayer::observe`]), bullets, and hits
+//! (`sekiro_sim::hit_fx`, [`FxrPlayer::hits`]). `--no-fxr` turns the player off so the
+//! hand-made stand-ins draw instead; `--fxr-preview <id>` repeats one effect between the actors.
+
+use std::{collections::HashMap, path::PathBuf};
 
 use bevy::{
-    asset::RenderAssetUsages,
-    asset::{embedded_asset, embedded_path},
-    mesh::MeshVertexBufferLayoutRef,
-    mesh::{Indices, PrimitiveTopology},
+    asset::{RenderAssetUsages, embedded_asset, embedded_path},
+    mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology},
     pbr::{MaterialPipeline, MaterialPipelineKey},
     prelude::*,
     render::render_resource::{
@@ -14,12 +23,23 @@ use bevy::{
     },
     shader::ShaderRef,
 };
-use sekiro_formats::fxr::{Action, Blend, Fxr, NativeProperty};
-use sekiro_sim::duel::Duel;
+use sekiro_sim::duel::{Duel, DuelReport};
+use serde_json::Value;
 
-const PARTICLE_CAP: usize = 4096;
-const EMITTER_CAP: usize = 256;
-const EFFECT_SECONDS_CAP: f32 = 30.0;
+use crate::fxr_tree::{
+    FxrLib, NodeInst, Rnd, frame_uvs, grow_trails, int, make_node, particle_color, prop, scalar,
+    step_node, subdivide, view_fade,
+};
+
+/// Live effects and particles are bounded so a runaway effect cannot sink the frame.
+const EFFECT_CAP: usize = 192;
+const PARTICLE_CAP: usize = 8000;
+/// An effect with no end is stopped after this long, and dropped after [`EFFECT_DROP`].
+const EFFECT_STOP: f32 = 20.0;
+const EFFECT_DROP: f32 = 30.0;
+/// Who asked: `(actor, effect id, dummy)` for TAE events, `(2, id, serial)` for bullets,
+/// `(3, id, n)` for hits.
+type Key = (usize, i32, i32);
 
 /// A plugin-supplied bridge keeps the simulation private to the play module.
 pub fn plugin(cache: PathBuf, bridge: impl Fn(&mut App) + Send + Sync + 'static) -> impl Plugin {
@@ -30,157 +50,87 @@ pub fn plugin(cache: PathBuf, bridge: impl Fn(&mut App) + Send + Sync + 'static)
     impl<S: Fn(&mut App) + Send + Sync + 'static> Plugin for PlayerPlugin<S> {
         fn build(&self, app: &mut App) {
             embedded_asset!(app, "fxr.wgsl");
-            app.add_plugins(MaterialPlugin::<FxrMaterial>::default());
+            embedded_asset!(app, "fxr_multi.wgsl");
+            app.add_plugins((
+                MaterialPlugin::<FxrMaterial>::default(),
+                MaterialPlugin::<MultiMaterial>::default(),
+            ));
             app.insert_resource(FxrPlayer::new(self.cache.clone()))
-                .add_systems(Update, render);
+                .init_resource::<DepthCopy>()
+                .add_systems(Startup, setup_depth)
+                .add_systems(Update, (render, soft_depth));
+            if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
+                use bevy::core_pipeline::schedule::{Core3d, Core3dSystems};
+                // After the main pass: the particles of the next frame read this frame's depth
+                // (one frame late, which a soft fade does not show).
+                render_app.add_systems(Core3d, copy_depth.after(Core3dSystems::MainPass));
+            }
+            app.add_plugins(bevy::render::extract_resource::ExtractResourcePlugin::<
+                DepthCopy,
+            >::default());
             (self.bridge)(app);
         }
     }
     PlayerPlugin { cache, bridge }
 }
 
-#[derive(Clone)]
-struct Channel {
-    value: NativeProperty,
-}
-impl Channel {
-    fn new(action: &Action, effect: &Fxr, name: &str, default_value: [f32; 4]) -> Option<Self> {
-        let value = match action.property(effect, name) {
-            Some(p) => p.compile_native_unmodified().ok()?,
-            None => sekiro_formats::fxr::Property {
-                tag: 0x23,
-                evaluator: 0,
-                values: default_value.map(f32::to_bits).to_vec(),
-                modifiers: 0..0,
-            }
-            .compile_native_unmodified()
-            .ok()?,
-        };
-        Some(Self { value })
-    }
-    fn at(&self, time: f32) -> [f32; 4] {
-        self.value.sample(time).unwrap_or([0.0; 4])
-    }
-    fn scalar(&self, time: f32) -> f32 {
-        self.at(time)[0]
-    }
+fn shader(name: &'static str) -> ShaderRef {
+    bevy::asset::AssetPath::from_path_buf(match name {
+        "fxr.wgsl" => embedded_path!("fxr.wgsl"),
+        _ => embedded_path!("fxr_multi.wgsl"),
+    })
+    .with_source("embedded")
+    .into()
 }
 
-#[derive(Clone)]
-struct Billboard {
-    texture: PathBuf,
-    blend: Blend,
-    width: Channel,
-    height: Channel,
-    color: [Channel; 3],
-    brightness: Channel,
-    alpha: Channel,
-    rotation: Channel,
-    angular: Channel,
-    angular_multiplier: Channel,
-    frame: Channel,
-    frame_offset: Channel,
-    columns: u32,
-    frames: u32,
-    uniform: bool,
-    orientation: u32,
-    offset: [Channel; 3],
-    fade: Channel,
-    threshold: Channel,
-}
-
-struct Template {
-    appearance: Billboard,
-    delay: f32,
-    duration: f32,
-    lifetime: Channel,
-    interval: Channel,
-    count: Channel,
-    total: Channel,
-    concurrent: Channel,
-    periodic: bool,
-    speed: Channel,
-    gravity: Channel,
-    acceleration: Channel,
-    transform: Transform,
-    attached: bool,
-    scale: [Channel; 2],
-    color: Channel,
-    direction: Vec3,
-    movement_speed: Channel,
-    movement_multiplier: Channel,
-    acceleration_multiplier: Channel,
-}
-
-struct Emitter {
-    template: Arc<Template>,
-    key: (usize, i32, i32),
-    transform: Transform,
+/// One playing effect.
+struct Effect {
+    id: i64,
+    key: Key,
+    /// Where it is (and, while `follow`, where its dummy or bullet is).
+    at: Transform,
+    follow: bool,
+    /// Stops emitting when its event ends or its key is no longer requested.
+    stoppable: bool,
+    stop: bool,
+    root: Option<NodeInst>,
     age: f32,
-    next: f32,
-    emissions: usize,
-    stopped: bool,
-    generation: usize,
 }
-struct Particle {
-    template: Arc<Template>,
-    position: Vec3,
-    velocity: Vec3,
-    rotation: Quat,
-    age: f32,
-    lifetime: f32,
-    emitted: f32,
-    key: (usize, i32, i32),
-    generation: usize,
-    spin: f32,
-}
+
+/// A stain a hit asks for: DecalParam row, contact point, blow direction on the floor plane.
+pub type StainRequest = (i32, [f32; 3], [f32; 2]);
 
 #[derive(Resource)]
 pub struct FxrPlayer {
     enabled: bool,
-    files: HashMap<i32, PathBuf>,
-    templates: HashMap<i32, Vec<Arc<Template>>>,
-    emitters: Vec<Emitter>,
-    particles: Vec<Particle>,
-    batches: HashMap<(PathBuf, bool), (Handle<Mesh>, Entity)>,
-    bullets: HashMap<u64, (i32, Vec3)>,
+    lib: FxrLib,
+    effects: Vec<Effect>,
+    batches: HashMap<(i64, bool), (Handle<Mesh>, Entity)>,
+    multi_batches: HashMap<MultiKey, (Handle<Mesh>, Entity)>,
+    textures: HashMap<i64, Handle<Image>>,
+    bullets: HashMap<u64, i32>,
     bullet_sfx: HashMap<i32, i32>,
     last_cues: Vec<(usize, i32, i32, u32)>,
+    hit_fx: Option<sekiro_sim::hit_fx::HitFx>,
+    npc_param: i32,
+    hit_serial: i32,
+    /// Particles alive after the last step, for logs and the frame budget.
+    pub particles: usize,
     pub spawned: usize,
     pub rejected: usize,
     preview: Option<i32>,
     steps: usize,
-    next_emitter: usize,
+    cache: PathBuf,
 }
 
 impl FxrPlayer {
     fn new(cache: PathBuf) -> Self {
         let enabled = !std::env::args().any(|a| a == "--no-fxr");
-        let mut files = HashMap::new();
-        if enabled && let Ok(dirs) = std::fs::read_dir(cache.join("raw/sfx")) {
-            let mut dirs: Vec<_> = dirs
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.is_dir())
-                .collect();
-            dirs.sort();
-            for dir in dirs {
-                if let Ok(entries) = std::fs::read_dir(dir) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.extension().is_some_and(|e| e == "fxr")
-                            && let Some(id) = path
-                                .file_stem()
-                                .and_then(|s| s.to_str())
-                                .and_then(|s| s.strip_prefix('f'))
-                                .and_then(|s| s.parse().ok())
-                        {
-                            files.entry(id).or_insert(path);
-                        }
-                    }
-                }
-            }
-        }
+        let lib = if enabled {
+            FxrLib::scan(&cache)
+        } else {
+            FxrLib::default()
+        };
         let mut bullet_sfx = HashMap::new();
         if enabled
             && let Ok(params) = sekiro_formats::param::ParamSet::load(
@@ -197,18 +147,22 @@ impl FxrPlayer {
         }
         info!(
             "FXR: enabled={enabled}, indexed {} installed effects",
-            files.len()
+            lib.effect_count()
         );
         Self {
             enabled,
-            files,
-            templates: HashMap::new(),
-            emitters: Vec::new(),
-            particles: Vec::new(),
+            lib,
+            effects: Vec::new(),
             batches: HashMap::new(),
+            multi_batches: HashMap::new(),
+            textures: HashMap::new(),
             bullets: HashMap::new(),
             bullet_sfx,
             last_cues: Vec::new(),
+            hit_fx: None,
+            npc_param: -1,
+            hit_serial: 0,
+            particles: 0,
             spawned: 0,
             rejected: 0,
             preview: std::env::args()
@@ -217,83 +171,137 @@ impl FxrPlayer {
                 .find(|a| a[0] == "--fxr-preview")
                 .and_then(|a| a[1].parse().ok()),
             steps: 0,
-            next_emitter: 0,
+            cache,
         }
     }
 
-    fn load(&mut self, id: i32) {
-        if self.templates.contains_key(&id) {
-            return;
+    /// Whether the player draws this bullet, so its stand-in should not. A bullet with its own
+    /// installed effect is drawn by it. The blinding area has none: the smoke the Owl throws is
+    /// FFX 650640 on its carrier, so the stand-in sphere is dropped when that effect exists.
+    pub fn covers_bullet(
+        &mut self,
+        bullet_row: i32,
+        look: sekiro_sim::bullets::BulletLook,
+    ) -> bool {
+        use sekiro_sim::bullets::BulletLook;
+        let id = i64::from(self.bullet_sfx.get(&bullet_row).copied().unwrap_or(-1));
+        // An effect with a model (an arrow's, a shuriken's) is only half drawn: the stand-in stays
+        // under it, except for lightning, whose bolt is the tracers.
+        let own = id > 0
+            && self.lib.has(id)
+            && (look == BulletLook::Lightning || !self.lib.has_model(id));
+        self.enabled && (own || (look == BulletLook::Smoke && self.lib.has(650640)))
+    }
+
+    /// Whether this effect id is installed and can play (a stand-in is used otherwise).
+    pub fn has(&mut self, id: i32) -> bool {
+        self.enabled && id > 0 && self.lib.has(i64::from(id))
+    }
+
+    /// Loads the hit tables (effects, stains) for this fight's NPC when they are not loaded yet.
+    fn ensure_tables(&mut self, duel: &Duel) {
+        if self.enabled && (self.hit_fx.is_none() || self.npc_param != duel.spec.npc_param) {
+            self.npc_param = duel.spec.npc_param;
+            self.hit_fx =
+                sekiro_sim::hit_fx::HitFx::load_from_cache(&self.cache, duel.spec.npc_param);
         }
-        let templates = self
-            .files
-            .get(&id)
-            .and_then(|p| {
-                std::fs::read(p)
+    }
+
+    /// A DecalParam row, once the tables are loaded.
+    pub fn decal(&self, id: i32) -> Option<&sekiro_sim::hit_fx::DecalRow> {
+        self.hit_fx.as_ref()?.decal(id)
+    }
+
+    /// Floor stains whose TAE event started this step: (DecalParam id, dummy position).
+    pub fn event_stains(&self, duel: &Duel) -> Vec<(i32, [f32; 3])> {
+        let mut out = Vec::new();
+        for (actor, c) in [&duel.player, &duel.enemy].into_iter().enumerate() {
+            for &(id, dummy) in &c.tae_frame().decals {
+                let at = i16::try_from(dummy)
                     .ok()
-                    .and_then(|b| sekiro_formats::fxr::parse(&b).ok())
-                    .map(|f| (p.clone(), f))
-            })
-            .map(|(path, effect)| {
-                let mut out = Vec::new();
-                if let Some(bundle) = path.parent() {
-                    collect_templates(&effect, 0, Transform::IDENTITY, 0, bundle, &mut out);
-                }
-                out
-            })
-            .unwrap_or_default();
-        info!(
-            "FXR {id}: {} supported billboard emitters (others retain stand-ins)",
-            templates.len()
-        );
-        self.templates.insert(id, templates);
+                    .and_then(|d| duel.dummy_position(actor, d))
+                    .unwrap_or(c.body.position);
+                out.push((id, at));
+            }
+        }
+        out
     }
 
-    fn request(&mut self, id: i32, key: (usize, i32, i32), transform: Transform, start: bool) {
+    /// Starts an effect (`start`) or moves the one already playing under `key`.
+    fn request(&mut self, id: i32, key: Key, at: Transform, start: bool, stoppable: bool) {
         if !self.enabled || id <= 0 {
             return;
         }
         if !start {
-            for e in &mut self.emitters {
-                if e.key == key && !e.stopped {
-                    let next = transform * e.template.transform;
-                    if e.template.attached {
-                        let rotation = next.rotation * e.transform.rotation.inverse();
-                        for p in &mut self.particles {
-                            if p.key == key && p.generation == e.generation {
-                                p.position = next.translation
-                                    + rotation * (p.position - e.transform.translation);
-                                p.velocity = rotation * p.velocity;
-                                p.rotation = rotation * p.rotation;
-                            }
-                        }
-                    }
-                    e.transform = next;
-                }
+            for e in self.effects.iter_mut().filter(|e| e.key == key && e.follow) {
+                e.at = at;
             }
             return;
         }
-        self.load(id);
-        let templates = &self.templates[&id];
-        if templates.is_empty() {
+        if self.effects.len() >= EFFECT_CAP {
+            return;
+        }
+        if !self.lib.has(i64::from(id)) {
             self.rejected += 1;
+            return;
         }
-        for template in templates {
-            if self.emitters.len() >= EMITTER_CAP {
-                break;
+        self.spawned += 1;
+        if std::env::var_os("SEKIRO_FXR_LOG").is_some() {
+            info!("fxr spawn {id} for {key:?} at {:.2?}", at.translation);
+        }
+        self.effects.push(Effect {
+            id: i64::from(id),
+            key,
+            at,
+            follow: true,
+            stoppable,
+            stop: false,
+            root: None,
+            age: 0.0,
+        });
+    }
+
+    /// Effects for the step's hits: sparks on a deflect or block, blood on a landed hit, at the
+    /// contact point and facing the attacker. Returns the hits' floor stains for the caller.
+    pub fn hits(&mut self, duel: &Duel, report: &DuelReport) -> Vec<StainRequest> {
+        if !self.enabled || report.hits.is_empty() {
+            return Vec::new();
+        }
+        self.ensure_tables(duel);
+        let mut stains = Vec::new();
+        let mut requests = Vec::new();
+        if let Some(table) = &self.hit_fx {
+            for (hit, result) in &report.hits {
+                for id in table.stains(hit, result) {
+                    stains.push((id, hit.position, hit.direction));
+                }
+                // Facing the attacker: sparks bounce back toward where the blow came from.
+                let back =
+                    Vec3::new(-hit.direction[0], 0.0, -hit.direction[1]).normalize_or(Vec3::Z);
+                let body = if hit.defender == 0 {
+                    &duel.player.body
+                } else {
+                    &duel.enemy.body
+                };
+                let at = Transform::from_translation(on_body(
+                    Vec3::from_array(hit.position),
+                    Vec3::from_array(body.position),
+                ))
+                .with_rotation(Quat::from_rotation_arc(Vec3::Z, back));
+                for id in table.effects(hit, result) {
+                    requests.push((id, at));
+                }
             }
-            self.next_emitter += 1;
-            self.emitters.push(Emitter {
-                template: template.clone(),
-                key,
-                transform: transform * template.transform,
-                age: 0.0,
-                next: template.delay,
-                emissions: 0,
-                stopped: false,
-                generation: self.next_emitter,
-            });
         }
+        for (id, at) in requests {
+            self.hit_serial += 1;
+            let key = (3, id, self.hit_serial);
+            self.request(id, key, at, true, false);
+            if let Some(e) = self.effects.last_mut() {
+                e.follow = false;
+            }
+        }
+        stains
     }
 
     /// Called after each simulation step by the registration bridge.
@@ -302,6 +310,7 @@ impl FxrPlayer {
         if !self.enabled {
             return;
         }
+        self.ensure_tables(duel);
         let mut cues = Vec::new();
         let mut keys = Vec::new();
         self.steps += 1;
@@ -313,19 +322,15 @@ impl FxrPlayer {
                 * 0.5
                 + Vec3::Y;
             if self.steps >= 60 {
-                self.request(
-                    id,
-                    key,
-                    Transform::from_translation(position),
-                    (self.steps - 60).is_multiple_of(120),
-                );
+                let start = (self.steps - 60).is_multiple_of(120);
+                self.request(id, key, Transform::from_translation(position), start, true);
             }
             if self.steps.is_multiple_of(60) {
                 info!(
-                    "FXR preview step {}: particles={}, emitters={}, spawned={}, rejected={}",
+                    "FXR preview step {}: particles={}, effects={}, spawned={}, rejected={}",
                     self.steps,
-                    self.particles.len(),
-                    self.emitters.len(),
+                    self.particles,
+                    self.effects.len(),
                     self.spawned,
                     self.rejected
                 );
@@ -334,34 +339,30 @@ impl FxrPlayer {
         for (actor, character) in [&duel.player, &duel.enemy].into_iter().enumerate() {
             for cue in &character.tae_frame().effects {
                 let e = &cue.effect;
-                // Blade effects and conditional/repeating variants need separate runtimes.
-                if e.blade_tip.is_some()
-                    || e.extra_condition != 0
-                    || e.repeat
-                    || e.dummy_source != 0
-                {
+                // Conditional and repeating variants need their own runtimes.
+                if e.extra_condition != 0 || e.repeat {
                     continue;
                 }
                 let identity = (actor, e.id, e.dummy, cue.start.to_bits());
                 let start = !self.last_cues.contains(&identity);
                 cues.push(identity);
-                let position = i16::try_from(e.dummy)
+                let frame = i16::try_from(e.dummy)
                     .ok()
-                    .and_then(|d| duel.dummy_position(actor, d));
-                if e.restrict_to_dummy && position.is_none() {
+                    .and_then(|d| duel.dummy_frame(actor, d));
+                if e.restrict_to_dummy && frame.is_none() {
                     continue;
                 }
-                let position = position.unwrap_or(character.body.position);
-                let transform = Transform::from_translation(Vec3::from_array(position))
-                    .with_rotation(if e.ignore_dummy_angle {
-                        Quat::IDENTITY
-                    } else {
-                        Quat::from_rotation_y(character.body.yaw)
-                    });
+                let at = match frame {
+                    Some((p, fwd, up)) if !e.ignore_dummy_angle => frame_transform(p, fwd, up),
+                    Some((p, ..)) => Transform::from_translation(Vec3::from_array(p)),
+                    None => Transform::from_translation(Vec3::from_array(character.body.position))
+                        .with_rotation(Quat::from_rotation_y(character.body.yaw)),
+                };
                 let key = (actor, e.id, e.dummy);
                 keys.push(key);
                 if start || e.follow_dummy {
-                    self.request(e.id, key, transform, start);
+                    let stoppable = e.slot >= 0 || e.event_type == 118 || e.restrict_to_dummy;
+                    self.request(e.id, key, at, start, stoppable);
                 }
             }
         }
@@ -372,335 +373,475 @@ impl FxrPlayer {
             let start = !self.bullets.contains_key(&bullet.serial);
             let key = (2, id, bullet.serial as i32);
             keys.push(key);
+            let velocity = Vec3::from_array(bullet.velocity.to_array());
+            // A bullet that is not moving (a bang, flames, smoke on the floor) throws its effect
+            // upward; one in flight, along its flight.
+            let facing = if velocity.length() > 0.1 {
+                velocity.normalize()
+            } else {
+                Vec3::Y
+            };
             self.request(
                 id,
                 key,
-                Transform::from_translation(position).with_rotation(Quat::from_rotation_arc(
-                    Vec3::Z,
-                    Vec3::from_array(bullet.velocity.to_array()).normalize_or(Vec3::Z),
-                )),
+                Transform::from_translation(position)
+                    .with_rotation(Quat::from_rotation_arc(Vec3::Z, facing)),
                 start,
+                true,
             );
-            self.bullets.insert(bullet.serial, (id, position));
+            self.bullets.insert(bullet.serial, id);
         }
         self.bullets
             .retain(|serial, _| duel.bullets.live.iter().any(|b| b.serial == *serial));
-        for e in &mut self.emitters {
-            if !keys.contains(&e.key) && e.template.periodic {
-                e.stopped = true;
+        for e in &mut self.effects {
+            if e.stoppable && !keys.contains(&e.key) {
+                e.stop = true;
             }
         }
         self.advance(1.0 / 60.0);
     }
 
     fn advance(&mut self, dt: f32) {
-        for particle in &mut self.particles {
-            particle.age += dt;
-            let t = &particle.template;
-            let speed =
-                t.movement_speed.scalar(particle.age) * t.movement_multiplier.scalar(particle.age);
-            let previous_speed = t.movement_speed.scalar((particle.age - dt).max(0.0))
-                * t.movement_multiplier.scalar((particle.age - dt).max(0.0));
-            particle.velocity +=
-                particle.velocity.normalize_or(t.direction) * (speed - previous_speed);
-            particle.spin += t.appearance.angular.scalar(particle.age)
-                * t.appearance.angular_multiplier.scalar(particle.age)
-                * dt;
-            particle.velocity += (particle.velocity.normalize_or(Vec3::Z)
-                * t.acceleration.scalar(particle.age)
-                * t.acceleration_multiplier.scalar(particle.age)
-                - Vec3::Y * t.gravity.scalar(particle.age))
-                * dt;
-            particle.position += particle.velocity * dt;
-        }
-        self.particles
-            .retain(|p| p.age < p.lifetime && p.position.is_finite());
-        for emitter in &mut self.emitters {
-            emitter.age += dt;
-            let template = &emitter.template;
-            let active = emitter.age - template.delay;
-            if emitter.stopped || active >= template.duration || emitter.age >= EFFECT_SECONDS_CAP {
+        let _timer = crate::perf_log::SystemTimer::start("fxr_step");
+        let mut live = 0usize;
+        let lib = &mut self.lib;
+        for e in &mut self.effects {
+            if e.root.is_none() {
+                let Some(def) = lib.get(e.id) else {
+                    e.age = EFFECT_DROP + 1.0;
+                    continue;
+                };
+                let seed = (e.id as u32)
+                    .wrapping_mul(97)
+                    .wrapping_add(e.key.2 as u32)
+                    .wrapping_add(self.steps as u32 * 31);
+                e.root = make_node(lib, &def["root"], seed, 0);
+                if e.root.is_none() {
+                    e.age = EFFECT_DROP + 1.0;
+                    continue;
+                }
+            }
+            e.age += dt;
+            let stop = e.stop || e.age > EFFECT_STOP || live > PARTICLE_CAP;
+            let Some(root) = e.root.as_mut() else {
                 continue;
-            }
-            let total = template.total.scalar(active);
-            let max = template.concurrent.scalar(active);
-            let mut iterations = 0;
-            while emitter.next <= emitter.age
-                && iterations < 8
-                && (total < 0.0 || (emitter.emissions as f32) < total)
-            {
-                if !template.periodic && emitter.emissions != 0 {
-                    break;
-                }
-                iterations += 1;
-                let count = template.count.scalar(active).round().clamp(0.0, 256.0) as usize;
-                for _ in 0..count {
-                    if self.particles.len() >= PARTICLE_CAP {
-                        break;
-                    }
-                    if max >= 0.0
-                        && self
-                            .particles
-                            .iter()
-                            .filter(|p| p.generation == emitter.generation)
-                            .count()
-                            >= max as usize
-                    {
-                        break;
-                    }
-                    let lifetime = template.lifetime.scalar(0.0);
-                    let lifetime = if lifetime < 0.0 {
-                        template.duration - active
-                    } else {
-                        lifetime
-                    };
-                    if lifetime <= 0.0 {
-                        continue;
-                    }
-                    self.particles.push(Particle {
-                        template: template.clone(),
-                        position: emitter.transform.translation,
-                        velocity: emitter.transform.rotation
-                            * template.direction
-                            * (template.speed.scalar(active)
-                                + template.movement_speed.scalar(0.0)
-                                    * template.movement_multiplier.scalar(0.0)),
-                        rotation: emitter.transform.rotation,
-                        age: 0.0,
-                        lifetime: lifetime.min(EFFECT_SECONDS_CAP),
-                        emitted: active,
-                        key: emitter.key,
-                        generation: emitter.generation,
-                        spin: 0.0,
-                    });
-                    self.spawned += 1;
-                }
-                emitter.emissions += 1;
-                emitter.next += template.interval.scalar(active).max(0.000001);
-            }
-        }
-        self.emitters.retain(|e| {
-            !e.stopped
-                && e.age < e.template.delay + e.template.duration
-                && e.age < EFFECT_SECONDS_CAP
-        });
-    }
-}
-
-fn collect_templates(
-    effect: &Fxr,
-    index: usize,
-    parent: Transform,
-    depth: usize,
-    bundle: &std::path::Path,
-    out: &mut Vec<Arc<Template>>,
-) {
-    if depth >= 64 || out.len() >= EMITTER_CAP {
-        return;
-    }
-    let Some(node) = effect.nodes.get(index) else {
-        return;
-    };
-    let mut parent = parent;
-    if let Some(config) = effect.initial_configuration(node) {
-        if config.tag as u16 == 1005 {
-            return;
-        }
-        let actions = &effect.actions[config.actions.clone()];
-        // Unsupported parent motion must not flatten its descendants into a false placement.
-        if actions
-            .iter()
-            .any(|a| matches!(a.id(), 1 | 15 | 34 | 36 | 83 | 106 | 120..=123))
-        {
-            return;
-        }
-        if let Some((p, r)) = actions
-            .iter()
-            .find(|a| a.id() == 35)
-            .and_then(Action::transform)
-        {
-            parent = parent
-                * Transform::from_translation(Vec3::new(-p[0], p[1], p[2])).with_rotation(
-                    Quat::from_euler(
-                        EulerRot::YXZ,
-                        -r[1].to_radians(),
-                        r[0].to_radians(),
-                        -r[2].to_radians(),
-                    ),
-                );
-        }
-        if config.tag as u16 == 1004
-            && let Some(mut template) = template(effect, actions, bundle.to_path_buf())
-        {
-            template.transform = parent;
-            out.push(Arc::new(template));
-        }
-    }
-    for child in node.children.clone() {
-        collect_templates(effect, child, parent, depth + 1, bundle, out);
-    }
-}
-
-fn template(effect: &Fxr, actions: &[Action], bundle: PathBuf) -> Option<Template> {
-    let find = |id| actions.iter().find(|a| a.id() == id);
-    let appearance = find(603)?;
-    // This milestone draws single-texture quads only, with explicit unsupported fallbacks.
-    let channel = |a: &Action, name, value| Channel::new(a, effect, name, [value; 4]);
-    let texture = channel(appearance, "texture", 1.0)?.scalar(0.0) as i32;
-    let texture = bundle.join(format!("s{texture:05}.tpf"));
-    if !texture.is_file() {
-        return None;
-    }
-    let blend = Blend::from_raw(channel(appearance, "blend", 2.0)?.scalar(0.0) as u32)?;
-    if !matches!(blend, Blend::Additive | Blend::Alpha) {
-        return None;
-    }
-    let attrs = find(128)?;
-    let duration = channel(attrs, "duration", -1.0)?.scalar(0.0);
-    let duration = if duration < 0.0 {
-        EFFECT_SECONDS_CAP
-    } else {
-        duration
-    };
-    let particle_attrs = find(129)?;
-    let emitter = find(300).or_else(|| find(399))?;
-    let modifier = find(131)?;
-    let movement = find(55).or_else(|| find(60));
-    let zero = channel(modifier, "unused", 0.0)?;
-    let acceleration = movement
-        .filter(|a| a.id() == 55)
-        .map(|a| channel(a, "acceleration", 0.0))
-        .unwrap_or_else(|| Some(zero.clone()))?;
-    let gravity = movement
-        .map(|a| channel(a, "gravity", 0.0))
-        .unwrap_or_else(|| Some(zero.clone()))?;
-    let speed = channel(modifier, "speed", 0.0)?;
-    // Moving shapes, spread, node movement and attachment modes need separate integration.
-    if actions.iter().any(|a| matches!(a.id(), 1 | 15 | 34 | 36 | 83 | 105 | 106 | 120..=123 | 301 | 401..=405 | 501..=503 | 1005)) { return None; }
-    let transform = find(35)
-        .and_then(Action::transform)
-        .map(|(p, r)| {
-            Transform::from_translation(Vec3::new(-p[0], p[1], p[2])).with_rotation(
-                Quat::from_euler(
-                    EulerRot::YXZ,
-                    -r[1].to_radians(),
-                    r[0].to_radians(),
-                    -r[2].to_radians(),
-                ),
-            )
-        })
-        .unwrap_or_default();
-    let delay = attrs.float_field("delay")?;
-    let color = [
-        channel(appearance, "color", 1.0)?,
-        channel(appearance, "emission_color", 1.0)?,
-        channel(appearance, "hdr_color", 1.0)?,
-    ];
-    Some(Template {
-        appearance: Billboard {
-            texture,
-            blend,
-            width: channel(appearance, "width", 1.0)?,
-            height: channel(appearance, "height", 1.0)?,
-            color,
-            brightness: channel(appearance, "brightness", 1.0)?,
-            alpha: channel(appearance, "alpha", 1.0)?,
-            rotation: channel(appearance, "rotation_z", 0.0)?,
-            angular: channel(appearance, "angular_z", 0.0)?,
-            angular_multiplier: channel(appearance, "angular_multiplier_z", 1.0)?,
-            frame: channel(appearance, "frame", 0.0)?,
-            frame_offset: channel(appearance, "frame_offset", 0.0)?,
-            columns: appearance.field("columns")?.max(1),
-            frames: appearance.field("frames")?.max(1),
-            uniform: appearance.field("uniform")? != 0,
-            orientation: appearance.field("orientation")?,
-            offset: [
-                channel(appearance, "offset_x", 0.0)?,
-                channel(appearance, "offset_y", 0.0)?,
-                channel(appearance, "offset_z", 0.0)?,
-            ],
-            fade: channel(appearance, "alpha_fade", 0.0)?,
-            threshold: channel(appearance, "alpha_threshold", 0.0)?,
-        },
-        delay,
-        duration,
-        lifetime: channel(particle_attrs, "duration", -1.0)?,
-        interval: channel(emitter, "interval", 1.0)?,
-        count: channel(emitter, "count", 1.0)?,
-        total: channel(emitter, "total", -1.0)?,
-        concurrent: channel(emitter, "concurrent", -1.0)?,
-        periodic: emitter.id() == 300,
-        speed,
-        gravity,
-        acceleration,
-        transform,
-        attached: particle_attrs.field("attachment")? != 0,
-        scale: [
-            channel(modifier, "scale_x", 1.0)?,
-            channel(
-                modifier,
-                if modifier.field("uniform")? != 0 {
-                    "scale_x"
-                } else {
-                    "scale_y"
+            };
+            step_node(
+                root,
+                lib,
+                Transform {
+                    scale: Vec3::ONE,
+                    ..e.at
                 },
-                1.0,
-            )?,
-        ],
-        color: channel(modifier, "color", 1.0)?,
-        direction: match find(400).and_then(|a| a.field("direction")).unwrap_or(0) {
-            1 | 4 => Vec3::Y,
-            2 | 5 => Vec3::NEG_Y,
-            _ => Vec3::Z,
-        },
-        movement_speed: movement
-            .filter(|a| a.id() == 60)
-            .map(|a| channel(a, "speed", 0.0))
-            .unwrap_or_else(|| Some(zero.clone()))?,
-        movement_multiplier: movement
-            .filter(|a| a.id() == 60)
-            .map(|a| channel(a, "speed_multiplier", 1.0))
-            .unwrap_or_else(|| channel(modifier, "unused", 1.0))?,
-        acceleration_multiplier: movement
-            .filter(|a| a.id() == 55)
-            .map(|a| channel(a, "acceleration_multiplier", 1.0))
-            .unwrap_or_else(|| channel(modifier, "unused", 1.0))?,
-    })
+                dt,
+                stop,
+            );
+            grow_trails(root);
+            live += count_particles(root);
+            if root.finished {
+                e.age = EFFECT_DROP + 1.0;
+            }
+        }
+        self.effects.retain(|e| e.age <= EFFECT_DROP);
+        self.particles = live;
+    }
 }
+
+/// A contact point held on the defender's body: the sim reports where the two hit shapes are
+/// closest, which can be a metre off the body or above the head, so it is kept within the body's
+/// height (0.5 to 1.5 m above the feet) and 0.6 m of its axis.
+fn on_body(contact: Vec3, feet: Vec3) -> Vec3 {
+    let height = (contact.y - feet.y).clamp(0.5, 1.5);
+    let mut flat = Vec2::new(contact.x - feet.x, contact.z - feet.z);
+    if flat.length() > 0.6 {
+        flat = flat.normalize() * 0.6;
+    }
+    Vec3::new(feet.x + flat.x, feet.y + height, feet.z + flat.y)
+}
+
+fn count_particles(n: &NodeInst) -> usize {
+    n.particles.len() + n.children.iter().map(count_particles).sum::<usize>()
+}
+
+/// A dummy's world frame as a transform: forward is +Z, up +Y; X completes a right-handed basis
+/// (the dummy axes arrive mirrored, which `game_vec` undoes in the effect's own offsets).
+pub fn frame_transform(position: [f32; 3], forward: [f32; 3], up: [f32; 3]) -> Transform {
+    let (z, y) = (Vec3::from_array(forward), Vec3::from_array(up));
+    let x = y.cross(z).normalize_or(Vec3::X);
+    let y = z.cross(x).normalize_or(Vec3::Y);
+    Transform::from_translation(Vec3::from_array(position))
+        .with_rotation(Quat::from_mat3(&Mat3::from_cols(x, y, z)))
+}
+
+// ---------------------------------------------------------------- drawing
 
 #[derive(Default)]
-struct QuadBatch {
-    positions: Vec<[f32; 3]>,
-    colors: Vec<[f32; 4]>,
+struct Buf {
+    pos: Vec<[f32; 3]>,
     uv: Vec<[f32; 2]>,
-    indices: Vec<u32>,
-    thresholds: Vec<[f32; 4]>,
+    col: Vec<[f32; 4]>,
+    /// x: alpha fade threshold, y: hard alpha threshold (both 0..1), z: the soft distance
+    /// (0 = hard edge).
+    tan: Vec<[f32; 4]>,
 }
-impl QuadBatch {
-    fn mesh(self) -> Mesh {
-        Mesh::new(
-            PrimitiveTopology::TriangleList,
-            RenderAssetUsages::default(),
-        )
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, self.colors)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uv)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_TANGENT, self.thresholds)
-        .with_inserted_attribute(
-            Mesh::ATTRIBUTE_NORMAL,
-            vec![[0.0, 0.0, 1.0]; self.indices.len() / 6 * 4],
-        )
-        .with_inserted_indices(Indices::U32(self.indices))
+
+impl Buf {
+    fn quad(&mut self, c: [Vec3; 4], uv: [[f32; 2]; 4], col: [f32; 4], tan: [f32; 4]) {
+        for i in [0, 1, 2, 0, 2, 3] {
+            self.pos.push(c[i].to_array());
+            self.uv.push(uv[i]);
+            self.col.push(col);
+            self.tan.push(tan);
+        }
     }
 }
 
+/// MultiTextureBillboardEx quads, one mesh per `MultiKey`.
+#[derive(Default)]
+struct MultiBuf {
+    pos: Vec<[f32; 3]>,
+    uv1: Vec<[f32; 2]>,
+    uv2: Vec<[f32; 2]>,
+    uv3n: Vec<[f32; 4]>,
+    col: Vec<[f32; 4]>,
+    c1: Vec<[f32; 4]>,
+    c2: Vec<[f32; 4]>,
+    c3: Vec<[f32; 4]>,
+    soft: Vec<f32>,
+}
+
+struct MultiQuad {
+    corners: [Vec3; 4],
+    uv1: [[f32; 2]; 4],
+    uv1_next: [[f32; 2]; 4],
+    uv2: [[f32; 2]; 4],
+    uv3: [[f32; 2]; 4],
+    col: [f32; 4],
+    c1: [f32; 4],
+    c2: [f32; 4],
+    c3: [f32; 4],
+    soft: f32,
+}
+
+impl MultiBuf {
+    fn quad(&mut self, q: &MultiQuad) {
+        for i in [0, 1, 2, 0, 2, 3] {
+            self.pos.push(q.corners[i].to_array());
+            self.uv1.push(q.uv1[i]);
+            self.uv2.push(q.uv2[i]);
+            self.uv3n
+                .push([q.uv3[i][0], q.uv3[i][1], q.uv1_next[i][0], q.uv1_next[i][1]]);
+            self.col.push(q.col);
+            self.c1.push(q.c1);
+            self.c2.push(q.c2);
+            self.c3.push(q.c3);
+            self.soft.push(q.soft);
+        }
+    }
+}
+
+/// (layer1, layer2, layer3 textures, TexBlendType | TexBlendType2 << 4 | TexBlendType3 << 8 |
+/// ColorBlendType << 12 | premultiplyAlpha << 16, blend mode).
+type MultiKey = (i64, i64, i64, i64, i64);
+
+/// Blend modes 0, 4 and 7 add; the rest blend.
+fn additive(blend: i64) -> bool {
+    matches!(blend, 0 | 4 | 7)
+}
+
+/// Soft particles: pull the quad toward the camera by the particle's half size so it does not
+/// cut a hard line through the floor, and fade it where it meets the scene (the shaders,
+/// `fxr.wgsl` / `fxr_multi.wgsl`). Where the appearance's `depthBlend` is set: (scale, offset) are
+/// `unkDepthBlend1/2`. Returns the corners and the soft distance (0 = hard).
+fn soften(a: &Value, size: f32, cam: &GlobalTransform, c: [Vec3; 4]) -> ([Vec3; 4], f32) {
+    if a["depthBlend"].as_bool() != Some(true) {
+        return (c, 0.0);
+    }
+    const NEAR: f32 = 0.1;
+    let scale = a
+        .get("unkDepthBlend1")
+        .and_then(Value::as_f64)
+        .unwrap_or(1.0) as f32;
+    let off = a
+        .get("unkDepthBlend2")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0) as f32;
+    let h = scale * size * 0.5;
+    let (eye, fwd) = (cam.translation(), cam.forward().as_vec3());
+    let pull = |p: Vec3| {
+        let w = (p - eye).dot(fwd);
+        if w <= 1e-3 {
+            return p;
+        }
+        let mut nw = w - (h + off);
+        if nw < NEAR + 1.0 {
+            nw += (NEAR + 1.0 - nw).min(1.0) * (w - nw);
+        }
+        eye + (p - eye) * (nw / w)
+    };
+    (c.map(pull), 2.0 * off + h)
+}
+
+fn layer_uv(a: &Value, n: u32, age: f32, rnd: &mut Rnd) -> [[f32; 2]; 4] {
+    let su = scalar(a, &format!("layer{n}ScaleU"), age, rnd, 1.0);
+    let sv = scalar(a, &format!("layer{n}ScaleV"), age, rnd, 1.0);
+    let ou = scalar(a, &format!("layer{n}OffsetU"), 0.0, rnd, 0.0)
+        + scalar(a, &format!("layer{n}SpeedU"), age, rnd, 0.0) * age;
+    let ov = scalar(a, &format!("layer{n}OffsetV"), 0.0, rnd, 0.0)
+        + scalar(a, &format!("layer{n}SpeedV"), age, rnd, 0.0) * age;
+    QUAD_UV.map(|[u, v]: [f32; 2]| [u * su + ou, v * sv + ov])
+}
+
+const QUAD_UV: [[f32; 2]; 4] = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+
+struct Frame<'a> {
+    cam: &'a GlobalTransform,
+    bufs: HashMap<(i64, bool), Buf>,
+    multi: HashMap<MultiKey, MultiBuf>,
+}
+
+fn collect(n: &NodeInst, f: &mut Frame) {
+    if let Some(c) = &n.cfg {
+        collect_node(n, c, f);
+    }
+    for ch in &n.children {
+        collect(ch, f);
+    }
+}
+
+fn collect_node(n: &NodeInst, c: &Value, f: &mut Frame) {
+    let a = &c["appearance"];
+    let at = a["type"].as_i64().unwrap_or(0);
+    if !matches!(at, 600 | 602 | 603 | 604 | 606 | 10012) {
+        return;
+    }
+    let active_t = (n.time - n.delay).max(0.0);
+    let blend = int(a, "blendMode", 2);
+    let tex = match at {
+        604 => int(a, "layer1", 1),
+        _ => int(a, "texture", 1),
+    };
+    let cam = f.cam;
+    let (cam_r, cam_u, cam_f) = (
+        cam.right().as_vec3(),
+        cam.up().as_vec3(),
+        cam.forward().as_vec3(),
+    );
+    let env = crate::lighting::ENV_PER_UNIT;
+    for p in &n.particles {
+        let mut rnd = Rnd {
+            seed: p.seed ^ 0x9999,
+            k: 0,
+        };
+        let world = if p.attached {
+            n.world.transform_point(p.pos)
+        } else {
+            p.pos
+        };
+        let fade = view_fade(a, world.distance(cam.translation()));
+        if fade <= 0.0 {
+            continue;
+        }
+        let mut col = particle_color(a, c, p, active_t, &mut rnd);
+        col[3] *= fade;
+        for v in &mut col[..3] {
+            *v *= env;
+        }
+        let pmod = &c["particleModifier"];
+        let sx = scalar(pmod, "scaleX", p.emit_t, &mut rnd, 1.0);
+        let sy = if pmod["uniformScale"].as_bool() == Some(true) {
+            sx
+        } else {
+            scalar(pmod, "scaleY", p.emit_t, &mut rnd, 1.0)
+        };
+        match at {
+            600 | 603 | 604 => {
+                let w = if at == 600 {
+                    scalar(a, "size", p.age, &mut rnd, 1.0) * sx
+                } else {
+                    scalar(a, "width", p.age, &mut rnd, 1.0) * sx
+                };
+                let h = if at == 600 || a["uniformScale"].as_bool() == Some(true) {
+                    w
+                } else {
+                    scalar(a, "height", p.age, &mut rnd, 1.0) * sy
+                };
+                let rz = (scalar(a, "rotationZ", 0.0, &mut rnd, 0.0)
+                    + scalar(a, "angularSpeedZ", p.age, &mut rnd, 0.0)
+                        * scalar(a, "angularSpeedMultiplierZ", p.age, &mut rnd, 1.0)
+                        * p.age)
+                    .to_radians();
+                // OrientationMode: 1 / 6 camera, 7 / 4 yaw toward the camera, 2 the node's
+                // frame, 0 / 3 global.
+                let (right, up) = match int(a, "orientation", 1) {
+                    0 | 3 => (Vec3::X, Vec3::Y),
+                    2 => (n.world.rotation * Vec3::X, n.world.rotation * Vec3::Y),
+                    o @ (4 | 7) => {
+                        let axis = if o == 7 {
+                            n.world.rotation * Vec3::Y
+                        } else {
+                            Vec3::Y
+                        };
+                        let to_cam = (cam.translation() - world)
+                            .reject_from(axis)
+                            .normalize_or(cam_f);
+                        (axis.cross(to_cam).normalize_or(cam_r), axis)
+                    }
+                    _ => (cam_r, cam_u),
+                };
+                let (cr, sr) = (rz.cos(), rz.sin());
+                let (r2, u2) = (right * cr + up * sr, up * cr - right * sr);
+                let (hw, hh) = (r2 * w * 0.5, u2 * h * 0.5);
+                let (corners, soft) = soften(
+                    a,
+                    w.abs().max(h.abs()),
+                    cam,
+                    [
+                        world - hw - hh,
+                        world + hw - hh,
+                        world + hw + hh,
+                        world - hw + hh,
+                    ],
+                );
+                let l2 = int(a, "layer2", 0);
+                if at == 604 && l2 > 0 {
+                    // The layers (fxr_multi.wgsl); unk_ds3_f2_10..13 are the shader's
+                    // TexBlendType / 2 / 3 / ColorBlendType (FwLo's reading).
+                    let l3 = int(a, "layer3", 0).max(0);
+                    let m = |k: &str| int(a, k, 0) & 0xf;
+                    let modes = m("unk_ds3_f2_10")
+                        | m("unk_ds3_f2_11") << 4
+                        | m("unk_ds3_f2_12") << 8
+                        | m("unk_ds3_f2_13") << 12
+                        | ((a["premultiplyAlpha"].as_bool() == Some(true)) as i64) << 16;
+                    let scale1 = [
+                        scalar(a, "layer1ScaleU", p.age, &mut rnd, 1.0),
+                        scalar(a, "layer1ScaleV", p.age, &mut rnd, 1.0),
+                    ];
+                    let (f_uv, f_next, f_t) = frame_uvs(a, p.age, &mut rnd, scale1);
+                    let o1 = [
+                        scalar(a, "layer1OffsetU", 0.0, &mut rnd, 0.0)
+                            + scalar(a, "layer1SpeedU", p.age, &mut rnd, 0.0) * p.age,
+                        scalar(a, "layer1OffsetV", 0.0, &mut rnd, 0.0)
+                            + scalar(a, "layer1SpeedV", p.age, &mut rnd, 0.0) * p.age,
+                    ];
+                    let shift = |uv: [[f32; 2]; 4]| uv.map(|[u, v]| [u + o1[0], v + o1[1]]);
+                    let lc = |k: &str, rnd: &mut Rnd| {
+                        prop(a.get(k), p.age, rnd, [1.0; 4]).map(|v| v.clamp(0.0, 1.0))
+                    };
+                    let c1 = lc("layer1Color", &mut rnd);
+                    let interp = a["interpolateFrames"].as_bool() != Some(false);
+                    let q = MultiQuad {
+                        corners,
+                        uv1: shift(f_uv),
+                        uv1_next: shift(f_next),
+                        uv2: layer_uv(a, 2, p.age, &mut rnd),
+                        uv3: layer_uv(a, 3, p.age, &mut rnd),
+                        col,
+                        c1: [c1[0], c1[1], c1[2], if interp { f_t } else { 0.0 }],
+                        c2: lc("layer2Color", &mut rnd),
+                        c3: lc("layer3Color", &mut rnd),
+                        soft,
+                    };
+                    f.multi
+                        .entry((tex, l2, l3, modes, blend))
+                        .or_default()
+                        .quad(&q);
+                    continue;
+                }
+                let (uv, _, _) = frame_uvs(a, p.age, &mut rnd, [1.0, 1.0]);
+                let tan = [
+                    scalar(a, "alphaFadeThreshold", p.age, &mut rnd, 0.0) / 255.0,
+                    scalar(a, "alphaThreshold", active_t, &mut rnd, 0.0) / 255.0,
+                    soft,
+                    0.0,
+                ];
+                f.bufs
+                    .entry((tex, additive(blend)))
+                    .or_default()
+                    .quad(corners, uv, col, tan);
+            }
+            602 => {
+                let wl = scalar(a, "width", p.emit_t, &mut rnd, 1.0)
+                    * scalar(a, "widthMultiplier", p.age, &mut rnd, 1.0)
+                    * sx;
+                let len = scalar(a, "length", p.emit_t, &mut rnd, 1.0)
+                    * scalar(a, "lengthMultiplier", p.age, &mut rnd, 1.0)
+                    * sy;
+                let d = if p.attached {
+                    n.world.rotation * p.dir
+                } else {
+                    p.dir
+                };
+                let side = d.cross(cam_f).normalize_or(cam_r) * wl * 0.5;
+                let tail = world - d * len;
+                f.bufs.entry((-1, additive(blend))).or_default().quad(
+                    [tail - side, world - side, world + side, tail + side],
+                    QUAD_UV,
+                    col,
+                    [0.0; 4],
+                );
+            }
+            606 | 10012 => {
+                let w = (scalar(a, "width", p.age, &mut rnd, 1.0)
+                    * scalar(a, "widthMultiplier", p.emit_t, &mut rnd, 1.0))
+                .abs();
+                let cross = int(a, "orientation", 0) == 4;
+                // A trail with no colour (a distortion-only layer) draws nothing here.
+                if p.trail.len() < 2 || a["rgbMultiplier"].as_f64() == Some(0.0) {
+                    continue;
+                }
+                let segs = subdivide(
+                    &p.trail,
+                    int(a, "segmentSubdivision", 0).clamp(0, 16) as usize,
+                );
+                let sf = scalar(a, "startFadeEndpoint", p.age, &mut rnd, 0.0).max(0.0) / 100.0;
+                let ef = scalar(a, "endFadeEndpoint", p.age, &mut rnd, 0.0).max(0.0) / 100.0;
+                let fade_at = |u: f32| -> f32 {
+                    let mut k = 1.0;
+                    if sf > 0.0 {
+                        k *= (u / sf).min(1.0);
+                    }
+                    if ef > 0.0 {
+                        k *= ((1.0 - u) / ef).min(1.0);
+                    }
+                    k
+                };
+                let buf = f.bufs.entry((tex, additive(blend))).or_default();
+                for w2 in segs.windows(2) {
+                    let ((a0, x0, u0), (a1, x1, u1)) = (w2[0], w2[1]);
+                    let d = (a1 - a0).normalize_or(cam_r);
+                    let travel = d.cross(cam_f).normalize_or(cam_u);
+                    let s0 = if x0 == Vec3::ZERO { travel } else { x0 } * w * 0.5;
+                    let s1 = if x1 == Vec3::ZERO { travel } else { x1 } * w * 0.5;
+                    let k = fade_at(u0).min(fade_at(u1));
+                    let c0 = [col[0], col[1], col[2], col[3] * k];
+                    let quv = [[u0, 1.0], [u1, 1.0], [u1, 0.0], [u0, 0.0]];
+                    buf.quad([a0 - s0, a1 - s1, a1 + s1, a0 + s0], quv, c0, [0.0; 4]);
+                    if cross {
+                        let cx = Vec3::X * w * 0.5;
+                        buf.quad([a0 - cx, a1 - cx, a1 + cx, a0 + cx], quv, c0, [0.0; 4]);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The sprite batches' material: unlit texture x vertex colour with a soft depth fade
+/// (`fxr.wgsl`).
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
-struct FxrMaterial {
+pub struct FxrMaterial {
     #[texture(0)]
     #[sampler(1)]
     texture: Handle<Image>,
+    /// The scene depth ([`DepthCopy`]): where a soft particle meets the scene.
+    #[texture(2, sample_type = "depth", multisampled = true)]
+    depth: Handle<Image>,
     additive: bool,
 }
+
 impl Material for FxrMaterial {
     fn enable_prepass() -> bool {
         false
@@ -716,12 +857,10 @@ impl Material for FxrMaterial {
         }
     }
     fn vertex_shader() -> ShaderRef {
-        bevy::asset::AssetPath::from_path_buf(embedded_path!("fxr.wgsl"))
-            .with_source("embedded")
-            .into()
+        shader("fxr.wgsl")
     }
     fn fragment_shader() -> ShaderRef {
-        Self::vertex_shader()
+        shader("fxr.wgsl")
     }
     fn specialize(
         _: &MaterialPipeline,
@@ -737,166 +876,431 @@ impl Material for FxrMaterial {
     }
 }
 
+const ATTR_UV3N: bevy::mesh::MeshVertexAttribute = bevy::mesh::MeshVertexAttribute::new(
+    "FxMultiUv3Next",
+    0x5ec1_0604,
+    bevy::render::render_resource::VertexFormat::Float32x4,
+);
+const ATTR_C1: bevy::mesh::MeshVertexAttribute = bevy::mesh::MeshVertexAttribute::new(
+    "FxMultiColor1",
+    0x5ec1_0641,
+    bevy::render::render_resource::VertexFormat::Float32x4,
+);
+const ATTR_C2: bevy::mesh::MeshVertexAttribute = bevy::mesh::MeshVertexAttribute::new(
+    "FxMultiColor2",
+    0x5ec1_0642,
+    bevy::render::render_resource::VertexFormat::Float32x4,
+);
+const ATTR_C3: bevy::mesh::MeshVertexAttribute = bevy::mesh::MeshVertexAttribute::new(
+    "FxMultiColor3",
+    0x5ec1_0643,
+    bevy::render::render_resource::VertexFormat::Float32x4,
+);
+const ATTR_SOFT: bevy::mesh::MeshVertexAttribute = bevy::mesh::MeshVertexAttribute::new(
+    "FxSoft",
+    0x5ec1_0650,
+    bevy::render::render_resource::VertexFormat::Float32,
+);
+
+/// MultiTextureBillboardEx (604): three texture layers blended as the game's
+/// GXFfxtessellateBlendMultiTexture shader does (`fxr_multi.wgsl`, FwLo's port). Output is
+/// premultiplied, so one alpha mode serves normal and additive blends.
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+pub struct MultiMaterial {
+    #[texture(0)]
+    #[sampler(1)]
+    t0: Handle<Image>,
+    #[texture(2)]
+    #[sampler(3)]
+    t1: Handle<Image>,
+    #[texture(4)]
+    #[sampler(5)]
+    t2: Handle<Image>,
+    #[uniform(6)]
+    modes: UVec4,
+    #[uniform(7)]
+    flags: UVec4,
+    #[texture(8, sample_type = "depth", multisampled = true)]
+    depth: Handle<Image>,
+}
+
+impl Material for MultiMaterial {
+    fn vertex_shader() -> ShaderRef {
+        shader("fxr_multi.wgsl")
+    }
+    fn fragment_shader() -> ShaderRef {
+        shader("fxr_multi.wgsl")
+    }
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Premultiplied
+    }
+    fn enable_prepass() -> bool {
+        false
+    }
+    fn enable_shadows() -> bool {
+        false
+    }
+    fn specialize(
+        _: &MaterialPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        layout: &MeshVertexBufferLayoutRef,
+        _: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        descriptor.vertex.buffers = vec![layout.0.get_layout(&[
+            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+            Mesh::ATTRIBUTE_UV_0.at_shader_location(1),
+            Mesh::ATTRIBUTE_UV_1.at_shader_location(2),
+            ATTR_UV3N.at_shader_location(3),
+            Mesh::ATTRIBUTE_COLOR.at_shader_location(4),
+            ATTR_C1.at_shader_location(5),
+            ATTR_C2.at_shader_location(6),
+            ATTR_C3.at_shader_location(7),
+            ATTR_SOFT.at_shader_location(8),
+        ])?];
+        descriptor.primitive.cull_mode = None;
+        if let Some(depth) = &mut descriptor.depth_stencil {
+            depth.depth_write_enabled = Some(false);
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------- scene depth
+
+/// The camera's depth buffer copied after the opaque pass: soft particles read it. Not Bevy's
+/// DepthPrepass, which draws the whole map twice. Never written (a size or sample-count mismatch)
+/// it stays 0, which reads as infinitely far, and particles keep hard edges.
+#[derive(Resource, Clone, Default, bevy::render::extract_resource::ExtractResource)]
+pub struct DepthCopy {
+    image: Handle<Image>,
+}
+
+fn depth_image(size: UVec2) -> Image {
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
+    let mut img = Image::new_uninit(
+        Extent3d {
+            width: size.x.max(1),
+            height: size.y.max(1),
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        TextureFormat::Depth32Float,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    img.texture_descriptor.sample_count = 4;
+    img.texture_descriptor.usage =
+        TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST | TextureUsages::RENDER_ATTACHMENT;
+    img
+}
+
+fn setup_depth(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    commands.insert_resource(DepthCopy {
+        image: images.add(depth_image(UVec2::ONE)),
+    });
+}
+
+/// Keeps the copy at the camera's size and lets the camera's depth be copied from.
+fn soft_depth(
+    copy: Res<DepthCopy>,
+    mut images: ResMut<Assets<Image>>,
+    mut sprites: ResMut<Assets<FxrMaterial>>,
+    mut multi: ResMut<Assets<MultiMaterial>>,
+    mut cams: Query<(&Camera, &mut Camera3d)>,
+) {
+    if std::env::var_os("SEKIRO_NO_SOFT").is_some() {
+        return;
+    }
+    for (cam, mut c3) in &mut cams {
+        let usage = bevy::render::render_resource::TextureUsages::from(c3.depth_texture_usages);
+        if !usage.contains(bevy::render::render_resource::TextureUsages::COPY_SRC) {
+            c3.depth_texture_usages =
+                (usage | bevy::render::render_resource::TextureUsages::COPY_SRC).into();
+        }
+        let Some(size) = cam.physical_target_size() else {
+            continue;
+        };
+        let Some(img) = images.get(&copy.image) else {
+            continue;
+        };
+        if img.size() == size {
+            continue;
+        }
+        let _ = images.insert(&copy.image, depth_image(size));
+        // Touch the materials so their bind groups pick up the new texture.
+        for _ in sprites.iter_mut() {}
+        for _ in multi.iter_mut() {}
+    }
+}
+
+/// Render world: the camera's depth (opaque pass done) into [`DepthCopy`], when size and sample
+/// count match.
+fn copy_depth(
+    view: bevy::render::renderer::ViewQuery<&bevy::render::view::ViewDepthTexture>,
+    copy: Option<Res<DepthCopy>>,
+    images: Res<bevy::render::render_asset::RenderAssets<bevy::render::texture::GpuImage>>,
+    mut ctx: bevy::render::renderer::RenderContext,
+) {
+    let depth = view.into_inner();
+    if std::env::var_os("SEKIRO_FX_DEBUG_NOCOPY").is_some() {
+        return;
+    }
+    let Some(copy) = copy else { return };
+    let Some(dst) = images.get(&copy.image) else {
+        return;
+    };
+    let (s, d) = (&depth.texture, &dst.texture);
+    if s.size() != d.size()
+        || s.sample_count() != d.sample_count()
+        || s.format() != d.format()
+        || !s
+            .usage()
+            .contains(bevy::render::render_resource::TextureUsages::COPY_SRC)
+    {
+        return;
+    }
+    ctx.command_encoder()
+        .copy_texture_to_texture(s.as_image_copy(), d.as_image_copy(), s.size());
+}
+
+// ---------------------------------------------------------------- render system
+
+fn load_texture(lib: &FxrLib, id: i64) -> Option<Image> {
+    let path = lib.texture_path(id)?;
+    let data = std::fs::read(path).ok()?;
+    let tpf = sekiro_formats::tpf::parse(&data).ok()?;
+    let first = tpf.first()?;
+    first.header().ok()?;
+    Image::from_buffer(
+        first.dds,
+        bevy::image::ImageType::Extension("dds"),
+        bevy::image::CompressedImageFormats::all(),
+        true,
+        bevy::image::ImageSampler::Descriptor(bevy::image::ImageSamplerDescriptor {
+            address_mode_u: bevy::image::ImageAddressMode::Repeat,
+            address_mode_v: bevy::image::ImageAddressMode::Repeat,
+            ..bevy::image::ImageSamplerDescriptor::linear()
+        }),
+        RenderAssetUsages::default(),
+    )
+    .ok()
+}
+
+fn texture_handle(
+    player: &mut FxrPlayer,
+    images: &mut Assets<Image>,
+    id: i64,
+    white: &Handle<Image>,
+) -> Handle<Image> {
+    if id <= 0 {
+        return white.clone();
+    }
+    if let Some(h) = player.textures.get(&id) {
+        return h.clone();
+    }
+    let handle = match load_texture(&player.lib, id) {
+        Some(image) => images.add(image),
+        None => {
+            warn!("FXR texture {id} is not installed or cannot be decoded");
+            white.clone()
+        }
+    };
+    player.textures.insert(id, handle.clone());
+    handle
+}
+
+/// A degenerate triangle far below, so a batch mesh is never empty (zero-length buffers are not
+/// supported by the mesh allocator).
+const PAD: [f32; 3] = [0.0, -50.0, 0.0];
+
+fn new_batch(commands: &mut Commands, meshes: &mut Assets<Mesh>) -> (Handle<Mesh>, Entity) {
+    let mesh = meshes.add(Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    ));
+    (mesh.clone(), mesh_entity(commands, mesh))
+}
+
+fn mesh_entity(commands: &mut Commands, mesh: Handle<Mesh>) -> Entity {
+    commands
+        .spawn((
+            Mesh3d(mesh),
+            Transform::IDENTITY,
+            bevy::camera::visibility::NoFrustumCulling,
+            bevy::light::NotShadowCaster,
+            bevy::light::NotShadowReceiver,
+        ))
+        .id()
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render(
     mut commands: Commands,
     mut player: ResMut<FxrPlayer>,
     camera: Query<&GlobalTransform, With<Camera3d>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<FxrMaterial>>,
+    mut sprite_materials: ResMut<Assets<FxrMaterial>>,
+    mut multi_materials: ResMut<Assets<MultiMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    depth: Res<DepthCopy>,
+    mut white: Local<Option<Handle<Image>>>,
 ) {
-    let Some(camera) = camera.iter().next() else {
+    if !player.enabled {
+        return;
+    }
+    let Some(cam) = camera.iter().next() else {
         return;
     };
     let _timer = crate::perf_log::SystemTimer::start("fxr");
-    let mut batches: HashMap<(PathBuf, bool), QuadBatch> = HashMap::new();
-    for p in &player.particles {
-        let a = &p.template.appearance;
-        let key = (a.texture.clone(), a.blend == Blend::Additive);
-        let width = a.width.scalar(p.age) * p.template.scale[0].scalar(p.emitted);
-        let height = if a.uniform {
-            width
-        } else {
-            a.height.scalar(p.age) * p.template.scale[1].scalar(p.emitted)
-        };
-        let angle = -(a.rotation.scalar(0.0) + p.spin).to_radians();
-        let (sin, cos) = angle.sin_cos();
-        let (right, up) = match a.orientation {
-            0 | 3 => (Vec3::X, Vec3::Y),
-            2 => (p.rotation * Vec3::X, p.rotation * Vec3::Y),
-            4 | 7 => {
-                let up = if a.orientation == 7 {
-                    p.rotation * Vec3::Y
-                } else {
-                    Vec3::Y
-                };
-                (
-                    up.cross(camera.translation() - p.position)
-                        .normalize_or(Vec3::X),
-                    up,
-                )
-            }
-            _ => (camera.right().as_vec3(), camera.up().as_vec3()),
-        };
-        let horizontal = (right * cos + up * sin) * width * 0.5;
-        let vertical = (up * cos - right * sin) * height * 0.5;
-        let c = [
-            a.color[0].at(p.age),
-            a.color[1].at(p.emitted),
-            a.color[2].at(p.age),
-        ];
-        let mut color: [f32; 4] = std::array::from_fn(|i| {
-            c[0][i].clamp(0.0, 1.0)
-                * c[1][i].clamp(0.0, 1.0)
-                * c[2][i]
-                * p.template.color.at(p.emitted)[i]
-        });
-        for lane in &mut color[..3] {
-            *lane *= a.brightness.scalar(p.age + p.emitted) * crate::lighting::ENV_PER_UNIT;
+    let white = white
+        .get_or_insert_with(|| {
+            images.add(Image::new_fill(
+                bevy::render::render_resource::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                bevy::render::render_resource::TextureDimension::D2,
+                &[255, 255, 255, 255],
+                bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+                RenderAssetUsages::default(),
+            ))
+        })
+        .clone();
+    let mut frame = Frame {
+        cam,
+        bufs: HashMap::new(),
+        multi: HashMap::new(),
+    };
+    for e in &player.effects {
+        if let Some(root) = &e.root {
+            collect(root, &mut frame);
         }
-        color[3] *= a.alpha.scalar(p.age + p.emitted);
-        if color.iter().any(|v| !v.is_finite()) || !width.is_finite() || !height.is_finite() {
+    }
+    let (bufs, multi) = (frame.bufs, frame.multi);
+    // New batches for keys seen for the first time.
+    for key in bufs.keys() {
+        if player.batches.contains_key(key) {
             continue;
         }
-        let frame =
-            (a.frame.scalar(p.age) + a.frame_offset.scalar(p.age)).max(0.0) as u32 % a.frames;
-        let rows = a.frames.div_ceil(a.columns);
-        let batch = batches.entry(key).or_default();
-        let base = batch.positions.len() as u32;
-        for (corner, uv) in [
-            (-horizontal - vertical, [0.0, 1.0]),
-            (horizontal - vertical, [1.0, 1.0]),
-            (horizontal + vertical, [1.0, 0.0]),
-            (-horizontal + vertical, [0.0, 0.0]),
-        ] {
-            let offset = p.rotation
-                * Vec3::new(
-                    -a.offset[0].scalar(p.age) * width,
-                    a.offset[1].scalar(p.age) * height,
-                    a.offset[2].scalar(p.age),
-                );
-            batch
-                .positions
-                .push((p.position + offset + corner).to_array());
-            batch.colors.push(color);
-            batch.thresholds.push([
-                a.fade.scalar(p.age) / 255.0,
-                a.threshold.scalar(p.age + p.emitted) / 255.0,
-                0.0,
-                0.0,
-            ]);
-            batch.uv.push([
-                (frame % a.columns) as f32 / a.columns as f32 + uv[0] / a.columns as f32,
-                (frame / a.columns) as f32 / rows as f32 + uv[1] / rows as f32,
-            ]);
-        }
-        batch
-            .indices
-            .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        let texture = texture_handle(&mut player, &mut images, key.0, &white);
+        let material = sprite_materials.add(FxrMaterial {
+            texture,
+            depth: depth.image.clone(),
+            additive: key.1,
+        });
+        let (mesh, entity) = new_batch(&mut commands, &mut meshes);
+        commands.entity(entity).insert(MeshMaterial3d(material));
+        player.batches.insert(*key, (mesh, entity));
     }
-    for (key, batch) in batches {
-        let mesh = batch.mesh();
-        if let Some((handle, entity)) = player.batches.get(&key) {
-            commands.entity(*entity).insert(Visibility::Visible);
-            if let Some(mut existing) = meshes.get_mut(handle) {
-                *existing = mesh;
-            }
-        } else {
-            let texture = std::fs::read(&key.0).ok().and_then(|data| {
-                sekiro_formats::tpf::parse(&data).ok().and_then(|t| {
-                    t.first().and_then(|t| {
-                        t.header().ok().and_then(|_| {
-                            Image::from_buffer(
-                                t.dds,
-                                bevy::image::ImageType::Extension("dds"),
-                                bevy::image::CompressedImageFormats::all(),
-                                false,
-                                bevy::image::ImageSampler::default(),
-                                RenderAssetUsages::default(),
-                            )
-                            .ok()
-                        })
-                    })
-                })
-            });
-            let Some(texture) = texture else {
-                warn!("FXR texture cannot be decoded: {}", key.0.display());
-                continue;
-            };
-            let material = materials.add(FxrMaterial {
-                texture: images.add(texture),
-                additive: key.1,
-            });
-            let handle = meshes.add(mesh);
-            let entity = commands
-                .spawn((
-                    Mesh3d(handle.clone()),
-                    MeshMaterial3d(material),
-                    Transform::IDENTITY,
-                    bevy::camera::visibility::NoFrustumCulling,
-                    bevy::light::NotShadowCaster,
-                    bevy::light::NotShadowReceiver,
-                ))
-                .id();
-            player.batches.insert(key, (handle, entity));
+    for key in multi.keys() {
+        if player.multi_batches.contains_key(key) {
+            continue;
         }
+        let &(l1, l2, l3, modes, blend) = key;
+        let t0 = texture_handle(&mut player, &mut images, l1, &white);
+        let t1 = texture_handle(&mut player, &mut images, l2, &white);
+        let t2 = texture_handle(
+            &mut player,
+            &mut images,
+            if l3 > 0 { l3 } else { l2 },
+            &white,
+        );
+        let material = multi_materials.add(MultiMaterial {
+            t0,
+            t1,
+            t2,
+            modes: UVec4::new(
+                (modes & 0xf) as u32,
+                (modes >> 4 & 0xf) as u32,
+                (modes >> 8 & 0xf) as u32,
+                (modes >> 12 & 0xf) as u32,
+            ),
+            flags: UVec4::new(
+                (modes >> 16 & 1) as u32,
+                additive(blend) as u32,
+                (l3 > 0) as u32,
+                0,
+            ),
+            depth: depth.image.clone(),
+        });
+        let (mesh, entity) = new_batch(&mut commands, &mut meshes);
+        commands.entity(entity).insert(MeshMaterial3d(material));
+        player.multi_batches.insert(*key, (mesh, entity));
     }
-    // Keep the last allocation and hide inactive batches. Zero-byte mesh uploads are not
-    // supported by Bevy's slab allocator and repeatedly copying them reports freed keys.
-    let live: Vec<_> = player
-        .particles
-        .iter()
-        .map(|p| {
-            (
-                p.template.appearance.texture.clone(),
-                p.template.appearance.blend == Blend::Additive,
-            )
-        })
-        .collect();
-    for (key, (_, entity)) in &player.batches {
-        if !live.contains(key) {
-            commands.entity(*entity).insert(Visibility::Hidden);
-        }
+    // Fill every batch (empty ones get the padding triangle only).
+    let empty = Buf::default();
+    for (key, (mesh, _)) in &player.batches {
+        let Some(mut m) = meshes.get_mut(mesh) else {
+            continue;
+        };
+        let b = bufs.get(key).unwrap_or(&empty);
+        let n = b.pos.len() + 3;
+        m.insert_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            [vec![PAD; 3], b.pos.clone()].concat(),
+        );
+        m.insert_attribute(
+            Mesh::ATTRIBUTE_UV_0,
+            [vec![[0.0; 2]; 3], b.uv.clone()].concat(),
+        );
+        m.insert_attribute(
+            Mesh::ATTRIBUTE_COLOR,
+            [vec![[0.0; 4]; 3], b.col.clone()].concat(),
+        );
+        m.insert_attribute(
+            Mesh::ATTRIBUTE_TANGENT,
+            [vec![[0.0; 4]; 3], b.tan.clone()].concat(),
+        );
+        m.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 0.0, 1.0]; n]);
+        m.insert_indices(Indices::U32((0..n as u32).collect()));
+    }
+    let empty = MultiBuf::default();
+    for (key, (mesh, _)) in &player.multi_batches {
+        let Some(mut m) = meshes.get_mut(mesh) else {
+            continue;
+        };
+        let b = multi.get(key).unwrap_or(&empty);
+        let n = b.pos.len() + 3;
+        m.insert_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            [vec![PAD; 3], b.pos.clone()].concat(),
+        );
+        m.insert_attribute(
+            Mesh::ATTRIBUTE_UV_0,
+            [vec![[0.0; 2]; 3], b.uv1.clone()].concat(),
+        );
+        m.insert_attribute(
+            Mesh::ATTRIBUTE_UV_1,
+            [vec![[0.0; 2]; 3], b.uv2.clone()].concat(),
+        );
+        m.insert_attribute(ATTR_UV3N, [vec![[0.0; 4]; 3], b.uv3n.clone()].concat());
+        m.insert_attribute(
+            Mesh::ATTRIBUTE_COLOR,
+            [vec![[0.0; 4]; 3], b.col.clone()].concat(),
+        );
+        m.insert_attribute(ATTR_C1, [vec![[0.0; 4]; 3], b.c1.clone()].concat());
+        m.insert_attribute(ATTR_C2, [vec![[0.0; 4]; 3], b.c2.clone()].concat());
+        m.insert_attribute(ATTR_C3, [vec![[0.0; 4]; 3], b.c3.clone()].concat());
+        m.insert_attribute(ATTR_SOFT, [vec![0.0; 3], b.soft.clone()].concat());
+        m.insert_indices(Indices::U32((0..n as u32).collect()));
+    }
+    if std::env::var_os("SEKIRO_FXR_LOG").is_some() && !(bufs.is_empty() && multi.is_empty()) {
+        let mut v: Vec<String> = bufs
+            .iter()
+            .map(|(k, b)| format!("{}/{}:{}", k.0, k.1 as u8, b.pos.len() / 6))
+            .collect();
+        v.extend(
+            multi
+                .iter()
+                .map(|(k, b)| format!("multi {}:{}", k.0, b.pos.len() / 6)),
+        );
+        v.sort();
+        info!(
+            "fxr quads (step {}, {} particles) {}",
+            player.steps,
+            player.particles,
+            v.join(" ")
+        );
     }
 }
 
@@ -904,136 +1308,97 @@ fn render(
 mod tests {
     use super::*;
 
-    fn constant(value: f32) -> Channel {
-        Channel {
-            value: sekiro_formats::fxr::Property {
-                tag: 0x23,
-                evaluator: 0,
-                values: [value.to_bits(); 4].to_vec(),
-                modifiers: 0..0,
-            }
-            .compile_native_unmodified()
-            .unwrap(),
-        }
-    }
-
-    fn test_template() -> Arc<Template> {
-        Arc::new(Template {
-            appearance: Billboard {
-                texture: PathBuf::from("test.tpf"),
-                blend: Blend::Alpha,
-                width: constant(1.0),
-                height: constant(1.0),
-                color: std::array::from_fn(|_| constant(1.0)),
-                brightness: constant(1.0),
-                alpha: constant(1.0),
-                rotation: constant(0.0),
-                angular: constant(90.0),
-                angular_multiplier: constant(1.0),
-                frame: constant(0.0),
-                frame_offset: constant(0.0),
-                columns: 1,
-                frames: 1,
-                uniform: false,
-                orientation: 1,
-                offset: std::array::from_fn(|_| constant(0.0)),
-                fade: constant(0.0),
-                threshold: constant(0.0),
-            },
-            delay: 0.05,
-            duration: 0.3,
-            lifetime: constant(0.1),
-            interval: constant(0.02),
-            count: constant(3.0),
-            total: constant(2.0),
-            concurrent: constant(2.0),
-            periodic: true,
-            speed: constant(1.0),
-            gravity: constant(10.0),
-            acceleration: constant(0.0),
-            transform: Transform::IDENTITY,
-            attached: true,
-            scale: [constant(1.0), constant(1.0)],
-            color: constant(1.0),
-            direction: Vec3::Z,
-            movement_speed: constant(0.0),
-            movement_multiplier: constant(1.0),
-            acceleration_multiplier: constant(1.0),
-        })
+    #[test]
+    fn hit_contacts_are_held_on_the_body() {
+        let feet = Vec3::new(10.0, 2.0, 10.0);
+        let p = on_body(Vec3::new(10.6, 4.1, 10.0), feet);
+        assert!((p.y - 3.5).abs() < 1e-5, "capped at 1.5 m");
+        assert!(((p.x - feet.x).powi(2) + (p.z - feet.z).powi(2)).sqrt() <= 0.6001);
+        let low = on_body(Vec3::new(10.1, 2.0, 10.0), feet);
+        assert!((low.y - 2.5).abs() < 1e-5, "at least 0.5 m up");
+        assert!((low.x - 10.1).abs() < 1e-5, "near contacts stay put");
     }
 
     #[test]
-    fn emission_delay_concurrency_attachment_and_expiry_are_bounded() {
+    fn dummy_frames_keep_forward_and_up() {
+        let t = frame_transform([1.0, 2.0, 3.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]);
+        assert!((t.rotation * Vec3::Z - Vec3::Z).length() < 1e-5);
+        assert!((t.rotation * Vec3::Y - Vec3::Y).length() < 1e-5);
+        // A frame facing +X: forward +X, up +Y gives X to -Z (right-handed).
+        let t = frame_transform([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        assert!((t.rotation * Vec3::Z - Vec3::X).length() < 1e-5);
+        assert!((t.rotation * Vec3::X - Vec3::NEG_Z).length() < 1e-5);
+    }
+
+    #[test]
+    fn a_requested_effect_plays_out_and_is_dropped() {
         let mut player = FxrPlayer::new(PathBuf::from("missing-fxr-test-cache"));
-        player.templates.insert(1, vec![test_template()]);
-        let key = (0, 1, 0);
-        player.request(1, key, Transform::IDENTITY, true);
-        player.advance(0.02);
-        assert!(player.particles.is_empty());
-        player.advance(0.031);
-        assert_eq!(player.particles.len(), 2);
-        player.request(1, key, Transform::from_translation(Vec3::X), false);
-        assert!(player.particles.iter().all(|p| p.position.x == 1.0));
-        player.advance(0.02);
-        assert_eq!(player.particles.len(), 2);
-        assert!(
-            player
-                .particles
-                .iter()
-                .all(|p| p.position.y < 0.0 && p.spin > 0.0)
-        );
-        player.advance(0.2);
-        assert!(player.particles.is_empty());
-        player.advance(0.2);
-        assert!(player.emitters.is_empty());
-        for _ in 0..EMITTER_CAP + 10 {
-            player.request(1, key, Transform::IDENTITY, true);
+        // A synthetic effect: a 0.1 s node emitting 2 billboards of 0.2 s every 0.05 s.
+        let tree = serde_json::json!({"id": 1, "root": {"type": 2200, "stateConfigMap": [0], "nodes": [], "configs": [{
+            "type": 1004,
+            "nodeAttributes": {"type": 128, "delay": 0.0, "duration": 0.1},
+            "emitter": {"type": 300, "interval": 0.05, "perEmission": 2.0, "totalEmissions": -1.0, "maxConcurrent": -1.0},
+            "emitterShape": {"type": 400, "direction": 0},
+            "directionSpread": {"type": 500},
+            "particleAttributes": {"type": 129, "duration": 0.2, "attachment": 1},
+            "particleModifier": {"type": 131, "speed": 1.0},
+            "appearance": {"type": 603}}]}});
+        player.lib.insert_for_test(1, tree);
+        player.request(1, (0, 1, 0), Transform::IDENTITY, true, true);
+        player.advance(1.0 / 60.0);
+        assert_eq!(player.effects.len(), 1);
+        assert_eq!(player.particles, 2);
+        for _ in 0..90 {
+            player.advance(1.0 / 60.0);
         }
-        assert_eq!(player.emitters.len(), EMITTER_CAP);
-        for emitter in &mut player.emitters {
-            emitter.template = Arc::new(Template {
-                concurrent: constant(-1.0),
-                count: constant(256.0),
-                ..Arc::try_unwrap(test_template()).ok().unwrap()
-            });
-        }
-        player.advance(0.05);
-        assert_eq!(player.particles.len(), PARTICLE_CAP);
+        assert!(player.effects.is_empty());
+        assert_eq!(player.particles, 0);
     }
 
     #[test]
-    fn installed_supported_emitters_are_reported_without_proprietary_fixtures() {
-        let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
-        if !cache.join("raw/sfx").is_dir() {
-            return;
+    fn stoppable_effects_end_when_their_key_goes() {
+        let mut player = FxrPlayer::new(PathBuf::from("missing-fxr-test-cache"));
+        // An endless node: it only ends when stopped.
+        let tree = serde_json::json!({"id": 2, "root": {"type": 2200, "stateConfigMap": [0], "nodes": [], "configs": [{
+            "type": 1004,
+            "nodeAttributes": {"type": 128, "delay": 0.0, "duration": -1.0},
+            "emitter": {"type": 300, "interval": 0.05, "perEmission": 1.0, "totalEmissions": -1.0, "maxConcurrent": -1.0},
+            "emitterShape": {"type": 400, "direction": 0},
+            "directionSpread": {"type": 500},
+            "particleAttributes": {"type": 129, "duration": 0.1, "attachment": 1},
+            "particleModifier": {"type": 131, "speed": 0.0},
+            "appearance": {"type": 603}}]}});
+        player.lib.insert_for_test(2, tree);
+        player.request(2, (0, 2, 7), Transform::IDENTITY, true, true);
+        for _ in 0..30 {
+            player.advance(1.0 / 60.0);
         }
-        let mut player = FxrPlayer::new(cache);
-        let ids: Vec<_> = player.files.keys().copied().collect();
-        let mut count = 0;
-        for id in ids {
-            player.load(id);
-            let supported = player.templates[&id].len();
-            if supported != 0 {
-                count += supported;
-                println!("FXR {id}: {supported} supported emitters");
-            }
+        assert_eq!(player.effects.len(), 1);
+        player.effects[0].stop = true;
+        for _ in 0..30 {
+            player.advance(1.0 / 60.0);
         }
-        println!("supported emitter total: {count}");
-        assert!(count > 0, "no authored emitters can play");
+        assert!(player.effects.is_empty());
     }
 
     #[test]
-    fn quad_batches_have_one_triangle_pair_per_quad() {
-        let batch = QuadBatch {
-            positions: vec![[0.0; 3]; 8],
-            colors: vec![[1.0; 4]; 8],
-            uv: vec![[0.0; 2]; 8],
-            indices: vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7],
-            thresholds: vec![[0.0; 4]; 8],
-        };
-        let mesh = batch.mesh();
-        assert_eq!(mesh.count_vertices(), 8);
-        assert_eq!(mesh.indices().unwrap().len(), 12);
-        assert_eq!(QuadBatch::default().mesh().count_vertices(), 0);
+    fn batches_collect_six_vertices_per_quad() {
+        let mut b = Buf::default();
+        b.quad([Vec3::ZERO; 4], QUAD_UV, [1.0; 4], [0.0; 4]);
+        assert_eq!(b.pos.len(), 6);
+        assert_eq!(b.tan.len(), 6);
+    }
+
+    #[test]
+    fn soft_distance_applies_only_with_depth_blend() {
+        let cam = GlobalTransform::IDENTITY;
+        let corners = [Vec3::new(0.0, 0.0, -5.0); 4];
+        let off = serde_json::json!({});
+        assert_eq!(soften(&off, 1.0, &cam, corners).1, 0.0);
+        let on =
+            serde_json::json!({"depthBlend": true, "unkDepthBlend1": 1.0, "unkDepthBlend2": 0.5});
+        let (c, soft) = soften(&on, 2.0, &cam, corners);
+        assert!(soft > 0.0);
+        assert!(c[0].z > corners[0].z, "pulled toward the camera");
     }
 }

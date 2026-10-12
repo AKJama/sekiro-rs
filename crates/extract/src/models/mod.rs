@@ -6,6 +6,7 @@
 //! kept: FromSoftware front faces are clockwise in their left-handed space, which the mirror
 //! turns into the counter-clockwise front faces glTF expects (verified on single-sided meshes).
 
+mod cloth;
 pub(crate) mod glb;
 mod info;
 pub(crate) mod textures;
@@ -53,6 +54,7 @@ pub fn export(cache: &Path, ids: &[String], verbose: bool) -> Result<()> {
         let path = out.join(format!("{id}.glb"));
         std::fs::write(&path, &bytes)?;
         eprintln!("  wrote {} ({} KiB)", path.display(), bytes.len() / 1024);
+        cloth::export(&raw, &model, &out, id)?;
         if id == "c0000" {
             tool::export(cache, verbose)?;
         }
@@ -479,7 +481,7 @@ type TextureRef = (String, usize);
 fn material_textures(
     material: &flver::Material,
     mtd: Option<&mtd::Mtd>,
-) -> (Option<TextureRef>, Option<TextureRef>) {
+) -> (Option<TextureRef>, Option<TextureRef>, Option<TextureRef>) {
     struct Slot {
         param: String,
         path: String,
@@ -487,6 +489,7 @@ fn material_textures(
     }
     let mut albedo = Vec::new();
     let mut normal = Vec::new();
+    let mut metallic = Vec::new();
     for t in &material.textures {
         let from_mtd = mtd.and_then(|m| m.textures.iter().find(|mt| mt.kind == t.param));
         let path = if t.path.is_empty() {
@@ -506,11 +509,33 @@ fn material_textures(
             albedo.push(slot);
         } else if slot.param.contains("normalmap") || slot.param.contains("bumpmap") {
             normal.push(slot);
+        } else if slot.param.contains("metallicmap") {
+            metallic.push(slot);
+        }
+    }
+    // Hair and fur cards (`Fur_NTC*`): AlbedoMap_0 is the shared strand texture (grey strands with
+    // an alpha cutout), not an overlay; AlbedoMap_1 is a fur-coat colour map that is wrong on a
+    // card (the Owl's beard and brows turned into grey flaps), so it is left out. A card with no
+    // AlbedoMap_0 path takes the albedo that pairs with its normal map (`x_n` -> `x_a`).
+    let fur = mtd.is_some_and(|m| m.shader.contains("Fur_"));
+    if fur {
+        albedo.retain(|s| s.param.ends_with("albedomap_0"));
+        if albedo.is_empty()
+            && let Some(n) = normal.first()
+            && let Some(base) = textures::texture_stem(&n.path)
+                .to_ascii_lowercase()
+                .strip_suffix("_n")
+        {
+            albedo.push(Slot {
+                param: "albedomap_0".into(),
+                path: format!("{base}_a"),
+                uv: n.uv,
+            });
         }
     }
     let overlay = |s: &Slot| {
         let stem = textures::texture_stem(&s.path).to_ascii_lowercase();
-        stem.starts_with("fc_a_0000")
+        (!fur && stem.starts_with("fc_a_0000"))
             || ["damage", "expression", "_skin_"]
                 .iter()
                 .any(|w| stem.contains(w))
@@ -531,8 +556,18 @@ fn material_textures(
                 .position(|s| textures::texture_stem(&s.path).eq_ignore_ascii_case(&want))
         })
         .or_else(|| main(&normal, "normalmap_4"));
+    // The metallic mask of the same texture set (`x_a` -> `x_m`), else the first one listed.
+    let m = a
+        .and_then(|a| {
+            let stem = textures::texture_stem(&albedo[a].path).to_ascii_lowercase();
+            let want = format!("{}_m", stem.strip_suffix("_a")?);
+            metallic
+                .iter()
+                .position(|s| textures::texture_stem(&s.path).eq_ignore_ascii_case(&want))
+        })
+        .or(if metallic.is_empty() { None } else { Some(0) });
     let out = |list: &[Slot], i: Option<usize>| i.map(|i| (list[i].path.clone(), list[i].uv));
-    (out(&albedo, a), out(&normal, n))
+    (out(&albedo, a), out(&normal, n), out(&metallic, m))
 }
 
 fn build(raw: &Path, model: &Model, verbose: bool) -> Result<Vec<u8>> {
@@ -864,6 +899,30 @@ struct MaterialContext<'a> {
 }
 
 impl MaterialContext<'_> {
+    /// Texture index of the packed metallic-roughness map for a normal map and metallic mask.
+    fn metal_rough(
+        &mut self,
+        normal: Option<&str>,
+        metallic: Option<&str>,
+    ) -> Result<Option<usize>> {
+        let stem = |p: Option<&str>| p.map(|p| textures::texture_stem(p).to_ascii_lowercase());
+        let name = format!(
+            "{}+{}_mr",
+            stem(normal).unwrap_or_default(),
+            stem(metallic).unwrap_or_default()
+        );
+        let key = (name.clone(), Usage::MetalRough);
+        if let Some(&t) = self.texture_ids.get(&key) {
+            return Ok(t);
+        }
+        let t = self
+            .store
+            .metal_rough_png(normal, metallic)?
+            .map(|png| self.g.texture(&png, &name));
+        self.texture_ids.insert(key, t);
+        Ok(t)
+    }
+
     fn texture(&mut self, path: &str, usage: Usage) -> Result<Option<usize>> {
         let key = (textures::texture_stem(path).to_ascii_lowercase(), usage);
         if let Some(&t) = self.texture_ids.get(&key) {
@@ -895,7 +954,7 @@ fn material_json(
         .and_then(|n| part.flver.nodes.get(n))
         .map(|n| n.name.as_str())
         .unwrap_or("-");
-    let (albedo, normal) = material_textures(fm, mtd);
+    let (albedo, normal, metallic) = material_textures(fm, mtd);
     let mut pbr = json!({ "metallicFactor": 0.0, "roughnessFactor": 0.75 });
     if let Some((path, uv)) = &albedo
         && let Some(t) = ctx.texture(path, Usage::Color)?
@@ -912,6 +971,20 @@ fn material_json(
     {
         mat["normalTexture"] = json!({ "index": t, "texCoord": uv });
     }
+    // Shininess (normal map blue) and the metallic mask go in the glTF metallic-roughness slot.
+    let (npath, nuv) = normal
+        .as_ref()
+        .map_or((None, 0), |(p, uv)| (Some(p.as_str()), *uv));
+    let (mpath, muv) = metallic
+        .as_ref()
+        .map_or((None, 0), |(p, uv)| (Some(p.as_str()), *uv));
+    if let Some(t) = ctx.metal_rough(npath, mpath)? {
+        let pbr = &mut mat["pbrMetallicRoughness"];
+        pbr["metallicFactor"] = json!(1.0);
+        pbr["roughnessFactor"] = json!(1.0);
+        pbr["metallicRoughnessTexture"] =
+            json!({ "index": t, "texCoord": if npath.is_some() { nuv } else { muv } });
+    }
     if let Some(m) = mtd {
         let int = |name: &str| match m.param(name) {
             Some(mtd::ParamValue::Ints(v)) => v.first().copied().unwrap_or(0),
@@ -920,12 +993,19 @@ fn material_json(
         let (alpha_ref, blend) = (int("g_AlphaRef"), int("g_BlendMode"));
         if blend == 2 || blend >= 4 {
             mat["alphaMode"] = json!("BLEND");
-        } else if alpha_ref > 0 || blend == 1 {
+        } else if alpha_ref > 0 || blend == 1 || edge_cutout(mtd_name) {
             mat["alphaMode"] = json!("MASK");
             mat["alphaCutoff"] = json!((alpha_ref.max(1) as f32 / 255.0).max(0.3));
         }
     }
     Ok(mat)
+}
+
+/// MTD names with an `_e` (edge) part, e.g. `c1010_hat_e_decal`, cut their albedo alpha out even
+/// when the material carries no alpha reference (the straw hat's weave and fraying are holes).
+fn edge_cutout(mtd_name: &str) -> bool {
+    let name = mtd_name.to_ascii_lowercase();
+    name.contains("_e_") || name.ends_with("_e")
 }
 
 /// A dummy poly's frame in its parent node's space (FromSoftware space): +Z along `forward`,
