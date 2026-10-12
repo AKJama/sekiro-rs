@@ -5,6 +5,57 @@ use super::metrics::{self, FightMetrics, FightRecord, Trend};
 use super::*;
 use crate::lua_ai::NumberOnActivate;
 
+#[test]
+fn brain_checkpoint_context_keeps_reasoning_and_bounds_escaped_unicode() {
+    use super::coach::{CHECKPOINT_CONTEXT_BUDGET, PlanSet};
+    let mut plan = GamePlan {
+        notes: "Bait the counter, then finish quickly".into(),
+        sets: vec![PlanSet {
+            name: "press".into(),
+            description: "Stay close and punish recovery".into(),
+            ..Default::default()
+        }],
+        principles: vec!["Wolf waits for long setups".into()],
+        move_controls: vec![super::move_bandit::Control {
+            plan: "3000".into(),
+            confidence: 0.8,
+            lock: true,
+        }],
+        ..Default::default()
+    };
+    let boss = vec!["Short slashes build posture".into()];
+    let lessons = vec!["Old lesson".into(), "Punish the pause".into()];
+    let context = plan.checkpoint_context(Some("press"), &boss, &lessons);
+    eprintln!(
+        "Decisions coach context: {} bytes",
+        context.to_string().len()
+    );
+    assert_eq!(context["notes"], plan.notes);
+    assert_eq!(context["intent"], plan.sets[0].description);
+    assert_eq!(context["boss"][0], boss[0]);
+    assert_eq!(context["player"][0], plan.principles[0]);
+    assert_eq!(context["lessons"][1], lessons[1]);
+    assert_eq!(
+        context["confidence"][0],
+        serde_json::json!(["3000", 0.8, true])
+    );
+    let huge = "雪\"\\\n".repeat(400);
+    plan.notes = huge.clone();
+    plan.sets[0].description = huge.clone();
+    plan.principles = vec![huge.clone(); 6];
+    plan.move_controls = (0..32)
+        .map(|i| super::move_bandit::Control {
+            plan: huge.clone(),
+            confidence: i as f32 / 32.0,
+            lock: false,
+        })
+        .collect();
+    let context = plan.checkpoint_context(Some("press"), &vec![huge.clone(); 6], &vec![huge; 20]);
+    assert!(context.to_string().len() <= CHECKPOINT_CONTEXT_BUDGET);
+    assert!(!context["notes"].as_str().unwrap().is_empty());
+    assert!(!context["intent"].as_str().unwrap().is_empty());
+}
+
 fn start(t: &mut Tally, time: f32, side: Side, key: &str) {
     t.record(
         time,

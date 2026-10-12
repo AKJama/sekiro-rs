@@ -125,6 +125,58 @@ pub struct GamePlan {
     pub notes: String,
 }
 
+/// Serialized coach reasoning added to the checkpoint brief, including JSON overhead.
+pub const CHECKPOINT_CONTEXT_BUDGET: usize = 768;
+
+impl GamePlan {
+    pub fn checkpoint_context(
+        &self,
+        active: Option<&str>,
+        boss_principles: &[String],
+        lessons: &[String],
+    ) -> serde_json::Value {
+        let mut controls: Vec<_> = self.move_controls.iter().collect();
+        controls.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
+        let mut context = serde_json::json!({
+            "notes": clip(&self.notes, 200),
+            "intent": clip(self.sets.iter().find(|s| Some(s.name.as_str()) == active)
+                .map_or("", |s| s.description.as_str()), 100),
+            "boss": boss_principles.iter().take(2).map(|s| clip(s, 70)).collect::<Vec<_>>(),
+            "player": self.principles.iter().take(2).map(|s| clip(s, 70)).collect::<Vec<_>>(),
+            "lessons": lessons.iter().rev().take(2).map(|s| clip(s, 90)).collect::<Vec<_>>()
+                .into_iter().rev().collect::<Vec<_>>(),
+            "confidence": controls.into_iter().take(3).map(|c|
+                serde_json::json!([c.plan, (f64::from(c.confidence) * 100.0).round() / 100.0, c.lock]))
+                .collect::<Vec<_>>()
+        });
+        while context.to_string().len() > CHECKPOINT_CONTEXT_BUDGET {
+            let mut trimmed = false;
+            for key in ["confidence", "lessons", "boss", "player"] {
+                let rows = context[key].as_array_mut().unwrap();
+                if !rows.is_empty() {
+                    if key == "lessons" {
+                        rows.remove(0);
+                    } else {
+                        rows.pop();
+                    }
+                    trimmed = true;
+                    break;
+                }
+            }
+            if !trimmed {
+                for key in ["notes", "intent"] {
+                    let text = context[key].as_str().unwrap();
+                    if !text.is_empty() {
+                        context[key] = clip(text, text.chars().count() / 2).into();
+                        break;
+                    }
+                }
+            }
+        }
+        context
+    }
+}
+
 fn read_checkpoint_prefs<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<std::collections::BTreeMap<String, std::collections::BTreeMap<String, f32>>, D::Error> {

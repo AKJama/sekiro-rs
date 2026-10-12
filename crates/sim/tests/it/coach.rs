@@ -432,7 +432,11 @@ fn fight_one_makes_no_calls_and_a_plan_that_arrives_in_the_respawn_plays_from_fi
         let c = coach.borrow();
         let brief = c.checkpoint_briefs[0].as_deref().expect("a brief");
         eprintln!("checkpoint input ({} bytes): {brief}", brief.len());
-        assert!(brief.len() < 200, "{brief}");
+        // Deliberately raised from 200: up to 768 bytes of coach intent plus scalars.
+        assert!(brief.len() < 1000, "{brief}");
+        let input: serde_json::Value = serde_json::from_str(brief).unwrap();
+        assert_eq!(input["coach"]["notes"], "he deflects thrusts");
+        assert!(!input["coach"]["intent"].as_str().unwrap().is_empty());
         assert!(
             brief.contains("\"why\":\"start\"") && brief.contains("\"set\":\"a\""),
             "{brief}"

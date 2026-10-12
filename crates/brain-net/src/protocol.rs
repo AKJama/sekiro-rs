@@ -330,7 +330,7 @@ pub(crate) fn plan_from_text(text: &str) -> Result<GamePlan, Failure> {
 /// Instructions of the checkpoint chooser.
 pub(crate) fn chooser_instructions(actions: &BossActions) -> String {
     format!(
-        "{}: win fast; break+hit; damage/min; low boss damage. Passive>35% fails. Counters/Mikiri/jump/deflect/guard fail. Compare arsenal rates after 3 uses. Local moves; choose set.",
+        "{}: follow coach notes, intent, principles and newest lessons; confidence rows are [plan,confidence,lock]. Adapt the coach's plan to the moment using set descriptions; keep only when its intent still fits. win fast; break+hit; damage/min; low boss damage. Passive>35% fails. Counters/Mikiri/jump/deflect/guard fail. Compare arsenal rates after 3 uses. Guarding without a threat fails. Local moves; choose set.",
         actions.chr
     )
 }

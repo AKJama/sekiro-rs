@@ -1,5 +1,14 @@
 # Status
 
+## Decisions coach context and idle guards (2026-10-12)
+
+Decisions checkpoint input now includes up to 768 serialized bytes of coach notes, active-set intent, principles, newest lessons and move confidence, with a documented trimming order.
+The offline size fixture measures 1968 bytes for the full body with four maximum-length set descriptions.
+Idle guards now produce failure evidence for their plan/set and both samplers; they never reset the attack clock, and the six-second deadline requests an allowed attack instead of trusting Lua to attack.
+The real-data scripted Genichiro regression fails with the old harmless-guard scoring and passes with the fix.
+All seven required release filters and all 42 brain-net tests pass, as do workspace/all-target Clippy with warnings denied and the formatting check.
+All builds used target/alt-dc and six jobs; verification used offline fakes, with no commits, git-state changes or writes to the protected data/log directories.
+
 Last updated 12 October 2026.
 Read this first in a new session, then `AGENTS.md` and `docs/DESIGN.md`.
 How much of the game is done overall: `docs/PROGRESS.md`.

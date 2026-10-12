@@ -1261,8 +1261,36 @@ fn the_coach_mode_checkpoint_request_is_tiny() {
             description: "x".repeat(140),
         })
         .collect();
-    let brief = r#"{"why":"half_hp","set":"bait","boss_hp":0.48,"boss_posture":0.2,"wolf_hp":0.91,"wolf_posture":0.12,"dist":3.4}"#;
-    req.brief = Some(brief.into());
+    let plan = sekiro_sim::brain::GamePlan {
+        notes: "Pressure him; answer his counter rather than repeat a deflected combo. ".repeat(6),
+        sets: vec![sekiro_sim::brain::coach::PlanSet {
+            name: "bait".into(),
+            description: "A short defensive beat, then punish his recovery".into(),
+            ..Default::default()
+        }],
+        principles: vec![
+            "Wolf waits for slow setups".into(),
+            "He deflects predictable extensions".into(),
+        ],
+        move_controls: vec![sekiro_sim::brain::move_bandit::Control {
+            plan: "3000".into(),
+            confidence: 0.85,
+            lock: true,
+        }],
+        ..Default::default()
+    };
+    let mut input = json!({"why":"half_hp","set":"bait","boss_hp":0.48,
+        "boss_posture":0.2,"wolf_hp":0.91,"wolf_posture":0.12,"dist":3.4});
+    input["coach"] = plan.checkpoint_context(
+        Some("bait"),
+        &["Attack until deflected, then answer the counter".into()],
+        &[
+            "Old setup failed".into(),
+            "Punish recovery with short slashes".into(),
+        ],
+    );
+    let brief = input.to_string();
+    req.brief = Some(brief.clone());
     // Everything the full request would carry stays out of the body.
     req.memory = Some(Memory::new("c1010").summary());
     brain.submit(&req);
@@ -1272,11 +1300,12 @@ fn the_coach_mode_checkpoint_request_is_tiny() {
     let body = mock.requests.recv().unwrap();
     let bytes = serde_json::to_string(&body).unwrap().len();
     eprintln!("coach-mode checkpoint request body: {bytes} bytes");
-    assert!(bytes < 1200, "{bytes} bytes: {body}");
+    // Raised from 1200 for 768 bytes of coach reasoning, JSON escaping and its instructions.
+    assert!(bytes < 2600, "{bytes} bytes: {body}");
     assert_eq!(body["input"], brief);
-    assert!(brief.len() < 150, "a few numbers, not the memory");
+    assert!(brief.len() < 1000, "bounded reasoning plus scalars");
     let text = body["questions"][0]["instructions"].as_str().unwrap();
-    assert!(text.len() < 200 && !text.contains("tally"), "{text}");
+    assert!(text.len() < 500 && !text.contains("tally"), "{text}");
     assert!(
         text.contains("damage/min")
             && text.contains("low boss damage")
@@ -1284,6 +1313,8 @@ fn the_coach_mode_checkpoint_request_is_tiny() {
             && text.contains("Counters/Mikiri/jump/deflect/guard fail")
             && text.contains("Compare arsenal rates after 3 uses")
             && text.contains("choose set")
+            && text.contains("follow coach notes, intent, principles and newest lessons")
+            && text.contains("Adapt the coach's plan to the moment")
     );
     // Input tokens are counted per call kind.
     let [decide, coach] = brain.call_stats();

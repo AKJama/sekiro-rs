@@ -383,6 +383,9 @@ pub struct BrainDriver {
     wolf_open: Option<String>,
     /// A tactic's exchange is open in the tally.
     tactic_open: bool,
+    idle_guard_secs: f32,
+    guard_exchange: bool,
+    stall_recovery: bool,
     fight: FightState,
     /// The record of the last finished fight, for tests and the summary.
     pub last_record: Option<FightRecord>,
@@ -715,6 +718,9 @@ impl BrainDriver {
             boss_open: None,
             wolf_open: None,
             tactic_open: false,
+            idle_guard_secs: 0.0,
+            guard_exchange: false,
+            stall_recovery: false,
             fight: FightState {
                 phase_changes: vec![(0.0, actions.chr.into())],
                 ..FightState::default()
@@ -1584,6 +1590,18 @@ impl BrainDriver {
         if self.fight_over {
             return;
         }
+        if self.anti_stall
+            && !self.stall_recovery
+            && self.idle_guard_secs >= 0.5
+            && self.time - self.pacing.last_attack >= limits::MAX_PASSIVE_SECS
+        {
+            // A guard goal or an unstartable plan can keep Lua from opening another slot.
+            // Replan through the existing hook, without interrupting a live Wolf attack.
+            ai.state.replan = true;
+            self.stall_recovery = true;
+            self.ready = None;
+            self.picked = false;
+        }
         if self.break_pending {
             self.break_pending = false;
             let choices: Vec<_> = self
@@ -1678,7 +1696,9 @@ impl BrainDriver {
             && (!self.set.is_empty()
                 || self.opener.is_some()
                 || self.mid_plan.is_some()
-                || self.staged_mid.is_some())
+                || self.staged_mid.is_some()
+                || (self.anti_stall
+                    && self.time - self.pacing.last_attack >= limits::MAX_PASSIVE_SECS))
         {
             self.pick_next(ai, hit_radius);
         }
@@ -1795,7 +1815,7 @@ impl BrainDriver {
                 self.rng.next_f32() < factor
             });
         let is_opener = opener.is_some();
-        let plan = if let Some(plan) = opener {
+        let mut plan = if let Some(plan) = opener {
             if self.brain_moves {
                 self.move_context =
                     super::move_bandit::context(&self.move_observation, &self.move_fighter.last);
@@ -1818,7 +1838,10 @@ impl BrainDriver {
                                 .is_none_or(|p| self.pacing.eligible(p, self.time, self.actions)))
                 })
                 .collect();
-            if self.set.is_empty() {
+            if self.set.is_empty()
+                && (!self.anti_stall
+                    || self.time - self.pacing.last_attack < limits::MAX_PASSIVE_SECS)
+            {
                 return;
             }
             let view: Vec<Weighted> = eligible
@@ -1845,6 +1868,26 @@ impl BrainDriver {
                 }
             }
         };
+        if self.anti_stall
+            && (self.stall_recovery
+                || (plan.is_none()
+                    && self.time - self.pacing.last_attack >= limits::MAX_PASSIVE_SECS))
+        {
+            // Lua is not a guaranteed attack. Use an allowed attack from this boss's table.
+            plan = self
+                .actions
+                .actions
+                .iter()
+                .filter(|a| a.kind == super::actions::ActionKind::Attack)
+                .find_map(|a| {
+                    let p = self.actions.parse(&a.id.to_string()).ok()?;
+                    (!self.banned.contains(&p.value())
+                        && self.game_plan.as_ref().is_none_or(|plan| {
+                            !plan.avoid.iter().any(|avoid| avoid.choice == p.value())
+                        }))
+                    .then_some(p)
+                });
+        }
         if !self.persist && !is_opener {
             self.set.clear();
         }
@@ -2233,12 +2276,18 @@ impl BrainDriver {
             }
         }
         let (tally, memory, brief) = if self.coach_mode {
-            // The chooser sees a few numbers and the set names, nothing else (the habits and
-            // the history are the coach's): about 100 tokens.
+            // Scalars plus bounded coach reasoning; full histories remain with the coach.
             let r2 = |x: f32| (f64::from(x) * 100.0).round() / 100.0;
-            let brief = json!({"why": why, "set": active, "boss_hp": r2(obs.boss.hp),
+            let mut brief = json!({"why": why, "set": active, "boss_hp": r2(obs.boss.hp),
                 "boss_posture": r2(obs.boss.posture), "wolf_hp": r2(obs.wolf.hp),
                 "wolf_posture": r2(obs.wolf.posture), "dist": r2(obs.dist)});
+            if let Some(plan) = &self.game_plan {
+                brief["coach"] = plan.checkpoint_context(
+                    active.as_deref(),
+                    &self.boss_knowledge.principles,
+                    &self.memory.coach.lessons,
+                );
+            }
             (Default::default(), None, Some(brief.to_string()))
         } else {
             (self.tally.summary(), Some(self.memory_summary()), None)
@@ -2369,6 +2418,7 @@ impl BrainDriver {
                 // An attack step started (a back step does not count).
                 self.fight.metrics.attack_started(t);
                 self.pacing.last_attack = t;
+                self.stall_recovery = false;
                 if let Some(use_) = self.fight.uses.last_mut()
                     && self.fight.runs.last().is_some_and(|r| r.0 == use_.start)
                 {
@@ -2678,6 +2728,30 @@ impl BrainDriver {
         for e in &events {
             self.tally.record(t, e.clone());
         }
+        let guarding = self.move_observation.boss.guarding && self.boss_open.is_none();
+        let threatened = self.move_observation.wolf.attacking;
+        if guarding && !threatened && !self.quiet(duel) {
+            self.idle_guard_secs += self.step_dt;
+            if !self.tactic_open && self.boss_open.is_none() && !self.guard_exchange {
+                self.tally.record(
+                    t,
+                    TallyEvent::Start {
+                        side: Side::Boss,
+                        key: "guard".into(),
+                    },
+                );
+                self.guard_exchange = true;
+            }
+            if self.idle_guard_secs >= 0.5 {
+                self.tally.idle_guard();
+            }
+        } else {
+            self.idle_guard_secs = 0.0;
+        }
+        if self.guard_exchange && !guarding {
+            self.tally.record(t, TallyEvent::End { side: Side::Boss });
+            self.guard_exchange = false;
+        }
         let (p, e) = (duel.player.body.position, duel.enemy.body.position);
         let frame = WolfFrame {
             t,
@@ -2744,7 +2818,7 @@ impl BrainDriver {
                 let (success, failure) = super::adaptation::signal(x);
                 failure > success
             } else {
-                o.punished
+                o.punished || o.idle_guard
             };
             self.streaks.record(&x.key, repelled);
         }
@@ -2816,7 +2890,9 @@ impl BrainDriver {
             f.uses += 1;
             f.deflected_all += u32::from(use_.attacks > 0 && use_.attacks == use_.deflected);
             f.fatal += u32::from(use_.fatal);
-            f.failed += u32::from(use_.failed && !use_.fatal && use_.attacks != use_.deflected);
+            f.failed += u32::from(
+                use_.failed && !use_.fatal && (use_.attacks == 0 || use_.attacks != use_.deflected),
+            );
         }
     }
 
@@ -2834,6 +2910,12 @@ impl BrainDriver {
             else {
                 continue;
             };
+            if x.outcome.idle_guard
+                && let Some(use_) = self.fight.uses.iter_mut().find(|u| u.start == start)
+                && !use_.settled
+            {
+                use_.failed = true;
+            }
             if x.key
                 .parse::<i32>()
                 .is_ok_and(|a| (3000..3100).contains(&a))
@@ -3537,6 +3619,9 @@ impl BrainDriver {
         self.boss_open = None;
         self.wolf_open = None;
         self.tactic_open = false;
+        self.idle_guard_secs = 0.0;
+        self.guard_exchange = false;
+        self.stall_recovery = false;
         self.fight_over = false;
         self.fight_no += 1;
         self.bandit_fight_start = self.bandit_choices.len();
@@ -4313,6 +4398,41 @@ mod tests {
         assert_eq!(d.fight.break_plans["3000"].hit, 1);
         assert_eq!(d.fight.break_plans["3000"].whiffed, 2);
         assert_eq!(d.fight.break_plans["3000"].punished, 1);
+    }
+
+    #[test]
+    fn brain_idle_guard_fails_a_plan_even_when_no_attack_could_start() {
+        let mut d = learning_driver();
+        d.fight
+            .runs
+            .push((0.0, "guard1>3000".into(), "press".into()));
+        d.fight.uses.push(PlanUse {
+            text: "guard1>3000".into(),
+            start: 0.0,
+            last_attack: None,
+            attacks: 0,
+            deflected: 0,
+            failed: false,
+            fatal: false,
+            settled: false,
+            break_response: false,
+        });
+        d.settle(&[Exchange {
+            phase: "c1010".into(),
+            side: Side::Boss,
+            key: "guard1".into(),
+            start: 0.0,
+            end: Some(1.0),
+            outcome: super::super::tally::Outcome {
+                idle_guard: true,
+                ..Default::default()
+            },
+        }]);
+        d.settle_plans(true);
+        assert_eq!(d.fight.failures["guard1>3000"].failed, 1);
+        assert_eq!(d.fight.by_plan["guard1>3000"].whiffed, 1);
+        assert_eq!(d.streaks.get("guard1"), 1);
+        assert_eq!(d.fight.metrics.snapshot(d.time).boss_attacks, 0);
     }
 
     fn learning_driver() -> BrainDriver {

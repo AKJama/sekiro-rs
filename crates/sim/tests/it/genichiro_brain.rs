@@ -184,6 +184,66 @@ fn actions(duel: &mut Duel) -> Vec<i32> {
 }
 
 #[test]
+fn genichiro_brain_idle_guard_is_failed_and_cannot_stall() {
+    let Some(mut duel) = load(3.0) else { return };
+    let plan = GENICHIRO.parse("guard1>3005").unwrap();
+    duel.set_brain(
+        Box::new(ScriptedBrain::new(plan.clone(), plan, u32::MAX, 0.0)),
+        false,
+    )
+    .unwrap();
+    duel.boss_brain.as_mut().unwrap().anti_stall = true;
+    let mut starts = Vec::new();
+    let mut guards = 0;
+    for i in 0..1200 {
+        let r = duel.step(&InputFrame::default(), DT);
+        if r.enemy.clip_started {
+            if r.enemy.animation.as_deref() == Some("a000_003100") {
+                guards += 1;
+            }
+            if r.enemy
+                .animation
+                .as_deref()
+                .and_then(|s| s.strip_prefix("a000_"))
+                .and_then(|s| s.parse::<i32>().ok())
+                .is_some_and(|id| (3000..3100).contains(&id))
+            {
+                starts.push(i as f32 * DT);
+            }
+        }
+    }
+    let d = duel.boss_brain.as_ref().unwrap();
+    eprintln!("idle guards {guards}, attacks {starts:?}");
+    assert!(guards > 0);
+    assert!(!starts.is_empty() && starts[0] <= 7.5, "{starts:?}");
+    assert!(
+        starts.windows(2).all(|pair| pair[1] - pair[0] <= 7.5),
+        "{starts:?}"
+    );
+    assert!(20.0 - starts.last().unwrap() <= 7.5, "{starts:?}");
+    let counts = &d.tally.summary().boss.0;
+    eprintln!("counts {counts:?}");
+    assert!(
+        counts
+            .iter()
+            .any(|(key, c)| key == "guard1" && c.whiffed > 0),
+        "idle guard must fail"
+    );
+    let d = duel.boss_brain.as_mut().unwrap();
+    d.end_fight(sekiro_sim::brain::memory::FightEnd::BossWon);
+    let record = d.last_record.as_ref().unwrap();
+    assert_eq!(
+        record.metrics.boss_attacks as usize,
+        starts.len(),
+        "guards must not count as attacks"
+    );
+    assert!(
+        record.metrics.passive_share() > 0.05,
+        "idle guards must stay passive"
+    );
+}
+
+#[test]
 fn scripted_genichiro_attacks_idle_god_wolf_for_sixty_seconds() {
     let Some(mut duel) = load(6.0) else { return };
     duel.set_brain(BrainKind::Scripted.build("c7100"), false)

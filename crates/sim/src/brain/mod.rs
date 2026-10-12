@@ -76,8 +76,8 @@ pub struct BrainRequest {
     /// `keep`; not part of the input text).
     #[serde(skip)]
     pub sets: Vec<SetOffer>,
-    /// Coach mode: the whole input text of the checkpoint chooser, a few numbers (about 100
-    /// tokens); a hosted controller sends this instead of the serialized request.
+    /// Coach mode: checkpoint scalars and at most 768 bytes of coach reasoning;
+    /// a hosted controller sends this instead of the serialized request.
     #[serde(skip)]
     pub brief: Option<String>,
     /// Plan texts a hosted controller must not offer this time (deflected or guarded three

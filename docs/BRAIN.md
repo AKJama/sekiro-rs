@@ -571,7 +571,7 @@ Strict coach output expresses the same preferences as `checkpoint_prefs: [{"chec
 Both representations deserialize into the same map; saved plans use the map.
 The coach must translate actionable notes and player principles into plan weights, avoids/retries, counter weights and checkpoint preferences or hints.
 Those structured fields execute its judgement on the local path; free prose is retained for reasoning and display, not interpreted with keyword heuristics.
-The previous Decisions checkpoint brief contained seven scalar fields and set descriptions, without notes, per-attack outcomes or habits; it had no extra note-reading path.
+The Decisions checkpoint brief includes bounded coach reasoning alongside seven scalar fields and set descriptions (see "Decisions request").
 
 Reward measures cumulative metric deltas from selection until the next checkpoint, four seconds, phase hand-over, or fight end, whichever comes first.
 All HP and posture damage terms are fractions of a full bar, accumulated without refunding recovery or healing.
@@ -736,6 +736,15 @@ Actual `input` contains the compact serialization of `BrainRequest`.
 Bodies are emitted as compact JSON; indentation here is for reading.
 
 ### Decisions request
+
+In coach mode (`--checkpoint decisions`), input contains `why`, active `set`, both fighters' HP/posture fractions and `dist`, plus a `coach` context.
+That context carries the active plan's notes, the current set's intent, the first two boss and player principles, the newest two retained review lessons, and up to three move controls ranked by confidence as `[plan, confidence, lock]`.
+All offered sets' descriptions remain in the choices, including the current set's description.
+The chooser follows the coach's plan and intent while adapting its set choice to the moment.
+Coach context is capped at 768 serialized UTF-8 bytes, including JSON overhead and escaping; the brief size test deliberately permits 1000 bytes instead of 200 to accommodate it.
+Initial field limits are 200 characters of notes, 100 of intent, 70 per principle and 90 per lesson.
+If it still exceeds the byte cap, trim lowest-confidence controls first, then oldest lessons, lowest-ranked boss principles, lowest-ranked player principles, notes, and finally intent.
+String trimming preserves UTF-8 boundaries; full histories and move tables stay with the coach.
 
 `POST {base_url}/v1/decisions`
 
@@ -1004,7 +1013,11 @@ They are in the scorecard line, the trend (`apm`, `dpm`, `passive`) and the coac
 The driver enforces, for every hosted brain (`BrainDriver::anti_stall`), however the model answers:
 
 - A plan in a set must contain an attack step (`has_attack`); the opener is exempt.
-- After `MAX_PASSIVE_SECS` (6 s) without an attack starting, only plans that reach an attack within `OVERDUE_LEAD_SECS` (1 s of tactics) are eligible; with none in the active set his own AI's act runs. A plan whose lead-in (the tactics' lifetime caps) could outlast the time left is not eligible earlier either.
+- After `MAX_PASSIVE_SECS` (6 s) without an attack starting, only plans that reach an attack within `OVERDUE_LEAD_SECS` (1 s of tactics) are eligible; an empty or Lua fallback instead requests an allowed attack from the boss's own table.
+  A plan whose lead-in (the tactics' lifetime caps) could outlast the time left is not eligible earlier either.
+- Guarding never resets the attack clock.
+  Holding guard without a signalled Wolf attack for 0.5 s records `idle_guard` failure evidence, represented in compact outcome counts as a whiff for the responsible tactic, plan and set.
+  After the 6 s attack deadline, an idle guard replans once through the existing act hook into an allowed attack, so an unstartable defensive plan cannot keep recycling guard.
 - At most one plan with a `back_off`, `retreat` or back step per `RETREAT_INTERVAL_SECS` (5 s).
 
 There is no rule against retreating beyond that rate: the tally scores tactics (punished when Wolf hits him during one) and the coach should learn from it.

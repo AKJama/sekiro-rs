@@ -254,7 +254,7 @@ impl Fighter {
             .key
             .parse::<i32>()
             .is_ok_and(|id| (3000..3100).contains(&id));
-        if !attack && !x.outcome.punished {
+        if !attack && !x.outcome.punished && !x.outcome.idle_guard {
             return;
         }
         let (success, failure) = super::adaptation::signal(x);

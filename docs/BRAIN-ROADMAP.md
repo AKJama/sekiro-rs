@@ -51,6 +51,25 @@ What the evidence showed:
 | 5 | `--brain-stage` presets for Genichiro, like the Owl's, from the frozen snapshots below | To do |
 | 6 | Playtest A/B: new brain against the frozen ones, same player | To do |
 
+## Decisions after the outside review (2026-10-12)
+
+An Opus reviewer with no prior context read the brain and the player's logs; the player and Claude agreed on the following.
+
+- Metrics: winning comes first, but with multi-phase bosses the player rarely wins anyway, so once the boss wins reliably the main signal is how fast he kills Wolf (what made the Owl strong), then breaks converted, then damage per minute.
+- No artificial variety pressure: a move that works should be used as much as it keeps working.
+  Evidence must be per situation (distance, Wolf's posture, what Wolf is doing) and favour recent fights, so a move fades only once the player has learned it, and only in the situations where it stopped working.
+- The fundamentals come before any chooser: attacks are offered only when their reach and first-hit time fit where Wolf will be; a break is punished with the fastest reachable hit; idle time and guarding with no threat count against the choice that caused them.
+- Combo planning from posture: with per-move and per-combo posture damage, hit timing and Wolf's posture in the context, the boss can start a breaking combo early enough to keep a fast follow-up for the break (what the Owl's coach discovered by itself).
+- One fast learner: the checkpoint bandit and the duplicate per-attack store go; one bandit keyed by move, fed by every attack (including Lua's), with each move's overall rate as the prior for each situation, and Wolf's current action and habits in its context.
+- The Decisions chooser stays as an option for players with a key, now with the coach's context, until an A/B against the improved bandit settles it.
+- The coach: one call after each fight with the moves table, the move sheet and the trends, giving priors, avoids, exploration and at most three hypotheses; the review folds into every fifth after-fight call; mid-fight calls are reduced, not removed.
+
+| Task | What | Status |
+|---|---|---|
+| A | Move sheet as a gate and a feature (reach and first-hit time against Wolf's predicted position), fastest reachable break punish, idle and no-threat guard penalties, per-move and per-combo posture damage | Next |
+| B | One merged bandit: every attack, keyed by move, shared priors across situations, Wolf's current action, posture and habits in the context, recency weighting; checkpoint bandit and duplicate store removed; memory migration | After A |
+| C | Coach narrowed and reviews folded in; mid-fight calls reduced; Decisions A/B | After B |
+
 ## Frozen brains
 
 Snapshots are copies; play from them only through `--brain-stage` (which works on a temporary copy), never by copying them back into `logs/memory/`.
@@ -81,3 +100,4 @@ Snapshots are copies; play from them only through `--brain-stage` (which works o
 
 - 2026-10-12: Problem found from the player's 57 Genichiro fights; steps 1 to 4 started; Owl and Genichiro brains frozen.
 - 2026-10-12: Steps 1 to 4 landed in e964560; the player is running the Decisions-from-scratch test on the old exe (`target/play`); the new brain is in `target/play-next`.
+- 2026-10-12: Decisions now receives bounded coach reasoning; the idle-guard reproduction confirmed defensive tactics had no failure evidence, and the attack deadline no longer assumes a Lua fallback will attack.

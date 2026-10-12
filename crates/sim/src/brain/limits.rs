@@ -7,7 +7,7 @@
 //!   tactic, a back step) is never picked. The coach's `opener` is exempt.
 //! - **Passive limit.** After [`MAX_PASSIVE_SECS`] without an attack starting, only plans that
 //!   reach an attack within [`OVERDUE_LEAD_SECS`] are eligible; when the active set has none,
-//!   his own AI's act runs (it attacks). A plan is also not eligible when its steps before the
+//!   an allowed attack from the boss's table runs. A plan is also not eligible when its steps before the
 //!   first attack could take longer than the time left (`lead_secs`, the sum of the tactics'
 //!   lifetime caps) plus that margin.
 //! - **Retreat rate.** At most one plan with a `back_off`, `retreat` or back step per

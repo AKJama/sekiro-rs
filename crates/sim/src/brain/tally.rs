@@ -54,6 +54,7 @@ impl Side {
 /// How one exchange ended.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct Outcome {
+    pub idle_guard: bool,
     pub progress: bool,
     pub broke: bool,
     pub countered: Option<CounterKind>,
@@ -85,15 +86,15 @@ pub struct Exchange {
 }
 
 impl Exchange {
-    /// Only attacks can whiff. Boss movement/guard tactics and back steps remain exchanges
-    /// for usage and punishment, but contacting nothing is their normal outcome.
+    /// Attacks can whiff; an idle guard also uses this compact failure column.
+    /// Other tactics and back steps retain normal non-contact outcomes.
     pub fn whiffed(&self) -> bool {
         let attack = self.side == Side::Wolf
             || self
                 .key
                 .parse::<i32>()
                 .is_ok_and(|id| (3000..3100).contains(&id));
-        attack && self.outcome.whiffed()
+        self.outcome.idle_guard || (attack && self.outcome.whiffed())
     }
 }
 
@@ -349,6 +350,12 @@ impl Default for Tally {
 }
 
 impl Tally {
+    /// Guard held without an incoming attack is failure evidence for the current exchange.
+    pub fn idle_guard(&mut self) {
+        if let Some(x) = self.latest_mut(Side::Boss) {
+            x.outcome.idle_guard = true;
+        }
+    }
     /// Applies an event at fight time `time`.
     pub fn record(&mut self, time: f32, event: TallyEvent) {
         match event {
