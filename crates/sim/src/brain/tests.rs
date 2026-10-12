@@ -509,10 +509,12 @@ fn real_owl_datasets_migrate_without_losing_totals() {
         std::fs::copy(&source, &legacy).unwrap();
         let original = std::fs::read(&legacy).unwrap();
         let mut old: Memory = serde_json::from_slice(&original).unwrap();
-        // Migration changes the schema version while preserving every evidence field.
+        // Raw evidence stays exact; recent attack masses are newly derived and tested separately.
         old.version = memory::MEMORY_VERSION;
         let paths = memory::LayerPaths::new(&legacy, "default");
         let (boss, profile) = paths.load("c5060").unwrap();
+        assert!(!profile.attack_learning.is_empty());
+        old.attack_learning = profile.attack_learning.clone();
         assert_eq!(profile, old);
         assert_eq!(boss.evidence.fights, old.fights);
         assert_eq!(boss.evidence.boss_wins, old.boss_wins);
@@ -559,15 +561,15 @@ fn both_full_layers_fit_coach_budget() {
         actions: input.overall.clone(),
         plans: input.overall.clone(),
         break_plans: input.overall.clone(),
-        principles: vec!["Ã§â€¢Å’".repeat(90); 6],
+        principles: vec!["界".repeat(90); 6],
         bans: (0..8)
             .map(|i| coach::Avoid {
                 choice: format!("300{i}"),
-                reason: "Ã§â€¢Å’".repeat(80),
+                reason: "界".repeat(80),
             })
             .collect(),
     };
-    input.principles = vec!["Ã§â€¢Å’".repeat(90); 6];
+    input.principles = vec!["界".repeat(90); 6];
     input.played.as_mut().unwrap().boss_principles = input.boss_knowledge.principles.clone();
     input.played.as_mut().unwrap().boss_bans = input.boss_knowledge.bans.clone();
     input.phase = "mid".into();
@@ -633,7 +635,10 @@ fn memory_round_trips_and_merges_fights() {
     assert_eq!(again.wolf["AttackCombo1"].hit, 3);
     assert_eq!(again.habits.answers["3000"].to["deflect"], 3);
     let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.contains("\"version\": 3"), "{text}");
+    assert!(
+        text.contains(&format!("\"version\": {}", memory::MEMORY_VERSION)),
+        "{text}"
+    );
     assert!(!path.with_extension("json.tmp").exists());
     let _ = std::fs::remove_file(&path);
 }
@@ -1090,7 +1095,10 @@ fn memory_v1_migrates_and_keeps_ten_fights() {
     .unwrap();
     let (mut m, how) = Memory::load(&path, "c1010");
     assert_eq!(how, Loaded::Read);
-    assert_eq!((m.version, m.fights, m.history.len()), (3, 2, 0));
+    assert_eq!(
+        (m.version, m.fights, m.history.len()),
+        (memory::MEMORY_VERSION, 2, 0)
+    );
     assert_eq!(m.boss["3000"].n, 5);
     for i in 0..13 {
         m.push_record(record(i, 0, None));
@@ -1099,7 +1107,10 @@ fn memory_v1_migrates_and_keeps_ten_fights() {
     assert_eq!(m.history[0].metrics.deflected, 3);
     m.save(&path).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.contains("\"version\": 3"), "{text}");
+    assert!(
+        text.contains(&format!("\"version\": {}", memory::MEMORY_VERSION)),
+        "{text}"
+    );
     let (back, _) = Memory::load(&path, "c1010");
     assert_eq!(back, m);
     assert_eq!(back.summary().trend.defl.len(), 3);
@@ -1208,10 +1219,13 @@ fn set(name: &str, plans: &[(&str, f32)]) -> PlanSet {
 
 fn good_plan() -> GamePlan {
     GamePlan {
+        explore: Default::default(),
+        move_controls: Vec::new(),
+        lessons: Vec::new(),
         checkpoint_prefs: Default::default(),
         boss_phase: "c1010".into(),
         counter_weights: Default::default(),
-        version: 1,
+        version: coach::GAME_PLAN_VERSION,
         opener: "hold3.5>walk_in4".into(),
         sets: vec![
             set("press", &[("3000+3001", 2.0), ("3008", 1.0)]),
@@ -1275,7 +1289,7 @@ fn coach_caps_lua_and_keeps_bounded_principles_and_break_plans() {
             weight: 50.0,
         },
     ]);
-    p.principles = vec!["Ã§â€¢Å’".repeat(120); 8];
+    p.principles = vec!["界".repeat(120); 8];
     p.on_wolf_break = vec![
         coach::WeightedChoice {
             plan: "3000".into(),
@@ -1441,7 +1455,7 @@ fn sets_cannot_hold_plans_without_an_attack_or_in_the_avoid_list() {
 #[test]
 fn names_counts_and_notes_are_bounded() {
     let mut plan = good_plan();
-    plan.notes = "ÃƒÆ’Ã‚Â©".repeat(NOTES_MAX + 50);
+    plan.notes = "é".repeat(NOTES_MAX + 50);
     plan.start_set = "nope".into();
     plan.sets.push(set("bad name!", &[("3000", 1.0)]));
     plan.sets.push(set("keep", &[("3000", 1.0)]));
@@ -1498,6 +1512,9 @@ fn busy_input() -> CoachInput {
         memory.push_record(record(3 + i, i, Some(30.0 + i as f32)));
     }
     let big_plan = GamePlan {
+        explore: Default::default(),
+        move_controls: Vec::new(),
+        lessons: Vec::new(),
         checkpoint_prefs: Default::default(),
         boss_phase: "c1010".into(),
         counter_weights: Default::default(),
@@ -1543,6 +1560,7 @@ fn busy_input() -> CoachInput {
         );
     }
     CoachInput {
+        digest: Default::default(),
         banned: Vec::new(),
         failures: Default::default(),
         fight: 123,
@@ -1663,7 +1681,7 @@ fn mid_input_keeps_current_plan_and_results_first_within_four_kb() {
     input.elapsed = Some(45.0);
     input.vitals = Some([0.7, 0.8, 0.9, 0.3]);
     input.marks = Some(2);
-    assert!(input.fit(INPUT_BUDGET) <= 4096);
+    assert!(input.fit(INPUT_BUDGET) <= INPUT_BUDGET);
     let text = serde_json::to_string(&input).unwrap();
     assert!(input.played.is_some());
     assert!(!input.plans.0.is_empty());

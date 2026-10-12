@@ -8,7 +8,7 @@
 //!   time). [`GamePlan::validate`] checks it against the boss's [`BossActions`]: invalid plans
 //!   and choices are dropped with a warning, and a plan with nothing valid is not usable (the
 //!   Lua AI plays).
-//! - [`CoachInput`] is what the coach is sent about the current or finished fight (bounded to 4 KB).
+//! - [`CoachInput`] is what the coach is sent about the current or finished fight (bounded to 8 KB).
 //! - [`CoachRequest`] / [`CoachReply`] are the non-blocking hand-off to a controller
 //!   ([`super::BossBrain::submit_coach`]); [`ScriptedCoach`] is the offline test controller.
 //!
@@ -27,7 +27,7 @@ use super::tally::{Counts, TopMap};
 use super::{BossBrain, BrainReply, BrainRequest};
 
 /// The game plan format version.
-pub const GAME_PLAN_VERSION: u32 = 1;
+pub const GAME_PLAN_VERSION: u32 = 2;
 /// Longest `notes`, characters.
 pub const NOTES_MAX: usize = 400;
 /// Most sets kept.
@@ -41,7 +41,7 @@ pub const NAME_MAX: usize = 24;
 pub const DESCRIPTION_MAX: usize = 140;
 pub const REASON_MAX: usize = 80;
 /// The coach input's size target, bytes of compact JSON.
-pub const INPUT_BUDGET: usize = 4096;
+pub const INPUT_BUDGET: usize = 8192;
 pub const MID_COACH_INTERVAL: f32 = 30.0;
 /// The checkpoint events a set's `when` hint may name.
 pub const CHECKPOINTS: [&str; 11] = [
@@ -94,6 +94,9 @@ pub struct Avoid {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GamePlan {
+    pub explore: super::move_bandit::Explore,
+    pub move_controls: Vec<super::move_bandit::Control>,
+    pub lessons: Vec<String>,
     #[serde(deserialize_with = "read_checkpoint_prefs")]
     pub checkpoint_prefs:
         std::collections::BTreeMap<String, std::collections::BTreeMap<String, f32>>,
@@ -206,6 +209,24 @@ impl GamePlan {
             ..GamePlan::default()
         };
         out.boss_phase = actions.chr.into();
+        out.explore = self.explore;
+        out.lessons = self
+            .lessons
+            .iter()
+            .map(|s| clip(s.trim(), 120))
+            .filter(|s| !s.is_empty())
+            .take(6)
+            .collect();
+        for c in self.move_controls.iter().take(32) {
+            if actions.parse(&c.plan).is_ok()
+                && c.confidence.is_finite()
+                && (0.0..=1.0).contains(&c.confidence)
+            {
+                out.move_controls.push(c.clone());
+            } else {
+                warnings.push("invalid move control dropped".into());
+            }
+        }
         if !self.boss_phase.is_empty() && self.boss_phase != actions.chr {
             warnings.push("game plan belongs to another boss phase".into());
             return Validated {
@@ -225,7 +246,7 @@ impl GamePlan {
                 warnings.push(format!("counter weight dropped: {id}"));
             }
         }
-        if self.version != 0 && self.version != GAME_PLAN_VERSION {
+        if self.version > GAME_PLAN_VERSION {
             warnings.push(format!("unsupported game plan version {}", self.version));
             return Validated {
                 plan: out,
@@ -642,6 +663,9 @@ pub struct SetStat {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(into = "CoachWire")]
 pub struct CoachInput {
+    pub digest: super::digest::Digest,
+    /// Mature recent outcomes: [samples, success rate, severity-weighted failure rate].
+    pub attack_rates: TopMap<[f32; 3]>,
     pub checkpoints:
         std::collections::BTreeMap<String, std::collections::BTreeMap<String, [f32; 2]>>,
     pub counters: TopMap<Counts>,
@@ -668,7 +692,7 @@ pub struct CoachInput {
     pub failures: std::collections::BTreeMap<String, [u32; 4]>,
     /// Fights with this enemy so far, this one included.
     pub fight: u32,
-    /// Wolf's play over the last 3 finished fights, this one last.
+    /// Wolf's play over the last 10 finished fights, this one last.
     pub trend: Trend,
     /// Per-plan mean [attack-start distance, observed melee reach], metres.
     /// Reach includes root travel, hit capsules and Wolf's radius; projectile-only attacks
@@ -689,6 +713,8 @@ pub struct CoachInput {
 impl From<CoachInput> for serde_json::Value {
     fn from(i: CoachInput) -> Self {
         let mut value = serde_json::json!({
+            "digest": i.digest,
+            "attack_rates": i.attack_rates,
             "checkpoints": i.checkpoints,
             "move_sheet": i.move_sheet, "break_log": i.break_log,
             "break_summary": i.break_summary,
@@ -760,6 +786,9 @@ impl CoachInput {
     }
 
     fn trim_one(&mut self) -> bool {
+        if self.attack_rates.pop(3) {
+            return true;
+        }
         if self.checkpoints.len() > 4 {
             self.checkpoints.pop_last();
             return true;
@@ -910,6 +939,28 @@ impl CoachInput {
             || self.move_sheet.pop_last().is_some()
             || (!self.break_log.is_empty() && {
                 self.break_log.remove(0);
+                true
+            })
+            || (!self.digest.moves.is_empty() && {
+                self.digest.moves = self
+                    .digest
+                    .moves
+                    .lines()
+                    .take(self.digest.moves.lines().count().saturating_sub(1))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                true
+            })
+            || (self.digest.fights.len() > 1 && {
+                self.digest.fights.remove(0);
+                true
+            })
+            || (!self.digest.lessons.is_empty() && {
+                self.digest.lessons.remove(0);
+                true
+            })
+            || (self.digest.hypotheses.len() > 1 && {
+                self.digest.hypotheses.remove(0);
                 true
             })
             || self.banned.pop().is_some()

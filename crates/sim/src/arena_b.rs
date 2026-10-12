@@ -96,7 +96,9 @@ pub const GYOUBU: BossEvents = BossEvents {
 };
 
 /// m11_00 events 11105900/910/912/920/921/922/924 and camera events 970-972.
-/// The retry state 11100901 bypasses the soldier encounter; 11105901 skips the arena-entry wait.
+/// The retry state 11100901 bypasses the soldier encounter. Off the arena (a flat `--enemy` duel)
+/// 11105901 is staged so the fight is on; `Arena::place` removes it, and event 11105910 then holds
+/// the Demon's animation disabled until Wolf and he are inside region 1102910 and sets it itself.
 /// 11105911 seals the same three assets with start 11105901 and defeat 9313.
 pub const DEMON: BossEvents = BossEvents {
     map: "m11_00_00_00",
@@ -220,6 +222,7 @@ pub fn entry(id: i64, flags: &std::collections::HashSet<i32>) -> Option<usize> {
 /// These flags mean the pre-fight entrance sequence has already completed.
 pub fn after_intro(id: i64, pc: usize, flags: &std::collections::HashSet<i32>) -> Option<usize> {
     match (id, pc) {
+        (11_105_810, 12) if flags.contains(&11_100_801) => Some(18),
         (11_105_810, 14) if flags.contains(&11_100_801) => Some(18),
         (11_105_910, 27) if flags.contains(&11_105_901) => Some(30),
         _ => None,

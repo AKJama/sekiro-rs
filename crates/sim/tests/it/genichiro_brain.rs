@@ -7,7 +7,7 @@ use sekiro_sim::{InputFrame, duel::Duel, lua_ai::AiEvent, registry::Registry};
 const DT: f32 = 1.0 / 60.0;
 
 #[test]
-fn counter_memory_vetoes_mikiri_bait_and_is_in_the_fitted_coach_input() {
+fn counter_memory_suppresses_mikiri_bait_and_is_in_the_fitted_coach_input() {
     let Some(mut duel) = load(4.0) else { return };
     duel.set_brain(BrainKind::Scripted.build("c7100"), false)
         .unwrap();
@@ -24,14 +24,13 @@ fn counter_memory_vetoes_mikiri_bait_and_is_in_the_fitted_coach_input() {
     );
     duel.step(&InputFrame::default(), DT);
     let hook = duel.ai.as_ref().unwrap().state.act_hook.as_ref().unwrap();
-    assert_eq!(
-        hook.counter_weights
-            .iter()
-            .find(|(id, _)| *id == 14)
-            .unwrap()
-            .1,
-        0.0
-    );
+    let factor = hook
+        .counter_weights
+        .iter()
+        .find(|(id, _)| *id == 14)
+        .unwrap()
+        .1;
+    assert!(factor > 0.0 && factor < 0.1, "exploration floor: {factor}");
     assert!(
         hook.counter_weights
             .iter()

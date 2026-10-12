@@ -238,7 +238,7 @@ impl Character {
             behavior,
             clips,
             tae,
-            tae_runtime: TaeRuntime::default(),
+            tae_runtime: TaeRuntime::for_kind(kind == ControlKind::Npc && chr == crate::demon::CHR),
             body: Body::default(),
             docking: crate::docking::Docking::default(),
             wire: crate::wire::Wire::default(),
@@ -569,14 +569,19 @@ impl Character {
         env.move_cancel = Some(move_window);
         env.landed = self.body.grounded && !authored_airborne;
         let [x, y, z] = self.body.position;
-        let water = self.ground.water_surface(x, z, f32::INFINITY);
+        // An overhead pond does not flood a cave separated from it by solid collision.
+        let water = self.ground.water_surface(x, z, f32::INFINITY).filter(|w| {
+            self.ground
+                .floor(x, z, w.height + 0.01)
+                .is_none_or(|floor| floor <= y + self.ground.max_step())
+        });
         env.in_water = water.is_some_and(|w| {
             w.deep()
                 && y <= w.height + 0.01
                 && self
                     .ground
                     .floor(x, z, w.height + 0.01)
-                    .is_none_or(|floor| floor < w.height - 0.01)
+                    .is_none_or(|floor| floor < w.height - self.ground.max_step())
         });
         env.can_dive = env.in_water;
         env.can_surface = env.in_water && water.is_some_and(|w| y >= w.height - 0.05);
@@ -586,7 +591,8 @@ impl Character {
                 .floor(x, z, y + 0.01)
                 .is_some_and(|floor| y - floor <= 0.01);
         }
-        if water.is_some_and(|w| y <= w.height + 0.5) {
+        // The waterside action restriction belongs to swimming water, not shallow floors.
+        if env.in_water {
             env.sp_effect_refs.insert(110005);
         }
         env.landing_ready = self.wire.active.is_some()

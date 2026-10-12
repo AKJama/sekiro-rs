@@ -110,7 +110,12 @@ impl Registry {
                 .iter()
                 .find(|p| p.map == map && p.entity == entity)
             {
-                return Ok((self.resolve(&format!("{chr}:{}", p.npc))?, p));
+                let mut spec = self.resolve(&format!("{chr}:{}", p.npc))?;
+                // The two placed Isshins share NpcParam but have distinct authored Lua goals.
+                if chr == "c5400" {
+                    spec.think = p.think;
+                }
+                return Ok((spec, p));
             }
         }
         Err(format!("{map}: no placed entity {entity}"))
@@ -140,6 +145,10 @@ impl Registry {
     }
 
     pub fn display_name(&self, chr: &str, row: i32) -> Option<&str> {
+        // The Hall's c1000 row carries the monkeys' event-authored bar, not c1000's name.
+        if chr == "c1000" && row == 12_600_050 {
+            return self.names.get(&901_260).map(String::as_str);
+        }
         let number = chr.strip_prefix('c')?.parse::<i32>().ok()?;
         let name_id = self.npc.get(&row)?["nameId"].as_i64().unwrap_or(0) as i32;
         self.names
@@ -158,6 +167,11 @@ impl Registry {
             Some(id) if id > 0 => format!("c{id:04}"),
             _ => chr.into(),
         }
+    }
+
+    /// Map-authored boss-bar text can differ between placements sharing NpcParam.
+    pub fn boss_name(&self, id: i32) -> Option<&str> {
+        self.names.get(&id).map(String::as_str)
     }
 
     pub fn resolve(&self, name: &str) -> Result<EnemySpec, String> {

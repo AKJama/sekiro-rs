@@ -98,6 +98,9 @@ pub struct Options {
     pub brain_memory: Option<PathBuf>,
     pub player: String,
     pub coach_interval: f32,
+    pub brain_moves: bool,
+    pub brain_move_every: u32,
+    pub coach_review_every: u32,
     /// Play on this exported map (`cache/maps/<id>`) instead of the flat floor.
     pub map: Option<String>,
     /// Player start point on the map.
@@ -313,6 +316,9 @@ pub fn run(options: Options) -> Result<()> {
         if let Some(driver) = duel.boss_brain.as_mut() {
             driver.player.clone_from(&options.player);
             driver.coach_interval = options.coach_interval;
+            driver.brain_moves = options.brain_moves;
+            driver.brain_move_every = options.brain_move_every;
+            driver.coach_review_every = options.coach_review_every;
         }
         if let (Some(path), Some(driver)) = (options.brain_memory, duel.boss_brain.as_mut()) {
             driver.use_player_memory(path, &options.player);
@@ -1241,6 +1247,10 @@ fn sync_actors(
 ) {
     for (actor, mut anim, mut tf, mut vis) in &mut q {
         let i = actor.0;
+        if i == ENEMY && sim.duel.screen_monkeys.is_some() {
+            *vis = Visibility::Hidden;
+            continue;
+        }
         let (position, yaw) = shown(&sim, i, fixed.overstep_fraction());
         tf.translation = position;
         tf.rotation = Quat::from_rotation_y(yaw);
@@ -1326,6 +1336,12 @@ fn drawn_clip_time(report: &StepReport, alpha: f32) -> f32 {
 /// how far the render time is into the next step, so motion is smooth at any frame rate
 /// (drawing the last step alone stalls and jumps whenever a frame runs no step or two).
 fn shown(sim: &Sim, i: usize, alpha: f32) -> (Vec3, f32) {
+    if i == ENEMY
+        && let Some(encounter) = &sim.duel.screen_monkeys
+    {
+        let target = &encounter.monkeys[encounter.selected].duel.enemy;
+        return (Vec3::from_array(target.body.position), target.visual_yaw());
+    }
     let chr = if i == WOLF {
         &sim.duel.player
     } else {
@@ -1405,7 +1421,7 @@ fn sync_bullets(
         .filter(|b| fxr.covers_bullet(b.def.id, b.look()))
         .map(|b| b.serial)
         .collect();
-    let shown: Vec<_> = sim
+    let mut shown: Vec<_> = sim
         .duel
         .bullets
         .live
@@ -1413,6 +1429,9 @@ fn sync_bullets(
         .filter(|b| !covered.contains(&b.serial))
         .cloned()
         .collect();
+    if let Some(bird) = sim.duel.father_bird.as_ref().filter(|b| b.enabled) {
+        shown.extend(bird.duel.bullets.live.iter().cloned());
+    }
     crate::lightning_fx::draw(
         &sim.duel,
         time.elapsed_secs(),
@@ -1522,6 +1541,9 @@ fn status_line(status: &sekiro_sim::status::Status, states: &[String]) -> String
         .iter()
         .filter_map(|(id, name)| status.remaining(*id).map(|s| format!("{name} {s:.0} s")))
         .collect();
+    if status.terror.value > 0.0 {
+        parts.push(format!("Terror {:.0}%", status.terror.fraction() * 100.0));
+    }
     if states.iter().any(|s| s.contains("Blinding")) {
         parts.push("Blinded".into());
     }
@@ -1544,15 +1566,17 @@ fn hud(
                 + Vec3::Y * (sim.duel.fighters[1].height + 0.2),
         ),
         // Hidden with him while a warp fades him out.
-        enemy_alive: !f[1].dead() && sim.duel.enemy_bar_shown() && !sim.faded[1],
+        enemy_alive: !f[1].dead()
+            && sim.duel.enemy_bar_shown()
+            && (!sim.faded[1] || sekiro_sim::duel::old_dragons::owns(&sim.duel.spec)),
         boss_bar: sim
             .duel
             .events
             .as_ref()
             .is_some_and(|events| events.boss_bar.is_some()),
-        deathblow: sim.duel.deathblow_available(),
+        deathblow: sim.duel.deathblow_available() && !sim.duel.brown_deathblow_available(),
         enemy_name: sim.duel.spec.display_name(),
-        enemy_marks: sekiro_sim::deathblow::deathblow_marks(f[1].vitality.deathblows_left),
+        enemy_marks: sim.duel.enemy_bar_marks(),
         poison: f[0].status.poison.fraction(),
         status: status_line(&f[0].status, &sim.last.player.behavior.state_path),
         // Lifted from the chest dummy to above Wolf's head (ours; the effect's own offset is in
@@ -1605,6 +1629,14 @@ fn hud(
     }
     if sim.duel.player.behavior.env.in_water {
         s += "C / L3: Dive or descend   Space / A: Rise   Shift / B: Swim kick\n";
+    }
+    if sim
+        .duel
+        .screen_monkeys
+        .as_ref()
+        .is_some_and(|encounter| encounter.bell.available)
+    {
+        s += "E / Y: Ring bell\n";
     }
     s += "WASD move, mouse look, LMB attack, RMB guard, Space jump, Shift step/sprint, C crouch, Q lock-on, Esc pause, -/= volume";
     text.0 = s;

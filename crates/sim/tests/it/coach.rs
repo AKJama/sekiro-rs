@@ -95,7 +95,7 @@ fn long_fight_reviews_at_45_and_90_then_post_and_zero_disables() {
                 let elapsed = value["elapsed"].as_f64().unwrap();
                 assert!((elapsed - expected).abs() < 0.1, "{elapsed}");
                 assert_eq!(value["phase"], "mid");
-                assert!(input.len() <= 4096);
+                assert!(input.len() <= sekiro_sim::brain::coach::INPUT_BUDGET);
             }
             assert_eq!(driver(&duel).game_plan.as_ref().unwrap().notes, "mid");
             assert!(
@@ -257,6 +257,9 @@ fn plan(notes: &str) -> GamePlan {
         principles: Vec::new(),
         boss_principles: Vec::new(),
         boss_bans: Vec::new(),
+        explore: Default::default(),
+        move_controls: Default::default(),
+        lessons: Default::default(),
     }
 }
 

@@ -301,6 +301,18 @@ impl ActiveEffect {
             condition_hp_rate: row.f32("conditionHpRate")?,
             max_stamina_rate: row.f32("maxStaminaRate")?,
             change_hp_rate: row.f32("changeHpRate")?,
+            hp_cut_phys: [
+                row.f32("slashDamageCutRate").unwrap_or(1.0),
+                row.f32("lightHitDamageCutRate").unwrap_or(1.0),
+                row.f32("thrustDamageCutRate").unwrap_or(1.0),
+                row.f32("neutralDamageCutRate").unwrap_or(1.0),
+            ],
+            hp_cut_elements: [
+                row.f32("magicDamageCutRate").unwrap_or(1.0),
+                row.f32("fireDamageCutRate").unwrap_or(1.0),
+                row.f32("thunderDamageCutRate").unwrap_or(1.0),
+                row.f32("darkDamageCutRate").unwrap_or(1.0),
+            ],
         })
     }
 }

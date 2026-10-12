@@ -36,6 +36,8 @@ pub mod cancel {
     pub const DISABLE_TURN: i32 = 7;
     /// Main weapon attack (R1) allowed: combo windows.
     pub const ATTACK: i32 = 115;
+    /// Interrupt into a deathblow allowed (including the Mikiri counter's recovery).
+    pub const DEATHBLOW: i32 = 154;
     /// Guard (L1) allowed.
     pub const GUARD: i32 = 117;
     /// Combat art (L2 in the DS3 naming) allowed.
@@ -139,6 +141,10 @@ pub enum TaeKind {
     /// active. The scripts wait for it with `IfCharacterHasEventMessage` (EMEVD 4[8]); the Owl's
     /// first deathblow get-up raises 20, which starts his phase 2 (`docs/OWL.md`).
     EzStateRequest(i32),
+    /// TAE 932 exposes a special action/throw opening, separate from ChrActionFlag.
+    ActionUnlock(i32),
+    /// TAE 233 persistently switches model variant groups, including the ape's severed head.
+    DrawMask([u8; 32]),
     /// `CameraLookAtTarget` (151): while active the camera focus chases dummy poly `dummy` of
     /// the character, at `rate` per 1/30 s (the normal chase rates when 0), and the camera's
     /// pitch and yaw stay within `limits` degrees (up, down, left, right) around the direction
@@ -294,6 +300,10 @@ pub struct SpEffectInfo {
     /// Seconds the effect lasts after it is applied; 0 means only while the TAE event is active.
     pub duration: f32,
     pub state_info: i32,
+    /// `spCategory` and `categoryPriority`: an effect applied later replaces the active effects
+    /// of its category whose priority does not exceed its own ([`crate::sp_category`]).
+    pub category: i32,
+    pub priority: i32,
     /// `vfxId`: the SpEffectVfxParam row it shows while active (48100 is the perilous-attack
     /// kanji 危, [`crate::perilous::KANJI_VFX`]); 0 or -1 for none.
     pub vfx: i32,
@@ -364,6 +374,8 @@ impl TaeDb {
                         behavior_ref: row.i32("behaviorRefId").unwrap_or(0),
                         duration: row.f32("effectEndurance").unwrap_or(0.0),
                         state_info: row.int("stateInfo").unwrap_or(0) as i32,
+                        category: row.int("spCategory").unwrap_or(0) as i32,
+                        priority: row.int("categoryPriority").unwrap_or(0) as i32,
                         vfx: row.i32("vfxId").unwrap_or(0),
                     },
                 );
@@ -496,6 +508,7 @@ fn decode(template: &Template, e: &tae::TaeEvent) -> Option<TimedEvent> {
         960 => TaeKind::StaminaControl(int("StaminaRatioType")?),
         66 | 67 | 401 => TaeKind::SpEffect(int("SpEffectID")?),
         224 => TaeKind::TurnSpeed(d.field("TurnSpeed")?.as_f32()?),
+        233 => TaeKind::DrawMask(e.params.get(..32)?.try_into().ok()?),
         920 => TaeKind::VelocityChange(int("ChrPhysicsVelocityParam ID")?),
         922 => TaeKind::VelocityScale(int("ChrPhysicsVelocityParam ID")?),
         1 => TaeKind::Attack {
@@ -543,6 +556,10 @@ fn decode(template: &Template, e: &tae::TaeEvent) -> Option<TimedEvent> {
             }
         }
         231 => TaeKind::EzStateRequest(int("EzStateRequestID")?),
+        932 => TaeKind::ActionUnlock(int("Unk00")?),
+        // Finishing throws raise the map's player message 10 through TAE 936.
+        // Cross-checked with FwLo's MIT boss-ending notes; other 936 operations remain opaque.
+        936 if e.params.get(..4) == Some(&10_i32.to_le_bytes()) => TaeKind::EzStateRequest(10),
         151 => {
             let f = |name: &str| d.field(name).and_then(|v| v.as_f32()).unwrap_or(0.0);
             TaeKind::CameraLookAt {
@@ -620,6 +637,7 @@ pub struct TaeFrame {
     pub opacity: Option<f32>,
     /// TAE 231 messages to the event scripts, active or started this tick.
     pub ezstate_requests: Vec<i32>,
+    pub action_unlocks: HashSet<i32>,
     /// TAE 760 of the first playing clip that has one.
     pub reach_target: Option<ReachTarget>,
     /// TAE 226 as a fraction (0.3 for 30 %); `None` is full knockback.
@@ -652,19 +670,50 @@ impl TaeFrame {
 /// Tracks timed SpEffects across ticks and builds each [`TaeFrame`].
 #[derive(Default)]
 pub struct TaeRuntime {
+    /// Last authored group changes; 255 preserves the row's initial group value.
+    pub draw_mask: Option<[u8; 32]>,
     /// Effects with a duration, and their remaining seconds.
     timed: HashMap<i32, f32>,
     /// SpEffects the character always has (equipment, skills); they open `StateInfo` gates.
     pub resident: Vec<i32>,
     pub frame: TaeFrame,
+    /// Native character message register, retained until the next TAE 231 write.
+    pub event_message: Option<i32>,
+    /// An animation event that adds an SpEffect whose `effectEndurance` is -1 leaves it on the
+    /// character until a map event clears it (the Demon of Hatred's 5022 "opener done" marker,
+    /// read by its Lua). Only the Demon opts in: other enemies' clips add -1 state effects
+    /// (200000, 200004, 275060 and so on) whose persistence is not verified.
+    pub keep_endless: bool,
+    /// Effects applied since the last [`Self::take_applied`] that last beyond their event window,
+    /// for the category replacement in [`crate::sp_category`].
+    applied: Vec<i32>,
 }
 
 impl TaeRuntime {
+    /// A runtime for an enemy (`keep_endless`) or for Wolf.
+    pub fn for_kind(keep_endless: bool) -> Self {
+        Self {
+            keep_endless,
+            ..Self::default()
+        }
+    }
+
     /// Starts (or refreshes) a timed SpEffect from outside the animation, such as one a bullet
     /// left on the character ([`crate::status`]). It shows in the frame from the next update on.
     pub fn add_timed(&mut self, id: i32, seconds: f32) {
         let r = self.timed.entry(id).or_insert(0.0);
         *r = r.max(seconds);
+        self.applied.push(id);
+    }
+
+    /// The effects applied (and still running) since the last call.
+    pub fn take_applied(&mut self) -> Vec<i32> {
+        std::mem::take(&mut self.applied)
+    }
+
+    /// Ids of the timed effects still running.
+    pub fn timed_ids(&self) -> Vec<i32> {
+        self.timed.keys().copied().collect()
     }
 
     /// Removes an externally applied effect when a map event clears it.
@@ -703,6 +752,14 @@ impl TaeRuntime {
                     continue;
                 }
                 match &e.kind {
+                    TaeKind::DrawMask(values) => {
+                        let mask = self.draw_mask.get_or_insert([255; 32]);
+                        for (current, &value) in mask.iter_mut().zip(values) {
+                            if value <= 1 {
+                                *current = value;
+                            }
+                        }
+                    }
                     TaeKind::Effect(effect) => f.effects.push(EffectCue {
                         effect: effect.clone(),
                         started,
@@ -728,6 +785,16 @@ impl TaeRuntime {
                             && started
                         {
                             self.timed.insert(*id, info.duration);
+                            self.applied.push(*id);
+                        } else if self.keep_endless
+                            && started
+                            && db
+                                .sp_effects
+                                .get(id)
+                                .is_some_and(|info| info.duration < 0.0)
+                        {
+                            self.timed.insert(*id, f32::INFINITY);
+                            self.applied.push(*id);
                         }
                     }
                     TaeKind::TurnSpeed(s) => {
@@ -790,7 +857,15 @@ impl TaeRuntime {
                             f.opacity = Some(f.opacity.map_or(o, |c: f32| c.min(o)));
                         }
                     }
-                    TaeKind::EzStateRequest(id) => f.ezstate_requests.push(*id),
+                    TaeKind::ActionUnlock(id) => {
+                        f.action_unlocks.insert(*id);
+                    }
+                    TaeKind::EzStateRequest(id) => {
+                        f.ezstate_requests.push(*id);
+                        if started {
+                            self.event_message = Some(*id);
+                        }
+                    }
                 }
             }
         }
@@ -919,6 +994,8 @@ mod fxr_event_tests {
                 behavior_ref: 0,
                 duration: 0.0,
                 state_info: 7,
+                category: 0,
+                priority: 0,
                 vfx: 0,
             },
         );

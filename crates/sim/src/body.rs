@@ -286,6 +286,12 @@ impl Body {
             && let Some(water) =
                 ground.water_surface(self.position[0], self.position[2], f32::INFINITY)
             && water.deep()
+            && ground
+                .floor(self.position[0], self.position[2], water.height)
+                .is_none_or(|floor| {
+                    floor <= self.position[1] + ground.max_step()
+                        && floor < water.height - ground.max_step()
+                })
         {
             self.velocity = [0.0; 3];
             self.grounded = true;
@@ -344,7 +350,7 @@ impl Body {
         let floor = ground.floor(self.position[0], self.position[2], previous_y + step);
         let water = ground
             .water_surface(self.position[0], self.position[2], previous_y + step)
-            .filter(|w| w.deep())
+            .filter(|w| w.deep() && floor.is_none_or(|h| h < w.height - ground.max_step()))
             .map(|w| w.height);
         let floor = match (floor, water) {
             (Some(a), Some(b)) => Some(a.max(b)),

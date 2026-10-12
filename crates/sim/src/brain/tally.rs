@@ -9,7 +9,8 @@
 //! - `blocked`: the other side guarded one of its hits;
 //! - `deflected`: the other side deflected one of its hits;
 //! - `whiffed`: none of the above (dodged, out of range, interrupted before contact);
-//! - `punished`: its side took an unguarded hit during it or within the punish window after.
+//! - `punished`: its side took HP/posture damage during it or within the punish window after;
+//! - `progress` and `broke`: resolved HP/posture progress and a defender posture break.
 //!
 //! Hits that arrive after the clip ended (a shuriken in flight) count for the side's latest
 //! exchange.
@@ -53,6 +54,8 @@ impl Side {
 /// How one exchange ended.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct Outcome {
+    pub progress: bool,
+    pub broke: bool,
     pub countered: Option<CounterKind>,
     pub hit: bool,
     pub blocked: bool,
@@ -290,6 +293,13 @@ pub struct TallySummary {
 /// Something that happened, as the tally needs it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TallyEvent {
+    Damaged {
+        side: Side,
+    },
+    Progress {
+        attacker: Side,
+        broke: bool,
+    },
     Countered {
         kind: CounterKind,
     },
@@ -342,6 +352,22 @@ impl Tally {
     /// Applies an event at fight time `time`.
     pub fn record(&mut self, time: f32, event: TallyEvent) {
         match event {
+            TallyEvent::Damaged { side } => {
+                if let Some(x) = self.open[side.index()].as_mut() {
+                    x.outcome.punished = true;
+                }
+                for x in &mut self.closing {
+                    if x.side == side && x.end.is_some_and(|end| time - end <= self.punish_window) {
+                        x.outcome.punished = true;
+                    }
+                }
+            }
+            TallyEvent::Progress { attacker, broke } => {
+                if let Some(x) = self.latest_mut(attacker) {
+                    x.outcome.progress = true;
+                    x.outcome.broke |= broke;
+                }
+            }
             TallyEvent::Countered { kind } => {
                 if let Some(x) = self.latest_mut(Side::Boss) {
                     x.outcome.countered = Some(kind);

@@ -43,6 +43,7 @@ impl EnemySpec {
         match name.to_ascii_lowercase().as_str() {
             "c1010" | "soldier" => Ok(Self::soldier()),
             "c5060" | "owl" => Ok(Self::owl()),
+            "inner-isshin" => Self::from_cache(&Self::default_cache(), "inner-isshin"),
             other => crate::registry::Registry::load(&Self::default_cache())?.resolve(other),
         }
     }
@@ -50,6 +51,11 @@ impl EnemySpec {
     /// Resolve a selection using the caller's cache rather than the repository default.
     pub fn from_cache(cache: &std::path::Path, name: &str) -> Result<Self, String> {
         let name = name.to_ascii_lowercase();
+        if name == "inner-isshin" {
+            return crate::registry::Registry::load(cache)?
+                .entity("m11_02_00_00", 1120890)
+                .map(|(spec, _)| spec);
+        }
         let selection = match name.as_str() {
             "soldier" => "c1010:10100000",
             "owl" => "c5060:50600000",
@@ -65,7 +71,17 @@ impl EnemySpec {
         if let Some(name) = ROSTER
             .get_or_init(|| crate::registry::Registry::load(&Self::default_cache()).ok())
             .as_ref()
-            .and_then(|r| r.display_name(&self.chr, self.npc_param))
+            .and_then(|r| {
+                if self.chr == "c5400" && matches!(self.think, 54030000 | 54030100) {
+                    r.boss_name(905403)
+                } else if crate::owl_father::owns(self) && self.think == 50630000 {
+                    r.boss_name(905063)
+                } else if crate::owl_father::owns(self) {
+                    r.boss_name(905061)
+                } else {
+                    r.display_name(&self.chr, self.npc_param)
+                }
+            })
         {
             return name;
         }

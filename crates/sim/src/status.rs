@@ -51,6 +51,9 @@ pub struct StatusEffect {
     pub electric_attack: i32,
     /// `poizonAttackPower`: poison build-up added on a hit.
     pub poison_attack: i32,
+    /// Sekiro terror uses the legacy disease resistance field.
+    pub terror_attack: i32,
+    pub disable_terror: bool,
     /// `replaceSpEffectId`: the effect a filled meter applies (see the module notes).
     pub replace: i32,
     /// `disablePoison`.
@@ -72,6 +75,8 @@ impl StatusEffect {
             change_stamina_point: i("changeStaminaPoint"),
             electric_attack: i("registFreeze"),
             poison_attack: i("poizonAttackPower"),
+            terror_attack: i("registIllness"),
+            disable_terror: i("disableDisease") != 0,
             replace: i("replaceSpEffectId"),
             disable_poison: i("disablePoison") != 0,
             state_info: i("stateInfo"),
@@ -148,6 +153,7 @@ pub struct Running {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Status {
     pub poison: Meter,
+    pub terror: Meter,
     pub running: Vec<Running>,
 }
 
@@ -158,6 +164,9 @@ pub struct Applied {
     pub timed: Vec<(i32, f32)>,
     /// The poison meter filled this hit.
     pub poisoned: bool,
+    /// HP taken when terror reaches resistance, from the buildup row.
+    pub terror_hp_rate: f32,
+    pub terror_hp_point: i32,
 }
 
 impl Status {
@@ -169,12 +178,14 @@ impl Status {
                 recover: poison_recover,
             },
             running: Vec::new(),
+            terror: Meter::default(),
         }
     }
 
     /// Back to no build-up and no effects.
     pub fn clear(&mut self) {
         self.poison.value = 0.0;
+        self.terror.value = 0.0;
         self.running.clear();
     }
 
@@ -224,6 +235,23 @@ impl Status {
                 }
             }
             self.start(&e, &mut applied);
+            if e.terror_attack > 0
+                && self.terror.max > 0.0
+                && !self
+                    .running
+                    .iter()
+                    .any(|r| book.get(r.id).is_some_and(|e| e.disable_terror))
+            {
+                self.terror.value += e.terror_attack as f32;
+                if self.terror.value >= self.terror.max {
+                    self.terror.value = 0.0;
+                    applied.terror_hp_rate += e.change_hp_rate;
+                    applied.terror_hp_point += e.change_hp_point;
+                    if let Some(result) = book.get(e.replace) {
+                        self.start(result, &mut applied);
+                    }
+                }
+            }
         }
         applied
     }
@@ -238,6 +266,7 @@ impl Status {
     /// took (negative heals).
     pub fn tick(&mut self, book: &StatusBook, max_hp: i32, dt: f32) -> i32 {
         self.poison.value = (self.poison.value - self.poison.recover * dt).max(0.0);
+        self.terror.value = (self.terror.value - self.terror.recover * dt).max(0.0);
         let mut hp = 0;
         for r in &mut self.running {
             r.remaining -= dt;

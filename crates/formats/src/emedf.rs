@@ -130,6 +130,19 @@ pub const DEFS: &[Def] = defs![
     ),
     (
         3,
+        3,
+        "IfEntityInoutsideRadius",
+        [
+            ("rg", b'3'),
+            ("inside", b'0'),
+            ("entity", b'5'),
+            ("target", b'5'),
+            ("radius", b'6'),
+            ("count", b'5')
+        ]
+    ),
+    (
+        3,
         31,
         "IfOngoingCutsceneFinished",
         [("rg", b'3'), ("cutscene", b'5')]

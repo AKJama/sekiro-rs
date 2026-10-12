@@ -508,7 +508,7 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
         crate::perf_log::add_render_probe(app, probe.clone());
         app.insert_resource(probe);
     }
-    map_material::install(app, &scene.prefix, &args);
+    map_material::install(app, &scene.prefix, dir, &args);
     app.insert_resource(ShadowSettings::from_args(&gparam, hour, &args)?);
     app.insert_resource(LocalLights::load(dir, &args)?);
     if args.iter().any(|a| a == "--uncapped") {

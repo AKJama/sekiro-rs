@@ -40,6 +40,7 @@ The event-controlled idol object 1101955 is hidden during the fight and enabled 
 The test checks the arrival warp against Wolf's MSB start, real duel loading, night, three active walls, both mark transitions and scripted defeat.
 The first-visit soldier encounter and travel interaction are bypassed by the documented retry state.
 Attack-driven flame hazards, final paired execution and camera sub-ID behaviour remain the separate boss fight implementation task.
+The fight pass in `BOSSES-s.md` supersedes the staged fight flag: `Arena::place` removes 11105901, so event 11105910 waits for Wolf to enter region 1102910 and sets it itself; the three walls then rise, and the final execution and mark flow are exercised by real duel tests.
 
 ## Shura: Emma and Isshin Ashina
 

@@ -356,6 +356,7 @@ impl HabitTracker {
         let t = frame.t;
         for e in events {
             match e {
+                TallyEvent::Progress { .. } | TallyEvent::Damaged { .. } => {}
                 TallyEvent::Countered { .. } => {
                     if let Some(open) = self.boss_open.as_mut() {
                         open.answer = Some("counter");

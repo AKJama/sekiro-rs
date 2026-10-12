@@ -15,14 +15,19 @@
 //! See `docs/BRAIN.md`.
 
 pub mod actions;
+pub mod adaptation;
 pub mod bandit;
 pub mod coach;
 pub mod cost;
+pub mod digest;
 pub mod driver;
 pub mod habits;
 pub mod limits;
 pub mod memory;
 pub mod metrics;
+pub mod move_bandit;
+#[cfg(test)]
+mod move_tests;
 pub mod moves;
 pub mod observation;
 pub mod plan;
@@ -357,8 +362,12 @@ impl BrainKind {
     }
 
     /// The controller for the enemy `chr` (the scripted one plays that enemy's test plans;
-    /// an enemy without a table gets the Owl's, and `Duel::set_brain` refuses it anyway).
+    /// an enemy without a table keeps its own Lua AI).
     pub fn build(self, chr: &str) -> Box<dyn BossBrain> {
+        if self == Self::Scripted && BossActions::for_chr(chr).is_none() {
+            eprintln!("{chr}: no scripted plan table; retaining the character's own Lua AI");
+            return Box::new(LuaBrain);
+        }
         match self {
             Self::Lua => Box::new(LuaBrain),
             Self::Scripted => Box::new(ScriptedBrain::for_actions(

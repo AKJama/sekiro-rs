@@ -26,7 +26,7 @@ The fixed-width dark panel wraps text, uses the HUD's warm colours and Windows S
 The panel shows the controller and coach model, fight number (including the snapshot's earlier fights), selected player, active set and description, running plan with its current step in brackets, and the current move's label.
 Lua choices display `Lua`.
 The last checkpoint shows its reason, set switch or keep decision, and age.
-Accepted coach notes appear as a highlighted pre-, mid- or post-fight card for eight seconds; boss and player principles remain beneath it, and `coach thinkingÃ¢â‚¬Â¦` shows while a coach request is pending.
+Accepted coach notes appear as a highlighted pre-, mid- or post-fight card for eight seconds; boss and player principles remain beneath it, and `coach thinking…` shows while a coach request is pending.
 The last ban appears for five seconds, including the driver's actual whiff or failure evidence.
 A fight's scorecard appears for six seconds with the winner, time to kill Wolf, Wolf's posture breaks, deflect rate and mean break conversion delay.
 The view reads driver state directly and works without `--brain-log`.
@@ -365,7 +365,7 @@ Then the tally and the habits go into the memory, and the next fight starts with
 The two layers live beside the legacy memory path:
 
 - `logs/memory/<chr>.boss.json`, version 1, holds shared `evidence` (fights, wins, action/plan/break-response outcome counts), `players` (count-bearing contribution snapshots), `principles`, reasoned `bans`, and `best` (sanitized game plan, evidence snapshot, score and last result).
-- `logs/memory/<chr>.player-<name>.json`, version 3, holds this player's habits, recent history/trend, outcome counts for local bans, and `coach.plan` with player notes and principles.
+- `logs/memory/<chr>.player-<name>.json`, version 5, holds this player's habits, recent history/trend, raw outcome counts, discounted `attack_learning`, contextual `move_bandit`, and coach plans, hypotheses and retained lessons.
 
 ```json
 {"version":1,"chr":"c5060","evidence":{"fights":21,"boss_wins":20,"wolf_wins":1,"actions":{"3010":[9,0,0,0,9,0]},"plans":{},"break_plans":{}},"players":{},"principles":["Strike immediately after a posture break"],"bans":[{"choice":"3010","reason":"shared: 9/9 whiffs"}],"best":null}
@@ -385,8 +385,9 @@ Invalid layers disable persistence with a warning rather than overwriting the so
 
 A new player inherits `best.plan` at fight 1 once shared knowledge has at least 20 fights; otherwise the Lua baseline plays.
 Existing players resume their own latest validated plan.
-A shared ban from at least nine all-whiff action outcomes, or an explicit coach `boss_bans` entry, applies to every player and to offered chains containing that action.
-Failure-rate bans, avoids and retries remain scoped to the selected player; a player retry cannot reopen a shared ban.
+Only an explicit, reasoned coach `boss_bans` entry creates a shared ban, applying to every player and offered chain containing the action.
+Automatic all-whiff and counter-rate bans are retired; generated legacy reasons beginning `shared: ` are ignored and removed when contributions are reconciled.
+Player avoids and retries remain scoped to the selected player; a player retry cannot reopen a shared coach ban.
 Shared principles merge newest first, deduplicate case-insensitively and keep six.
 
 Coach JSON sends `boss_knowledge` first, `player_profile` second, then the current fight evidence.
@@ -429,11 +430,49 @@ The player file format, version 2 (an example after two short soldier fights in 
 }
 ```
 
-A version 1 file loads (its `history` is empty) and is saved as version 3 from then on (`memory_v1_migrates_and_keeps_ten_fights`).
+A version 1 file loads (its `history` is empty) and is saved as version 4 from then on (`memory_v1_migrates_and_keeps_ten_fights`).
 `history` holds the last 10 finished fights, oldest first, each as `{"winner", "metrics", "decisions", "lua_acts", "requests", "choices", "tokens", "latency_ms", "brain"}` (see "The score to beat"); `boss` also holds tactic tokens next to action ids.
 A missing file starts fresh with a note on stderr.
 An unusable layer (bad JSON, another `version`, or another enemy's `chr`) disables persistence with a warning and keeps every existing file intact.
 Every field but `version` and `chr` has a default, so a file from a build with fewer fields still loads.
+
+### Recent per-attack evidence
+
+`brain/adaptation.rs` records settled attack exchanges as phase-specific recent successes and severity-weighted failures.
+Three observed uses are the safety minimum; mature rates are passed to the coach as `attack_rates[action] = [samples, success_share, failure_share]`.
+The coach decides whether a move needs a different setup, a lower weight or an explicit exclusion, without waiting for 10/10 failures.
+Raw ten-entry outcome arrays remain the audit trail and preserve the separate counter kinds.
+
+| Outcome | Recent success | Recent failure |
+|---|---:|---:|
+| Clean unguarded hit | 1 | 0 |
+| Actual Wolf HP/posture progress | +0.25 | 0 |
+| Wolf posture break | +1 | 0 |
+| Mikiri, sweep kick, other counter such as lightning return | 0 | 2 |
+| Deflected contact, including mixed clips | 0 | 1 |
+| Fully guarded attack with no clean hit | 0 | 0.6 |
+| Whiff, including dodged perilous sweep, out of range or interruption | 0 | 1 |
+| Boss HP/posture damage during the attack or its punishment window | 0 | +1.5 |
+| Movement, guard tactic or back step without contact | No attack sample | No attack sample |
+
+Flags coexist, so a hit followed by punishment teaches both success and failure, and guarded posture progress retains both its benefit and its guard failure.
+Actual resolved posture damage is used rather than treating a guard as no progress.
+`TallyEvent::Countered` supplies counter kinds, `Hit` supplies contacts, `Progress` supplies resolved damage/breaks, and `Damaged` includes Wolf's guarded posture damage to the boss.
+`BrainDriver::settle` records the completed exchange and `attribute` also reports net-bad plan uses; fatal and fully deflected plan-use counts remain available to coach judgement.
+
+Recent masses retain 0.9 per subsequent attack observation and 0.85 per completed active fight, without decaying raw audit counts.
+The multiplier is `clamp((2*(success+0.5)/(success+failure+1))^3, 0.01, 2)` after three uses, otherwise 1.
+Chains use their weakest attack multiplier, and a failed opener is probabilistically skipped into the active set instead of repeating at every reset.
+The selected player's full recent evidence is combined with other players at quarter strength, capped at one effective borrowed observation per attack; its own contribution is excluded from pooling.
+The same signal reduces Lua's offered counter callback weights, including whiffs and guards that the previous counter-only formula ignored.
+Only explicit coach zero weights, avoids or shared bans veto a callback; outcome evidence keeps a 1% multiplier floor.
+Mandatory single-candidate Lua branches and the existing all-zero fallback remain Lua-owned, so the floor is a relative weight, not a guarantee of alternatives that Lua never offered.
+
+Version 4 adds defaulted recent maps to player profiles and contribution snapshots while shared boss files remain version 1.
+Older counts seed at most six effective own observations, without inventing counter kinds, temporal ordering, damage or break flags.
+Six-, seven- and ten-entry outcome arrays remain readable; migration preserves raw counts and is idempotent.
+New fight records and session reports retain per-phase, per-action outcomes for each fight, closing the historical aggregate-only reporting gap.
+See [BRAIN-LEARNING.md](BRAIN-LEARNING.md) for the read-only evidence audit and offline experiment.
 
 ## Wolf's habits
 
@@ -505,6 +544,9 @@ A reply to a request of an earlier fight is dropped.
 
 ## Local checkpoint chooser
 
+The checkpoint chooser switches sets; the contextual move fighter described below selects plans inside those sets.
+`--brain-moves off` restores the previous persistent-evidence sampler for comparison.
+
 `--brain coach` defaults to `--checkpoint local` with a Codex or Claude CLI coach, so both plan execution and checkpoint selection work without an API key.
 `--checkpoint decisions` explicitly selects the existing OpenAI Decisions chooser and requires a key.
 `--checkpoint off` keeps the coach's start set; direct `--brain decisions` and `--brain responses` remain available.
@@ -516,14 +558,20 @@ Distance and habit buckets are deliberately omitted to keep evidence dense.
 Arms are exactly the validated plan sets offered by `GamePlan::offers()` to the Decisions request; selecting the active set is equivalent to `keep`, without a duplicate arm.
 Normal plan sampling, bans, reflexes, checkpoint suppression and anti-stalling limits still apply.
 Each arm draws from `Beta(success + 4*p, failure + 4*(1-p))` and the largest draw wins, using the driver's seeded generator.
+The draw is multiplied by the set's coach-weighted mean per-attack multiplier, including its chains, so a countered move lowers a set even outside the reward window.
+Ordinary plan sampling and Lua counter callbacks consume the same attack signal independently of checkpoints.
 Unseen arms draw from the coach prior, so they retain exploration probability alongside established arms.
 
 The coach may supply `checkpoint_prefs: {"wolf_posture_75": {"finisher": 0.8, "bait": 0.2}}`.
 Each number is a prior reward mean, clamped to 0.05..0.95 for sampling, with four total pseudo-counts.
-Missing preferences give `p = 0.5`; unknown checkpoints, unknown surviving sets, non-finite numbers and values outside 0..1 are dropped with warnings.
+Missing preferences give `p = 0.8` for a set whose `when` matches the checkpoint, otherwise `p = 0.5`; explicit preferences override the hint.
+Unknown checkpoints, unknown surviving sets, non-finite numbers and values outside 0..1 are dropped with warnings.
 Old plans remain valid without this field.
 Strict coach output expresses the same preferences as `checkpoint_prefs: [{"checkpoint":"wolf_posture_75", "set":"finisher", "weight":0.8}]`, or an empty array for uniform priors.
 Both representations deserialize into the same map; saved plans use the map.
+The coach must translate actionable notes and player principles into plan weights, avoids/retries, counter weights and checkpoint preferences or hints.
+Those structured fields execute its judgement on the local path; free prose is retained for reasoning and display, not interpreted with keyword heuristics.
+The previous Decisions checkpoint brief contained seven scalar fields and set descriptions, without notes, per-attack outcomes or habits; it had no extra note-reading path.
 
 Reward measures cumulative metric deltas from selection until the next checkpoint, four seconds, phase hand-over, or fight end, whichever comes first.
 All HP and posture damage terms are fractions of a full bar, accumulated without refunding recovery or healing.
@@ -533,9 +581,11 @@ A wholly passive window receives zero; neither elapsed time nor survival adds re
 If the finished fight exceeds the existing 35% passivity limit, all its window rewards become zero before learning is committed.
 Activity checks prevent an inactive player from teaching the bandit.
 Within-fight evidence is provisional and only committed when the finished fight passes the existing void-fight checks.
+The four-second window can miss a late counter, and zero reward cannot distinguish degrees of failure or a lack of progress.
+Persistent attack evidence below updates when each exchange settles, including outside those windows, and directly affects plans, counters and checkpoint quality.
 
-Player memory is version 3 and keeps `bandit.<phase>.<checkpoint>.<set> = {"success": ..., "failure": ...}` beside the other player evidence.
-Version 1 and 2 profiles migrate with empty bandit evidence and retain their other counts.
+Player memory is version 4 and keeps `bandit.<phase>.<checkpoint>.<set> = {"success": ..., "failure": ...}` beside phase-specific `attack_learning`.
+Version 1 through 3 profiles load with retained raw counts, bounded attack priors and defaults for missing bandit fields.
 The shared boss file retains version 1 and adds the same defaulted map to each player's contribution snapshot and aggregated evidence.
 Repeated saves replace contributions instead of counting them again.
 Own evidence has full weight; other players' snapshots contribute at quarter strength only while choosing, and borrowed counts never enter the selected player's profile.
@@ -545,7 +595,7 @@ Each non-void completed fight discounts old own evidence by 0.98 before adding i
 
 The overlay shows checkpoint context, chosen set and posterior mean.
 The session report lists choices, posterior means and settled rewards.
-Coach reviews receive a compact `checkpoints.<phase/context>.<set> = [rewarded choices, mean reward]` summary for the current fight inside the existing 4096-byte input budget.
+Coach reviews receive a compact `checkpoints.<phase/context>.<set> = [rewarded choices, mean reward]` summary for the current fight inside the 8192-byte input budget.
 Local choices consume zero model tokens and zero billed API calls.
 
 ## Choosing plans
@@ -554,10 +604,11 @@ The driver samples every plan locally, from the controller's plan set, so variet
 A Decisions answer lists a probability for each choice; the set is those probabilities (values that are not a valid plan are dropped, `lua` stays as the option to leave the act to his AI).
 Each act, one plan is drawn with weight
 
-`probability ^ (1 / temperature) * 0.5 ^ streak * 1.5 if untried`
+`(probability * attack_multiplier) ^ (1 / temperature) * max(0.01, 0.5 ^ streak) * 1.5 if untried`
 
 - `temperature` is `BrainDriver::temperature` (`SEKIRO_BRAIN_TEMPERATURE`, default 1.0; below 1 sharpens, above flattens, 0 or less always takes the heaviest).
-- `streak` sums over the plan's steps how many times in a row this fight that step was *repelled*: an attack was deflected or guarded and never landed (a landed hit, or any other end, resets it); a tactic was repelled when Wolf hit him during it. Keys are action ids and tactic tokens, counted per fight.
+- `streak` sums over the plan's steps consecutive net-bad exchanges: counters, deflects, fully guarded attacks, whiffs or punishment outweighing hits/progress; a tactic is repelled when Wolf hits him during it.
+  Keys are action ids and tactic tokens, counted per fight, with a 1% streak multiplier floor for sampled distributions.
 - *untried*: the plan's text was not run yet this fight.
 - The generator is a seeded xorshift (`SEKIRO_BRAIN_SEED`, `BrainDriver::seed`), so tests are deterministic.
 - A set of one (the Responses backend, or an answer without probabilities) is not sampled: it is dropped for the Lua AI's act once any of its steps was repelled 3 times in a row. The Responses request also leaves such plans out of its choices (`BrainRequest::excluded`), so the model picks another; its answer stays the argmax.
@@ -816,10 +867,13 @@ Credential-source tests use in-memory dotenv text and never read the real enviro
 
 ## The coach
 
+Coach input is now bounded to 8192 bytes so the lifetime move table and ten-fight manager review can survive alongside the played plan.
+See "Contextual move fighter and cross-fight review" below for the current controls, digest and trimming policy.
+
 Real-time per-move calls are wasteful, and the Decisions API cannot reason.
 FromSoftware players fight the same enemy dozens of times, so the boss learns between fights and reviews during long fights.
 
-- **Coach (between fights, full reasoning).** When a fight ends (a death, a win, a respawn that restarts it), the driver sends the coach a compact summary of it (`CoachInput` in `crates/sim/src/brain/coach.rs`, bounded to 4 KB, measured in `the_coach_input_is_bounded_and_keeps_the_notes_and_the_played_plan`).
+- **Coach (between fights, full reasoning).** When a fight ends (a death, a win, a respawn that restarts it), the driver sends the coach a compact summary of it (`CoachInput` in `crates/sim/src/brain/coach.rs`, bounded to 8 KB, measured in `the_coach_input_is_bounded_and_keeps_the_notes_and_the_played_plan`).
   The coach writes a **game plan** for the next fight.
   It runs on its own thread in `sekiro-brain-net` (never the game thread), so latency does not matter: the plan is used from the next fight if it arrived by then (during the 6 s respawn), else from the fight after; a failed or empty answer keeps the previous plan.
 - **Fighter (in the fight, cheap).** The driver runs the plan's sets locally with the sampler (`sampler.rs`, with the repelled-plan penalty and the untried bonus).
@@ -855,7 +909,7 @@ On Windows the codex npm shim is tried as `codex.cmd`; killing it by its handle 
 
 ### The game plan
 
-Versioned JSON (`GamePlan`, version 1), checked against the boss's `BossActions` (`GamePlan::validate`): unknown choices, plans and sets are dropped with a warning on the console, set names must be 1 to 24 of letters, digits, `_`, `-` (not `keep` or `lua`), at most 4 sets of 8 plans, notes at most 400 characters, the start set falls back to the first set, and a plan with nothing valid (no opener and no set) is ignored (his Lua AI plays).
+Versioned JSON (`GamePlan`, version 2; versions 0/1 migrate), checked against the boss's `BossActions` (`GamePlan::validate`): unknown choices, plans and sets are dropped with a warning on the console, set names must be 1 to 24 of letters, digits, `_`, `-` (not `keep` or `lua`), at most 4 sets of 8 plans, notes at most 400 characters, the start set falls back to the first set, and a plan with nothing valid (no opener and no set) is ignored (his Lua AI plays).
 Plans in sets must contain an attack and may not be in `avoid` (see "Hard limits"); the opener may be tactics only.
 
 ```json
@@ -903,7 +957,7 @@ Projectile-only attacks and attacks interrupted before any measurable melee wind
 This is a radial envelope relative to the attack's starting centre: distance above reach indicates insufficient reach to Wolf's starting position, while distance below reach does not establish contact.
 Direction, height, timing and Wolf's movement still matter; per-plan means are diagnostic summaries rather than individual-hit proofs.
 The entries are paired with the surviving plan outcomes during budget trimming; range entries are the final fallback to trim.
-Entries are trimmed (overall plans first, then Wolf's attacks, habits, this fight's plans, the oldest trend fights) to stay under 4096 bytes.
+Entries are trimmed (overall plans first, then Wolf's attacks, habits, this fight's plans, the oldest trend fights) to stay under 8192 bytes.
 The instructions (`protocol::coach_instructions`, followed by every choice with its label, 80 or 82 lines) are:
 
 > You are the coach of {name}, who fights the player (Wolf) again and again.
@@ -1028,7 +1082,7 @@ Historical memory is not rewritten.
 `retreat_rechecks_range_before_a_close_slash` retains the actual range-whiff reproduction.
 `reactive_tactics_answer_pressure_and_keep_the_attack_chain` drives Wolf's real HKS with attack presses every eight frames at 1.6 m against both bosses and checks script guard/deflect, timed back-step motion, the following attack request and idle caps.
 The soldier's readiness finishes after 36 ticks under pressure, its short step gains 0.86 m and finishes after 38 ticks, and both idle waits finish after 90 ticks at 60 Hz.
-`coach_reports_measured_attack_ranges_per_plan` checks spacing telemetry and excludes tactic whiffs; the worst-case coach-input test keeps the summary inside 4096 bytes with per-action and range entries.
+`coach_reports_measured_attack_ranges_per_plan` checks spacing telemetry and excludes tactic whiffs; the worst-case coach-input test keeps the summary inside 8192 bytes with per-action and range entries.
 
 ### Five playtest findings (2026-10-11)
 
@@ -1044,16 +1098,15 @@ A plan use is `deflected_all` only when at least one attack started and all its 
 A whiff or an attack with mixed contact outcomes prevents that classification; tactics do not count as attacks.
 A use is `fatal` if the boss loses a deathblow mark or dies within three seconds of its last attack, or Wolf punishes it into a posture break.
 The three-second attribution window is anchored to the last attack exchange ending, survives a subsequent plan starting, and settles a use only once.
-After three uses, a `(deflected_all + fatal) / uses` rate of at least 0.6 excludes that plan from local sampling and openers for the rest of the session.
-The counters can overlap, so this sum is not a probability of distinct failed uses.
-The console prints `banned: <plan> (n uses, x% deflected/fatal)` when the ban is applied.
-Existing memory counters also establish bans at session startup.
-Only a new validated coach reply's optional `retry: [{"choice":"3000","reason":"a new timing hypothesis"}]` re-allows a choice.
+Plan-use counts inform the coach, while recent per-attack evidence supplies soft sampling penalties after three uses.
+The diagnostic fatal and deflected counters can overlap, so their sum is not a probability of distinct failed uses.
+Outcome counts no longer create automatic bans at startup or during a fight; legacy automatic phase bans are retained only when the current coach plan explicitly avoids the choice.
+A validated coach reply's optional `retry: [{"choice":"3000","reason":"a new timing hypothesis"}]` re-allows a player exclusion.
 Unknown choices, empty reasons and choices also listed in avoid are rejected.
-A retry keeps the historical counts and starts a new session-local evidence baseline; three further failing uses can ban it again.
+A retry keeps historical and recent evidence; further failures teach the sampler and coach rather than imposing another automatic ban.
 Void fights roll back their provisional bans and never persist their counters.
 
-Coach input includes `banned` and `failures`, with failure counters packed as `[uses, deflected_all, fatal, failed_break_response]`.
+Coach input includes `banned` and `failures`, with failure counters packed as `[uses, deflected_all, fatal, failed_attack_use]`.
 Budget fitting prioritizes those counters, trims ordinary summaries first, and can omit the played plan and shorten notes in the extreme case where the full known banned vocabulary is sent.
 The normal input retains the played plan and previous notes.
 The schema includes retry as an array, with an empty array meaning no retry; old JSON and memory can omit it.
@@ -1104,7 +1157,7 @@ The coach is instructed to mix at least three different attack ids per set; narr
 Coach input `actions` contains individual `[n, hit, blocked, deflected, whiffed, punished, countered, mikiri, jump, other]` counts for Lua and coached moves, with zero-count rows for untried offered actions.
 `action_range` supplies each measured action's mean attack-start distance and melee reach, rounded to two decimals; projectile-only actions have no reach sample.
 The coach can therefore probe under-used moves using their own outcomes rather than the aggregate `lua` plan count.
-The input budget is 4096 bytes; the small in-fight chooser request remains unchanged.
+The input budget is 8192 bytes; the small in-fight chooser request remains unchanged.
 
 `player_principles` and `boss_principles` each keep up to six lessons of at most 90 Unicode characters.
 Coach inputs separate shared lessons from player lessons, and console plan summaries mark each as boss or player.
@@ -1130,7 +1183,7 @@ Reviews wait until 20 seconds have elapsed, the player is active, and both fight
 `--coach-interval 0` disables the timer and all early triggers.
 
 Requests use `phase: "mid"` and start with this fight's partial result and per-plan/per-set outcomes before older evidence.
-They include elapsed seconds, `[wolf_hp, wolf_posture, boss_hp, boss_posture]` fractions, boss marks left and the current game plan, with a strict 4096-byte compact JSON budget.
+They include elapsed seconds, `[wolf_hp, wolf_posture, boss_hp, boss_posture]` fractions, boss marks left and the current game plan, with a strict 8192-byte compact JSON budget.
 The coach keeps what works, replaces what fails and returns a full game plan.
 The next decision-slot choice uses the replacement start set and skips its opener; queued active attack goals continue normally.
 Validated plans are saved through the existing memory path.
@@ -1197,7 +1250,7 @@ The no-window fixture removes only cancel flags from a copy of 3001's in-memory 
 All three assert the previous clip clock against the allowed boundary and verify the logged break is hit 2 of 3.
 
 Coach and mid-review instructions ask for breaks on the last combo hit or a fast single move near breaking, a short `finisher` set for `wolf_posture_75`, and inspection of failed conversions.
-The input still fits 4096 bytes: trimming prefers the current plan's moves and the most-used other actions, keeps recent break detail and aggregate totals, then uses the existing summary trimming.
+The input still fits 8192 bytes: trimming prefers the current plan's moves and the most-used other actions, keeps recent break detail and aggregate totals, then uses the existing summary trimming.
 The four Owl fixtures measured 3916 to 4067 bytes for the complete fitted coach JSON, including the move sheet, break log and aggregate totals.
 The mixed `walk_in4>3000+3001` fixture also checks that the current attack group remains in the fitted sheet and that its break is logged as hit 2 of 2.
 No hosted calls or real model CLIs are needed for these tests.
@@ -1229,7 +1282,7 @@ Failed API answers retain reported usage even when their plan is unusable.
 Fight summary lines include both fight and session totals, counting calls that complete during that fight (including a previous fight's coach review).
 Session reports include a Cost table by kind and model, with plan-proxy tokens, API tokens and billed USD.
 F9 and normal exit print the report; the F8 recording overlay shows the session line and persistent budget notice.
-For example: `session: 12 calls Ã‚Â· 48.0k tok (plan proxy) Ã‚Â· 2.0k tok Ã‚Â· $0.000200 (API)`.
+For example: `session: 12 calls · 48.0k tok (plan proxy) · 2.0k tok · $0.000200 (API)`.
 
 Measured coach context is about 11k reported tokens per Codex call, while a Decisions checkpoint uses about 250 input tokens.
 With the default local chooser, two subscription coach reviews use roughly 22k plan-proxy tokens and checkpoint choices add zero tokens or billed usage.
@@ -1328,18 +1381,18 @@ The exchange carries `countered: mikiri|jump|other`; it cannot also count as a w
 Counts now append total counters and the three kind counts to the old six entries: `[n, hit, blocked, deflected, whiffed, punished, countered, mikiri, jump, other]`.
 Six-entry legacy arrays and the transitional seven-entry form default the missing values to zero.
 Metrics, coach results, action reports and the recording overlay expose the total.
-Countered plan exchanges contribute failure evidence; a move with at least three uses and a counter rate of at least 60% is locally vetoed/banned.
-Shared evidence uses the existing nine-use minimum before imposing a shared counter-rate ban.
+Countered plan exchanges contribute strong recent failure evidence after the three-use safety minimum, with soft penalties instead of automatic counter-rate bans.
+The coach receives mature rates and chooses explicit avoids or shared bans when justified.
 
 ### Reweighting Lua deflect counters
 
 Lua still decides when `Kengeki_Activate` runs and computes its candidate callback weights.
 The new hook wraps only `Common_Kengeki_Activate`, reweights positive offered entries, and calls the saved helper with the same callbacks and parameters.
 Callback bodies, their combos, pressure settings, timers and conditional branches are preserved.
-The driver uses each callback's animation outcome evidence; countered and deflected rates reduce its multiplier, hit rate rewards successful alternatives, and untried moves retain their original weight.
-A high counter rate vetoes the callback; coach `counter_weights` supplies additional multipliers from 0 to 10 for legal counter animation ids.
+The driver uses each callback's recent per-attack outcome signal, shared with ordinary plans and checkpoint quality; counters, deflects, guards, whiffs and punishment reduce its multiplier, while hits and actual progress reward alternatives.
+Coach `counter_weights` supplies additional multipliers from 0 to 10 for legal counter animation ids; zero, an explicit avoid or a shared coach ban vetoes the callback.
 For a multi-animation callback the least favourable multiplier governs the whole callback.
-The coach receives a ranked `counters` map that retains at least four entries under the existing 4096-byte budget, alongside counter move-sheet rows.
+The coach receives a ranked `counters` map that retains at least four entries under the 8192-byte budget, alongside counter move-sheet rows.
 
 The hook never introduces a positive weight for a callback Lua did not offer.
 If all offered weights would become zero, the original Lua weights stand.
@@ -1356,3 +1409,104 @@ The counter move sheet excludes script-named variants without a decoded characte
 Castle Genichiro's 3039 is also excluded because lightning belongs to Tomoe.
 These callbacks remain Lua-owned; the coach cannot assign them explicit weights.
 Plan failure keys also carry the c7110 prefix, so phase-only failures cannot ban the castle plan after reset.
+
+## Contextual move fighter and cross-fight review
+
+Implemented 12 October 2026, independently of the checkpoint set bandit.
+The ordinary and posture-break plan slots share `BrainDriver::pick_move`; exactly one selector chooses an arm at each slot.
+`--brain-moves local|off` defaults to `local`, needs no model or key, and `off` preserves the previous sampler and its persistent outcome multipliers.
+`--brain-move-every 1|2|3` defaults to 2 attacks, exposed as `MOVE_EVERY` and the driver's configurable interval.
+A multi-attack plan is indivisible: the fighter chooses again at its next legal slot rather than interrupting a TAE/Lua chain.
+Holding counts constituent attacks, never more than three, and is cancelled when physical context changes or the arm becomes ineligible.
+Contexts contain near/mid/far distance (3 and 7 metre boundaries), low/high boss and Wolf posture (75%), a separate broken-Wolf state, and the previous plan's first named animation family (`id / 10`).
+Evidence is keyed by character phase, context and full plan text, so different setups/chains and Tomoe stay separate.
+Arms are only the current filtered set or explicit break responses; coach avoids, bans, limits and pacing remain authoritative.
+Lua retains reactions, callbacks and fallback acts, including the existing per-attack callback evidence.
+An explicit `lua` entry retains the coach's delegation share, capped at 25% while attack plans are eligible; it cannot become a permanently untried Thompson arm.
+
+Each arm draws from `Beta(success + 4*p, failure + 4*(1-p))`.
+The coach prior is `p = clamp(0.25 + 0.35*weight/max_weight + 0.35*confidence, 0.05, 0.95)`.
+Before three effective observations, a 0.4 novelty bonus encourages aggressive coverage.
+Mature draws are compared to the best available posterior mean, using `draw * min(draw/best_mean, 1)^3`, without an absolute failure-rate threshold or automatic exclusion.
+The largest independent draw wins; this is a relative posterior comparison, not a second weighted selector.
+Explicit random probes occur at low/normal/high rates of 1%, 2.5% and 8% per decision, reduced by confidence with a 0.5% floor.
+Novelty disappears as successful evidence accumulates, while the coach can increase exploration when the trends deteriorate.
+Shared player evidence contributes at most four effective observations per arm and at most 25% of another profile's mass; personal and current-fight evidence dominate.
+Per-fight retention is 0.98, matching checkpoint decay.
+Both direct and layered profile loaders migrate versions 1 through 4 to version 5 without inventing contextual history.
+The shared boss envelope remains version 1 with optional contextual evidence in contribution snapshots.
+Void fights discard provisional learning; passive fights convert their success mass to failure before commitment.
+
+Move settlement uses the existing success/failure classifier: counters including Mikiri and jump counters, deflects, full guards, whiffs/dodged sweeps and damage taken are failures.
+Clean hits, actual progress and breaks are successes, with overlapping evidence retained.
+Breaking posture adds two success units on top of the classifier's break reward.
+A connecting hit in the broken-Wolf context within 2.5 seconds of the opening adds `2 / max(contact_delay, 0.25)` success units; missing that opening adds 0.5 failure units.
+The contact timestamp, not clip recovery or exchange duration, determines the conversion bonus.
+Safe movement/setup exchanges are neutral; getting punished during a setup teaches failure for that plan.
+The fractional reward is `success / (success + failure + 0.25)`.
+Measured HP/posture bar damage contributes a bounded 0.5 success bonus using damage per minute over elapsed plan time, including setup.
+A non-passive win supplies three terminal observations with reward `0.98 + 0.02*60/(60+kill_seconds)`, so wins outrank ordinary rewards and faster kills score higher.
+No survival or waiting reward exists.
+The overlay's MOVE line shows arm, context, posterior mean and posterior failure share; checkpoint cards continue to show set switches.
+
+Game plan version 2 adds `explore`, `move_controls: [{plan, confidence, lock}]`, and at most six 120-character `lessons`.
+Versions 0 and 1 remain readable and validate into version 2 with normal exploration and empty controls/lessons.
+Confidence must be finite and within 0..1, and controls must name a valid boss plan; invalid entries warn and are dropped.
+`lock` holds that arm for up to three eligible attacks after selection, subject to context and hard limits; it is not a forced illegal attack or a permanent veto of alternatives.
+Lessons are deduplicated, repeated lessons refresh recency, and the newest six survive; oldest lessons are evicted first.
+The boss profile retains these lessons and six previous hypotheses, their plan texts and measured kill-time/conversion/damage outcomes.
+
+`digest.moves` is a terse fixed-column lifetime arsenal table: id, short label, uses, hit%, deflected/guarded%, Mikiri/jump-counter%, whiff%, progress%, and recent/lifetime hit%.
+Counts use the current character phase over all fights, falling back to legacy aggregate counts only when phase counts are unavailable.
+The recent column uses this fight in the same phase; `-` means no recent samples rather than a zero hit rate.
+Unused rows lead, then weaker lifetime hit rates relative to counter/punishment rates; flags can overlap, so percentages need not sum to 100.
+Never-tried moves are explicitly `unused`, rather than silently absent.
+Historical files have no progress counts or first-deathblow attribution; `?` and -1 mean unknown, not zero.
+New fights record progress and the player's first deathblow.
+Progress rates use observed exchanges since version 5; `*` marks a partial historical denominator.
+The digest includes best/worst three mature moves, the last ten completed fights as `[kill_seconds_or_-1_loss_or_-2_unknown, break_conversion, damage_per_minute, player_first_deathblow_or_-1, passive_share]`, their deterministic means in `trends` (unknown values excluded), retained lessons and bounded hypotheses.
+Legacy boss wins with a known fight duration supply the kill time rather than being mislabeled losses when their newer kill-time field is absent.
+The coach's existing trend also uses ten fights; shorter general-purpose request trends remain compatible.
+
+The input budget deliberately rises from 4096 to 8192 bytes, still small for CLI coaches, to preserve a full typical arsenal and ten results.
+The format comparison test writes JSON-encoded text and arrays-of-arrays to `target/alt-fb/table-formats.json`; `uv run --offline --no-project -m docs.brain_table_measure target/alt-fb/table-formats.json` compares wire bytes and explicitly approximate tokens.
+No provider tokenizer or vocabulary is installed locally, so token estimates are labelled rather than represented as exact Codex/Claude token counts.
+The supplied phase-specific profile snapshot measured 1550 wire bytes and 654 estimated tokens for text, versus 1862 bytes and 1284 estimated tokens for arrays.
+The text format avoids array punctuation and repeated string quoting.
+Trimming first reduces the existing attack/checkpoint/counter detail, move timings, break timelines, redundant shared summaries, plan outcomes and detailed ranges, following `CoachInput::trim_one`.
+Only after those details are exhausted does it remove table rows from the tail, preserving unused/worst rows first, then oldest fight results and lessons, and finally old hypotheses while keeping the latest one.
+The review boolean survives trimming and the final serialized byte count is checked before submission.
+
+`--coach-review-every <n>` defaults to `REVIEW_EVERY = 5`; 0 disables cross-fight reviews.
+The next coach call at each interval, or after an eight-fight plateau in kill/conversion score, uses REVIEW MODE once per completed fight.
+Only completed non-void wins and losses advance the interval; unfinished saves do not count.
+The same worker, coach infrastructure and reply validator ask whether the strategy works, what was learned, which hypothesis to test next, how exploration should change, and which moves to promote or retire.
+Failure keeps the previous validated plan and lessons, just as a normal coach failure does.
+There is no second persistent coach: the same coach reviews the lifetime arsenal and its own measured hypotheses, avoiding competing plans, duplicate model cost and divergent memories.
+Prompt audit added contextual relative comparisons, failure classes, the table/ten-fight field legend, confidence/exploration/lock controls and bounded lessons to the normal coach, plus a separate review block selected from `digest.review` for both CLI and API adapters.
+The Decisions checkpoint instructions now explicitly rank fast wins, breaks plus quick contact, damage rate and low boss damage, classify counters/deflects/guards as failures, and leave per-move decisions to the local fighter.
+
+The offline experiment copies the supplied Genichiro boss/profile files to a temporary directory and never writes under `logs/`.
+With no local memory fixture, CI runs the same synthetic environment from empty memory.
+It runs 64 seeds, six fights and 96 eligible slots per fight, with four ordinary slots followed by four broken-posture slots.
+Wolf always Mikiri-counters 3025 and deflects 3016; 3000 connects quickly, while 3001 misses the opening despite eventually connecting.
+The three pickers are the old counter-blind current-fight streak sampler, previous persistent evidence, and the contextual move bandit.
+This is a selection replay through production outcome settlement, not a full replay of player HKS or mandatory Lua callbacks.
+Its assertions require combined bad-move use below 5% by fight five, continuing probes, rising quick-punisher share and family switches below 55% of boundaries.
+Detailed final numbers and validation are recorded in `target/alt-fb/` and the dated status entry.
+
+| Sampler | Bad moves fight 1 | Fight 2 | Fight 3 | Fight 4 | Fight 5 | Fight 6 | Quick punisher fight 6 | Family switches |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Old streak | 37.27% | 36.36% | 36.56% | 35.89% | 36.23% | 36.95% | 31.36% | 49.6% |
+| Previous persistent evidence | 1.77% | 1.11% | 1.04% | 0.81% | 0.94% | 0.81% | 49.59% | 2.1% |
+| Contextual move bandit | 37.76% | 3.09% | 9.47% | 2.34% | 2.08% | 2.31% | 94.47% | 7.8% |
+
+Bad moves combine the always-Mikiri and always-deflected arms, over 6144 choices per fight.
+Persistent evidence starts with the real player's already trained history; the new contextual posterior starts empty because old files cannot reconstruct distance, posture and previous-family context.
+The regression explicitly keeps that version-4 migration starting point even if the live profile later gains version-5 contextual evidence.
+The contextual fighter falls below 5% at fight two, explores rare transitions again at fight three, and stays below 5% from fight four onward.
+It retains probes and satisfies the stricter per-seed, per-fight cap of 48 family switches over 95 boundaries.
+Baseline persistent numbers can change if the read-only live profile advances between runs; the replay transcript identifies the measured snapshot's output.
+The brain library and brain-net suites pass, and libraries/binaries pass Clippy with warnings denied.
+Requested integration filters and workspace/all-target Clippy currently cannot compile `crates/sim/tests/it/coach.rs:242`, whose explicit old `GamePlan` literal lacks the new three fields.
+That file is outside this task's allowed paths, so the minimal fixture update remains pending permission rather than silently broadening the edit scope.

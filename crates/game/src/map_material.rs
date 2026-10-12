@@ -10,6 +10,9 @@ use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
 use serde_json::Value;
 
+#[path = "camera_fade.rs"]
+mod camera_fade;
+
 type LayeredMaterial = ExtendedMaterial<StandardMaterial, MapLayers>;
 
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
@@ -24,6 +27,7 @@ struct MapLayers {
     normal_enabled: Vec4,
     hemi_axis: Vec4,
     hemi_delta: Vec4,
+    camera_fade: Vec4,
     #[texture(51)]
     #[sampler(52)]
     overlay: Option<Handle<Image>>,
@@ -68,6 +72,7 @@ struct MapLayersUniform {
     normal_enabled: Vec4,
     hemi_axis: Vec4,
     hemi_delta: Vec4,
+    camera_fade: Vec4,
 }
 
 impl From<&MapLayers> for MapLayersUniform {
@@ -80,6 +85,7 @@ impl From<&MapLayers> for MapLayersUniform {
             normal_enabled: layers.normal_enabled,
             hemi_axis: layers.hemi_axis,
             hemi_delta: layers.hemi_delta,
+            camera_fade: layers.camera_fade,
         }
     }
 }
@@ -113,6 +119,7 @@ mod tests {
                 enabled: true,
                 debug: false,
                 materials: HashMap::new(),
+                camera_fade: camera_fade::CameraFade::load(std::path::Path::new(""), false),
             })
             .add_systems(Update, replace_materials)
             .add_systems(PostUpdate, sync_actor_materials);
@@ -218,6 +225,7 @@ struct LayerSettings {
     enabled: bool,
     debug: bool,
     materials: HashMap<AssetId<StandardMaterial>, Handle<LayeredMaterial>>,
+    camera_fade: camera_fade::CameraFade,
 }
 
 #[derive(bevy::ecs::system::SystemParam)]
@@ -253,7 +261,7 @@ fn sync_actor_materials(
     }
 }
 
-pub(super) fn install(app: &mut App, prefix: &str, args: &[String]) {
+pub(super) fn install(app: &mut App, prefix: &str, dir: &std::path::Path, args: &[String]) {
     embedded_asset!(app, "map_material.wgsl");
     app.add_plugins(MaterialPlugin::<LayeredMaterial>::default())
         .insert_resource(LayerSettings {
@@ -261,6 +269,10 @@ pub(super) fn install(app: &mut App, prefix: &str, args: &[String]) {
             enabled: !args.iter().any(|s| s == "--no-layers"),
             debug: args.iter().any(|s| s == "--show-blend"),
             materials: HashMap::new(),
+            camera_fade: camera_fade::CameraFade::load(
+                dir,
+                !args.iter().any(|s| s == "--no-camera-fade"),
+            ),
         })
         .add_systems(
             Update,
@@ -308,6 +320,7 @@ fn replace_materials(
             Entity,
             &MeshMaterial3d<StandardMaterial>,
             Option<&GltfMaterialExtras>,
+            Option<&bevy::gltf::GltfMaterialName>,
         ),
         Without<MaterialTintProxy>,
     >,
@@ -325,7 +338,7 @@ fn replace_materials(
     } = environment;
     let set =
         crate::lighting::LightSet::from_gparam(&lighting.gparam, lighting.light_set, lighting.hour);
-    for (entity, original, extras) in &meshes {
+    for (entity, original, extras, name) in &meshes {
         // Map and rig descendants share spatial lighting. Actor tint proxies retain
         // the StandardMaterial handles used by gameplay; unrelated FX stay untouched.
         let mut ancestor = entity;
@@ -353,6 +366,13 @@ fn replace_materials(
         let handle = if let Some(handle) = settings.materials.get(&original.0.id()) {
             handle.clone()
         } else {
+            let camera_fade = if map_surface {
+                settings
+                    .camera_fade
+                    .material(name.map_or("", |name| name.0.as_str()))
+            } else {
+                Vec4::ZERO
+            };
             let load = |key: &str, srgb: bool| -> Option<Handle<Image>> {
                 if !settings.enabled {
                     return None;
@@ -403,6 +423,7 @@ fn replace_materials(
                 hemi_axis: set.hemi_axis.extend(f32::from(ambient.brightness > 0.)),
                 hemi_delta: (set.hemi_delta * crate::lighting::ENV_PER_UNIT)
                     .extend(crate::lighting::ENV_PER_UNIT),
+                camera_fade,
                 overlay: load("overlay", true),
                 snow: load("snow", true),
                 c: load("c", true),

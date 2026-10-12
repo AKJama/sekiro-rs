@@ -163,7 +163,7 @@ fn dispatch() -> anyhow::Result<()> {
         "                 [--map <id> [--start <n> | --spawn x,y,z,yaw,0]] [--no-enemy] [--lock-on]"
     );
     eprintln!(
-        "                 [--checkpoint local|decisions|off] (coach default: local, no API key)"
+        "                 [--checkpoint local|decisions|off] [--brain-moves local|off] [--brain-move-every 1|2|3] [--coach-review-every <n>] (local defaults; review 5, 0 disables)"
     );
     eprintln!(
         "                 [--simple-ai] [--passive] [--god] [--immortal] [--force-act <id>] [--enemy cXXXX[:npcrow]|soldier|owl] [--brain lua|scripted|decisions|responses|coach] [--brain-model <name>] [--coach claude|codex|api] [--coach-model <name>] [--coach-effort <level>] [--coach-interval <secs>] [--brain-log] [--brain-memory off|on|<path>] [--player <name>]"
@@ -241,6 +241,21 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
         .unwrap_or_else(|| arg_value(args, "--brain").unwrap_or_else(|| "lua".into()));
     let coach_backend = arg_value(args, "--coach").unwrap_or_else(|| "codex".into());
     let checkpoint = arg_value(args, "--checkpoint").unwrap_or_else(|| "local".into());
+    let brain_moves = arg_value(args, "--brain-moves").unwrap_or_else(|| "local".into());
+    anyhow::ensure!(
+        matches!(brain_moves.as_str(), "local" | "off"),
+        "--brain-moves wants local or off"
+    );
+    let review_every = arg_value(args, "--coach-review-every")
+        .unwrap_or_else(|| sekiro_sim::brain::move_bandit::REVIEW_EVERY.to_string())
+        .parse::<u32>()?;
+    let move_every = arg_value(args, "--brain-move-every")
+        .unwrap_or_else(|| sekiro_sim::brain::move_bandit::MOVE_EVERY.to_string())
+        .parse::<u32>()?;
+    anyhow::ensure!(
+        (1..=3).contains(&move_every),
+        "--brain-move-every wants 1, 2 or 3"
+    );
     anyhow::ensure!(
         sekiro_sim::brain::bandit::CheckpointChooser::by_name(&checkpoint).is_some(),
         "unknown --checkpoint {checkpoint}: known are local, decisions, off"
@@ -339,6 +354,9 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
             },
         },
         coach_interval: arg_f32(args, "--coach-interval", 30.0)?.max(0.0),
+        brain_moves: brain_moves == "local",
+        brain_move_every: move_every,
+        coach_review_every: review_every,
         player,
         brain_log: args.iter().any(|a| a == "--brain-log"),
         brain_memory: if let Some(stage) = stage {

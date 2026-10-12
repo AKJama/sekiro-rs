@@ -225,7 +225,7 @@ fn memory_file() -> PathBuf {
 }
 
 #[test]
-fn a_plan_banned_by_saved_failures_never_reaches_an_ai_slot() {
+fn saved_plan_failures_inform_the_coach_without_an_automatic_ban() {
     let Some(mut duel) = load(4.0) else { return };
     let path = memory_file();
     let mut memory = Memory::new("c1010");
@@ -246,9 +246,8 @@ fn a_plan_banned_by_saved_failures_never_reaches_an_ai_slot() {
         duel.step(&InputFrame::default(), DT);
     }
     let driver = duel.boss_brain.as_ref().unwrap();
-    assert!(driver.history.is_empty());
-    assert_eq!(driver.stats.planned, 0);
-    assert!(driver.stats.fallback > 0);
+    assert!(!driver.history.is_empty());
+    assert!(driver.stats.planned > 0);
     assert_eq!(driver.memory.coach.failures["3000"].uses, 3);
     drop(duel);
     assert_eq!(

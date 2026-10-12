@@ -29,6 +29,7 @@ pub const TREND_FIGHTS: usize = 3;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FightMetrics {
+    pub player_first_deathblow: Option<bool>,
     pub countered: u32,
     pub boss_hp_lost: f32,
     pub boss_posture_gained: f32,
@@ -344,6 +345,8 @@ impl MetricsTracker {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FightRecord {
+    /// Phase-specific animation outcomes, including Lua callbacks and their follow-ups.
+    pub attacks: BTreeMap<String, super::tally::CountMap>,
     pub cost: super::cost::CostTotals,
     pub session_cost: super::cost::CostTotals,
     pub breaks: Vec<BreakRecord>,
@@ -530,7 +533,15 @@ fn pct(r: Option<f32>) -> u32 {
 impl Trend {
     /// The trend over the last [`TREND_FIGHTS`] records and this fight's numbers so far.
     pub fn new(history: &[FightRecord], now: Option<&FightMetrics>) -> Self {
-        let recent = &history[history.len().saturating_sub(TREND_FIGHTS)..];
+        Self::window(history, now, TREND_FIGHTS)
+    }
+
+    pub fn last_ten(history: &[FightRecord]) -> Self {
+        Self::window(history, None, 10)
+    }
+
+    fn window(history: &[FightRecord], now: Option<&FightMetrics>, count: usize) -> Self {
+        let recent = &history[history.len().saturating_sub(count)..];
         Self {
             boss_damage_taken_per_min: recent
                 .iter()

@@ -8,6 +8,7 @@
 
 pub mod brain;
 pub mod lua50;
+pub mod regions;
 pub mod runtime;
 pub mod world;
 

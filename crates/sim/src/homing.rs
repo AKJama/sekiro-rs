@@ -122,7 +122,9 @@ pub fn reach_scale(r: &ReachTarget, me: [f32; 3], target: [f32; 3]) -> f32 {
             target[2] + turned[1] * r.arrive_dist,
         ];
         let (dx, dz) = (arrive[0] - me[0], arrive[1] - me[2]);
-        (dx * dx + dz * dz).sqrt().clamp(r.range_min, r.range_max)
+        // Shipped c5080 a000_003043 has min 6, max 4. Preserve both bounds without
+        // Rust's ordered-bound assertion; upper-bound precedence is not exe-traced.
+        (dx * dx + dz * dz).sqrt().max(r.range_min).min(r.range_max)
     };
     dist / r.reference_dist
 }

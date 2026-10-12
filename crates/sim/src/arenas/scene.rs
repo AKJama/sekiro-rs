@@ -11,10 +11,14 @@ pub struct SceneState {
     pub animation_enabled: HashMap<i32, bool>,
     pub masks: HashMap<i32, HashMap<u8, bool>>,
     pub effects: HashMap<i32, bool>,
+    /// Map-authored effect state retained for a character before it occupies a combat slot.
+    pub character_effects: HashMap<(i32, i32), bool>,
     pub lighting: Option<i32>,
     /// Region warps for supporting actors; bone-relative attachments need the actor rig.
     pub warps: HashMap<i32, i32>,
     pub backread_enabled: HashMap<i32, bool>,
+    /// Animated objects follow a character's authored dummy instead of their MSB origin.
+    pub attachments: HashMap<i32, (i32, i16)>,
 }
 
 impl SceneState {
@@ -23,12 +27,32 @@ impl SceneState {
     pub fn instruction(&mut self, ins: &Instruction, args: &[Arg]) -> bool {
         let i = |n: usize| args.get(n).map_or(0, |v| v.as_i64());
         match ins.code() {
+            (2003, 58) => {
+                self.attachments.insert(
+                    ins.i32_at(8).unwrap_or(0),
+                    (
+                        ins.i32_at(0).unwrap_or(0),
+                        ins.i32_at(4).unwrap_or(0) as i16,
+                    ),
+                );
+                true
+            }
+            (2004, 8) | (2004, 21) => {
+                self.character_effects
+                    .insert((i(0) as i32, i(1) as i32), ins.id == 8);
+                false
+            }
             (2004, 29) => {
                 self.backread_enabled.insert(i(0) as i32, i(1) == 0);
                 true
             }
             (2004, 41) if i(1) == 1 => {
                 self.warps.insert(i(0) as i32, i(2) as i32);
+                true
+            }
+            (2004, 42) if ins.i32_at(4) == Some(1) => {
+                self.warps
+                    .insert(ins.i32_at(0).unwrap_or(0), ins.i32_at(8).unwrap_or(0));
                 true
             }
             (2004, 5) => {

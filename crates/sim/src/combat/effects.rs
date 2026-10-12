@@ -59,6 +59,11 @@ pub struct ActiveEffect {
     /// `changeHpRate`: percent of max HP taken when the effect starts (negative heals; -100 is
     /// SpEffect 300610 "HP reset").
     pub change_hp_rate: f32,
+    /// The defender's HP multipliers from `slash/lightHit/thrust/neutralDamageCutRate` (indexed
+    /// by `atkAttribute` 1 to 4) and `magic/fire/thunder/darkDamageCutRate`. 0 makes the owner
+    /// immune (the Demon's 300331 "HP damage multiplier 0" during its heat-up roar).
+    pub hp_cut_phys: [f32; 4],
+    pub hp_cut_elements: [f32; 4],
 }
 
 impl Default for ActiveEffect {
@@ -79,6 +84,8 @@ impl Default for ActiveEffect {
             condition_hp_rate: -1.0,
             max_stamina_rate: 1.0,
             change_hp_rate: 0.0,
+            hp_cut_phys: [1.0; 4],
+            hp_cut_elements: [1.0; 4],
         }
     }
 }

@@ -363,6 +363,11 @@ pub struct Combatant {
     /// Body capsule radius and height, metres.
     pub radius: f32,
     pub height: f32,
+    /// Radius of the body that pushes other characters away (NpcParam `chrHitRadius`); 0 means
+    /// [`Self::radius`]. Only the Demon of Hatred reads it (1.4 against its 2.8 m hurt capsule):
+    /// its sweeps reach Wolf only once he stands that close. Other enemies keep the hurt radius,
+    /// which the existing Owl and Genichiro regressions are tuned to (inferred from the names).
+    pub body_radius: f32,
     /// Attacks by behaviour judge id.
     pub attacks: HashMap<i32, AttackData>,
     /// The player's `PCBehavior` (TAE 307) attacks by judge id: BehaviorParam_PC rows below 1000,
@@ -501,10 +506,15 @@ impl Combatant {
                     r.int("behaviorVariationId").unwrap_or(0) as i32,
                     r.f32("hitRadius").unwrap_or(0.4),
                     r.f32("hitHeight").unwrap_or(1.7),
+                    r.f32("chrHitRadius").unwrap_or(0.0),
                 )
             })
         }) {
-            (c.variation, c.radius, c.height) = row;
+            let body;
+            (c.variation, c.radius, c.height, body) = row;
+            if chr == crate::demon::CHR {
+                c.body_radius = body;
+            }
             c.param_id = npc_param;
         }
         c.attacks = load_attacks(

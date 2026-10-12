@@ -122,6 +122,7 @@ pub struct Fighter {
     control: Option<StaminaControl>,
     /// Always-on SpEffects (NpcParam `spEffectID0..`), still subject to their HP gates.
     resident: Vec<i32>,
+    start_resident: Vec<i32>,
     /// KnockBackParam row timing this character's pushes.
     pub knockback_row: i32,
     start: (Vitality, PostureMeter),
@@ -135,6 +136,7 @@ impl Fighter {
     /// Back to full HP and posture.
     pub fn reset(&mut self) {
         (self.vitality, self.posture) = self.start;
+        self.resident.clone_from(&self.start_resident);
         self.recovery = RecoveryAccumulator::default();
         self.last_tae_effects.clear();
         self.status.clear();
@@ -155,6 +157,10 @@ impl Fighter {
     /// Always-on SpEffect ids (NpcParam `spEffectID0..`).
     pub fn resident(&self) -> &[i32] {
         &self.resident
+    }
+    /// A map script can explicitly remove an effect initially supplied by NpcParam.
+    pub fn clear_resident_effect(&mut self, id: i32) {
+        self.resident.retain(|effect| *effect != id);
     }
 
     pub fn dead(&self) -> bool {
@@ -242,6 +248,7 @@ impl CombatRules {
         }
         wolf.resident.retain(|id| !(160000..=160099).contains(id));
         wolf.resident.push(id);
+        wolf.start_resident.clone_from(&wolf.resident);
         Ok(())
     }
     /// Direct-hit posture estimate using the same weapon, defence and effects as resolution.
@@ -334,11 +341,16 @@ impl CombatRules {
         };
         let statuses = sp.as_ref().map(StatusBook::from_table).unwrap_or_default();
         let tentative_f = |f: &str| row_f32(tentative.as_ref(), 0, f).unwrap_or(0.0);
-        let wolf_status = Status::new(
+        let mut wolf_status = Status::new(
             graph(GRAPH_POISON_RESIST).map_or(0.0, |g| g.eval(PLAYER_GROWTH_LEVEL).trunc())
                 + player_poison_resist(&pd, &dd),
             tentative_f("ResistRecoverPoint_Poision_Player"),
         );
+        wolf_status.terror = crate::status::Meter {
+            value: 0.0,
+            max: graph(111).map_or(0.0, |g| g.eval(PLAYER_GROWTH_LEVEL).trunc()),
+            recover: tentative_f("ResistRecoverPoint_Desease_Player"),
+        };
         let npc_poison_recover = tentative_f("ResistRecoverPoint_Poision_Enemy");
 
         let fighters = combatants
@@ -349,7 +361,7 @@ impl CombatRules {
                                posture: PostureMeter,
                                recovery_base,
                                control,
-                               resident,
+                               resident: Vec<i32>,
                                status: Status,
                                kind: FighterKind| Fighter {
                     vitality: vit,
@@ -363,6 +375,7 @@ impl CombatRules {
                     recovery: RecoveryAccumulator::default(),
                     recovery_base,
                     control,
+                    start_resident: resident.clone(),
                     resident,
                     start: (vit, posture),
                     last_tae_effects: Vec::new(),
@@ -635,7 +648,7 @@ impl CombatRules {
         chars: [&Character; 2],
         combatants: [&Combatant; 2],
     ) -> HitResult {
-        self.resolve_contact(hit, chars, combatants, false)
+        self.resolve_contact(hit, chars, combatants, false, false)
     }
 
     /// A projectile owns the contact; its shooter supplies damage scaling, but does not
@@ -647,7 +660,21 @@ impl CombatRules {
         chars: [&Character; 2],
         combatants: [&Combatant; 2],
     ) -> HitResult {
-        self.resolve_contact(hit, chars, combatants, true)
+        self.resolve_contact(hit, chars, combatants, true, false)
+    }
+
+    /// A static event emitter owns scaling, with no animation effects from the visible boss.
+    pub fn resolve_event_bullet(
+        &mut self,
+        hit: &HitEvent,
+        chars: [&Character; 2],
+        combatants: [&Combatant; 2],
+        owner: &mut Fighter,
+    ) -> HitResult {
+        std::mem::swap(&mut self.fighters[hit.attacker], owner);
+        let result = self.resolve_contact(hit, chars, combatants, true, true);
+        std::mem::swap(&mut self.fighters[hit.attacker], owner);
+        result
     }
 
     fn resolve_contact(
@@ -656,13 +683,18 @@ impl CombatRules {
         chars: [&Character; 2],
         combatants: [&Combatant; 2],
         from_bullet: bool,
+        static_owner: bool,
     ) -> HitResult {
         let (a, d) = (hit.attacker, hit.defender);
         let Some(atk) = hit.attack.profile.clone() else {
             return HitResult::default();
         };
         let (attacker, defender) = (chars[a], chars[d]);
-        let effects_a = self.active_effects(a, attacker);
+        let effects_a = if static_owner {
+            self.effects_for(a, &TaeFrame::default())
+        } else {
+            self.active_effects(a, attacker)
+        };
         let effects_d = self.active_effects(d, defender);
         let frame_d = defender.tae_frame();
         let guard_row: Option<&AttackData> = frame_d
@@ -744,7 +776,7 @@ impl CombatRules {
             &hit.attack,
             outcome,
             guard_profile,
-            &effects_a,
+            (&effects_a, &effects_d),
         );
         let fd = &mut self.fighters[d];
         let hp_damage = keep_hp(fd.vitality.hp, hp_damage, atk.excess_dmg_keep_hp);
@@ -892,7 +924,7 @@ impl CombatRules {
         data: &AttackData,
         outcome: HitOutcome,
         guard: Option<&AttackProfile>,
-        effects: &[ActiveEffect],
+        (effects, defender_effects): (&[ActiveEffect], &[ActiveEffect]),
     ) -> i32 {
         let (a, d) = sides;
         let attack = match &self.fighters[a].kind {
@@ -948,6 +980,18 @@ impl CombatRules {
                 .map(|e| e.hp_attack_rates[i])
                 .product::<f32>();
         }
+        // The defender's SpEffect cut rates: physical by the attack's attribute, then elements.
+        for e in defender_effects {
+            if let Some(cut) = (atk.atk_attribute as usize)
+                .checked_sub(1)
+                .and_then(|i| e.hp_cut_phys.get(i))
+            {
+                mult[0] *= cut;
+            }
+            for (k, cut) in e.hp_cut_elements.iter().enumerate() {
+                mult[k + 1] *= cut;
+            }
+        }
         let total = element_damage(attack, [0.0; 5], mult, 1.0);
         final_hp_damage(total, 1.0, 1.0)
     }
@@ -985,7 +1029,14 @@ impl CombatRules {
             return Applied::default();
         }
         let book = &self.statuses;
-        self.fighters[d].status.apply(book, ids)
+        let applied = self.fighters[d].status.apply(book, ids);
+        let vitality = &mut self.fighters[d].vitality;
+        let damage = (vitality.max_hp as f32 * applied.terror_hp_rate / 100.0) as i32
+            + applied.terror_hp_point;
+        if damage > 0 {
+            vitality.set_hp(vitality.hp - damage);
+        }
+        applied
     }
 
     /// Advances fighter `i`'s status by `dt` seconds and applies the HP its periodic effects take

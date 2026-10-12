@@ -1,4 +1,6 @@
 //! Sunken Valley supporting actors and silvergrass storm presentation.
+#[path = "ape_hud.rs"]
+mod ape_hud;
 use super::Sim;
 use crate::{
     character::{AnimLibrary, Animator, Rig},
@@ -18,6 +20,8 @@ struct Support {
     library: AnimLibrary,
     requested: Option<(i32, bool)>,
     warped: Option<(i32, i16)>,
+    base_groups: [bool; 32],
+    tae_mask: Option<[u8; 32]>,
 }
 #[derive(Resource)]
 struct Stage {
@@ -78,11 +82,14 @@ pub(super) fn install(
     }
     app.insert_resource(stage)
         .add_systems(Startup, spawn)
+        .add_systems(Startup, ape_hud::spawn)
+        .add_systems(Update, ape_hud::update.after(super::sync_actors))
         .add_systems(
             Update,
             update
                 .after(super::sync_actors)
-                .before(crate::draw_mask::apply_draw_masks)
+                // Play's main chain applies masks before synchronizing actors.
+                .after(crate::draw_mask::apply_draw_masks)
                 .before(crate::character::animate),
         );
     Ok(())
@@ -124,6 +131,8 @@ fn spawn(mut commands: Commands, assets: Res<AssetServer>, mut stage: ResMut<Sta
                 library,
                 requested: None,
                 warped: None,
+                base_groups: masks,
+                tae_mask: None,
             },
         ));
     }
@@ -167,6 +176,38 @@ fn update(
         };
     }
     for (mut support, mut visible, mut animator, mut mask, mut transform) in &mut actors {
+        if support.entity == sekiro_sim::duel::headless_ape::BROWN
+            && let Some(ape) = sim.duel.headless_ape.as_ref()
+        {
+            *visible = if ape.duel.enemy_active {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+            *transform =
+                Transform::from_translation(Vec3::from_array(ape.duel.enemy.body.position))
+                    .with_rotation(Quat::from_rotation_y(ape.duel.enemy.body.yaw));
+            let report = &ape.report.enemy;
+            if support.tae_mask != ape.duel.enemy.tae_runtime.draw_mask {
+                support.tae_mask = ape.duel.enemy.tae_runtime.draw_mask;
+                if let Some(values) = &support.tae_mask {
+                    mask.apply_event(values);
+                } else {
+                    *mask = DrawMask::with_groups(support.base_groups);
+                }
+            }
+            if let Some(name) = &report.animation {
+                if (animator.clip_name() != name || report.clip_started)
+                    && let Ok(clip) = support.library.clip(name)
+                {
+                    animator.play_named(name, clip, false, report.blend_in);
+                }
+                animator.time = report.anim_time;
+                animator.speed = 0.0;
+                animator.apply_root_motion = false;
+            }
+            continue;
+        }
         let warp = events
             .scripts
             .arena_c_state
@@ -219,6 +260,13 @@ fn update(
                 }
             }
             mask.apply_event(&values);
+        }
+    }
+    if let Some(values) = &sim.duel.enemy.tae_runtime.draw_mask {
+        for (actor, mut mask) in &mut main_masks {
+            if actor.0 == super::ENEMY {
+                mask.apply_event(values);
+            }
         }
     }
     if let Some(masks) = scene.masks.get(&events.boss_entity) {

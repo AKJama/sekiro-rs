@@ -290,9 +290,6 @@ impl Choices {
                 _ => "lua",
             },
         );
-        if v[5] == "Coach brain (codex)" {
-            pair("--checkpoint", "local");
-        }
         if self.owl() && v[6] != "none" {
             pair("--brain-stage", &v[6]);
         }
@@ -420,7 +417,17 @@ impl PanelState {
             })
             .collect();
         let mut extras = Vec::new();
-        for flag in ["--cache", "--window-size", "--script", "--shots", "--input"] {
+        for flag in [
+            "--cache",
+            "--window-size",
+            "--script",
+            "--shots",
+            "--input",
+            "--checkpoint",
+            "--brain-moves",
+            "--brain-move-every",
+            "--coach-review-every",
+        ] {
             if let Some(v) = crate::arg_value(args, flag) {
                 extras.extend([flag.to_string(), v]);
             }
@@ -845,7 +852,14 @@ fn update(
                         "--menu-choices".into(),
                         serde_json::to_string(&state.choices.values).unwrap(),
                     ];
-                    for flag in ["--window-size", "--cache"] {
+                    for flag in [
+                        "--window-size",
+                        "--cache",
+                        "--checkpoint",
+                        "--brain-moves",
+                        "--brain-move-every",
+                        "--coach-review-every",
+                    ] {
                         if let Some(value) = crate::arg_value(&state.extras, flag) {
                             args.extend([flag.into(), value]);
                         }

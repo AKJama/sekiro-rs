@@ -528,6 +528,12 @@ impl AbsorbSlide {
     }
 
     /// This step's share, or `None` once it is all handed out.
+    pub fn with_vertical(mut self, from: &Placement, target: &Placement) -> Self {
+        self.offset[1] = target.position[1] - from.position[1];
+        self
+    }
+
+    /// This step's share, or `None` once it is all handed out.
     pub fn advance(&mut self, dt: f32) -> Option<AbsorbStep> {
         self.time += dt;
         let w = if self.duration > 0.0 {
@@ -644,6 +650,37 @@ impl Deathblow {
         } else {
             self.body.defender_anim()
         }
+    }
+
+    /// A special-state row has a body clip but no separate grab-start animation.
+    pub fn begin_body(
+        row: &ThrowRow,
+        times: ThrowTimes,
+        sorb: DummyFrame,
+        body_duration: f32,
+        attacker: &Placement,
+        defender: &Placement,
+    ) -> (Self, DeathblowStep) {
+        let (mut db, _) = Self::begin((row, row), times, sorb, body_duration, 1);
+        db.phase = Phase::Body;
+        db.death_clip = false;
+        db.absorbed = Absorbed::Attacker;
+        db.slide = Some(
+            AbsorbSlide::new(
+                db.absorbed,
+                &db.sorb,
+                attacker,
+                defender,
+                row.interpolation_time,
+            )
+            .with_vertical(attacker, &db.sorb.inverse().placement(defender)),
+        );
+        let first = DeathblowStep {
+            attacker_clip: Some(row.attacker_anim()),
+            defender_clip: row.defender_anim(),
+            ..Default::default()
+        };
+        (db, first)
     }
 
     /// Ends the pairing early: the attacker left its body clip (its TAE allowed a move or

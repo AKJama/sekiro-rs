@@ -4,6 +4,201 @@ Last updated 12 October 2026.
 Read this first in a new session, then `AGENTS.md` and `docs/DESIGN.md`.
 How much of the game is done overall: `docs/PROGRESS.md`.
 
+## Mibu event regression fix (2026-10-12)
+
+Reproduced `mibu_bridge::arena_d_mibu_bridge` on installed data: event 11505810 stalled at instruction 11, despite Wolf being about 9.5 m from the boss inside its authored 20 m radius.
+Since b082d8a, EMEVD 3[3] became a blocking condition, but only the screen-monkeys host could evaluate it; Mibu therefore waited on false rather than reaching boss bar 905000.
+The staged flag 11505801 was unchanged, and the Demon arrival flag removal remained scoped to the Demon.
+Mapped duel characters now answer the radius condition, with a shared decoder reading the state at byte 1 rather than the entity count at byte 16; screen monkeys use the same decoder.
+SetNetworkUpdateRate 2004[34] is a documented offline no-op, with inside/outside wait regression coverage and a stronger Mibu event-completion assertion.
+The focused installed-data replay shows `bar Some(905000); skipped []`.
+One full `CARGO_TARGET_DIR=target/alt cargo test --release --workspace -j 12` run passes 696 tests with zero failures and 18 existing ignored tests, including 305 simulation integration passes in 145.24 seconds.
+Workspace/all-target Clippy with 12 jobs and warnings denied passes, and `cargo fmt --all --check` passes.
+Cargo ran offline; no commits, git-state changes, network access, or model/API calls were made.
+
+## Contextual move fighter and coach review (2026-10-12)
+
+Added a free contextual Thompson move fighter at ordinary and break-response plan slots, with a two-attack default, confidence/lock/exploration controls, actual contact-time conversion rewards, damage-rate rewards and faster-win credit.
+Player memory version 5 retains contextual posteriors with 0.98 fight decay, shared transfer, bounded lessons and measured hypotheses; both loaders migrate old profiles.
+The coach receives a lifetime arsenal table and ten-fight digest within 8192 bytes, and the same coach enters cross-fight REVIEW MODE every five fights or on an eight-fight plateau.
+The 64-seed offline replay keeps combined Mikiri/deflect use below 5% from fight four (2.34%, 2.08%, 2.31%), raises the quick punisher to 94.47%, retains probes and switches family at 7.8% of boundaries.
+The previous trained persistent sampler ends at 0.81% bad moves and 49.59% quick punisher; the old streak baseline ends at 36.95% and 31.36% respectively.
+Brain library validation passes 93 tests, brain-net passes 42, and game build plus library/binary Clippy pass.
+Requested integration filters and workspace/all-target Clippy are blocked by the explicit old GamePlan literal at crates/sim/tests/it/coach.rs:242, outside the permitted paths; its minimal default-field update awaits permission.
+All Cargo work used target/alt-fb, three jobs and offline mode; logs, cache, research files and git state were not written.
+See docs/BRAIN.md for controls, replay numbers, prompt audit, budget policy and the A/B flag `--brain-moves off`.
+
+## Brain attack learning (2026-10-12)
+
+Genichiro's initial forty-fight evidence shows 29 Mikiri counters in 60 thrust exchanges and 115 whiffs in 119 uses of callback animation 3076, while the checkpoint bandit already holds about 162 discounted updates.
+Added recent phase-specific attack evidence shared by ordinary and break-response sampling, Lua counter callbacks and local checkpoint quality, with a three-use safety minimum, stronger counter/punishment failures, actual posture progress, bounded player transfer, decay and exploration.
+Removed automatic outcome bans and made mature recent rates available to coach judgement, with structured preferences and matching checkpoint hints executing its notes.
+Player memory version 4 migrates through both direct and layered loaders, preserves old raw counts and source backups, and adds per-fight action reporting.
+The offline always-Mikiri experiment reduces thrust use to 4.38% with persistent sampling and 1.25% with local checkpoints by fight two, while retaining subsequent probes.
+The filtered release run passes 150 tests with one existing slow test ignored; the final migration, retention and brain unit rerun passes all 80 tests, and final workspace/all-target Clippy passes with warnings denied.
+All builds and checks used target/alt-fk and three Cargo jobs, with offline fakes or headless duels; existing logs, cache/re, game saves and git state were left untouched.
+The local collaboration board was read without changing it under this session's no-git/no-network instruction.
+Exact findings, benchmark limits, test evidence and manual follow-up are in `docs/BRAIN-LEARNING.md`, with the design updated in `docs/BRAIN.md`.
+
+## Group-s Demon of Hatred fight pass (2026-10-12)
+
+The Demon of Hatred (c7020:70200000, entity 1100900) is fightable at `--arena demon` in all three phases on the installed data and the map's own Lua AI.
+Wolf's arrival at region 1102910 now starts the fight (animation frozen until then, three fog walls, bar 907021), and Wolf's death re-freezes it.
+The first and second marks play the kneel, refill HP from the clip's SpEffect 300610, run the Lua's heat-up roar 20001 (immune to HP and posture damage), swap its phase SpEffect and raise 3702005 at one bar.
+The final mark plays ThrowParam 17020180/17020181, the map's Event20200 and Wolf's Event710207, and defeat releases the walls.
+New shared mechanisms are SpEffect categories (Demon only), endless TAE effects (Demon only), defender SpEffect HP cut rates, a throw-pair re-grounding step, and a Demon-only body radius and `GetDist` offset.
+Eleven fast tests pass and three slow ones (every attack lands, every projectile row flies, the three-phase soak) pass when run with `--ignored`; Owl, Genichiro, brain, attack-power, posture, perilous and the other boss regression filters pass, and `arena_d_mibu_bridge` fails on its own boss-bar event (a different group's work).
+Missing: TAE 705 FacingAngleCorrection (act 3026 never lands), the first-visit introduction, camera sub-IDs, FXR effects and sound, and the exact original `GetDist` and category rules; see `docs/BOSSES-s.md`.
+
+## Group-f Hirata Father combat (2026-10-12)
+
+Story Father and Inner Father now host their native c5060 Lua/HKS and a separate c5070 bird, including event-driven appearance, vanish, return and finishing execution.
+Fixed the shallow-floor waterside reference that cancelled Wolf's sword actions, resumed the bird's animation on enable, retained each variant's real Lua under the scripted CLI option and corrected both HUD names.
+The controlled two-mark replay plays the real get-up, restores 2552 HP, observes native phase-two contacts and reaches defeat flags 9317 and 9346 in 18.99 seconds.
+Both variants pass native arena-combat and Mikiri checks, all six Owl/Genichiro, tactics, attack-power, posture-recovery and swimming regression filters pass, and the final release game build succeeds.
+Both arena launch forms exit zero for both encounters, with reviewed first-phase captures under target/alt-f.
+Neither encounter is fully DONE: full attack/fire-counter coverage, native dummy-220 hit masks, collision-perfect finishing placement, continuous unassisted victory and graphical phase-two verification remain open.
+Workspace Clippy fails twice on the concurrent fight.rs hp_damage argument-count lint, and workspace formatting still reports shared differences; those files and ordering are left untouched.
+Exact commands, per-phase evidence, fixture limitations, screenshots and changed files are in `docs/BOSSES-f.md`.
+
+## Group-c Sword Saint combat continuation (2026-10-12)
+
+The continuous silvergrass replay runs final Tomoe's own Lua and real deathblow into all three story Isshin phases, both native get-ups and the separate Mortal Blade execution, reaching map defeat flag 9312.
+The second placed Isshin now has a distinct `silvergrass-inner-isshin` arena, think/event identity, native Inner Isshin bar name and a three-mark replay reaching the original rematch flag 9347.
+Fixed c5400's lost a100 throw/get-up group and reconstructed the queued kneeling request and HKS death ownership, preserving authored messages 20/30 and a six-second final-prompt delay without synthetic HP or victory changes.
+Four installed-data tests pass, covering the full story/rematch fights, both Mikiri/sweep-evasion sets, pistol damage and airborne lightning reversal; the story fight passed alone in 8.41 seconds.
+All required regression filters plus Isshin Ashina pass together: 102 passed and one existing slow test ignored.
+Workspace/all-target Clippy and the release game build pass after other agents repair their transient shared visibility errors; inspected arena captures show the real models, named bars and Lua contacts.
+Complete move/branch coverage, sweep kick-off, full graphical finishing verification and original-game comparison remain open, so no phase is claimed fully DONE.
+Exact commands, per-phase evidence, changed files, screenshots and limits are in `docs/BOSSES-c.md`; cache/re, original saves, existing logs and git state remain untouched.
+
+## Group-d sanctuary encounter continuation (2026-10-12)
+
+The Old Dragons opening now runs all twenty-five fighters' real Lua/HKS against a shared Wolf, applies the authored 4% controller damage, hosts revivals and black conversion, and reaches the native Divine Dragon hand-over from sword inputs at the normal arena start.
+The complete first-phase replay records 113 outgoing contacts, two incoming contacts and 23 revivals, with no enemy stats, placements, AI or event-flag edits.
+Added event bitfields, event-request interrupts, MSB group routing, attached tree props and posed-eye selection of the Dragon's native 15200090 finishing pair.
+The isolated finishing fixture plays both native clips and reaches defeat flag 9310; all five phase-two trees now perform their own rise and hold through Lua/event commands.
+The encounter is not DONE: the opening tree-area execution, exact native revival scheduling and full poison coverage remain open, and phase two is blocked by the authored tree wire-target activation, with no grapple, lightning charge or reversal in the sixty-second replay.
+Four Dragon tests and 100 Owl/Genichiro, tactics, attack-power and posture-recovery regressions pass, with slow encounter fixtures ignored by default.
+All four strengthened Dragon fixtures pass in 120.29 seconds, and the release game build passes.
+Workspace Clippy passed earlier, but its final retries encounter a concurrent `fight.rs:921` too-many-arguments lint, left untouched under the shared-tree rule.
+Both sanctuary CLI forms exit successfully with reviewed animated combat captures, the named Old Dragons bar and real incoming/outgoing contacts after fixing the source-verified meshless helper and hidden-controller HUD.
+The captures still expose washed-out arena presentation and cloth restarts, and do not certify complete visual fidelity.
+The completed Monk code was left untouched, and `docs/BOSSES-d.md` contains the concrete limits, changed files and commands.
+
+## Group-b ape continuation (2026-10-12)
+
+Guardian Ape's separate headless continuation and terror now run from the installed throw, TAE, bullet and status rows, with guard/deflect, dung-shot payload and sweep-counter checks.
+The burrow's brown ape now has independent Lua/HKS combat, live map-assigned TARGET_EVENT state, its own animated transform and vitality/posture/deathblow panel.
+The installed-data replay spends the main ape's first mark, lets Lua reach the real summon region, records both apes' contacts, kills the brown ape with its paired throw, then reaches the main ape's finishing message, flag 9307 and both fog removals.
+Fixed shallow cave water incorrectly trapping Wolf in swim transitions; the depth threshold uses existing step height and remains an explicit native-fidelity approximation.
+Neither ape is declared DONE because full attack/counter verification, selectable prosthetics and optional Mortal Blade severance remain incomplete.
+Father and Inner Father remain untouched in the requested order; see `docs/BOSSES-b.md` for precise implemented phases, controlled fixtures and blockers.
+All seven ape tests pass including the slow two-ape replay, and the requested Owl/Genichiro and supporting regressions, workspace Clippy and release game build pass.
+Both arena launch forms run, but graphical captures expose heavy staged haze and cave-camera obstruction and do not establish complete visual phase fidelity.
+New files pass direct rustfmt checks; workspace fmt --check reports concurrent shared formatting differences, left untouched.
+
+## Group-c Shura combat checkpoint (2026-10-12)
+
+Emma's six release tests verify installed Lua attacks on the roof, guard/deflect responses, both Mikiri thrusts, sweep evasion, the grab and her real deathblow-to-Isshin map hand-over.
+Isshin Ashina uses his data-selected c5400 donor; three tests verify both marks, get-up HP restoration, final map defeat, Mikiri, sweep evasion, the grab and damaging event-driven floor fire at 33 authored points.
+The finishing command now waits for the throw's TAE defeat-message window, and boss AI receives MSB region membership and Wolf's actual HP for its single-target last-target query.
+Two fire-source references remain unresolved in the original MSB, native target-switch history and request hand-off remain inferred, and no graphical or original-game comparison is claimed.
+All requested Owl, Genichiro, brain-tactics, attack-power and posture-recovery regression filters pass; the final workspace Clippy and game-build attempts hit another agent's ape HUD privacy errors, which were left untouched.
+The five new Rust files pass direct rustfmt checks, with shared module ordering preserved.
+Sword Saint's four-phase combat bring-up and rematch row remain unstarted; exact commands, evidence, changed files and limits are in `docs/BOSSES-c.md`, and no phase is overstated as fully DONE.
+
+## Group-d True Monk continuation (2026-10-12)
+
+True Monk runs natural Lua combat through all three marks, including three independent c5005 phantom AIs, authored get-up stat changes and the a100 centipede phase.
+The final pair now preserves its authored message 40 before accepting the map continuation, enabling centipede entity 2500852 and reaching defeat flag 9309.
+The support renderer applies the event's one-shot dummy-260 warp and explicit centipede playback.
+Three installed-data tests pass, including the slow three-phase replay and thrust/sweep counters in both animation sets, and both arena CLI forms produce reviewed first-phase captures.
+Native entrance/fog presentation, smooth phantom shading, complete move/status coverage and full finishing visual verification remain open, so True Monk is not claimed DONE.
+Dragon probes pass for a placed Old Dragon's real Lua contact and the Divine Dragon retry's Lua attacks, bullets and contacts, but the encounter remains blocked by aggregate/group combat, resurrection, event-value operations, tree/lightning interactions and the special finishing throw.
+All five group-d tests pass in the final combined run, and the eleven-test Owl failure retry passes after the shared tree update.
+The release game build and an earlier Clippy check pass, but later final Clippy and build retries are blocked by concurrent `ape_hud.rs` private-interface errors; exact commands and results are in `docs/BOSSES-d.md`.
+No cache/re, existing logs, git state, network or external model/API calls were used.
+
+## Group-a native release and descent continuation (2026-10-12)
+
+Butterfly's immediate-action Lua wrapper now reaches HKS env 125, and all eight illusions play their release clip and emit the installed damaging Bullet children.
+The native second-entity descent now completes its region/SpEffect gate, command 10, a100 entrance/descent clips and flag 11005802, replacing the staged instruction-18 bypass.
+The map event's wait survives hand-over, and cleared entrance effects restore correctly on retry.
+Gyoubu's two mounted bars pass the Lua/contact and paired-execution regression without per-frame position holding, while retaining a reduced-posture fixture.
+Butterfly pursuit homing, summon warps/recreation, Snap Seed and complete attack/counter fidelity remain unresolved, including two late-wave illusion floor falls, so no boss is claimed DONE and this continuation did not work on Demon.
+See `docs/BOSSES-a.md` for exact evidence, limits and final validation results.
+The final three Butterfly tests and Gyoubu's unheld-pair test pass, along with Owl, Genichiro, tactics, attack-power and posture-recovery regression filters, with one existing slow tactics sweep ignored.
+Workspace Clippy and the game build remain blocked by concurrent ape HUD privacy errors; the posture retry passes after concurrent Old Dragons borrow errors were resolved by their owner.
+
+## Group-e playable monkey continuation (2026-10-12)
+
+The hidden Folding Screen Monkey has a normal-arena-start sword replay with all four native Lua instances enabled and no placement, HP or posture edits.
+Fixed the following event's inverted radius condition and the auxiliary Wolf origin fallback, and bell input now plays the installed 710700 gesture.
+The four-target victory fixture retains each monkey's Lua instead of disabling its AI and reaches the real map defeat event.
+The complete puzzle is not DONE: native sensory acquisition/history, roof-link navigation, paired room-door activation and decoded object animation remain missing.
+The m89 re-export still omits m900085 in this checkout; no cache files were modified.
+The inspected graphical replay kills the hidden target at step 128 and shows shared HP 74.
+Monkey tests and combat regression filters pass; the latest workspace lint and game build are blocked by concurrent ape HUD private-type errors after earlier clean checks.
+See `docs/BOSSES-e.md` for per-target coverage, exact blockers and continuation verification.
+
+## Group-a combat continuation (2026-10-12)
+
+Butterfly's eight placed illusions now run separate Lua/HKS combat with shared Wolf contacts, shared AI event flags and the authored release pulse reaching the cast.
+Full projectile conversion and native descent remain blocked by event-relative point/warp and immediate-action hosting; the tested descent stalled, so the existing entry fallback was retained.
+Gyoubu's two mounted bars now have a focused real-Lua/contact and paired-throw regression, including first-mark HP refill and map defeat, using an explicit positioning/reduced-posture fixture.
+The final mark selects installed ThrowParam 15080170/15080171, and the staged active fight skips a stale opening AI command.
+His second bar exposed an inverted TAE lunge-bound panic, now handled without changing the game data, with bound precedence documented as approximate.
+Neither boss is claimed DONE, and Demon remains untouched while the native blockers remain unresolved.
+See `docs/BOSSES-a.md` for per-phase gaps, changed files and continuation verification.
+
+## Group-b boss fight pass, Guardian Ape (2026-10-12)
+
+Fixed the waterfall ape's false death so its real decapitation, twelve-second map wait and TAE HP refill reach a live headless phase.
+Headless deathblows now use the a235 player pair and retain the ape's a100 animation group, and the installed-data arena replay reaches Lua hits in both phases and defeat flag 9304.
+The scripted CLI option retains c5100's extracted Lua AI with an explicit diagnostic when no external action table exists.
+The revival's maximum-stat effect is read from params, and both new tests and all requested regression filters pass in `target/alt-b` with three jobs.
+Workspace/all-target Clippy and the release game build pass, and a one-dependency support-actor scheduling fix lets the graphical replay exit successfully.
+The inspected first-phase capture shows the real model, animation, named bar and Lua hits, with washed-out fog/exposure and fur-cloth reset warnings.
+Guardian Ape is not DONE: the separate final paired continuation, terror and complete attack/counter verification, and full two-phase graphical verification remain outstanding.
+Headless Ape and both Fathers remain outstanding; see `docs/BOSSES-b.md` for per-phase scope, evidence and gaps.
+
+## Group-a boss combat progress (2026-10-12)
+
+Lady Butterfly now uses her second entity's real finishing ThrowParam pair 15090680/15090681 instead of the first phase's ordinary pair.
+TAE finishing message 10 and player EzState execution requests are hosted, and her Lua GetDistXZ query uses horizontal target distance.
+Two focused release tests pass in 5.09 seconds on Hirata collision, covering natural Lua attacks, both paired deathblows, the entity hand-over, correct mark counts, both finishing clips and the map defeat flag.
+The phase-two throw retains its live a100 animation group, and both arena CLI forms visibly load Butterfly and exit successfully with scripted guard input and memory disabled.
+The illusion actors still lack simultaneous combat, shared AI state and projectile conversion, and the native phase-two descent remains bypassed, so Butterfly is not DONE.
+Gyoubu and Demon were left at their arena-staging baseline while Butterfly remains incomplete.
+The previously missing c5090, c1510, c5080 and c7020 models are now present.
+All requested combat regression filters, workspace/all-target Clippy with warnings denied and the final release game build pass in target/alt-a with three build jobs.
+The existing slow sweep remains ignored, and shared formatting requests were left untouched under the additive-edit rule.
+Verification, inferred throw-family selection and remaining per-phase gaps are recorded in `docs/BOSSES-a.md`.
+
+## Group-d boss combat, pass 2 (2026-10-12)
+
+The Mibu ghost Monk now runs its real Lua battle goal without the chained-goal-setter crash, and its Mikiri uses the authored defender dummy instead of requiring a dummy on Wolf.
+Four arena combat tests cover Lua attacks, guard and deflect, thrust and sweep counters, and single-mark removal through map victory and fog removal.
+The scoped release regression passes 115 tests with one existing slow case ignored, including Owl, Genichiro, brain tactics, attack power, posture recovery and perilous counters.
+Unlisted scripted plan tables retain the character's real Lua AI with a diagnostic, allowing offline scripted-mode arena entry without installing Owl plans on unrelated bosses.
+The ghost is not claimed fully DONE: visual replays show opaque ghost shading and an incorrect finishing defender clip, alongside snap-seed event bitfields, AI target history, entrance hosting and throw-clearance gaps.
+True Monk is stopped at missing `cache/models/c5005.glb`; NpcParam 50050000 selects c5000 animations, and the cache owner should run `sekiro-extract models c5005:50050000`.
+The Dragon encounter was not started, preserving the requested boss order.
+Workspace/all-target Clippy and the release game build pass in `target/alt-d` with three jobs, and both Mibu entry forms produce reviewed graphical captures.
+The new test file passes rustfmt; workspace formatting only requests prohibited sorting of shared module tables.
+See `docs/BOSSES-d.md` for exact commands, phase-by-phase limits and verification results.
+
+## Group-e Folding Screen Monkeys audit (2026-10-12)
+
+The c1260 zero-animation extract is a skeleton-only binder, not a decoder failure; all four placed monkey rows explicitly use c1250 animations and c1259 textures.
+Added a focused four-placement donor-loading integration check and `docs/BOSSES-e.md`, with the verified row identities and an honest encounter coverage table.
+The three character GLBs reported missing by pass 1 are now present, but the authored m900085 illusion sky export is still missing; its exact owner-run extraction command is documented.
+The encounter is not DONE: simultaneous monkey combat, independent Lua/event routing, sensory/navigation state, puzzle interactions, shared health and natural victory remain unimplemented.
+No combat or phase logic was changed, and no cache/re, existing logs, git state, network or model/API calls were used.
+The donor and Senpou staging tests pass in 1.14 and 3.51 seconds; all requested Owl/Genichiro, tactics, attack-power and posture-recovery regression filters pass, with one existing slow sweep ignored.
+Workspace/all-target Clippy and the release game build pass in `target/alt-e` with three jobs; workspace formatting reports concurrent/shared-file differences, while the new Rust file passes direct rustfmt checking.
+
 ## Group-c arena staging (2026-10-12)
 
 Added `silvergrass`, `silvergrass-genichiro`, `silvergrass-isshin`, `watering-hole` and `apes-burrow` from the installed MSBs and EMEVDs.
@@ -589,7 +784,7 @@ No commits, links, junctions, protected brain edits or game-install writes were 
 
 - Done 2026-10-11, to be tried in play: the boss **coach** (`--brain coach`, `docs/BRAIN.md` "The coach"). Between fights a reasoning model (`--coach claude|codex|api`, default `api` = Responses, `gpt-6-luna`, low effort, 45 s; `claude` = slim `claude -p --model claude-haiku-5-5`, no API key, `--coach-model`, `--coach-effort`) reads the fight summary (about 4 KB: result, trend, per-plan and per-set outcomes, Wolf's habits, the plan played, its own notes) and writes a versioned game plan (opener, 2 to 4 named plan sets, start set, avoid, notes), validated against the boss's actions. Fight 1 with no memory starts with his own Lua AI and can be reviewed mid-fight; the plan arriving during the respawn plays from fight 2 (opener, then the start set), a late one a fight later, a failure keeps the old plan, and the newest plan is saved in `logs/memory/<chr>.json`. In the fight only the Decisions API picks a set at the checkpoints, with a tiny request (about 100 tokens of numbers plus the set names). The console prints the request and a 3 to 5 line summary of each plan. Against reward hacking: winning faster is the first goal; new metrics `attacks/min`, `damage/min` and `passive_share` (a fight above 35% passive failed), and hard limits in the driver (an attack at least every 6 s, one retreat per 8 s, plans need an attack). Also fixed: an attack after `retreat12` or a strafe swung at empty air; it now turns to face Wolf first (30 degree rule). Tests `crates/sim/tests/coach.rs`, `crates/sim/src/brain/tests.rs`, `crates/brain-net/tests/offline.rs` (mock servers and a fake CLI only). Not verified: any real API, `claude` or `codex` call (flag names are from `--help` output), that the strict schema with `$defs` is accepted, that 6000 output tokens suffice for `medium` reasoning, how the plans look in play.
 
-- Done 2026-10-10, to be confirmed in play: three features after FwLo's RustSekiro video (his code adapted under MIT, `CREDITS.md`). (1) The deathblow camera: Wolf's deathblow clips drive it through TAE 155 (CameraSetParam slot 41, CameraParam 4000), 153 (distance, 1.5 m at the soldier's blow) and 151 (focus on dummy 142 of his animated camera bone, with look limits; the Owl's deathblow), and it hands back on the params' own chase rates (`docs/DEATHBLOW.md`, "Camera"). (2) The perilous kanji: the warning dummy bullet (judge 980 to 989) is made at Wolf within 5 m (soldier) or 9 m (Owl), its SpEffect 211000 shows VFX 48100 "ÃƒÂ¥Ã‚ÂÃ‚Â±" at Wolf's dummy 220, and the HUD draws a red ÃƒÂ¥Ã‚ÂÃ‚Â± over Wolf with a Windows Japanese font (the game's FXR is not decoded; no sound found). (3) The jump counter: Wolf's jumps carry sweep i-frames (TAE 954 type 1), his air kick (PCBehavior 901, anti-ground) is now a real attack, the sweeps' SpEffect 400200 multiplies its posture damage by 8 (the soldier's posture breaks), and env 2004 lets his script kick off the enemy (`docs/COMBAT-RULES.md`, "Perilous attacks"). Tests `crates/sim/tests/perilous.rs`, `deathblow_camera.rs`; scripts `crates/game/scripts/soldier_deathblow.txt`, `soldier_jump_counter.txt`; screenshots `cache/screens/dbcam_soldier_*.png`, `dbcam_owl2_*.png`, `kanji_soldier_*.png`.
+- Done 2026-10-10, to be confirmed in play: three features after FwLo's RustSekiro video (his code adapted under MIT, `CREDITS.md`). (1) The deathblow camera: Wolf's deathblow clips drive it through TAE 155 (CameraSetParam slot 41, CameraParam 4000), 153 (distance, 1.5 m at the soldier's blow) and 151 (focus on dummy 142 of his animated camera bone, with look limits; the Owl's deathblow), and it hands back on the params' own chase rates (`docs/DEATHBLOW.md`, "Camera"). (2) The perilous kanji: the warning dummy bullet (judge 980 to 989) is made at Wolf within 5 m (soldier) or 9 m (Owl), its SpEffect 211000 shows VFX 48100 "危" at Wolf's dummy 220, and the HUD draws a red 危 over Wolf with a Windows Japanese font (the game's FXR is not decoded; no sound found). (3) The jump counter: Wolf's jumps carry sweep i-frames (TAE 954 type 1), his air kick (PCBehavior 901, anti-ground) is now a real attack, the sweeps' SpEffect 400200 multiplies its posture damage by 8 (the soldier's posture breaks), and env 2004 lets his script kick off the enemy (`docs/COMBAT-RULES.md`, "Perilous attacks"). Tests `crates/sim/tests/perilous.rs`, `deathblow_camera.rs`; scripts `crates/game/scripts/soldier_deathblow.txt`, `soldier_jump_counter.txt`; screenshots `cache/screens/dbcam_soldier_*.png`, `dbcam_owl2_*.png`, `kanji_soldier_*.png`.
 
 - Done 2026-10-11, to be tried in play (user's first real soldier fight: the model chose the leaping slash 3003 twelve times although Wolf deflected it 5 of 5): the boss brain now probes instead of repeating. (1) Plans are 1 to 3 steps, each an attack or a movement *tactic* run through the engine's own native goals (hold, guard, walk_in, run_in, strafe, back_off, retreat, keep_range, relative to Wolf, each with a lifetime cap); the soldier and the Owl offer 73 and 75 choices (his actions, combos, 15 tactics, about 40 curated chains), text form such as `walk_in4>hold2>3013`. (2) Request modes `slot` (as before), `plan_end` and `checkpoints` (hosted default: only at fight start, half HP, a lost deathblow mark, Wolf punishing twice or deflecting three times in a row; a fight takes 1 to 5 requests); a reply is a plan set (the Decisions probabilities) the boss samples locally at every act, with a penalty for options repelled repeatedly this fight and a bonus for untried ones (temperature, seed by environment variables). (3) Per-fight metrics for Wolf (perfect-deflect and guard rate, hits taken, HP and posture lost, punishes, kill time) are kept in the memory file (version 2, last 10 fights), sent as a trend, and printed as one summary line per fight; `--brain lua --brain-memory on` saves the baseline to `logs/memory/<chr>.lua.json`. (4) Nothing is requested or logged once a fighter is dead; the hosted worker warms the route (DNS and TCP, no request) and its timeout is 3 s. `docs/BRAIN.md`, tests `crates/sim/tests/brain_tactics.rs`, `crates/sim/src/brain/tests.rs`, `crates/brain-net`. Not verified: any live API call (probability field names come from the docs), how the tactics look in play (distances and caps are tested, the animation blends are not).
 - Done 2026-10-10, to be tried in play: the Ashina soldier (c1010) can be driven by the boss brain, as a testbed for whether a hosted model plays better than the game's AI. His action table (`brain::actions::SOLDIER`, from `101000_battle.lua`, his BehaviorParam and AtkParam rows) has 13 attacks and 2 back steps with his acts' approach distances, his rushes' AI number, combos `3000+3001` and `3005+3007`, and reflex acts 23, 25 and 27; his script also names 3004, 3006, 5202 and 5203, which his TAE has no clips for, so they are refused. The driver, observation (`boss`, `boss_bearing`, `since_boss_hit`), tally and hosted requests are generic now (question `boss_action`, instructions naming the enemy). Memory: each fight's tally and Wolf's habits (attack distance, range, his response after deflects, guards and back steps, his answer to and punish speed for each boss action, heals, jumps) go into `logs/memory/<chr>.json` (version 1) at each death, respawn, every 15 s and on exit; requests carry this fight and all fights within 1200 bytes. Try: `.\target\release\sekiro-rs.exe --play --enemy soldier --brain scripted --brain-memory on --brain-log`. `docs/BRAIN.md`, tests `crates/sim/tests/soldier_brain.rs`, `crates/sim/src/brain/tests.rs`, `crates/brain-net`.
@@ -993,3 +1188,24 @@ The full release sekiro-sim/sekiro-brain-net suite passes: 463 passed, 0 failed,
 Workspace/all-target Clippy with -D warnings and cargo fmt --all --check pass.
 All build and test commands used CARGO_TARGET_DIR=target/alt and 12 jobs.
 No tests were weakened or deleted, and no commits or git state changes were made.
+
+## Combat counter follow-ups (2026-10-12)
+
+The initial scripted Genichiro and Owl Mikiri-to-deathblow fixtures failed because the counter defender clip was treated as a deathblow get-up lock until posture had recovered.
+Deathblows now respect the queued counter startup and Wolf's TAE flag 154 at 1.200 s, replace the counter pair cleanly, and clear the counter lock when Wolf cancels through another action.
+Seven new installed-data regressions pass for Genichiro, Owl and the soldier, including the first valid deathblow press, a move-cancel follow-up, and actual sweep-stomp meter loss.
+The reported reduced sweep-counter damage remains unreproduced: AtkParam_Pc 901's 10 posture and SpEffect 400200's 8x anti-ground rate already give 80 at AP1 and 180 with castle-roof AP6 effect 160006.
+Additional Genichiro 3007 / 3048 range and timing probes produced misses rather than a landed low-damage counter, so no unsupported damage multiplier was added.
+The release counter_followups, owl, genichiro, brain_tactics, attack_power, posture_recovery, deathblow and perilous filters all passed, with their slow tests left ignored.
+Workspace/all-target Clippy with -D warnings and formatting of the new test file passed; the parameter and animation findings are appended to docs/COMBAT-RULES.md.
+All builds and tests used target/alt-fc and three jobs, with no commits, git state changes, network/model calls, live game sessions or protected-path writes.
+
+## Castle-top camera obstruction (2026-10-12)
+
+Reproduced the Genichiro/Owl obstruction as the hanging bamboo blind `m006672_4001`, which crosses the rendered sight line without a camera collision hit.
+Added near-camera dither from the native MTD opt-out and shader distance transform, with the provisional fade interval, noise and interpolation differences documented in [FIDELITY.md](docs/FIDELITY.md#castle-top-camera-obstruction-2026-10-12).
+Inspected Genichiro and Owl before/after captures are retained under `target/alt-fm/`, with an original reproduction script in `crates/game/scripts/camera_ceiling_edge.txt`.
+All 23 focused release tests passed: 11 map tests including the installed-data obstruction guard, seven camera unit tests and five collision unit tests.
+Scoped game/format all-target Clippy and rustfmt checks of the two new Rust files passed.
+The simulation camera integration build and final workspace/all-target Clippy remain blocked by untouched `crates/sim/tests/it/coach.rs:242`, whose `GamePlan` initializer lacks `explore`, `lessons` and `move_controls`.
+All Cargo checks used `target/alt-fm` and three jobs, with no git operations, network/model calls, live game sessions or writes to the game, cache, re or protected output directories.

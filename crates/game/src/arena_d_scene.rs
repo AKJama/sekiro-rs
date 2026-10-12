@@ -24,6 +24,7 @@ struct Cast {
     library: AnimLibrary,
     requested: Option<(i32, bool)>,
     requested_warp: Option<i32>,
+    requested_bone_warp: Option<(i32, i16)>,
 }
 
 #[derive(Resource)]
@@ -104,9 +105,19 @@ pub(crate) fn install(
             if !model.starts_with("o258") && !model.starts_with("o259") {
                 continue;
             }
-            let glb = json["models"][model]["glb"]
-                .as_str()
-                .with_context(|| format!("missing extracted sanctuary object {model}"))?;
+            let Some(glb) = json["models"][model]["glb"].as_str() else {
+                // o259900 is an authored dummy-only FLVER, so extraction emits no mesh GLB.
+                let path = cache.join(format!("raw/obj/{model}.objbnd.d/{model}.flver"));
+                let bytes = std::fs::read(&path)
+                    .with_context(|| format!("missing extracted sanctuary object {model}"))?;
+                let data = sekiro_formats::flver::parse(&bytes)?;
+                anyhow::ensure!(
+                    data.meshes.is_empty(),
+                    "missing extracted sanctuary object {model}; run sekiro-extract map {}",
+                    spec.map
+                );
+                continue;
+            };
             anyhow::ensure!(
                 cache.join(format!("maps/{}/{glb}", spec.map)).is_file(),
                 "missing extracted sanctuary object maps/{}/{glb}",
@@ -236,6 +247,7 @@ fn spawn(
                 library,
                 requested: None,
                 requested_warp: None,
+                requested_bone_warp: None,
             },
             if on {
                 Visibility::Inherited
@@ -299,14 +311,182 @@ fn update(
             .unwrap_or(true);
         // A support model becomes the primary opponent at a sequential phase transition.
         let primary = part.entity == events.boss_entity;
-        *visibility = if on && backread && !primary {
+        // The sanctuary keeps c5200 frozen during the opening, then enables his branch.
+        // This visibility gate follows those event states; native draw-flag hosting remains open.
+        let dragon_waiting =
+            part.entity == 2_500_800 && scene.animation_enabled.get(&part.entity) == Some(&false);
+        *visibility = if on && backread && !primary && !dragon_waiting {
             Visibility::Inherited
         } else {
             Visibility::Hidden
         };
+        if let Some(&(owner, dummy)) = scene.attachments.get(&part.entity)
+            && let Some([point, forward, up]) = sim.duel.sanctuary_dummy(owner, dummy)
+        {
+            *transform =
+                crate::fxr::frame_transform(point.to_array(), forward.to_array(), up.to_array());
+        }
         let Some((mut cast, mut animator, mut mask)) = actor else {
             continue;
         };
+        if let Some(bird) = sim
+            .duel
+            .father_bird
+            .as_ref()
+            .filter(|b| b.entity == part.entity)
+        {
+            let report = &bird.report.enemy;
+            transform.translation = Vec3::from_array(bird.duel.enemy.body.position);
+            transform.rotation = Quat::from_rotation_y(bird.duel.enemy.body.yaw);
+            if let Some(name) = &report.animation {
+                if (animator.clip_name() != name || report.clip_started)
+                    && let Ok(clip) = cast.library.clip(name)
+                {
+                    animator.play_named(name, clip, false, report.blend_in);
+                }
+                animator.time = report.anim_time;
+                animator.speed = 0.0;
+                animator.apply_root_motion = false;
+            }
+            if report.fade >= 0.5 {
+                *visibility = Visibility::Hidden;
+            }
+            continue;
+        }
+        if let Some(illusion) = sim
+            .duel
+            .butterfly_illusions
+            .as_ref()
+            .and_then(|e| e.actors.iter().find(|a| a.entity == part.entity))
+        {
+            let report = &illusion.report.enemy;
+            transform.translation = Vec3::from_array(illusion.duel.enemy.body.position);
+            transform.rotation = Quat::from_rotation_y(illusion.duel.enemy.body.yaw);
+            if let Some(name) = &report.animation {
+                if (animator.clip_name() != name || report.clip_started)
+                    && let Ok(clip) = cast.library.clip(name)
+                {
+                    animator.play_named(name, clip, false, report.blend_in);
+                }
+                animator.time = report.anim_time;
+                animator.speed = 0.0;
+                animator.apply_root_motion = false;
+            }
+            if illusion.duel.rules.fighters[1].dead() || report.fade >= 0.5 {
+                *visibility = Visibility::Hidden;
+            }
+            continue;
+        }
+        if let Some(dragon) = sim
+            .duel
+            .old_dragons
+            .as_ref()
+            .and_then(|e| e.actors.iter().find(|p| p.entity == part.entity))
+        {
+            let report = &dragon.report.enemy;
+            transform.translation = Vec3::from_array(dragon.duel.enemy.body.position);
+            transform.rotation = Quat::from_rotation_y(dragon.duel.enemy.body.yaw);
+            if let Some(name) = &report.animation {
+                if (animator.clip_name() != name || report.clip_started)
+                    && let Ok(clip) = cast.library.clip(name)
+                {
+                    animator.play_named(name, clip, false, report.blend_in);
+                }
+                animator.time = report.anim_time;
+                animator.speed = 0.0;
+                animator.apply_root_motion = false;
+            }
+            if let Some(bits) = scene.masks.get(&part.entity) {
+                let mut values = [2u8; 32];
+                for (&bit, &shown) in bits {
+                    if let Some(v) = values.get_mut(bit as usize) {
+                        *v = u8::from(shown);
+                    }
+                }
+                mask.apply_event(&values);
+            }
+            continue;
+        }
+        if let Some(phantom) = sim
+            .duel
+            .monk_phantoms
+            .as_ref()
+            .and_then(|e| e.actors.iter().find(|p| p.entity == part.entity))
+        {
+            let report = &phantom.report.enemy;
+            transform.translation = Vec3::from_array(phantom.duel.enemy.body.position);
+            transform.rotation = Quat::from_rotation_y(phantom.duel.enemy.body.yaw);
+            if let Some(name) = &report.animation {
+                if (animator.clip_name() != name || report.clip_started)
+                    && let Ok(clip) = cast.library.clip(name)
+                {
+                    animator.play_named(name, clip, false, report.blend_in);
+                }
+                animator.time = report.anim_time;
+                animator.speed = 0.0;
+                animator.apply_root_motion = false;
+            }
+            if report.fade >= 0.5 {
+                *visibility = Visibility::Hidden;
+            }
+            continue;
+        }
+        if let Some(monkey) = sim
+            .duel
+            .screen_monkeys
+            .as_ref()
+            .and_then(|e| e.monkeys.iter().find(|m| m.entity == part.entity))
+        {
+            if sim
+                .duel
+                .screen_monkeys
+                .as_ref()
+                .is_some_and(|encounter| encounter.camouflaged(part.entity))
+            {
+                *visibility = Visibility::Hidden;
+            }
+            let report = &monkey.report.enemy;
+            transform.translation = Vec3::from_array(monkey.duel.enemy.body.position);
+            transform.rotation = Quat::from_rotation_y(monkey.duel.enemy.body.yaw);
+            if let Some(name) = &report.animation {
+                if (animator.clip_name() != name || report.clip_started)
+                    && let Ok(clip) = cast.library.clip(name)
+                {
+                    animator.play_named(name, clip, false, report.blend_in);
+                }
+                animator.time = report.anim_time;
+                animator.speed = 0.0;
+                animator.apply_root_motion = false;
+            }
+            continue;
+        }
+        let bone_warp = events
+            .scripts
+            .arena_c_state
+            .bone_warps
+            .get(&part.entity)
+            .copied();
+        if bone_warp != cast.requested_bone_warp
+            && let Some((entity, dummy)) = bone_warp
+            && entity == events.boss_entity
+        {
+            let model = sim.duel.enemy.bone_source_matrices();
+            if let Some(&[position, forward, up]) = sim.duel.fighters[1]
+                .rig
+                .frames(dummy, &model, sim.duel.enemy.source_to_world())
+                .first()
+            {
+                *transform = crate::fxr::frame_transform(
+                    position.to_array(),
+                    forward.to_array(),
+                    up.to_array(),
+                );
+                cast.requested_bone_warp = bone_warp;
+            }
+        }
+        if bone_warp.is_none() {
+            cast.requested_bone_warp = None;
+        }
         if let Some(&region) = scene.warps.get(&part.entity)
             && cast.requested_warp != Some(region)
             && let Some(spot) =
@@ -335,6 +515,11 @@ fn update(
                 Err(error) => warn!("supporting actor {}: {error}", part.entity),
             }
             cast.requested = Some(request);
+        }
+        // 12505990 disables ordinary centipede animation updates; 12505965 still
+        // explicitly requests its finishing playback without enabling that state.
+        if part.entity == 2_500_852 && cast.requested == Some((20000, false)) {
+            animator.speed = 1.0;
         }
         if let Some(bits) = scene.masks.get(&part.entity) {
             let mut values = [2u8; 32];

@@ -27,6 +27,7 @@ struct Layers {
     normal_enabled: vec4<f32>,
     hemi_axis: vec4<f32>,
     hemi_delta: vec4<f32>,
+    camera_fade: vec4<f32>,
 }
 #ifdef BINDLESS
 #import bevy_render::bindless::{bindless_textures_2d, bindless_textures_3d, bindless_textures_cube_array, bindless_samplers_filtering}
@@ -259,6 +260,16 @@ fn fragment(vertex: VertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     let slot = 0u;
 #endif
     var input = vertex;
+    if layers.camera_fade.x > 0.0 {
+        let opacity = distance(input.world_position.xyz, view.world_position) * layers.camera_fade.z - layers.camera_fade.y;
+        // Native camera fade samples an 8x8 noise tile; ordered coverage is provisional.
+        let p = vec2<u32>(input.position.xy) & vec2(7u);
+        let a = ((p.x & 1u) ^ (p.y & 1u)) * 2u + (p.y & 1u);
+        let b = (((p.x >> 1u) & 1u) ^ ((p.y >> 1u) & 1u)) * 2u + ((p.y >> 1u) & 1u);
+        let c = (((p.x >> 2u) & 1u) ^ ((p.y >> 2u) & 1u)) * 2u + ((p.y >> 2u) & 1u);
+        let noise = (f32(a * 16u + b * 4u + c) + 0.5) / 64.0;
+        if opacity < 0.01 + 0.99 * noise { discard; }
+    }
     var weights = vec3(0.0);
 #ifdef VERTEX_COLORS
     if layers.albedo_enabled.w > 0.0 {

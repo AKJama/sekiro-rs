@@ -152,7 +152,10 @@ The returned `NpcControl` carries the requested action (attack codes 3000 and up
 The shared NPC script (`c9997.hks`) reads the request as `env(106)` when it is free (idle, moving).
 Inside an attack or step it calls `ExecAIAction` with its cancel flag set, which reads a different env per kind of cancel instead: 107 combo action, 120 attack-cancel action, 118 step action, plus 123, 124 and 125 (endure, anti-backstab, immediate reaction; env names from the community env list in `re/ext/meow_env.txt`).
 Env 123 is the request of an `EndureAttack` goal, whose `Activate` calls `SetEnableEndureCancel_forGoal` (`attack_endure.lua`); `ExecAIAction` takes it before every other cancel, and no TAE flag gates it in the template, so ours offers it in any state that asks (set by the duel as an env override; the Owl's heat-up escapes 20006 to 20008, guards and deflects are endure requests).
-124 and 125 are still never set.
+Env 125 now carries the action while the installed `AttackImmediateAction` wrapper has enabled it with `SetEnableImmediateAction_forGoal`, until its termination callback clears it.
+The lifecycle and HKS request connection are reconstructed from the installed Lua and shared HKS dispatcher, not a traced native cancellation handler.
+The Butterfly regression exercises interruption into every illusion's release animation and its damaging Bullet children.
+Env 124 remains unhosted.
 The NPC TAEs mark where an animation may be cut for a queued request with action flags 23 ("end if AI combo attack queued"), 86 (attack), 79 (step) and 78 (move).
 Ours (`Character::fill_env`): env 107 is the request while flag 23 is on and the request comes from a goal registered with `ENABLE_COMBO_ATK_CANCEL` (`ComboRepeat`, `ComboFinal`); env 120 is any non-step request while flag 86 is on; env 118 a step (`5xxx`) while flag 79 is on.
 The pairing of flags and requests follows FwLo's RustSekiro notes (`docs/kb/enemy.md`).
@@ -173,7 +176,7 @@ Both readiness goals succeed at their 1.5 s cap.
 ## Not done yet
 
 - Interrupts other than parry timing, FindAttack, damage, observed SpEffects and watched areas (shoot impact, guard results, item use, observe regions and dummy areas).
-- Envs 124 and 125 (anti-backstab and immediate cancels).
+- Env 124 (anti-backstab cancels).
 - `GetEventRequest` answers -1 (the map events' requests to the AI are not wired).
 - Kengeki (sword clash) acts, platoon and team behaviour, navigation, sound targets, non-battle behaviour, home return.
 - The engine's exact goal update order, lifetime rules and interrupt order are ours; checking them against the native goal classes in the executable is the next step.

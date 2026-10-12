@@ -797,7 +797,10 @@ fn the_coach_request_has_the_structured_output_shape_and_reports_reasoning_token
             "boss_bans",
             "boss_phase",
             "counter_weights",
-            "checkpoint_prefs"
+            "checkpoint_prefs",
+            "explore",
+            "move_controls",
+            "lessons"
         ])
     );
     let choices = schema["$defs"]["choice"]["enum"].as_array().unwrap();
@@ -1275,10 +1278,12 @@ fn the_coach_mode_checkpoint_request_is_tiny() {
     let text = body["questions"][0]["instructions"].as_str().unwrap();
     assert!(text.len() < 200 && !text.contains("tally"), "{text}");
     assert!(
-        text.contains("Wolf HP+posture/min")
-            && text.contains("low boss HP+posture/min and Wolf deflects")
+        text.contains("damage/min")
+            && text.contains("low boss damage")
             && text.contains("Passive>35% fails")
-            && text.contains("Retreat to attack")
+            && text.contains("Counters/Mikiri/jump/deflect/guard fail")
+            && text.contains("Compare arsenal rates after 3 uses")
+            && text.contains("choose set")
     );
     // Input tokens are counted per call kind.
     let [decide, coach] = brain.call_stats();

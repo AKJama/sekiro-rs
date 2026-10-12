@@ -105,7 +105,9 @@ fn weight(entry: &Weighted, ctx: &Context<'_>) -> f32 {
         base
     };
     if let Some(plan) = &entry.plan {
-        w *= PENALTY.powi(ctx.streaks.total(plan).min(30) as i32);
+        w *= PENALTY
+            .powi(ctx.streaks.total(plan).min(30) as i32)
+            .max(super::adaptation::FLOOR);
         if !ctx.tried.contains(&plan.value()) {
             w *= UNTRIED_BONUS;
         }

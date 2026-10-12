@@ -1,7 +1,7 @@
 //! Shared boss evidence and isolated player profiles across fights and sessions.
 //! [`LayerPaths`] migrates legacy memory without deleting its source, and persists counted
 //! boss knowledge beside each player's habits, history and tuned game plan.
-//! [`Memory`] is the version-3 profile and legacy format; [`BossKnowledge`] is version 1.
+//! [`Memory`] is the version-5 profile and legacy format; [`BossKnowledge`] is version 1.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ use super::tally::{CountMap, Counts, Side, Tally, TopMap, merge_counts, ranked_c
 use std::collections::BTreeMap;
 
 /// The memory file format version.
-pub const MEMORY_VERSION: u32 = 3;
+pub const MEMORY_VERSION: u32 = 5;
 
 /// The oldest format this build still reads (version 1 had no fight history).
 pub const OLDEST_VERSION: u32 = 1;
@@ -38,6 +38,10 @@ pub enum FightEnd {
 /// The memory file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Memory {
+    #[serde(default)]
+    pub move_bandit: super::bandit::BanditMemory,
+    #[serde(default)]
+    pub attack_learning: super::adaptation::AttackMemory,
     #[serde(default)]
     pub bandit: super::bandit::BanditMemory,
     #[serde(default)]
@@ -73,6 +77,14 @@ pub struct Memory {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CoachMemory {
     #[serde(default)]
+    pub hypotheses: Vec<super::digest::Hypothesis>,
+    #[serde(default)]
+    pub last_review_fight: u32,
+    #[serde(default)]
+    pub move_progress: BTreeMap<String, [u32; 2]>,
+    #[serde(default)]
+    pub lessons: Vec<String>,
+    #[serde(default)]
     pub phase_bans: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub phase_plans: BTreeMap<String, GamePlan>,
@@ -91,7 +103,7 @@ pub struct CoachMemory {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct PlanFailures {
-    /// Whiffed or punished posture-break responses, excluding other failure classifications.
+    /// Net-bad attack uses, excluding fatal and fully deflected classifications.
     #[serde(default)]
     pub failed: u32,
     pub uses: u32,
@@ -103,14 +115,15 @@ impl PlanFailures {
     pub fn rate(&self) -> f32 {
         (self.deflected_all + self.fatal + self.failed) as f32 / self.uses.max(1) as f32
     }
-    pub fn banned(&self) -> bool {
-        self.uses >= 3 && self.rate() >= 0.6
-    }
 }
 
 impl CoachMemory {
     pub fn is_empty(&self) -> bool {
         self.phase_plans.is_empty()
+            && self.last_review_fight == 0
+            && self.hypotheses.is_empty()
+            && self.lessons.is_empty()
+            && self.move_progress.is_empty()
             && self.phase_bans.is_empty()
             && self.plan.is_none()
             && self.plans.is_empty()
@@ -157,6 +170,8 @@ impl Memory {
     pub fn new(chr: &str) -> Self {
         Self {
             version: MEMORY_VERSION,
+            move_bandit: Default::default(),
+            attack_learning: Default::default(),
             bandit: Default::default(),
             chr: chr.to_string(),
             fights: 0,
@@ -170,6 +185,37 @@ impl Memory {
             history: Vec::new(),
             coach: CoachMemory::default(),
         }
+    }
+
+    fn migrate(&mut self) {
+        let incoming: Vec<_> = self
+            .coach
+            .lessons
+            .iter()
+            .map(|s| s.trim().chars().take(120).collect::<String>())
+            .filter(|s| !s.is_empty())
+            .collect();
+        self.coach.lessons.clear();
+        super::digest::remember(&mut self.coach.lessons, &incoming);
+        let excess = self.coach.hypotheses.len().saturating_sub(6);
+        self.coach.hypotheses.drain(..excess);
+        if self.version < 4 {
+            super::adaptation::seed(&mut self.attack_learning, &self.chr, &self.boss);
+            for (phase, counts) in &self.phase_actions {
+                super::adaptation::seed(&mut self.attack_learning, phase, counts);
+            }
+            for (phase, bans) in &mut self.coach.phase_bans {
+                let plan = self.coach.phase_plans.get(phase).or(if phase == &self.chr {
+                    self.coach.plan.as_ref()
+                } else {
+                    None
+                });
+                bans.retain(|choice| {
+                    plan.is_some_and(|p| p.avoid.iter().any(|a| &a.choice == choice))
+                });
+            }
+        }
+        self.version = MEMORY_VERSION;
     }
 
     /// Reads the memory for `chr` from `path`; starts fresh when it is missing or unusable,
@@ -190,7 +236,7 @@ impl Memory {
             Ok(m) if m.chr != chr => format!("memory of {} (wanted {chr})", m.chr),
             Ok(mut m) => {
                 // Older files default missing evidence and are saved as the current version.
-                m.version = MEMORY_VERSION;
+                m.migrate();
                 return (m, Loaded::Read);
             }
             Err(e) => format!("bad JSON: {e}"),
@@ -312,6 +358,9 @@ pub fn resolve_for(arg: Option<&str>, chr: &str, brain: &str, hosted: bool) -> O
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BossEvidence {
+    pub move_bandit: super::bandit::BanditMemory,
+    #[serde(default)]
+    pub attack_learning: super::adaptation::AttackMemory,
     #[serde(default)]
     pub bandit: super::bandit::BanditMemory,
     pub phase_actions: BTreeMap<String, CountMap>,
@@ -327,6 +376,8 @@ impl BossEvidence {
     fn from_player(m: &Memory) -> Self {
         Self {
             bandit: m.bandit.clone(),
+            move_bandit: m.move_bandit.clone(),
+            attack_learning: m.attack_learning.clone(),
             fights: m.fights,
             boss_wins: m.boss_wins,
             wolf_wins: m.wolf_wins,
@@ -412,6 +463,18 @@ impl BossKnowledge {
             .insert(player.into(), BossEvidence::from_player(memory));
         self.evidence = BossEvidence::default();
         for e in self.players.values() {
+            super::bandit::merge(&mut self.evidence.move_bandit, &e.move_bandit, 1.0);
+            for (phase, actions) in &e.attack_learning {
+                for (key, evidence) in actions {
+                    self.evidence
+                        .attack_learning
+                        .entry(phase.clone())
+                        .or_default()
+                        .entry(key.clone())
+                        .or_default()
+                        .pool(*evidence);
+                }
+            }
             for (phase, contexts) in &e.bandit {
                 for (context, arms) in contexts {
                     for (name, arm) in arms {
@@ -445,29 +508,8 @@ impl BossKnowledge {
             merge_counts(&mut self.evidence.plans, &e.plans);
             merge_counts(&mut self.evidence.break_plans, &e.break_plans);
         }
-        for (choice, counts) in self
-            .evidence
-            .actions
-            .iter()
-            .chain(self.evidence.plans.iter())
-        {
-            if counts.n >= 9
-                && (counts.whiffed == counts.n || counts.countered as f32 / counts.n as f32 >= 0.6)
-                && choice.split(['>', '+']).any(|step| {
-                    step.parse::<i32>()
-                        .is_ok_and(|id| (3000..3100).contains(&id))
-                })
-                && !self.bans.iter().any(|b| &b.choice == choice)
-            {
-                self.bans.push(Avoid {
-                    choice: choice.clone(),
-                    reason: format!(
-                        "shared: {}/{} whiffs, {} countered",
-                        counts.whiffed, counts.n, counts.countered
-                    ),
-                });
-            }
-        }
+        // Outcomes inform rates and sampling. Only a reasoned coach reply creates a ban.
+        self.bans.retain(|ban| !ban.reason.starts_with("shared: "));
     }
     pub fn learn(&mut self, plan: &GamePlan) {
         for principle in plan.boss_principles.iter().rev() {
@@ -614,7 +656,7 @@ impl LayerPaths {
             if !self.backup.exists() {
                 std::fs::copy(&self.legacy, &self.backup)?;
             }
-            m.version = MEMORY_VERSION;
+            m.migrate();
             boss.update("default", &m);
             if let Some(p) = &m.coach.plan {
                 boss.learn(p);
@@ -634,7 +676,7 @@ impl LayerPaths {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Memory::new(chr),
             Err(e) => return Err(e),
         };
-        player.version = MEMORY_VERSION;
+        player.migrate();
         // Repair a interrupted two-file save using the durable profile snapshot.
         let name = self
             .player
@@ -669,6 +711,7 @@ impl LayerPaths {
             let snapshot = combined.players.get(name).cloned().unwrap_or_default();
             let mut evidence = Memory::new(&boss.chr);
             evidence.bandit = snapshot.bandit;
+            evidence.move_bandit = snapshot.move_bandit;
             evidence.phase_actions = snapshot.phase_actions;
             evidence.fights = snapshot.fights;
             evidence.boss_wins = snapshot.boss_wins;

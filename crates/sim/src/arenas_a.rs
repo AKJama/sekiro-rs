@@ -29,7 +29,7 @@ pub const BUTTERFLY: BossEvents = BossEvents {
 };
 
 /// Butterfly's second placed character, with its own NpcParam and boss-bar entity.
-/// 11005812 is joined after the descent/region gate; the illusion event ids are retained.
+/// 11005812 retains its native descent/region gate; the illusion event ids are retained.
 pub const BUTTERFLY_SECOND: BossEvents = BossEvents {
     boss_entity: 1_000_810,
     events: &[
@@ -310,12 +310,9 @@ pub fn retired_butterfly(boss: i32, entity: i32) -> bool {
 
 /// Entry instructions where the original event has no label at the post-intro boundary.
 /// Verify the command at the offset before joining, so changed extracts fail explicitly.
-pub fn join(map: &str, id: i64, entries: &[EventEntry]) -> Option<(usize, (i32, i32))> {
+pub fn join(map: &str, id: i64, _entries: &[EventEntry]) -> Option<(usize, (i32, i32))> {
     match (map, id) {
         ("m10_00_00_00", 11_005_810) => Some((15, (2008, 4))),
-        ("m10_00_00_00", 11_005_812) if !entries.iter().any(|e| e.id == 11_005_810) => {
-            Some((18, (2004, 17)))
-        }
         ("m10_00_00_00", 11_005_800) => Some((21, (4, 5))),
         ("m20_00_00_00", 12_005_810) => Some((29, (2003, 2))),
         _ => None,

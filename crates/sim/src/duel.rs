@@ -21,6 +21,23 @@ use sekiro_formats::flver::{self, Flver};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[path = "butterfly_illusions.rs"]
+pub mod butterfly_illusions;
+#[path = "dragon_finish.rs"]
+mod dragon_finish;
+#[path = "dragon_trees.rs"]
+mod dragon_trees;
+#[path = "father_bird.rs"]
+pub mod father_bird;
+#[path = "headless_ape.rs"]
+pub mod headless_ape;
+#[path = "monk_phantoms.rs"]
+pub mod monk_phantoms;
+#[path = "old_dragons.rs"]
+pub mod old_dragons;
+#[path = "screen_monkeys.rs"]
+pub mod screen_monkeys;
+
 /// Seconds between a death and both characters respawning at their start positions (a stand-in
 /// for the game's death screen and reload).
 pub const RESPAWN_DELAY: f32 = 6.0;
@@ -124,6 +141,19 @@ struct Throws {
 }
 
 pub struct Duel {
+    /// Independent combatants in the Hall of Illusions, sharing this duel's Wolf.
+    pub screen_monkeys: Option<screen_monkeys::Encounter>,
+    pub monk_phantoms: Option<monk_phantoms::Encounter>,
+    pub father_bird: Option<father_bird::Bird>,
+    pub old_dragons: Option<old_dragons::Encounter>,
+    pub butterfly_illusions: Option<butterfly_illusions::Encounter>,
+    pub headless_ape: Option<headless_ape::Encounter>,
+    monk_stats: Option<crate::true_monk::PhaseStats>,
+    /// An auxiliary opponent resolves contacts against Wolf's already advanced frame.
+    shared_player_frame: bool,
+    defer_map_events: bool,
+    auxiliary_ezstate: Option<(u8, i32)>,
+    auxiliary_animation_enabled: bool,
     pub camera: crate::camera::CameraParams,
     /// The camera as Wolf's animation drives it (the deathblow camera, TAE 151 / 153 / 155),
     /// updated every step.
@@ -155,6 +185,8 @@ pub struct Duel {
     cache: PathBuf,
     /// Which enemy this duel loaded.
     pub spec: EnemySpec,
+    /// Marks on a later placed entity belonging to this encounter's visible boss bar.
+    encounter_extra_marks: i32,
     initial_spec: EnemySpec,
     pending_handover: Option<(i32, Option<i32>)>,
     /// Map-event cinematic boundary, queued until any active deathblow releases.
@@ -200,6 +232,7 @@ pub struct Duel {
     /// The fight's map events (phase changes, boss bar, defeat), when the enemy has any
     /// ([`crate::arena::boss_events`]).
     pub events: Option<FightEvents>,
+    pub isshin_fire: Option<crate::isshin_fire::FireEmitter>,
     /// The arena's gated collision (fog wall and boundary, [`CollisionWorld::set_gate`]), which
     /// blocks while one of the fight's fog walls stands. Set by `Arena::place`.
     pub fog_gate: Option<Arc<crate::collision::CollisionWorld>>,
@@ -219,6 +252,9 @@ pub struct FightEvents {
     pub defeated: bool,
     /// An event command waiting for the boss's script (`env(105, slot)`): (slot, command).
     pub ezstate: Option<(u8, i32)>,
+    /// A map-authored player execution request, consumed by the player's HKS script.
+    pub player_ezstate: Option<(u8, i32)>,
+    sword_saint_finish: crate::sword_saint::FinishRequests,
     /// Whether the post-intro event setup has already run.
     initialized: bool,
     /// The fight's fog walls (placed by the map's events, see [`crate::fogwall`]).
@@ -251,6 +287,8 @@ impl FightEvents {
             hp_bar: true,
             defeated: false,
             ezstate: None,
+            player_ezstate: None,
+            sword_saint_finish: Default::default(),
             initialized: false,
         })
     }
@@ -263,6 +301,8 @@ impl FightEvents {
         self.hp_bar = true;
         self.defeated = false;
         self.ezstate = None;
+        self.player_ezstate = None;
+        self.sword_saint_finish = Default::default();
         self.initialized = false;
     }
 }
@@ -280,6 +320,8 @@ const ENV_IN_THROW: i32 = 206;
 /// community env list): an `EndureAttack` goal's request, which the NPC script's
 /// `ExecAIAction` takes before every other cancel.
 const ENV_AI_ENDURE_ACTION: i32 = 123;
+/// The immediate-action wrapper's request, read by the shipped ExecAIAction dispatcher.
+const ENV_AI_IMMEDIATE_ACTION: i32 = 125;
 
 /// TAE action flag 78, "End If AI Move Queued": an NPC clip's move window.
 const AI_MOVE_FLAG: i32 = 78;
@@ -313,12 +355,63 @@ impl EventView<'_> {
 }
 
 impl EventHost for EventView<'_> {
+    fn encounter_condition(
+        &self,
+        instruction: &sekiro_formats::emevd::Instruction,
+    ) -> Option<bool> {
+        if let Some(value) = self
+            .duel
+            .screen_monkeys
+            .as_ref()
+            .and_then(|encounter| encounter.condition(instruction, &self.duel.player))
+        {
+            return Some(value);
+        }
+        if instruction.code() == (3, 3) {
+            let a = self
+                .character(self.who(instruction.i32_at(4)?)?)
+                .body
+                .position;
+            let b = self
+                .character(self.who(instruction.i32_at(8)?)?)
+                .body
+                .position;
+            return crate::events::radius_condition(instruction, a, b);
+        }
+        None
+    }
     fn inside_area(&self, entity: i32, area: i32) -> Option<bool> {
+        if let Some(bird) = self
+            .duel
+            .father_bird
+            .as_ref()
+            .filter(|b| b.entity == entity)
+        {
+            return crate::arena_c::regions::contains(
+                &self.duel.cache,
+                "m10_00_00_00",
+                area,
+                bird.duel.enemy.body.position,
+            );
+        }
+        if let Some(actor) = self
+            .duel
+            .screen_monkeys
+            .as_ref()
+            .and_then(|e| e.actor(entity))
+        {
+            return crate::arena_c::regions::contains(
+                &self.duel.cache,
+                screen_monkeys::MAP,
+                area,
+                actor.enemy.body.position,
+            );
+        }
         let character = self.character(self.who(entity)?);
         let events = crate::arena::boss_events(&self.duel.spec)?;
         crate::arena_c::regions::contains(
             &self.duel.cache,
-            events.map,
+            crate::sword_saint::world_map(events.map),
             area,
             character.body.position,
         )
@@ -334,6 +427,84 @@ impl EventHost for EventView<'_> {
             .is_none_or(|c| c.id != id || c.applied)
     }
     fn has_sp_effect(&self, entity: i32, id: i32) -> Option<bool> {
+        if let Some(bird) = self
+            .duel
+            .father_bird
+            .as_ref()
+            .filter(|b| b.entity == entity)
+        {
+            if id == 200004
+                && bird
+                    .duel
+                    .ai
+                    .as_ref()
+                    .is_some_and(|ai| ai.state.target_state >= 2)
+            {
+                return Some(true);
+            }
+            return EventView {
+                duel: &bird.duel,
+                boss: entity,
+            }
+            .has_sp_effect(entity, id);
+        }
+        if let Some(cast) = &self.duel.old_dragons {
+            if let Some(value) = cast.group_effect(entity, id) {
+                return Some(value);
+            }
+            if let Some(actor) = cast.actor(entity) {
+                return EventView {
+                    duel: actor,
+                    boss: entity,
+                }
+                .has_sp_effect(entity, id);
+            }
+        }
+        if entity == headless_ape::BROWN
+            && let Some(actor) = &self.duel.headless_ape
+        {
+            return EventView {
+                duel: &actor.duel,
+                boss: entity,
+            }
+            .has_sp_effect(entity, id);
+        }
+        if let Some(actor) = self
+            .duel
+            .butterfly_illusions
+            .as_ref()
+            .and_then(|e| e.actor(entity))
+        {
+            return EventView {
+                duel: actor,
+                boss: entity,
+            }
+            .has_sp_effect(entity, id);
+        }
+        if let Some(actor) = self
+            .duel
+            .monk_phantoms
+            .as_ref()
+            .and_then(|e| e.actor(entity))
+        {
+            return EventView {
+                duel: actor,
+                boss: entity,
+            }
+            .has_sp_effect(entity, id);
+        }
+        if let Some(actor) = self
+            .duel
+            .screen_monkeys
+            .as_ref()
+            .and_then(|e| e.actor(entity))
+        {
+            return EventView {
+                duel: actor,
+                boss: entity,
+            }
+            .has_sp_effect(entity, id);
+        }
         let i = self.who(entity)?;
         Some(
             self.character(i).tae_frame().sp_effects.contains(&id)
@@ -342,11 +513,99 @@ impl EventHost for EventView<'_> {
     }
 
     fn has_event_message(&self, entity: i32, id: i32) -> Option<bool> {
+        if let Some(bird) = self
+            .duel
+            .father_bird
+            .as_ref()
+            .filter(|b| b.entity == entity)
+        {
+            return EventView {
+                duel: &bird.duel,
+                boss: entity,
+            }
+            .has_event_message(entity, id);
+        }
+        if let Some(actor) = self.duel.old_dragons.as_ref().and_then(|e| e.actor(entity)) {
+            return EventView {
+                duel: actor,
+                boss: entity,
+            }
+            .has_event_message(entity, id);
+        }
+        if entity == headless_ape::BROWN
+            && let Some(actor) = &self.duel.headless_ape
+        {
+            return EventView {
+                duel: &actor.duel,
+                boss: entity,
+            }
+            .has_event_message(entity, id);
+        }
+        if let Some(actor) = self
+            .duel
+            .butterfly_illusions
+            .as_ref()
+            .and_then(|e| e.actor(entity))
+        {
+            return EventView {
+                duel: actor,
+                boss: entity,
+            }
+            .has_event_message(entity, id);
+        }
+        if let Some(actor) = self
+            .duel
+            .monk_phantoms
+            .as_ref()
+            .and_then(|e| e.actor(entity))
+        {
+            return EventView {
+                duel: actor,
+                boss: entity,
+            }
+            .has_event_message(entity, id);
+        }
+        if let Some(actor) = self
+            .duel
+            .screen_monkeys
+            .as_ref()
+            .and_then(|e| e.actor(entity))
+        {
+            return EventView {
+                duel: actor,
+                boss: entity,
+            }
+            .has_event_message(entity, id);
+        }
         let i = self.who(entity)?;
-        Some(self.character(i).tae_frame().ezstate_requests.contains(&id))
+        Some(self.character(i).tae_runtime.event_message == Some(id))
     }
 
     fn is_dead(&self, entity: i32) -> Option<bool> {
+        if let Some(actor) = self.duel.old_dragons.as_ref().and_then(|e| e.actor(entity)) {
+            return Some(actor.rules.fighters[1].dead());
+        }
+        if entity == headless_ape::BROWN
+            && let Some(actor) = &self.duel.headless_ape
+        {
+            return Some(actor.duel.rules.fighters[1].dead());
+        }
+        if let Some(actor) = self
+            .duel
+            .butterfly_illusions
+            .as_ref()
+            .and_then(|e| e.actor(entity))
+        {
+            return Some(actor.rules.fighters[1].dead());
+        }
+        if let Some(actor) = self
+            .duel
+            .screen_monkeys
+            .as_ref()
+            .and_then(|e| e.actor(entity))
+        {
+            return Some(actor.rules.fighters[1].dead());
+        }
         if crate::arenas_a::retired_butterfly(self.boss, entity) {
             return Some(true);
         }
@@ -354,9 +613,44 @@ impl EventHost for EventView<'_> {
     }
 
     fn hp(&self, entity: i32) -> Option<i32> {
+        if let Some(actor) = self.duel.old_dragons.as_ref().and_then(|e| e.actor(entity)) {
+            return Some(actor.rules.fighters[1].vitality.hp);
+        }
+        if entity == headless_ape::BROWN
+            && let Some(actor) = &self.duel.headless_ape
+        {
+            return Some(actor.duel.rules.fighters[1].vitality.hp);
+        }
+        if let Some(actor) = self
+            .duel
+            .butterfly_illusions
+            .as_ref()
+            .and_then(|e| e.actor(entity))
+        {
+            return Some(actor.rules.fighters[1].vitality.hp);
+        }
+        if let Some(actor) = self
+            .duel
+            .screen_monkeys
+            .as_ref()
+            .and_then(|e| e.actor(entity))
+        {
+            return Some(actor.rules.fighters[1].vitality.hp);
+        }
         Some(self.duel.rules.fighters[self.who(entity)?].vitality.hp)
     }
     fn max_hp(&self, entity: i32) -> Option<i32> {
+        if let Some(actor) = self.duel.old_dragons.as_ref().and_then(|e| e.actor(entity)) {
+            return Some(actor.rules.fighters[1].vitality.max_hp);
+        }
+        if let Some(actor) = self
+            .duel
+            .screen_monkeys
+            .as_ref()
+            .and_then(|e| e.actor(entity))
+        {
+            return Some(actor.rules.fighters[1].vitality.max_hp);
+        }
         Some(self.duel.rules.fighters[self.who(entity)?].vitality.max_hp)
     }
     fn health_bars(&self, entity: i32) -> Option<i32> {
@@ -409,6 +703,19 @@ impl Duel {
             })
         });
         Ok(Self {
+            monk_stats: crate::true_monk::owns(&spec)
+                .then(|| crate::true_monk::PhaseStats::load(cache))
+                .flatten(),
+            screen_monkeys: None,
+            monk_phantoms: None,
+            father_bird: None,
+            old_dragons: None,
+            butterfly_illusions: None,
+            headless_ape: None,
+            shared_player_frame: false,
+            defer_map_events: false,
+            auxiliary_ezstate: None,
+            auxiliary_animation_enabled: true,
             camera: crate::camera::CameraParams::load(cache),
             camera_director: crate::camera::CameraDirector::load(cache),
             player,
@@ -427,6 +734,7 @@ impl Duel {
             throws,
             cache: cache.to_path_buf(),
             initial_spec: spec.clone(),
+            encounter_extra_marks: crate::butterfly::additional_marks(cache, &spec),
             pending_handover: None,
             cinematic: None,
             spec,
@@ -450,14 +758,33 @@ impl Duel {
             god: false,
             immortal: false,
             events: None,
+            isshin_fire: None,
         })
-        .map(|mut duel| {
+        .and_then(|mut duel| {
             duel.events = crate::arena::boss_events(&duel.spec).and_then(|spec| {
                 FightEvents::load(cache, spec)
                     .map_err(|e| eprintln!("{}: map events not loaded: {e}", duel.spec.chr))
                     .ok()
             });
-            duel
+            if screen_monkeys::controller(&duel.spec) {
+                duel.screen_monkeys = Some(screen_monkeys::Encounter::load(cache)?);
+            }
+            if old_dragons::owns(&duel.spec) {
+                duel.old_dragons = Some(old_dragons::Encounter::load(cache)?);
+            }
+            if crate::true_monk::owns(&duel.spec) {
+                duel.monk_phantoms = Some(monk_phantoms::Encounter::load(cache)?);
+            }
+            if crate::owl_father::owns(&duel.spec) {
+                duel.father_bird = Some(father_bird::Bird::load(cache, &duel.spec)?);
+            }
+            if duel.spec.chr == "c5090" {
+                duel.butterfly_illusions = Some(butterfly_illusions::Encounter::load(cache)?);
+            }
+            if duel.spec.chr == "c5100" && duel.spec.npc_param == 51_000_100 {
+                duel.headless_ape = Some(headless_ape::Encounter::load(cache)?);
+            }
+            Ok(duel)
         })
     }
 
@@ -473,6 +800,10 @@ impl Duel {
             .and_then(|r| ThinkParams::from_row(&r).ok())?;
         match AiBrain::load(cache, &spec.ai_bundle, think, AI_SEED) {
             Ok(mut brain) => {
+                if let Some(events) = crate::arena::boss_events(spec) {
+                    brain.state.map_regions =
+                        Some(crate::lua_ai::regions::MapRegions::new(cache, events.map));
+                }
                 if spec.starts_in_battle {
                     brain.start_in_battle();
                 }
@@ -500,6 +831,23 @@ impl Duel {
         brain: Box<dyn crate::brain::BossBrain>,
         log: bool,
     ) -> Result<Option<PathBuf>, String> {
+        if crate::sword_saint::keep_lua(&self.spec, brain.name(), log)
+            || crate::owl_father::keep_lua(&self.spec, brain.name(), log)
+        {
+            eprintln!(
+                "{}: retaining the installed Lua AI",
+                self.spec.display_name()
+            );
+            return Ok(None);
+        }
+        if self.spec.chr == "c5100"
+            && brain.name() == "scripted"
+            && crate::brain::BossActions::for_chr(&self.spec.chr).is_none()
+            && !log
+        {
+            eprintln!("c5100: no external action table; retaining the extracted Lua AI");
+            return Ok(None);
+        }
         if crate::brain::BossActions::for_chr(&self.spec.chr).is_none() && !brain.plans() && !log {
             return Ok(None);
         }
@@ -540,12 +888,13 @@ impl Duel {
             let mut sp_effects = c.tae_frame().sp_effects.clone();
             sp_effects.extend_from_slice(f.resident());
             if c.kind == crate::character::ControlKind::Npc
-                && sp_effects.iter().any(|id| {
-                    c.tae
-                        .sp_effects
-                        .get(id)
-                        .is_some_and(|info| (270..=274).contains(&info.state_info))
-                })
+                && (c.behavior.runtime.offsets.by_type.contains_key(&15)
+                    || sp_effects.iter().any(|id| {
+                        c.tae
+                            .sp_effects
+                            .get(id)
+                            .is_some_and(|info| (270..=274).contains(&info.state_info))
+                    }))
             {
                 let group = c.behavior.runtime.offsets.offset(15) / 100;
                 sp_effects.retain(|id| {
@@ -662,6 +1011,37 @@ impl Duel {
         self.player = player;
         self.enemy = enemy;
         self.rules.reset();
+        if crate::owl_father::owns(&self.spec) {
+            let mut bird = father_bird::Bird::load(&self.cache, &self.spec)?;
+            if let Some(world) = &self.fog_gate {
+                bird.place(world);
+            }
+            self.father_bird = Some(bird);
+        }
+        if self.spec.chr == "c5100" && self.spec.npc_param == 51_000_100 {
+            let mut cast = headless_ape::Encounter::load(&self.cache)?;
+            if let Some(world) = &self.fog_gate {
+                cast.place(world);
+            }
+            self.headless_ape = Some(cast);
+        }
+        if self.spec.chr == "c5090" {
+            let mut cast = butterfly_illusions::Encounter::load(&self.cache)?;
+            if let Some(world) = &self.fog_gate {
+                cast.place(world);
+            }
+            self.butterfly_illusions = Some(cast);
+        }
+        self.monk_stats = crate::true_monk::owns(&self.spec)
+            .then(|| crate::true_monk::PhaseStats::load(&self.cache))
+            .flatten();
+        if crate::true_monk::owns(&self.spec) {
+            let mut cast = monk_phantoms::Encounter::load(&self.cache)?;
+            if let Some(world) = &self.fog_gate {
+                cast.place(world);
+            }
+            self.monk_phantoms = Some(cast);
+        }
         self.detector = HitDetector::default();
         if self.ai.is_some() {
             self.ai = Self::load_ai(&self.cache, &self.spec);
@@ -680,6 +1060,19 @@ impl Duel {
         self.lightning_returned = false;
         if let Some(ev) = self.events.as_mut() {
             ev.restart();
+        }
+        crate::demon::on_reset(
+            &self.spec,
+            self.events.as_mut(),
+            self.fall_respawn_depth.is_some(),
+        );
+        if let Some(encounter) = self.old_dragons.as_mut() {
+            encounter.reset(&self.cache)?;
+        }
+        if let Some(encounter) = self.screen_monkeys.as_mut() {
+            for monkey in &mut encounter.monkeys {
+                monkey.duel.reset()?;
+            }
         }
         if let Some(mut driver) = self.boss_brain.take() {
             driver.rebind(self);
@@ -723,6 +1116,14 @@ impl Duel {
                     .scripts
                     .cast_scene
                     .clone_from(&previous.scripts.cast_scene);
+                if next.spec.chr == "c5090" && next.spec.npc_param == 50_900_001 {
+                    events
+                        .scripts
+                        .continue_event_from(&previous.scripts, 11_005_812);
+                    if crate::butterfly::entrance_effect_cleared(&previous.scripts) {
+                        next.rules.fighters[1].clear_resident_effect(3_509_210);
+                    }
+                }
             }
         }
         self.enemy = next.enemy;
@@ -737,7 +1138,12 @@ impl Duel {
         self.rules = next.rules;
         self.ai = if self.ai.is_some() { next.ai } else { None };
         self.spec = next.spec;
+        self.encounter_extra_marks = next.encounter_extra_marks;
         self.events = next.events;
+        self.butterfly_illusions = next.butterfly_illusions;
+        if let (Some(encounter), Some(world)) = (&mut self.butterfly_illusions, &self.fog_gate) {
+            encounter.place(world);
+        }
         self.throws = next.throws;
         self.enemy_active = true;
         self.last_throw_def_clip = None;
@@ -817,7 +1223,14 @@ impl Duel {
     /// only Wolf gives way, so walking into him does not shove him out of his animation (ours,
     /// after FwLo's RustSekiro, where throw pairs skip the push-apart).
     fn separate(&mut self) {
-        let min = self.fighters[0].radius + self.fighters[1].radius;
+        let body = |f: &Combatant| {
+            if f.body_radius > 0.0 {
+                f.body_radius
+            } else {
+                f.radius
+            }
+        };
+        let min = body(&self.fighters[0]) + body(&self.fighters[1]);
         let (p, e) = (self.player.body.position, self.enemy.body.position);
         let (dx, dz) = (e[0] - p[0], e[2] - p[2]);
         let d = (dx * dx + dz * dz).sqrt();
@@ -861,15 +1274,50 @@ impl Duel {
 
     /// Whether pressing attack now would start a deathblow.
     pub fn deathblow_available(&self) -> bool {
-        self.deathblow_rows().is_some()
+        if let Some(encounter) = &self.screen_monkeys {
+            return encounter.deathblow_available(&self.player);
+        }
+        self.brown_deathblow_available() || self.deathblow_rows().is_some()
     }
 
     fn deathblow_rows(&self) -> Option<(i32, i32)> {
+        if self.spec.chr == "c5200" {
+            return self.dragon_finishing_row();
+        }
+        if self.deathblow.is_none()
+            && !self.rules.fighters[0].dead()
+            && let Some(throws) = &self.throws
+            && let Some(rows) = crate::sword_saint::finishing_rows(
+                &self.spec,
+                &self.enemy,
+                &throws.table,
+                &placement(&self.player),
+                &placement(&self.enemy),
+            )
+            .or_else(|| {
+                crate::guardian_ape::finishing_rows(
+                    &self.spec,
+                    &self.enemy,
+                    &throws.table,
+                    &placement(&self.player),
+                    &placement(&self.enemy),
+                )
+            })
+        {
+            return Some(rows);
+        }
         // Owl's TAE keeps the heat-up judgment effect on throughout the heat-up and kneel.
         // HP 1 here is the interrupted first deathblow's HP floor, not another opening.
         // Leave attacks enabled: his Lua ParryTiming interrupt uses this same effect to
         // request escape 20007, whose TAE restores HP and posture (docs/OWL.md, Phase 2).
         if self.enemy.tae_frame().sp_effects.contains(&OWL_HEAT_UP) {
+            return None;
+        }
+        if crate::guardian_ape::headless(&self.spec)
+            && self.rules.fighters[1].vitality.deathblows_left == 0
+            && self.rules.fighters[1].vitality.hp <= 1
+            && self.last_throw_def_clip.is_some()
+        {
             return None;
         }
         // The enemy must have reacted to the hit that broke it first: while it is frozen in hit
@@ -880,10 +1328,14 @@ impl Duel {
             || !self.rules.deathblow_open(1)
             || self.hit_stop[1].active()
             || self.enemy.pending_damage.is_some()
+            || self.mikiri.as_ref().is_some_and(|pair| {
+                !pair.started || !self.player.tae_frame().flag(crate::tae::cancel::DEATHBLOW)
+            })
         {
             return None;
         }
         if let Some(clip) = &self.last_throw_def_clip
+            && self.mikiri.is_none()
             && self
                 .enemy
                 .behavior
@@ -894,6 +1346,27 @@ impl Duel {
             return None;
         }
         let throws = self.throws.as_ref()?;
+        if self.spec.chr == "c5090" && self.spec.npc_param == 50_900_001 {
+            return crate::butterfly::second_phase_deathblow(
+                &throws.table,
+                &placement(&self.player),
+                &placement(&self.enemy),
+            );
+        }
+        if crate::guardian_ape::headless(&self.spec) {
+            return crate::guardian_ape::headless_rows(
+                &throws.table,
+                &placement(&self.player),
+                &placement(&self.enemy),
+            );
+        }
+        if self.spec.chr == "c5080" && self.lethal_deathblow() {
+            return crate::gyoubu::finishing_rows(
+                &throws.table,
+                &placement(&self.player),
+                &placement(&self.enemy),
+            );
+        }
         let situation = if self.lethal_deathblow() {
             Situation::Final
         } else {
@@ -920,18 +1393,44 @@ impl Duel {
     /// Fires the throw events into both graphs, as the engine does (the scripts never start
     /// throws themselves).
     fn try_deathblow(&mut self) -> Option<(i32, i32)> {
+        if self.spec.chr == "c5200" {
+            return self.try_dragon_finish();
+        }
         let rows = self.deathblow_rows()?;
         let throws = self.throws.as_ref()?;
         let row = |id: i32| throws.table.rows.iter().find(|r| r.id == id);
         let (start, body) = (row(rows.0)?, row(rows.1)?);
+        let mut resolved_body = body.clone();
+        if crate::guardian_ape::headless(&self.spec)
+            || (self.spec.chr == "c5090" && self.spec.npc_param == 50_900_001)
+            || crate::true_monk::owns(&self.spec)
+            || self.spec.chr == "c5400"
+        {
+            resolved_body.def_anim_offset += self
+                .enemy
+                .behavior
+                .runtime
+                .offsets
+                .by_type
+                .get(&THROW_DEF_OFFSET_TYPE)
+                .copied()
+                .unwrap_or(0) as i32;
+        }
+        let body = &resolved_body;
         let (attacker, defender) = (placement(&self.player), placement(&self.enemy));
         let defender_clip = body.defender_anim();
-        let times = ThrowTimes::from_tae_db(
-            &self.player.tae,
-            &start.attacker_anim(),
-            &body.attacker_anim(),
-            defender_clip.as_deref().map(|d| (&*self.enemy.tae, d)),
-        )?;
+        let times = if rows.0 == rows.1
+            && (crate::guardian_ape::headless(&self.spec) || self.spec.chr == "c5400")
+        {
+            crate::guardian_ape::finishing_times(&self.player.tae, body)
+        } else {
+            ThrowTimes::from_tae_db(
+                &self.player.tae,
+                &start.attacker_anim(),
+                &body.attacker_anim(),
+                defender_clip.as_deref().map(|d| (&*self.enemy.tae, d)),
+            )
+        }?;
         let sorb = if body.atk_sorb_dummy <= 0 && body.def_sorb_dummy > 0 {
             // Wolf is snapped to the enemy's dummy; hold the enemy where that puts it.
             DummyFrame::from_flver(throws.enemy_model.as_ref()?, body.def_sorb_dummy)?.inverse()
@@ -953,7 +1452,7 @@ impl Duel {
             body_duration,
             deathblow_marks(marks),
         );
-        db.death_clip = death_clip;
+        db.death_clip = death_clip && rows.0 != rows.1;
         if body.atk_sorb_dummy <= 0 && body.def_sorb_dummy > 0 {
             db.absorbed = Absorbed::Attacker;
         }
@@ -973,6 +1472,8 @@ impl Duel {
         // resume (and shove the enemy) once the pair ends.
         self.knockback = [None, None];
         self.deathblow = Some(db);
+        // The deathblow replaces the counter pair; its slide must not move the new throw.
+        self.mikiri = None;
         self.defender_dying = 0;
         Some(rows)
     }
@@ -1043,6 +1544,14 @@ impl Duel {
             self.rules.deathblow(1);
             report.hit = true;
             report.killed = step.killed;
+            if self.events.is_some() && crate::guardian_ape::false_death(&self.spec) {
+                crate::guardian_ape::decapitated(&mut self.rules.fighters[1].vitality);
+                report.killed = false;
+            }
+            if self.events.is_some() && crate::guardian_ape::headless(&self.spec) && step.killed {
+                crate::guardian_ape::decapitated(&mut self.rules.fighters[1].vitality);
+                report.killed = false;
+            }
             if step.killed && !db.death_clip {
                 // The defender clip is itself the death: the script may see HP 0 from now on.
                 self.defender_dying = self.defender_dying.max(1);
@@ -1060,6 +1569,28 @@ impl Duel {
         }
         if let Some(a) = step.absorb {
             self.absorb(&a);
+        }
+    }
+
+    /// The enemy's newly applied lasting SpEffects replace the active ones of their category
+    /// ([`crate::sp_category`]), resident NpcParam effects included. Only the Demon of Hatred
+    /// uses it so far: the rule is inferred and other bosses' regressions are tuned without it.
+    fn apply_sp_categories(&mut self) {
+        let applied = self.enemy.tae_runtime.take_applied();
+        if !crate::demon::owns(&self.spec) {
+            return;
+        }
+        for id in applied {
+            let active: Vec<i32> = self.rules.fighters[1]
+                .resident()
+                .iter()
+                .copied()
+                .chain(self.enemy.tae_runtime.timed_ids())
+                .collect();
+            for old in crate::sp_category::replaced(&self.enemy.tae, id, active) {
+                self.rules.fighters[1].clear_resident_effect(old);
+                self.enemy.tae_runtime.clear_timed(old);
+            }
         }
     }
 
@@ -1085,6 +1616,18 @@ impl Duel {
             for c in [&mut self.player, &mut self.enemy] {
                 c.body.position[0] += shift[0];
                 c.body.position[2] += shift[1];
+                // A shift over sloped ground must not leave the body hanging (a fall start
+                // would cancel the throw clip): follow a floor within a step's height.
+                if shift[0].hypot(shift[1]) > 0.01
+                    && let Some(y) = c.ground.floor(
+                        c.body.position[0],
+                        c.body.position[2],
+                        c.body.position[1] + 1.0,
+                    )
+                    && (y - c.body.position[1]).abs() <= 1.0
+                {
+                    c.body.position[1] = y;
+                }
             }
         } else {
             eprintln!("throw pair clearance exhausted; retaining authored alignment");
@@ -1146,20 +1689,37 @@ impl Duel {
             .player_row(self.spec.throw_chr(), 0, if broken { 120 } else { 190 })?
             .clone();
         self.player.clip_duration(&row.attacker_anim())?;
-        let sorb = DummyFrame::from_flver(&throws.model, row.atk_sorb_dummy)?;
+        let absorbed = if row.atk_sorb_dummy <= 0 && row.def_sorb_dummy > 0 {
+            Absorbed::Attacker
+        } else {
+            Absorbed::Defender
+        };
+        let sorb = if absorbed == Absorbed::Attacker {
+            DummyFrame::from_flver(throws.enemy_model.as_ref()?, row.def_sorb_dummy)?.inverse()
+        } else {
+            DummyFrame::from_flver(&throws.model, row.atk_sorb_dummy)?
+        };
         self.player.body.yaw = self.player.yaw_to(self.enemy.body.position);
         self.enemy.body.yaw = self.enemy.yaw_to(self.player.body.position);
         let slide = crate::deathblow::AbsorbSlide::new(
-            Absorbed::Defender,
+            absorbed,
             &sorb,
             &placement(&self.player),
             &placement(&self.enemy),
             row.interpolation_time,
         );
-        self.reserve_pair([
-            self.player.body.position,
-            sorb.placement(&placement(&self.player)).position,
-        ]);
+        let aligned = if absorbed == Absorbed::Attacker {
+            [
+                sorb.inverse().placement(&placement(&self.enemy)).position,
+                self.enemy.body.position,
+            ]
+        } else {
+            [
+                self.player.body.position,
+                sorb.placement(&placement(&self.player)).position,
+            ]
+        };
+        self.reserve_pair(aligned);
         self.rules.fighters[1].posture.take(damage, None);
         self.player
             .behavior
@@ -1208,6 +1768,10 @@ impl Duel {
             pair.started = true;
         }
         if pair.started && !playing {
+            // A counter reaction is not a deathblow get-up lock after Wolf cancels out.
+            if self.last_throw_def_clip == pair.row.defender_anim() {
+                self.last_throw_def_clip = None;
+            }
             return;
         }
         if let Some(a) = pair.slide.advance(dt) {
@@ -1465,7 +2029,16 @@ impl Duel {
             .enumerate()
         {
             let hp = f.vitality.hp as f32;
-            c.behavior.env.hp = if (held && i == 1) || (thrown && i == 0) {
+            c.behavior.env.hp = if (held && i == 1)
+                || (thrown && i == 0)
+                || (i == 1 && crate::demon::execution_owns_death(&self.spec, c))
+                || (i == 1 && crate::true_monk::finishing_message_pending(&self.spec, c))
+                || (i == 1
+                    && crate::sword_saint::execution_owns_death(
+                        &self.spec,
+                        c,
+                        f.vitality.deathblows_left,
+                    )) {
                 hp.max(1.0)
             } else {
                 hp
@@ -1649,13 +2222,50 @@ impl Duel {
             .is_none_or(|e| e.boss_bar.is_some() || e.hp_bar)
     }
 
+    /// Encounter marks for the HUD; combat still spends only the active entity's own marks.
+    pub fn enemy_bar_marks(&self) -> i32 {
+        if old_dragons::owns(&self.spec) {
+            return 0;
+        }
+        if self.screen_monkeys.is_some() {
+            return 0;
+        }
+        let remaining = self.rules.fighters[1].vitality.deathblows_left;
+        if self.spec.chr == "c5090" {
+            remaining.max(0) + self.encounter_extra_marks
+        } else {
+            deathblow_marks(remaining)
+        }
+    }
+
     /// What the enemy's script reads from the engine about events, throws and endure requests,
     /// before it runs: the waiting event command (`env(105, slot)`), "in a throw" (`env(206)`),
     /// the AI's endure-cancel action (`env(123)`), and, in an event animation, the move cancel
     /// and standby states without the clip-end stand-in (see below).
     fn publish_event_envs(&mut self, endure_action: Option<i32>) {
+        self.player
+            .behavior
+            .env
+            .overrides
+            .retain(|(id, _, _)| *id != ENV_EVENT_COMMAND);
+        if let Some((slot, command)) = self.events.as_ref().and_then(|e| e.player_ezstate) {
+            self.player.behavior.env.overrides.push((
+                ENV_EVENT_COMMAND,
+                Some(i32::from(slot)),
+                command as f32,
+            ));
+        }
         let in_throw = self.deathblow.is_some() || self.enemy_in_throw_clip();
-        let command = self.events.as_ref().and_then(|e| e.ezstate);
+        let command = self
+            .events
+            .as_ref()
+            .and_then(|e| e.ezstate)
+            .or(self.auxiliary_ezstate)
+            .filter(|(_, command)| {
+                !crate::isshin::defer_finishing_request(&self.spec, &self.enemy, *command)
+                    && !(*command == 20200
+                        && crate::true_monk::finishing_message_pending(&self.spec, &self.enemy))
+            });
         // Event animations (the graph's `Event*` states, such as the Owl's heat-up) end through
         // their own state's end branch (`env(339)`, `W_Event21003` after `a000_020005`); their
         // TAE opens no move window. Our clip-end stand-in for env 2000 / 1105 would hand them to
@@ -1672,6 +2282,7 @@ impl Duel {
                 273,
                 ENV_EVENT_COMMAND,
                 ENV_AI_ENDURE_ACTION,
+                ENV_AI_IMMEDIATE_ACTION,
                 crate::player::ENV_MOVE_CANCEL,
                 crate::player::ENV_STANDBY_STATE,
             ]
@@ -1685,6 +2296,15 @@ impl Duel {
         }
         if let Some(a) = endure_action.filter(|&a| a > 0) {
             env.overrides.push((ENV_AI_ENDURE_ACTION, None, a as f32));
+        }
+        if self
+            .ai
+            .as_ref()
+            .is_some_and(|ai| ai.state.request.immediate)
+            && self.enemy.npc.action > 0
+        {
+            env.overrides
+                .push((ENV_AI_IMMEDIATE_ACTION, None, self.enemy.npc.action as f32));
         }
         if event_anim {
             env.overrides
@@ -1704,6 +2324,15 @@ impl Duel {
             return;
         };
         // A waiting command is used up once the script played an event animation for it.
+        if ev.player_ezstate.is_some()
+            && self.last_steps[0]
+                .behavior
+                .events
+                .iter()
+                .any(|e| e.starts_with("W_Event"))
+        {
+            ev.player_ezstate = None;
+        }
         if ev.ezstate.is_some()
             && self.last_steps[1]
                 .behavior
@@ -1713,7 +2342,15 @@ impl Duel {
         {
             ev.ezstate = None;
         }
+        ev.sword_saint_finish
+            .release(&mut self.enemy, &mut ev.ezstate);
         let initializing = !ev.initialized;
+        if initializing && self.spec.chr == "c5430" && self.isshin_fire.is_none() {
+            match crate::isshin_fire::FireEmitter::load(&self.cache, &self.fighters[0]) {
+                Ok(emitter) => self.isshin_fire = Some(emitter),
+                Err(error) => eprintln!("Shura fire emitter not loaded: {error}"),
+            }
+        }
         ev.initialized = true;
         let commands = ev.scripts.step(
             dt,
@@ -1722,6 +2359,16 @@ impl Duel {
                 boss: ev.boss_entity,
             },
         );
+        if (matches!(self.spec.chr.as_str(), "c5090" | "c5200")
+            || crate::owl_father::owns(&self.spec))
+            && let Some((animation, _)) = ev.scripts.cast_scene.animations.remove(&ev.boss_entity)
+            && animation >= 0
+        {
+            self.enemy
+                .behavior
+                .runtime
+                .fire_event(&format!("W_Event{animation}"));
+        }
         if let Some(region) = ev.scripts.cast_scene.warps.remove(&ev.boss_entity)
             && let Some(events) = crate::arena::boss_events(&self.spec)
         {
@@ -1740,7 +2387,69 @@ impl Duel {
             _ => None,
         };
         for c in commands {
+            if let Some(encounter) = self.old_dragons.as_mut() {
+                encounter.command(&c, dt);
+            }
+            if let Some(encounter) = self.butterfly_illusions.as_mut() {
+                encounter.command(&c, dt);
+            }
+            if let Some(encounter) = self.monk_phantoms.as_mut() {
+                encounter.command(&c, dt);
+            }
+            if let Some(bird) = self.father_bird.as_mut() {
+                bird.command(&c, dt);
+            }
+            if let Some(encounter) = self.headless_ape.as_mut() {
+                encounter.command(&c, dt);
+            }
+            if let Some(encounter) = self.screen_monkeys.as_mut() {
+                encounter.command(&c, dt, &self.player, &self.fighters[0]);
+            }
             match c {
+                EventCommand::AiEnabled { entity, enabled }
+                    if self.spec.chr == "c5090" && who(entity) == Some(1) =>
+                {
+                    self.enemy_active = enabled;
+                }
+                EventCommand::ShootBullet {
+                    owner,
+                    source,
+                    dummy,
+                    behavior,
+                    angles,
+                } if self.spec.chr == "c5430"
+                    && owner == crate::isshin_fire::OWNER
+                    && dummy == -1
+                    && angles == [0; 3] =>
+                {
+                    if self.isshin_fire.is_none() {
+                        match crate::isshin_fire::FireEmitter::load(&self.cache, &self.fighters[0])
+                        {
+                            Ok(emitter) => self.isshin_fire = Some(emitter),
+                            Err(error) => eprintln!("Shura fire emitter not loaded: {error}"),
+                        }
+                    }
+                    if let Some(emitter) = self.isshin_fire.as_ref()
+                        && let Err(error) = crate::isshin_fire::shoot(
+                            emitter,
+                            &mut self.bullets,
+                            &self.fighters[1],
+                            source,
+                            behavior,
+                        )
+                    {
+                        eprintln!("Shura event shot not emitted: {error}");
+                    }
+                }
+                EventCommand::ShootBullet {
+                    owner,
+                    source,
+                    dummy,
+                    behavior,
+                    angles,
+                } if self.spec.chr == "c5200" && owner == ev.boss_entity && angles == [0; 3] => {
+                    self.shoot_dragon_event(owner, source, dummy as i16, behavior);
+                }
                 EventCommand::AiCommand {
                     entity,
                     command,
@@ -1786,6 +2495,14 @@ impl Duel {
                     self.player.input.reset_requests();
                 }
                 EventCommand::SetSpEffect { entity, id } => {
+                    if self.old_dragons.is_some() && entity == ev.boss_entity {
+                        self.apply_screen_health_effect(id);
+                    }
+                    if self.screen_monkeys.is_some() && entity == ev.boss_entity && id == 3_126_010
+                    {
+                        self.apply_screen_health_effect(id);
+                        continue;
+                    }
                     if let Some(i) = who(entity) {
                         let c = if i == 0 {
                             &mut self.player
@@ -1809,13 +2526,35 @@ impl Duel {
                             &mut self.enemy
                         };
                         character.tae_runtime.clear_timed(id);
+                        if self.spec.chr == "c5090" {
+                            character
+                                .tae_runtime
+                                .resident
+                                .retain(|effect| *effect != id);
+                            self.rules.fighters[i].clear_resident_effect(id);
+                        }
                     }
                 }
                 EventCommand::EzStateRequest {
                     entity,
                     command,
+                    slot: _,
+                } if crate::guardian_ape::headless(&self.spec)
+                    && ((who(entity) == Some(1) && command == 20200)
+                        || (who(entity) == Some(0) && command == 710203)) => {}
+                EventCommand::EzStateRequest {
+                    entity,
+                    command,
                     slot,
-                } if who(entity) == Some(1) => ev.ezstate = Some((slot, command)),
+                } if who(entity) == Some(1) => {
+                    ev.sword_saint_finish
+                        .receive(&self.spec, &mut ev.ezstate, (slot, command));
+                }
+                EventCommand::EzStateRequest {
+                    entity,
+                    command,
+                    slot,
+                } if who(entity) == Some(0) => ev.player_ezstate = Some((slot, command)),
                 EventCommand::BossBar {
                     shown,
                     entity,
@@ -2005,6 +2744,15 @@ impl Duel {
     }
 
     pub fn step(&mut self, input: &InputFrame, dt: f32) -> DuelReport {
+        if old_dragons::owns(&self.spec) && self.old_dragons.is_some() && !self.defer_map_events {
+            return self.step_old_dragons(input, dt);
+        }
+        if self.headless_ape.is_some() && !self.defer_map_events {
+            return self.step_ape_encounter(input, dt);
+        }
+        if self.screen_monkeys.is_some() {
+            return self.step_screen_monkeys(input, dt);
+        }
         // Let an already playing pair finish before beginning a queued cinematic. Otherwise
         // pausing the pair would prevent the map's hand-over from ever becoming eligible.
         if self.deathblow.is_none() && self.cinematic.is_some() {
@@ -2068,14 +2816,19 @@ impl Duel {
                 respawned = true;
             }
         }
-        self.update_lock(input);
+        if !self.shared_player_frame {
+            self.update_lock(input);
+        }
 
         // The engine checks for a deathblow before the attack reaches the script.
         let mut input = *input;
         let attack_pressed = input.buttons.attack && !self.attack_button;
         self.attack_button = input.buttons.attack;
         let mut deathblow = DeathblowReport::default();
-        if attack_pressed && let Some(rows) = self.try_deathblow() {
+        if !self.shared_player_frame
+            && attack_pressed
+            && let Some(rows) = self.try_deathblow()
+        {
             deathblow.started = Some(rows);
             input.buttons.attack = false;
         }
@@ -2085,7 +2838,17 @@ impl Duel {
         }
         let enemy_alive = !self.rules.fighters[1].dead();
         let mut endure_action = None;
-        if self.enemy_active && enemy_alive && self.deathblow.is_none() && !respawned {
+        let demon_idle = crate::demon::waiting(&self.spec, self.events.as_ref())
+            || crate::demon::recovering(
+                &self.spec,
+                self.enemy
+                    .behavior
+                    .runtime
+                    .main_clip()
+                    .map(|c| c.animation.as_str()),
+            );
+        if self.enemy_active && enemy_alive && self.deathblow.is_none() && !respawned && !demon_idle
+        {
             if self.ai.is_some() {
                 let world = self.ai_world(dt);
                 let mut driver = self.boss_brain.take();
@@ -2099,7 +2862,20 @@ impl Duel {
                     };
                     ai.state.ninsatsu =
                         (self.rules.fighters[1].vitality.deathblows_left, max_marks);
+                    if let Some(events) = &self.events {
+                        ai.state.event_flags.clone_from(&events.scripts.flags);
+                    }
+                    ai.state.dist_offset = crate::demon::dist_offset(&self.spec, &self.fighters[1]);
                     self.enemy.npc = ai.think(world);
+                    if let Some(events) = self.events.as_mut() {
+                        for (flag, on) in ai.state.event_flag_changes.drain() {
+                            if on {
+                                events.scripts.flags.insert(flag);
+                            } else {
+                                events.scripts.flags.remove(&flag);
+                            }
+                        }
+                    }
                     endure_action = ai.state.request.endure.then_some(self.enemy.npc.action);
                     if let Some(d) = driver.as_mut() {
                         d.after_think(&mut ai, self);
@@ -2127,7 +2903,28 @@ impl Duel {
         self.enemy.npc_target =
             (!self.rules.fighters[0].dead()).then_some(self.player.body.position);
         // Hit stop: each character advances only by what is left of the step after its freeze.
-        let dts = [self.hit_stop[0].split(dt), self.hit_stop[1].split(dt)];
+        let monk_frozen = crate::demon::waiting(&self.spec, self.events.as_ref())
+            || (crate::owl_father::owns(&self.spec)
+                && self.events.as_ref().is_some_and(|e| {
+                    e.scripts.cast_scene.animation_enabled.get(&e.boss_entity) == Some(&false)
+                }))
+            || (crate::true_monk::owns(&self.spec)
+                && self.events.as_ref().is_some_and(|e| {
+                    e.scripts.cast_scene.animation_enabled.get(&e.boss_entity) == Some(&false)
+                }))
+            || !self.auxiliary_animation_enabled;
+        let dts = [
+            if self.shared_player_frame {
+                0.0
+            } else {
+                self.hit_stop[0].split(dt)
+            },
+            if monk_frozen {
+                0.0
+            } else {
+                self.hit_stop[1].split(dt)
+            },
+        ];
         let was_grounded = self.player.body.grounded;
         let held = self
             .deathblow
@@ -2136,8 +2933,20 @@ impl Duel {
             || self.throw_held();
         self.player.throw_ignore_walls = held;
         self.enemy.throw_ignore_walls = held;
-        let player = self.advance_character(0, &input, dt, dts[0]);
-        let enemy = self.advance_character(1, &InputFrame::default(), dt, dts[1]);
+        let player = if self.shared_player_frame {
+            self.last_steps[0].clone()
+        } else {
+            self.advance_character(0, &input, dt, dts[0])
+        };
+        let enemy = if monk_frozen {
+            // Animation disable holds the clip clock, while HKS still accepts AI/event requests.
+            let report = self.enemy.tick(&InputFrame::default(), 0.0);
+            self.last_steps[1] = report.clone();
+            report
+        } else {
+            self.advance_character(1, &InputFrame::default(), dt, dts[1])
+        };
+        self.apply_sp_categories();
         if self.deathblow.is_none() && !self.throw_held() {
             self.push(0, dts[0]);
             self.push(1, dts[1]);
@@ -2149,10 +2958,13 @@ impl Duel {
         let mut grab = GrabReport::default();
         self.step_enemy_throw(dt, &mut grab);
         self.step_mikiri(dt);
-        if self.deathblow.is_none() && !self.throw_held() && enemy_alive {
+        if self.deathblow.is_none() && !self.throw_held() && enemy_alive && self.spec.chr != "c5005"
+        {
             self.separate();
         }
-        self.kill_fallen(was_grounded);
+        if !self.shared_player_frame {
+            self.kill_fallen(was_grounded);
+        }
 
         if self.god {
             let f = &mut self.rules.fighters[0];
@@ -2220,6 +3032,7 @@ impl Duel {
             bullet_hits.into_iter().partition(|b| b.effects_only);
         let bullet_effects: Vec<Vec<i32>> =
             bullet_hits.iter().map(|b| b.sp_effects.clone()).collect();
+        let bullet_owners: Vec<Option<i32>> = bullet_hits.iter().map(|b| b.event_owner).collect();
         found.extend(bullet_hits.into_iter().map(|b| b.hit));
         let mut hits = Vec::new();
         // Counter contacts win over the damaging blade contact of the same step.
@@ -2253,7 +3066,13 @@ impl Duel {
             let from_bullet = k >= first_bullet_hit;
             let chars = [&self.player, &self.enemy];
             let combatants = [&self.fighters[0], &self.fighters[1]];
-            let mut result = if from_bullet {
+            let mut result = if from_bullet
+                && bullet_owners[k - first_bullet_hit] == Some(crate::isshin_fire::OWNER)
+                && let Some(emitter) = self.isshin_fire.as_mut()
+            {
+                self.rules
+                    .resolve_event_bullet(&hit, chars, combatants, &mut emitter.fighter)
+            } else if from_bullet {
                 self.rules.resolve_bullet(&hit, chars, combatants)
             } else {
                 self.rules.resolve(&hit, chars, combatants)
@@ -2325,17 +3144,38 @@ impl Duel {
         }
         self.step_lightning();
         let jump_counter = self.note_player_hits(&hits);
-        self.rules.tick_status(0, dt);
+        if !self.shared_player_frame {
+            self.rules.tick_status(0, dt);
+        }
         self.rules.tick_status(1, dt);
-        self.rules.apply_effect_hp(0, self.player.tae_frame());
+        if !self.shared_player_frame {
+            self.rules.apply_effect_hp(0, self.player.tae_frame());
+        }
+        if crate::guardian_ape::headless(&self.spec)
+            && self.spec.npc_param == 51000000
+            && self.enemy.tae_frame().sp_effects.contains(&275100)
+        {
+            let _ = crate::guardian_ape::revival_stats(&self.cache, &mut self.rules.fighters[1]);
+        }
+        if let Some(stats) = self.monk_stats.as_mut() {
+            stats.apply(&mut self.rules.fighters[1], self.enemy.tae_frame());
+        }
         self.rules.apply_effect_hp(1, self.enemy.tae_frame());
+        if crate::guardian_ape::headless(&self.spec)
+            && self.enemy.tae_frame().sp_effects.contains(&401000)
+        {
+            self.defender_dying = 0;
+        }
         if self.god {
             let v = &mut self.rules.fighters[0].vitality;
             v.hp = v.max_hp;
         }
-        self.rules.recover(0, &self.player, dts[0]);
+        if !self.shared_player_frame {
+            self.rules.recover(0, &self.player, dts[0]);
+        }
         self.rules.recover(1, &self.enemy, dts[1]);
         if self.respawn_in.is_none()
+            && !self.shared_player_frame
             && self.deathblow.is_none()
             // Map defeat events can still be waiting before handing over to the next boss.
             && (self.events.is_none() || self.rules.fighters[0].dead())
@@ -2343,11 +3183,19 @@ impl Duel {
         {
             self.respawn_in = Some(RESPAWN_DELAY);
         }
-        self.step_events(dt);
-        if self.rules.fighters[1].dead() {
+        if crate::guardian_ape::headless(&self.spec)
+            && self.enemy.tae_runtime.event_message == Some(30)
+        {
+            self.rules.fighters[1].vitality.cannot_die = false;
+            self.rules.fighters[1].vitality.hp = 0;
+        }
+        if !self.defer_map_events {
+            self.step_events(dt);
+        }
+        if !self.shared_player_frame && self.rules.fighters[1].dead() {
             self.release_lock();
         }
-        let report = DuelReport {
+        let mut report = DuelReport {
             locked_on: self.player.lock_target.is_some(),
             player,
             enemy,
@@ -2366,15 +3214,21 @@ impl Duel {
             .runtime
             .main_clip()
             .map(|c| (c.animation.clone(), c.time));
-        self.camera_director.update(
-            clip.as_ref().map(|(a, t)| (a.as_str(), *t)),
-            &self.player.tae,
-            dt,
-        );
+        if !self.shared_player_frame {
+            self.camera_director.update(
+                clip.as_ref().map(|(a, t)| (a.as_str(), *t)),
+                &self.player.tae,
+                dt,
+            );
+        }
         if let Some(mut d) = self.boss_brain.take() {
             d.after_step(self, &report, &raw_input);
             self.boss_brain = Some(d);
         }
+        self.step_monk_phantoms(dt, &mut report);
+        self.step_father_bird(dt, &mut report);
+        self.step_dragon_trees(dt, &mut report);
+        self.step_butterfly_illusions(dt, &mut report);
         report
     }
 }

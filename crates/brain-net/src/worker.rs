@@ -874,7 +874,7 @@ fn run_coach(
                     config.cmd.as_deref(),
                     &cli::Prompt {
                         input: &prompt,
-                        instructions: &protocol::coach_instructions(actions),
+                        instructions: &protocol::coach_instructions_for(actions, &work.input),
                     },
                     &schema,
                     config.timeout,

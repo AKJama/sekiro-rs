@@ -13,6 +13,8 @@ pub mod regions;
 
 #[derive(Debug, Clone, Default)]
 pub struct EventState {
+    /// SetCharacterEventTarget, used by the two apes' TARGET_EVENT queries.
+    pub targets: std::collections::HashMap<i32, i32>,
     pub bone_warps: std::collections::HashMap<i32, (i32, i16)>,
     /// SetAreaGparamSubID(area, block, sub-id, transition seconds), from 11125872/860.
     pub gparam: Option<(i16, i16, u8, f32)>,
@@ -20,6 +22,12 @@ pub struct EventState {
 
 impl EventState {
     pub fn instruction(&mut self, ins: &Instruction) -> bool {
+        if ins.code() == (2004, 11)
+            && let (Some(entity), Some(target)) = (ins.i32_at(0), ins.i32_at(4))
+        {
+            self.targets.insert(entity, target);
+            return true;
+        }
         if ins.code() == (2004, 41)
             && ins.args.get(4) == Some(&2)
             && let (Some(entity), Some(destination), Some(dummy)) =
@@ -52,6 +60,7 @@ pub fn missing_models(cache: &Path, spec: &ArenaSpec) -> Vec<String> {
         "silvergrass-genichiro" => &["c7100"],
         "silvergrass" => &["c7110", "c5400"],
         "silvergrass-isshin" => &["c5400"],
+        "silvergrass-inner-isshin" => &["c5400"],
         "watering-hole" | "apes-burrow" => &["c5100", "c5001"],
         _ => &[],
     };
@@ -94,7 +103,7 @@ pub fn take_event_collision(
 
 /// Common event 100 and final intro 11125840 hide alternative sky groups.
 pub fn seed_scene(boss: i32, scene: &mut crate::arena::scene::SceneState) {
-    if ![1_120_800, 1_120_830, 1_120_860].contains(&boss) {
+    if ![1_120_800, 1_120_830, 1_120_860, 1_120_890].contains(&boss) {
         return;
     }
     for id in [

@@ -28,9 +28,24 @@ use sekiro_formats::emevd::{Emevd, Instruction};
 /// The entity id the event scripts use for the player.
 pub const PLAYER_ENTITY: i32 = 10000;
 
+/// EMEVD 3[3]: group/state at bytes 0/1, entities at 4/8, radius at 12,
+/// and entity count at 16. State 1 waits inside the radius; state 0 waits outside.
+pub(crate) fn radius_condition(ins: &Instruction, a: [f32; 3], b: [f32; 3]) -> Option<bool> {
+    let distance = glam::Vec3::from_array(a).distance(glam::Vec3::from_array(b));
+    Some((distance <= ins.f32_at(12)?) == (ins.u8_at(1)? != 0))
+}
+
 /// What an event asks of the world.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EventCommand {
+    /// EMEVD 2003[5]: an event-authored shot from a character or region source.
+    ShootBullet {
+        owner: i32,
+        source: i32,
+        dummy: i32,
+        behavior: i32,
+        angles: [i32; 3],
+    },
     /// Event 2004[19] changes the fight's NpcThinkParam row.
     AiParam {
         entity: i32,
@@ -101,16 +116,33 @@ pub enum EventCommand {
         entity: i32,
         enabled: bool,
     },
+    AiEnabled {
+        entity: i32,
+        enabled: bool,
+    },
     /// SetCharacterGravity (2004[10]), used by the hidden monkeys health controller.
     Gravity {
         entity: i32,
         enabled: bool,
+    },
+    CharacterKilled {
+        entity: i32,
+    },
+    WarpToDummy {
+        entity: i32,
+        target: i32,
+        dummy: i32,
+        copy_floor: i32,
     },
 }
 
 /// What the events may ask about the world. Unknown entities answer `None`, which makes the
 /// condition false.
 pub trait EventHost {
+    /// Optional world conditions for encounters with independently simulated actors.
+    fn encounter_condition(&self, _instruction: &Instruction) -> Option<bool> {
+        None
+    }
     fn in_state(&self, _entity: i32, _state: i32) -> Option<bool> {
         None
     }
@@ -200,6 +232,7 @@ pub struct EventScripts {
     pub flags: HashSet<i32>,
     pub log: Vec<EventLog>,
     skipped: HashSet<(i64, i32, i32)>,
+    random_state: u64,
 }
 
 /// Instructions run per event and step before the event is made to wait (a loop guard).
@@ -267,6 +300,7 @@ impl EventScripts {
             flags: HashSet::new(),
             log: Vec::new(),
             skipped: HashSet::new(),
+            random_state: 1,
         })
     }
 
@@ -311,6 +345,18 @@ impl EventScripts {
 
     pub fn flag(&self, id: i32) -> bool {
         self.flags.contains(&id)
+    }
+    /// Keep an authored event's program counter and wait across an entity hand-over.
+    pub fn continue_event_from(&mut self, previous: &Self, id: i64) {
+        for current in self.running.iter_mut().filter(|event| event.id == id) {
+            if let Some(old) = previous
+                .running
+                .iter()
+                .find(|event| event.id == id && event.code == current.code)
+            {
+                *current = old.clone();
+            }
+        }
     }
 
     pub fn set_flag(&mut self, id: i32, on: bool) {
@@ -373,6 +419,9 @@ impl EventScripts {
         let a = args(ins);
         let i = |k: usize| a.get(k).map_or(0, |v| v.as_i64());
         match ins.code() {
+            (3, 12) => crate::event_values::comparison(ins, &self.flags),
+            (3, 1) => (ins.i32_at(4).unwrap_or(0)..=ins.i32_at(8).unwrap_or(0))
+                .all(|flag| self.flag(flag)),
             (4, 2) => crate::arenas_a::hp_ratio_condition(ins, host),
             (4, 21) => {
                 host.in_state(ins.i32_at(4).unwrap_or(0), ins.i32_at(8).unwrap_or(0))
@@ -392,7 +441,7 @@ impl EventScripts {
                 .health_bars(i(1) as i32)
                 .is_some_and(|bars| compare(i(2), bars as i64, i(3))),
             (3, 31) => host.cutscene_finished(i(1) as i32),
-            _ => false,
+            _ => host.encounter_condition(ins).unwrap_or(false),
         }
     }
 
@@ -403,6 +452,8 @@ impl EventScripts {
         matches!(
             ins.code(),
             (0, 0)
+                | (3, 12)
+                | (3, 1)
                 | (3, 0)
                 | (3, 2)
                 | (3, 31)
@@ -412,6 +463,9 @@ impl EventScripts {
                 | (4, 14)
                 | (4, 21)
                 | (4, 37)
+                | (4, 9)
+                | (3, 3)
+                | (5, 2)
         )
     }
 
@@ -465,7 +519,9 @@ impl EventScripts {
             let a = args(&ins);
             let i = |k: usize| a.get(k).map_or(0, |v| v.as_i64());
             let f = |k: usize| a.get(k).map_or(0.0, |v| v.as_f32());
-            if crate::arenas_a::unavailable_condition(r.id, ins.code()) {
+            if crate::arenas_a::unavailable_condition(r.id, ins.code())
+                && host.encounter_condition(&ins).is_none()
+            {
                 if self.skipped.insert((r.id, ins.bank, ins.id)) {
                     self.log.push(EventLog::Skipped {
                         event: r.id,
@@ -512,6 +568,33 @@ impl EventScripts {
             }
             let mut command = None;
             match ins.code() {
+                (1000, 0..=3) => {
+                    let state = ins.args.get(1).copied().unwrap_or(0) != 0;
+                    let group = ins.args.get(2).copied().unwrap_or(0) as i8;
+                    // 1/3 test the groups just constructed; 0/2 use the completed MAIN.
+                    // Monk 12505970 builds group 2 immediately before opcode 1.
+                    let compiled = ins.id == 0 || ins.id == 2;
+                    let passed = if compiled {
+                        r.finished_groups.get(&group).copied().unwrap_or(false)
+                    } else {
+                        self.eval_group(r, group, host)
+                    };
+                    if passed == state {
+                        let value = ins.args.first().copied().unwrap_or(0);
+                        if ins.id <= 1 {
+                            next += usize::from(value);
+                        } else {
+                            self.end(r, i64::from(value));
+                            if !r.ended {
+                                return;
+                            }
+                            continue;
+                        }
+                    }
+                }
+                // SetNetworkUpdateRate only controls replication to remote players.
+                // The offline simulation has no network character updates to schedule.
+                (2004, 34) => {}
                 (2004, 17) => {
                     command = Some(EventCommand::AiCommand {
                         entity: ins.i32_at(0).unwrap_or(0),
@@ -625,6 +708,36 @@ impl EventScripts {
                     }
                 }
                 (1014, _) => {}
+                (2003, 17) => {
+                    // A reproducible uniform choice among the authored flags.
+                    let first = ins.i32_at(0).unwrap_or(0);
+                    let last = ins.i32_at(4).unwrap_or(first);
+                    self.random_state = self
+                        .random_state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1);
+                    let count = i64::from(last) - i64::from(first) + 1;
+                    let chosen = first + ((self.random_state >> 32) % count.max(1) as u64) as i32;
+                    for flag in first..=last {
+                        self.set_flag(flag, flag == chosen && ins.u8_at(8).unwrap_or(0) != 0);
+                    }
+                }
+                (2003, 31) => {
+                    let start = ins.i32_at(0).unwrap_or(0);
+                    let bits = ins.u8_at(4).unwrap_or(0).min(32);
+                    let limit = ins.i32_at(8).unwrap_or(0).max(0) as u32;
+                    let value = crate::event_values::read(&self.flags, start, bits)
+                        .saturating_add(1)
+                        .min(limit);
+                    for bit in 0..bits {
+                        self.set_flag(start + i32::from(bit), value & (1 << bit) != 0);
+                    }
+                }
+                (2003, 22) => {
+                    for flag in ins.i32_at(0).unwrap_or(0)..=ins.i32_at(4).unwrap_or(0) {
+                        self.set_flag(flag, ins.u8_at(8).unwrap_or(0) != 0);
+                    }
+                }
                 // SetEventFlag / SetNetworkconnectedEventFlag(flag, state: 0 off, 1 on, 2 toggle).
                 (2003, 2) | (2003, 62) => {
                     let flag = i(0) as i32;
@@ -649,9 +762,23 @@ impl EventScripts {
                         name: i(3) as i32,
                     })
                 }
+                (2003, 5) => {
+                    command = Some(EventCommand::ShootBullet {
+                        owner: ins.i32_at(0).unwrap_or(0),
+                        source: ins.i32_at(4).unwrap_or(0),
+                        dummy: ins.i32_at(8).unwrap_or(-1),
+                        behavior: ins.i32_at(12).unwrap_or(0),
+                        angles: std::array::from_fn(|k| ins.i32_at(16 + k * 4).unwrap_or(0)),
+                    })
+                }
                 (2003, 12) => {
                     command = Some(EventCommand::BossDefeat {
                         entity: i(0) as i32,
+                    })
+                }
+                (2003, 74) => {
+                    command = Some(EventCommand::BossDefeat {
+                        entity: ins.i32_at(0).unwrap_or(0),
                     })
                 }
                 (2004, 5) => {
@@ -660,10 +787,29 @@ impl EventScripts {
                         enabled: i(1) != 0,
                     })
                 }
+                (2004, 1) => {
+                    command = Some(EventCommand::AiEnabled {
+                        entity: ins.i32_at(0).unwrap_or(0),
+                        enabled: ins.u8_at(4).unwrap_or(1) != 0,
+                    })
+                }
+                (2004, 4) => {
+                    command = Some(EventCommand::CharacterKilled {
+                        entity: ins.i32_at(0).unwrap_or(0),
+                    })
+                }
                 (2004, 10) => {
                     command = Some(EventCommand::Gravity {
                         entity: ins.i32_at(0).unwrap_or(0),
                         enabled: ins.u8_at(4).unwrap_or(1) != 0,
+                    })
+                }
+                (2004, 42) if ins.i32_at(4) == Some(2) => {
+                    command = Some(EventCommand::WarpToDummy {
+                        entity: ins.i32_at(0).unwrap_or(0),
+                        target: ins.i32_at(8).unwrap_or(0),
+                        dummy: ins.i32_at(12).unwrap_or(-1),
+                        copy_floor: ins.i32_at(16).unwrap_or(0),
                     })
                 }
                 (2004, 6) => {
@@ -861,9 +1007,15 @@ mod tests {
     struct World {
         messages: HashSet<i32>,
         effects: HashSet<i32>,
+        distance: f32,
     }
 
     impl EventHost for World {
+        fn encounter_condition(&self, instruction: &Instruction) -> Option<bool> {
+            (instruction.code() == (3, 3)).then(|| {
+                radius_condition(instruction, [0.0; 3], [0.0, self.distance, 0.0]).unwrap()
+            })
+        }
         fn has_sp_effect(&self, entity: i32, id: i32) -> Option<bool> {
             (entity == 7).then(|| self.effects.contains(&id))
         }
@@ -887,6 +1039,42 @@ mod tests {
                 parameters: Vec::new(),
             }],
             ..Emevd::default()
+        }
+    }
+
+    #[test]
+    fn radius_gate_waits_for_authored_state_after_network_noop() {
+        for inside in [false, true] {
+            // Real 3[3] layout, including the entity count (not the state) at byte 16.
+            let mut gate = ins(3, 3, &[0, PLAYER_ENTITY, 7, 20.0f32.to_bits() as i32, 1]);
+            gate.args[1] = u8::from(inside);
+            let code = vec![
+                ins(2004, 34, &[7, 1, 0]),
+                gate,
+                ins(2003, 2, &[11505801, 1]),
+            ];
+            let mut scripts = EventScripts::new(
+                &file(code),
+                &[EventEntry {
+                    id: 1,
+                    from_label: None,
+                }],
+            )
+            .unwrap();
+            let mut world = World {
+                distance: if inside { 21.0 } else { 19.0 },
+                ..World::default()
+            };
+            scripts.step(0.1, &world);
+            assert!(!scripts.flag(11505801));
+            assert!(
+                scripts.log.is_empty(),
+                "network update is an explicit no-op"
+            );
+            world.distance = if inside { 19.0 } else { 21.0 };
+            scripts.step(0.1, &world);
+            assert!(scripts.flag(11505801));
+            assert!(scripts.ended(1));
         }
     }
 

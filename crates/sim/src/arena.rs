@@ -127,6 +127,9 @@ pub const OWL_EVENTS: BossEvents = BossEvents {
 
 /// The fight events of an enemy, by character id (also used off the arena, on the flat floor).
 pub fn boss_events(spec: &EnemySpec) -> Option<&'static BossEvents> {
+    if spec.chr == "c5400" && matches!(spec.think, 54030000 | 54030100) {
+        return Some(&crate::sword_saint::REMATCH_EVENTS);
+    }
     if let Some(events) = crate::arenas_a::identity_events(spec) {
         return Some(events);
     }
@@ -244,6 +247,7 @@ pub const ARENAS: &[ArenaSpec] = &[
     crate::arena_c::SILVERGRASS,
     crate::arena_c::SILVERGRASS_GENICHIRO,
     crate::arena_c::SILVERGRASS_ISSHIN,
+    crate::sword_saint::REMATCH_ARENA,
     crate::arena_c::WATERING_HOLE,
     crate::arena_c::APES_BURROW,
     depths_palace::MIBU,
@@ -484,6 +488,25 @@ impl Arena {
             c.ground = Box::new(self.world.clone());
         }
         duel.fall_respawn_depth = Some(FALL_RESPAWN_DEPTH);
+        crate::demon::on_place(duel);
+        if let Some(encounter) = duel.screen_monkeys.as_mut() {
+            encounter.place(&self.world);
+        }
+        if let Some(encounter) = duel.monk_phantoms.as_mut() {
+            encounter.place(&self.world);
+        }
+        if let Some(bird) = duel.father_bird.as_mut() {
+            bird.place(&self.world);
+        }
+        if let Some(encounter) = duel.old_dragons.as_mut() {
+            encounter.place(&self.world);
+        }
+        if let Some(encounter) = duel.butterfly_illusions.as_mut() {
+            encounter.place(&self.world);
+        }
+        if let Some(encounter) = duel.headless_ape.as_mut() {
+            encounter.place(&self.world);
+        }
         if !self.fog_walls.is_empty() {
             duel.fog_gate = Some(self.world.clone());
         }

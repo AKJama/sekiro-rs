@@ -305,6 +305,8 @@ fn read_def<'t>(
 /// A bullet in flight.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Bullet {
+    /// Static map-script owner, preserved by child and interval shots.
+    pub event_owner: Option<i32>,
     /// Unique per bullet in this fight (from 1), so a renderer can follow it.
     pub serial: u64,
     pub shooter: usize,
@@ -340,6 +342,7 @@ impl Bullet {
 /// A bullet's contact with a character.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BulletHit {
+    pub event_owner: Option<i32>,
     pub hit: HitEvent,
     /// SpEffects it leaves on the character.
     pub sp_effects: Vec<i32>,
@@ -403,6 +406,7 @@ fn launch(
             let byaw = yaw - offset;
             let dir = dir_of(byaw, pitch + elevation);
             Bullet {
+                event_owner: None,
                 serial: 0,
                 shooter,
                 judge,
@@ -421,6 +425,22 @@ fn launch(
             }
         })
         .collect()
+}
+
+fn launch_children(def: &Arc<BulletDef>, parent: &Bullet, origin: Vec3) -> Vec<Bullet> {
+    let mut children = launch(
+        def,
+        parent.shooter,
+        parent.judge,
+        parent.shot,
+        origin,
+        parent.yaw,
+        0.0,
+    );
+    for child in &mut children {
+        child.event_owner = parent.event_owner;
+    }
+    children
 }
 
 /// `attack` scaled by a bullet's decay past its range.
@@ -452,6 +472,25 @@ fn decayed(attack: &AttackData, damp: [f32; 3], seconds: f32) -> AttackData {
 }
 
 impl Bullets {
+    /// Fire an authored map point without replacing its origin with AI aim or a dummy.
+    pub fn spawn_event(
+        &mut self,
+        def: &Arc<BulletDef>,
+        owner: i32,
+        shooter: usize,
+        judge: i32,
+        origin: Vec3,
+        yaw: f32,
+    ) {
+        let shot = self.next_shot;
+        self.next_shot += 1;
+        let mut made = launch(def, shooter, judge, shot, origin, yaw, 0.0);
+        for bullet in &mut made {
+            bullet.event_owner = Some(owner);
+        }
+        self.live.extend(made);
+        self.number_new();
+    }
     /// Fires the bullets whose TAE window opened this step on any character, aimed at the
     /// other character.
     pub fn spawn(&mut self, chars: &[&Character], fighters: &[&Combatant]) {
@@ -622,6 +661,7 @@ impl Bullets {
                         && attack.damage_level <= 0
                         && attack.profile.as_ref().is_none_or(|p| p.behavior_id == 0);
                     hits.push(BulletHit {
+                        event_owner: b.event_owner,
                         hit: HitEvent {
                             attacker: b.shooter,
                             defender: di,
@@ -645,7 +685,7 @@ impl Bullets {
             {
                 let due = ((b.age - iv.wait) / iv.every).floor() as u32 + 1;
                 while b.intervals_made < due {
-                    born.extend(launch(&iv.def, b.shooter, b.judge, b.shot, to, b.yaw, 0.0));
+                    born.extend(launch_children(&iv.def, b, to));
                     b.intervals_made += 1;
                 }
             }
@@ -656,7 +696,7 @@ impl Bullets {
                     if let Some(floor) = ground.floor(at.x, at.z, at.y + 0.5) {
                         at.y = at.y.max(floor);
                     }
-                    born.extend(launch(child, b.shooter, b.judge, b.shot, at, b.yaw, 0.0));
+                    born.extend(launch_children(child, b, at));
                 }
                 return false;
             }

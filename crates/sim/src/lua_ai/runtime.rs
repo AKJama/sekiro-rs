@@ -114,6 +114,8 @@ pub struct Goal {
     /// AI numbers and timers to set when this goal activates or succeeds
     /// (`TimingSetNumber`, `TimingSetTimer`).
     pub timing_sets: Vec<TimingSet>,
+    /// Explicit lifetime result requested by the shipped goal script.
+    pub life_end_success: Option<bool>,
     /// Ours, set for goals an outside plan queues: the goal succeeds when its lifetime ends (a
     /// move or leave that times out is not a failure that drops the rest of the plan) and
     /// `KeepDist` keeps holding its range until then instead of succeeding inside it.
@@ -186,6 +188,8 @@ pub struct Request {
     /// cancel (`SetEnableEndureCancel_forGoal`, `attack_endure.lua`): the NPC script reads it as
     /// `env(123)` and takes it in any state that offers AI cancels.
     pub endure: bool,
+    /// The shipped AttackImmediateAction wrapper enables HKS env(125).
+    pub immediate: bool,
 }
 
 /// `GOAL_COMMON_EndureAttack` (`goal_list.lua`).
@@ -278,6 +282,7 @@ pub struct ActHook {
 /// Registered goal and logic information plus all per-character AI state. Implements the
 /// scripts' [`Host`].
 pub struct AiState {
+    previous_event_requests: HashMap<i32, i32>,
     pub think: ThinkParams,
     pub names: HashMap<i32, String>,
     pub table_goals: HashSet<i32>,
@@ -286,12 +291,24 @@ pub struct AiState {
     pub top: u32,
     pub replan: bool,
     pub world: AiWorld,
+    /// The character assigned to TARGET_EVENT (20) by map command 2004[11].
+    pub event_target: Option<AiActor>,
     /// Remaining and initial deathblow marks, supplied by the fight's NpcParam vitality.
     pub ninsatsu: (i32, i32),
+    /// Metres taken off `GetDist` / `GetDist_Point` (the engine measures from the AI character's
+    /// own radius, FwLo's static notes); 0 keeps the centre distance.
+    pub dist_offset: f32,
     pub request: Request,
+    /// Enabled and cleared by the shipped immediate-action wrapper's lifecycle callbacks.
+    pub immediate_action: bool,
     pub numbers: HashMap<i32, f64>,
     pub string_numbers: HashMap<String, f64>,
     pub event_requests: HashMap<i32, i32>,
+    pub event_move_target: Option<[f32; 3]>,
+    pub event_flags: HashSet<i32>,
+    /// Lua writes awaiting publication to the encounter's other actors.
+    pub event_flag_changes: HashMap<i32, bool>,
+    pub map_regions: Option<super::regions::MapRegions>,
     pub timers: HashMap<i32, f32>,
     /// Seconds since each action id was last requested.
     pub action_age: HashMap<i32, f32>,
@@ -333,10 +350,18 @@ impl AiState {
             replan: false,
             world: AiWorld::default(),
             ninsatsu: (0, 0),
+            dist_offset: 0.0,
+            event_target: None,
+            previous_event_requests: HashMap::new(),
             request: Request::default(),
+            immediate_action: false,
             numbers: HashMap::new(),
             string_numbers: HashMap::new(),
             event_requests: HashMap::new(),
+            event_move_target: None,
+            event_flags: HashSet::new(),
+            event_flag_changes: HashMap::new(),
+            map_regions: None,
             timers: HashMap::new(),
             action_age: HashMap::new(),
             time: 0.0,
@@ -398,6 +423,7 @@ impl AiState {
             started_anim: false,
             restart_clock: None,
             timing_sets: Vec::new(),
+            life_end_success: None,
             timed: false,
             away: false,
             face_first: false,
@@ -431,6 +457,7 @@ impl AiState {
         match target {
             -1 => Some(self.world.me.clone()),
             0 | 21 => self.world.target.clone(),
+            20 => self.event_target.clone(),
             _ => None,
         }
     }
@@ -440,7 +467,9 @@ impl AiState {
         match target {
             -1 => Some(self.world.me.position),
             0 | 21 => self.world.target.as_ref().map(|t| t.position),
+            20 => self.event_target.as_ref().map(|t| t.position),
             100 | 111 | 121 | 125 => Some(self.world.home),
+            102 => self.event_move_target,
             _ => None,
         }
     }
@@ -887,8 +916,12 @@ impl AiState {
                 self.goal_mut(id).timing_sets.push(set);
                 vec![goal_obj(id)]
             }
-            "SetLifeEndSuccess" | "SetTargetRange" | "SetFailedEndOption" | "SetNoUpdate"
-            | "SetManagementGoal" | "SetTableGoal" | "SetNormalGoal" => vec![],
+            "SetLifeEndSuccess" => {
+                self.goal_mut(id).life_end_success = Some(a.first().is_some_and(Value::truthy));
+                vec![goal_obj(id)]
+            }
+            "SetTargetRange" | "SetFailedEndOption" | "SetNoUpdate" | "SetManagementGoal"
+            | "SetTableGoal" | "SetNormalGoal" => vec![goal_obj(id)],
             _ => self.default_method(&format!("goal:{name}")),
         })
     }
@@ -924,9 +957,25 @@ impl AiState {
                 self.replan = true;
                 vec![]
             }
-            "GetDist" => num(self.dist(t(0)) as f64),
-            "GetDist_Point" => num(self.dist(t(0)) as f64),
-            "GetDistYSigned" | "GetDistY" => num(0.0),
+            "GetDistXZ" => num(self.dist(t(0)) as f64),
+            "GetDist" | "GetDist_Point" => {
+                num((self.dist(t(0)) - self.dist_offset).max(0.0) as f64)
+            }
+            "IsInsideTargetRegion" => boolean(
+                self.position(t(0))
+                    .and_then(|position| self.map_regions.as_ref()?.contains(t(1), position))
+                    .unwrap_or(false),
+            ),
+            "GetDistYSigned" | "GetDistY" => {
+                let height = self
+                    .position(t(0))
+                    .map_or(0.0, |p| p[1] - self.world.me.position[1]);
+                num(if name == "GetDistY" {
+                    height.abs()
+                } else {
+                    height
+                } as f64)
+            }
             "GetRandam_Int" => {
                 let (lo, hi) = (n(0).floor(), n(1).floor());
                 let r = self.random();
@@ -935,6 +984,10 @@ impl AiState {
             "GetRandam_Float" => {
                 let r = self.random();
                 num(n(0) + r * (n(1) - n(0)))
+            }
+            // Reviewed boss duels retain Wolf as their sole enemy target.
+            "GetHpLastTarget" => {
+                num(self.world.target.as_ref().map_or(0.0, |target| target.hp) as f64)
             }
             "GetHpRate" => num(self.actor(t(0)).map_or(1.0, |a| {
                 if a.max_hp > 0.0 {
@@ -1007,8 +1060,32 @@ impl AiState {
             | "TeamHelp_IsValidReply"
             | "IsTouchBreakableObject"
             | "IsLockOnTarget" => boolean(false),
-            "CheckDoesExistPath" | "IsExistMeshOnLine" | "IsFinishAttackCoolTime" => boolean(true),
+            "CheckDoesExistPath"
+            | "CheckDoesExistPathWithSetPoint"
+            | "IsExistMeshOnLine"
+            | "IsFinishAttackCoolTime" => boolean(true),
             "GetEventRequest" => num(self.event_requests.get(&t(0)).copied().unwrap_or(-1) as f64),
+            "IsEventFlag" => boolean(self.event_flags.contains(&t(0))),
+            "SetEventFlag" => {
+                let on = a.get(1).is_some_and(|v| match v {
+                    Value::Num(n) => *n != 0.0,
+                    _ => v.truthy(),
+                });
+                if on {
+                    self.event_flags.insert(t(0));
+                } else {
+                    self.event_flags.remove(&t(0));
+                }
+                self.event_flag_changes.insert(t(0), on);
+                vec![]
+            }
+            "SetEventMoveTarget" => {
+                self.event_move_target = self
+                    .map_regions
+                    .as_ref()
+                    .and_then(|regions| regions.point(t(0)));
+                vec![]
+            }
             "GetTeamOrder"
             | "GetChangeBattleStateCount"
             | "GetCurrTargetType"
@@ -1017,6 +1094,14 @@ impl AiState {
             | "GetOddsParamIdOffset" => num(0.0),
             "TurnTo" => {
                 self.request.face_yaw = self.yaw_to(t(0));
+                vec![]
+            }
+            "SetEnableImmediateAction_forGoal" => {
+                self.immediate_action = true;
+                vec![]
+            }
+            "ClearEnableImmediateAction_forGoal" => {
+                self.immediate_action = false;
                 vec![]
             }
             "DoEzAction" => {
@@ -1054,9 +1139,7 @@ impl AiState {
             }
             "AddObserveRegion"
             | "AddObserveChrDmyArea"
-            | "SetEventFlag"
             | "PrintText"
-            | "SetEventMoveTarget"
             | "ReqPlatoonState"
             | "ClearForceBattleGoal"
             | "RequestEmergencyQuickTurn"
@@ -1099,6 +1182,13 @@ pub fn tick(vm: &mut Vm, st: &mut AiState, world: AiWorld) {
         st.battle = true;
     }
     let mut fired = Vec::new();
+    // Table logic such as c5310 handles map commands in Interrupt, while Main only waits.
+    if st.previous_event_requests != st.event_requests {
+        st.previous_event_requests.clone_from(&st.event_requests);
+        if let Some(kind) = vm.get_global("INTERUPT_EventRequest").num() {
+            fired.push(kind as i32);
+        }
+    }
     if st.world.parry_timing && !st.last_parry_timing {
         // INTERUPT_FindAttack and INTERUPT_ParryTiming.
         fired.extend([1, 24]);
@@ -1481,10 +1571,12 @@ fn update(vm: &mut Vm, st: &mut AiState, id: u32, depth: usize) -> i32 {
         if g.life < 0.0 {
             // Lifetime over: waiting-style goals succeed, the rest fail (our reading of how
             // the scripts use lifetimes, see docs/AI.md).
-            let ok = matches!(
-                g.imp,
-                GoalImpl::Native(NativeGoal::Wait | NativeGoal::Guard | NativeGoal::Sideway)
-            ) || g.timed;
+            let ok = g.life_end_success.unwrap_or(
+                matches!(
+                    g.imp,
+                    GoalImpl::Native(NativeGoal::Wait | NativeGoal::Guard | NativeGoal::Sideway)
+                ) || g.timed,
+            );
             return if ok { RESULT_SUCCESS } else { RESULT_FAILED };
         }
     }
@@ -1675,6 +1767,7 @@ fn action_update(st: &mut AiState, id: u32, g: &Goal) -> i32 {
             .as_ref()
             .is_some_and(|h| h.break_followup.is_some());
         st.request.endure = parent.is_some_and(|p| p.kind == GOAL_ENDURE_ATTACK);
+        st.request.immediate = st.immediate_action;
         return RESULT_CONTINUE;
     }
     if !playing {

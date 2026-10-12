@@ -147,6 +147,17 @@ pub fn choose(
     plan: &GamePlan,
     rng: &mut Rng,
 ) -> Option<(String, f32)> {
+    choose_with_quality(memory, phase, context, plan, &BTreeMap::new(), rng)
+}
+
+pub fn choose_with_quality(
+    memory: &BanditMemory,
+    phase: &str,
+    context: &str,
+    plan: &GamePlan,
+    quality: &BTreeMap<String, f32>,
+    rng: &mut Rng,
+) -> Option<(String, f32)> {
     plan.offers()
         .into_iter()
         .map(|offer| {
@@ -155,7 +166,17 @@ pub fn choose(
                 .get(context)
                 .and_then(|p| p.get(&offer.name))
                 .copied()
-                .unwrap_or(0.5)
+                .unwrap_or_else(|| {
+                    if plan
+                        .sets
+                        .iter()
+                        .any(|s| s.name == offer.name && s.when.as_deref() == Some(context))
+                    {
+                        0.8
+                    } else {
+                        0.5
+                    }
+                })
                 .clamp(0.05, 0.95);
             let evidence = memory
                 .get(phase)
@@ -164,9 +185,9 @@ pub fn choose(
                 .copied()
                 .unwrap_or_default();
             (
-                offer.name,
+                offer.name.clone(),
                 evidence.mean(prior),
-                evidence.sample(prior, rng),
+                evidence.sample(prior, rng) * quality.get(&offer.name).copied().unwrap_or(1.0),
                 prior,
             )
         })

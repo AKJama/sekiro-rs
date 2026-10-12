@@ -111,9 +111,15 @@ pub const DIVINE_DRAGON_EVENTS: BossEvents = BossEvents {
         event(12_505_888),
         event(12_505_889),
         event(12_505_890),
+        event(12_505_891),
+        event(12_505_894),
         event(12_505_895),
         event(12_505_901),
         event(12_505_906),
+        event(12_505_911),
+        event(12_505_916),
+        event(12_505_921),
+        event(12_505_926),
     ],
     fog_events: &[],
     lighting: Some(1),
@@ -209,6 +215,9 @@ pub fn all_slots(map: &str, id: i64) -> bool {
                 | 12_505_851
                 | 12_505_901
                 | 12_505_906
+                | 12_505_911
+                | 12_505_916
+                | 12_505_921
                 | 12_505_970
                 | 12_505_984
         )

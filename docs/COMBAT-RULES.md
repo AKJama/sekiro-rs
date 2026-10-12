@@ -562,3 +562,15 @@ Their TAE 920 events select velocity row 5000 at 0.000-0.033 s and row 5100 at 0
 Action flag 51 at 0.000-0.133 prevents premature fall cancellation, and SpEffect 5910 carries landing-decision reference 1000070.
 The scripted interrupted 3015 run selects DamageAerialBack and then LandDownward (7220).
 Support-height transfer starts with zero vertical speed; retaining the authored pre-contact vertical momentum and reconstructing native animation-root physics remain approximations.
+
+### Mikiri deathblow follow-up (2026-10-12)
+
+AtkParam_Npc 71000250, 50600310 / 50600311 and 10100230 / 10100940 / 10100941 carry base Mikiri posture damage 90 in staminaDamageAttackHitParry.
+A projected break selects ThrowParam 17100120 / 15060120 / 11010120, pairing Wolf's a227_511100 / a221_511100 / a200_511100 with the enemy's 13100 counter reaction.
+The boss Wolf clips import a201_511100, whose ChrActionFlag 154 opens deathblow cancellation at 1.200 s, as does a200_511100.
+Genichiro's counter reaction holds posture at zero with StaminaControl type 5 until 1.500 s, then type 6 restores 30 percent, so waiting for the defender clip to end loses the opening.
+A Mikiri pair now blocks deathblows only until Wolf's flag 154 opens, allows the counter reaction to be interrupted, and releases its slide when the deathblow takes ownership.
+Leaving the counter through another action also clears its defender-clip lock; ordinary deathblow get-up locks retain their existing checks.
+The extracted sweep bonus remains SpEffect 400200, stateInfo 912, defAntiGroundStaminaDmgRate 8, multiplying AtkParam_Pc 901's directAtkStamDamage 10 with staminaPhysicsAttribute 7.
+At AP1 a landed in-window stomp takes 80 posture; the castle-roof AP6 effect 160006 has staminaAttackRate 2.25, giving 180 before the target meter's floor clamp.
+The reported reduced damage on a landed sweep counter was not reproduced on Genichiro's 3067, Owl's 3004 or the soldier's 3020; the counter regressions measure the parameter-derived damage and the actual meter loss.
