@@ -119,6 +119,33 @@ pub struct Options {
     pub objects: bool,
 }
 
+/// The arena's fog walls: where the map's event script puts them. They are drawn with the
+/// asset's own effect while the fight's events keep them standing.
+#[derive(Resource)]
+struct FogWalls(Vec<sekiro_sim::arena::FogWallPlace>);
+
+/// Plays each fog wall's effect on its asset's dummy polygon while the walls stand (their
+/// start flag on and end flag off in the fight's events) and lets it fade after.
+fn hold_fog_walls(sim: NonSend<Sim>, walls: Res<FogWalls>, mut fx: ResMut<crate::fxr::FxrPlayer>) {
+    let standing: Vec<i32> = sim.duel.events.as_ref().map_or_else(Vec::new, |e| {
+        e.standing_fog_walls().map(|w| w.object_entity).collect()
+    });
+    for place in &walls.0 {
+        // The dummy polygon (101) sits at the asset's origin, facing along its -Z with +Y up.
+        let at = crate::fxr::frame_transform(
+            place.position.to_array(),
+            (place.rotation * Vec3::NEG_Z).to_array(),
+            (place.rotation * Vec3::Y).to_array(),
+        );
+        fx.hold(
+            place.wall.sfx,
+            place.wall.object_entity,
+            at,
+            standing.contains(&place.wall.object_entity),
+        );
+    }
+}
+
 /// The map's collision, for the camera; absent on the flat floor.
 #[derive(Resource)]
 struct MapCollision(Arc<CollisionWorld>);
@@ -256,6 +283,7 @@ pub fn run(options: Options) -> Result<()> {
     let mut on_map = None;
     let mut start_yaw = 0.0;
     let mut within = None;
+    let mut fog_walls = Vec::new();
     if let Some(spec) = options.arena {
         let t = std::time::Instant::now();
         let arena = Arena::load(&cache, spec, options.full_map).map_err(|e| {
@@ -266,6 +294,7 @@ pub fn run(options: Options) -> Result<()> {
             )
         })?;
         arena.place(&mut duel);
+        fog_walls.clone_from(&arena.fog_walls);
         start_yaw = arena.layout.wolf.yaw;
         if let Some([x, y, z, yaw_degrees]) = options.spawn {
             start_yaw = yaw_degrees.to_radians();
@@ -486,7 +515,12 @@ pub fn run(options: Options) -> Result<()> {
     .add_systems(Startup, setup)
     .insert_resource(rope::RopeCache(cache.clone()))
     .add_systems(Startup, crate::brain_overlay::spawn)
+    .insert_resource(FogWalls(fog_walls))
     .add_systems(FixedUpdate, simulate.run_if(crate::menu::active))
+    .add_systems(
+        FixedUpdate,
+        hold_fog_walls.after(simulate).run_if(crate::menu::active),
+    )
     .add_systems(
         Update,
         (

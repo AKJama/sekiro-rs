@@ -217,7 +217,7 @@ impl Default for Choices {
                 "none",
                 "off",
                 "castle-roof",
-                "12",
+                "story",
                 "normal",
                 "default",
                 "",
@@ -304,7 +304,10 @@ impl Choices {
             },
             &v[8],
         );
-        pair("--hour", &v[9]);
+        // "story" leaves the hour to the arena's story time of day (flat floor and maps: 12).
+        if v[9] != "story" {
+            pair("--hour", &v[9]);
+        }
         pair("--player", &v[11]);
         if v[0] == "No enemy" {
             args.push("--no-enemy".into());

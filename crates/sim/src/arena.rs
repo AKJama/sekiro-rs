@@ -22,6 +22,7 @@ use crate::collision::CollisionWorld;
 use crate::duel::Duel;
 use crate::enemy::EnemySpec;
 use crate::events::EventEntry;
+use crate::fogwall::FogWall;
 
 /// One boss arena.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -43,6 +44,9 @@ pub struct ArenaSpec {
     /// Map piece models not shown in this fight: event-state alternatives that the map's
     /// event script keeps hidden during it, by model name prefix.
     pub hidden_models: &'static [&'static str],
+    /// The time-advancing bosses ([`crate::story::TIME_BOSS_FLAGS`]) already beaten when the
+    /// game stages this fight: they set the story time of day ([`ArenaSpec::story_time`]).
+    pub beaten: &'static [i32],
 }
 
 /// The map events that run a boss fight (see [`crate::events`]): which events of the map's
@@ -56,6 +60,12 @@ pub struct BossEvents {
     /// Event flags that are on when the fight starts (the story state the fight needs).
     pub flags: &'static [i32],
     pub events: &'static [EventEntry],
+    /// Events of the map's script that start the fight's fog wall (common event 20005820, see
+    /// [`crate::fogwall`]); we do not run them, only read what they place.
+    pub fog_events: &'static [i64],
+    /// The `SetLighting` time of day (1 morning to 4 night) the fight's events switch to when
+    /// the fight reaches this boss, when they do ([`crate::story`]).
+    pub lighting: Option<i32>,
 }
 
 /// The Great Shinobi Owl on the castle top (`docs/OWL.md`, "Phase 2"). From
@@ -74,11 +84,13 @@ pub struct BossEvents {
 /// - 11115873 shows the smoke map effect on message 40.
 ///
 /// Flags 8301 and 9303 are the story state in which the event script starts this fight
-/// (11115860 needs both); they open no other branch of the events we run.
+/// (11115860 needs both); they open no other branch of the events we run. Flag 11115722 is
+/// raised by event 11115721 when Wolf walks into the roof (area 1112712) and cleared by the
+/// defeat: it stands the fog wall, whose events (11115861) we only read.
 pub const OWL_EVENTS: BossEvents = BossEvents {
     map: "m11_01_00_00",
     boss_entity: 1_110_850,
-    flags: &[8301, 9303],
+    flags: &[8301, 9303, 11_115_722],
     events: &[
         EventEntry {
             id: 11_115_860,
@@ -101,6 +113,8 @@ pub const OWL_EVENTS: BossEvents = BossEvents {
             from_label: None,
         },
     ],
+    fog_events: &[11_115_861],
+    lighting: None,
 };
 
 /// The fight events of an enemy, by character id (also used off the arena, on the flat floor).
@@ -131,6 +145,8 @@ pub const BOSS_EVENT_ROWS: &[(&str, i32, BossEvents)] = &[
                     from_label: None,
                 },
             ],
+            fog_events: &[11_115_811],
+            lighting: None,
         },
     ),
     (
@@ -139,7 +155,9 @@ pub const BOSS_EVENT_ROWS: &[(&str, i32, BossEvents)] = &[
         BossEvents {
             map: "m11_01_00_00",
             boss_entity: 1_110_801,
-            flags: &[11_115_802],
+            // 11115801 is the first phase's fog wall, still up in the second (event 11115810
+            // sets it, 11115800 ends it with flag 9403).
+            flags: &[11_115_802, 11_115_801],
             events: &[
                 EventEntry {
                     id: 11_115_800,
@@ -150,6 +168,9 @@ pub const BOSS_EVENT_ROWS: &[(&str, i32, BossEvents)] = &[
                     from_label: None,
                 },
             ],
+            fog_events: &[11_115_811],
+            // Event 11115820 plays the hand-over cutscene under `SetLighting(3)`: the storm.
+            lighting: Some(3),
         },
     ),
 ];
@@ -170,6 +191,10 @@ pub const ARENAS: &[ArenaSpec] = &[
         // flag 11115921 is set (after cutscene 11010080, which starts the later fight with c5430 on
         // this roof) and the tatami again with 11110100; the Owl fight shows the tatami.
         hidden_models: &["m015072"],
+        // The castle-roof progression (`--progression castle-roof`): Genichiro and the three
+        // other time-advancing bosses (Memories for attack power 6) are down. Event 820 then
+        // raises flags 9800 and 9801 and event 100 shows the evening sky and light.
+        beaten: &[9303, 9304, 9305, 9306],
     },
     ArenaSpec {
         name: "genichiro",
@@ -179,6 +204,9 @@ pub const ARENAS: &[ArenaSpec] = &[
         radius: 60.0,
         player_start: Some("c0000_0003"),
         hidden_models: &["m015072"],
+        // His first visit: no time-advancing boss is down, so no time flag is on and event 100
+        // shows the morning (environment variant 1).
+        beaten: &[],
     },
 ];
 
@@ -196,6 +224,16 @@ impl ArenaSpec {
 
     pub fn enemy_spec(&self) -> EnemySpec {
         EnemySpec::by_name(self.enemy).expect("arena enemies are known enemy names")
+    }
+
+    /// The story time of day this fight is staged in: the one the story flags give
+    /// ([`crate::story::StoryTime::from_flags`]), unless the fight's events switch the lighting
+    /// when `phase` (the enemy actually fought) begins.
+    pub fn story_time(&self, phase: &EnemySpec) -> crate::story::StoryTime {
+        boss_events(phase)
+            .and_then(|e| e.lighting)
+            .and_then(crate::story::StoryTime::from_variant)
+            .unwrap_or_else(|| crate::story::StoryTime::from_flags(|f| self.beaten.contains(&f)))
     }
 }
 
@@ -284,29 +322,84 @@ impl ArenaLayout {
 /// modelled yet; the castle roof's eaves are about 6 m above the next roof down).
 pub const FALL_RESPAWN_DEPTH: f32 = 30.0;
 
+/// A fog wall placed on the map: the event's wall and its asset's MSB transform and local box.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FogWallPlace {
+    pub wall: FogWall,
+    /// Bevy space, like every part of the layout.
+    pub position: Vec3,
+    pub rotation: glam::Quat,
+    /// The asset's box in its own frame (from its model bounds).
+    pub local_min: Vec3,
+    pub local_max: Vec3,
+}
+
 /// An arena ready to fight on: where both stand and the collision they stand on.
 pub struct Arena {
     pub spec: &'static ArenaSpec,
     pub layout: ArenaLayout,
     pub world: Arc<CollisionWorld>,
+    /// The fight's fog walls; their collision is the world's gate, open while one stands.
+    pub fog_walls: Vec<FogWallPlace>,
 }
+
+/// The thinnest a fog wall's blocker is made: the asset is a flat plane, and a body must not
+/// step through it between two ticks.
+const FOG_WALL_THICKNESS: f32 = 0.6;
 
 impl Arena {
     /// Reads `cache/maps/<map>`: the layout, and the collision within the arena's radius (or
-    /// all of it with `full_map`).
+    /// all of it with `full_map`). The fight's fog walls (events read with
+    /// [`crate::fogwall`]) are held back as the world's gate: the arena's boundary collision
+    /// and a box on each wall's asset, which block only while the walls stand.
     pub fn load(cache: &Path, spec: &'static ArenaSpec, full_map: bool) -> Result<Self, String> {
         let dir = cache.join("maps").join(spec.map);
-        let layout = ArenaLayout::load(spec, &dir)?;
+        let path = dir.join("layout.json");
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let json: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let layout = ArenaLayout::resolve(spec, &json)?;
+        let fog_walls = match boss_events(&spec.enemy_spec()) {
+            Some(events) if !events.fog_events.is_empty() => {
+                let walls = crate::fogwall::load(cache, events.map, events.fog_events)?;
+                fog_wall_places(&walls, &json)?
+            }
+            _ => Vec::new(),
+        };
         let path = dir.join("collision.bin");
-        let world = if full_map {
-            CollisionWorld::load(&path)?
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut mesh = CollisionMesh::from_bytes(&bytes).map_err(|e| e.to_string())?;
+        let mut gate = CollisionMesh::default();
+        for place in &fog_walls {
+            if let Some(range) = place
+                .wall
+                .collision_entity
+                .and_then(|entity| collision_range(&json, entity))
+            {
+                let (rest, part) = split_triangles(&mesh, range);
+                mesh = rest;
+                gate.extend(&part);
+            }
+            gate.extend(&place.blocker());
+        }
+        let world = if fog_walls.is_empty() {
+            if full_map {
+                CollisionWorld::from_mesh(&mesh)
+            } else {
+                CollisionWorld::from_mesh(&crop(&mesh, layout.center(), spec.radius))
+            }
+        } else if full_map {
+            CollisionWorld::from_mesh_with_gate(&mesh, &gate)
         } else {
-            CollisionWorld::load_within(&path, layout.center(), spec.radius)?
+            CollisionWorld::from_mesh_with_gate(
+                &crop(&mesh, layout.center(), spec.radius),
+                &crop(&gate, layout.center(), spec.radius),
+            )
         };
         Ok(Self {
             spec,
             layout,
             world: Arc::new(world),
+            fog_walls,
         })
     }
 
@@ -328,7 +421,117 @@ impl Arena {
             c.ground = Box::new(self.world.clone());
         }
         duel.fall_respawn_depth = Some(FALL_RESPAWN_DEPTH);
+        if !self.fog_walls.is_empty() {
+            duel.fog_gate = Some(self.world.clone());
+        }
     }
+}
+
+impl FogWallPlace {
+    /// A box over the asset's plane, [`FOG_WALL_THICKNESS`] thick at least, as collision.
+    pub fn blocker(&self) -> CollisionMesh {
+        let mut min = self.local_min;
+        let mut max = self.local_max;
+        let thickness = (max.z - min.z).max(FOG_WALL_THICKNESS);
+        let mid = (min.z + max.z) * 0.5;
+        min.z = mid - thickness * 0.5;
+        max.z = mid + thickness * 0.5;
+        let corners = [0, 1, 2, 3, 4, 5, 6, 7].map(|i| {
+            let local = Vec3::new(
+                if i & 1 == 0 { min.x } else { max.x },
+                if i & 2 == 0 { min.y } else { max.y },
+                if i & 4 == 0 { min.z } else { max.z },
+            );
+            (self.position + self.rotation * local).to_array()
+        });
+        const QUADS: [[u32; 4]; 6] = [
+            [0, 1, 3, 2],
+            [4, 6, 7, 5],
+            [0, 2, 6, 4],
+            [1, 5, 7, 3],
+            [0, 4, 5, 1],
+            [2, 3, 7, 6],
+        ];
+        let mut mesh = CollisionMesh {
+            vertices: corners.to_vec(),
+            ..Default::default()
+        };
+        for [a, b, c, d] in QUADS {
+            mesh.indices.extend([a, b, c, a, c, d]);
+            mesh.materials.extend([u32::MAX; 2]);
+        }
+        mesh
+    }
+}
+
+/// The wall assets in the layout: their transform and model bounds.
+fn fog_wall_places(walls: &[FogWall], layout: &Value) -> Result<Vec<FogWallPlace>, String> {
+    let vec3 = |v: &Value| -> Option<Vec3> {
+        Some(Vec3::new(
+            v[0].as_f64()? as f32,
+            v[1].as_f64()? as f32,
+            v[2].as_f64()? as f32,
+        ))
+    };
+    walls
+        .iter()
+        .map(|wall| {
+            let row = layout["objects"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|o| o["entity_id"].as_i64() == Some(i64::from(wall.object_entity)))
+                .ok_or_else(|| format!("no object with entity {}", wall.object_entity))?;
+            let bounds = &layout["models"][row["model"].as_str().unwrap_or_default()];
+            let q = &row["rotation"];
+            let rotation = glam::Quat::from_xyzw(
+                q[0].as_f64().unwrap_or(0.0) as f32,
+                q[1].as_f64().unwrap_or(0.0) as f32,
+                q[2].as_f64().unwrap_or(0.0) as f32,
+                q[3].as_f64().unwrap_or(1.0) as f32,
+            );
+            Ok(FogWallPlace {
+                wall: *wall,
+                position: vec3(&row["translation"]).ok_or("object has no translation")?,
+                rotation,
+                local_min: vec3(&bounds["min"]).ok_or("fog wall model has no bounds")?,
+                local_max: vec3(&bounds["max"]).ok_or("fog wall model has no bounds")?,
+            })
+        })
+        .collect()
+}
+
+/// The triangle range `[first, first + count)` of the collision part with `entity`.
+fn collision_range(layout: &Value, entity: i32) -> Option<std::ops::Range<usize>> {
+    let row = layout["collisions"]
+        .as_array()?
+        .iter()
+        .find(|c| c["entity_id"].as_i64() == Some(i64::from(entity)))?;
+    let first = row["triangles"][0].as_u64()? as usize;
+    Some(first..first + row["triangles"][1].as_u64()? as usize)
+}
+
+/// `mesh` without the triangles in `range`, and those triangles on their own.
+fn split_triangles(
+    mesh: &CollisionMesh,
+    range: std::ops::Range<usize>,
+) -> (CollisionMesh, CollisionMesh) {
+    let mut rest = CollisionMesh {
+        vertices: mesh.vertices.clone(),
+        ..Default::default()
+    };
+    let mut part = rest.clone();
+    for (t, tri) in mesh.indices.as_chunks::<3>().0.iter().enumerate() {
+        let side = if range.contains(&t) {
+            &mut part
+        } else {
+            &mut rest
+        };
+        side.indices.extend(tri);
+        side.materials
+            .push(mesh.materials.get(t).copied().unwrap_or(u32::MAX));
+    }
+    (rest, part)
 }
 
 /// The horizontal direction a yaw faces (yaw 0 faces -Z, positive yaw turns left).

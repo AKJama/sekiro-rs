@@ -1103,3 +1103,43 @@ We pack both into the exported glTF metallic-roughness texture (`crates/extract/
 Fur and hair cards take the shared strand albedo and its alpha cutout (the Owl face fix); `_e` materials are cutouts.
 Open: DetailBlend and SSS layers, `g_DiffuseMapColor`, alpha-to-coverage (shadow pass would treat it as opaque), the recovered shininess-to-specular curve.
 
+
+## Status: boss fog walls and story time of day (2026-10-12)
+
+### Fog walls of the castle roof
+
+Read with `emevd_dump` from `event/m11_01_00_00.emevd` and `common_func.emevd`.
+The events that start the fight start common event 20005820 (end flag, asset entity, effect id, start flag) and 20005825 (end flag, collision entity, start flag).
+Both bosses use the same wall, and the event never draws mist from the MSB's SFX points: the effect is attached to an asset.
+
+| Piece | Data |
+| --- | --- |
+| Asset | `o001401`, entity 1111800, MSB (-120.9, 53.83, 229.08), yaw -47, a 6 by 7 m plane 0.1 m thick; dummy polygon 101 sits at its origin |
+| Effect | FXR 11 (`sfxbnd_commoneffects`) on dummy 101, via `CreateAssetfollowingSFX` (2006[4]) in event 20005820 |
+| Collision | part `h900800`, entity 1114800, a 24-triangle rim wall (y 54.2 to 62) around the roof edge, enabled by event 20005825; it is in `collision.bin`, so before this change it blocked at all times |
+| Owl | event 11115861: end flag 9308, asset stands while flag 11115722 is on (event 11115721 raises it when Wolf enters area 1112712; 11115850 clears it), collision from flag 11115851 (fight start) |
+| Genichiro | event 11115811: both stand from flag 11115801 (set by 11115810 after the intro) until 9403 (11115800, final defeat); the second phase keeps it |
+
+The map also has SFX points (MSB point kind 5, entities 1114832 to 1114839, 1114350) spawned by the same events: Owl `忍軍の長_濃霧` (dense fog) FXR 811280 and a light shaft 811500 at (-110.3, 54, 238.8), Genichiro's storm snow 811240/811241 and lightning 811242 in the second phase, and snow 839500.
+These are atmosphere, not walls, and are not drawn yet.
+
+Implementation: `sekiro_sim::fogwall` resolves the walls from the event starts, `Arena::load` splits the rim wall out of the world and adds a box over the asset as a gate (`CollisionWorld::from_mesh_with_gate`), and the duel opens the gate while a wall stands (start flag on, end flag off).
+`play.rs` holds FXR 11 at the asset (`FxrPlayer::hold`) over the same condition, so the wall appears at the fight and fades after victory.
+The asset's own collision (`o001401.hkx`) is a Havok box that our hknp decoder does not read, so the blocker is a 0.6 m box built from the model bounds.
+The camera ray still uses the same world, so the gate also blocks it.
+
+### Story time of day
+
+Sekiro keys light by story flags (`common.emevd` event 100): flags 9800 to 9803 are cumulative; none is morning (environment variant 1), then afternoon, evening, night, dawn.
+Event 820 raises 9800 once one of the bosses 9303 to 9306 is down and 9801 once three are.
+`SetLighting(n)` uses the same variants 1 to 4.
+`sekiro_sim::story` encodes this and a test checks the constants against the installed script; variants map to the authored hour keys (6, 12, 18, 22, 2).
+
+| Arena | Flags at the fight | Time | Default `--hour` |
+| --- | --- | --- | --- |
+| `genichiro` (first visit, c7100) | no time-advancing boss beaten | morning | 6 |
+| `genichiro` with `--genichiro-phase tomoe` | event 11115820 runs `SetLighting(3)` for the storm phase | evening | 18 |
+| `owl` (castle-roof progression) | 9303 to 9306 beaten | evening | 18 |
+
+`--hour` still overrides.
+Gaps: the in-fight switch at the Genichiro hand-over is not animated, and `SetAreaGparamSubID` is not applied (Owl sub 50, Genichiro phase two sub 10; draw param files appear to be named by sub id divided by ten, and m11_01 has no 05xx file).

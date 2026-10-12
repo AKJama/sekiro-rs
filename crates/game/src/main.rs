@@ -274,6 +274,21 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
         })
         .transpose()?
         .unwrap_or((1600, 900));
+    // Sekiro's time of day follows the story, not a clock: an arena defaults to the hour of the
+    // light, probes and sky the game's own flags select at that point (`--hour` overrides).
+    let default_hour = match boss_arena {
+        Some(arena) if arg_value(args, "--hour").is_none() => {
+            let time = arena.story_time(&opponent);
+            eprintln!(
+                "arena {}: story time {} ({} h), set --hour to override",
+                arena.name,
+                time.name(),
+                time.hour()
+            );
+            time.hour()
+        }
+        _ => 12.0,
+    };
     Ok(play::Options {
         brain_overlay: args.iter().any(|a| a == "--brain-overlay"),
         brain_label,
@@ -338,7 +353,7 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
         spawn: map::parse_camera(arg_value(args, "--spawn").as_deref())?
             .map(|[x, y, z, yaw, _]| [x, y, z, yaw]),
         enemy_distance: arg_f32(args, "--enemy-distance", 5.0)?,
-        hour: arg_f32(args, "--hour", 12.0)?,
+        hour: arg_f32(args, "--hour", default_hour)?,
         gparam: arg_value(args, "--gparam"),
     })
 }

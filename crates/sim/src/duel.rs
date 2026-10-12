@@ -19,6 +19,7 @@ use crate::lua_ai::{AiActor, AiBrain, AiWorld, ThinkParams, anim_id_from_clip};
 use crate::player::LoadError;
 use sekiro_formats::flver::{self, Flver};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Seconds between a death and both characters respawning at their start positions (a stand-in
 /// for the game's death screen and reload).
@@ -199,6 +200,9 @@ pub struct Duel {
     /// The fight's map events (phase changes, boss bar, defeat), when the enemy has any
     /// ([`crate::arena::boss_events`]).
     pub events: Option<FightEvents>,
+    /// The arena's gated collision (fog wall and boundary, [`CollisionWorld::set_gate`]), which
+    /// blocks while one of the fight's fog walls stands. Set by `Arena::place`.
+    pub fog_gate: Option<Arc<crate::collision::CollisionWorld>>,
 }
 
 /// The state the map events keep for a fight (see [`crate::events`]).
@@ -215,13 +219,28 @@ pub struct FightEvents {
     pub defeated: bool,
     /// An event command waiting for the boss's script (`env(105, slot)`): (slot, command).
     pub ezstate: Option<(u8, i32)>,
+    /// The fight's fog walls (placed by the map's events, see [`crate::fogwall`]).
+    pub fog_walls: Vec<crate::fogwall::FogWall>,
 }
 
 impl FightEvents {
+    /// The fog walls that stand now: their start flag is on and their end flag is off.
+    pub fn standing_fog_walls(&self) -> impl Iterator<Item = &crate::fogwall::FogWall> {
+        self.fog_walls
+            .iter()
+            .filter(|w| w.active(|f| self.scripts.flag(f)))
+    }
+
     pub fn load(cache: &Path, spec: &BossEvents) -> Result<Self, String> {
         let mut scripts = EventScripts::load(cache, spec.map, spec.events)?;
         scripts.flags.extend(spec.flags.iter().copied());
+        let fog_walls = if spec.fog_events.is_empty() {
+            Vec::new()
+        } else {
+            crate::fogwall::load(cache, spec.map, spec.fog_events)?
+        };
         Ok(Self {
+            fog_walls,
             scripts,
             boss_entity: spec.boss_entity,
             boss_bar: None,
@@ -397,6 +416,7 @@ impl Duel {
             bullets: Default::default(),
             lightning_returned: false,
             fall_respawn_depth: None,
+            fog_gate: None,
             fall_materials: load_fall_materials(cache),
             last_safe: None,
             boss_brain: None,
@@ -1772,6 +1792,9 @@ impl Duel {
             }
         }
         self.events = Some(ev);
+        if let (Some(gate), Some(ev)) = (&self.fog_gate, &self.events) {
+            gate.set_gate(ev.standing_fog_walls().next().is_some());
+        }
         if self.deathblow.is_none()
             && let Some((entity, bar)) = self.pending_handover.take()
         {

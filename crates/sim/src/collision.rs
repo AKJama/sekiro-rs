@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use glam::{Vec2, Vec3};
 use sekiro_formats::hknp::CollisionMesh;
@@ -112,6 +113,10 @@ pub struct CollisionWorld {
     materials: Vec<u32>,
     cells: HashMap<(i32, i32), Vec<u32>>,
     min_walk_ny: f32,
+    /// Triangles from this index on form the gate: collision that exists only while a map event
+    /// has it enabled (a boss fog wall and its invisible boundary). `u32::MAX` when there is none.
+    gate_from: u32,
+    gate_open: AtomicBool,
 }
 
 fn cell_of(x: f32, z: f32) -> (i32, i32) {
@@ -134,12 +139,43 @@ impl CollisionWorld {
     }
 
     pub fn from_mesh(mesh: &CollisionMesh) -> Self {
+        Self::build(mesh, None)
+    }
+
+    /// [`CollisionWorld::from_mesh`] plus a gate: triangles that block only while
+    /// [`CollisionWorld::set_gate`] has them on (off at first).
+    pub fn from_mesh_with_gate(mesh: &CollisionMesh, gate: &CollisionMesh) -> Self {
+        let mut all = mesh.clone();
+        all.extend(gate);
+        Self::build(&all, Some(mesh.triangle_count()))
+    }
+
+    /// Switches the gate's triangles on or off. They are shared by every holder of the world.
+    pub fn set_gate(&self, on: bool) {
+        self.gate_open.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether the gate's triangles currently block.
+    pub fn gate(&self) -> bool {
+        self.gate_open.load(Ordering::Relaxed)
+    }
+
+    /// Whether triangle `t` takes part in queries: every ordinary one, a gate one while on.
+    fn live(&self, t: u32) -> bool {
+        t < self.gate_from || self.gate_open.load(Ordering::Relaxed)
+    }
+
+    fn build(mesh: &CollisionMesh, gate_start: Option<usize>) -> Self {
+        let mut gate_from = u32::MAX;
         let vertices: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from(*v)).collect();
         let mut triangles = Vec::with_capacity(mesh.indices.len() / 3);
         let mut normals = Vec::with_capacity(mesh.indices.len() / 3);
         let mut materials = Vec::with_capacity(mesh.indices.len() / 3);
         let mut cells: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
         for (source, tri) in mesh.indices.as_chunks::<3>().0.iter().enumerate() {
+            if gate_start == Some(source) {
+                gate_from = triangles.len() as u32;
+            }
             let [a, b, c] = tri.map(|i| vertices[i as usize]);
             let n = (b - a).cross(c - a);
             if n.length_squared() < 1e-12 {
@@ -164,6 +200,8 @@ impl CollisionWorld {
             materials,
             cells,
             min_walk_ny: MAX_SLOPE_DEGREES.to_radians().cos(),
+            gate_from,
+            gate_open: AtomicBool::new(false),
         }
     }
 
@@ -214,6 +252,7 @@ impl CollisionWorld {
         for &t in cell {
             if matches!(self.materials[t as usize], 22 | 36 | 38)
                 || self.normals[t as usize].y.abs() < self.min_walk_ny
+                || !self.live(t)
             {
                 continue;
             }
@@ -236,6 +275,7 @@ impl CollisionWorld {
             .get(&cell_of(x, z))
             .into_iter()
             .flatten()
+            .filter(|&&t| self.live(t))
             .filter_map(|&t| {
                 let [a, b, c] = self.corners(t);
                 Some((height_on(x, z, a, b, c)?, self.normals[t as usize].y))
@@ -256,7 +296,7 @@ impl CollisionWorld {
         );
         let mut best: Option<f32> = None;
         for t in tris {
-            if matches!(self.materials[t as usize], 22 | 36 | 38) {
+            if matches!(self.materials[t as usize], 22 | 36 | 38) || !self.live(t) {
                 continue;
             }
             let [a, b, c] = self.corners(t);
@@ -307,7 +347,7 @@ impl CollisionWorld {
             let centre = feet + Vec3::Y * h;
             let mut push = Vec2::ZERO;
             for &t in tris {
-                if matches!(self.materials[t as usize], 22 | 36 | 38) {
+                if matches!(self.materials[t as usize], 22 | 36 | 38) || !self.live(t) {
                     continue;
                 }
                 let [a, b, c] = self.corners(t);
@@ -352,7 +392,7 @@ impl Ground for CollisionWorld {
             .iter()
             .filter_map(|&t| {
                 let material = self.materials[t as usize];
-                if !matches!(material, 20..=24 | 35..=38) {
+                if !matches!(material, 20..=24 | 35..=38) || !self.live(t) {
                     return None;
                 }
                 let [a, b, c] = self.corners(t);

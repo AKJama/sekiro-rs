@@ -24,6 +24,7 @@ pub mod duel;
 pub mod enemy;
 pub mod events;
 pub mod fight;
+pub mod fogwall;
 pub mod grab;
 pub mod hit_fx;
 pub mod hits;
@@ -37,6 +38,7 @@ pub mod registry;
 pub mod scenario;
 pub mod sound;
 pub mod status;
+pub mod story;
 pub mod tae;
 pub mod wire;
 

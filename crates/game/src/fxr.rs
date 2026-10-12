@@ -93,6 +93,9 @@ struct Effect {
     /// Stops emitting when its event ends or its key is no longer requested.
     stoppable: bool,
     stop: bool,
+    /// A map effect held by [`FxrPlayer::hold`]: it neither times out nor is dropped by age
+    /// while held.
+    persistent: bool,
     root: Option<NodeInst>,
     age: f32,
 }
@@ -256,9 +259,38 @@ impl FxrPlayer {
             follow: true,
             stoppable,
             stop: false,
+            persistent: false,
             root: None,
             age: 0.0,
         });
+    }
+
+    /// Holds a map effect (a boss fog wall) at `at` while `on`, and lets it fade out once it is
+    /// off. `serial` tells apart effects with the same id; the effect does not time out.
+    pub fn hold(&mut self, id: i32, serial: i32, at: Transform, on: bool) {
+        let key = (4, id, serial);
+        let held = self
+            .effects
+            .iter_mut()
+            .find(|e| e.key == key && e.persistent);
+        match (on, held) {
+            (true, None) => {
+                let before = self.effects.len();
+                self.request(id, key, at, true, false);
+                if self.effects.len() > before
+                    && let Some(e) = self.effects.last_mut()
+                {
+                    e.persistent = true;
+                    e.follow = false;
+                }
+            }
+            (false, Some(e)) => {
+                e.persistent = false;
+                e.stop = true;
+                e.age = EFFECT_STOP;
+            }
+            _ => {}
+        }
     }
 
     /// Effects for the step's hits: sparks on a deflect or block, blood on a landed hit, at the
@@ -409,6 +441,7 @@ impl FxrPlayer {
             if e.root.is_none() {
                 let Some(def) = lib.get(e.id) else {
                     e.age = EFFECT_DROP + 1.0;
+                    e.persistent = false;
                     continue;
                 };
                 let seed = (e.id as u32)
@@ -418,11 +451,12 @@ impl FxrPlayer {
                 e.root = make_node(lib, &def["root"], seed, 0);
                 if e.root.is_none() {
                     e.age = EFFECT_DROP + 1.0;
+                    e.persistent = false;
                     continue;
                 }
             }
             e.age += dt;
-            let stop = e.stop || e.age > EFFECT_STOP || live > PARTICLE_CAP;
+            let stop = e.stop || (e.age > EFFECT_STOP && !e.persistent) || live > PARTICLE_CAP;
             let Some(root) = e.root.as_mut() else {
                 continue;
             };
@@ -440,9 +474,11 @@ impl FxrPlayer {
             live += count_particles(root);
             if root.finished {
                 e.age = EFFECT_DROP + 1.0;
+                e.persistent = false;
             }
         }
-        self.effects.retain(|e| e.age <= EFFECT_DROP);
+        self.effects
+            .retain(|e| e.persistent || e.age <= EFFECT_DROP);
         self.particles = live;
     }
 }
