@@ -1,7 +1,7 @@
 //! Shared boss evidence and isolated player profiles across fights and sessions.
 //! [`LayerPaths`] migrates legacy memory without deleting its source, and persists counted
 //! boss knowledge beside each player's habits, history and tuned game plan.
-//! [`Memory`] remains the version-2 profile and legacy format; [`BossKnowledge`] is version 1.
+//! [`Memory`] is the version-3 profile and legacy format; [`BossKnowledge`] is version 1.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ use super::tally::{CountMap, Counts, Side, Tally, TopMap, merge_counts, ranked_c
 use std::collections::BTreeMap;
 
 /// The memory file format version.
-pub const MEMORY_VERSION: u32 = 2;
+pub const MEMORY_VERSION: u32 = 3;
 
 /// The oldest format this build still reads (version 1 had no fight history).
 pub const OLDEST_VERSION: u32 = 1;
@@ -38,6 +38,8 @@ pub enum FightEnd {
 /// The memory file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Memory {
+    #[serde(default)]
+    pub bandit: super::bandit::BanditMemory,
     #[serde(default)]
     pub shared_actions: std::collections::BTreeSet<String>,
     #[serde(default)]
@@ -155,6 +157,7 @@ impl Memory {
     pub fn new(chr: &str) -> Self {
         Self {
             version: MEMORY_VERSION,
+            bandit: Default::default(),
             chr: chr.to_string(),
             fights: 0,
             boss_wins: 0,
@@ -186,7 +189,7 @@ impl Memory {
             ),
             Ok(m) if m.chr != chr => format!("memory of {} (wanted {chr})", m.chr),
             Ok(mut m) => {
-                // Version 1 files have no history; they are saved as version 2 from now on.
+                // Older files default missing evidence and are saved as the current version.
                 m.version = MEMORY_VERSION;
                 return (m, Loaded::Read);
             }
@@ -309,6 +312,8 @@ pub fn resolve_for(arg: Option<&str>, chr: &str, brain: &str, hosted: bool) -> O
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BossEvidence {
+    #[serde(default)]
+    pub bandit: super::bandit::BanditMemory,
     pub phase_actions: BTreeMap<String, CountMap>,
     pub fights: u32,
     pub boss_wins: u32,
@@ -321,6 +326,7 @@ pub struct BossEvidence {
 impl BossEvidence {
     fn from_player(m: &Memory) -> Self {
         Self {
+            bandit: m.bandit.clone(),
             fights: m.fights,
             boss_wins: m.boss_wins,
             wolf_wins: m.wolf_wins,
@@ -406,6 +412,23 @@ impl BossKnowledge {
             .insert(player.into(), BossEvidence::from_player(memory));
         self.evidence = BossEvidence::default();
         for e in self.players.values() {
+            for (phase, contexts) in &e.bandit {
+                for (context, arms) in contexts {
+                    for (name, arm) in arms {
+                        let shared = self
+                            .evidence
+                            .bandit
+                            .entry(phase.clone())
+                            .or_default()
+                            .entry(context.clone())
+                            .or_default()
+                            .entry(name.clone())
+                            .or_default();
+                        shared.success += arm.success;
+                        shared.failure += arm.failure;
+                    }
+                }
+            }
             for (phase, actions) in &e.phase_actions {
                 merge_counts(
                     self.evidence
@@ -584,13 +607,14 @@ impl LayerPaths {
         if !default.player.exists() && self.legacy.exists() {
             // Never rename/delete the source or overwrite an existing backup.
             let text = std::fs::read_to_string(&self.legacy)?;
-            let m: Memory = serde_json::from_str(&text)?;
+            let mut m: Memory = serde_json::from_str(&text)?;
             if !(OLDEST_VERSION..=MEMORY_VERSION).contains(&m.version) || m.chr != chr {
                 return Err(std::io::Error::other("incompatible legacy memory"));
             }
             if !self.backup.exists() {
                 std::fs::copy(&self.legacy, &self.backup)?;
             }
+            m.version = MEMORY_VERSION;
             boss.update("default", &m);
             if let Some(p) = &m.coach.plan {
                 boss.learn(p);
@@ -599,7 +623,7 @@ impl LayerPaths {
             write_json(&self.boss, &boss)?;
             m.save(&default.player)?;
         }
-        let player = match std::fs::read_to_string(&self.player) {
+        let mut player = match std::fs::read_to_string(&self.player) {
             Ok(text) => {
                 let m: Memory = serde_json::from_str(&text)?;
                 if m.chr != chr || !(OLDEST_VERSION..=MEMORY_VERSION).contains(&m.version) {
@@ -610,6 +634,7 @@ impl LayerPaths {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Memory::new(chr),
             Err(e) => return Err(e),
         };
+        player.version = MEMORY_VERSION;
         // Repair a interrupted two-file save using the durable profile snapshot.
         let name = self
             .player
@@ -643,6 +668,8 @@ impl LayerPaths {
             // Aggregate the snapshots without importing player habits or provisional fights.
             let snapshot = combined.players.get(name).cloned().unwrap_or_default();
             let mut evidence = Memory::new(&boss.chr);
+            evidence.bandit = snapshot.bandit;
+            evidence.phase_actions = snapshot.phase_actions;
             evidence.fights = snapshot.fights;
             evidence.boss_wins = snapshot.boss_wins;
             evidence.wolf_wins = snapshot.wolf_wins;

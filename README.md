@@ -91,15 +91,15 @@ It currently supports the Great Shinobi Owl, Genichiro and the Ashina soldier.
 It has two parts:
 
 - **The coach** reviews your fights (after each fight and about every 30 seconds mid-fight) and writes a game plan. It runs through a command-line agent on your own subscription, so it needs no API key.
-- **The checkpoint chooser** (optional) is a small, fast model that switches between the coach's prepared plans at key moments in a fight. It uses the OpenAI API and needs an API key.
+- **The checkpoint chooser** defaults to a local contextual bandit that learns which prepared plan set works at each combat checkpoint.
+  It runs instantly in the simulation, costs nothing, and needs no API key.
 
-### Recommended setup: Codex coach plus the OpenAI checkpoint chooser
+### Recommended setup: CLI coach plus local checkpoints
 
-1. Install the [Codex CLI](https://github.com/openai/codex) and sign in with your ChatGPT plan (`codex login`).
+1. Install the [Codex CLI](https://github.com/openai/codex) and sign in with your ChatGPT plan (`codex login`), or install Claude Code and sign in with your Claude plan.
    The game starts it isolated, without your other Codex settings, memories or project files.
-2. Optional, for the checkpoint chooser: copy `.env.example` to `.env` in the repository folder and set `OPENAI_API_KEY`.
-   `.env` is gitignored; never commit it.
-3. Play:
+2. Play with `--brain coach`; local checkpoints are the default and no API key is needed.
+   Choose `--coach claude` to use Claude Code instead of Codex.
 
 ```powershell
 & $game --arena owl --progression castle-roof --brain coach --coach codex --brain-overlay
@@ -107,6 +107,8 @@ It has two parts:
 ```
 
 Or pick "Coach brain" as the AI in the start menu.
+The OpenAI Decisions chooser remains optional: set `OPENAI_API_KEY` and add `--checkpoint decisions`.
+Use `--checkpoint off` to retain the coach's start set without checkpoint switches.
 
 ### What it costs and how fast it is
 
@@ -117,7 +119,8 @@ Measured on 11 October 2026:
 | Coach, `--coach codex` (default model `gpt-6.1-sol`) | Codex CLI | about 5 to 25 s | about 11k to 19k | your ChatGPT plan's usage |
 | Coach, `--coach claude` | Claude Code CLI (`claude -p`) | about 60 to 120 s | about 96k to 161k | your Claude plan's usage |
 | Coach, `--coach api` | OpenAI API | depends on model | similar to Codex | API key, billed |
-| Checkpoint chooser (`gpt-6-luna`) | OpenAI Decisions API | fast, about 100-byte requests | about 300 | API key, billed (about $0.002 for a 9-fight session) |
+| Checkpoint chooser, `--checkpoint local` (default) | Local Thompson sampling | synchronous, no I/O | 0 | free |
+| Optional chooser, `--checkpoint decisions` (`gpt-6-luna`) | OpenAI Decisions API | fast, about 100-byte requests | about 300 | API key, billed (historically about $0.002 for a 9-fight session) |
 
 The Codex coach is the recommended one: it was by far the fastest and leanest in our tests.
 The Claude coach works but is slow, because the CLI loads your whole Claude Code setup on every call; if you prefer it, your own coding agent can help you tune it.

@@ -52,6 +52,7 @@ impl fmt::Display for Backend {
 }
 
 pub struct HostedConfig {
+    pub checkpoint_chooser: sekiro_sim::brain::bandit::CheckpointChooser,
     pub budget_usd: Option<f64>,
     pub token_budget: Option<u64>,
     pub prices: crate::PriceTable,
@@ -75,8 +76,7 @@ pub struct HostedConfig {
     /// Overrides the CLI program of the `claude` and `codex` coaches (`SEKIRO_COACH_CMD`; the
     /// tests point it at a fake).
     pub coach_cmd: Option<PathBuf>,
-    /// Whether the in-fight checkpoint calls (Decisions API) are made; off when there is no
-    /// API key (the opener and start set still play).
+    /// Legacy veto for explicit Decisions checkpoint calls; local/off never sends HTTP.
     pub checkpoints: bool,
 }
 
@@ -172,6 +172,7 @@ impl std::error::Error for ConfigError {}
 impl HostedConfig {
     pub fn new(backend: Backend, api_key: ApiKey) -> Self {
         Self {
+            checkpoint_chooser: sekiro_sim::brain::bandit::CheckpointChooser::Local,
             budget_usd: None,
             token_budget: None,
             prices: crate::PriceTable::default(),

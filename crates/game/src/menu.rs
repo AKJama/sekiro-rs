@@ -99,6 +99,7 @@ mod tests {
                 a.brain.coach.backend,
                 a.brain.coach.model,
                 a.brain.coach.effort,
+                a.brain.coach.checkpoint,
                 a.brain.coach.budget_usd,
                 a.brain.coach.token_budget
             ),
@@ -106,6 +107,7 @@ mod tests {
                 b.brain.coach.backend,
                 b.brain.coach.model,
                 b.brain.coach.effort,
+                b.brain.coach.checkpoint,
                 b.brain.coach.budget_usd,
                 b.brain.coach.token_budget
             )
@@ -288,6 +290,9 @@ impl Choices {
                 _ => "lua",
             },
         );
+        if v[5] == "Coach brain (codex)" {
+            pair("--checkpoint", "local");
+        }
         if self.owl() && v[6] != "none" {
             pair("--brain-stage", &v[6]);
         }

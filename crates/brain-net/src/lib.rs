@@ -24,6 +24,7 @@ pub fn is_hosted(name: &str) -> bool {
 /// The coach options of the game CLI (`--coach`, `--coach-model`, `--coach-effort`).
 #[derive(Debug, Clone, Default)]
 pub struct CoachCli {
+    pub checkpoint: Option<String>,
     pub budget_usd: Option<f64>,
     pub token_budget: Option<u64>,
     /// `codex` (default), `claude` or `api`.
@@ -73,66 +74,84 @@ pub fn from_cli_with(
         }
     };
     let coach_backend = coach.resolved_backend()?;
+    let checkpoint = sekiro_sim::brain::bandit::CheckpointChooser::by_name(
+        coach.checkpoint.as_deref().unwrap_or("local"),
+    )
+    .ok_or_else(|| "unknown --checkpoint: known are local, decisions, off".to_string())?;
     let Some(actions) = BossActions::for_chr(chr) else {
         eprintln!("--brain {backend}: no action list for {chr}; falling back to Lua AI");
         return Ok(Box::new(LuaBrain));
     };
-    let result = HostedConfig::from_env(backend)
-        .or_else(|e| {
-            // A CLI coach needs no API key; only the in-fight checkpoint choices do.
-            if backend == Backend::Coach && coach_backend != CoachBackend::Api && e == ConfigError::MissingKey {
-                eprintln!(
-                    "coach: no OPENAI_API_KEY, so the checkpoint switches (Decisions API) are off; the coach's opener and start set still play"
-                );
-                let mut c = HostedConfig::new(backend, ApiKey::new("none"));
-                c.checkpoints = false;
-                Ok(c)
+    let result = checkpoint_config(backend, coach_backend, checkpoint, || {
+        HostedConfig::from_env(backend)
+    })
+    .and_then(|mut config| {
+        config.checkpoint_chooser = checkpoint;
+        if backend == Backend::Coach {
+            config.checkpoints =
+                checkpoint == sekiro_sim::brain::bandit::CheckpointChooser::Decisions;
+        }
+        config.budget_usd = coach.budget_usd;
+        config.token_budget = coach.token_budget;
+        config.prices = PriceTable::load()?;
+        if let Some(model) = model {
+            config.model = model;
+        }
+        if backend == Backend::Coach {
+            config.coach_backend = coach_backend;
+            config.coach_model = coach
+                .model
+                .clone()
+                .unwrap_or_else(|| coach_backend.default_model().to_string());
+            if let Some(effort) = &coach.effort {
+                config.coach_effort = effort.clone();
+            } else if coach_backend == CoachBackend::Codex {
+                config.coach_effort = "medium".into();
             } else {
-                Err(e)
+                config.coach_effort = "low".into();
             }
-        })
-        .and_then(|mut config| {
-            config.budget_usd = coach.budget_usd;
-            config.token_budget = coach.token_budget;
-            config.prices = PriceTable::load()?;
-            if let Some(model) = model {
-                config.model = model;
-            }
-            if backend == Backend::Coach {
-                config.coach_backend = coach_backend;
-                config.coach_model = coach
-                    .model
-                    .clone()
-                    .unwrap_or_else(|| coach_backend.default_model().to_string());
-                if let Some(effort) = &coach.effort {
-                    config.coach_effort = effort.clone();
-                } else if coach_backend == CoachBackend::Codex {
-                    config.coach_effort = "medium".into();
+            config.coach_timeout = coach_backend.timeout();
+            config.coach_cmd = std::env::var_os("SEKIRO_COACH_CMD").map(Into::into);
+            eprintln!(
+                "coach: {} (model {}{}), checkpoints on {}",
+                coach_backend.name(),
+                config.coach_model,
+                if coach_backend != CoachBackend::Claude {
+                    format!(", effort {}", config.coach_effort)
                 } else {
-                    config.coach_effort = "low".into();
+                    String::new()
+                },
+                match checkpoint {
+                    sekiro_sim::brain::bandit::CheckpointChooser::Local => "local",
+                    sekiro_sim::brain::bandit::CheckpointChooser::Off => "off",
+                    sekiro_sim::brain::bandit::CheckpointChooser::Decisions => &config.model,
                 }
-                config.coach_timeout = coach_backend.timeout();
-                config.coach_cmd = std::env::var_os("SEKIRO_COACH_CMD").map(Into::into);
-                eprintln!(
-                    "coach: {} (model {}{}), checkpoints on {}",
-                    coach_backend.name(),
-                    config.coach_model,
-                    if coach_backend != CoachBackend::Claude {
-                        format!(", effort {}", config.coach_effort)
-                    } else {
-                        String::new()
-                    },
-                    if config.checkpoints { &config.model } else { "off" }
-                );
-            }
-            let stamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            config.log_path = Some(format!("logs/brain-{stamp}.jsonl").into());
-            HostedBrain::new(config, actions)
-        });
+            );
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        config.log_path = Some(format!("logs/brain-{stamp}.jsonl").into());
+        HostedBrain::new(config, actions)
+    });
     Ok(fallback(backend, result))
+}
+
+fn checkpoint_config(
+    backend: Backend,
+    coach: CoachBackend,
+    checkpoint: sekiro_sim::brain::bandit::CheckpointChooser,
+    credentials: impl FnOnce() -> Result<HostedConfig, ConfigError>,
+) -> Result<HostedConfig, ConfigError> {
+    if backend != Backend::Coach
+        || coach == CoachBackend::Api
+        || checkpoint == sekiro_sim::brain::bandit::CheckpointChooser::Decisions
+    {
+        credentials()
+    } else {
+        Ok(HostedConfig::new(backend, ApiKey::new("")))
+    }
 }
 
 fn fallback(backend: Backend, result: Result<HostedBrain, ConfigError>) -> Box<dyn BossBrain> {
@@ -148,6 +167,42 @@ fn fallback(backend: Backend, result: Result<HostedBrain, ConfigError>) -> Box<d
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_and_off_cli_coaches_never_read_credentials() {
+        use sekiro_sim::brain::bandit::CheckpointChooser;
+        for coach in [CoachBackend::Codex, CoachBackend::Claude] {
+            for checkpoint in [CheckpointChooser::Local, CheckpointChooser::Off] {
+                let config = checkpoint_config(Backend::Coach, coach, checkpoint, || {
+                    panic!("credential access")
+                })
+                .unwrap();
+                assert_eq!(config.backend, Backend::Coach);
+            }
+        }
+        assert_eq!(
+            CheckpointChooser::by_name("decisions"),
+            Some(CheckpointChooser::Decisions)
+        );
+        assert!(matches!(
+            checkpoint_config(
+                Backend::Coach,
+                CoachBackend::Codex,
+                CheckpointChooser::Decisions,
+                || Err(ConfigError::MissingKey)
+            ),
+            Err(ConfigError::MissingKey)
+        ));
+        assert!(matches!(
+            checkpoint_config(
+                Backend::Coach,
+                CoachBackend::Api,
+                CheckpointChooser::Local,
+                || Err(ConfigError::MissingKey)
+            ),
+            Err(ConfigError::MissingKey)
+        ));
+    }
 
     #[test]
     fn game_cli_defaults_to_codex() {

@@ -11,7 +11,7 @@ cargo run --release -p sekiro-sim --bin duel-sim -- --enemy soldier --brain scri
 cargo test -p sekiro-sim --test owl_brain --test soldier_brain --test brain_tactics
 ```
 
-`--brain coach` is the hosted way to run it (a coach between fights, a tiny checkpoint chooser in them, see "The coach"); `--brain lua` (the default) leaves his Lua AI unchanged; `--brain scripted` runs the deterministic test controller with that enemy's own test plans; `--brain-log` writes a JSONL log to `cache/brain_logs/`; `--brain-memory off|on|<path>` keeps the memory of every fight (on by default for hosted brains, see "Memory across fights").
+`--brain coach` runs a CLI coach with a free local checkpoint chooser by default (see "The coach" and "Local checkpoint chooser"); `--brain lua` (the default) leaves his Lua AI unchanged; `--brain scripted` runs the deterministic test controller with that enemy's own test plans; `--brain-log` writes a JSONL log to `cache/brain_logs/`; `--brain-memory off|on|<path>` keeps the memory of every fight (on by default for hosted brains, see "Memory across fights").
 `--force-act <id>` (the enemy requests that act whenever he is free) works for either enemy.
 
 Three environment variables tune the driver (no flags): `SEKIRO_BRAIN_MODE=slot|plan_end|checkpoints` (when requests go out, see "Timing model"; the default is `checkpoints` for hosted brains and `slot` for the others), `SEKIRO_BRAIN_TEMPERATURE` (sampling temperature, default 1.0) and `SEKIRO_BRAIN_SEED` (seeds the sampler; random otherwise).
@@ -365,7 +365,7 @@ Then the tally and the habits go into the memory, and the next fight starts with
 The two layers live beside the legacy memory path:
 
 - `logs/memory/<chr>.boss.json`, version 1, holds shared `evidence` (fights, wins, action/plan/break-response outcome counts), `players` (count-bearing contribution snapshots), `principles`, reasoned `bans`, and `best` (sanitized game plan, evidence snapshot, score and last result).
-- `logs/memory/<chr>.player-<name>.json`, version 2, holds this player's habits, recent history/trend, outcome counts for local bans, and `coach.plan` with player notes and principles.
+- `logs/memory/<chr>.player-<name>.json`, version 3, holds this player's habits, recent history/trend, outcome counts for local bans, and `coach.plan` with player notes and principles.
 
 ```json
 {"version":1,"chr":"c5060","evidence":{"fights":21,"boss_wins":20,"wolf_wins":1,"actions":{"3010":[9,0,0,0,9,0]},"plans":{},"break_plans":{}},"players":{},"principles":["Strike immediately after a posture break"],"bans":[{"choice":"3010","reason":"shared: 9/9 whiffs"}],"best":null}
@@ -395,7 +395,7 @@ The player object contains fight count, habits, trend, notes, `player_principles
 The response remains a full game plan, now with `player_principles`, `boss_principles` and `boss_bans` arrays.
 Strict hosted schemas require the arrays (use an empty `boss_bans` for no update); older replies using `principles` still deserialize as player principles.
 Both layers and current fight evidence share the 4096-byte budget, trimming low-priority rows before retained shared lessons and exclusions.
-The tiny checkpoint chooser is unchanged.
+The local checkpoint chooser and optional Decisions chooser use the same offered sets.
 
 Saves replace each file through a temporary file at fight end, respawn, 15-second autosave and exit.
 Contribution snapshots replace each player's earlier evidence rather than adding it again, so repeated saves cannot inflate totals.
@@ -429,7 +429,7 @@ The player file format, version 2 (an example after two short soldier fights in 
 }
 ```
 
-A version 1 file loads (its `history` is empty) and is saved as version 2 from then on (`memory_v1_migrates_and_keeps_ten_fights`).
+A version 1 file loads (its `history` is empty) and is saved as version 3 from then on (`memory_v1_migrates_and_keeps_ten_fights`).
 `history` holds the last 10 finished fights, oldest first, each as `{"winner", "metrics", "decisions", "lua_acts", "requests", "choices", "tokens", "latency_ms", "brain"}` (see "The score to beat"); `boss` also holds tactic tokens next to action ids.
 A missing file starts fresh with a note on stderr.
 An unusable layer (bad JSON, another `version`, or another enemy's `chr`) disables persistence with a warning and keeps every existing file intact.
@@ -502,6 +502,51 @@ Before the first answer arrives (the start request takes a fraction of a second)
 A reply to a request of an earlier fight is dropped.
 
 `ScriptedBrain` models its latency on the fight clock, so tests are deterministic: with a 4 s delay (longer than his acts) most slots fall back to the Lua AI, and the Owl is never idle longer than his own AI makes him (`slow_brain_falls_back_to_his_lua_ai_without_freezing`); a controller that never answers leaves every act to the soldier's AI (`lua_picks_when_no_answer_comes`).
+
+## Local checkpoint chooser
+
+`--brain coach` defaults to `--checkpoint local` with a Codex or Claude CLI coach, so both plan execution and checkpoint selection work without an API key.
+`--checkpoint decisions` explicitly selects the existing OpenAI Decisions chooser and requires a key.
+`--checkpoint off` keeps the coach's start set; direct `--brain decisions` and `--brain responses` remain available.
+The start menu's coach option selects local checkpoints.
+The local path reads no credential source, creates no HTTP agent and performs no DNS warmup or network request.
+
+Contexts are the eleven existing checkpoint kinds: start, Wolf posture 25/50/75/broken, boss pressure/critical pressure, half HP, mark lost, punished twice, and deflected thrice.
+Distance and habit buckets are deliberately omitted to keep evidence dense.
+Arms are exactly the validated plan sets offered by `GamePlan::offers()` to the Decisions request; selecting the active set is equivalent to `keep`, without a duplicate arm.
+Normal plan sampling, bans, reflexes, checkpoint suppression and anti-stalling limits still apply.
+Each arm draws from `Beta(success + 4*p, failure + 4*(1-p))` and the largest draw wins, using the driver's seeded generator.
+Unseen arms draw from the coach prior, so they retain exploration probability alongside established arms.
+
+The coach may supply `checkpoint_prefs: {"wolf_posture_75": {"finisher": 0.8, "bait": 0.2}}`.
+Each number is a prior reward mean, clamped to 0.05..0.95 for sampling, with four total pseudo-counts.
+Missing preferences give `p = 0.5`; unknown checkpoints, unknown surviving sets, non-finite numbers and values outside 0..1 are dropped with warnings.
+Old plans remain valid without this field.
+Strict coach output expresses the same preferences as `checkpoint_prefs: [{"checkpoint":"wolf_posture_75", "set":"finisher", "weight":0.8}]`, or an empty array for uniform priors.
+Both representations deserialize into the same map; saved plans use the map.
+
+Reward measures cumulative metric deltas from selection until the next checkpoint, four seconds, phase hand-over, or fight end, whichever comes first.
+All HP and posture damage terms are fractions of a full bar, accumulated without refunding recovery or healing.
+The formula is `clamp(Wolf posture damage + 2*Wolf HP damage + 0.5*Wolf breaks - boss HP damage - boss posture damage - 0.25*successful Wolf counters - 0.2*fully deflected plan uses, 0, 1)`.
+Fully deflected uses come from the driver's existing plan-failure classification, not from a single deflected hit.
+A wholly passive window receives zero; neither elapsed time nor survival adds reward.
+If the finished fight exceeds the existing 35% passivity limit, all its window rewards become zero before learning is committed.
+Activity checks prevent an inactive player from teaching the bandit.
+Within-fight evidence is provisional and only committed when the finished fight passes the existing void-fight checks.
+
+Player memory is version 3 and keeps `bandit.<phase>.<checkpoint>.<set> = {"success": ..., "failure": ...}` beside the other player evidence.
+Version 1 and 2 profiles migrate with empty bandit evidence and retain their other counts.
+The shared boss file retains version 1 and adds the same defaulted map to each player's contribution snapshot and aggregated evidence.
+Repeated saves replace contributions instead of counting them again.
+Own evidence has full weight; other players' snapshots contribute at quarter strength only while choosing, and borrowed counts never enter the selected player's profile.
+Pooled transfer is capped at four counts per arm so a long shared history cannot overwhelm learning about the selected player.
+Each non-void completed fight discounts old own evidence by 0.98 before adding its new rewards; coach pseudo-counts are never decayed or stored as evidence.
+`--brain-memory off` learns only within the session.
+
+The overlay shows checkpoint context, chosen set and posterior mean.
+The session report lists choices, posterior means and settled rewards.
+Coach reviews receive a compact `checkpoints.<phase/context>.<set> = [rewarded choices, mean reward]` summary for the current fight inside the existing 4096-byte input budget.
+Local choices consume zero model tokens and zero billed API calls.
 
 ## Choosing plans
 
@@ -778,7 +823,7 @@ FromSoftware players fight the same enemy dozens of times, so the boss learns be
   The coach writes a **game plan** for the next fight.
   It runs on its own thread in `sekiro-brain-net` (never the game thread), so latency does not matter: the plan is used from the next fight if it arrived by then (during the 6 s respawn), else from the fight after; a failed or empty answer keeps the previous plan.
 - **Fighter (in the fight, cheap).** The driver runs the plan's sets locally with the sampler (`sampler.rs`, with the repelled-plan penalty and the untried bonus).
-  At the checkpoints (`start`, `pressure`, `pressure_critical`, `half_hp` (fallback), `mark_lost`, `punished_twice`, `deflected_thrice`) the Decisions API picks which set to play, or `keep`.
+  At the checkpoints the local bandit picks which set to play; `--checkpoint decisions` uses the Decisions API and its `keep` option.
   No per-move calls.
 - **Phases across fights.** Fight 1 for a new player uses the shared best plan once boss knowledge has at least 20 fights; with thinner knowledge it starts with his own Lua AI; the coach can review it mid-fight and runs after it.
   From fight 2 on the coach's plan drives him: the opener runs first, then plans sampled from the start set.
@@ -793,7 +838,7 @@ FromSoftware players fight the same enemy dozens of times, so the boss learns be
 
 | Flag | Meaning |
 |---|---|
-| `--brain coach` | The coach plus the Decisions checkpoint chooser. Memory is on by default (`logs/memory/<chr>.boss.json` and `<chr>.player-default.json`); `--brain-memory off` turns it off. `decisions` and `responses` stay as they were |
+| `--brain coach` | The coach plus the local checkpoint chooser by default; `--checkpoint decisions` selects the API chooser. Memory is on by default (`logs/memory/<chr>.boss.json` and `<chr>.player-default.json`); `--brain-memory off` turns it off. `decisions` and `responses` stay as they were |
 | `--coach claude\|codex\|api` | Who writes the plan. `codex` (default) uses `gpt-6.1-sol`, medium reasoning effort, ignores user config, and uses a read-only sandbox, ephemeral sessions and the output schema. `api` uses Responses with `gpt-6-luna`, low effort, strict schema, `store:false` and a 45 s deadline. `claude` uses `claude-haiku-5-5`, our replacement system prompt, empty settings and MCP configuration, safe mode, low effort, no tools or session persistence, and the JSON schema. Only `api` needs an API key |
 | `--coach-model <name>` | Default `claude-haiku-5-5` (claude), `gpt-6.1-sol` (codex), `gpt-6-luna` (api) |
 | `--coach-interval <secs>` | Mid-fight review interval, default 30 seconds; 0 disables all mid-fight triggers |
@@ -805,7 +850,7 @@ A CLI that is not on PATH prints "the claude CLI was not found on PATH (...)" an
 The Claude Code envelope's `usage` and its `result` (or `structured_output`) are read; its dollar field is ignored for subscription usage.
 Codex runs with `--json`: completed-turn usage events supply input, cached input, output and reported reasoning tokens, while the plan still comes from the `-o` last-message file.
 The flags come from `claude --help` and `codex exec --help` (read on 2026-10-11; the tests never run the real CLIs, only a fake).
-Without an `OPENAI_API_KEY` a CLI coach still works and the checkpoint switches are off (the opener and the start set play).
+Without an `OPENAI_API_KEY` a CLI coach and the default local checkpoint switches both work.
 On Windows the codex npm shim is tried as `codex.cmd`; killing it by its handle may leave its node child running until it ends.
 
 ### The game plan
@@ -882,7 +927,7 @@ The instructions (`protocol::coach_instructions`, followed by every choice with 
 > Input (compact JSON about the fight just over): fight = fights so far; result = Wolf's result (won = who won, secs, defl/guard = Wolf's perfect-deflect and guard percent, hits = hits you landed, hp/posture = percent of his bars lost, punishes = your actions he hit, apm, dpm = percent of a bar per minute, passive percent); trend = his deflect%, guard%, hits, hp%, kill seconds (information only), apm, dpm and passive over the last fights; plans = this fight per plan text, as [exchanges, hit, blocked, deflected, whiffed, punished, countered, mikiri, jump, other] (lua = your own AI's acts); sets = this fight per set of the game plan played: secs and the same counts (opener = the opener, lua = own AI); wolf = his attacks this fight, same counts; overall = every fight per plan text; habits = how Wolf behaves; played = the game plan this fight ran; notes = your own notes from last time. With no played plan this fight was your plain AI, the baseline.\n\
 > Output: one game plan. opener = a plan run first in the fight (may be tactics such as hold3.5>walk_in4, or lua for none). sets = 2 to 4 named sets (name of letters, digits, _ or -, at most 24 characters), each with a one-line description for the fighter who picks the set (what it does and when it suits), 2 to 6 weighted plans from the choices below (weights relative), and when = the checkpoint it suits or null. start_set = the set played from the start. avoid = choices not to use, each with a short reason. notes = at most 400 characters: your hypotheses about this player, kept and shown to you next time so your reasoning accumulates; revise them with the new evidence. In the fight a cheap model only picks which set to switch to at the checkpoints (start, pressure, pressure_critical, half_hp (fallback), mark_lost, punished_twice, deflected_thrice, or keep), and your plans run locally, sampled by weight with a penalty for plans that keep being deflected, so spread weights over good options and make the sets clearly different. pressure means about 6 Wolf hits to break, pressure_critical about 3 but at least 2; both re-arm above 70% remaining posture. mark_lost only fires with lives still left; checkpoints wait until the boss can act. half_hp is the backup event at 50% HP left. Reflexes (guarding, deflecting, counters, reactions) are automatic. Use only the choices listed; lua leaves an act to the boss's own AI. A choice is a single action, a movement tactic (distances from Wolf, left and right are the boss's) or a plan of up to {max} steps joined with > (consecutive attacks joined with +). Choices:
 
-The checkpoint chooser (coach mode) gets only a few numbers and the set names, about 100 input tokens plus the choice list (the sets' descriptions and `keep`):
+The optional Decisions checkpoint chooser (`--checkpoint decisions`) gets only a few numbers and the set names, about 100 input tokens plus the choice list (the sets' descriptions and `keep`):
 
 ```json
 {"model": "gpt-6-luna",
@@ -1187,9 +1232,10 @@ F9 and normal exit print the report; the F8 recording overlay shows the session 
 For example: `session: 12 calls Ã‚Â· 48.0k tok (plan proxy) Ã‚Â· 2.0k tok Ã‚Â· $0.000200 (API)`.
 
 Measured coach context is about 11k reported tokens per Codex call, while a Decisions checkpoint uses about 250 input tokens.
-Two subscription coach reviews plus eight checkpoints therefore use roughly 22k plan-proxy tokens plus 2k API input tokens, with about $0.0002 billed API usage per fight (output is free for Decisions).
+With the default local chooser, two subscription coach reviews use roughly 22k plan-proxy tokens and checkpoint choices add zero tokens or billed usage.
+With `--checkpoint decisions`, eight checkpoints add about 2k API input tokens and $0.0002 billed API usage per fight (output is free for Decisions).
 Mid-fight reviews add about another 11k plan-proxy tokens each.
-For an API Luna coach, an illustrative 10k input + 1k output call without caching is $0.0015, so two such calls plus eight checkpoints are approximately $0.0032 per fight.
+For an API Luna coach, an illustrative 10k input + 1k output call without caching is $0.0015, so two such calls with local checkpoints are approximately $0.003 per fight, or $0.0032 with eight Decisions checkpoints.
 Actual input/output splits and cache hits come from the telemetry, rather than an assumption that all coach tokens are input.
 
 Use `--brain-token-budget 50000` as the main per-session stop, counting all reported input plus output tokens across both workers.

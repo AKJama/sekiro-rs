@@ -164,6 +164,7 @@ impl Mock {
 
     fn config(&self, backend: Backend) -> HostedConfig {
         let mut config = HostedConfig::new(backend, ApiKey::new(KEY));
+        config.checkpoint_chooser = sekiro_sim::brain::bandit::CheckpointChooser::Decisions;
         config.base_url = self.base.clone();
         // Tests count accepted connections; the warm-up has a test of its own.
         config.warm_up = false;
@@ -795,7 +796,8 @@ fn the_coach_request_has_the_structured_output_shape_and_reports_reasoning_token
             "boss_principles",
             "boss_bans",
             "boss_phase",
-            "counter_weights"
+            "counter_weights",
+            "checkpoint_prefs"
         ])
     );
     let choices = schema["$defs"]["choice"]["enum"].as_array().unwrap();
@@ -948,6 +950,30 @@ fn without_an_api_key_the_chooser_keeps_the_set_and_sends_nothing() {
     assert_eq!((reply.id, reply.choice), (4, None));
     let stats = brain.stats();
     assert_eq!(stats.answered + stats.failed.values().sum::<u64>(), 0);
+}
+
+#[test]
+fn local_chooser_accepts_no_key_and_never_connects_even_with_warmup_enabled() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut config = HostedConfig::new(Backend::Coach, ApiKey::new(""));
+    config.base_url = format!("http://{}", listener.local_addr().unwrap());
+    assert!(config.warm_up);
+    let mut brain = HostedBrain::new(config, &SOLDIER).unwrap();
+    assert_eq!(
+        brain.checkpoint_chooser(),
+        sekiro_sim::brain::bandit::CheckpointChooser::Local
+    );
+    let mut req = request(4);
+    req.sets = offers();
+    brain.submit(&req);
+    assert_eq!(poll(&mut brain).id, 4);
+    thread::sleep(Duration::from_millis(20));
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    assert_eq!(brain.stats().requests, 0);
 }
 
 /// A temp directory holding a copy of the fake CLI and its settings.

@@ -210,16 +210,21 @@ pub struct HostedBrain {
     coach_worker: Option<JoinHandle<()>>,
     /// The coach talks to a CLI (killed at once on drop) rather than an HTTP call.
     coach_is_cli: bool,
+    checkpoint_chooser: sekiro_sim::brain::bandit::CheckpointChooser,
+    local_reply: Option<BrainReply>,
     stopping: Arc<AtomicBool>,
     stats: StatsHandle,
 }
 
 impl HostedBrain {
     pub fn new(config: HostedConfig, actions: &'static BossActions) -> Result<Self, ConfigError> {
+        let needs_key = config.backend != Backend::Coach
+            || config.coach_backend == CoachBackend::Api
+            || config.checkpoint_chooser == sekiro_sim::brain::bandit::CheckpointChooser::Decisions;
         if config.model.trim().is_empty()
             || config.budget_usd.is_some_and(|n| !n.is_finite() || n < 0.0)
             || config.coach_model.trim().is_empty()
-            || config.api_key.0.trim().is_empty()
+            || (needs_key && config.api_key.0.trim().is_empty())
             || config.api_key.0.chars().any(char::is_control)
             || config.timeout.is_zero()
             || config.coach_timeout.is_zero()
@@ -253,6 +258,7 @@ impl HostedBrain {
             None => None,
         };
         let backend = config.backend;
+        let checkpoint_chooser = config.checkpoint_chooser;
         let (tx, work) = mpsc::channel();
         let (reply, rx) = mpsc::channel();
         let (coach_tx, coach_work) = mpsc::channel();
@@ -319,6 +325,8 @@ impl HostedBrain {
             coach_rx,
             coach_worker,
             coach_is_cli,
+            checkpoint_chooser,
+            local_reply: None,
             stopping,
             stats,
         })
@@ -335,6 +343,9 @@ impl HostedBrain {
 }
 
 impl BossBrain for HostedBrain {
+    fn checkpoint_chooser(&self) -> sekiro_sim::brain::bandit::CheckpointChooser {
+        self.checkpoint_chooser
+    }
     fn change_phase(&mut self, actions: &'static BossActions) {
         self.actions = actions;
     }
@@ -389,6 +400,15 @@ impl BossBrain for HostedBrain {
     }
 
     fn submit(&mut self, request: &BrainRequest) {
+        if self.backend == Backend::Coach
+            && self.checkpoint_chooser != sekiro_sim::brain::bandit::CheckpointChooser::Decisions
+        {
+            self.local_reply = Some(BrainReply {
+                id: request.id,
+                ..Default::default()
+            });
+            return;
+        }
         // Unbounded mpsc send never waits for the HTTP worker. No worker-held locks here.
         let input = match &request.brief {
             Some(brief) if !request.sets.is_empty() => Ok(brief.clone()),
@@ -407,6 +427,9 @@ impl BossBrain for HostedBrain {
     }
 
     fn poll(&mut self, _now: f32) -> Option<BrainReply> {
+        if self.local_reply.is_some() {
+            return self.local_reply.take();
+        }
         self.rx.try_recv().ok()
     }
 
@@ -604,6 +627,12 @@ fn run(
     stopping: Arc<AtomicBool>,
     mut log: Option<File>,
 ) {
+    if config.backend == Backend::Coach
+        && config.checkpoint_chooser != sekiro_sim::brain::bandit::CheckpointChooser::Decisions
+    {
+        // No TLS agent, DNS warmup, or request processing for a local/off chooser.
+        return;
+    }
     // Keep one pooled rustls agent for the entire fight. Disable redirects (no credential
     // forwarding or extra provider calls) and environment proxies (loopback tests stay local).
     if config.warm_up && config.checkpoints {

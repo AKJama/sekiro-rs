@@ -15,6 +15,7 @@
 //! See `docs/BRAIN.md`.
 
 pub mod actions;
+pub mod bandit;
 pub mod coach;
 pub mod cost;
 pub mod driver;
@@ -186,6 +187,9 @@ impl RequestMode {
 /// A boss controller. Calls never block: a controller that needs time (a hosted model) works
 /// on a background thread and answers through [`BossBrain::poll`].
 pub trait BossBrain {
+    fn checkpoint_chooser(&self) -> bandit::CheckpointChooser {
+        bandit::CheckpointChooser::Decisions
+    }
     fn change_phase(&mut self, _actions: &'static BossActions) {}
     fn costs(&self) -> cost::CostSnapshot {
         cost::CostSnapshot::default()

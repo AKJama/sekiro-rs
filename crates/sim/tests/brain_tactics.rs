@@ -994,7 +994,7 @@ fn a_fight_summary_and_the_baseline_are_saved_with_the_metrics() {
     );
     assert_eq!(
         (saved.version, saved.fights, saved.history.len()),
-        (2, 1, 1)
+        (sekiro_sim::brain::memory::MEMORY_VERSION, 1, 1)
     );
     assert_eq!(saved.history[0], record);
 

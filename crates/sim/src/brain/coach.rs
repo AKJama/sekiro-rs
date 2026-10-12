@@ -94,6 +94,9 @@ pub struct Avoid {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GamePlan {
+    #[serde(deserialize_with = "read_checkpoint_prefs")]
+    pub checkpoint_prefs:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, f32>>,
     /// Multipliers for counter animation ids; zero vetoes a callback containing that act.
     pub counter_weights: std::collections::BTreeMap<String, f32>,
     /// Character phase this plan was validated for; old plans default to the installing phase.
@@ -117,6 +120,37 @@ pub struct GamePlan {
     pub retry: Vec<Avoid>,
     /// The coach's hypotheses about the player (at most [`NOTES_MAX`] characters).
     pub notes: String,
+}
+
+fn read_checkpoint_prefs<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<std::collections::BTreeMap<String, std::collections::BTreeMap<String, f32>>, D::Error> {
+    #[derive(Deserialize)]
+    struct Preference {
+        checkpoint: String,
+        set: String,
+        weight: f32,
+    }
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Preferences {
+        Map(std::collections::BTreeMap<String, std::collections::BTreeMap<String, f32>>),
+        Rows(Vec<Preference>),
+    }
+    match Preferences::deserialize(deserializer)? {
+        Preferences::Map(map) => Ok(map),
+        Preferences::Rows(rows) => {
+            let mut map =
+                std::collections::BTreeMap::<String, std::collections::BTreeMap<String, f32>>::new(
+                );
+            for row in rows {
+                map.entry(row.checkpoint)
+                    .or_default()
+                    .insert(row.set, row.weight);
+            }
+            Ok(map)
+        }
+    }
 }
 
 /// A plan checked against a boss: what survived, and what was dropped.
@@ -374,6 +408,22 @@ impl GamePlan {
             }
         }
         out.sets.retain(|s| !s.plans.is_empty());
+        for (context, prefs) in &self.checkpoint_prefs {
+            for (name, weight) in prefs {
+                if CHECKPOINTS.contains(&context.as_str())
+                    && out.set_index(name).is_some()
+                    && weight.is_finite()
+                    && (0.0..=1.0).contains(weight)
+                {
+                    out.checkpoint_prefs
+                        .entry(context.clone())
+                        .or_default()
+                        .insert(name.clone(), *weight);
+                } else {
+                    warnings.push(format!("checkpoint preference dropped: {context}/{name}"));
+                }
+            }
+        }
         if !out.sets.iter().any(|s| s.name == out.start_set) {
             out.start_set = out.sets.first().map(|s| s.name.clone()).unwrap_or_default();
         }
@@ -592,6 +642,8 @@ pub struct SetStat {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(into = "CoachWire")]
 pub struct CoachInput {
+    pub checkpoints:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, [f32; 2]>>,
     pub counters: TopMap<Counts>,
     pub boss_phase: String,
     pub move_sheet: super::moves::MoveSheet,
@@ -637,6 +689,7 @@ pub struct CoachInput {
 impl From<CoachInput> for serde_json::Value {
     fn from(i: CoachInput) -> Self {
         let mut value = serde_json::json!({
+            "checkpoints": i.checkpoints,
             "move_sheet": i.move_sheet, "break_log": i.break_log,
             "break_summary": i.break_summary,
             "boss_knowledge": i.boss_knowledge,
@@ -707,6 +760,10 @@ impl CoachInput {
     }
 
     fn trim_one(&mut self) -> bool {
+        if self.checkpoints.len() > 4 {
+            self.checkpoints.pop_last();
+            return true;
+        }
         if self.counters.pop(4) {
             return true;
         }
@@ -771,6 +828,13 @@ impl CoachInput {
             && let Some(set) = plan.sets.iter_mut().find(|s| !s.description.is_empty())
         {
             set.description.clear();
+            return true;
+        }
+        if self
+            .played
+            .as_mut()
+            .is_some_and(|plan| plan.checkpoint_prefs.pop_last().is_some())
+        {
             return true;
         }
         // Counter statistics must fit without erasing which game plan was played.
@@ -849,6 +913,7 @@ impl CoachInput {
                 true
             })
             || self.banned.pop().is_some()
+            || self.checkpoints.pop_last().is_some()
             || self.boss_knowledge.trim_last()
     }
 }

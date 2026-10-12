@@ -252,6 +252,15 @@ struct FightState {
     set_secs: BTreeMap<String, f32>,
 }
 
+struct PendingCheckpoint {
+    phase: String,
+    context: String,
+    set: String,
+    started: f32,
+    metrics: super::metrics::FightMetrics,
+    deflected_all: u32,
+}
+
 #[derive(Debug, Clone)]
 struct PlanUse {
     break_response: bool,
@@ -333,6 +342,10 @@ pub struct BrainDriver {
     /// Sampling temperature (see [`super::sampler`]); `SEKIRO_BRAIN_TEMPERATURE` sets it.
     pub temperature: f32,
     rng: Rng,
+    bandit_pending: Option<PendingCheckpoint>,
+    fight_bandit: super::bandit::BanditMemory,
+    bandit_choices: Vec<(String, String, f32, Option<f32>)>,
+    bandit_fight_start: usize,
     streaks: Streaks,
     /// Plan texts chosen this fight.
     tried: HashSet<String>,
@@ -478,6 +491,7 @@ impl BrainDriver {
     }
     /// Rebinds the same session to the character installed by a map hand-over or reset.
     pub fn rebind(&mut self, duel: &Duel) {
+        self.settle_bandit();
         let Some(actions) = BossActions::for_chr(&duel.spec.chr) else {
             return;
         };
@@ -606,6 +620,10 @@ impl BrainDriver {
             mode,
             temperature,
             rng: Rng::new(seed),
+            bandit_pending: None,
+            fight_bandit: Default::default(),
+            bandit_choices: Vec::new(),
+            bandit_fight_start: 0,
             streaks: Streaks::default(),
             tried: HashSet::new(),
             in_flight: None,
@@ -1114,6 +1132,13 @@ impl BrainDriver {
         }
         if let Some(notice) = costs.budget_notice {
             report.push_str(&format!("\n{notice}\n"));
+        }
+        report.push_str("\n## Local checkpoints\n\n| context | set | posterior mean | reward |\n|---|---|---:|---:|\n");
+        for (context, set, mean, reward) in &self.bandit_choices {
+            report.push_str(&format!(
+                "| {context} | {set} | {mean:.3} | {} |\n",
+                reward.map_or_else(|| "pending".into(), |r| format!("{r:.3}"))
+            ));
         }
         report
     }
@@ -1932,7 +1957,10 @@ impl BrainDriver {
             RequestMode::Checkpoints => self.pending_why.map(Some),
         };
         let Some(why) = why else { return };
-        if self.brain.budget_exhausted() {
+        if self.brain.budget_exhausted()
+            && (!self.coach_mode
+                || self.brain.checkpoint_chooser() == super::bandit::CheckpointChooser::Decisions)
+        {
             return;
         }
         self.want_request = false;
@@ -1947,6 +1975,63 @@ impl BrainDriver {
             (None, Vec::new())
         };
         let obs = observe(duel, self.time, self.since_hit, &self.running.value());
+        if self.coach_mode {
+            use super::bandit::CheckpointChooser;
+            match self.brain.checkpoint_chooser() {
+                CheckpointChooser::Off => return,
+                CheckpointChooser::Local => {
+                    self.settle_bandit();
+                    let context = why.unwrap_or("start");
+                    let plan = self.game_plan.as_ref().expect("offered game plan");
+                    let mut evidence = self.memory.bandit.clone();
+                    super::bandit::merge(&mut evidence, &self.fight_bandit, 1.0);
+                    // Borrow other players' evidence at quarter strength, without duplicating
+                    // this player's evidence or writing borrowed counts into their profile.
+                    let mut shared_evidence = super::bandit::BanditMemory::new();
+                    for (player, shared) in &self.boss_knowledge.players {
+                        if player == &self.player {
+                            continue;
+                        }
+                        super::bandit::merge(&mut shared_evidence, &shared.bandit, 1.0);
+                    }
+                    super::bandit::transfer(&mut evidence, &shared_evidence);
+                    if let Some((chosen, mean)) = super::bandit::choose(
+                        &evidence,
+                        self.actions.chr,
+                        context,
+                        plan,
+                        &mut self.rng,
+                    ) {
+                        self.switch_set(&chosen);
+                        self.overlay_events.checkpoint = Some((
+                            self.time,
+                            format!("{context} -> set {chosen} (mean {mean:.2})"),
+                        ));
+                        self.bandit_pending = Some(PendingCheckpoint {
+                            phase: self.actions.chr.into(),
+                            context: context.into(),
+                            set: chosen.clone(),
+                            started: self.time,
+                            metrics: self.fight.metrics.snapshot(self.time),
+                            deflected_all: self
+                                .fight
+                                .failures
+                                .values()
+                                .map(|f| f.deflected_all)
+                                .sum(),
+                        });
+                        self.bandit_choices.push((
+                            format!("{}/{context}", self.actions.chr),
+                            chosen,
+                            mean,
+                            None,
+                        ));
+                    }
+                    return;
+                }
+                CheckpointChooser::Decisions => {}
+            }
+        }
         let (tally, memory, brief) = if self.coach_mode {
             // The chooser sees a few numbers and the set names, nothing else (the habits and
             // the history are the coach's): about 100 tokens.
@@ -2381,6 +2466,15 @@ impl BrainDriver {
             self.fatal_plans(t, punished_break);
         }
         self.settle_plans(false);
+        if self
+            .bandit_pending
+            .as_ref()
+            .is_some_and(|pending| t - pending.started >= 4.0)
+            || self.pending_why.is_some()
+            || !self.wolf_events.is_empty()
+        {
+            self.settle_bandit();
+        }
         self.log_outcomes(t, &done);
         self.review_mid_fight(duel);
         // The duel schedules its respawn exactly when the fight is over: a death outside a
@@ -2625,6 +2719,33 @@ impl BrainDriver {
         }
     }
 
+    fn settle_bandit(&mut self) {
+        let Some(pending) = self.bandit_pending.take() else {
+            return;
+        };
+        let after = self.fight.metrics.snapshot(self.time);
+        if !self.fight.metrics.player_active(self.time) {
+            return;
+        }
+        let deflected_all: u32 = self.fight.failures.values().map(|f| f.deflected_all).sum();
+        let reward = super::bandit::reward(
+            pending.metrics,
+            after,
+            deflected_all.saturating_sub(pending.deflected_all),
+        );
+        self.fight_bandit
+            .entry(pending.phase)
+            .or_default()
+            .entry(pending.context)
+            .or_default()
+            .entry(pending.set)
+            .or_default()
+            .record(reward);
+        if let Some(choice) = self.bandit_choices.last_mut() {
+            choice.3 = Some(reward);
+        }
+    }
+
     /// Ends the fight: settles it, adds it and its record to the memory and saves.
     pub fn end_fight(&mut self, end: FightEnd) {
         if self.fight_over {
@@ -2638,6 +2759,7 @@ impl BrainDriver {
             self.fatal_plans(t, false);
         }
         self.settle_plans(true);
+        self.settle_bandit();
         self.close_set_time();
         self.log_outcomes(t, &done);
         self.habits.flush(t);
@@ -2714,6 +2836,25 @@ impl BrainDriver {
             "void": record.metrics.void, "fights": self.memory.fights + u32::from(!record.metrics.void), "summary": record.summary_line()}));
         self.write_line(&json!({"ev": "fight_summary", "t": ms(t), "record": record}));
         if !record.metrics.void {
+            if record.metrics.stalled() {
+                for arms in self
+                    .fight_bandit
+                    .values_mut()
+                    .flat_map(|contexts| contexts.values_mut())
+                {
+                    for arm in arms.values_mut() {
+                        arm.failure += arm.success;
+                        arm.success = 0.0;
+                    }
+                }
+                for (_, _, _, reward) in &mut self.bandit_choices[self.bandit_fight_start..] {
+                    if reward.is_some() {
+                        *reward = Some(0.0);
+                    }
+                }
+            }
+            super::bandit::decay(&mut self.memory.bandit);
+            super::bandit::merge(&mut self.memory.bandit, &self.fight_bandit, 1.0);
             self.session_records.push(record.clone());
             merge_counts(&mut self.session_actions, self.tally.all(Side::Boss));
             for (action, &(n, distance, reach)) in &self.fight.action_ranges {
@@ -2773,6 +2914,24 @@ impl BrainDriver {
             sets.entry(name.clone()).or_default().secs = (s * 10.0).round() / 10.0;
         }
         let mut input = CoachInput {
+            checkpoints: {
+                let mut summary = BTreeMap::<String, BTreeMap<String, [f32; 2]>>::new();
+                for (context, set, _, reward) in &self.bandit_choices[self.bandit_fight_start..] {
+                    if let Some(reward) = reward {
+                        let entry = summary
+                            .entry(context.clone())
+                            .or_default()
+                            .entry(set.clone())
+                            .or_default();
+                        entry[0] += 1.0;
+                        entry[1] += reward;
+                    }
+                }
+                for value in summary.values_mut().flat_map(|arms| arms.values_mut()) {
+                    value[1] /= value[0];
+                }
+                summary
+            },
             counters: super::tally::TopMap::ranked(
                 self.actions
                     .counter_ids()
@@ -3083,6 +3242,9 @@ impl BrainDriver {
         self.tactic_open = false;
         self.fight_over = false;
         self.fight_no += 1;
+        self.bandit_fight_start = self.bandit_choices.len();
+        self.fight_bandit.clear();
+        self.bandit_pending = None;
         self.streaks.clear();
         self.tried.clear();
         self.set.clear();
@@ -3215,6 +3377,113 @@ struct OutcomeLine<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_checkpoints_drive_real_duel_without_controller_requests_or_memory_writes() {
+        struct LocalCoach;
+        impl BossBrain for LocalCoach {
+            fn name(&self) -> &'static str {
+                "coach"
+            }
+            fn coaches(&self) -> bool {
+                true
+            }
+            fn default_mode(&self) -> RequestMode {
+                RequestMode::Checkpoints
+            }
+            fn checkpoint_chooser(&self) -> super::super::bandit::CheckpointChooser {
+                super::super::bandit::CheckpointChooser::Local
+            }
+            fn submit(&mut self, _: &BrainRequest) {
+                panic!("local checkpoint called controller");
+            }
+            fn poll(&mut self, _: f32) -> Option<BrainReply> {
+                None
+            }
+        }
+        let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        if !cache.join("anim/c1010/tae.json").exists() {
+            eprintln!("skipping real-data local chooser: soldier not extracted");
+            return;
+        }
+        let mut duel = Duel::load_with(&cache, 2.5, crate::enemy::EnemySpec::soldier()).unwrap();
+        duel.set_brain(Box::new(LocalCoach), false).unwrap();
+        let driver = duel.boss_brain.as_mut().unwrap();
+        driver.game_plan = Some(GamePlan::from_json(r#"{"sets":[{"name":"press","plans":[{"plan":"3000+3001","weight":1}]},{"name":"bait","plans":[{"plan":"3008","weight":1}]}],"start_set":"press"}"#).unwrap().validate(&crate::brain::SOLDIER).plan);
+        driver.install_plan();
+        for i in 0..600 {
+            let input = crate::InputFrame {
+                move_stick: [0.0, 0.1],
+                buttons: crate::Buttons {
+                    attack: i % 8 == 0,
+                    guard: i % 8 != 0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            duel.step(&input, 1.0 / 60.0);
+            for fighter in &mut duel.rules.fighters {
+                fighter.vitality.hp = fighter.vitality.max_hp;
+                fighter.posture.remaining = fighter.posture.max;
+            }
+        }
+        let driver = duel.boss_brain.as_mut().unwrap();
+        assert!(driver.memory_path().is_none());
+        assert_eq!(driver.stats.requests, 0);
+        assert!(!driver.bandit_choices.is_empty());
+        assert!(
+            driver
+                .bandit_choices
+                .iter()
+                .any(|choice| choice.3.is_some())
+        );
+        assert!(driver.overlay().checkpoint.unwrap().contains("mean"));
+        driver.end_fight(FightEnd::BossWon);
+        assert!(!driver.memory.bandit.is_empty());
+        let mut input = driver.coach_input(driver.last_record.as_ref().unwrap());
+        assert!(!input.checkpoints.is_empty());
+        assert!(input.fit(INPUT_BUDGET) <= INPUT_BUDGET);
+        assert!(driver.session_report().contains("Local checkpoints"));
+        eprintln!(
+            "local chooser: {} choices, zero controller requests, rewards retained",
+            driver.bandit_choices.len()
+        );
+    }
+
+    #[test]
+    fn void_fights_discard_provisional_bandit_evidence() {
+        let mut driver = learning_driver();
+        driver
+            .fight_bandit
+            .entry("c1010".into())
+            .or_default()
+            .entry("start".into())
+            .or_default()
+            .entry("press".into())
+            .or_default()
+            .record(1.0);
+        driver.time = 100.0;
+        driver.end_fight(FightEnd::WolfWon);
+        assert!(driver.memory.bandit.is_empty());
+    }
+
+    #[test]
+    fn stalled_fights_turn_positive_bandit_rewards_into_failures() {
+        let mut driver = learning_driver();
+        driver
+            .fight_bandit
+            .entry("c1010".into())
+            .or_default()
+            .entry("start".into())
+            .or_default()
+            .entry("press".into())
+            .or_default()
+            .record(1.0);
+        driver.fight.metrics.metrics.passive_secs = 3.0;
+        driver.end_fight(FightEnd::BossWon);
+        let arm = driver.memory.bandit["c1010"]["start"]["press"];
+        assert_eq!((arm.success, arm.failure), (0.0, 1.0));
+    }
 
     #[test]
     fn tomoe_plan_failures_and_counter_weights_are_phase_scoped() {

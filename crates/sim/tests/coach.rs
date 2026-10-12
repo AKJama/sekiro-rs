@@ -236,6 +236,7 @@ fn set(name: &str, plan: &str) -> PlanSet {
 
 fn plan(notes: &str) -> GamePlan {
     GamePlan {
+        checkpoint_prefs: Default::default(),
         boss_phase: "c1010".into(),
         counter_weights: Default::default(),
         version: 1,

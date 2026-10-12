@@ -508,7 +508,9 @@ fn real_owl_datasets_migrate_without_losing_totals() {
         let legacy = temp_file("c5060.json");
         std::fs::copy(&source, &legacy).unwrap();
         let original = std::fs::read(&legacy).unwrap();
-        let old: Memory = serde_json::from_slice(&original).unwrap();
+        let mut old: Memory = serde_json::from_slice(&original).unwrap();
+        // Migration changes the schema version while preserving every evidence field.
+        old.version = memory::MEMORY_VERSION;
         let paths = memory::LayerPaths::new(&legacy, "default");
         let (boss, profile) = paths.load("c5060").unwrap();
         assert_eq!(profile, old);
@@ -631,7 +633,7 @@ fn memory_round_trips_and_merges_fights() {
     assert_eq!(again.wolf["AttackCombo1"].hit, 3);
     assert_eq!(again.habits.answers["3000"].to["deflect"], 3);
     let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.contains("\"version\": 2"), "{text}");
+    assert!(text.contains("\"version\": 3"), "{text}");
     assert!(!path.with_extension("json.tmp").exists());
     let _ = std::fs::remove_file(&path);
 }
@@ -1088,7 +1090,7 @@ fn memory_v1_migrates_and_keeps_ten_fights() {
     .unwrap();
     let (mut m, how) = Memory::load(&path, "c1010");
     assert_eq!(how, Loaded::Read);
-    assert_eq!((m.version, m.fights, m.history.len()), (2, 2, 0));
+    assert_eq!((m.version, m.fights, m.history.len()), (3, 2, 0));
     assert_eq!(m.boss["3000"].n, 5);
     for i in 0..13 {
         m.push_record(record(i, 0, None));
@@ -1097,7 +1099,7 @@ fn memory_v1_migrates_and_keeps_ten_fights() {
     assert_eq!(m.history[0].metrics.deflected, 3);
     m.save(&path).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.contains("\"version\": 2"), "{text}");
+    assert!(text.contains("\"version\": 3"), "{text}");
     let (back, _) = Memory::load(&path, "c1010");
     assert_eq!(back, m);
     assert_eq!(back.summary().trend.defl.len(), 3);
@@ -1206,6 +1208,7 @@ fn set(name: &str, plans: &[(&str, f32)]) -> PlanSet {
 
 fn good_plan() -> GamePlan {
     GamePlan {
+        checkpoint_prefs: Default::default(),
         boss_phase: "c1010".into(),
         counter_weights: Default::default(),
         version: 1,
@@ -1495,6 +1498,7 @@ fn busy_input() -> CoachInput {
         memory.push_record(record(3 + i, i, Some(30.0 + i as f32)));
     }
     let big_plan = GamePlan {
+        checkpoint_prefs: Default::default(),
         boss_phase: "c1010".into(),
         counter_weights: Default::default(),
         version: 1,
