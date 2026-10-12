@@ -24,6 +24,12 @@ use crate::enemy::EnemySpec;
 use crate::events::EventEntry;
 use crate::fogwall::FogWall;
 
+#[path = "arenas/depths_palace.rs"]
+pub mod depths_palace;
+
+#[path = "arenas/scene.rs"]
+pub mod scene;
+
 /// One boss arena.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ArenaSpec {
@@ -40,6 +46,7 @@ pub struct ArenaSpec {
     pub radius: f32,
     /// Where Wolf starts: an MSB player start part, or `None` for [`FALLBACK_DISTANCE`]
     /// metres in front of the boss.
+    /// `region:<id>` selects an authored cinematic warp in the original local MSB.
     pub player_start: Option<&'static str>,
     /// Map piece models not shown in this fight: event-state alternatives that the map's
     /// event script keeps hidden during it, by model name prefix.
@@ -65,6 +72,7 @@ pub struct BossEvents {
     pub fog_events: &'static [i64],
     /// The `SetLighting` time of day (1 morning to 4 night) the fight's events switch to when
     /// the fight reaches this boss, when they do ([`crate::story`]).
+    /// Variant 0 also represents common event 100's fixed prologue/memory environment.
     pub lighting: Option<i32>,
 }
 
@@ -119,6 +127,9 @@ pub const OWL_EVENTS: BossEvents = BossEvents {
 
 /// The fight events of an enemy, by character id (also used off the arena, on the flat floor).
 pub fn boss_events(spec: &EnemySpec) -> Option<&'static BossEvents> {
+    if let Some(events) = crate::arenas_a::identity_events(spec) {
+        return Some(events);
+    }
     BOSS_EVENT_ROWS
         .iter()
         .find(|(character, row, _)| *character == spec.chr && *row == spec.npc_param)
@@ -173,6 +184,24 @@ pub const BOSS_EVENT_ROWS: &[(&str, i32, BossEvents)] = &[
             lighting: Some(3),
         },
     ),
+    ("c5090", 50_900_000, crate::arenas_a::BUTTERFLY),
+    ("c5090", 50_900_001, crate::arenas_a::BUTTERFLY_SECOND),
+    ("c5060", 50_601_010, crate::arenas_a::FATHER),
+    ("c5060", 50_601_010, crate::arenas_a::INNER_FATHER),
+    ("c1000", 12_600_050, crate::arenas_a::MONKEYS),
+    ("c7100", 71_000_000, crate::arena_c::RESERVOIR_GENICHIRO),
+    ("c7110", 71_101_000, crate::arena_c::RESERVOIR_TOMOE),
+    ("c5400", 54_000_000, crate::arena_c::SWORD_SAINT),
+    ("c5100", 51_000_000, crate::arena_c::GUARDIAN_APE),
+    ("c5100", 51_000_100, crate::arena_c::HEADLESS_APE),
+    ("c5000", 50_001_000, depths_palace::MIBU_EVENTS),
+    ("c5000", 50_000_000, depths_palace::TRUE_MONK_EVENTS),
+    ("c5300", 53_000_000, depths_palace::OLD_DRAGONS_EVENTS),
+    ("c5200", 52_000_000, depths_palace::DIVINE_DRAGON_EVENTS),
+    ("c5080", 50_800_000, crate::arena_b::GYOUBU),
+    ("c7020", 70_200_000, crate::arena_b::DEMON),
+    ("c7400", 74_000_010, crate::arena_b::EMMA),
+    ("c5430", 54_300_000, crate::arena_b::ISSHIN),
 ];
 
 /// Every arena. The player start choices are documented in `docs/OWL.md` ("The castle roof").
@@ -208,6 +237,21 @@ pub const ARENAS: &[ArenaSpec] = &[
         // shows the morning (environment variant 1).
         beaten: &[],
     },
+    crate::arenas_a::HIRATA_HALL,
+    crate::arenas_a::HIRATA_FATHER,
+    crate::arenas_a::HIRATA_INNER_FATHER,
+    crate::arenas_a::SENPOU_SCREENS,
+    crate::arena_c::SILVERGRASS,
+    crate::arena_c::SILVERGRASS_GENICHIRO,
+    crate::arena_c::SILVERGRASS_ISSHIN,
+    crate::arena_c::WATERING_HOLE,
+    crate::arena_c::APES_BURROW,
+    depths_palace::MIBU,
+    depths_palace::TRUE_MONK,
+    depths_palace::SANCTUARY,
+    crate::arena_b::GYOUBU_ARENA,
+    crate::arena_b::DEMON_ARENA,
+    crate::arena_b::SHURA_ARENA,
 ];
 
 /// Distance in front of the boss where Wolf starts when the arena names no player start.
@@ -223,6 +267,9 @@ impl ArenaSpec {
     }
 
     pub fn enemy_spec(&self) -> EnemySpec {
+        if let Some(enemy) = crate::arenas_a::arena_enemy(self) {
+            return enemy;
+        }
         EnemySpec::by_name(self.enemy).expect("arena enemies are known enemy names")
     }
 
@@ -309,7 +356,9 @@ impl ArenaLayout {
         let path = dir.join("layout.json");
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let json: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-        Self::resolve(spec, &json)
+        let mut layout = depths_palace::layout(&dir.join("../.."), spec, &json)?;
+        crate::arena_c::story_start(&dir.join("../.."), spec, &mut layout)?;
+        Ok(layout)
     }
 
     /// The arena's centre: the boss's start.
@@ -357,7 +406,9 @@ impl Arena {
         let path = dir.join("layout.json");
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let json: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-        let layout = ArenaLayout::resolve(spec, &json)?;
+        let mut layout = depths_palace::layout(cache, spec, &json)?;
+        crate::arena_c::story_start(cache, spec, &mut layout)?;
+        crate::arena_b::story_start(cache, spec, &mut layout)?;
         let fog_walls = match boss_events(&spec.enemy_spec()) {
             Some(events) if !events.fog_events.is_empty() => {
                 let walls = crate::fogwall::load(cache, events.map, events.fog_events)?;
@@ -368,6 +419,10 @@ impl Arena {
         let path = dir.join("collision.bin");
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut mesh = CollisionMesh::from_bytes(&bytes).map_err(|e| e.to_string())?;
+        crate::arena_c::filter_collision(spec, &json, &mut mesh);
+        let event_collision = crate::arena_c::take_event_collision(spec, &json, &mut mesh);
+        let hidden = crate::arenas_a::hidden_parts(cache, spec)?;
+        crate::arenas_a::remove_hidden_collision(&mut mesh, &json, &hidden);
         let mut gate = CollisionMesh::default();
         for place in &fog_walls {
             if let Some(range) = place
@@ -381,7 +436,7 @@ impl Arena {
             }
             gate.extend(&place.blocker());
         }
-        let world = if fog_walls.is_empty() {
+        let mut world = if fog_walls.is_empty() {
             if full_map {
                 CollisionWorld::from_mesh(&mesh)
             } else {
@@ -395,6 +450,14 @@ impl Arena {
                 &crop(&gate, layout.center(), spec.radius),
             )
         };
+        if let Some(part) = event_collision {
+            let part = if full_map {
+                part
+            } else {
+                crop(&part, layout.center(), spec.radius)
+            };
+            world.append_event_part(1_124_860, &part, true);
+        }
         Ok(Self {
             spec,
             layout,

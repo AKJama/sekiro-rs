@@ -291,6 +291,7 @@ pub struct AiState {
     pub request: Request,
     pub numbers: HashMap<i32, f64>,
     pub string_numbers: HashMap<String, f64>,
+    pub event_requests: HashMap<i32, i32>,
     pub timers: HashMap<i32, f32>,
     /// Seconds since each action id was last requested.
     pub action_age: HashMap<i32, f32>,
@@ -335,6 +336,7 @@ impl AiState {
             request: Request::default(),
             numbers: HashMap::new(),
             string_numbers: HashMap::new(),
+            event_requests: HashMap::new(),
             timers: HashMap::new(),
             action_age: HashMap::new(),
             time: 0.0,
@@ -1006,7 +1008,7 @@ impl AiState {
             | "IsTouchBreakableObject"
             | "IsLockOnTarget" => boolean(false),
             "CheckDoesExistPath" | "IsExistMeshOnLine" | "IsFinishAttackCoolTime" => boolean(true),
-            "GetEventRequest" => num(-1.0),
+            "GetEventRequest" => num(self.event_requests.get(&t(0)).copied().unwrap_or(-1) as f64),
             "GetTeamOrder"
             | "GetChangeBattleStateCount"
             | "GetCurrTargetType"

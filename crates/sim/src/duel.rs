@@ -219,6 +219,8 @@ pub struct FightEvents {
     pub defeated: bool,
     /// An event command waiting for the boss's script (`env(105, slot)`): (slot, command).
     pub ezstate: Option<(u8, i32)>,
+    /// Whether the post-intro event setup has already run.
+    initialized: bool,
     /// The fight's fog walls (placed by the map's events, see [`crate::fogwall`]).
     pub fog_walls: Vec<crate::fogwall::FogWall>,
 }
@@ -234,6 +236,8 @@ impl FightEvents {
     pub fn load(cache: &Path, spec: &BossEvents) -> Result<Self, String> {
         let mut scripts = EventScripts::load(cache, spec.map, spec.events)?;
         scripts.flags.extend(spec.flags.iter().copied());
+        crate::arenas_a::seed_scene(cache, spec, &mut scripts)?;
+        crate::arena_c::seed_scene(spec.boss_entity, &mut scripts.cast_scene);
         let fog_walls = if spec.fog_events.is_empty() {
             Vec::new()
         } else {
@@ -247,16 +251,19 @@ impl FightEvents {
             hp_bar: true,
             defeated: false,
             ezstate: None,
+            initialized: false,
         })
     }
 
     /// The fight reloads: the events start over, their flags stay.
     fn restart(&mut self) {
         self.scripts.restart();
+        crate::arena_c::seed_scene(self.boss_entity, &mut self.scripts.cast_scene);
         self.boss_bar = None;
         self.hp_bar = true;
         self.defeated = false;
         self.ezstate = None;
+        self.initialized = false;
     }
 }
 
@@ -306,6 +313,20 @@ impl EventView<'_> {
 }
 
 impl EventHost for EventView<'_> {
+    fn inside_area(&self, entity: i32, area: i32) -> Option<bool> {
+        let character = self.character(self.who(entity)?);
+        let events = crate::arena::boss_events(&self.duel.spec)?;
+        crate::arena_c::regions::contains(
+            &self.duel.cache,
+            events.map,
+            area,
+            character.body.position,
+        )
+    }
+    fn in_state(&self, entity: i32, state: i32) -> Option<bool> {
+        self.who(entity)?;
+        (state == 10).then_some(self.duel.deathblow.is_some())
+    }
     fn cutscene_finished(&self, id: i32) -> bool {
         self.duel
             .cinematic
@@ -326,11 +347,17 @@ impl EventHost for EventView<'_> {
     }
 
     fn is_dead(&self, entity: i32) -> Option<bool> {
+        if crate::arenas_a::retired_butterfly(self.boss, entity) {
+            return Some(true);
+        }
         Some(self.duel.rules.fighters[self.who(entity)?].dead())
     }
 
     fn hp(&self, entity: i32) -> Option<i32> {
         Some(self.duel.rules.fighters[self.who(entity)?].vitality.hp)
+    }
+    fn max_hp(&self, entity: i32) -> Option<i32> {
+        Some(self.duel.rules.fighters[self.who(entity)?].vitality.max_hp)
     }
     fn health_bars(&self, entity: i32) -> Option<i32> {
         Some(
@@ -691,6 +718,12 @@ impl Duel {
             && let Some(flags) = flags
         {
             events.scripts.flags.extend(flags);
+            if let Some(previous) = self.events.as_ref() {
+                events
+                    .scripts
+                    .cast_scene
+                    .clone_from(&previous.scripts.cast_scene);
+            }
         }
         self.enemy = next.enemy;
         self.last_steps[1] = StepReport {
@@ -1680,6 +1713,8 @@ impl Duel {
         {
             ev.ezstate = None;
         }
+        let initializing = !ev.initialized;
+        ev.initialized = true;
         let commands = ev.scripts.step(
             dt,
             &EventView {
@@ -1687,6 +1722,18 @@ impl Duel {
                 boss: ev.boss_entity,
             },
         );
+        if let Some(region) = ev.scripts.cast_scene.warps.remove(&ev.boss_entity)
+            && let Some(events) = crate::arena::boss_events(&self.spec)
+        {
+            let fields: Vec<_> = events.map.trim_start_matches('m').split('_').collect();
+            if let (Ok(area), Ok(block)) = (fields[0].parse(), fields[1].parse())
+                && let Some(spot) = crate::events::warp_point(&self.cache, area, block, region)
+            {
+                self.enemy.body.position = spot.position;
+                self.enemy.body.yaw = spot.yaw;
+                self.enemy.body.velocity = [0.0; 3];
+            }
+        }
         let who = |entity: i32| match entity {
             PLAYER_ENTITY => Some(0),
             e if e == ev.boss_entity => Some(1),
@@ -1694,6 +1741,27 @@ impl Duel {
         };
         for c in commands {
             match c {
+                EventCommand::AiCommand {
+                    entity,
+                    command,
+                    slot,
+                } if who(entity) == Some(1) => {
+                    if let Some(ai) = self.ai.as_mut() {
+                        ai.state.event_requests.insert(i32::from(slot), command);
+                    }
+                }
+                // Post-intro setup must not discard the battle goal already started this tick.
+                EventCommand::AiReplan { entity }
+                    if who(entity) == Some(1) && !(initializing && self.spec.starts_in_battle) =>
+                {
+                    if let Some(ai) = self.ai.as_mut() {
+                        ai.state.replan = true;
+                    }
+                }
+                EventCommand::AiParam { entity, row } if who(entity) == Some(1) => {
+                    self.spec.think = row;
+                    self.ai = Self::load_ai(&self.cache, &self.spec);
+                }
                 EventCommand::Cutscene {
                     id,
                     point,
@@ -1764,17 +1832,45 @@ impl Duel {
                         self.rules.fighters[i].vitality.cannot_die = on;
                     }
                 }
-                EventCommand::BossDefeat { entity } if who(entity) == Some(1) => {
+                EventCommand::Gravity { entity, enabled } => {
+                    if let Some(i) = who(entity) {
+                        let body = if i == 0 {
+                            &mut self.player.body
+                        } else {
+                            &mut self.enemy.body
+                        };
+                        body.gravity_enabled = enabled;
+                        if !enabled {
+                            body.velocity[1] = 0.0;
+                        }
+                    }
+                }
+                EventCommand::BossDefeat { entity }
+                    if who(entity) == Some(1)
+                        || crate::arenas_a::retired_butterfly(ev.boss_entity, entity) =>
+                {
                     ev.defeated = true;
                 }
                 EventCommand::CharacterEnabled { entity, enabled } if who(entity) == Some(1) => {
                     self.enemy_active = enabled;
                 }
+                EventCommand::CharacterEnabled { entity, .. }
+                    if crate::arena::depths_palace::simultaneous(ev.boss_entity, entity) => {}
                 EventCommand::CharacterEnabled {
                     entity,
                     enabled: true,
-                } if who(entity).is_none() => {
+                } if who(entity).is_none() && crate::arena_c::allow_handover(&self.spec) => {
                     self.pending_handover = Some((entity, None));
+                }
+                EventCommand::BossBar {
+                    shown: true,
+                    entity: 2_500_800,
+                    name,
+                    ..
+                } if ev.boss_entity == 2_500_810 => {
+                    // EMEVD 12505885 activates the Dragon through animation/AI state,
+                    // then its boss bar, rather than ChangeCharacterEnableState.
+                    self.pending_handover = Some((2_500_800, Some(name)));
                 }
                 EventCommand::BossBar {
                     shown: true,
@@ -1794,6 +1890,9 @@ impl Duel {
         self.events = Some(ev);
         if let (Some(gate), Some(ev)) = (&self.fog_gate, &self.events) {
             gate.set_gate(ev.standing_fog_walls().next().is_some());
+            for (&entity, &on) in &ev.scripts.cast_scene.enabled {
+                gate.set_event_part(entity, on);
+            }
         }
         if self.deathblow.is_none()
             && let Some((entity, bar)) = self.pending_handover.take()
@@ -1801,6 +1900,8 @@ impl Duel {
             let handover = crate::arena::boss_events(&self.spec).and_then(|events| {
                 let roster = crate::registry::Registry::load(&self.cache).ok()?;
                 let (spec, p) = roster.entity(events.map, entity).ok()?;
+                // A summoned illusion or Father's bird is an additional actor, not a boss phase.
+                crate::arena::boss_events(&spec)?;
                 Some((
                     spec,
                     Placement {
@@ -2236,6 +2337,8 @@ impl Duel {
         self.rules.recover(1, &self.enemy, dts[1]);
         if self.respawn_in.is_none()
             && self.deathblow.is_none()
+            // Map defeat events can still be waiting before handing over to the next boss.
+            && (self.events.is_none() || self.rules.fighters[0].dead())
             && self.rules.fighters.iter().any(|f| f.dead())
         {
             self.respawn_in = Some(RESPAWN_DELAY);

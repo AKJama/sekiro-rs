@@ -4,6 +4,54 @@ Last updated 12 October 2026.
 Read this first in a new session, then `AGENTS.md` and `docs/DESIGN.md`.
 How much of the game is done overall: `docs/PROGRESS.md`.
 
+## Group-c arena staging (2026-10-12)
+
+Added `silvergrass`, `silvergrass-genichiro`, `silvergrass-isshin`, `watering-hole` and `apes-burrow` from the installed MSBs and EMEVDs.
+Headless staging covers story starts, real hit collision, event fog and bars, the actual Tomoe-to-story-Isshin hand-over, storm state, Guardian Ape's delayed phase/victory events and the burrow companion/severance events.
+The prologue selects its authored midnight environment and sky; the silvergrass finishing boundary switches independently of entrance fog.
+Support actors have event visibility, draw masks, animations and centipede dummy warps, without simultaneous companion combat.
+Graphical completion remains blocked by missing `cache/models/c5400.glb`, `c5100.glb` and `c5001.glb`, now reported before opening a window.
+Four focused release tests pass in 8.32 seconds; workspace/all-target Clippy with warnings denied and the release game build pass in `target/alt-c` with four jobs.
+The new Rust files pass direct rustfmt checks; workspace formatting only requests prohibited reordering of the shared test modules, which remain additive.
+Exact event IDs, commands, changed files and remaining presentation approximations are in `docs/ARENAS-c.md`, with a summary in `docs/FIDELITY.md`.
+No game data, research data, existing logs or git state were changed, and no graphical run or screenshot is claimed for missing-model fights.
+
+## Group-a arena staging (2026-10-12)
+
+Added `hirata-hall`, `hirata-father`, `hirata-inner-father` and `senpou-screens` from the installed layouts and EMEVDs, with story starts, map collision, real fog flags, supporting-cast hooks and story lighting.
+Inner Father preserves think 50630000 and reads the m10_00_50_61 gauntlet script; Hirata uses the fixed past-night environment variant 0.
+Senpou uses warp region 2002200, all four screen-event slots and the script's gravity-disabled hidden health controller, with no invented fog gate.
+All three focused headless tests pass: two Hirata tests in 9.05 seconds and the Senpou test in 5.03 seconds.
+The final workspace/all-target Clippy and release game build pass offline with four jobs in `target/alt-a`.
+Workspace formatting reports only the appended test-module ordering in `tests/it/main.rs`, which was preserved under the shared-tree instruction; the new group-a Rust files pass direct rustfmt checking.
+CLI startup reports missing models c5090/c1510 for Butterfly, c5070 for both Fathers, and c1000/c1250/c1260 for Senpou; no window, brain request or cache write is needed to report these errors.
+The authored illusion sky m900085 is also absent from the exported sky library, and auxiliary combat and native set-piece interaction hosts remain incomplete, so these arenas are not reported fully DONE.
+See `docs/ARENAS-a.md` for the reviewed events, exact missing paths, changed files, commands and verification limits.
+No commits, Git operations, network calls, screenshots or protected data/log writes were used.
+
+## Group-d arena staging (2026-10-12)
+
+Added `mibu-bridge`, `fountainhead-bridge` and `fountainhead-sanctuary` rows from the installed map layouts and event scripts, with authored starts, collision, fog and story lighting.
+Supporting phantom and Dragon cast presentation uses separate event state, and the sanctuary uses the original cinematic warp regions and cloud-sea sky.
+All three focused headless staging tests passed in 6.98 seconds, including the True Monk phantom enables and the script's retry transition from Old Dragons to Divine Dragon with preserved sky and cast-removal state.
+Visible staging remains blocked by missing `cache/models/c5000.glb`, `c5200.glb`, `c5300.glb`, `c5310.glb` and `c5320.glb`; cache was kept read-only.
+Simultaneous cast combat, aggregate Old Dragons defeat and attached tree or finishing props remain incomplete, so these arenas are not reported fully DONE.
+See `docs/ARENAS-d.md` for the exact reviewed events, missing data, changed files and verification commands.
+Workspace/all-target Clippy with warnings denied and the release game build pass with four jobs in `target/alt-d`.
+The new group-d Rust files pass direct rustfmt checks; the workspace formatting check only requests sorting the shared test-module table, which was left appended as instructed.
+
+## Group-b arena staging (2026-10-12)
+
+Added `gyoubu`, `demon` and `shura` arena rows from the installed MSBs and EMEVDs, including story starts, collision, fog and phase event rows.
+Shura uses distinct Emma and Isshin fog lifecycles and changes the tatami to the burnt roof and evening to night through the map script.
+The map renderer now reads original MSB entity/group identities and placed SFX to apply the shared event scene state.
+All three focused headless staging tests and the existing Genichiro hand-over regression pass, including the exact Shura story warp and delayed Emma-to-Isshin transition.
+Scripted boss defeat no longer schedules the harness's three-second automatic retry before a delayed map transition completes; player death still retries normally.
+Workspace/all-target Clippy and the release game build pass in `target/alt-b` with four jobs; only the prohibited module-order rewrite remains in the workspace format check.
+Exact commands, results and changed files are recorded in `docs/ARENAS-b.md`.
+Graphical boss placement remains blocked by missing `cache/models/c5080.glb`, `c7020.glb`, `c7400.glb` and `c5430.glb`; cache was kept read-only.
+Boss attack fidelity, the first-visit Demon encounter and Isshin's attack-driven fire helper remain separate work.
+
 ## Local checkpoint chooser (2026-10-12)
 
 Coach brains now default to a free local Beta Thompson sampler over the coach's offered sets and existing combat checkpoints; a signed-in Codex or Claude CLI needs no API key.
@@ -934,3 +982,14 @@ Validation logs: target/alt/projectile-baseline.log, projectile-focused.log, pro
 A superseded overlapping rebuild encountered a Windows lock on a running Owl test executable; the final sequential rerun passed.
 All Cargo commands used CARGO_TARGET_DIR=target/alt and four jobs, with CARGO_BUILD_JOBS=4 for formatting.
 No commits, network calls, live game sessions, protected data writes, worktrees, links or deletions were made by this task.
+
+
+## Arena integration regression (2026-10-12)
+
+Reproduced the Owl slash failure through the real-data Duel integration test and isolated the new AiReplan handler by temporarily reverting its application.
+Owl's post-intro startup event replanned after his first AI tick, discarding the initial combat goal and changing deterministic Lua choices, tactic plans, and tool positioning.
+FightEvents now tracks its first event pass and suppresses that redundant startup replan for enemies already initialized in battle, resetting this state on reload and preserving later event replans.
+The full release sekiro-sim/sekiro-brain-net suite passes: 463 passed, 0 failed, 3 ignored, including all existing regressions and the new arena tests.
+Workspace/all-target Clippy with -D warnings and cargo fmt --all --check pass.
+All build and test commands used CARGO_TARGET_DIR=target/alt and 12 jobs.
+No tests were weakened or deleted, and no commits or git state changes were made.

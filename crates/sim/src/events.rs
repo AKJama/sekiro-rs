@@ -31,6 +31,20 @@ pub const PLAYER_ENTITY: i32 = 10000;
 /// What an event asks of the world.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EventCommand {
+    /// Event 2004[19] changes the fight's NpcThinkParam row.
+    AiParam {
+        entity: i32,
+        row: i32,
+    },
+    /// Event 2004[17] supplies GetEventRequest(slot) to Lua.
+    AiCommand {
+        entity: i32,
+        command: i32,
+        slot: u8,
+    },
+    AiReplan {
+        entity: i32,
+    },
     /// The arena placeholder replaces this cinematic with a timed black-screen boundary.
     Cutscene {
         id: i32,
@@ -87,11 +101,19 @@ pub enum EventCommand {
         entity: i32,
         enabled: bool,
     },
+    /// SetCharacterGravity (2004[10]), used by the hidden monkeys health controller.
+    Gravity {
+        entity: i32,
+        enabled: bool,
+    },
 }
 
 /// What the events may ask about the world. Unknown entities answer `None`, which makes the
 /// condition false.
 pub trait EventHost {
+    fn in_state(&self, _entity: i32, _state: i32) -> Option<bool> {
+        None
+    }
     fn cutscene_finished(&self, _id: i32) -> bool {
         true
     }
@@ -101,6 +123,12 @@ pub trait EventHost {
     fn has_event_message(&self, entity: i32, id: i32) -> Option<bool>;
     fn is_dead(&self, entity: i32) -> Option<bool>;
     fn hp(&self, entity: i32) -> Option<i32>;
+    fn max_hp(&self, _entity: i32) -> Option<i32> {
+        None
+    }
+    fn inside_area(&self, _entity: i32, _area: i32) -> Option<bool> {
+        None
+    }
     fn health_bars(&self, _entity: i32) -> Option<i32> {
         None
     }
@@ -138,6 +166,8 @@ pub struct EventEntry {
 
 #[derive(Debug, Clone)]
 struct Running {
+    finished_groups: HashMap<i8, bool>,
+    staged: bool,
     id: i64,
     code: Vec<Instruction>,
     entry: usize,
@@ -150,6 +180,8 @@ struct Running {
 
 impl Running {
     fn reset(&mut self) {
+        self.finished_groups.clear();
+        self.staged = false;
         self.pc = self.entry;
         self.wait = None;
         self.groups.clear();
@@ -160,6 +192,9 @@ impl Running {
 /// The events of one fight, their flags and log.
 #[derive(Debug, Clone)]
 pub struct EventScripts {
+    /// Supporting actors retained separately from the arena's primary combatant.
+    pub cast_scene: crate::arena::scene::SceneState,
+    pub arena_c_state: crate::arena_c::EventState,
     running: Vec<Running>,
     /// Event flags that are on. They persist over a death and reload, as the game's do.
     pub flags: HashSet<i32>,
@@ -202,7 +237,8 @@ impl EventScripts {
                 .event(e.id)
                 .ok_or_else(|| format!("event {} is not in the script", e.id))?;
             let start = file.starts_of(e.id).into_iter().next();
-            let code = ev.resolve(start.as_ref().map_or(&[][..], |s| &s.args));
+            let mut code = ev.resolve(start.as_ref().map_or(&[][..], |s| &s.args));
+            crate::arena_c::join_intro(e.id, &mut code)?;
             let entry = match e.from_label {
                 None => 0,
                 Some(n) => {
@@ -213,6 +249,8 @@ impl EventScripts {
                 }
             };
             running.push(Running {
+                finished_groups: HashMap::new(),
+                staged: false,
                 id: e.id,
                 code,
                 entry,
@@ -223,6 +261,8 @@ impl EventScripts {
             });
         }
         Ok(Self {
+            cast_scene: Default::default(),
+            arena_c_state: Default::default(),
             running,
             flags: HashSet::new(),
             log: Vec::new(),
@@ -235,11 +275,35 @@ impl EventScripts {
         let path = cache.join(format!("raw/event/{map}.emevd"));
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let file = Emevd::parse(&bytes).map_err(|e| e.to_string())?;
-        Self::new(&file, entries)
+        let mut scripts = Self::new(&file, entries)?;
+        for running in &mut scripts.running {
+            if let Some((at, code)) = crate::arenas_a::join(map, running.id, entries) {
+                if running.code.get(at).map(Instruction::code) != Some(code) {
+                    return Err(format!("event {}: staged entry {at} changed", running.id));
+                }
+                running.entry = at;
+                running.pc = at;
+            }
+        }
+        let initial = scripts.running.clone();
+        for running in initial {
+            if crate::arenas_a::all_slots(map, running.id)
+                || crate::arena::depths_palace::all_slots(map, running.id)
+            {
+                for start in file.starts_of(running.id).iter().skip(1) {
+                    let mut extra = running.clone();
+                    extra.code = file.event(running.id).unwrap().resolve(&start.args);
+                    scripts.running.push(extra);
+                }
+            }
+        }
+        Ok(scripts)
     }
 
     /// Starts every event over (after the fight reloads), keeping the flags.
     pub fn restart(&mut self) {
+        self.cast_scene = Default::default();
+        self.arena_c_state = Default::default();
         for r in &mut self.running {
             r.reset();
         }
@@ -272,6 +336,8 @@ impl EventScripts {
             let mut r = std::mem::replace(
                 &mut self.running[k],
                 Running {
+                    finished_groups: HashMap::new(),
+                    staged: false,
                     id: 0,
                     code: Vec::new(),
                     entry: 0,
@@ -307,8 +373,14 @@ impl EventScripts {
         let a = args(ins);
         let i = |k: usize| a.get(k).map_or(0, |v| v.as_i64());
         match ins.code() {
+            (4, 2) => crate::arenas_a::hp_ratio_condition(ins, host),
+            (4, 21) => {
+                host.in_state(ins.i32_at(4).unwrap_or(0), ins.i32_at(8).unwrap_or(0))
+                    == Some(ins.args.get(12).copied().unwrap_or(0) != 0)
+            }
             (0, 0) => self.eval_group(r, i(2) as i8, host) == (i(1) != 0),
             (3, 0) => self.flag(i(3) as i32) == (i(1) != 0),
+            (3, 2) => host.inside_area(i(2) as i32, i(3) as i32) == Some(i(1) != 0),
             // DarkScript3's death state: 0 alive, 1 dead.
             (4, 0) => host.is_dead(i(1) as i32) == Some(i(2) == 1),
             (4, 5) => host.has_sp_effect(i(1) as i32, i(2) as i32) == Some(i(3) != 0),
@@ -325,9 +397,21 @@ impl EventScripts {
     }
 
     fn is_condition(ins: &Instruction) -> bool {
+        if ins.code() == (4, 2) {
+            return true;
+        }
         matches!(
             ins.code(),
-            (0, 0) | (3, 0) | (3, 31) | (4, 0) | (4, 5) | (4, 8) | (4, 14) | (4, 37)
+            (0, 0)
+                | (3, 0)
+                | (3, 2)
+                | (3, 31)
+                | (4, 0)
+                | (4, 5)
+                | (4, 8)
+                | (4, 14)
+                | (4, 21)
+                | (4, 37)
         )
     }
 
@@ -350,13 +434,26 @@ impl EventScripts {
             self.log.push(EventLog::Restarted(r.id));
         } else {
             r.ended = true;
+            if crate::arena::depths_palace::completion_flag(r.id) {
+                self.set_flag(r.id as i32, true);
+            }
             self.log.push(EventLog::Ended(r.id));
         }
     }
 
     fn run(&mut self, r: &mut Running, dt: f32, host: &dyn EventHost, out: &mut Vec<EventCommand>) {
+        if !r.staged {
+            if let Some(entry) = crate::arena_b::entry(r.id, &self.flags) {
+                r.pc = entry;
+                r.entry = entry;
+            }
+            r.staged = true;
+        }
         let mut dt_left = dt;
         for _ in 0..STEP_BUDGET {
+            if let Some(pc) = crate::arena_b::after_intro(r.id, r.pc, &self.flags) {
+                r.pc = pc;
+            }
             if r.ended {
                 return;
             }
@@ -368,12 +465,27 @@ impl EventScripts {
             let a = args(&ins);
             let i = |k: usize| a.get(k).map_or(0, |v| v.as_i64());
             let f = |k: usize| a.get(k).map_or(0.0, |v| v.as_f32());
+            if crate::arenas_a::unavailable_condition(r.id, ins.code()) {
+                if self.skipped.insert((r.id, ins.bank, ins.id)) {
+                    self.log.push(EventLog::Skipped {
+                        event: r.id,
+                        bank: ins.bank,
+                        id: ins.id,
+                    });
+                }
+                return;
+            }
             if Self::is_condition(&ins) {
-                let group = i(0) as i8;
+                let group = ins.args.first().copied().unwrap_or(0) as i8;
                 if group == 0 {
                     if !self.eval(r, &ins, host) {
                         return;
                     }
+                    r.finished_groups = r
+                        .groups
+                        .keys()
+                        .map(|&g| (g, self.eval_group(r, g, host)))
+                        .collect();
                     r.groups.clear();
                 } else {
                     r.groups.entry(group).or_default().push(r.pc);
@@ -382,8 +494,52 @@ impl EventScripts {
                 continue;
             }
             let mut next = r.pc + 1;
+            if self.arena_c_state.instruction(&ins) {
+                r.pc = next;
+                continue;
+            }
+            if ins.code() == (2011, 1) {
+                self.cast_scene.enabled.insert(
+                    ins.i32_at(0).unwrap_or(0),
+                    ins.args.get(4).copied().unwrap_or(0) != 0,
+                );
+                r.pc = next;
+                continue;
+            }
+            if self.cast_scene.instruction(&ins, &a) {
+                r.pc = next;
+                continue;
+            }
             let mut command = None;
             match ins.code() {
+                (2004, 17) => {
+                    command = Some(EventCommand::AiCommand {
+                        entity: ins.i32_at(0).unwrap_or(0),
+                        command: ins.i32_at(4).unwrap_or(-1),
+                        slot: ins.args.get(8).copied().unwrap_or(0),
+                    })
+                }
+                (2004, 20) => {
+                    command = Some(EventCommand::AiReplan {
+                        entity: ins.i32_at(0).unwrap_or(0),
+                    })
+                }
+                (2004, 19) => {
+                    command = Some(EventCommand::AiParam {
+                        entity: ins.i32_at(0).unwrap_or(0),
+                        row: ins.i32_at(4).unwrap_or(0),
+                    })
+                }
+                // GotoIfConditionGroupStateCompiled uses the last completed MAIN's results.
+                (1000, 107) => {
+                    let label = ins.args.first().copied().unwrap_or(0);
+                    let state = ins.args.get(1).copied().unwrap_or(0) != 0;
+                    let group = ins.args.get(2).copied().unwrap_or(0) as i8;
+                    if r.finished_groups.get(&group).copied().unwrap_or(false) == state {
+                        Self::goto(r, i64::from(label));
+                        continue;
+                    }
+                }
                 (2002, 4) | (2002, 13) => {
                     let command = EventCommand::Cutscene {
                         id: i(0) as i32,
@@ -422,10 +578,14 @@ impl EventScripts {
                     continue;
                 }
                 // WaitFixedTimeSeconds / WaitFixedTimeFrames (one frame per step).
-                (1001, 0) | (1001, 1) => {
-                    let left = r
-                        .wait
-                        .get_or_insert(if ins.id == 0 { f(0) } else { i(0) as f32 });
+                (1001, 0) | (1001, 1) | (1, 0) if ins.bank != 1 || ins.args.first() == Some(&0) => {
+                    let left = r.wait.get_or_insert(if ins.bank == 1 {
+                        ins.f32_at(4).unwrap_or(0.0)
+                    } else if ins.id == 0 {
+                        f(0)
+                    } else {
+                        i(0) as f32
+                    });
                     if *left > 0.0 {
                         *left -= if ins.id == 0 { dt_left } else { 1.0 };
                         dt_left = 0.0;
@@ -498,6 +658,12 @@ impl EventScripts {
                     command = Some(EventCommand::CharacterEnabled {
                         entity: i(0) as i32,
                         enabled: i(1) != 0,
+                    })
+                }
+                (2004, 10) => {
+                    command = Some(EventCommand::Gravity {
+                        entity: ins.i32_at(0).unwrap_or(0),
+                        enabled: ins.u8_at(4).unwrap_or(1) != 0,
                     })
                 }
                 (2004, 6) => {

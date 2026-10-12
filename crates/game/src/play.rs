@@ -47,6 +47,10 @@ use crate::draw_mask::{DrawMask, MaskSource, apply_draw_masks};
 use crate::map::{self, MapFocus, MapScene};
 use sekiro_sim::arena::{Arena, ArenaSpec};
 use sekiro_sim::collision::CollisionWorld;
+#[path = "arena_c_scene.rs"]
+mod arena_c_scene;
+#[path = "arena_d_scene.rs"]
+mod arena_d_scene;
 #[path = "cinematic_fade.rs"]
 mod cinematic_fade;
 #[path = "rope.rs"]
@@ -146,6 +150,16 @@ fn hold_fog_walls(sim: NonSend<Sim>, walls: Res<FogWalls>, mut fx: ResMut<crate:
     }
 }
 
+fn sync_arena_scene(sim: NonSend<Sim>, scene: Option<ResMut<crate::arena_b::Scene>>) {
+    if let (Some(mut scene), Some(events)) = (scene, &sim.duel.events) {
+        scene.0.clone_from(&events.scripts.cast_scene);
+        if scene.0.lighting.is_none() {
+            scene.0.lighting =
+                sekiro_sim::arena::boss_events(&sim.duel.spec).and_then(|e| e.lighting);
+        }
+    }
+}
+
 /// The map's collision, for the camera; absent on the flat floor.
 #[derive(Resource)]
 struct MapCollision(Arc<CollisionWorld>);
@@ -239,6 +253,30 @@ struct Captures {
 
 pub fn run(options: Options) -> Result<()> {
     let cache = options.cache.canonicalize().context("cache directory")?;
+    if let Some(arena) = options.arena {
+        let missing_b = sekiro_sim::arena_b::missing_models(&cache, arena);
+        anyhow::ensure!(
+            missing_b.is_empty(),
+            "arena {}: missing extracted data: {}",
+            arena.name,
+            missing_b.join(", ")
+        );
+        let missing_c = sekiro_sim::arena_c::missing_models(&cache, arena);
+        anyhow::ensure!(
+            missing_c.is_empty(),
+            "arena {}: missing extracted data: {}",
+            arena.name,
+            missing_c.join(", ")
+        );
+        let missing =
+            sekiro_sim::arenas_a::missing_models(&cache, arena).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(
+            missing.is_empty(),
+            "arena {}: missing extracted data: {}",
+            arena.name,
+            missing.join(", ")
+        );
+    }
     let roster = sekiro_sim::registry::Registry::load(&cache).map_err(anyhow::Error::msg)?;
     let anim_chr = roster.anim_chr(&options.opponent.chr, options.opponent.npc_param);
     let enemy_draw_groups = roster.draw_mask(&cache, &options.opponent);
@@ -534,6 +572,7 @@ pub fn run(options: Options) -> Result<()> {
             bind_rigs,
             apply_draw_masks,
             sync_actors,
+            sync_arena_scene,
             sync_bullets,
             sync_lightning_tint,
             (rope::pose, animate, rope::draw, sheath_sword).chain(),
@@ -544,12 +583,13 @@ pub fn run(options: Options) -> Result<()> {
             combat_hud::update,
             combat_hud::update_status,
             combat_hud::update_perilous,
-            capture,
-            log_camera,
+            (capture, log_camera).chain(),
         )
             .chain(),
     );
     crate::menu::install(&mut app);
+    arena_d_scene::install(&mut app, &cache, options.arena, options.objects)?;
+    arena_c_scene::install(&mut app, &cache, options.arena)?;
     crate::perf_log::register!(app);
     if let Some(replay) = replay {
         app.insert_resource(replay).add_systems(
@@ -558,6 +598,12 @@ pub fn run(options: Options) -> Result<()> {
         );
     }
     if let Some((dir, id, world)) = on_map {
+        let arena_hidden = options
+            .arena
+            .map(|a| sekiro_sim::arenas_a::hidden_parts(&cache, a))
+            .transpose()
+            .map_err(anyhow::Error::msg)?
+            .unwrap_or_default();
         // The map's sun, ambient light and sky replace the floor setup's.
         map::add_map(
             &mut app,
@@ -570,6 +616,7 @@ pub fn run(options: Options) -> Result<()> {
                     .hide
                     .iter()
                     .cloned()
+                    .chain(arena_hidden)
                     .chain(
                         options
                             .arena
@@ -586,6 +633,9 @@ pub fn run(options: Options) -> Result<()> {
             },
         )?;
         app.insert_resource(MapCollision(world));
+        if options.arena.is_some() {
+            crate::arena_b::install(&mut app, &cache, &id)?;
+        }
     }
     app.run();
     Ok(())

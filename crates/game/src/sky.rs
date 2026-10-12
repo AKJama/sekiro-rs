@@ -25,6 +25,10 @@ const SKY_RADIANCE_SCALE: f32 = crate::lighting::ENV_PER_UNIT;
 #[derive(Resource)]
 pub(crate) struct SkyEnabled;
 
+/// Event-selected authored sky, such as the Dragon sanctuary's group 8907090.
+#[derive(Resource, Default)]
+pub(crate) struct SkyOverride(pub Option<&'static str>);
+
 #[derive(Clone, ShaderType, Debug)]
 struct SkyInputs {
     colors: [Vec4; 11],
@@ -336,8 +340,17 @@ pub(super) fn install(app: &mut App, cache: &Path, id: &str, hour: f32) -> Resul
     let mut images = BTreeMap::<String, Handle<Image>>::new();
     for name in [
         "m900000", "m900010", "m900020", "m900030", "m900040", "m900050", "m900060", "m900070",
+        "m900090", "m900085", "m900075",
     ] {
         let row = &json["models"][name];
+        if name == "m900075" && row.is_null() {
+            warn!("silvergrass sky m900075 is not extracted in maps/m89_00_00_99/sky.json");
+            continue;
+        }
+        if name == "m900085" && row.is_null() {
+            warn!("illusion temple sky m900085 is not extracted in maps/m89_00_00_99/sky.json");
+            continue;
+        }
         anyhow::ensure!(!row.is_null(), "missing sky material {name}");
         let slots = texture_slots(app, &dir, row, &mut images)?;
         let value = inputs(row);
@@ -400,20 +413,35 @@ pub(super) fn install(app: &mut App, cache: &Path, id: &str, hour: f32) -> Resul
     }
     info!("authored sky {} for {id} at {hour}h", library.current);
     app.insert_resource(library)
+        .init_resource::<SkyOverride>()
         .insert_resource(SkyEnabled)
         .add_systems(Update, update);
     Ok(())
 }
 
+type Clouds<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static MeshMaterial3d<SkyMaterial>,
+        &'static mut Visibility,
+    ),
+    (With<CloudDome>, Without<Dome>),
+>;
+
 fn update(
+    sky_override: Res<SkyOverride>,
     lighting: Res<crate::lighting::MapLighting>,
     time: Res<Time>,
     mut library: ResMut<Library>,
     mut materials: ResMut<Assets<SkyMaterial>>,
     mut domes: Query<(&mut Mesh3d, &mut MeshMaterial3d<SkyMaterial>), With<Dome>>,
-    clouds: Query<&MeshMaterial3d<SkyMaterial>, (With<CloudDome>, Without<Dome>)>,
+    mut clouds: Clouds<'_, '_>,
 ) {
-    let selected = selection(&library.id, lighting.hour);
+    let selected = sky_override
+        .0
+        .filter(|name| library.meshes.contains_key(*name))
+        .unwrap_or_else(|| selection(&library.id, lighting.hour));
     if library.current != selected {
         for (mut mesh, mut material) in &mut domes {
             mesh.0 = library.meshes[selected].clone();
@@ -427,7 +455,12 @@ fn update(
         material.inputs.sun = set.sun_toward.extend(0.);
         material.inputs.control.z = time.elapsed_secs();
     }
-    for handle in &clouds {
+    for (handle, mut visibility) in &mut clouds {
+        *visibility = if sky_override.0.is_some() {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
         if let Some(mut material) = materials.get_mut(&handle.0) {
             material.inputs.sun = set.sun_toward.extend(0.);
             material.inputs.control.z = time.elapsed_secs();

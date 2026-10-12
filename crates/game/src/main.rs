@@ -23,6 +23,7 @@
 //! `--fxr-preview <id>` repeats an installed effect between the actors every two seconds.
 
 mod arena;
+mod arena_b;
 mod audio;
 mod brain_overlay;
 mod brain_stage;
@@ -209,7 +210,7 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
         Some("tomoe") => Some("c7110:71100000".to_owned()),
         Some(_) => anyhow::bail!("--genichiro-phase wants ashina or tomoe"),
     };
-    let opponent = match (
+    let mut opponent = match (
         phase_enemy.or_else(|| arg_value(args, "--enemy")),
         boss_arena,
     ) {
@@ -224,6 +225,9 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
         )
         .map_err(|e| anyhow::anyhow!("--enemy: {e}"))?,
     };
+    if let Some(arena) = boss_arena {
+        sekiro_sim::arenas_a::select_placed_think(arena, &mut opponent);
+    }
     let player = sekiro_sim::brain::memory::player_name(
         &arg_value(args, "--player").unwrap_or_else(|| "default".into()),
     )

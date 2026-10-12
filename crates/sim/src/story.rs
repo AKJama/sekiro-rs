@@ -24,6 +24,8 @@ pub const TIME_FLAGS: [i32; 4] = [9800, 9801, 9802, 9803];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoryTime {
+    /// The fixed Hirata memory environment, selected by common event 100 Label2.
+    PastNight,
     Morning,
     Afternoon,
     Evening,
@@ -36,6 +38,7 @@ impl StoryTime {
     /// "past night" variant, which no flag state of event 100 selects).
     pub fn hour(self) -> f32 {
         match self {
+            Self::PastNight => 0.0,
             Self::Morning => 6.0,
             Self::Afternoon => 12.0,
             Self::Evening => 18.0,
@@ -46,6 +49,7 @@ impl StoryTime {
 
     pub fn name(self) -> &'static str {
         match self {
+            Self::PastNight => "past night",
             Self::Morning => "morning",
             Self::Afternoon => "afternoon",
             Self::Evening => "evening",
@@ -57,6 +61,7 @@ impl StoryTime {
     /// The environment variant `SetLighting` and event 100's `SetAreaEnvmap` use.
     pub fn from_variant(variant: i32) -> Option<Self> {
         Some(match variant {
+            0 => Self::PastNight,
             1 => Self::Morning,
             2 => Self::Afternoon,
             3 => Self::Evening,

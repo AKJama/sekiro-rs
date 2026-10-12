@@ -713,7 +713,9 @@ fn setup_view(mut commands: Commands, start: Vec3) {
     ));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_map(
+    arena_parts: Option<Res<crate::arena_b::Parts>>,
     mut commands: Commands,
     assets: Res<AssetServer>,
     layout: Res<Layout>,
@@ -743,6 +745,13 @@ fn spawn_map(
                 continue;
             };
             if scene.hide.iter().any(|h| model.starts_with(h.as_str())) {
+                continue;
+            }
+            if scene
+                .hide
+                .iter()
+                .any(|h| row["name"].as_str() == Some(h.as_str()))
+            {
                 continue;
             }
             let Some(glb) = models[model]["glb"].as_str() else {
@@ -784,6 +793,12 @@ fn spawn_map(
             ));
             if far_scenery {
                 entity.insert(FarScenery);
+            }
+            if let Some(part) = arena_parts
+                .as_ref()
+                .and_then(|p| p.0.get(row["name"].as_str().unwrap_or_default()))
+            {
+                entity.insert(part.clone());
             }
             spawned += 1;
         }

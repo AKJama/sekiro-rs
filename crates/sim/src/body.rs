@@ -162,6 +162,8 @@ impl Ground for FlatGround {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Body {
+    /// EMEVD 2004[10] can suspend an invisible controller below a map without a fake floor.
+    pub gravity_enabled: bool,
     /// Selected by the latest velocity change, reset on landing or walking off a ledge.
     pub fall_type: u8,
     pub position: [f32; 3],
@@ -177,6 +179,7 @@ pub struct Body {
 impl Default for Body {
     fn default() -> Self {
         Self {
+            gravity_enabled: true,
             fall_type: 0,
             position: [0.0; 3],
             yaw: 0.0,
@@ -303,6 +306,10 @@ impl Body {
             return;
         }
 
+        if !self.gravity_enabled {
+            self.position[1] += input.root_motion[1] + self.velocity[1] * dt;
+            return;
+        }
         let step = ground.max_step();
         if self.grounded {
             // Follow the floor up or down by a step, plus what a 50 degree slope rises over

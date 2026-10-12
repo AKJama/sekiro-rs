@@ -8,6 +8,8 @@
 
 pub mod ai;
 pub mod arena;
+pub mod arena_b;
+pub mod arena_c;
 pub mod behavior;
 pub mod body;
 pub mod brain;
@@ -46,3 +48,4 @@ pub use behavior::{AnimOffsets, BehaviorRuntime, ClipDurations, ClipState, HookC
 pub use character::{Character, ControlKind, NpcControl, PlayerCharacter, StepReport};
 pub use input::{Buttons, InputFrame};
 pub use player::{PlayerBehavior, PlayerEnv, TickReport};
+pub mod arenas_a;

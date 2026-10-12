@@ -33,3 +33,12 @@ This is not a reconstruction of native animation-root physics or momentum transf
 Category-1001 SpEffect replacement is traced, but positive durability/toughness meters for other NPC rows are not implemented.
 Genichiro 3015 has no verified armour source in the audited data; its 8140/8141 aliases permit an aerial interruption, so unconditional protection for that act remains unresolved.
 See [COMBAT-RULES.md](COMBAT-RULES.md#super-armour-and-interruption-2026-10-11) for native addresses and timed effects.
+
+## Reservoir and Sunken Valley staging
+
+Group-c staging uses the map's real event rows, MSB starts and collision, including fog and the independent silvergrass finishing boundary.
+The silvergrass GPARAM sub-ID changes snap to extracted presets rather than blending over five seconds, and the 09 preset family selection is inferred rather than traced.
+The brown ape is an event-visible supporting actor without simultaneous combat simulation.
+Centipede dummy warps and animation are wired but cannot be visually verified until `cache/models/c5001.glb` exists; `c5100.glb` and `c5400.glb` also block graphical completion in this checkout.
+Character-part state instructions, paired finishing player event animations, false-victory banners, custom event camera sub-IDs and native cutscene playback remain incomplete.
+See [ARENAS-c.md](ARENAS-c.md) for exact story states, event IDs, missing assets and verification limits.

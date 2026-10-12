@@ -117,6 +117,7 @@ pub struct CollisionWorld {
     /// has it enabled (a boss fog wall and its invisible boundary). `u32::MAX` when there is none.
     gate_from: u32,
     gate_open: AtomicBool,
+    event_parts: Vec<(i32, std::ops::Range<u32>, AtomicBool)>,
 }
 
 fn cell_of(x: f32, z: f32) -> (i32, i32) {
@@ -162,6 +163,13 @@ impl CollisionWorld {
 
     /// Whether triangle `t` takes part in queries: every ordinary one, a gate one while on.
     fn live(&self, t: u32) -> bool {
+        if let Some((_, _, on)) = self
+            .event_parts
+            .iter()
+            .find(|(_, range, _)| range.contains(&t))
+        {
+            return on.load(Ordering::Relaxed);
+        }
         t < self.gate_from || self.gate_open.load(Ordering::Relaxed)
     }
 
@@ -202,6 +210,7 @@ impl CollisionWorld {
             min_walk_ny: MAX_SLOPE_DEGREES.to_radians().cos(),
             gate_from,
             gate_open: AtomicBool::new(false),
+            event_parts: Vec::new(),
         }
     }
 
@@ -538,6 +547,9 @@ fn closest_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
     let denom = 1.0 / (va + vb + vc);
     a + ab * (vb * denom) + ac * (vc * denom)
 }
+
+#[path = "arena_c_collision.rs"]
+mod arena_c_collision;
 
 #[cfg(test)]
 mod tests {
