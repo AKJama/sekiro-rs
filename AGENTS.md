@@ -11,6 +11,7 @@ A Rust/Bevy reimplementation of Sekiro: Shadows Die Twice (Steam, v1.6.0.0, buil
 - Build first, then compare against the real game.
   Keep known approximations in `docs/FIDELITY.md`; they never block progress.
 - Every milestone must be runnable. Show it working (screenshot or log), then move on.
+- Shared plan with [RustSekiro](https://github.com/FFwLo/RustSekiro): read `WORK.md` in [AKJama/sekiro-collab](https://github.com/AKJama/sekiro-collab) and claim a task there before starting it.
 
 ## Layout
 
