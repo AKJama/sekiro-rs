@@ -44,10 +44,10 @@ What the evidence showed:
 
 | Step | What | Status |
 |---|---|---|
-| 1 | Classify every outcome; per-attack evidence after 3 samples; remove automatic bans; memory version 4 | Done in the working tree, not yet committed (`docs/BRAIN-LEARNING.md`) |
-| 2 | Per-move contextual bandit; break capitalisation reward; coach confidence and exploration controls; `--brain-moves local\|off` | In progress |
-| 3 | Deterministic moves table and 10-fight trend digest in the coach input; the coach prompt audited to match | In progress |
-| 4 | Coach review mode with accumulated lessons | In progress |
+| 1 | Classify every outcome; per-attack evidence after 3 samples; remove automatic bans; memory version 4 | Done in e964560 (`docs/BRAIN-LEARNING.md`) |
+| 2 | Per-move contextual bandit; break capitalisation reward; coach confidence and exploration controls; `--brain-moves local\|off` | Done in e964560; offline replay: countered moves under 5% from fight 4 |
+| 3 | Deterministic moves table and 10-fight trend digest in the coach input; the coach prompt audited to match | Done in e964560 (coach input budget now 8 KB) |
+| 4 | Coach review mode with accumulated lessons | Done in e964560 |
 | 5 | `--brain-stage` presets for Genichiro, like the Owl's, from the frozen snapshots below | To do |
 | 6 | Playtest A/B: new brain against the frozen ones, same player | To do |
 
@@ -80,3 +80,4 @@ Snapshots are copies; play from them only through `--brain-stage` (which works o
 ## Log
 
 - 2026-10-12: Problem found from the player's 57 Genichiro fights; steps 1 to 4 started; Owl and Genichiro brains frozen.
+- 2026-10-12: Steps 1 to 4 landed in e964560; the player is running the Decisions-from-scratch test on the old exe (`target/play`); the new brain is in `target/play-next`.
