@@ -800,7 +800,8 @@ fn the_coach_request_has_the_structured_output_shape_and_reports_reasoning_token
             "checkpoint_prefs",
             "explore",
             "move_controls",
-            "lessons"
+            "lessons",
+            "punish_preferences"
         ])
     );
     let choices = schema["$defs"]["choice"]["enum"].as_array().unwrap();

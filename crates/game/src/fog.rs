@@ -257,14 +257,14 @@ fn configure(
     mut commands: Commands,
     lighting: Res<super::MapLighting>,
     cameras: Query<(Entity, &Camera3d)>,
-    mut last: Local<Option<(i32, f32, i32)>>,
+    mut last: Local<Option<(i32, f32, i32, String)>>,
     added: Query<(), Added<Camera3d>>,
     selection: Res<FogSelection>,
     dome: Option<Res<crate::map::sky::SkyEnabled>>,
 ) {
     let key = (lighting.light_set, lighting.hour);
-    let cache_key = (key.0, key.1, selection.0);
-    if *last == Some(cache_key) && added.is_empty() {
+    let cache_key = (key.0, key.1, selection.0, lighting.source.clone());
+    if last.as_ref() == Some(&cache_key) && added.is_empty() {
         return;
     }
     *last = Some(cache_key);

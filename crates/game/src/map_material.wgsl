@@ -260,6 +260,7 @@ fn fragment(vertex: VertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     let slot = 0u;
 #endif
     var input = vertex;
+#ifdef CAMERA_FADE
     if layers.camera_fade.x > 0.0 {
         let opacity = distance(input.world_position.xyz, view.world_position) * layers.camera_fade.z - layers.camera_fade.y;
         // Native camera fade samples an 8x8 noise tile; ordered coverage is provisional.
@@ -270,6 +271,7 @@ fn fragment(vertex: VertexOutput, @builtin(front_facing) is_front: bool) -> Frag
         let noise = (f32(a * 16u + b * 4u + c) + 0.5) / 64.0;
         if opacity < 0.01 + 0.99 * noise { discard; }
     }
+#endif
     var weights = vec3(0.0);
 #ifdef VERTEX_COLORS
     if layers.albedo_enabled.w > 0.0 {

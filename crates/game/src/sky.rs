@@ -94,6 +94,7 @@ struct Library {
     meshes: BTreeMap<String, Handle<Mesh>>,
     materials: BTreeMap<String, Handle<SkyMaterial>>,
     current: String,
+    groups: BTreeMap<i32, String>,
 }
 
 #[derive(Component)]
@@ -336,12 +337,27 @@ pub(super) fn install(app: &mut App, cache: &Path, id: &str, hour: f32) -> Resul
         meshes: BTreeMap::new(),
         materials: BTreeMap::new(),
         current: selection(id, hour).into(),
+        groups: BTreeMap::new(),
     };
+    let msb = sekiro_formats::msb::parse(&std::fs::read(
+        cache.join("raw/map/mapstudio/m89_00_00_99.msb"),
+    )?)?;
+    for part in &msb.parts {
+        if let Some(model) = msb.model(part) {
+            for &group in &part.entity_group_ids {
+                if group > 0 {
+                    library.groups.insert(group, model.name.clone());
+                }
+            }
+        }
+    }
     let mut images = BTreeMap::<String, Handle<Image>>::new();
-    for name in [
-        "m900000", "m900010", "m900020", "m900030", "m900040", "m900050", "m900060", "m900070",
-        "m900090", "m900085", "m900075",
-    ] {
+    for name in json["models"]
+        .as_object()
+        .context("sky models")?
+        .keys()
+        .map(String::as_str)
+    {
         let row = &json["models"][name];
         if name == "m900075" && row.is_null() {
             warn!("silvergrass sky m900075 is not extracted in maps/m89_00_00_99/sky.json");
@@ -370,6 +386,22 @@ pub(super) fn install(app: &mut App, cache: &Path, id: &str, hour: f32) -> Resul
                 row["material_index"].as_u64().unwrap_or(0) as usize,
             )?),
         );
+    }
+    if let Some(name) = app
+        .world()
+        .resource::<crate::lighting_selection::LightingSelection>()
+        .initial
+        .sky
+        .as_ref()
+    {
+        if library.meshes.contains_key(name) {
+            library.current.clone_from(name);
+        } else {
+            warn!(
+                "event-selected sky {name} is not exported; retaining {}",
+                library.current
+            );
+        }
     }
     app.world_mut().spawn((
         Dome,
@@ -429,6 +461,7 @@ type Clouds<'w, 's> = Query<
     (With<CloudDome>, Without<Dome>),
 >;
 
+#[allow(clippy::too_many_arguments)]
 fn update(
     sky_override: Res<SkyOverride>,
     lighting: Res<crate::lighting::MapLighting>,
@@ -437,21 +470,41 @@ fn update(
     mut materials: ResMut<Assets<SkyMaterial>>,
     mut domes: Query<(&mut Mesh3d, &mut MeshMaterial3d<SkyMaterial>), With<Dome>>,
     mut clouds: Clouds<'_, '_>,
+    scene: Option<Res<crate::arena_b::Scene>>,
+    story: Res<crate::lighting_selection::LightingSelection>,
+    map_scene: Res<crate::lighting_selection::MapEventScene>,
 ) {
+    let scene = scene.as_deref().map_or(&map_scene.0, |s| &s.0);
+    let event_sky = {
+        scene
+            .enabled_order
+            .iter()
+            .rev()
+            .filter(|group| scene.enabled.get(group) == Some(&true))
+            .filter_map(|group| library.groups.get(group))
+            .find(|name| library.meshes.contains_key(*name))
+            .map(String::as_str)
+    };
+    let initial_sky = (lighting.hour == story.initial.hour)
+        .then_some(story.initial.sky.as_deref())
+        .flatten();
     let selected = sky_override
         .0
         .filter(|name| library.meshes.contains_key(*name))
+        .or(event_sky)
+        .or(initial_sky.filter(|name| library.meshes.contains_key(*name)))
         .unwrap_or_else(|| selection(&library.id, lighting.hour));
+    let selected = selected.to_owned();
     if library.current != selected {
         for (mut mesh, mut material) in &mut domes {
-            mesh.0 = library.meshes[selected].clone();
-            material.0 = library.materials[selected].clone();
+            mesh.0 = library.meshes[&selected].clone();
+            material.0 = library.materials[&selected].clone();
         }
-        library.current = selected.into();
+        library.current.clone_from(&selected);
     }
     let set =
         crate::lighting::LightSet::from_gparam(&lighting.gparam, lighting.light_set, lighting.hour);
-    if let Some(mut material) = materials.get_mut(&library.materials[selected]) {
+    if let Some(mut material) = materials.get_mut(&library.materials[&selected]) {
         material.inputs.sun = set.sun_toward.extend(0.);
         material.inputs.control.z = time.elapsed_secs();
     }

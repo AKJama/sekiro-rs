@@ -1143,3 +1143,62 @@ Event 820 raises 9800 once one of the bosses 9303 to 9306 is down and 9801 once 
 
 `--hour` still overrides.
 Gaps: the in-fight switch at the Genichiro hand-over is not animated, and `SetAreaGparamSubID` is not applied (Owl sub 50, Genichiro phase two sub 10; draw param files appear to be named by sub id divided by ten, and m11_01 has no 05xx file).
+
+## Castle rooftop GPU cost and fight cleanup (2026-10-13)
+
+The camera fade added after `5f6dc64` put a conditional `discard` in every layered-map fragment shader, including opaque materials whose fade parameter was zero.
+`MapPipelineKey` now specializes `CAMERA_FADE` only for authored fade materials, preserving the hanging-blind dither and bindless batching.
+Non-fading pipelines compile without that discard block.
+The extra opaque GPU cost is consistent with losing early depth rejection, although these measurements do not independently inspect the driver's early-depth state.
+
+Three sequential release runs used the RTX 5070 Ti, Vulkan, a 1920x1080 client area, `--arena genichiro --uncapped --simple-ai --passive --god --profile-systems`, and a 900-tick idle script.
+No compilation overlapped these three runs.
+`PLAY_LOG_PERF=1` and `PLAY_PERF_DIR=target/alt-pf/<label>-perf` directed all performance CSVs to the permitted target directory.
+Mean and median wall times use `perf_log.rs` rows at simulation ticks 180 through 840 with no pending pipelines.
+Opaque GPU times average six smoothed diagnostic samples at loaded seconds 6 through 11.
+
+| Configuration | Mean frame, ms | Median frame, ms | Opaque GPU, ms |
+| --- | ---: | ---: | ---: |
+| Original shared shader, `--legacy-camera-fade` | 16.781 | 16.704 | 13.153 |
+| Specialized shader, blind fade enabled | 16.681 | 16.668 | 10.455 |
+| Baseline-equivalent feature control, `--no-camera-fade --no-arena-effects` | 16.681 | 16.675 | 10.558 |
+
+Specialization removes 20.5% of the measured opaque GPU time and matches the baseline control's frame time, within the requested 5% margin.
+All three short idle runs remained near 60 fps despite `--uncapped`, so the reported long-session 35 fps state was not reproduced by this idle comparison.
+The control disables the two new rendering features; it is not a checkout or build of the historical commit.
+Before/after captures are `target/alt-pf/captures/legacy-shader.png` and `fixed.png`, and their lighting, geometry and framing were visually inspected.
+An initial run overlapped compilation and was discarded from the comparison.
+That initial Lua run unexpectedly enabled a session report and wrote `logs/brain-session-1791847964710.md`; the file was left untouched, and subsequent runs used simple AI to bypass reporting.
+
+The lifecycle audit also found three accumulation paths.
+Placed map effects skipped absent event entries, leaving persistent holds alive after the scene was replaced; absent entries now release the hold.
+Decal budgeting used an ECS query snapshot while commands were deferred, so a burst repeatedly evicted the same old stain and exceeded the intended 48-stain limit.
+The headless legacy-path reproduction leaves 123 stains after eight 16-stain bursts; immediate bookkeeping enforces the budget, and respawn clears stains and transient FX.
+Character material wrappers were cached indefinitely, with a rendered phase-cycle probe growing from 6,786 to 7,234 standard-plus-layered material assets in nine sampled fights, about 56 assets per phase cycle.
+The cache now releases removed source materials and unused wrappers when actor descendants are torn down, without scanning map meshes on ordinary frames.
+Twenty-fight headless tests cover stain cleanup, shared decal assets, held-effect release and material-wrapper teardown.
+
+Phase-one castle rendering discards a replayed storm-lighting override from retained Tomoe story flags and returns to the arena's initial story hour.
+Tomoe still uses story variant 3, while an explicit `--hour` remains authoritative.
+The installed-data regression test checks morning hour 6 for 150 ticks after restarting with the phase-two flag and storm lighting present.
+The forced-scene probe captures `respawns-storm.png` and `respawns-reset.png` visibly switch from the evening environment back to the morning sky and shadow direction.
+
+For short diagnostics, `PF_RESPAWN_PROBE=1` forces one Tomoe scene identity and calls the public duel reset once per 60 ticks, with a blood-stain burst before each reset.
+`PF_RESPAWN_PROBE=tomoe-each` forces the scene identity each cycle and is slower because character assets reload.
+This probes renderer lifecycle behavior rather than playing twenty complete boss fights.
+With performance logging enabled it reports entities, mesh entities, mesh and standard-plus-layered material assets, lights, cameras, rigs, live/held FX, particles, story hour and queued main-pass draw batches.
+Draw batches count opaque and alpha-mask bins plus prepared transparent batches, rather than individual indirect subdraws or shadow/post passes.
+`PF_LEGACY_DECALS=1` restores the old deferred-query budgeting and missing respawn cleanup for reproduction only.
+
+The final rendered probe completed 1,200 simulation ticks and recorded all twenty reset cycles in `target/alt-pf/respawns-fixed.stderr.txt`.
+Every phase-one sample has 16,076 mesh entities, 3,376 mesh assets, 6,730 standard-plus-layered material assets, 27 lights, one camera, two rigs and 30 queued main draw batches.
+Gameplay entities remain at 28,413; the final screenshot request temporarily adds two capture entities.
+One authored fog-wall effect remains held during the active fight, with its particles warming from 10 to a stable 30 rather than growing with resets.
+Story hour is 6 in every completed-fight sample.
+The final storm, reset and twentieth-fight images are `respawns-fixed-storm.png`, `respawns-fixed-reset.png` and `respawns-fixed.png` under `target/alt-pf/captures`.
+The earlier every-cycle Tomoe probe was stopped at 55 seconds as required; character asset loading allowed nine phase cycles in that window and exposed the material leak.
+The final twenty-cycle probe uses one forced Tomoe identity followed by ordinary phase-one resets, while headless teardown coverage repeats character wrapper replacement twenty times.
+
+Final verification uses `CARGO_TARGET_DIR=target/alt-pf` and four Cargo jobs: all 59 game unit tests and five integration tests pass, including renderer/map/camera coverage.
+Workspace/all-target Clippy with warnings denied passes, and the final workspace formatting check passes after the concurrent brain formatting changes settled.
+No brain files were edited by this renderer work, and no commits or git-state mutations were made.

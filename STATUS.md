@@ -1,5 +1,29 @@
 # Status
 
+## Coach-selected break punishes (2026-10-13)
+
+Wolf's ordinary break window comes from a050_190100's 1.3-second TAE execution cancel.
+The coach receives complete near/mid/far punish facts and returns ordered preferences; otherwise neutral Thompson sampling uses recorded punish outcomes, with fastest-reachable selection only when nothing is viable.
+Memory v6 preserves valid-fight punish uses, landed hits, window damage and kill conversions; legacy profiles migrate without invented evidence.
+Real Genichiro/Owl fixtures, all sim brain and coach tests, brain-net tests, workspace/all-target Clippy with warnings denied and formatting pass using target/alt-po and six jobs.
+
+## Paired placement at walls and ledges (2026-10-13)
+
+Reproduced castle-top deathblows crossing collision and falling onto lower roofs; paired clearance now checks the real relocation sweep, stable supporting floors and actual deathblow, grab and throw-recovery movement.
+Unsafe cramped-space displacement keeps the last safe feet, while ordinary movement and knockback can still leave the arena.
+All six placement regressions pass, including four installed-map replays in the slow tier, along with the targeted deathblow, combat, arena, Owl grab, perilous counter and Genichiro filters.
+Workspace/all-target Clippy with warnings denied and the formatting check pass using `target/alt-db` and six build jobs.
+Per-tick before/after position traces and the verified 4.17-second castle entrance capture are under `target/alt-db/captures/` (`castle-door.mp4`, also available as GIF).
+
+## Brain Task A: reachable attacks and break conversion (2026-10-13)
+
+Task A is complete: cached data-derived move/combo sheets gate brain-owned attacks, choose the fastest reachable break punish, expose posture-timed combos, penalise idle/no-threat guarding and report first-hit hit/miss distances.
+The controlled Genichiro A/B reduces true whiffs from 6/18 (33.3%) to 3/14 (21.4%); the Owl converts 1/1 breaks on both sides, with delay reduced from 0.917 s to 0.450 s.
+Old bow whiff rates cannot be corrected exactly from saved aggregates; new projectiles retain their firing move, and utility animations cannot whiff.
+All seven required release filters, all 42 brain-net tests, workspace/all-target Clippy with warnings denied and formatting pass using target/alt-ta and six jobs offline.
+GPU and shared simulation changes are preserved, with two behavior-preserving lighting lint adjustments; no commits, real coach calls or writes to protected data/log directories.
+See `docs/BRAIN.md` for sheet examples, prediction limits and the player's manual checks; Task A is marked done in `docs/BRAIN-ROADMAP.md`.
+
 ## Decisions coach context and idle guards (2026-10-12)
 
 Decisions checkpoint input now includes up to 768 serialized bytes of coach notes, active-set intent, principles, newest lessons and move confidence, with a documented trimming order.
@@ -9,7 +33,7 @@ The real-data scripted Genichiro regression fails with the old harmless-guard sc
 All seven required release filters and all 42 brain-net tests pass, as do workspace/all-target Clippy with warnings denied and the formatting check.
 All builds used target/alt-dc and six jobs; verification used offline fakes, with no commits, git-state changes or writes to the protected data/log directories.
 
-Last updated 12 October 2026.
+Last updated 13 October 2026.
 Read this first in a new session, then `AGENTS.md` and `docs/DESIGN.md`.
 How much of the game is done overall: `docs/PROGRESS.md`.
 
@@ -1218,3 +1242,34 @@ All 23 focused release tests passed: 11 map tests including the installed-data o
 Scoped game/format all-target Clippy and rustfmt checks of the two new Rust files passed.
 The simulation camera integration build and final workspace/all-target Clippy remain blocked by untouched `crates/sim/tests/it/coach.rs:242`, whose `GamePlan` initializer lacks `explore`, `lessons` and `move_controls`.
 All Cargo checks used `target/alt-fm` and three jobs, with no git operations, network/model calls, live game sessions or writes to the game, cache, re or protected output directories.
+
+## Castle rooftop renderer and restart cleanup (2026-10-13)
+
+Specialized blind camera fade removes the shared discard from ordinary map shaders, lowering measured opaque GPU time from 13.153 to 10.455 ms at 1080p on the RTX 5070 Ti.
+Mean frame time is 16.781 ms before and 16.681 ms after, matching the 16.681 ms baseline-equivalent feature control; short idle runs did not reproduce the reported long-session 35 fps state.
+Fixed deferred decal-budget overflow, respawn stain/transient-FX cleanup, stale placed-effect holds and unused character-material wrappers.
+The twenty-reset rendered probe keeps mesh/material assets, lights, cameras, rigs and main draw batches flat, with 6,730 materials instead of the former growth of about 56 per phase cycle.
+Phase-one Genichiro restores the arena's morning environment after Tomoe; headless story-time and visual storm/reset checks pass.
+Measurements and captures are under target/alt-pf, with details in docs/VISUALS-PLAN.md.
+The initial Lua measurement inadvertently wrote logs/brain-session-1791847964710.md; it was left untouched, and subsequent captures used simple AI to bypass reports.
+All 59 game unit tests and five integration tests pass with target/alt-pf and four jobs; workspace/all-target Clippy with warnings denied and the final workspace formatting check pass.
+No brain files were edited, and no commits or git-state mutations were made.
+
+## Wolf victory recording (2026-10-13)
+
+Reproduced a final Genichiro/Tomoe deathblow leaving Wolf wins at zero; map-backed encounters never schedule the boss-death respawn that the brain required to settle a result.
+Encounter defeat now settles once, including cinematic event frames and before reset; confirmed victories survive the low-input void gate and retain kill time in memory, reports and coach trends.
+Regressions cover Genichiro handover, final victory and persisted summaries, Owl and both Father variants, single-phase c1010, and player death remaining a boss win.
+Validation with target/alt-ww and six jobs: 98 brain unit tests, 53 brain integration tests and 19 local coach tests pass, with one existing slow test ignored; workspace/all-target Clippy with warnings denied and workspace formatting checks pass.
+Existing player memory and logs were left untouched; logs contain no raw combat victory timestamps, so an exact recount requires additional fight telemetry or a recording and should first produce a reviewed copy.
+
+## Shared map story lighting (2026-10-13)
+
+The map loader now selects installed event-100 lighting, map-specific story presets, GPARAM sub-IDs and sky groups through shared logic, with one original metadata module per map and `--story` selection.
+All four collision GPARAM IDs are retained independently, lighting regions switch with player/camera movement, and reservoir file switching uses the same mechanism as the other maps.
+Seven installed-data selector tests pass, including boss states, clear/storm restoration and sky-override priority; earlier focused map/lighting/sky/story/arena checks passed, including the Tomoe restart regression.
+Accepted captures cover all nine default map starts and both castle-top times under `target/alt-lf/captures/`, with frame medians from 16.504 to 20.522 ms and detailed evidence in `docs/LIGHTING.md`.
+Exact visual equivalence remains limited by missing event sky exports, unresolved nonzero bank/family provenance and the existing rendering calibration; no tone curve, exposure or probe-blend implementation was added.
+Final workspace/all-target Clippy with warnings denied and workspace formatting both pass after the other agent resolved their temporary compilation/lint/formatting blockers.
+All builds and tests use target/alt-lf and six jobs, with no commits, git-state changes, network/API calls or writes to protected data directories.
+2026-10-13: Fixed Task A move-sheet selection applying reach gates and generated alternatives to fixed/scripted brains; added fixed-plan and generic/installed Tomoe bullet-range regressions, and explicitly opted adaptive fixtures into move selection without changing assertions; sekiro-sim release tests pass (199 unit + 315 integration, 20 ignored, 0 failed), workspace/all-target Clippy with warnings denied and formatting checks pass using target/alt-lt and eight build jobs.

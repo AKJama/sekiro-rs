@@ -147,6 +147,22 @@ fn guarded_lightning_still_electrifies() {
 }
 
 #[test]
+fn lightning_bullet_reaches_beyond_melee_range() {
+    let Some(duel) = tomoe() else {
+        return;
+    };
+    let row = &duel.boss_brain.as_ref().unwrap().move_sheet["3039"];
+    assert!(
+        !row.projectiles.is_empty(),
+        "lightning bullet missing from move sheet: {row:?}"
+    );
+    assert!(
+        row.fits([6.0, 0.0], [0.0; 2]),
+        "lightning bullet cannot reach Wolf: {row:?}"
+    );
+}
+
+#[test]
 fn grounded_lightning_electrifies_wolf() {
     let Some(mut duel) = tomoe() else {
         return;

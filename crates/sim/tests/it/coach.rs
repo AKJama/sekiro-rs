@@ -240,6 +240,7 @@ fn set(name: &str, plan: &str) -> PlanSet {
 
 fn plan(notes: &str) -> GamePlan {
     GamePlan {
+        punish_preferences: Default::default(),
         checkpoint_prefs: Default::default(),
         boss_phase: "c1010".into(),
         counter_weights: Default::default(),
@@ -416,7 +417,13 @@ fn fight_one_makes_no_calls_and_a_plan_that_arrives_in_the_respawn_plays_from_fi
     eprintln!("fight 2 plans: {plans:?}");
     assert_eq!(plans[0], "3002", "the opener runs first");
     assert!(plans.len() >= 3, "{plans:?}");
-    assert!(plans[1..].iter().all(|p| p == "3000+3001"), "{plans:?}");
+    assert!(
+        plans[1..].iter().all(|p| p == "3000+3001"
+            || p.starts_with("run_in")
+                && driver(&duel).history.iter().any(|plan| plan.value() == *p
+                    && sekiro_sim::brain::limits::has_attack(plan, &SOLDIER))),
+        "{plans:?}"
+    );
     {
         let c = coach.borrow();
         assert_eq!(
@@ -601,8 +608,14 @@ fn a_set_of_only_retreats_still_attacks_within_six_seconds() {
     let starts = attack_starts(&mut duel, 60.0);
     let stats = driver(&duel).stats;
     eprintln!("{stats:?}; attacks at {starts:?}");
-    // The plan has no attack, so it is never run; his own AI acts and attacks.
-    assert_eq!(stats.planned, 0, "{stats:?}");
+    // The attack-free retreat is refused; the sheet supplies attacks and approaches.
+    assert!(
+        !driver(&duel)
+            .history
+            .iter()
+            .any(|p| p.value() == "retreat12")
+    );
+    assert!(stats.planned > 0, "{stats:?}");
     assert!(starts.len() >= 4, "{starts:?}");
     let mut last = 0.0;
     for s in &starts {

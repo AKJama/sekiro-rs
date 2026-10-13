@@ -1,4 +1,5 @@
-//! Opt-in (`PLAY_LOG_PERF=1`), buffered per-render-frame measurements in `cache/perf/<ms>.csv`:
+//! Opt-in (`PLAY_LOG_PERF=1`), buffered per-render-frame measurements in `cache/perf/<ms>.csv`
+//! (override the directory with `PLAY_PERF_DIR`):
 //! wall time, fixed steps, drawn and simulated clip times and positions, hit stops, hits and
 //! sounds, plus where a slow frame went: `x_main_ms` (the main schedule, `First` to `Last`),
 //! `x_fixed_ms` (the fixed steps), `x_clip_loads`/`x_clip_ms` (clips read from disk on the frame
@@ -74,12 +75,15 @@ pub struct PerfLog {
 
 impl PerfLog {
     pub fn open() -> std::io::Result<Self> {
-        std::fs::create_dir_all("cache/perf")?;
+        let dir = std::env::var_os("PLAY_PERF_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| "cache/perf".into());
+        std::fs::create_dir_all(&dir)?;
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        let path = format!("cache/perf/{stamp}.csv");
+        let path = dir.join(format!("{stamp}.csv"));
         let mut output = BufWriter::new(
             std::fs::OpenOptions::new()
                 .write(true)
@@ -90,7 +94,7 @@ impl PerfLog {
             output,
             "frame,wall_ms,steps,alpha,sim_step,replay_frame,wolf_state,wolf_clip,wolf_time,wolf_sim_time,draw_x,draw_y,draw_z,sim_x,sim_y,sim_z,owl_state,owl_clip,owl_time,wolf_stop,owl_stop,x_main_ms,x_fixed_ms,x_clip_loads,x_clip_ms,x_render_max_ms,x_render_frames,x_pipelines_ok,x_pipelines_waiting,x_render_sets,hits,sounds,wolf_starts,owl_starts,wolf_stop_max,owl_stop_max"
         )?;
-        info!("perf log: {path}");
+        info!("perf log: {}", path.display());
         Ok(Self {
             output,
             last: Instant::now(),
@@ -156,6 +160,8 @@ pub struct RenderProbeData {
     pub frames: usize,
     pub pipelines_ok: usize,
     pub pipelines_waiting: usize,
+    /// Queued draw batches in the main opaque, alpha-mask and transparent passes.
+    pub draw_batches: usize,
 }
 
 #[derive(Resource, Clone, Default)]
@@ -198,6 +204,9 @@ pub fn add_render_probe(app: &mut App, probe: RenderProbe) {
         return;
     };
     render.insert_resource(probe);
+    if std::env::var_os("PF_RESPAWN_PROBE").is_some() {
+        render.add_systems(Render, count_draw_batches.in_set(RenderSystems::Render));
+    }
     render.add_systems(
         Render,
         (|p: Res<RenderProbe>| {
@@ -254,6 +263,58 @@ pub fn add_render_probe(app: &mut App, probe: RenderProbe) {
         })
         .in_set(RenderSystems::PostCleanup),
     );
+}
+
+fn count_draw_batches(
+    probe: Res<RenderProbe>,
+    opaque: Res<
+        bevy::render::render_phase::ViewBinnedRenderPhases<bevy::core_pipeline::core_3d::Opaque3d>,
+    >,
+    masked: Res<
+        bevy::render::render_phase::ViewBinnedRenderPhases<
+            bevy::core_pipeline::core_3d::AlphaMask3d,
+        >,
+    >,
+    transparent: Res<
+        bevy::render::render_phase::ViewSortedRenderPhases<
+            bevy::core_pipeline::core_3d::Transparent3d,
+        >,
+    >,
+) {
+    fn binned<P: bevy::render::render_phase::BinnedPhaseItem>(
+        phases: &bevy::render::render_phase::ViewBinnedRenderPhases<P>,
+    ) -> usize {
+        phases
+            .0
+            .values()
+            .map(|p| {
+                p.multidrawable_meshes.len()
+                    + p.batchable_meshes.len()
+                    + p.unbatchable_meshes
+                        .values()
+                        .map(|b| b.entities.len())
+                        .sum::<usize>()
+                    + p.non_mesh_items
+                        .values()
+                        .map(|b| b.entities.len())
+                        .sum::<usize>()
+            })
+            .sum()
+    }
+    if let Ok(mut data) = probe.0.lock() {
+        data.draw_batches = binned(&opaque)
+            + binned(&masked)
+            + transparent
+                .0
+                .values()
+                .map(|p| {
+                    p.items
+                        .iter()
+                        .filter(|(_, i)| !i.batch_range.is_empty())
+                        .count()
+                })
+                .sum::<usize>();
+    }
 }
 
 pub fn enabled() -> bool {

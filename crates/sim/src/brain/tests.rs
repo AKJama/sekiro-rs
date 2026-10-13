@@ -1151,6 +1151,10 @@ fn memory_v1_migrates_and_keeps_ten_fights() {
         (memory::MEMORY_VERSION, 2, 0)
     );
     assert_eq!(m.boss["3000"].n, 5);
+    assert!(
+        m.punishes.is_empty(),
+        "legacy hits are not evidence of punish success"
+    );
     for i in 0..13 {
         m.push_record(record(i, 0, None));
     }
@@ -1270,6 +1274,7 @@ fn set(name: &str, plans: &[(&str, f32)]) -> PlanSet {
 
 fn good_plan() -> GamePlan {
     GamePlan {
+        punish_preferences: Default::default(),
         explore: Default::default(),
         move_controls: Vec::new(),
         lessons: Vec::new(),
@@ -1563,6 +1568,7 @@ fn busy_input() -> CoachInput {
         memory.push_record(record(3 + i, i, Some(30.0 + i as f32)));
     }
     let big_plan = GamePlan {
+        punish_preferences: Default::default(),
         explore: Default::default(),
         move_controls: Vec::new(),
         lessons: Vec::new(),

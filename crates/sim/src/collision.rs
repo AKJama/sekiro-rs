@@ -46,6 +46,163 @@ pub fn throw_pair_path_shift(
     grounds: [&dyn Ground; 2],
     path: &[[[f32; 3]; 2]],
 ) -> Option<[f32; 2]> {
+    pair_path_shift(grounds, path, 4.0, true)
+}
+
+/// Small corrections for actual paired movement, avoiding large relocations mid-clip.
+pub fn throw_pair_step_shift(
+    grounds: [&dyn Ground; 2],
+    path: &[[[f32; 3]; 2]],
+) -> Option<[f32; 2]> {
+    pair_path_shift(grounds, path, 0.2, true)
+}
+
+/// Start/recovery travel already went through the controller's wall slide. Check its
+/// floor support without re-sweeping the slide's curved path as a straight line.
+pub(crate) fn throw_pair_floor_step_shift(
+    grounds: [&dyn Ground; 2],
+    path: &[[[f32; 3]; 2]],
+) -> Option<[f32; 2]> {
+    pair_path_shift(grounds, path, 0.2, false)
+}
+
+fn pair_path_shift(
+    grounds: [&dyn Ground; 2],
+    path: &[[[f32; 3]; 2]],
+    limit: f32,
+    sweep_motion: bool,
+) -> Option<[f32; 2]> {
+    if path.is_empty() {
+        return Some([0.0; 2]);
+    }
+    let preferred = if sweep_motion {
+        throw_wall_shift(grounds, path).unwrap_or([0.0; 2])
+    } else {
+        [0.0; 2]
+    };
+    if preferred[0].hypot(preferred[1]) <= limit
+        && pair_path_clear(grounds, path, preferred, sweep_motion)
+    {
+        return Some(preferred);
+    }
+    // Try the blocking surface's normal first. A wide paired clip at a door can
+    // need metres of clearance; probing every direction at every radius stalls play.
+    if limit > 0.2
+        && let Some(direction) = pair_clearance_direction(grounds, path)
+    {
+        for ring in 1..=(limit / 0.1).round() as usize {
+            let radius = ring as f32 * 0.1;
+            let shift = [
+                preferred[0] + direction[0] * radius,
+                preferred[1] + direction[1] * radius,
+            ];
+            if shift[0].hypot(shift[1]) <= limit
+                && pair_path_clear(grounds, path, shift, sweep_motion)
+            {
+                return Some(shift);
+            }
+        }
+    }
+    // Search locally around the wall projection for supported pair space. This only
+    // constrains authored paired placement; ordinary movement may still leave a ledge.
+    for ring in 1..=(limit / 0.1).round() as usize {
+        let radius = ring as f32 * 0.1;
+        for direction in 0..16 {
+            let angle = direction as f32 * std::f32::consts::TAU / 16.0;
+            let shift = [
+                preferred[0] + radius * angle.sin(),
+                preferred[1] + radius * angle.cos(),
+            ];
+            if shift[0].hypot(shift[1]) <= limit
+                && pair_path_clear(grounds, path, shift, sweep_motion)
+            {
+                return Some(shift);
+            }
+        }
+    }
+    None
+}
+
+fn pair_clearance_direction(grounds: [&dyn Ground; 2], path: &[[[f32; 3]; 2]]) -> Option<[f32; 2]> {
+    for segment in path.windows(2) {
+        for (i, ground) in grounds.into_iter().enumerate() {
+            let mut from = segment[0][i];
+            from[1] = ground
+                .floor(from[0], from[2], from[1] + ground.max_step())
+                .unwrap_or(from[1]);
+            let want = [segment[1][i][0] - from[0], segment[1][i][2] - from[2]];
+            let got = ground.slide(from, want);
+            let correction = [got[0] - want[0], got[1] - want[1]];
+            let length = correction[0].hypot(correction[1]);
+            if length > 0.01 {
+                return Some(correction.map(|v| v / length));
+            }
+        }
+    }
+    None
+}
+
+/// Check the real relocation as well as the translated animation, so a valid endpoint
+/// on the other side of a thin wall or on a lower roof cannot be selected.
+fn pair_path_clear(
+    grounds: [&dyn Ground; 2],
+    path: &[[[f32; 3]; 2]],
+    shift: [f32; 2],
+    sweep_motion: bool,
+) -> bool {
+    for (i, ground) in grounds.into_iter().enumerate() {
+        let origin = path[0][i];
+        let translate = |p: [f32; 3]| [p[0] + shift[0], p[1], p[2] + shift[1]];
+        let mut from = origin;
+        for (segment, to) in std::iter::once(translate(origin))
+            .chain(path.iter().skip(1).map(|p| translate(p[i])))
+            .enumerate()
+        {
+            let delta = [to[0] - from[0], to[2] - from[2]];
+            let steps = (delta[0].hypot(delta[1]) / 0.1).ceil().max(1.0) as usize;
+            for n in 0..=steps {
+                let t = n as f32 / steps as f32;
+                let p = [from[0] + delta[0] * t, origin[1], from[2] + delta[1] * t];
+                // Support the capsule footprint, allowing ordinary roof seams and steps,
+                // but never borrowing a floor metres below the throw's starting floor.
+                for (dx, dz) in [(0.0, 0.0), (0.2, 0.0), (-0.2, 0.0), (0.0, 0.2), (0.0, -0.2)] {
+                    if !ground
+                        .floor(p[0] + dx, p[2] + dz, origin[1] + ground.max_step())
+                        .is_some_and(|y| (y - origin[1]).abs() <= ground.max_step())
+                    {
+                        return false;
+                    }
+                }
+            }
+            let mut feet = from;
+            feet[1] = ground
+                .floor(from[0], from[2], origin[1] + ground.max_step())
+                .unwrap_or(origin[1]);
+            let got = if sweep_motion || (segment == 0 && shift[0].hypot(shift[1]) > 1e-4) {
+                ground.slide(feet, delta)
+            } else {
+                delta
+            };
+            if (got[0] - delta[0]).hypot(got[1] - delta[1]) > 1e-4 {
+                return false;
+            }
+            from = to;
+        }
+        if !sweep_motion && shift[0].hypot(shift[1]) > 1e-4 {
+            let mut end = path.last().unwrap()[i];
+            end[1] = ground
+                .floor(end[0], end[2], origin[1] + ground.max_step())
+                .unwrap_or(origin[1]);
+            let got = ground.slide(end, shift);
+            if (got[0] - shift[0]).hypot(got[1] - shift[1]) > 1e-4 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn throw_wall_shift(grounds: [&dyn Ground; 2], path: &[[[f32; 3]; 2]]) -> Option<[f32; 2]> {
     let mut shift = [0.0; 2];
     for _ in 0..32 {
         let mut clear = true;

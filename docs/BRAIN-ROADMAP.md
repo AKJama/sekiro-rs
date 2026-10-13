@@ -66,7 +66,7 @@ An Opus reviewer with no prior context read the brain and the player's logs; the
 
 | Task | What | Status |
 |---|---|---|
-| A | Move sheet as a gate and a feature (reach and first-hit time against Wolf's predicted position), fastest reachable break punish, idle and no-threat guard penalties, per-move and per-combo posture damage | Next |
+| A | Move sheet as a gate and a feature (reach and first-hit time against Wolf's predicted position), fastest reachable break punish, idle and no-threat guard penalties, per-move and per-combo posture damage | Done (2026-10-13) |
 | B | One merged bandit: every attack, keyed by move, shared priors across situations, Wolf's current action, posture and habits in the context, recency weighting; checkpoint bandit and duplicate store removed; memory migration | After A |
 | C | Coach narrowed and reviews folded in; mid-fight calls reduced; Decisions A/B | After B |
 
@@ -94,9 +94,22 @@ Snapshots are copies; play from them only through `--brain-stage` (which works o
 
 - Is the local chooser missing the "intuition" a model brings when picking plan sets? Test: Genichiro from scratch with `--checkpoint decisions` and its own memory folder (`logs/memory-decisions`), about 40 fights, against the 57 local-chooser fights.
 - Later: make the coach an agent with read-only query tools over the deterministic tables (top moves by posture damage, most deflected or Mikiri'd moves, best combos, least used), so it can investigate instead of reading one fixed digest.
+- Later (the player's idea, 2026-10-13): a systematic coach test harness.
+  The boss brain fights a consistent opponent (a Lua-controlled Wolf, or a fully scripted list of moves), and we measure how many fights it takes to dominate it.
+  This gives a repeatable score for every brain change instead of relying only on live playtests.
 - Coach input grew from about 6 to 9 thousand tokens a call on 2026-10-11 to about 19 thousand on 2026-10-12 (about 40% cached); find out how much is the game's message and how much the CLI's own prompt.
 
 ## Log
+
+- 2026-10-13: Added data-derived viable posture-break punishes, ordered coach preferences, neutral per-punish evidence sampling, memory-v6 outcome records and bounded Decisions break facts; real Genichiro and Owl fixtures verify recovery and range.
+
+- 2026-10-13: Fixed missing Wolf victories by settling map encounter defeat independently of respawn, preserving confirmed sparse-input wins, and carrying kill time through memory, metrics, reports and coach trends with Genichiro, Owl/Father and single-phase regressions.
+
+- 2026-10-13: Task A implemented: first-window reach/velocity gate, live plan-goal checks, fastest reachable break punishment, guarded-prefix combo option, small idle/guard failure signal, enriched coach table and first-hit hit/miss distances.
+  The cited bow moves are genuine attacks, but old delayed-projectile attribution makes their historical real-miss rates unrecoverable; new shots retain their firing move.
+  Final installed-data A/B: Genichiro whiffs 6/18 (33.3%) -> 3/14 (21.4%); Owl breaks converted 1/1 on both sides, with delay 0.917 s -> 0.450 s.
+  All seven required release filters and all 42 brain-net tests pass, as do workspace/all-target Clippy with warnings denied and the formatting check, using target/alt-ta and six jobs offline.
+  The gate scene exercises live reach rejection and the passive deadline; the small scripted results still need the player's spacing, break-follow-up and fresh telemetry checks in play.
 
 - 2026-10-12: Problem found from the player's 57 Genichiro fights; steps 1 to 4 started; Owl and Genichiro brains frozen.
 - 2026-10-12: Steps 1 to 4 landed in e964560; the player is running the Decisions-from-scratch test on the old exe (`target/play`); the new brain is in `target/play-next`.

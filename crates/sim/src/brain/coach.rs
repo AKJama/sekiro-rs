@@ -94,6 +94,8 @@ pub struct Avoid {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GamePlan {
+    /// Distance bucket -> preferred ids in order, each with a one-line reason.
+    pub punish_preferences: std::collections::BTreeMap<String, Vec<Avoid>>,
     pub explore: super::move_bandit::Explore,
     pub move_controls: Vec<super::move_bandit::Control>,
     pub lessons: Vec<String>,
@@ -248,7 +250,10 @@ impl GamePlan {
 
     /// Whether anything can be played.
     pub fn usable(&self) -> bool {
-        !self.sets.is_empty() || !self.opener.is_empty() || !self.on_wolf_break.is_empty()
+        !self.sets.is_empty()
+            || !self.opener.is_empty()
+            || !self.on_wolf_break.is_empty()
+            || self.punish_preferences.values().any(|p| !p.is_empty())
     }
 
     /// Checks the plan against the boss's table: unknown choices and plans are dropped with a
@@ -261,6 +266,26 @@ impl GamePlan {
             ..GamePlan::default()
         };
         out.boss_phase = actions.chr.into();
+        for (bucket, preferences) in &self.punish_preferences {
+            if !matches!(bucket.as_str(), "near" | "mid" | "far") {
+                continue;
+            }
+            out.punish_preferences.insert(
+                bucket.clone(),
+                preferences
+                    .iter()
+                    .filter(|p| actions.parse(&p.choice).is_ok() && !p.reason.trim().is_empty())
+                    .take(8)
+                    .map(|p| Avoid {
+                        choice: p.choice.clone(),
+                        reason: clip(
+                            &p.reason.split_whitespace().collect::<Vec<_>>().join(" "),
+                            120,
+                        ),
+                    })
+                    .collect(),
+            );
+        }
         out.explore = self.explore;
         out.lessons = self
             .lessons
@@ -456,28 +481,6 @@ impl GamePlan {
                 }
                 set.plans.retain(|p| p.weight > 0.0);
                 warnings.push(format!("set {}: lua capped at 25%", set.name));
-            }
-            let ids: std::collections::HashSet<_> = set
-                .plans
-                .iter()
-                .filter_map(|p| actions.parse(&p.plan).ok())
-                .flat_map(|p| p.steps)
-                .filter_map(|s| match s {
-                    super::plan::Step::Act(id)
-                        if actions.actions.iter().any(|a| {
-                            a.id == id && a.kind == super::actions::ActionKind::Attack
-                        }) =>
-                    {
-                        Some(id)
-                    }
-                    _ => None,
-                })
-                .collect();
-            if ids.len() < 3 {
-                warnings.push(format!(
-                    "set {}: mix at least 3 different attack ids",
-                    set.name
-                ));
             }
         }
         out.sets.retain(|s| !s.plans.is_empty());
@@ -715,6 +718,9 @@ pub struct SetStat {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(into = "CoachWire")]
 pub struct CoachInput {
+    pub punish_window: Option<f32>,
+    pub viable_punishes: std::collections::BTreeMap<String, Vec<super::moves::Punish>>,
+    pub wolf_posture: f32,
     pub digest: super::digest::Digest,
     /// Mature recent outcomes: [samples, success rate, severity-weighted failure rate].
     pub attack_rates: TopMap<[f32; 3]>,
@@ -764,7 +770,27 @@ pub struct CoachInput {
 
 impl From<CoachInput> for serde_json::Value {
     fn from(i: CoachInput) -> Self {
+        let mut options = serde_json::Map::new();
+        let mut buckets = serde_json::Map::new();
+        for (bucket, rows) in &i.viable_punishes {
+            let compact: Vec<_> = rows
+                .iter()
+                .map(|p| {
+                    let mut row = serde_json::to_value(p).unwrap().as_array().unwrap().clone();
+                    options
+                        .entry(p.id.clone())
+                        .or_insert_with(|| serde_json::json!([row[1], row[6], row[9]]));
+                    row.remove(9);
+                    row.remove(6);
+                    row.remove(1);
+                    serde_json::Value::Array(row)
+                })
+                .collect();
+            buckets.insert(bucket.clone(), compact.into());
+        }
         let mut value = serde_json::json!({
+            "punish_window": i.punish_window, "punish_options": options, "viable_punishes": buckets,
+            "wolf_posture": i.wolf_posture,
             "digest": i.digest,
             "attack_rates": i.attack_rates,
             "checkpoints": i.checkpoints,
@@ -838,6 +864,21 @@ impl CoachInput {
     }
 
     fn trim_one(&mut self) -> bool {
+        // Preserve punish facts ahead of the duplicate raw animation sheet.
+        if !self.viable_punishes.is_empty() && !self.move_sheet.is_empty() {
+            self.move_sheet.pop_last();
+            return true;
+        }
+        if self.digest.moves.lines().count() > 8 {
+            self.digest.moves = self
+                .digest
+                .moves
+                .lines()
+                .take(self.digest.moves.lines().count() - 1)
+                .collect::<Vec<_>>()
+                .join("\n");
+            return true;
+        }
         if self.attack_rates.pop(3) {
             return true;
         }
@@ -931,6 +972,8 @@ impl CoachInput {
                 .keys()
                 .min_by_key(|key| {
                     (
+                        self.break_log.last().is_some_and(|r| r.action == **key),
+                        key.contains('+') && used.contains(key.as_str()),
                         used.contains(key.as_str()),
                         self.actions.get(*key).map_or(0, |c| c.n),
                     )
@@ -947,6 +990,15 @@ impl CoachInput {
         if self.phase == "mid"
             && let Some(plan) = self.played.as_mut()
         {
+            if let Some(preference) = plan
+                .punish_preferences
+                .values_mut()
+                .flat_map(|v| v.iter_mut())
+                .find(|p| !p.reason.is_empty())
+            {
+                preference.reason.clear();
+                return true;
+            }
             if plan.avoid.pop().is_some()
                 || plan.retry.pop().is_some()
                 || plan.principles.pop().is_some()
@@ -988,7 +1040,13 @@ impl CoachInput {
             return true;
         }
         self.break_summary.pop_last().is_some()
-            || self.move_sheet.pop_last().is_some()
+            || self
+                .move_sheet
+                .keys()
+                .rev()
+                .find(|key| self.break_log.last().is_none_or(|r| r.action != **key))
+                .cloned()
+                .is_some_and(|key| self.move_sheet.remove(&key).is_some())
             || (!self.break_log.is_empty() && {
                 self.break_log.remove(0);
                 true

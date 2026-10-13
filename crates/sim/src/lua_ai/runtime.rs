@@ -259,6 +259,8 @@ pub enum ActSlot {
 /// that queues [`ActHook::choice`] instead, unless the moment is a reaction.
 #[derive(Debug, Clone, Default)]
 pub struct ActHook {
+    /// Live reach eligibility for brain-owned attack goals only.
+    pub reachable: Option<std::collections::HashSet<i32>>,
     /// Relative multipliers for Lua's offered Kengeki callback indices.
     pub counter_weights: Vec<(i32, f64)>,
     /// One local posture-break response, replacing the script's queued follow-up.
@@ -1718,6 +1720,19 @@ fn action_update(st: &mut AiState, id: u32, g: &Goal) -> i32 {
     }
     let playing = st.world.current_anim == Some(action);
     if !g.started_anim {
+        if g.plan_step.is_some()
+            && st
+                .act_hook
+                .as_ref()
+                .and_then(|h| h.reachable.as_ref())
+                .is_some_and(|ids| !ids.contains(&action))
+            && (3000..3100).contains(&action)
+        {
+            // A setup's target can move away before its attack activates.
+            st.request.move_yaw = st.yaw_to(target);
+            st.request.move_level = 1.0;
+            return RESULT_CONTINUE;
+        }
         let followup = st
             .act_hook
             .as_ref()

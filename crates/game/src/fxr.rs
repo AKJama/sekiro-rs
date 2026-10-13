@@ -127,7 +127,7 @@ pub struct FxrPlayer {
 }
 
 impl FxrPlayer {
-    fn new(cache: PathBuf) -> Self {
+    pub(crate) fn new(cache: PathBuf) -> Self {
         let enabled = !std::env::args().any(|a| a == "--no-fxr");
         let lib = if enabled {
             FxrLib::scan(&cache)
@@ -267,6 +267,26 @@ impl FxrPlayer {
 
     /// Holds a map effect (a boss fog wall) at `at` while `on`, and lets it fade out once it is
     /// off. `serial` tells apart effects with the same id; the effect does not time out.
+    pub(crate) fn live_counts(&self) -> (usize, usize, usize) {
+        (
+            self.effects.len(),
+            self.effects.iter().filter(|e| e.persistent).count(),
+            self.particles,
+        )
+    }
+
+    pub(crate) fn reset_fight(&mut self) {
+        self.effects.retain(|e| e.persistent);
+        self.bullets.clear();
+        self.last_cues.clear();
+        self.particles = self
+            .effects
+            .iter()
+            .filter_map(|e| e.root.as_ref())
+            .map(count_particles)
+            .sum();
+    }
+
     pub fn hold(&mut self, id: i32, serial: i32, at: Transform, on: bool) {
         let key = (4, id, serial);
         let held = self
@@ -433,7 +453,7 @@ impl FxrPlayer {
         self.advance(1.0 / 60.0);
     }
 
-    fn advance(&mut self, dt: f32) {
+    pub(crate) fn advance(&mut self, dt: f32) {
         let _timer = crate::perf_log::SystemTimer::start("fxr_step");
         let mut live = 0usize;
         let lib = &mut self.lib;

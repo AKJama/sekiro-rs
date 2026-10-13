@@ -346,7 +346,7 @@ An exchange stays open for a punish window of 1 s after its clip ends, then coun
 | `whiffed` | An attack contacted nothing (dodged, out of range, interrupted before contact); tactics and back steps cannot whiff |
 | `punished` | Its side took an unguarded hit during it or within 1 s after |
 
-Each flag counts at most once per exchange; hits that arrive after the clip ended (a shuriken in flight) count for that side's latest exchange.
+Each flag counts at most once per exchange; delayed projectiles retain their firing animation and credit its open or retained exchange.
 `n` includes tactic and back-step exchanges, so it is not a count of plan uses or attacks alone.
 Older saved counts included non-attacking tactics as whiffs; existing memory files are left untouched, so historical totals still include those false whiffs.
 The request carries this fight's counts per key (`tally.boss`, `tally.wolf`, most used first) as arrays `[n, hit, blocked, deflected, whiffed, punished, countered, mikiri, jump, other]`; the same counts over every fight are in `memory.boss` and `memory.wolf`, so a controller can notice "the player deflects 3005" and "the player has adapted" (this fight differs from all fights).
@@ -780,7 +780,7 @@ String trimming preserves UTF-8 boundaries; full histories and move tables stay 
           "value": "lua"
         }
       ],
-      "instructions": "You are a doc example boss fighting Wolf. Reward order: win and win faster (time_to_kill_wolf, lower is better); then break Wolf posture and land a hit right after (wolf_posture_breaks, hits_after_break); then damage to Wolf per minute (HP plus posture); then take little damage (boss_damage_taken_per_min, HP plus posture) and reduce Wolf perfect deflects, each of which builds your posture. engaged_time is information and only a small tiebreaker when losing while landing hits; survival time is never a goal. Stalling, running away or passivity counts as failure: a fight where no attack of yours started in the last 4 s more than 35% of the time failed, whatever else happened, plans without an attack are ignored, you must start an attack at least every 6 s and may back off or retreat only once per 5 s. Retreat chains are allowed as baits when followed by an attack, including turning to punish a chase. Movement tactics exist to set up attacks (baits, spacing, timing mixups), not to avoid fighting. Think like a swordsman: turning your back or retreating while the opponent is in sword range leaves you open, so tactics should set up attacks safely. Probe instead of repeating: try untried options, drop what keeps being deflected or guarded, bait his habits (stand still briefly, walk in slowly, strafe, mix timings) and punish them. Input: obs is a fair view of both fighters (plan is what runs now); tally counts this fight per action or tactic as [n, hit, blocked, deflected, whiffed, punished, countered, mikiri, jump, other]; memory holds every fight so far (the same counts, Wolf's habits, and trend: his deflect%, guard%, hits you landed, hp% lost, attacks per minute, damage per minute and passive percent, and kill seconds for information only, over the last fights, now = this fight so far); why is what triggered this question. You are asked only a few times a fight. The boss samples from your probabilities all fight, so spread them over several good options. Reflexes (guarding, deflecting, counters and reactions) are automatic. Choose lua to leave an act to your own AI. Options are single actions, movement tactics (distances from Wolf, left and right are yours) and plans of up to 3 steps joined with > (consecutive attacks joined with +):\n3005: front kick\n5201: back step\nhold2: stand still facing Wolf for 2 s\nwalk_in4: walk slowly toward Wolf until 4 m away\nwalk_in4>3005: walk slowly toward Wolf until 4 m away, then front kick",
+      "instructions": "You are a doc example boss fighting Wolf. Reward order: win and win faster (time_to_kill_wolf, lower is better); then break Wolf posture and land a hit right after (wolf_posture_breaks, hits_after_break); then damage to Wolf per minute (HP plus posture); then take little damage (boss_damage_taken_per_min, HP plus posture) and reduce Wolf perfect deflects, each of which builds your posture. engaged_time is information and only a small tiebreaker when losing while landing hits; survival time is never a goal. Stalling, running away or passivity counts as failure: a fight where no attack of yours started in the last 4 s more than 35% of the time failed, whatever else happened, plans without an attack are ignored, you must start an attack at least every 6 s and may back off or retreat only once per 5 s. Retreat chains are allowed as baits when followed by an attack, including turning to punish a chase. Movement tactics exist to set up attacks (baits, spacing, timing mixups), not to avoid fighting. Think like a swordsman: turning your back or retreating while the opponent is in sword range leaves you open, so tactics should set up attacks safely. Probe instead of repeating: try untried options, drop what keeps being deflected or guarded, bait his habits (stand still briefly, walk in slowly, strafe, mix timings) and punish them. Input: obs is a fair view of both fighters (plan is what runs now); tally counts this fight per action or tactic as [n, hit, blocked, deflected, whiffed, punished, countered, mikiri, jump, other]; memory holds every fight so far (the same counts, Wolf's habits, and trend: his deflect%, guard%, hits you landed, hp% lost, attacks per minute, damage per minute and passive percent, and kill seconds for information only, over the last fights, now = this fight so far); why is what triggered this question; break contexts include up to four viable_punishes rows [id,name,first seconds,seconds left,hits,window HP/posture,total HP/posture,stun_lock,guard posture after,recovery,evidence,conversion rate], with the same facts as the coach. You are asked only a few times a fight. The boss samples from your probabilities all fight, so spread them over several good options. Reflexes (guarding, deflecting, counters and reactions) are automatic. Choose lua to leave an act to your own AI. Options are single actions, movement tactics (distances from Wolf, left and right are yours) and plans of up to 3 steps joined with > (consecutive attacks joined with +):\n3005: front kick\n5201: back step\nhold2: stand still facing Wolf for 2 s\nwalk_in4: walk slowly toward Wolf until 4 m away\nwalk_in4>3005: walk slowly toward Wolf until 4 m away, then front kick",
       "name": "boss_action",
       "type": "choice"
     }
@@ -804,7 +804,7 @@ The reply carries the chosen plan and the whole set (`BrainReply::set`, from `an
       "role": "user"
     }
   ],
-  "instructions": "You are a doc example boss fighting Wolf. Reward order: win and win faster (time_to_kill_wolf, lower is better); then break Wolf posture and land a hit right after (wolf_posture_breaks, hits_after_break); then damage to Wolf per minute (HP plus posture); then take little damage (boss_damage_taken_per_min, HP plus posture) and reduce Wolf perfect deflects, each of which builds your posture. engaged_time is information and only a small tiebreaker when losing while landing hits; survival time is never a goal. Stalling, running away or passivity counts as failure: a fight where no attack of yours started in the last 4 s more than 35% of the time failed, whatever else happened, plans without an attack are ignored, you must start an attack at least every 6 s and may back off or retreat only once per 5 s. Retreat chains are allowed as baits when followed by an attack, including turning to punish a chase. Movement tactics exist to set up attacks (baits, spacing, timing mixups), not to avoid fighting. Think like a swordsman: turning your back or retreating while the opponent is in sword range leaves you open, so tactics should set up attacks safely. Probe instead of repeating: try untried options, drop what keeps being deflected or guarded, bait his habits (stand still briefly, walk in slowly, strafe, mix timings) and punish them. Input: obs is a fair view of both fighters (plan is what runs now); tally counts this fight per action or tactic as [n, hit, blocked, deflected, whiffed, punished, countered, mikiri, jump, other]; memory holds every fight so far (the same counts, Wolf's habits, and trend: his deflect%, guard%, hits you landed, hp% lost, attacks per minute, damage per minute and passive percent, and kill seconds for information only, over the last fights, now = this fight so far); why is what triggered this question. You are asked only a few times a fight. The boss samples from your probabilities all fight, so spread them over several good options. Reflexes (guarding, deflecting, counters and reactions) are automatic. Choose lua to leave an act to your own AI. Options are single actions, movement tactics (distances from Wolf, left and right are yours) and plans of up to 3 steps joined with > (consecutive attacks joined with +):\n3005: front kick\n5201: back step\nhold2: stand still facing Wolf for 2 s\nwalk_in4: walk slowly toward Wolf until 4 m away\nwalk_in4>3005: walk slowly toward Wolf until 4 m away, then front kick",
+  "instructions": "You are a doc example boss fighting Wolf. Reward order: win and win faster (time_to_kill_wolf, lower is better); then break Wolf posture and land a hit right after (wolf_posture_breaks, hits_after_break); then damage to Wolf per minute (HP plus posture); then take little damage (boss_damage_taken_per_min, HP plus posture) and reduce Wolf perfect deflects, each of which builds your posture. engaged_time is information and only a small tiebreaker when losing while landing hits; survival time is never a goal. Stalling, running away or passivity counts as failure: a fight where no attack of yours started in the last 4 s more than 35% of the time failed, whatever else happened, plans without an attack are ignored, you must start an attack at least every 6 s and may back off or retreat only once per 5 s. Retreat chains are allowed as baits when followed by an attack, including turning to punish a chase. Movement tactics exist to set up attacks (baits, spacing, timing mixups), not to avoid fighting. Think like a swordsman: turning your back or retreating while the opponent is in sword range leaves you open, so tactics should set up attacks safely. Probe instead of repeating: try untried options, drop what keeps being deflected or guarded, bait his habits (stand still briefly, walk in slowly, strafe, mix timings) and punish them. Input: obs is a fair view of both fighters (plan is what runs now); tally counts this fight per action or tactic as [n, hit, blocked, deflected, whiffed, punished, countered, mikiri, jump, other]; memory holds every fight so far (the same counts, Wolf's habits, and trend: his deflect%, guard%, hits you landed, hp% lost, attacks per minute, damage per minute and passive percent, and kill seconds for information only, over the last fights, now = this fight so far); why is what triggered this question; break contexts include up to four viable_punishes rows [id,name,first seconds,seconds left,hits,window HP/posture,total HP/posture,stun_lock,guard posture after,recovery,evidence,conversion rate], with the same facts as the coach. You are asked only a few times a fight. The boss samples from your probabilities all fight, so spread them over several good options. Reflexes (guarding, deflecting, counters and reactions) are automatic. Choose lua to leave an act to your own AI. Options are single actions, movement tactics (distances from Wolf, left and right are yours) and plans of up to 3 steps joined with > (consecutive attacks joined with +):\n3005: front kick\n5201: back step\nhold2: stand still facing Wolf for 2 s\nwalk_in4: walk slowly toward Wolf until 4 m away\nwalk_in4>3005: walk slowly toward Wolf until 4 m away, then front kick",
   "max_output_tokens": 16,
   "model": "gpt-6-luna",
   "reasoning": {
@@ -1152,7 +1152,7 @@ Old memory fields default to zero or null rather than inventing historical break
 The coach prioritizes winning faster before breaks and their immediate follow-ups, damage per minute, and low boss damage taken; engaged time only breaks ties on losses while landing hits.
 
 A game plan can contain `on_wolf_break`, one to three weighted attack-containing plans validated against the boss's normal vocabulary and avoid list.
-An absent or empty list preserves the Lua follow-up.
+With a move sheet, the brain chooses the fastest reachable damaging normal move even when this list is absent or empty; a plain Lua brain keeps its own follow-up.
 Owl's compiled `506001_battle.lua` maps its grab helper to `Act40` (source line 1513), which queues 3040 through `AttackTunableSpin`; normal plans preserve this reflex.
 The local response owns this one follow-up after the battle goal activates, replacing its queued Lua act and surviving the delayed replan from observed effects.
 A single attack uses the existing `ComboFinal` cancellation path, so the current clip's TAE still decides when it can start.
@@ -1166,7 +1166,7 @@ The existing threshold of at least three uses and a failure rate of at least 0.6
 A reasoned retry for the ordinary plan text also resets the response's evidence baseline.
 
 Validation caps the combined Lua weight to at most 25% of each set, including duplicate Lua entries, and drops a Lua-only set.
-The coach is instructed to mix at least three different attack ids per set; narrower sets receive a validation warning and remain compatible with old memory.
+There is no variety warning or penalty; a successful move can keep its weight while it keeps working.
 Coach input `actions` contains individual `[n, hit, blocked, deflected, whiffed, punished, countered, mikiri, jump, other]` counts for Lua and coached moves, with zero-count rows for untried offered actions.
 `action_range` supplies each measured action's mean attack-start distance and melee reach, rounded to two decimals; projectile-only actions have no reach sample.
 The coach can therefore probe under-used moves using their own outcomes rather than the aggregate `lua` plan count.
@@ -1426,7 +1426,7 @@ Plan failure keys also carry the c7110 prefix, so phase-only failures cannot ban
 ## Contextual move fighter and cross-fight review
 
 Implemented 12 October 2026, independently of the checkpoint set bandit.
-The ordinary and posture-break plan slots share `BrainDriver::pick_move`; exactly one selector chooses an arm at each slot.
+Ordinary slots use `BrainDriver::pick_move`; posture-break slots use its deterministic fastest-reachable branch, without sampling learned evidence.
 `--brain-moves local|off` defaults to `local`, needs no model or key, and `off` preserves the previous sampler and its persistent outcome multipliers.
 `--brain-move-every 1|2|3` defaults to 2 attacks, exposed as `MOVE_EVERY` and the driver's configurable interval.
 A multi-attack plan is indivisible: the fighter chooses again at its next legal slot rather than interrupting a TAE/Lua chain.
@@ -1521,5 +1521,159 @@ The contextual fighter falls below 5% at fight two, explores rare transitions ag
 It retains probes and satisfies the stricter per-seed, per-fight cap of 48 family switches over 95 boundaries.
 Baseline persistent numbers can change if the read-only live profile advances between runs; the replay transcript identifies the measured snapshot's output.
 The brain library and brain-net suites pass, and libraries/binaries pass Clippy with warnings denied.
-Requested integration filters and workspace/all-target Clippy currently cannot compile `crates/sim/tests/it/coach.rs:242`, whose explicit old `GamePlan` literal lacks the new three fields.
-That file is outside this task's allowed paths, so the minimal fixture update remains pending permission rather than silently broadening the edit scope.
+At that checkpoint, the requested integration filters and workspace/all-target Clippy were blocked by an outdated `GamePlan` literal in `crates/sim/tests/it/coach.rs`.
+The fixture compatibility gap has since been resolved; Task A validation below covers the requested checks.
+
+## Move sheet as a gate and a feature (2026-10-13)
+
+The sheet in `brain::moves` is cached by character in the driver and shared by plan eligibility, live brain-owned attack goals, break punishment, telemetry and coaching.
+It resolves the decoded clips, root motion, animated hit capsules, TAE attack/cancel windows, BehaviorParam attack judges and AtkParam profiles through the combat damage resolver.
+Each melee row includes first-window reach samples at 60 Hz, active windows, per-hit direct HP/posture damage, guard/deflect posture, recovery, cancels and named chains.
+Combo rows use the existing legal cancel timing, accumulate root travel and hits, and publish guarded posture totals and time to the last hit.
+Cached `chain_next` and `cancel_into` edges name the following combo moves and normal damaging moves accepted by unconditional NPC cancel windows.
+Projectile rows include launch time, animated launch offset, nominal parent travel, speed/lifetime/radius, HP and direct/guard/deflect posture rather than pretending to be melee.
+The geometry samples stay local; the coach receives their compact reach and timing summaries.
+
+The ordinary chooser and opener reject attacks whose first active window cannot reach Wolf's predicted position, using observed horizontal position changes and a 0.2 m tolerance.
+The gate checks each first-window sample at its own time, so an attack can connect later in its first active window without borrowing reach from a later combo hit.
+Movement setups are considered at their destination and native approach distance, then every brain-owned attack goal is checked again at execution, including combo continuations.
+A rejected attack goal moves toward Wolf instead of requesting a swing.
+With no eligible attack, the driver generates a run-in followed by a fast attack, using the sheet's reachable spacing.
+The existing attack deadline still forces a reachable attack or an approach; guards and utility animations never reset that deadline.
+Lua goals and reaction callbacks have no brain plan-step tag and bypass this gate.
+
+On a posture break the brain ignores learned move weights and chooses the earliest reachable damaging normal move from the full sheet.
+If none reaches yet, it queues an approach into an attack and retries while the conversion window remains open.
+TAE cancellation and HKS still determine when the queued response can start.
+Wolf's remaining posture also exposes a named combo whose guarded prefix can break him with another hit within 2.5 s left in the chain.
+The chooser receives that combo as an additional option, and its context includes the combo name and posture total alongside the existing Wolf posture bucket.
+This predicts a guarded breaking sequence, not a guarantee against a player who deflects or evades it.
+
+No-threat guarding keeps the existing failure path, now with a small 0.25 failure weight and a separate classification from attack whiffs.
+Stationary idle time beyond 1.5 s uses the same path; active movement and damage reactions are excluded.
+The resulting exchange is attributed to the plan and set that caused it, and current-fight plan failures are included in mid-fight coach input.
+Neither idle nor harmless guarding counts as an attack for passive metrics.
+
+The moves table adds first-hit seconds, first-window reach, recovery, posture per hit, best combo posture/last-hit time, and separate hit/miss distance means.
+The coach receives Wolf's posture explicitly and the detailed sheet within the existing 8192-byte budget.
+Trimming reduces less relevant table rows before sacrificing the active combo or recent break records.
+The instructions rank wins, fast kills, converted breaks and damage per minute, and permit repeated successful moves without a variety penalty.
+
+### Whiff audit and distance telemetry
+
+The old test for an attack was its animation number in 3000-3099, so pure utility clips could count as whiffs.
+The four cited castle Genichiro moves are genuine attacks: 3000 is melee, 3018 and 3034 fire damaging arrows, and 3062 is a thrust.
+In `brain-session-1791839616326.md` their recorded whiff rates are 68/83 (81.9%), 135/140 (96.4%), 118/128 (92.2%) and 105/140 (75.0%).
+The melee misses include evasion, range failures and interruption before contact; resolved Mikiri counters are separate.
+The absence of a measured melee reach for the bow moves does not make them utility moves.
+
+There was a second measurement defect: delayed projectile contacts were credited to the latest action, so the historical bow rates are not reliable real-miss rates.
+Firing animation identity now survives projectile children and reaches the duel report and tally; the firing exchange stays available through the projectile lifetime.
+The saved profiles and session summaries lack shot-level provenance, so exact corrected historical bow rates cannot be reconstructed from those aggregates.
+Historical files remain untouched.
+Utility exchanges cannot whiff, and idle failure no longer inflates the miss column.
+Simultaneous contacts on the breaking tick no longer count as zero-delay break conversions.
+
+The driver records actual separation at the nominal first-hit clock, including nominal arrow flight from the starting separation.
+It classifies the sample after the exchange settles, so delayed hits are included and guarded/deflected contacts are excluded from both unguarded-hit and true-miss means.
+Session reports show separate first-hit hit/miss means and the coach table retains phase-specific sums/counts in defaulted profile fields.
+An interrupted animation that never reaches its first-hit clock has no distance sample, rather than a fabricated miss distance.
+Old profiles have no hit/miss distance evidence and display missing values until new samples arrive.
+
+### Installed-data validation
+
+The 30-second Genichiro retreat/guard A/B uses the same contact classification and projectile settlement on both sides, disabling only melee reach rejection in the baseline.
+Ordinary weighted slots are reserved for the scripted brain in this fixture; queued Lua reactions still run.
+Every observed live brain attack request must belong to the reachable set, at least one such request must occur, and the boss must start an attack within the six-second passive deadline.
+Misses fall from 6/18 (33.3%) to 3/14 (21.4%), a 36% relative reduction.
+The remaining Lua attacks are deliberately ungated.
+
+The stationary 1.6 m Owl break fixture compares the old supplied 3000 response with the full-sheet fastest reachable response.
+Both convert 1/1 breaks, but landed-hit delay falls from 0.917 s to 0.450 s.
+These small controlled regressions establish the mechanism, not a live player win-rate or kill-time estimate.
+
+Example Genichiro rows at the fixture's power are below.
+First active is the TAE window start or arrow launch, while first at 3 m includes sampled melee geometry or nominal projectile flight.
+Melee reach is the first-window envelope with root motion; arrow reach is nominal lifetime travel plus launch offset and radius.
+HP/direct posture and guarded posture are separate damage outcomes, per hit.
+
+| Move | First active (s) | First at 3 m (s) | Reach (m) | Recovery (s) | HP/direct posture | Guarded posture |
+|---|---:|---:|---:|---:|---|---|
+| 3000 | 0.667 | 0.718 | 4.695 | 0.233 | 64/18 | 17 |
+| 3062 | 1.033 | 1.151 | 3.757 | 1.267 | 128/36 | 35 |
+| 3018 | 0.867 | 0.895 | 161.096 | 0.243 | 64/18 per arrow | 17 per arrow |
+
+The Owl's 3001 starts its first active window at 0.333 s, reaches about 5.03 m and deals 23 guarded posture at the default fixture power.
+His 3000+3001+3002 combo totals 93 guarded posture with its final melee hit at 2.267 s.
+The real-data sheet tests compare damage with actual guard/deflect resolution and spot-check the existing authored timelines.
+
+All seven requested release filters (`brain`, `coach`, `brain_learning`, `genichiro`, `owl`, `soldier_brain`, `brain_tactics`) and all 42 brain-net tests pass; existing slow tests remain ignored.
+Workspace/all-target Clippy with warnings denied and `cargo fmt --all --check` pass.
+Builds and tests use `CARGO_TARGET_DIR=target/alt-ta`, six jobs and offline dependencies; coaching tests use local fakes without real model calls.
+
+In play, check pursuit against retreating Wolf, fast follow-ups after a posture break, an early breaking combo near full posture, and the new hit/miss distance columns after fresh fights.
+Also check that Lua reactions still fire and a held harmless guard does not stall the boss.
+Prediction remains horizontal and uses constant Wolf velocity and nominal projectile travel, as recorded in `FIDELITY.md`.
+
+## Coach-selected posture-break punishes (2026-10-13)
+
+Wolf's ordinary guard-break reaction is `a050_190100`, selected by his installed HKS for damage type 1001.
+The extracted c0000 TAE starts unconditional guard (117), dodge (26) and jump (119) execution cancels at 1.3 seconds, before movement at 2.0 seconds and the 2.6667-second clip end.
+Flags 150, 151 and 25 at 0.6 seconds accept buffered input; they do not execute a recovery.
+An offline fixture drives the real HKS with repeated dodge input and confirms that Wolf remains in the break clip until the 1.3-second execution window.
+The driver reads this timing from the loaded TAE and clip, then uses the current break reaction's timing when it is available.
+Missing timing admits no viable options rather than inventing a stun duration.
+
+`moves::viable_punishes` returns executable move and combo ids in deterministic lexical order.
+A first hit must be reachable at Wolf's predicted position and land strictly before the remaining break window minus one simulation tick (1/60 second).
+The live calculation subtracts elapsed break time and the boss's remaining data-defined cancel wait.
+Melee uses the cached radial contact envelopes; projectiles solve an interception equation using target velocity, launch time, speed, lifetime, radius and parent travel.
+Code does not sort or score options by predicted damage.
+Each option reports its name, first-hit time, time left, potential reachable hits and HP/posture damage inside the original window, whole-move HP/posture totals, stun-lock, guard posture after the window, recovery time, and observed uses, landed uses, conversions and window damage.
+Stun-lock compares consecutive contacts with Wolf's normal direct-hit recovery timings, selected by his HKS for each damage level and read from the resulting TAE cancel windows.
+Unknown reaction timing is reported as null.
+A stun-lock is true only for a multi-hit sequence whose later contacts arrive before the preceding reaction recovers; a single hit is false.
+Window damage is potential contact damage, so read it alongside stun-lock rather than assuming every contact is guaranteed.
+
+The coach receives `punish_window` and near/mid/far `viable_punishes` buckets, evaluated at 1.5, 4 and 8 metres with stationary Wolf.
+Near means less than 3 metres, mid means 3 to less than 6, and far means at least 6.
+To keep all viable rows within the 8192-byte input budget, `punish_options` maps each id to `[name, whole-move [HP, posture], recovery seconds]` once.
+Bucket rows are `[id, first seconds, seconds left, hits, window [HP, posture], stun_lock, guard posture after, evidence [uses, landed], conversion rate]`.
+Facts are rounded to milliseconds and three decimal places in the wire representation.
+The duplicate raw `move_sheet` is trimmed before these punish facts; the existing history/digest trimming then makes room without dropping viable options, and mid-fight inputs can trim prior preference reasons while retaining their ids.
+Decisions break requests receive up to four full rows in the same stable id order, including the common name/total/recovery facts inline.
+
+The response schema adds `punish_preferences`, an object with near, mid and far ordered arrays of `{choice, reason}`.
+Empty arrays mean no preference; each entry names a punish id and has a one-line reason, and validation keeps at most eight entries per bucket.
+The coach may prefer a slower or weaker hit for stun-lock, follow-ups or guard posture.
+At a break the driver takes the first preferred id that is currently viable.
+Without a usable preference, a per-punish Thompson sampler chooses only among the viable options using actual landed and conversion outcomes with a neutral 0.5 prior.
+If no option is viable, the existing fastest-reachable fallback remains available.
+Legacy `on_wolf_break` plans remain readable, but ordered preferences are the executable punish policy when a move sheet is present.
+
+Memory version 6 adds phase/bucket/id punish evidence.
+Versions 1 through 5 migrate with empty punish evidence, preserving their existing data and never interpreting historical aggregate hits as successful punishes.
+A use begins when the break-response plan actually starts; its observed clean hit, HP/posture damage inside the original break window, and conversion to a completed lethal throw/deathblow or other kill are recorded separately.
+Those observations drive the neutral bandit and the coach's evidence columns across fights.
+No hosted model calls are needed at the break.
+
+The predictions retain the move sheet's radial-envelope approximation, rather than guaranteeing facing, obstacle clearance or target-dependent root-motion scaling.
+Direct-hit recovery probes use grounded Wolf's normal reactions without situational SpEffects; projectile interception assumes constant velocity and the sheet's nominal travel.
+Actual contact and damage telemetry, rather than predictions, supplies punish success evidence.
+
+Examples from the installed c7100/c5060 fixture, with stationary Wolf and the ordinary 1.3-second window:
+
+| Boss | Distance | Example viable ids | First hit (seconds) |
+|---|---:|---|---|
+| Genichiro | 1.5 m | 3000, 3000+3001, 3001 | 0.668, 0.668, 0.768 |
+| Genichiro | 8 m | 3006, 3009 (bow), 3011 | 0.801, 0.950, 1.091 |
+| Owl | 1.5 m | 3000, 3000+3001, 3001 | 0.568, 0.568, 0.334 |
+| Owl | 8 m | 3003, 3009 (shuriken), 3014 (second shuriken) | 0.968, 0.817, 0.316 |
+
+The complete fixture lists contain 25 near and 8 far Genichiro options, and 14 near and 7 far Owl options.
+The fixture also exercises an actual guarded posture break and verifies that punish uses reach memory without hosted requests or memory-file writes.
+
+Punish observations are provisional during a fight and immediately inform subsequent break choices.
+Valid fights merge them into durable memory; void fights discard them alongside the other bandits' provisional evidence.
+Only uses, landed uses and conversion rate travel in the compact coach evidence column; conversion counts and cumulative window damage remain in memory.
+The preference schema includes attack groups inside tactic plans, so listed combo prefixes such as Owl's 3000+3001 are selectable even when absent from the whole-plan choice vocabulary.

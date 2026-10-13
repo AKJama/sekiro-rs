@@ -54,6 +54,7 @@ impl Side {
 /// How one exchange ended.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct Outcome {
+    pub no_contact: bool,
     pub idle_guard: bool,
     pub progress: bool,
     pub broke: bool,
@@ -86,15 +87,14 @@ pub struct Exchange {
 }
 
 impl Exchange {
-    /// Attacks can whiff; an idle guard also uses this compact failure column.
-    /// Other tactics and back steps retain normal non-contact outcomes.
+    /// Only contact-capable attacks can whiff; passivity is separate failure evidence.
     pub fn whiffed(&self) -> bool {
         let attack = self.side == Side::Wolf
             || self
                 .key
                 .parse::<i32>()
                 .is_ok_and(|id| (3000..3100).contains(&id));
-        self.outcome.idle_guard || (attack && self.outcome.whiffed())
+        !self.outcome.no_contact && attack && self.outcome.whiffed()
     }
 }
 
@@ -294,6 +294,12 @@ pub struct TallySummary {
 /// Something that happened, as the tally needs it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TallyEvent {
+    ProjectileHit {
+        key: String,
+        guarded: bool,
+        deflected: bool,
+        progress: bool,
+    },
     Damaged {
         side: Side,
     },
@@ -324,6 +330,7 @@ pub enum TallyEvent {
 /// The running tally of one fight.
 #[derive(Debug, Clone)]
 pub struct Tally {
+    contact_until: BTreeMap<String, f32>,
     pub phase: String,
     pub shared: std::collections::BTreeSet<String>,
     pub phases: BTreeMap<String, CountMap>,
@@ -344,12 +351,39 @@ impl Default for Tally {
             punish_window: 1.0,
             open: [None, None],
             closing: Vec::new(),
+            contact_until: Default::default(),
             all: [CountMap::new(), CountMap::new()],
         }
     }
 }
 
 impl Tally {
+    pub fn retain_projectile(&mut self, key: &str, until: f32) {
+        self.contact_until.insert(key.into(), until);
+    }
+
+    pub fn projectile_hit(&mut self, key: &str, guarded: bool, deflected: bool, progress: bool) {
+        let open = self.open[Side::Boss.index()]
+            .as_mut()
+            .filter(|x| x.key == key);
+        let target = open.or_else(|| {
+            self.closing
+                .iter_mut()
+                .rev()
+                .find(|x| x.side == Side::Boss && x.key == key)
+        });
+        if let Some(x) = target {
+            x.outcome.hit |= !guarded && !deflected;
+            x.outcome.blocked |= guarded && !deflected;
+            x.outcome.deflected |= deflected;
+            x.outcome.progress |= progress;
+        }
+    }
+    pub fn no_contact(&mut self) {
+        if let Some(x) = self.latest_mut(Side::Boss) {
+            x.outcome.no_contact = true;
+        }
+    }
     /// Guard held without an incoming attack is failure evidence for the current exchange.
     pub fn idle_guard(&mut self) {
         if let Some(x) = self.latest_mut(Side::Boss) {
@@ -359,6 +393,12 @@ impl Tally {
     /// Applies an event at fight time `time`.
     pub fn record(&mut self, time: f32, event: TallyEvent) {
         match event {
+            TallyEvent::ProjectileHit {
+                key,
+                guarded,
+                deflected,
+                progress,
+            } => self.projectile_hit(&key, guarded, deflected, progress),
             TallyEvent::Damaged { side } => {
                 if let Some(x) = self.open[side.index()].as_mut() {
                     x.outcome.punished = true;
@@ -426,10 +466,13 @@ impl Tally {
     /// Moves exchanges whose punish window has passed into the counts; returns them.
     pub fn advance(&mut self, time: f32) -> Vec<Exchange> {
         let window = self.punish_window;
-        let (done, keep): (Vec<_>, Vec<_>) = self
-            .closing
-            .drain(..)
-            .partition(|x| time - x.end.unwrap_or(time) >= window);
+        let (done, keep): (Vec<_>, Vec<_>) = self.closing.drain(..).partition(|x| {
+            time - x.end.unwrap_or(time) >= window
+                && self
+                    .contact_until
+                    .get(&x.key)
+                    .is_none_or(|until| time >= *until)
+        });
         self.closing = keep;
         for x in &done {
             if x.side == Side::Boss {
@@ -526,6 +569,48 @@ fn ser_ms_opt<S: Serializer>(x: &Option<f32>, s: S) -> Result<S::Ok, S::Error> {
 #[cfg(test)]
 mod counter_tests {
     use super::*;
+    #[test]
+    fn brain_projectile_contact_stays_with_the_firing_move_and_utility_cannot_whiff() {
+        let mut tally = Tally::default();
+        tally.record(
+            0.0,
+            TallyEvent::Start {
+                side: Side::Boss,
+                key: "3018".into(),
+            },
+        );
+        tally.retain_projectile("3018", 3.0);
+        tally.record(
+            0.5,
+            TallyEvent::Start {
+                side: Side::Boss,
+                key: "3034".into(),
+            },
+        );
+        assert!(tally.advance(2.0).is_empty());
+        tally.record(
+            2.1,
+            TallyEvent::ProjectileHit {
+                key: "3018".into(),
+                guarded: false,
+                deflected: false,
+                progress: true,
+            },
+        );
+        let done = tally.advance(3.0);
+        assert!(done[0].outcome.hit && !done[0].whiffed());
+        tally.record(
+            3.1,
+            TallyEvent::Start {
+                side: Side::Boss,
+                key: "3031".into(),
+            },
+        );
+        tally.no_contact();
+        let done = tally.flush(4.0);
+        assert!(done.iter().find(|x| x.key == "3034").unwrap().whiffed());
+        assert!(!done.iter().find(|x| x.key == "3031").unwrap().whiffed());
+    }
     #[test]
     fn successful_counters_are_not_whiffs_and_legacy_counts_default_to_zero() {
         let old: Counts = serde_json::from_str("[25,1,0,0,24,0]").unwrap();

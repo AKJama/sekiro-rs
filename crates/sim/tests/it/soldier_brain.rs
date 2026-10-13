@@ -18,6 +18,52 @@ use sekiro_sim::{Buttons, InputFrame};
 
 const DT: f32 = 1.0 / 60.0;
 
+#[test]
+fn single_phase_deathblow_and_player_death_record_opposite_winners() {
+    let Some(mut duel) = load(1.6) else { return };
+    duel.god = true;
+    duel.set_brain(Box::new(sekiro_sim::brain::LuaBrain), false)
+        .unwrap();
+    assert!(duel.events.is_none());
+    for _ in 0..150 {
+        duel.step(&InputFrame::default(), DT);
+    }
+    super::genichiro_brain::take_mark(&mut duel);
+    let driver = duel.boss_brain.as_ref().unwrap();
+    assert_eq!(driver.memory.wolf_wins, 1);
+    assert_eq!(driver.memory.fights, 1);
+    let record = driver.last_record.as_ref().unwrap();
+    assert_eq!(record.winner, "wolf");
+    assert!(record.metrics.kill_time.is_some());
+    duel.reset().unwrap();
+    for i in 0..150 {
+        duel.step(
+            &InputFrame {
+                buttons: Buttons {
+                    guard: i % 40 != 0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            DT,
+        );
+    }
+    duel.god = false;
+    duel.rules.fighters[0].vitality.hp = 0;
+    duel.step(&InputFrame::default(), DT);
+    let driver = duel.boss_brain.as_ref().unwrap();
+    assert_eq!(driver.memory.boss_wins, 1);
+    assert_eq!(driver.memory.wolf_wins, 1);
+    assert_eq!(driver.memory.fights, 2);
+    let record = driver.last_record.as_ref().unwrap();
+    assert_eq!(record.winner, "boss");
+    assert_eq!(record.metrics.kill_time, None);
+    assert_eq!(
+        record.metrics.time_to_kill_wolf,
+        Some(record.metrics.duration)
+    );
+}
+
 fn load(distance: f32) -> Option<Duel> {
     let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
     if !cache.join("anim/c1010/tae.json").exists()

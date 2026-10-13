@@ -17,7 +17,8 @@ See [OWL.md](OWL.md#transition-deathblow-protection) for the data, native addres
 ## Throw walls and cinematic hand-overs
 
 The shared, floor-aware throw capsule reservation and temporary wall-push bypass are inferred engine placeholders, not traced native behavior.
-The bounded search can exhaust in cramped space; it does not reserve full animated meshes or predict airborne velocity events and lethal defender branches.
+The bounded search can exhaust in cramped space, in which case unsafe paired displacement is held at the last safe feet.
+Swept relocation and supporting-floor checks cover paired placement and actual throw recovery; the predictor still omits airborne velocity events and lethal defender branches, and the reservation does not cover full animated meshes.
 See [DEATHBLOW.md](DEATHBLOW.md#alignment) for data-derived dummy placement and wall regressions.
 Genichiro's native cutscene is replaced by a timed black fade with the event's MSB warp; synchronous model loading can extend the black hold.
 See [GENICHIRO.md](GENICHIRO.md#hand-over-cinematic-placeholder-2026-10-11) for timing, input suppression and captures.
@@ -90,3 +91,13 @@ Reproduce with the following command, substituting `owl` for the shared arena ch
 ```powershell
 target/alt-fm/release/sekiro-rs.exe --arena genichiro --spawn 102.35,54,239.8,270,0 --enemy-distance 3 --lock-on --passive --brain scripted --brain-memory off --checkpoint off --script crates/game/scripts/camera_ceiling_edge.txt --shots 900:target/alt-fm/ceiling-check.png --exit
 ```
+
+## Brain move prediction
+
+The attack gate uses nominal animated radial envelopes and constant observed Wolf velocity through the first active window.
+It does not guarantee facing, height, future evasion or target-dependent TAE 760 scaling.
+Projectile summaries use nominal launch speed and lifetime; accelerating, falling, interval and delayed-child projectiles still rely on the real bullet simulation for contact.
+Guarded combo posture totals predict a breaking prefix only if the contacts are guarded; deflection, evasion and posture recovery can change the result.
+
+Posture-break punish facts use nominal radial hit envelopes and constant-velocity projectile interception, rather than full facing, obstacle and target-dependent root-motion prediction.
+Hit-stun timings are selected by the installed grounded Wolf HKS and read from TAE execution cancels without situational SpEffects; recorded punish outcomes use actual combat telemetry.

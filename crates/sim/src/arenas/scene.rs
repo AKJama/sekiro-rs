@@ -7,6 +7,8 @@ use sekiro_formats::{emedf::Arg, emevd::Instruction};
 #[derive(Debug, Clone, Default)]
 pub struct SceneState {
     pub enabled: HashMap<i32, bool>,
+    /// Recency of active map-part commands, used when an event overrides the common sky.
+    pub enabled_order: Vec<i32>,
     pub animations: HashMap<i32, (i32, bool)>,
     pub animation_enabled: HashMap<i32, bool>,
     pub masks: HashMap<i32, HashMap<u8, bool>>,
@@ -14,6 +16,9 @@ pub struct SceneState {
     /// Map-authored effect state retained for a character before it occupies a combat slot.
     pub character_effects: HashMap<(i32, i32), bool>,
     pub lighting: Option<i32>,
+    pub environment: Option<u8>,
+    /// Area/block overrides are independent and survive until the event state restarts.
+    pub gparam_sub_ids: HashMap<(i16, i16), (u8, f32)>,
     /// Region warps for supporting actors; bone-relative attachments need the actor rig.
     pub warps: HashMap<i32, i32>,
     pub backread_enabled: HashMap<i32, bool>,
@@ -27,6 +32,19 @@ impl SceneState {
     pub fn instruction(&mut self, ins: &Instruction, args: &[Arg]) -> bool {
         let i = |n: usize| args.get(n).map_or(0, |v| v.as_i64());
         match ins.code() {
+            (2003, 80) => {
+                self.environment = ins.u8_at(0);
+                true
+            }
+            (2003, 88) => {
+                if let (Some(area), Some(block), Some(sub), Some(seconds)) =
+                    (ins.i32_at(0), ins.i32_at(4), ins.u8_at(8), ins.f32_at(12))
+                {
+                    self.gparam_sub_ids
+                        .insert((area as i16, block as i16), (sub, seconds));
+                }
+                true
+            }
             (2003, 58) => {
                 self.attachments.insert(
                     ins.i32_at(8).unwrap_or(0),
@@ -61,6 +79,12 @@ impl SceneState {
             }
             (2005, 3) | (2012, 1) => {
                 self.enabled.insert(i(0) as i32, i(1) != 0);
+                if ins.code() == (2012, 1) {
+                    self.enabled_order.retain(|&entity| entity != i(0) as i32);
+                    if i(1) != 0 {
+                        self.enabled_order.push(i(0) as i32);
+                    }
+                }
                 true
             }
             (2003, 18) => {

@@ -59,6 +59,9 @@ pub const REQUEST_BUDGET: usize = 1400;
 /// fight.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct BrainRequest {
+    /// Same facts as the coach, bounded to four stable ids for a break decision.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub viable_punishes: Vec<moves::Punish>,
     /// Increasing per session; the reply carries it back.
     pub id: u64,
     pub obs: Observation,
@@ -208,6 +211,10 @@ pub trait BossBrain {
     fn plans(&self) -> bool {
         true
     }
+    /// Whether plans must run verbatim, without reach gating or generated alternatives.
+    fn fixed_plans(&self) -> bool {
+        false
+    }
     /// The request mode the driver uses unless told otherwise.
     fn default_mode(&self) -> RequestMode {
         RequestMode::Slot
@@ -263,6 +270,7 @@ impl BossBrain for LuaBrain {
 #[derive(Debug, Clone)]
 pub struct ScriptedBrain {
     follow_phase: bool,
+    fixed_plans: bool,
     pub opener: Plan,
     pub fallback_plan: Plan,
     pub switch_after_deflects: u32,
@@ -283,11 +291,18 @@ impl ScriptedBrain {
         Self {
             opener,
             follow_phase: false,
+            fixed_plans: true,
             fallback_plan,
             switch_after_deflects,
             delay,
             pending: None,
         }
+    }
+
+    /// Uses scripted proposals to exercise adaptive reach gating and move selection.
+    pub fn with_move_selection(mut self) -> Self {
+        self.fixed_plans = false;
+        self
     }
 
     /// The boss's own test plans ([`BossActions::scripted`]): switches after two deflected
@@ -316,6 +331,9 @@ impl ScriptedBrain {
 }
 
 impl BossBrain for ScriptedBrain {
+    fn fixed_plans(&self) -> bool {
+        self.fixed_plans
+    }
     fn change_phase(&mut self, actions: &'static BossActions) {
         if self.follow_phase {
             let next = Self::for_actions(actions);

@@ -38,7 +38,11 @@ mod tests {
         let b = crate::play_options_with(&cli, &root.join("logs/datasets")).unwrap();
         assert_eq!(a.opponent, b.opponent);
         assert_eq!(a.arena.map(|v| v.name), b.arena.map(|v| v.name));
-        assert_eq!((a.map, a.start, a.hour), (b.map, b.start, b.hour));
+        // An unset hour is NaN (the story picks it), so compare the bits, not the floats.
+        assert_eq!(
+            (a.map, a.start, a.hour.to_bits()),
+            (b.map, b.start, b.hour.to_bits())
+        );
         assert_eq!(
             (a.enemy, a.god, a.immortal, a.attack_power),
             (b.enemy, b.god, b.immortal, b.attack_power)

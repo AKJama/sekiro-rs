@@ -357,6 +357,17 @@ impl HabitTracker {
         for e in events {
             match e {
                 TallyEvent::Progress { .. } | TallyEvent::Damaged { .. } => {}
+                TallyEvent::ProjectileHit {
+                    guarded, deflected, ..
+                } => {
+                    if *guarded || *deflected {
+                        self.trigger(
+                            if *deflected { "deflect" } else { "guard" },
+                            t + AFTER_WINDOW,
+                            frame.dist,
+                        );
+                    }
+                }
                 TallyEvent::Countered { .. } => {
                     if let Some(open) = self.boss_open.as_mut() {
                         open.answer = Some("counter");

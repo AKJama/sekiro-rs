@@ -72,12 +72,29 @@ The second is inferred from the fields, not traced.
 Walls: at the paired body clip's start, compute the absorbed endpoint from the ThrowParam dummy frame and sweep each capsule from its starting position to that endpoint.
 Each rejected horizontal displacement becomes a translation of the whole pair, with both starts and endpoints rechecked until clear, including corner contacts.
 The reservation also probes both original root-motion tracks and the absorb interpolation at 60 Hz through the full paired body clip, so the wind-up and post-strike recovery do not carry either capsule back into the wall.
-The bounded solver tries 32 alternating projections within 4 m; exhaustion logs a diagnostic and retains authored alignment as a cramped-space placeholder.
+The bounded solver tries wall projections and a local search within 4 m, checking the swept relocation from the original feet as well as the translated animation path.
+Every sample must support the capsule footprint within a step of the starting floor, so a lower roof cannot count as safe paired space.
+Exhaustion logs a diagnostic and leaves actual placement to the per-step safety check.
 While the pair holds, both bodies bypass character-versus-wall push, and absorption applies its complete authored correction instead of allowing separate wall pushes to distort the strike.
 Ordinary collision resumes when the pair releases; floors remain active throughout.
 This clearance rule and temporary wall bypass are inferred engineering placeholders, not a recovered native engine algorithm.
 Each clearance sweep resolves the supporting floor at the translated sample, so stepped roof tiles do not invalidate a reservation made at the original height.
-The root-track predictor does not predict airborne velocity events, lethal defender-clip branches or motion after release; those can still enter geometry.
+The root-track predictor does not predict airborne velocity events or lethal defender-clip branches, so a second check validates actual paired travel, including grab and counter absorption, every step.
+Small common corrections preserve the pair's relative placement; when no safe correction exists, both keep their last safe feet while their clips and turning continue.
+After release, the check applies only to a character still playing its throw recovery, leaving the free character's normal movement and knockback unchanged.
+This does not add arena walls or prevent ordinary movement from leaving the roof.
+Start and recovery root motion keep the controller's existing wall slide; the safety check does not reinterpret that curved slide as a straight-line sweep.
+The supporting floors at pair entry remain the height reference through recovery, preventing gradual descent onto an outer roof.
+The 2026-10-13 `deathblow_space` regressions trace installed Genichiro pairs at the castle entrance, north wall, roof edge and open floor through one second after release.
+The full collision replays are in the slow tier; run them in PowerShell with:
+
+```powershell
+$env:CARGO_TARGET_DIR = 'target/alt-db'
+cargo test --offline --release -p sekiro-sim -j 6 --test it deathblow_space -- --include-ignored --nocapture
+```
+
+The normal tier covers finite-floor clearance, blocked placement and unchanged open-floor alignment without installed assets.
+Local position traces and the short entrance capture are under `target/alt-db/captures/`.
 While the enemy still plays the throw's defender clip, the push-apart moves only Wolf, so walking into the getting-up Owl does not shove him (ours, after FwLo's "throw pairs skip the push-apart").
 A knockback left over from the breaking hit is dropped when the deathblow starts; it used to resume when the pair ended and slide the defender 0.4 m in one step.
 

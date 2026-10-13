@@ -15,7 +15,39 @@ mod camera_fade;
 
 type LayeredMaterial = ExtendedMaterial<StandardMaterial, MapLayers>;
 
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct MaterialStats<'w> {
+    materials: Res<'w, Assets<LayeredMaterial>>,
+}
+
+impl MaterialStats<'_> {
+    pub(crate) fn count(&self) -> usize {
+        self.materials.len()
+    }
+}
+
+fn release_materials(
+    mut events: MessageReader<AssetEvent<StandardMaterial>>,
+    mut removed_actors: RemovedComponents<ActorMaterialSource>,
+    active: Query<&MeshMaterial3d<LayeredMaterial>>,
+    mut settings: ResMut<LayerSettings>,
+) {
+    for event in events.read() {
+        if let AssetEvent::Removed { id } = event {
+            settings.materials.remove(id);
+        }
+    }
+    // Scene assets can retain their source materials after the rig is gone.
+    // Drop unused wrappers on actor teardown, without scanning meshes on ordinary frames.
+    if removed_actors.read().next().is_some() {
+        removed_actors.clear();
+        let live: std::collections::HashSet<_> = active.iter().map(|h| h.0.id()).collect();
+        settings.materials.retain(|_, h| live.contains(&h.id()));
+    }
+}
+
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
+#[bind_group_data(MapPipelineKey)]
 #[data(50, MapLayersUniform, binding_array(101))]
 #[bindless(index_table(range(50..72), binding(100)))]
 struct MapLayers {
@@ -60,6 +92,21 @@ struct MapLayers {
     #[texture(70, dimension = "3d")]
     #[sampler(71)]
     voxels: Option<Handle<Image>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct MapPipelineKey {
+    camera_fade: bool,
+}
+
+impl From<&MapLayers> for MapPipelineKey {
+    fn from(layers: &MapLayers) -> Self {
+        static LEGACY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        Self {
+            camera_fade: layers.camera_fade.x > 0.
+                || *LEGACY.get_or_init(|| std::env::args().any(|a| a == "--legacy-camera-fade")),
+        }
+    }
 }
 
 // Packed once per material; bindless slabs preserve Bevy's multi-draw batching.
@@ -121,7 +168,7 @@ mod tests {
                 materials: HashMap::new(),
                 camera_fade: camera_fade::CameraFade::load(std::path::Path::new(""), false),
             })
-            .add_systems(Update, replace_materials)
+            .add_systems(Update, (release_materials, replace_materials).chain())
             .add_systems(PostUpdate, sync_actor_materials);
         let original = StandardMaterial {
             unlit: true,
@@ -177,6 +224,10 @@ mod tests {
         assert_eq!(material.base.base_color, original.base_color);
         assert_eq!(material.extension.albedo_enabled, Vec4::ZERO);
         assert_eq!(material.extension.hemi_axis.xyz(), Vec3::Y);
+        assert!(!MapPipelineKey::from(&material.extension).camera_fade);
+        let mut blind = material.extension.clone();
+        blind.camera_fade = Vec4::new(1., 1., 1. / 0.3, 0.);
+        assert!(MapPipelineKey::from(&blind).camera_fade);
         assert!(app.world().get::<ActorMaterialSource>(wolf).is_some());
         app.world_mut()
             .resource_mut::<Assets<StandardMaterial>>()
@@ -204,10 +255,55 @@ mod tests {
         assert_eq!(proxies.iter(app.world()).count(), 1);
         app.update();
         assert_eq!(proxies.iter(app.world()).count(), 1);
+        for fight in 0..20 {
+            let source = app
+                .world_mut()
+                .resource_mut::<Assets<StandardMaterial>>()
+                .add(original.clone());
+            let root = app
+                .world_mut()
+                .spawn(crate::character::Rig::new(std::sync::Arc::new(
+                    sekiro_formats::anim::Skeleton {
+                        name: String::new(),
+                        bones: vec![],
+                    },
+                )))
+                .id();
+            app.world_mut()
+                .spawn((MeshMaterial3d(source.clone()), ChildOf(root)));
+            app.update();
+            assert_eq!(app.world().resource::<LayerSettings>().materials.len(), 2);
+            app.world_mut().despawn(root);
+            app.world_mut()
+                .resource_mut::<Assets<StandardMaterial>>()
+                .remove(source.id());
+            for _ in 0..3 {
+                app.update();
+            }
+            assert_eq!(
+                app.world().resource::<LayerSettings>().materials.len(),
+                1,
+                "fight {fight}: wrapper survived source teardown"
+            );
+        }
     }
 }
 
 impl MaterialExtension for MapLayers {
+    fn specialize(
+        _pipeline: &bevy::pbr::MaterialExtensionPipeline,
+        descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
+        _layout: &bevy::mesh::MeshVertexBufferLayoutRef,
+        key: bevy::pbr::MaterialExtensionKey<Self>,
+    ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
+        if key.bind_group_data.camera_fade
+            && let Some(fragment) = descriptor.fragment.as_mut()
+        {
+            fragment.shader_defs.push("CAMERA_FADE".into());
+        }
+        Ok(())
+    }
+
     fn fragment_shader() -> ShaderRef {
         ShaderRef::Path(
             bevy::asset::AssetPath::parse(&format!(
@@ -276,7 +372,7 @@ pub(super) fn install(app: &mut App, prefix: &str, dir: &std::path::Path, args: 
         })
         .add_systems(
             Update,
-            (replace_materials, update_hemisphere)
+            (release_materials, replace_materials, update_hemisphere)
                 .chain()
                 .after(crate::lighting::apply_lighting)
                 .after(crate::lighting::apply_probes),
@@ -288,11 +384,16 @@ fn update_hemisphere(
     lighting: Res<crate::lighting::MapLighting>,
     ambient: Res<bevy::light::GlobalAmbientLight>,
     mut materials: ResMut<Assets<LayeredMaterial>>,
-    mut last: Local<Option<(i32, f32, bool)>>,
+    mut last: Local<Option<(i32, f32, bool, String)>>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("update_hemisphere");
-    let key = (lighting.light_set, lighting.hour, ambient.brightness > 0.);
-    if *last == Some(key) {
+    let key = (
+        lighting.light_set,
+        lighting.hour,
+        ambient.brightness > 0.,
+        lighting.source.clone(),
+    );
+    if last.as_ref() == Some(&key) {
         return;
     }
     *last = Some(key);

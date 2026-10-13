@@ -12,7 +12,8 @@
 //!   [--groups draw|display|off] [--uncapped]`: fly through an area exported by
 //!   `sekiro-extract map`.
 //!
-//! Map lighting: `--hour H` (default 12), `--no-env-probe` for hemisphere fallback,
+//! Map lighting: `--story NAME` selects map event states; `--hour H` overrides their clock.
+//! `--no-env-probe` for hemisphere fallback,
 //! `--probe-sky` to show the environment probe capture as the sky (debug only).
 //! `--no-grading`, `--no-bloom`, `--no-auto-exposure` disable individual map post effects.
 //! `--native-tone-reinhard` / `--native-tone-filmic` override the authored/default sensitometric operator.
@@ -38,6 +39,7 @@ mod fxr;
 mod fxr_tree;
 mod input_replay;
 mod lighting;
+mod lighting_selection;
 mod lightning_fx;
 mod map;
 mod menu;
@@ -90,6 +92,7 @@ fn dispatch() -> anyhow::Result<()> {
         "--brain-stage",
         "--window-size",
         "--hour",
+        "--story",
     ] {
         if args.iter().any(|a| a == flag)
             && arg_value(&args, flag).is_none_or(|v| v.starts_with("--"))
@@ -132,7 +135,7 @@ fn dispatch() -> anyhow::Result<()> {
             uncapped: args.iter().any(|a| a == "--uncapped"),
             groups: map::GroupMode::parse(arg_value(&args, "--groups").as_deref())?,
             objects: args.iter().any(|a| a == "--objects"),
-            hour: arg_f32(&args, "--hour", 12.0)?,
+            hour: arg_f32(&args, "--hour", f32::NAN)?,
             gparam: arg_value(&args, "--gparam"),
         });
     }
@@ -296,7 +299,9 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
     // Sekiro's time of day follows the story, not a clock: an arena defaults to the hour of the
     // light, probes and sky the game's own flags select at that point (`--hour` overrides).
     let default_hour = match boss_arena {
-        Some(arena) if arg_value(args, "--hour").is_none() => {
+        Some(arena)
+            if arg_value(args, "--hour").is_none() && arg_value(args, "--story").is_none() =>
+        {
             let time = arena.story_time(&opponent);
             eprintln!(
                 "arena {}: story time {} ({} h), set --hour to override",
@@ -306,7 +311,7 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
             );
             time.hour()
         }
-        _ => 12.0,
+        _ => f32::NAN,
     };
     Ok(play::Options {
         brain_overlay: args.iter().any(|a| a == "--brain-overlay"),

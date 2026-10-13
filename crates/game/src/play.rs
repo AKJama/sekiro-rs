@@ -155,12 +155,63 @@ fn hold_fog_walls(sim: NonSend<Sim>, walls: Res<FogWalls>, mut fx: ResMut<crate:
 
 fn sync_arena_scene(sim: NonSend<Sim>, scene: Option<ResMut<crate::arena_b::Scene>>) {
     if let (Some(mut scene), Some(events)) = (scene, &sim.duel.events) {
-        scene.0.clone_from(&events.scripts.cast_scene);
-        if scene.0.lighting.is_none() {
-            scene.0.lighting =
-                sekiro_sim::arena::boss_events(&sim.duel.spec).and_then(|e| e.lighting);
-        }
+        scene.0 = arena_scene(&sim.duel.spec, &events.scripts.cast_scene);
     }
+}
+
+fn arena_scene(
+    phase: &sekiro_sim::enemy::EnemySpec,
+    events: &sekiro_sim::arena::scene::SceneState,
+) -> sekiro_sim::arena::scene::SceneState {
+    let mut scene = events.clone();
+    // The hand-over event can replay SetLighting(3) from retained story flags.
+    // The restarted castle duel owns phase one's story time until Tomoe returns.
+    if phase.chr == "c7100" && phase.npc_param == 71_001_000 {
+        scene.lighting = None;
+        scene.gparam_sub_ids.remove(&(11, 1));
+        scene.enabled.insert(8_907_080, false);
+        scene.enabled_order.retain(|&entity| entity != 8_907_080);
+    }
+    if scene.lighting.is_none() {
+        scene.lighting = sekiro_sim::arena::boss_events(phase).and_then(|e| e.lighting);
+    }
+    scene
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn renderer_counts(
+    sim: NonSend<Sim>,
+    entities: Query<Entity>,
+    drawn: Query<&Mesh3d>,
+    lights: Query<Entity, Or<(With<PointLight>, With<SpotLight>, With<DirectionalLight>)>>,
+    cameras: Query<&Camera>,
+    rigs: Query<&Rig>,
+    meshes: Res<Assets<Mesh>>,
+    materials: Res<Assets<StandardMaterial>>,
+    layered: crate::map::MaterialStats,
+    fx: Res<crate::fxr::FxrPlayer>,
+    lighting: Res<crate::lighting::MapLighting>,
+    probe: Res<crate::perf_log::RenderProbe>,
+    mut last: Local<usize>,
+) {
+    if sim.step == 0 || sim.step % 60 != 59 || *last == sim.step {
+        return;
+    }
+    *last = sim.step;
+    info!(
+        "renderer probe fight {}: entities={} mesh_entities={} meshes={} materials={} lights={} cameras={} rigs={} fx={:?} hour={} draw_batches={}",
+        sim.step / 60,
+        entities.iter().count(),
+        drawn.iter().count(),
+        meshes.len(),
+        materials.len() + layered.count(),
+        lights.iter().count(),
+        cameras.iter().count(),
+        rigs.iter().count(),
+        fx.live_counts(),
+        lighting.hour,
+        probe.0.lock().map_or(0, |p| p.draw_batches)
+    );
 }
 
 /// The map's collision, for the camera; absent on the flat floor.
@@ -541,9 +592,24 @@ pub fn run(options: Options) -> Result<()> {
             FixedUpdate,
             (|sim: NonSend<Sim>,
               mut fx: ResMut<crate::fxr::FxrPlayer>,
+              mut resets: MessageWriter<crate::decals::ClearStains>,
               mut stains: MessageWriter<crate::decals::Stain>| {
+                if sim.last.respawned {
+                    fx.reset_fight();
+                    resets.write(crate::decals::ClearStains);
+                }
                 fx.observe(&sim.duel);
                 crate::decals::forward(&mut fx, &sim.duel, &sim.last, &mut stains);
+                if std::env::var_os("PF_RESPAWN_PROBE").is_some() && sim.step % 60 == 10 {
+                    for _ in 0..16 {
+                        stains.write(crate::decals::Stain {
+                            id: 50010,
+                            at: Vec3::from_array(sim.duel.player.body.position) + Vec3::Y,
+                            floor: sim.duel.player.body.position[1],
+                            blow: None,
+                        });
+                    }
+                }
             })
             .after(simulate)
             .run_if(crate::menu::active),
@@ -597,6 +663,9 @@ pub fn run(options: Options) -> Result<()> {
     arena_d_scene::install(&mut app, &cache, options.arena, options.objects)?;
     arena_c_scene::install(&mut app, &cache, options.arena)?;
     crate::perf_log::register!(app);
+    if std::env::var_os("PF_RESPAWN_PROBE").is_some() {
+        app.add_systems(Last, renderer_counts);
+    }
     if let Some(replay) = replay {
         app.insert_resource(replay).add_systems(
             PreUpdate,
@@ -1042,6 +1111,24 @@ fn simulate(
         r.running = true;
     }
     let dt = 1.0 / STEP_HZ as f32;
+    // Opt-in renderer lifecycle probe: force Tomoe's scene identity, then use Duel::reset.
+    if std::env::var_os("PF_RESPAWN_PROBE").is_some() {
+        let cycle = sim.step % 60;
+        if cycle == 15
+            && sim.duel.spec.chr == "c7100"
+            && (sim.step < 60 || std::env::var("PF_RESPAWN_PROBE").is_ok_and(|v| v == "tomoe-each"))
+        {
+            let cache = PathBuf::from(
+                crate::arg_value(&std::env::args().collect::<Vec<_>>(), "--cache")
+                    .unwrap_or_else(|| "cache".into()),
+            );
+            let tomoe = sekiro_sim::enemy::EnemySpec::from_cache(&cache, "c7110:71100000")
+                .expect("probe Tomoe");
+            sim.duel.spec = tomoe;
+        } else if cycle == 30 {
+            sim.duel.reset().expect("probe restart");
+        }
+    }
     let mut frame = match &sim.script {
         Some(frames) => {
             // Scripted sticks are camera-relative to the current orbit, like a player's.
@@ -1072,7 +1159,10 @@ fn simulate(
     }
     sim.duel.player.wire.view_pitch = orbit.pitch;
     let cinematic_applied = sim.duel.cinematic.as_ref().is_some_and(|c| c.applied);
-    let report = sim.duel.step(&frame, dt);
+    let mut report = sim.duel.step(&frame, dt);
+    if std::env::var_os("PF_RESPAWN_PROBE").is_some() && sim.step % 60 == 30 {
+        report.respawned = true;
+    }
     fade.alpha = sim.duel.cinematic.as_ref().map_or(0.0, |c| c.alpha());
     if !cinematic_applied && sim.duel.cinematic.as_ref().is_some_and(|c| c.applied) {
         orbit.focus = Vec3::from_array(sim.duel.player.body.position)
@@ -1916,6 +2006,48 @@ fn grapple_marker(
 mod tests {
     use super::*;
     use sekiro_sim::fight::FighterKind;
+
+    #[test]
+    fn castle_restart_restores_phase_one_story_lighting() {
+        let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let arena = ArenaSpec::by_name("genichiro").unwrap();
+        let phase = arena.enemy_spec();
+        let mut duel = Duel::load_with(&cache, 6., phase).unwrap();
+        // The phase-two flag survives a fight reload, as it does after Tomoe.
+        let events = duel.events.as_mut().unwrap();
+        events.scripts.flags.insert(11_115_802);
+        events.scripts.cast_scene.lighting = Some(3);
+        events.scripts.cast_scene.enabled_order.push(8_907_080);
+        events
+            .scripts
+            .cast_scene
+            .gparam_sub_ids
+            .insert((11, 1), (10, 0.));
+        duel.reset().unwrap();
+        for _ in 0..150 {
+            duel.step(&InputFrame::default(), 1. / 60.);
+            let scene = arena_scene(
+                &duel.spec,
+                &duel.events.as_ref().unwrap().scripts.cast_scene,
+            );
+            let hour = scene
+                .lighting
+                .and_then(sekiro_sim::story::StoryTime::from_variant)
+                .map_or_else(
+                    || arena.story_time(&duel.spec).hour(),
+                    sekiro_sim::story::StoryTime::hour,
+                );
+            assert_eq!(hour, 6., "storm survived phase-one restart");
+            assert!(
+                !scene.enabled_order.contains(&8_907_080),
+                "storm sky survived restart"
+            );
+            assert!(
+                !scene.gparam_sub_ids.contains_key(&(11, 1)),
+                "storm GPARAM survived restart"
+            );
+        }
+    }
 
     /// Drawn frames between steps never run a clip backwards, hold exactly still while a hit stop
     /// holds the character, and resume from where they stopped. The soldier's row is set to the

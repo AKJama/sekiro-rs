@@ -220,7 +220,7 @@ impl BulletDef {
     }
 }
 
-fn attack_damages(a: &AttackData) -> bool {
+pub(crate) fn attack_damages(a: &AttackData) -> bool {
     a.atk_phys > 0
         || a.atk_stam > 0
         || a.profile.as_ref().is_some_and(|p| {
@@ -305,6 +305,7 @@ fn read_def<'t>(
 /// A bullet in flight.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Bullet {
+    pub source_action: Option<i32>,
     /// Static map-script owner, preserved by child and interval shots.
     pub event_owner: Option<i32>,
     /// Unique per bullet in this fight (from 1), so a renderer can follow it.
@@ -342,6 +343,7 @@ impl Bullet {
 /// A bullet's contact with a character.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BulletHit {
+    pub source_action: Option<i32>,
     pub event_owner: Option<i32>,
     pub hit: HitEvent,
     /// SpEffects it leaves on the character.
@@ -406,6 +408,7 @@ fn launch(
             let byaw = yaw - offset;
             let dir = dir_of(byaw, pitch + elevation);
             Bullet {
+                source_action: None,
                 event_owner: None,
                 serial: 0,
                 shooter,
@@ -439,6 +442,7 @@ fn launch_children(def: &Arc<BulletDef>, parent: &Bullet, origin: Vec3) -> Vec<B
     );
     for child in &mut children {
         child.event_owner = parent.event_owner;
+        child.source_action = parent.source_action;
     }
     children
 }
@@ -552,8 +556,16 @@ impl Bullets {
                 };
                 let shot = self.next_shot;
                 self.next_shot += 1;
-                self.live
-                    .extend(launch(def, si, judge, shot, origin, yaw, pitch));
+                let source = shooter
+                    .behavior
+                    .runtime
+                    .main_clip()
+                    .and_then(|c| crate::lua_ai::anim_id_from_clip(&c.animation));
+                let mut made = launch(def, si, judge, shot, origin, yaw, pitch);
+                for bullet in &mut made {
+                    bullet.source_action = source;
+                }
+                self.live.extend(made);
             }
         }
         self.fired.retain(|k| live_windows.contains(k));
@@ -661,6 +673,7 @@ impl Bullets {
                         && attack.damage_level <= 0
                         && attack.profile.as_ref().is_none_or(|p| p.behavior_id == 0);
                     hits.push(BulletHit {
+                        source_action: b.source_action,
                         event_owner: b.event_owner,
                         hit: HitEvent {
                             attacker: b.shooter,

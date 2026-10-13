@@ -247,7 +247,7 @@ impl Fighter {
         else {
             return;
         };
-        if !arm.split(['>', '+']).any(|s| s == x.key) {
+        if !x.outcome.idle_guard && !arm.split(['>', '+']).any(|s| s == x.key) {
             return;
         }
         let attack = x

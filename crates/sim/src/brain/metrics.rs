@@ -192,7 +192,7 @@ impl MetricsTracker {
     pub fn post_break_hit(&mut self, now: f32) {
         if self
             .last_break
-            .is_some_and(|t| (0.0..=2.5).contains(&(now - t)))
+            .is_some_and(|t| now - t > 0.001 && now - t <= 2.5)
         {
             self.metrics.hits_after_break += 1;
             if !self.break_punished {
@@ -335,6 +335,8 @@ impl MetricsTracker {
     /// The fight is over at `now`: the final numbers.
     pub fn finish(&self, now: f32, punishes: u32, wolf_won: bool) -> FightMetrics {
         let mut m = self.snapshot(now);
+        // A confirmed victory is evidence even when sparse input fails the idle-session gate.
+        m.void &= !wolf_won;
         m.punishes = punishes;
         m.kill_time = wolf_won.then_some(m.duration);
         m
@@ -463,7 +465,7 @@ impl FightRecord {
             self.session_cost.line("session")
         );
         format!(
-            "break_conversion_delay {conversion}; time_to_kill_wolf {}; wolf_posture_breaks {} hits_after_break {}; boss_damage_taken_per_min {:.0}%; mid-coach {} reviews {} ms; {line}; engaged_time {:.1}s; wolf_posture_breaks {} hits_after_break {} break_punish_rate {:.0}% wolf_posture_peak {:.0}% time_to_kill_wolf {}",
+            "break_conversion_delay {conversion}; time_to_kill_wolf {}; wolf_posture_breaks {} hits_after_break {}; boss_damage_taken_per_min {:.0}%; mid-coach {} reviews {} ms; {line}; engaged_time {:.1}s; wolf_posture_breaks {} hits_after_break {} break_punish_rate {:.0}% wolf_posture_peak {:.0}% time_to_kill_wolf {}; wolf_kill_time {}",
             m.time_to_kill_wolf
                 .map_or("-".into(), |t| format!("{t:.1}s")),
             m.wolf_posture_breaks,
@@ -477,7 +479,8 @@ impl FightRecord {
             m.break_punish_rate * 100.0,
             m.wolf_posture_peak * 100.0,
             m.time_to_kill_wolf
-                .map_or("-".into(), |t| format!("{t:.1}s"))
+                .map_or("-".into(), |t| format!("{t:.1}s")),
+            m.kill_time.map_or("-".into(), |t| format!("{t:.1}s"))
         )
     }
 }

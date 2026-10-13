@@ -226,8 +226,15 @@ fn genichiro_brain_idle_guard_is_failed_and_cannot_stall() {
     assert!(
         counts
             .iter()
-            .any(|(key, c)| key == "guard1" && c.whiffed > 0),
-        "idle guard must fail"
+            .any(|(key, c)| key == "guard1" && c.n > 0 && c.whiffed == 0),
+        "idle guard is separate from an attack miss"
+    );
+    assert!(
+        d.coach_input(&Default::default())
+            .failures
+            .values()
+            .any(|f| f[3] > 0),
+        "idle guard must fail its plan"
     );
     let d = duel.boss_brain.as_mut().unwrap();
     d.end_fight(sekiro_sim::brain::memory::FightEnd::BossWon);
@@ -277,7 +284,12 @@ fn scripted_genichiro_attacks_idle_god_wolf_for_sixty_seconds() {
     assert!(chosen_attacks >= 5);
     assert!(driver.stats.planned >= 5);
     assert_eq!(driver.stats.invalid, 0);
-    assert!(driver.history.iter().all(|p| p.value() == "3000+3001+3002"));
+    assert!(
+        driver
+            .history
+            .iter()
+            .all(|p| sekiro_sim::brain::limits::has_attack(p, &GENICHIRO))
+    );
 }
 
 #[test]
@@ -286,6 +298,20 @@ fn genichiro_move_sheet_builds_real_combo_timelines() {
     duel.set_brain(BrainKind::Scripted.build("c7100"), false)
         .unwrap();
     let sheet = &duel.boss_brain.as_ref().unwrap().move_sheet;
+    for id in [3000, 3001, 3005, 3018, 3034, 3062, 3076] {
+        let m = &sheet[&id.to_string()];
+        eprintln!(
+            "sheet {id}: contact={} first={:?} reach={:?}/{:?} recovery={} hits={:?} damage={:?} projectiles={:?}",
+            m.contact,
+            m.first_hit(3.0),
+            m.first_reach,
+            m.reach,
+            m.recovery,
+            m.hits,
+            m.damage,
+            m.projectiles
+        );
+    }
     for action in GENICHIRO.actions {
         assert!(
             sheet.contains_key(&action.id.to_string()),
@@ -304,6 +330,147 @@ fn genichiro_move_sheet_builds_real_combo_timelines() {
     assert!(combo.reach.unwrap() > 0.0);
     assert_eq!(sheet["3040+3041"].hits.len(), 7);
     assert!(!sheet["3007"].cancels.is_empty());
+    assert!((sheet["3000"].hits[0][0] - 0.667).abs() < 0.002);
+    assert!(sheet["3000"].first_reach.unwrap() > 3.0);
+    assert!(!sheet["3018"].projectiles.is_empty());
+    assert!(!sheet["3034"].projectiles.is_empty());
+    assert!(!sheet["5201"].contact);
+    assert!(sheet["3000"].chain_next.contains(&3001));
+    assert!(sheet["3000"].cancel_into.contains(&3005));
+}
+
+#[test]
+fn genichiro_brain_gate_scripted_retreat_ab() {
+    let mut results = Vec::new();
+    for gated in [false, true] {
+        let Some(mut duel) = load(3.5) else { return };
+        let plan = GENICHIRO.parse("3000+3001+3002").unwrap();
+        duel.set_brain(
+            Box::new(ScriptedBrain::new(plan.clone(), plan, u32::MAX, 0.0).with_move_selection()),
+            false,
+        )
+        .unwrap();
+        let d = duel.boss_brain.as_mut().unwrap();
+        d.brain_moves = false;
+        d.mode = sekiro_sim::brain::RequestMode::Checkpoints;
+        d.anti_stall = true;
+        let contacts: std::collections::BTreeSet<_> = d
+            .move_sheet
+            .iter()
+            .filter(|(_, row)| row.contact)
+            .map(|(key, _)| key.clone())
+            .collect();
+        if !gated {
+            // Disable melee reach rejection without changing outcome classification or
+            // projectile settlement, so both sides measure the same genuine attacks.
+            for row in d.move_sheet.values_mut() {
+                for window in &mut row.first_window {
+                    window[1] = f32::MAX;
+                }
+                if row.first_reach.is_some() {
+                    row.first_reach = Some(f32::MAX);
+                }
+            }
+        }
+        let mut first_brain_attack = None;
+        let mut first_attack = None;
+        for frame in 0..1800 {
+            // Isolate ordinary brain slots; Lua reflexes have their own unchanged regressions.
+            if let Some(hook) = duel.ai.as_mut().unwrap().state.act_hook.as_mut() {
+                hook.reflex_acts.clear();
+            }
+            let mut input = InputFrame::default();
+            // Three early presses qualify the fight, then a held guard avoids reflex-counter noise.
+            input.buttons.guard = !matches!(frame, 1 | 3);
+            // Observable scripted retreat, then a stationary guard, repeated every six seconds.
+            if frame % 360 < 120 {
+                duel.player.body.position[2] += 3.0 * DT;
+            }
+            let report = duel.step(&input, DT);
+            if report.enemy.clip_started
+                && report
+                    .enemy
+                    .animation
+                    .as_deref()
+                    .and_then(|name| name.strip_prefix("a000_"))
+                    .and_then(|id| id.parse::<i32>().ok())
+                    .is_some_and(|id| contacts.contains(&id.to_string()))
+            {
+                first_attack.get_or_insert(frame as f32 * DT);
+            }
+            let st = &duel.ai.as_ref().unwrap().state;
+            if gated
+                && (3000..3100).contains(&st.request.action)
+                && st.goals.iter().flatten().any(|goal| {
+                    goal.activated
+                        && !goal.started_anim
+                        && goal.plan_step.is_some()
+                        && goal.params.first().and_then(|p| p.num())
+                            == Some(f64::from(st.request.action))
+                })
+            {
+                assert!(
+                    st.act_hook
+                        .as_ref()
+                        .unwrap()
+                        .reachable
+                        .as_ref()
+                        .unwrap()
+                        .contains(&st.request.action),
+                    "brain requested an unreachable attack at frame {frame}"
+                );
+                first_brain_attack.get_or_insert(frame as f32 * DT);
+            }
+        }
+        if gated {
+            assert!(
+                first_brain_attack.is_some(),
+                "live brain attack gate was not exercised"
+            );
+            assert!(
+                first_attack.is_some_and(|time| time <= 6.0),
+                "the boss must attack within the passive deadline: {first_attack:?}"
+            );
+        }
+        let d = duel.boss_brain.as_mut().unwrap();
+        d.end_fight(sekiro_sim::brain::memory::FightEnd::Unfinished);
+        if gated {
+            assert!(
+                !d.memory.coach.contact_ranges.is_empty(),
+                "real first-hit distance samples must survive the fight"
+            );
+            assert!(d.session_report().contains("first-hit hit / miss (m)"));
+            assert!(
+                d.coach_input(d.last_record.as_ref().unwrap())
+                    .digest
+                    .moves
+                    .contains("hit/miss_m")
+            );
+        }
+        let counts = d
+            .memory
+            .boss
+            .iter()
+            .filter(|(key, _)| {
+                contacts.contains(*key)
+                    && key
+                        .parse::<i32>()
+                        .is_ok_and(|id| (3000..3100).contains(&id))
+            })
+            .fold((0, 0), |(n, w), (_, c)| (n + c.n, w + c.whiffed));
+        eprintln!(
+            "gate scripted gated={gated}: n={} whiff={} rate={:.1}%",
+            counts.0,
+            counts.1,
+            100.0 * counts.1 as f32 / counts.0.max(1) as f32
+        );
+        results.push(counts);
+    }
+    assert!(results[1].0 > 0, "gate must still attack");
+    assert!(
+        results[1].1 * results[0].0 * 10 <= results[0].1 * results[1].0 * 7,
+        "{results:?}"
+    );
 }
 
 #[test]
@@ -461,8 +628,153 @@ fn tomoe_handover_preserves_the_brain_and_reset_continues_numbering() {
     assert!(duel.boss_brain.as_ref().unwrap().stats.planned > planned);
 }
 
-fn take_mark(duel: &mut Duel) {
-    duel.enemy_active = false;
+#[test]
+fn final_deathblow_records_one_wolf_win_across_genichiro_phases() {
+    let Some(mut duel) = load(1.6) else { return };
+    assert!(duel.events.is_some(), "exercise the map event path");
+    duel.set_brain(BrainKind::Scripted.build("c7100"), false)
+        .unwrap();
+    let dir = std::env::temp_dir().join(format!(
+        "sekiro-wolf-win-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("c7100.json");
+    let layers = sekiro_sim::brain::memory::LayerPaths::new(&path, "testwolf");
+    duel.boss_brain
+        .as_mut()
+        .unwrap()
+        .use_player_memory(path, "testwolf");
+    let driver = duel.boss_brain.as_mut().unwrap();
+    driver.enable_session_report(&dir);
+    let log = driver.log_to(&dir).unwrap();
+    for _ in 0..150 {
+        duel.step(&InputFrame::default(), DT);
+    }
+    for _ in 0..2 {
+        take_mark(&mut duel);
+        let driver = duel.boss_brain.as_ref().unwrap();
+        assert_eq!(driver.memory.wolf_wins, 0, "a phase is not a victory");
+        assert!(driver.last_record.is_none());
+    }
+    for _ in 0..600 {
+        duel.step(&InputFrame::default(), DT);
+        if duel.spec.chr == "c7110" {
+            break;
+        }
+    }
+    assert_eq!(duel.spec.chr, "c7110");
+    take_mark(&mut duel);
+    for _ in 0..600 {
+        duel.step(&InputFrame::default(), DT);
+        if duel.boss_brain.as_ref().unwrap().last_record.is_some() {
+            break;
+        }
+    }
+    let driver = duel.boss_brain.as_ref().unwrap();
+    assert_eq!(
+        driver.memory.wolf_wins, 1,
+        "final deathblow must record victory"
+    );
+    let record = driver.last_record.as_ref().unwrap();
+    assert_eq!(record.winner, "wolf");
+    assert!(
+        !record.metrics.void,
+        "a victory survives the sparse-input gate"
+    );
+    assert_eq!(record.metrics.kill_time, Some(record.metrics.duration));
+    let input = driver.coach_input(record);
+    assert_eq!(
+        input.trend.kill_s.last(),
+        Some(&Some(record.metrics.duration.round() as u32))
+    );
+    assert!(driver.session_report().contains("| 1 | wolf |"));
+    assert!(driver.session_report().contains("Wolf kill time (s)"));
+    driver.print_session_report().unwrap();
+    assert!(
+        record
+            .summary_line()
+            .contains(&format!("wolf_kill_time {:.1}s", record.metrics.duration))
+    );
+    let (_, saved) = layers.load("c7100").unwrap();
+    assert_eq!(saved.wolf_wins, 1);
+    assert_eq!(
+        saved.history.last().unwrap().metrics.kill_time,
+        record.metrics.kill_time
+    );
+    assert_eq!(
+        saved.chr, "c7100",
+        "Tomoe belongs to the castle fight memory"
+    );
+    for _ in 0..120 {
+        duel.step(&InputFrame::default(), DT);
+    }
+    duel.boss_brain
+        .as_mut()
+        .unwrap()
+        .end_fight(sekiro_sim::brain::memory::FightEnd::Unfinished);
+    assert_eq!(duel.boss_brain.as_ref().unwrap().memory.fights, 1);
+    let events: Vec<serde_json::Value> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|row: &serde_json::Value| row["ev"] == "fight_summary")
+        .collect();
+    assert_eq!(events.len(), 1, "exactly one persisted fight summary");
+    assert_eq!(events[0]["record"]["winner"], "wolf");
+    assert!(
+        events[0]["record"]["metrics"]["kill_time"]
+            .as_f64()
+            .unwrap()
+            > 0.0
+    );
+    duel.reset().unwrap();
+    assert_eq!(duel.spec.chr, "c7100");
+    for i in 0..150 {
+        duel.step(
+            &InputFrame {
+                buttons: sekiro_sim::Buttons {
+                    guard: i % 40 != 0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            DT,
+        );
+    }
+    duel.god = false;
+    duel.rules.fighters[0].vitality.hp = 0;
+    duel.step(&InputFrame::default(), DT);
+    let driver = duel.boss_brain.as_ref().unwrap();
+    assert_eq!(
+        (
+            driver.memory.fights,
+            driver.memory.wolf_wins,
+            driver.memory.boss_wins
+        ),
+        (2, 1, 1)
+    );
+    let record = driver.last_record.as_ref().unwrap();
+    assert_eq!(record.winner, "boss");
+    assert_eq!(record.metrics.kill_time, None);
+    assert_eq!(
+        record.metrics.time_to_kill_wolf,
+        Some(record.metrics.duration)
+    );
+    drop(duel);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+pub(super) fn take_mark(duel: &mut Duel) {
+    take_mark_with_ai(duel, false);
+}
+
+pub(super) fn take_mark_with_ai(duel: &mut Duel, enemy_active: bool) {
+    duel.enemy_active = enemy_active;
     for _ in 0..360 {
         duel.step(&InputFrame::default(), 1.0 / 60.0);
     }
@@ -473,6 +785,10 @@ fn take_mark(duel: &mut Duel) {
     let mut broke = false;
     let mut started = false;
     for i in 0..1500 {
+        // Owl can recover from his kneel before becoming throwable; break him again.
+        if !started {
+            broke &= duel.rules.deathblow_open(1);
+        }
         if !broke {
             duel.rules.fighters[1].posture.remaining = 1;
         }
@@ -503,5 +819,19 @@ fn take_mark(duel: &mut Duel) {
             break;
         }
     }
-    assert!(started, "deathblow not started");
+    assert!(
+        started,
+        "deathblow not started for {}:{} (broke={broke}, marks={}, clip={:?}, open={}, Wolf={:?}, boss={:?})",
+        duel.spec.chr,
+        duel.spec.npc_param,
+        duel.rules.fighters[1].vitality.deathblows_left,
+        duel.enemy
+            .behavior
+            .runtime
+            .main_clip()
+            .map(|c| &c.animation),
+        duel.deathblow_available(),
+        duel.player.body.position,
+        duel.enemy.body.position
+    );
 }

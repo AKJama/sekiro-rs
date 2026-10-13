@@ -420,8 +420,17 @@ impl EventScripts {
         let i = |k: usize| a.get(k).map_or(0, |v| v.as_i64());
         match ins.code() {
             (3, 12) => crate::event_values::comparison(ins, &self.flags),
-            (3, 1) => (ins.i32_at(4).unwrap_or(0)..=ins.i32_at(8).unwrap_or(0))
-                .all(|flag| self.flag(flag)),
+            (3, 1) => {
+                let mut flags = (ins.i32_at(4).unwrap_or(0)..=ins.i32_at(8).unwrap_or(0))
+                    .map(|flag| self.flag(flag));
+                match ins.u8_at(1) {
+                    Some(0) => flags.all(|on| on),
+                    Some(1) => flags.all(|on| !on),
+                    Some(2) => flags.any(|on| on),
+                    Some(3) => flags.any(|on| !on),
+                    _ => false,
+                }
+            }
             (4, 2) => crate::arenas_a::hp_ratio_condition(ins, host),
             (4, 21) => {
                 host.in_state(ins.i32_at(4).unwrap_or(0), ins.i32_at(8).unwrap_or(0))
@@ -456,6 +465,7 @@ impl EventScripts {
                 | (3, 1)
                 | (3, 0)
                 | (3, 2)
+                | (3, 8)
                 | (3, 31)
                 | (4, 0)
                 | (4, 5)
@@ -550,6 +560,9 @@ impl EventScripts {
                 continue;
             }
             let mut next = r.pc + 1;
+            if ins.code() == (2003, 88) {
+                self.cast_scene.instruction(&ins, &a);
+            }
             if self.arena_c_state.instruction(&ins) {
                 r.pc = next;
                 continue;
@@ -961,6 +974,34 @@ impl Cinematic {
 mod tests {
     use super::*;
     use sekiro_formats::emevd::{Event, RestBehavior};
+
+    #[test]
+    fn flag_range_distinguishes_all_off_from_all_on_and_any() {
+        for (state, enabled, expected) in [
+            (0, vec![], false),
+            (0, vec![9800, 9801], true),
+            (1, vec![], true),
+            (1, vec![9800], false),
+            (2, vec![9800], true),
+            (2, vec![], false),
+            (3, vec![9800], true),
+            (3, vec![9800, 9801], false),
+        ] {
+            let mut gate = ins(3, 1, &[0, 9800, 9801]);
+            gate.args[1] = state;
+            let mut scripts = EventScripts::new(
+                &file(vec![gate, ins(2003, 2, &[123, 1])]),
+                &[EventEntry {
+                    id: 1,
+                    from_label: None,
+                }],
+            )
+            .unwrap();
+            scripts.flags.extend(enabled);
+            scripts.step(0., &World::default());
+            assert_eq!(scripts.flag(123), expected, "range state {state}");
+        }
+    }
 
     fn ins(bank: i32, id: i32, words: &[i32]) -> Instruction {
         Instruction {

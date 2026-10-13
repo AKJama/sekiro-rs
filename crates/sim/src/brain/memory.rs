@@ -1,7 +1,7 @@
 //! Shared boss evidence and isolated player profiles across fights and sessions.
 //! [`LayerPaths`] migrates legacy memory without deleting its source, and persists counted
 //! boss knowledge beside each player's habits, history and tuned game plan.
-//! [`Memory`] is the version-5 profile and legacy format; [`BossKnowledge`] is version 1.
+//! [`Memory`] is the version-6 profile and legacy format; [`BossKnowledge`] is version 1.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ use super::tally::{CountMap, Counts, Side, Tally, TopMap, merge_counts, ranked_c
 use std::collections::BTreeMap;
 
 /// The memory file format version.
-pub const MEMORY_VERSION: u32 = 5;
+pub const MEMORY_VERSION: u32 = 6;
 
 /// The oldest format this build still reads (version 1 had no fight history).
 pub const OLDEST_VERSION: u32 = 1;
@@ -38,6 +38,10 @@ pub enum FightEnd {
 /// The memory file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Memory {
+    /// Phase -> distance bucket -> punish id -> observed punish outcomes.
+    #[serde(default)]
+    pub punishes:
+        BTreeMap<String, BTreeMap<String, BTreeMap<String, super::moves::PunishEvidence>>>,
     #[serde(default)]
     pub move_bandit: super::bandit::BanditMemory,
     #[serde(default)]
@@ -76,6 +80,9 @@ pub struct Memory {
 /// What the coach mode keeps across sessions (old files lack it).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CoachMemory {
+    /// Phase:move -> hit/miss [sample count, summed first-window distance].
+    #[serde(default)]
+    pub contact_ranges: BTreeMap<String, [[f32; 2]; 2]>,
     #[serde(default)]
     pub hypotheses: Vec<super::digest::Hypothesis>,
     #[serde(default)]
@@ -120,6 +127,7 @@ impl PlanFailures {
 impl CoachMemory {
     pub fn is_empty(&self) -> bool {
         self.phase_plans.is_empty()
+            && self.contact_ranges.is_empty()
             && self.last_review_fight == 0
             && self.hypotheses.is_empty()
             && self.lessons.is_empty()
@@ -170,6 +178,7 @@ impl Memory {
     pub fn new(chr: &str) -> Self {
         Self {
             version: MEMORY_VERSION,
+            punishes: Default::default(),
             move_bandit: Default::default(),
             attack_learning: Default::default(),
             bandit: Default::default(),
@@ -215,6 +224,8 @@ impl Memory {
                 });
             }
         }
+        // Version 6 adds punish outcomes; serde defaults old profiles to empty evidence.
+        // Never infer punish success from historical aggregate hit counts.
         self.version = MEMORY_VERSION;
     }
 

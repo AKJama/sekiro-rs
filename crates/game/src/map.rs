@@ -34,12 +34,13 @@ use serde_json::Value;
 
 #[path = "map_material.rs"]
 mod map_material;
+pub(crate) use map_material::MaterialStats;
 #[path = "sky.rs"]
 pub(crate) mod sky;
 
 use crate::lighting::{
     MapLighting, MapProbes, ProbeRegion, ShadowSettings, apply_lighting, apply_probes,
-    nearest_available_variant, nearest_variant, spawn_lights,
+    nearest_variant, spawn_lights,
 };
 
 pub struct Options {
@@ -119,6 +120,8 @@ struct CollisionPart {
     /// Light set id of the collision's gparam config (-1 when none).
     light_set: i32,
     fog_set: i32,
+    scattering_set: i32,
+    env_map: i32,
 }
 
 #[derive(Resource)]
@@ -282,6 +285,7 @@ pub struct MapScene {
 }
 
 /// Default draw param of a map: `m11_00_00_00` -> `m11_00_0000`.
+#[cfg(test)]
 fn default_gparam(id: &str) -> String {
     format!("{}_0000", id.get(..6).unwrap_or(id))
 }
@@ -374,6 +378,8 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
                 draw: groups8(&row["draw_groups"]),
                 light_set: row["light_set"].as_i64().unwrap_or(-1) as i32,
                 fog_set: row["fog_set"].as_i64().unwrap_or(-1) as i32,
+                scattering_set: row["scattering_set"].as_i64().unwrap_or(-1) as i32,
+                env_map: row["env_map"].as_i64().unwrap_or(-1) as i32,
             });
         }
     }
@@ -389,7 +395,9 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
         .and_then(Path::parent)
         .context("map folder has no cache above it")?;
     // Older extractor output lacks FogParamID; read the installed-data copy without rewriting it.
-    if group_parts.iter().any(|p| p.fog_set < 0)
+    if group_parts
+        .iter()
+        .any(|p| p.fog_set < 0 || p.scattering_set < 0 || p.env_map < 0)
         && let Ok(bytes) = std::fs::read(cache.join(format!("raw/map/mapstudio/{id}.msb")))
         && let Ok(msb) = sekiro_formats::msb::parse(&bytes)
     {
@@ -400,13 +408,41 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
                 .find(|p| p.name == part.name)
                 .and_then(|p| p.gparam)
             {
+                part.light_set = g[0];
                 part.fog_set = g[1];
+                part.scattering_set = g[2];
+                part.env_map = g[3];
             }
         }
     }
     app.init_resource::<crate::lighting::fog::FogSelection>();
+    app.init_resource::<crate::lighting_selection::RegionSelection>();
+    let args: Vec<_> = std::env::args().collect();
+    let arena_name = crate::arg_value(&args, "--arena");
+    let arena = arena_name
+        .as_deref()
+        .and_then(|name| sekiro_sim::arena::ArenaSpec::by_name(name).ok());
+    let story = crate::arg_value(&args, "--story");
+    let mut selection = crate::lighting_selection::select(cache, &id, story.as_deref(), arena)?;
+    if scene.hour.is_finite() {
+        let hour_changed = scene.hour != selection.hour;
+        selection.hour = scene.hour;
+        if !selection.fixed_environment {
+            selection.environment = nearest_variant(scene.hour);
+            // An explicit clock override chooses its matching ordinary sky.
+            if hour_changed || args.iter().any(|a| a == "--hour") {
+                selection.sky = None;
+            }
+        }
+    }
+    let hour = selection.hour;
+    info!(
+        "map story lighting: {id}, hour={hour}, environment={}, sub-ID={}, source={}, flags={:?}, sky={:?}",
+        selection.environment, selection.sub_id, selection.source, selection.flags, selection.sky
+    );
+    let selected_source = selection.source.clone();
     let stem = scene.gparam.clone().unwrap_or_else(|| {
-        let standard = default_gparam(&id);
+        let standard = selected_source;
         if cache
             .join(format!("raw/param/drawparam/{standard}.gparam"))
             .is_file()
@@ -427,12 +463,21 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
         &std::fs::read(&gparam_path)
             .with_context(|| format!("reading {}", gparam_path.display()))?,
     )?;
-    let hour = scene.hour;
+    let selection = crate::lighting_selection::LightingSelection::load(
+        cache,
+        &id,
+        selection,
+        scene.gparam.is_some(),
+    )?;
+    let selected_environment = selection.initial.environment;
+    app.insert_resource(selection);
+    crate::lighting_selection::MapStoryEvents::install(app, cache, &id, story.as_deref())?;
+    app.add_systems(PostUpdate, crate::lighting_selection::sync_events);
     crate::lighting::install_post_effects(app, dir)?;
     sky::install(app, cache, &id, hour)?;
     let mut probes = MapProbes {
         prefix: scene.prefix.clone(),
-        variant: nearest_variant(hour),
+        variant: selected_environment,
         ..default()
     };
     // This flag is shared by viewer and play without changing the play-mode options.
@@ -465,11 +510,15 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
                     .join(format!("env/gilm{probe}_{variant:02}_diffuse.dds"))
                     .exists()
         };
-        if let Some(variant) = nearest_available_variant(
-            hour,
-            (0..6).filter(|v| probes.regions.iter().any(|r| exists(r.probe, *v))),
-        ) {
-            probes.variant = variant;
+        if !probes
+            .regions
+            .iter()
+            .any(|r| exists(r.probe, probes.variant))
+        {
+            warn!(
+                "{id}: authored environment variant {} has no complete exported probes; no nearest-time substitution",
+                probes.variant
+            );
         }
         for r in &probes.regions {
             let probe = r.probe;
@@ -1034,13 +1083,14 @@ fn apply_fly(fly: Res<Fly>, mut camera: Query<&mut Transform, With<Camera3d>>) {
 }
 
 /// Finds the collision part under the camera (the nearest surface below, else the nearest
-/// above) and takes its groups. Runs when the camera has moved a couple of metres.
+/// above) and takes its groups and lighting configuration whenever the focus moves.
 fn pick_groups(
     keys: Res<ButtonInput<KeyCode>>,
     layout: Res<Layout>,
     mut groups: ResMut<Groups>,
     mut lighting: ResMut<MapLighting>,
     mut fog: ResMut<crate::lighting::fog::FogSelection>,
+    mut region: ResMut<crate::lighting_selection::RegionSelection>,
     focus: Query<&Transform, With<MapFocus>>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("pick_groups");
@@ -1052,11 +1102,8 @@ fn pick_groups(
     let (Some(t), Some(c)) = (focus.iter().next(), &layout.collision) else {
         return;
     };
-    if groups.mode == GroupMode::Off {
-        return;
-    }
     let pos = t.translation;
-    if groups.checked_at.is_some_and(|p| p.distance(pos) < 2.0) {
+    if groups.checked_at == Some(pos) {
         return;
     }
     groups.checked_at = Some(pos);
@@ -1085,6 +1132,7 @@ fn pick_groups(
         _ => part.draw,
     };
     let light_set = part.light_set;
+    region.enter([light_set, part.fog_set, part.scattering_set, part.env_map]);
     if part.fog_set >= 0 {
         fog.0 = part.fog_set;
     }
@@ -1556,6 +1604,100 @@ pub fn parse_camera(arg: Option<&str>) -> Result<Option<[f32; 5]>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collision_regions_select_all_four_ids_even_with_culling_off() {
+        let collision = sekiro_formats::hknp::CollisionMesh {
+            vertices: vec![
+                [0., 0., 0.],
+                [10., 0., 0.],
+                [0., 0., 10.],
+                [20., 0., 0.],
+                [30., 0., 0.],
+                [20., 0., 10.],
+            ],
+            indices: vec![0, 1, 2, 3, 4, 5],
+            materials: vec![0, 0],
+        };
+        let parts = [([110, 7, 9, 12], 0.), ([0; 4], 20.)]
+            .into_iter()
+            .enumerate()
+            .map(|(first, (config, x))| CollisionPart {
+                name: format!("h{first}"),
+                first,
+                count: 1,
+                min: Vec2::new(x, 0.),
+                max: Vec2::new(x + 10., 10.),
+                display: [0; 8],
+                draw: [0; 8],
+                light_set: config[0],
+                fog_set: config[1],
+                scattering_set: config[2],
+                env_map: config[3],
+            })
+            .collect();
+        let mut app = App::new();
+        app.insert_resource(ButtonInput::<KeyCode>::default())
+            .insert_resource(Layout {
+                json: serde_json::json!({}),
+                collision: Some(collision),
+                scene: MapScene {
+                    prefix: String::new(),
+                    collision: false,
+                    no_pieces: false,
+                    hide: vec![],
+                    objects: false,
+                    groups: GroupMode::Off,
+                    markers: false,
+                    hour: 6.,
+                    gparam: None,
+                    within: None,
+                },
+            })
+            .insert_resource(Groups {
+                mode: GroupMode::Off,
+                parts,
+                current: None,
+                active: None,
+                checked_at: None,
+                dirty: false,
+            })
+            .insert_resource(MapLighting {
+                gparam: Default::default(),
+                hour: 6.,
+                light_set: 0,
+                applied: None,
+                source: String::new(),
+            })
+            .init_resource::<crate::lighting::fog::FogSelection>()
+            .init_resource::<crate::lighting_selection::RegionSelection>()
+            .add_systems(Update, pick_groups);
+        let focus = app
+            .world_mut()
+            .spawn((MapFocus, Transform::from_xyz(2., 1., 2.)))
+            .id();
+        for (x, ids) in [(2., [110, 7, 9, 12]), (22., [0; 4])] {
+            app.world_mut()
+                .get_mut::<Transform>(focus)
+                .unwrap()
+                .translation
+                .x = x;
+            app.update();
+            assert_eq!(
+                app.world()
+                    .resource::<crate::lighting_selection::RegionSelection>()
+                    .0,
+                ids
+            );
+            assert_eq!(app.world().resource::<MapLighting>().light_set, ids[0]);
+            assert_eq!(
+                app.world()
+                    .resource::<crate::lighting::fog::FogSelection>()
+                    .0,
+                ids[1]
+            );
+        }
+    }
 
     #[test]
     fn draw_param_stems_preserve_cinematic_suffix() {

@@ -9,10 +9,7 @@ use crate::{
 use anyhow::Result;
 use bevy::prelude::*;
 use serde_json::Value;
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{path::Path, sync::Arc};
 
 #[derive(Component)]
 struct Support {
@@ -25,10 +22,7 @@ struct Support {
 }
 #[derive(Resource)]
 struct Stage {
-    cache: PathBuf,
     cast: Vec<(Value, AnimLibrary, [bool; 32])>,
-    gparam: Option<u8>,
-    base_gparam: Option<sekiro_formats::gparam::Gparam>,
 }
 
 pub(super) fn install(
@@ -39,12 +33,7 @@ pub(super) fn install(
     let Some(spec) = spec.filter(|s| matches!(s.map, "m11_02_00_00" | "m17_00_00_00")) else {
         return Ok(());
     };
-    let mut stage = Stage {
-        cache: cache.into(),
-        cast: Vec::new(),
-        gparam: None,
-        base_gparam: None,
-    };
+    let mut stage = Stage { cast: Vec::new() };
     if spec.map == "m17_00_00_00" {
         let layout: Value = serde_json::from_slice(&std::fs::read(
             cache.join(format!("maps/{}/layout.json", spec.map)),
@@ -140,7 +129,6 @@ fn spawn(mut commands: Commands, assets: Res<AssetServer>, mut stage: ResMut<Sta
 
 fn update(
     sim: NonSend<Sim>,
-    mut stage: ResMut<Stage>,
     mut actors: Query<(
         &mut Support,
         &mut Visibility,
@@ -148,7 +136,6 @@ fn update(
         &mut DrawMask,
         &mut Transform,
     )>,
-    mut lighting: Option<ResMut<crate::lighting::MapLighting>>,
     mut sky: Option<ResMut<crate::map::sky::SkyOverride>>,
     mut main_masks: Query<(&super::Actor, &mut DrawMask), Without<Support>>,
 ) {
@@ -156,18 +143,6 @@ fn update(
         return;
     };
     let scene = &events.scripts.cast_scene;
-    if let Some(light) = lighting.as_mut() {
-        if stage.base_gparam.is_none() {
-            stage.base_gparam = Some(light.gparam.clone());
-        }
-        if events.scripts.arena_c_state.gparam.is_none()
-            && stage.gparam.take().is_some()
-            && let Some(base) = stage.base_gparam.as_ref()
-        {
-            light.gparam.clone_from(base);
-            light.applied = None;
-        }
-    }
     if let Some(sky) = sky.as_mut() {
         sky.0 = match events.boss_entity {
             1_120_800 => Some("m900040"),
@@ -282,26 +257,5 @@ fn update(
             }
             mask.apply_event(&values);
         }
-    }
-    if let Some((11, 2, sub, _seconds)) = events.scripts.arena_c_state.gparam
-        && stage.gparam != Some(sub)
-        && let Some(light) = lighting.as_mut()
-    {
-        // 0930 is the sole authored storm-sub-ID file for this map; 0920 is its clear variant.
-        // The transition snaps to the authored set; interpolation is still a renderer gap.
-        let path = stage
-            .cache
-            .join(format!("raw/param/drawparam/m11_02_09{sub:02}.gparam"));
-        match std::fs::read(&path)
-            .ok()
-            .and_then(|b| sekiro_formats::gparam::parse(&b).ok())
-        {
-            Some(gparam) => {
-                light.gparam = gparam;
-                light.applied = None;
-            }
-            None => warn!("arena staging: missing GPARAM {}", path.display()),
-        }
-        stage.gparam = Some(sub);
     }
 }

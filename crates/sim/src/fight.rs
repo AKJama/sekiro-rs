@@ -917,7 +917,7 @@ impl CombatRules {
     }
 
     /// HP damage of `atk` from fighter `a` on fighter `d` for `outcome`.
-    fn hp_damage(
+    pub(crate) fn hp_damage(
         &self,
         sides: (usize, usize),
         atk: &AttackProfile,

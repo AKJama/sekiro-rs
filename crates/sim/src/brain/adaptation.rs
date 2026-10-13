@@ -97,7 +97,9 @@ fn finite(value: f32) -> f32 {
 /// Counters and punishments remain failures even if another hit landed in the clip.
 pub fn signal(x: &Exchange) -> (f32, f32) {
     let o = x.outcome;
-    let failure = if o.countered.is_some() {
+    let failure = if o.idle_guard {
+        0.25
+    } else if o.countered.is_some() {
         2.0
     } else if o.deflected {
         1.0

@@ -13,6 +13,59 @@ use sekiro_sim::{Buttons, InputFrame};
 
 const DT: f32 = 1.0 / 60.0;
 
+#[test]
+fn wolf_victory_uses_encounter_defeat_for_owl_and_father_variants() {
+    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    if !cache.join("anim/c5060/tae.json").exists()
+        || !cache.join("anim/c5070/tae.json").exists()
+        || !cache
+            .join("raw/script/m10_00_00_00.luabnd.d/506000_battle.lua")
+            .exists()
+        || !cache.join("raw/script/m11_01_00_00.luabnd.d").is_dir()
+    {
+        eprintln!("skipping: Owl and Father are not extracted");
+        return;
+    }
+    for arena in ["owl", "hirata-father", "hirata-inner-father"] {
+        let spec = sekiro_sim::arena::ArenaSpec::by_name(arena)
+            .unwrap()
+            .enemy_spec();
+        let mut duel = Duel::load_with(&cache, 1.6, spec).unwrap();
+        duel.god = true;
+        // Father keeps his native Lua goal; attach the observer without castle move plans.
+        duel.set_brain(Box::new(LuaBrain), false).unwrap();
+        assert!(duel.events.is_some());
+        for _ in 0..150 {
+            duel.step(&InputFrame::default(), DT);
+        }
+        super::genichiro_brain::take_mark(&mut duel);
+        let driver = duel.boss_brain.as_ref().unwrap();
+        assert_eq!(driver.memory.wolf_wins, 0, "{arena} phase transition");
+        assert!(driver.last_record.is_none());
+        // Let native phase-two AI leave Owl's heat-up kneel before isolating the final pair.
+        duel.enemy_active = true;
+        for _ in 0..600 {
+            duel.step(&InputFrame::default(), DT);
+        }
+        if let Some(bird) = duel.father_bird.as_mut() {
+            bird.duel.enemy_active = false;
+        }
+        super::genichiro_brain::take_mark_with_ai(&mut duel, true);
+        for _ in 0..600 {
+            duel.step(&InputFrame::default(), DT);
+            if duel.boss_brain.as_ref().unwrap().last_record.is_some() {
+                break;
+            }
+        }
+        let driver = duel.boss_brain.as_ref().unwrap();
+        assert_eq!(driver.memory.wolf_wins, 1, "{arena} final deathblow");
+        assert_eq!(driver.memory.fights, 1);
+        let record = driver.last_record.as_ref().unwrap();
+        assert_eq!(record.winner, "wolf");
+        assert_eq!(record.metrics.kill_time, Some(record.metrics.duration));
+    }
+}
+
 fn load(distance: f32) -> Option<Duel> {
     let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
     if !cache.join("anim/c5060/tae.json").exists()
@@ -75,8 +128,29 @@ fn local_coach_response_replaces_owls_post_break_grab() {
     let Some(mut duel) = load(1.6) else { return };
     duel.set_brain(Box::new(ScriptedCoach::new(Vec::new(), 0.0, 0.0)), false)
         .unwrap();
+    let mut fastest: Vec<_> = sekiro_sim::brain::OWL
+        .actions
+        .iter()
+        .filter_map(|a| {
+            Some((
+                a.id,
+                duel.boss_brain
+                    .as_ref()
+                    .unwrap()
+                    .move_sheet
+                    .get(&a.id.to_string())?
+                    .first_hit(1.6)?,
+            ))
+        })
+        .collect();
+    fastest.sort_by(|a, b| a.1.total_cmp(&b.1));
+    eprintln!(
+        "Owl fastest at 1.6m: {:?}",
+        &fastest[..fastest.len().min(5)]
+    );
     duel.boss_brain.as_mut().unwrap().game_plan = Some(GamePlan {
         opener: "3001".into(),
+        punish_preferences: punish_preference("3014"),
         on_wolf_break: vec![WeightedChoice {
             plan: "3000".into(),
             weight: 1.0,
@@ -106,14 +180,14 @@ fn local_coach_response_replaces_owls_post_break_grab() {
                 !requested.contains(&3040),
                 "Lua grab replaced: {requested:?}"
             );
-            requested_response |= requested.contains(&3000);
+            requested_response |= requested.contains(&3014);
             if report.enemy.clip_started
                 && report
                     .enemy
                     .animation
                     .as_deref()
                     .and_then(sekiro_sim::lua_ai::anim_id_from_clip)
-                    == Some(3000)
+                    == Some(3014)
             {
                 first_response = Some(tick - start);
                 break;
@@ -121,10 +195,10 @@ fn local_coach_response_replaces_owls_post_break_grab() {
         }
     }
     assert!(broke.is_some(), "Wolf never broke");
-    assert!(requested_response, "3000 never requested");
-    let ticks = first_response.expect("3000 animation never started");
+    assert!(requested_response, "3014 never requested");
+    let ticks = first_response.expect("3014 animation never started");
     eprintln!(
-        "Owl local break response 3000 started after {ticks} ticks ({:.3}s)",
+        "Owl local break response 3014 started after {ticks} ticks ({:.3}s)",
         ticks as f32 * DT
     );
     assert!(ticks <= 18, "response took {ticks} ticks");
@@ -236,6 +310,7 @@ fn tally_counts_outcomes_in_a_scripted_duel() {
             key.parse::<i32>()
                 .is_ok_and(|id| (3000..3100).contains(&id))
         })
+        .filter(|(key, _)| driver.move_sheet.get(key).is_none_or(|m| m.contact))
         .map(|(_, c)| c.n)
         .sum();
     for (key, c) in &s.boss.0 {
@@ -337,7 +412,7 @@ fn reflex_deflects_happen_while_a_plan_runs() {
 }
 
 #[test]
-fn absent_break_plan_keeps_owls_lua_grab() {
+fn absent_break_plan_uses_a_reachable_sheet_punish() {
     use sekiro_sim::brain::ScriptedCoach;
     let Some(mut duel) = load(1.6) else { return };
     duel.set_brain(Box::new(ScriptedCoach::new(Vec::new(), 0.0, 0.0)), false)
@@ -356,26 +431,99 @@ fn absent_break_plan_keeps_owls_lua_grab() {
             actions(&mut duel);
             continue;
         }
+        let requested = actions(&mut duel);
         if let Some(start) = broke
-            && actions(&mut duel).contains(&3040)
+            && requested.iter().any(|id| {
+                duel.boss_brain
+                    .as_ref()
+                    .unwrap()
+                    .move_sheet
+                    .get(&id.to_string())
+                    .is_some_and(|m| {
+                        m.damaging() && m.reachable_time([1.6, 0.0], [0.0; 2]).is_some()
+                    })
+            })
         {
             eprintln!(
-                "Owl Lua break follow-up 3040 requested after {} ticks",
+                "Owl reachable sheet break follow-up requested after {} ticks",
                 tick - start
             );
             return;
         }
     }
-    panic!("Owl did not use his Lua grab after the break");
+    panic!("Owl did not use a reachable punish after the break");
 }
 #[test]
 fn middle_combo_break_uses_tae_window() {
-    combo_break_fixture(false, "3005", "3000+3001+3002", 3);
+    combo_break_fixture(false, "3014", "3000+3001+3002", 3);
+}
+
+#[test]
+fn owl_brain_coach_preferred_punish_conversion_ab() {
+    use sekiro_sim::brain::{
+        ScriptedCoach,
+        coach::{GamePlan, WeightedChoice},
+    };
+    let mut delays = Vec::new();
+    for fastest in [false, true] {
+        let Some(mut duel) = load(1.6) else { return };
+        // Compare a legacy supplied arm with an explicit coach preference from the sheet.
+        let brain: Box<dyn sekiro_sim::brain::BossBrain> = if fastest {
+            Box::new(ScriptedCoach::new(Vec::new(), 0.0, 0.0))
+        } else {
+            Box::new(LuaBrain)
+        };
+        duel.set_brain(brain, false).unwrap();
+        duel.boss_brain.as_mut().unwrap().game_plan = Some(GamePlan {
+            punish_preferences: if fastest {
+                punish_preference("3014")
+            } else {
+                Default::default()
+            },
+            on_wolf_break: vec![WeightedChoice {
+                plan: "3000".into(),
+                weight: 1.0,
+            }],
+            ..Default::default()
+        });
+        duel.force_act = Some(3001);
+        let positions = [duel.player.body.position, duel.enemy.body.position];
+        let mut broke = false;
+        let mut converted = None;
+        for tick in 0..600 {
+            duel.player.body.position = positions[0];
+            duel.enemy.body.position = positions[1];
+            duel.rules.fighters[0].vitality.hp = duel.rules.fighters[0].vitality.max_hp;
+            if !broke {
+                duel.rules.fighters[0].posture.remaining = 1;
+            }
+            duel.step(&frame(false, false, tick == 0), DT);
+            if !broke && duel.rules.fighters[0].posture.broken() {
+                broke = true;
+                duel.force_act = None;
+            }
+            let input = duel
+                .boss_brain
+                .as_ref()
+                .unwrap()
+                .coach_input(&Default::default());
+            if let Some(record) = input.break_log.first()
+                && record.outcome == "hit"
+            {
+                converted = Some((tick + 1) as f32 * DT - record.time);
+                break;
+            }
+        }
+        let delay = converted.expect("break must be converted");
+        eprintln!("Owl conversion fastest={fastest}: 1/1 at {delay:.3}s");
+        delays.push(delay);
+    }
+    assert!(delays[1] < delays[0], "{delays:?}");
 }
 
 #[test]
 fn middle_combo_break_without_window_waits_until_free() {
-    combo_break_fixture(true, "3005", "3000+3001+3002", 3);
+    combo_break_fixture(true, "3014", "3000+3001+3002", 3);
 }
 
 #[test]
@@ -385,7 +533,7 @@ fn middle_combo_break_can_repeat_the_current_attack() {
 
 #[test]
 fn break_log_knows_the_combo_inside_a_tactic_plan() {
-    combo_break_fixture(false, "3005", "walk_in4>3000+3001", 2);
+    combo_break_fixture(false, "3014", "walk_in4>3000+3001", 2);
 }
 
 fn combo_break_fixture(no_window: bool, punish: &str, opener: &str, hit_count: usize) {
@@ -421,8 +569,15 @@ fn combo_break_fixture(no_window: bool, punish: &str, opener: &str, hit_count: u
         duel.boss_brain.as_mut().unwrap().move_sheet =
             sekiro_sim::brain::moves::build(&duel, &sekiro_sim::brain::OWL);
     }
+    if punish == "3001" {
+        // Isolate the existing same-animation melee cancel regression from faster projectiles.
+        for row in duel.boss_brain.as_mut().unwrap().move_sheet.values_mut() {
+            row.projectiles.clear();
+        }
+    }
     duel.boss_brain.as_mut().unwrap().game_plan = Some(GamePlan {
         opener: opener.into(),
+        punish_preferences: punish_preference(punish),
         on_wolf_break: vec![WeightedChoice {
             plan: punish.into(),
             weight: 1.0,
@@ -471,6 +626,14 @@ fn combo_break_fixture(no_window: bool, punish: &str, opener: &str, hit_count: u
         }
         if broke {
             elapsed += DT;
+            let requested = actions(&mut duel);
+            if elapsed < 4.0 && (!requested.is_empty() || report.enemy.clip_started) {
+                eprintln!(
+                    "break trace elapsed {elapsed:.3}: requested {requested:?}, clip {:?}, plan {}",
+                    report.enemy.animation,
+                    duel.boss_brain.as_ref().unwrap().running.value()
+                );
+            }
             if report.enemy.clip_started
                 && report
                     .enemy
@@ -506,12 +669,15 @@ fn combo_break_fixture(no_window: bool, punish: &str, opener: &str, hit_count: u
                 assert_eq!((log.hit, log.hits), (2, hit_count));
                 assert!(log.started && log.start_delay.is_some());
                 let mut fitted = input.clone();
-                let bytes = fitted.fit(4096);
-                assert!(bytes <= 4096);
+                let budget = sekiro_sim::brain::coach::INPUT_BUDGET;
+                let bytes = fitted.fit(budget);
+                assert!(bytes <= budget);
                 assert!(
                     fitted
-                        .move_sheet
-                        .contains_key(opener.rsplit('>').next().unwrap())
+                        .viable_punishes
+                        .values()
+                        .flatten()
+                        .any(|p| p.id == opener.rsplit('>').next().unwrap())
                 );
                 assert!(!fitted.break_log.is_empty() && !fitted.break_summary.is_empty());
                 eprintln!("request size {bytes} bytes");
@@ -597,4 +763,16 @@ fn owl_move_sheet_matches_guard_and_deflect_resolution_at_current_power() {
         // A new power forecast uses a fresh idle guard baseline, not the previous contact's effect.
         duel.player.tae_runtime.frame = Default::default();
     }
+}
+
+fn punish_preference(
+    id: &str,
+) -> std::collections::BTreeMap<String, Vec<sekiro_sim::brain::coach::Avoid>> {
+    std::collections::BTreeMap::from([(
+        "near".into(),
+        vec![sekiro_sim::brain::coach::Avoid {
+            choice: id.into(),
+            reason: "Use this authored follow-up in the cancel regression".into(),
+        }],
+    )])
 }

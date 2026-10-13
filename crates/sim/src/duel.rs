@@ -113,6 +113,8 @@ pub struct GrabReport {
 /// One step of the duel.
 #[derive(Debug, Clone, Default)]
 pub struct DuelReport {
+    /// Hit index to originating animation for delayed projectiles.
+    pub projectile_sources: std::collections::BTreeMap<usize, i32>,
     pub player: StepReport,
     pub enemy: StepReport,
     pub hits: Vec<(HitEvent, HitResult)>,
@@ -182,7 +184,7 @@ pub struct Duel {
     /// Seconds until the respawn after a death.
     pub respawn_in: Option<f32>,
     throws: Option<Throws>,
-    cache: PathBuf,
+    pub(crate) cache: PathBuf,
     /// Which enemy this duel loaded.
     pub spec: EnemySpec,
     /// Marks on a later placed entity belonging to this encounter's visible boss bar.
@@ -201,6 +203,9 @@ pub struct Duel {
     /// The defender clip of the last deathblow; no new deathblow starts while it plays (the
     /// enemy is in its throw-defence state, getting up from a non-lethal blow).
     last_throw_def_clip: Option<String>,
+    /// Supporting floors at pair entry, retained through throw recovery to prevent
+    /// successive small steps from migrating down an outer roof during a throw.
+    paired_floor: Option<[f32; 2]>,
     /// Wolf's full-body clip in which one of his attacks connected: env 2004 ("swing is hitting")
     /// reads true while it still plays.
     swing_hit: Option<String>,
@@ -744,6 +749,7 @@ impl Duel {
             attack_button: false,
             enemy_damaged: false,
             last_throw_def_clip: None,
+            paired_floor: None,
             swing_hit: None,
             hit_stop: [HitStop::default(); 2],
             knockback: [None; 2],
@@ -861,6 +867,7 @@ impl Duel {
         }
         let mut driver = crate::brain::BrainDriver::new(brain, actions);
         driver.move_sheet = crate::brain::moves::build(self, actions);
+        driver.observe_space(self);
         let path = if log {
             Some(
                 driver
@@ -989,6 +996,11 @@ impl Duel {
     /// Puts both characters back where they stood on the first step, with fresh scripts, full
     /// HP and posture. Each keeps its ground.
     pub fn reset(&mut self) -> Result<(), LoadError> {
+        // Settle a declared result before resetting its event state or rebinding the phase.
+        if let Some(mut driver) = self.boss_brain.take() {
+            driver.finish_if_over(self);
+            self.boss_brain = Some(driver);
+        }
         if self.spec != self.initial_spec {
             let spot = self.spawn.map_or(placement(&self.enemy), |s| s[1]);
             self.switch_enemy(self.initial_spec.clone(), spot)?;
@@ -1055,6 +1067,7 @@ impl Duel {
         self.respawn_in = None;
         self.defender_dying = 0;
         self.last_throw_def_clip = None;
+        self.paired_floor = None;
         self.swing_hit = None;
         self.bullets.clear();
         self.lightning_returned = false;
@@ -1147,6 +1160,7 @@ impl Duel {
         self.throws = next.throws;
         self.enemy_active = true;
         self.last_throw_def_clip = None;
+        self.paired_floor = None;
         self.enemy_damaged = false;
         self.detector = HitDetector::default();
         self.knockback[1] = None;
@@ -1562,7 +1576,7 @@ impl Duel {
         }
         if let Some(aligned) = alignment {
             let starts = [self.player.body.position, self.enemy.body.position];
-            let mut checks = vec![aligned, starts];
+            let mut checks = vec![starts, aligned, starts];
             // Include the fully absorbed endpoint even if the strike occurs before its end.
             checks.extend(path.unwrap_or_default());
             self.reserve_pair_path(&checks);
@@ -1630,7 +1644,7 @@ impl Duel {
                 }
             }
         } else {
-            eprintln!("throw pair clearance exhausted; retaining authored alignment");
+            eprintln!("throw pair clearance exhausted; applying safe per-step placement");
         }
     }
 
@@ -1650,6 +1664,95 @@ impl Duel {
         moved.body.position[0] += a.delta[0];
         moved.body.position[2] += a.delta[2];
         moved.body.yaw = angle_diff(moved.body.yaw + a.yaw, 0.0);
+    }
+
+    /// Validate actual paired travel too: grabs, velocity events and lethal branches are
+    /// not all covered by the deathblow's preflight root-motion probe.
+    fn constrain_pair_motion(
+        &mut self,
+        before: [crate::body::Body; 2],
+        actors: [bool; 2],
+        sweep_motion: bool,
+    ) {
+        let mut starts = before.clone().map(|b| b.position);
+        for (i, c) in [&self.player, &self.enemy].into_iter().enumerate() {
+            starts[i][1] = c
+                .ground
+                .floor(
+                    starts[i][0],
+                    starts[i][2],
+                    starts[i][1] + c.ground.max_step(),
+                )
+                .unwrap_or(starts[i][1]);
+        }
+        let mut ends = [self.player.body.position, self.enemy.body.position];
+        let floors = *self.paired_floor.get_or_insert(starts.map(|p| p[1]));
+        for i in 0..2 {
+            starts[i][1] = floors[i];
+            ends[i][1] = starts[i][1];
+        }
+        let indices = if actors == [true, true] {
+            [0, 1]
+        } else if actors[0] {
+            [0, 0]
+        } else {
+            [1, 1]
+        };
+        let characters = [&self.player, &self.enemy];
+        let solve = if sweep_motion {
+            crate::collision::throw_pair_step_shift
+        } else {
+            crate::collision::throw_pair_floor_step_shift
+        };
+        let candidate = solve(
+            indices.map(|i| characters[i].ground.as_ref()),
+            &[indices.map(|i| starts[i]), indices.map(|i| ends[i])],
+        );
+        let relocating = self
+            .deathblow
+            .as_ref()
+            .is_some_and(|d| d.phase == Phase::Body && d.time == 0.0);
+        let shift = candidate.filter(|s| {
+            // A small correction added to root travel must not become a large jump.
+            // Full preflight relocation is already part of `ends`, not this correction.
+            relocating
+                || s[0].hypot(s[1]) < 1e-4
+                || indices.into_iter().all(|i| {
+                    let dx = ends[i][0] - starts[i][0];
+                    let dz = ends[i][2] - starts[i][2];
+                    (dx + s[0]).hypot(dz + s[1]) <= dx.hypot(dz).max(0.2)
+                })
+        });
+        for (i, c) in [&mut self.player, &mut self.enemy].into_iter().enumerate() {
+            if !actors[i] {
+                continue;
+            }
+            if let Some(shift) = shift {
+                c.body.position[0] += shift[0];
+                c.body.position[2] += shift[1];
+                if shift[0].hypot(shift[1]) > 1e-4
+                    && before[i].grounded
+                    && c.body.velocity[1] <= 0.0
+                {
+                    c.body.position[1] = c
+                        .ground
+                        .floor(
+                            c.body.position[0],
+                            c.body.position[2],
+                            starts[i][1] + c.ground.max_step(),
+                        )
+                        .unwrap_or(starts[i][1]);
+                    c.body.grounded = true;
+                    c.body.velocity[1] = 0.0;
+                }
+            } else {
+                // Cramped space cannot justify moving either capsule through geometry.
+                // Keep the last safe feet while the paired clips and turning continue.
+                let yaw = c.body.yaw;
+                c.body = before[i].clone();
+                c.body.yaw = yaw;
+            }
+        }
     }
 
     /// Whether an enemy throw holds Wolf.
@@ -2770,6 +2873,11 @@ impl Duel {
                     self.player.body.grounded = true;
                 }
                 self.step_events(dt);
+                // Event-only cinematic frames bypass after_step, but may declare victory.
+                if let Some(mut driver) = self.boss_brain.take() {
+                    driver.finish_if_over(self);
+                    self.boss_brain = Some(driver);
+                }
             }
             for c in [&mut self.player, &mut self.enemy] {
                 c.tae_runtime.frame.sounds.clear();
@@ -2926,6 +3034,12 @@ impl Duel {
             },
         ];
         let was_grounded = self.player.body.grounded;
+        let pair_before = [self.player.body.clone(), self.enemy.body.clone()];
+        let paired_active = self.deathblow.is_some() || self.throw_held();
+        let recovering = [
+            self.player.state().starts_with("Throw"),
+            self.enemy_in_throw_clip(),
+        ];
         let held = self
             .deathblow
             .as_ref()
@@ -2958,6 +3072,21 @@ impl Duel {
         let mut grab = GrabReport::default();
         self.step_enemy_throw(dt, &mut grab);
         self.step_mikiri(dt);
+        if paired_active || self.deathblow.is_some() || self.throw_held() {
+            let sweep_motion = held
+                || self
+                    .deathblow
+                    .as_ref()
+                    .is_some_and(|d| d.phase == Phase::Body)
+                || self.throw_held();
+            self.constrain_pair_motion(pair_before, [true, true], sweep_motion);
+        } else if recovering.iter().any(|v| *v) {
+            // Once Wolf leaves his clip, only the still-playing throw recovery is
+            // constrained. Free movement and knockback remain the controller's job.
+            self.constrain_pair_motion(pair_before, recovering, false);
+        } else {
+            self.paired_floor = None;
+        }
         if self.deathblow.is_none() && !self.throw_held() && enemy_alive && self.spec.chr != "c5005"
         {
             self.separate();
@@ -3033,8 +3162,14 @@ impl Duel {
         let bullet_effects: Vec<Vec<i32>> =
             bullet_hits.iter().map(|b| b.sp_effects.clone()).collect();
         let bullet_owners: Vec<Option<i32>> = bullet_hits.iter().map(|b| b.event_owner).collect();
+        let bullet_sources: std::collections::BTreeMap<usize, i32> = bullet_hits
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| Some((found.len() + i, b.source_action?)))
+            .collect();
         found.extend(bullet_hits.into_iter().map(|b| b.hit));
         let mut hits = Vec::new();
+        let mut projectile_sources = std::collections::BTreeMap::new();
         // Counter contacts win over the damaging blade contact of the same step.
         let mikiri = if self.deathblow.is_none()
             && !self.throw_held()
@@ -3119,6 +3254,9 @@ impl Duel {
             result.hp_damage += after_contact.0 - self.rules.fighters[hit.defender].vitality.hp;
             result.posture_damage +=
                 after_contact.1 - self.rules.fighters[hit.defender].posture.remaining;
+            if let Some(source) = bullet_sources.get(&k) {
+                projectile_sources.insert(hits.len(), *source);
+            }
             hits.push((hit, result));
         }
         let mut perilous = None;
@@ -3196,6 +3334,7 @@ impl Duel {
             self.release_lock();
         }
         let mut report = DuelReport {
+            projectile_sources,
             locked_on: self.player.lock_target.is_some(),
             player,
             enemy,

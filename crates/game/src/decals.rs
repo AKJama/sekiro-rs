@@ -40,6 +40,9 @@ pub struct Stain {
     pub blow: Option<Vec3>,
 }
 
+#[derive(Message)]
+pub struct ClearStains;
+
 #[derive(Component)]
 struct Placed {
     id: i32,
@@ -70,6 +73,7 @@ impl Plugin for DecalPlugin {
     fn build(&self, app: &mut App) {
         let textures = self.cache.join("raw/other/decaltex.tpf");
         app.add_message::<Stain>()
+            .add_message::<ClearStains>()
             .insert_resource(PendingTextures(textures))
             .add_systems(Startup, setup)
             .add_systems(Update, place);
@@ -171,8 +175,24 @@ fn place(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut requests: MessageReader<Stain>,
+    mut resets: MessageReader<ClearStains>,
     stains: Query<(Entity, &Placed, &Transform)>,
 ) {
+    let legacy = std::env::var_os("PF_LEGACY_DECALS").is_some();
+    if resets.read().next().is_some() && !legacy {
+        resets.clear();
+        for (entity, _, _) in &stains {
+            commands.entity(entity).despawn();
+        }
+        requests.clear();
+        return;
+    }
+    // Commands are deferred: the query never includes this frame's new stains.
+    // Track placements and evictions immediately so a burst obeys both budgets.
+    let mut live: Vec<_> = stains
+        .iter()
+        .map(|(e, p, t)| (e, p.id, p.born, t.translation))
+        .collect();
     for r in requests.read() {
         let Some(row) = player.decal(r.id) else {
             continue;
@@ -184,26 +204,6 @@ fn place(
             * (row.random_size[0] as f32
                 + assets.next() * (row.random_size[1] - row.random_size[0]) as f32)
             / 100.0;
-        // At most `thin_out_max` stains of this row within the check distance.
-        if row.thin_out && row.thin_out_max > 0 {
-            let near: Vec<_> = stains
-                .iter()
-                .filter(|(_, p, t)| {
-                    p.id == r.id && t.translation.xz().distance(at.xz()) < row.thin_out_distance
-                })
-                .map(|(e, p, _)| (e, p.born))
-                .collect();
-            if near.len() >= row.thin_out_max as usize
-                && let Some((old, _)) = near.iter().min_by(|a, b| a.1.total_cmp(&b.1))
-            {
-                commands.entity(*old).despawn();
-            }
-        }
-        if stains.iter().count() >= MAX_STAINS
-            && let Some((old, _, _)) = stains.iter().min_by(|a, b| a.1.born.total_cmp(&b.1.born))
-        {
-            commands.entity(old).despawn();
-        }
         let path = assets.textures.clone();
         let material = assets
             .materials
@@ -229,22 +229,59 @@ fn place(
         let Some(material) = material else {
             continue;
         };
+        if row.thin_out && row.thin_out_max > 0 {
+            let near: Vec<_> = live
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, id, _, pos))| {
+                    *id == r.id && pos.xz().distance(at.xz()) < row.thin_out_distance
+                })
+                .collect();
+            if near.len() >= row.thin_out_max as usize
+                && let Some((index, _)) = near.iter().min_by(|(_, a), (_, b)| a.2.total_cmp(&b.2))
+            {
+                let entity = if legacy {
+                    live[*index].0
+                } else {
+                    live.remove(*index).0
+                };
+                commands.entity(entity).despawn();
+            }
+        }
+        if live.len() >= MAX_STAINS
+            && let Some((index, _)) = live
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| a.2.total_cmp(&b.2))
+        {
+            let entity = if legacy {
+                live[index].0
+            } else {
+                live.remove(index).0
+            };
+            commands.entity(entity).despawn();
+        }
         let roll = (row.random_roll[0] + assets.next() * (row.random_roll[1] - row.random_roll[0]))
             .to_radians();
         // Each new stain a hair above the last, so overlapping ones do not flicker.
         let lift = 0.004 + 0.0003 * (time.elapsed_secs() % 10.0);
-        commands.spawn((
-            Mesh3d(assets.plane.clone()),
-            MeshMaterial3d(material),
-            Transform::from_xyz(at.x, r.floor + lift, at.z)
-                .with_rotation(Quat::from_rotation_y(roll))
-                .with_scale(Vec3::new(size, 1.0, size)),
-            Placed {
-                id: r.id,
-                born: time.elapsed_secs(),
-            },
-            bevy::light::NotShadowCaster,
-        ));
+        let entity = commands
+            .spawn((
+                Mesh3d(assets.plane.clone()),
+                MeshMaterial3d(material),
+                Transform::from_xyz(at.x, r.floor + lift, at.z)
+                    .with_rotation(Quat::from_rotation_y(roll))
+                    .with_scale(Vec3::new(size, 1.0, size)),
+                Placed {
+                    id: r.id,
+                    born: time.elapsed_secs(),
+                },
+                bevy::light::NotShadowCaster,
+            ))
+            .id();
+        if !legacy {
+            live.push((entity, r.id, time.elapsed_secs(), at));
+        }
     }
 }
 
@@ -278,6 +315,59 @@ fn locate(row: &DecalRow, r: &Stain) -> Option<(Vec3, f32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deathblow_bursts_obey_budget_and_respawn_clears_stains_for_twenty_fights() {
+        let cache = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let duel = sekiro_sim::duel::Duel::load_with(
+            &cache,
+            6.,
+            sekiro_sim::arena::ArenaSpec::by_name("genichiro")
+                .unwrap()
+                .enemy_spec(),
+        )
+        .unwrap();
+        let mut fx = FxrPlayer::new(cache.clone());
+        fx.observe(&duel);
+        assert!(fx.decal(50010).is_some());
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .init_asset::<Image>()
+            .insert_resource(fx)
+            .add_plugins(DecalPlugin { cache });
+        app.update();
+        let mut count = app.world_mut().query_filtered::<Entity, With<Placed>>();
+        for fight in 0..20 {
+            for _ in 0..8 {
+                for _ in 0..16 {
+                    app.world_mut().write_message(Stain {
+                        id: 50010,
+                        at: Vec3::Y,
+                        floor: 0.,
+                        blow: None,
+                    });
+                }
+                app.update();
+            }
+            let placed = count.iter(app.world()).count();
+            assert!(
+                placed > 0 && placed <= MAX_STAINS,
+                "fight {fight}: {placed} stains exceed {MAX_STAINS}"
+            );
+            app.world_mut().write_message(ClearStains);
+            app.update();
+            assert_eq!(
+                count.iter(app.world()).count(),
+                0,
+                "fight {fight}: stains survived respawn"
+            );
+        }
+        assert_eq!(app.world().resource::<Assets<Mesh>>().len(), 1);
+        assert_eq!(app.world().resource::<Assets<StandardMaterial>>().len(), 1);
+        assert_eq!(app.world().resource::<Assets<Image>>().len(), 1);
+    }
 
     fn row() -> DecalRow {
         DecalRow {

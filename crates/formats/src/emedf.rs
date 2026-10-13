@@ -118,6 +118,29 @@ pub const DEFS: &[Def] = defs![
     ),
     (
         3,
+        1,
+        "IfEventFlagRange",
+        [
+            ("rg", b'3'),
+            ("state", b'0'),
+            ("type", b'0'),
+            ("first", b'5'),
+            ("last", b'5')
+        ]
+    ),
+    (
+        3,
+        8,
+        "IfPlayerInMap",
+        [
+            ("rg", b'3'),
+            ("inside", b'0'),
+            ("area", b'0'),
+            ("block", b'0')
+        ]
+    ),
+    (
+        3,
         2,
         "IfInoutsideArea",
         [

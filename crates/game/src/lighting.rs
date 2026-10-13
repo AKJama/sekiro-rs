@@ -235,7 +235,7 @@ impl PostSettings {
 }
 
 #[derive(Component)]
-struct AppliedPost(i32, f32);
+struct AppliedPost(i32, f32, String);
 
 fn apply_post_effects(
     mut commands: Commands,
@@ -246,7 +246,11 @@ fn apply_post_effects(
     let _timer = crate::perf_log::SystemTimer::start("apply_post_effects");
     let pending: Vec<_> = cameras
         .iter()
-        .filter(|(_, p)| p.is_none_or(|p| p.0 != lighting.light_set || p.1 != lighting.hour))
+        .filter(|(_, p)| {
+            p.is_none_or(|p| {
+                p.0 != lighting.light_set || p.1 != lighting.hour || p.2 != lighting.source
+            })
+        })
         .map(|(e, _)| e)
         .collect();
     if pending.is_empty() {
@@ -263,7 +267,7 @@ fn apply_post_effects(
             Hdr,
             Tonemapping::None,
             DebandDither::Disabled,
-            AppliedPost(lighting.light_set, lighting.hour),
+            AppliedPost(lighting.light_set, lighting.hour, lighting.source.clone()),
         ));
         camera.insert((ColorGrading::default(), set.upload(&effects)));
         camera.remove::<(AutoExposure, Bloom)>();
@@ -710,7 +714,7 @@ impl MapProbes {
 }
 
 /// Spatial reflection probes fade per receiver, so crossing boxes never cuts the whole view.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)] // Independent Bevy system parameters.
 pub fn apply_probes(
     mut commands: Commands,
     mut probes: ResMut<MapProbes>,
@@ -719,6 +723,8 @@ pub fn apply_probes(
     focus: Query<&Transform, With<crate::map::MapFocus>>,
     cameras: Query<(Entity, Option<&EnvironmentMapLight>, Option<&Skybox>), With<Camera3d>>,
     mut probe_sky: Local<Option<bool>>,
+    selection: Res<crate::lighting_selection::RegionSelection>,
+    mut last_env_bank: Local<Option<i32>>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("apply_probes");
     // The probes are captures from points inside the level, so as a sky they show nearby
@@ -726,6 +732,15 @@ pub fn apply_probes(
     // unless `--probe-sky` asks to see the capture for debugging.
     let show_sky = *probe_sky.get_or_insert_with(|| std::env::args().any(|a| a == "--probe-sky"));
     // Stable enclosing fallback rather than a camera-driven region hard cut.
+    if *last_env_bank != Some(selection.0[3]) {
+        *last_env_bank = Some(selection.0[3]);
+        if selection.0[3] > 0 {
+            warn!(
+                "unverified nonzero MSB environment bank {}; preserving the bank ID without inventing a GILM probe mapping",
+                selection.0[3]
+            );
+        }
+    }
     let selected = probes
         .regions
         .iter()
