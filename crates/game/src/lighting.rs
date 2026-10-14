@@ -21,7 +21,7 @@ use bevy::prelude::*;
 use sekiro_formats::gparam::Gparam;
 
 #[path = "grading.rs"]
-mod grading;
+pub(crate) mod grading;
 use bevy::camera::Hdr;
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::post_process::{auto_exposure::AutoExposure, bloom::Bloom};

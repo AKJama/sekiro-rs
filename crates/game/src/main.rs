@@ -1,6 +1,8 @@
 //! `sekiro-rs`: the Bevy app.
 //!
 //! Modes:
+//! - `sekiro-rs --sweep --map <id> [--spacing 80] [--views 4] [--objects]`:
+//!   offscreen visual-completeness survey; see `docs/MAP-COMPLETENESS-SWEEP.md`.
 //! - `sekiro-rs --viewer <file.glb> [--screenshot <out.png>] [--yaw <deg>] [--pitch <deg>]
 //!   [--distance <m>] [--height <m>] [--hide m12,hair] [--only m68,m69]`: inspect an exported
 //!   model in bind pose; `--hide`/`--only` filter primitives by material name, `--combat` shows
@@ -42,6 +44,7 @@ mod lighting;
 mod lighting_selection;
 mod lightning_fx;
 mod map;
+mod map_fog_surface;
 mod menu;
 mod perf_log;
 mod play;
@@ -83,6 +86,18 @@ fn arg_f32(args: &[String], name: &str, default: f32) -> anyhow::Result<f32> {
 
 fn dispatch() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    let cache = arg_value(&args, "--cache").map(PathBuf::from);
+    if args.iter().any(|a| a == "--cache")
+        && cache
+            .as_ref()
+            .is_none_or(|v| v.as_os_str().to_string_lossy().starts_with("--"))
+    {
+        anyhow::bail!("--cache requires a directory");
+    }
+    sekiro_sim::cache::init(cache.as_deref());
+    if args.iter().any(|a| a == "--sweep") {
+        return map::sweep::run(&args);
+    }
     if args.len() == 1 || args.iter().any(|a| a == "--menu") {
         return menu::run(&args);
     }
@@ -123,7 +138,7 @@ fn dispatch() -> anyhow::Result<()> {
         && !args.iter().any(|a| a == "--play")
     {
         return map::run(map::Options {
-            cache: PathBuf::from(arg_value(&args, "--cache").unwrap_or_else(|| "cache".into())),
+            cache: sekiro_sim::cache::root(),
             id,
             screenshot: arg_value(&args, "--screenshot").map(PathBuf::from),
             at: arg_f32(&args, "--at", 2.0)?,
@@ -153,7 +168,7 @@ fn dispatch() -> anyhow::Result<()> {
     }
     if args.iter().any(|a| a == "--arena") {
         return arena::run(arena::Options {
-            cache: PathBuf::from(arg_value(&args, "--cache").unwrap_or_else(|| "cache".into())),
+            cache: sekiro_sim::cache::root(),
             screenshot: arg_value(&args, "--screenshot").map(PathBuf::from),
             at: arg_f32(&args, "--at", 3.0)?,
             deathblow: args.iter().any(|a| a == "--deathblow"),
@@ -178,6 +193,7 @@ fn dispatch() -> anyhow::Result<()> {
         "                 [--brain-overlay] [--brain-stage lua|early|alive|outsmarted] [--window-size WIDTHxHEIGHT] (F8 toggles overlay)"
     );
     eprintln!("usage: sekiro-rs --arena [--deathblow] [--screenshot <out.png> --at <seconds>]");
+    eprintln!("       sekiro-rs --sweep --map <id> [--spacing 80] [--views 4] [--objects]");
     eprintln!("       sekiro-rs --map <id> [--start <n>] [--camera x,y,z,yaw,pitch] [--collision]");
     eprintln!("                 [--screenshot <out.png> --at <seconds>] (see src/map.rs)");
     eprintln!("       sekiro-rs --viewer <file.glb> [--screenshot <out.png>] [--yaw <deg>]");
@@ -190,6 +206,8 @@ fn play_options(args: &[String]) -> anyhow::Result<play::Options> {
 }
 
 fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Result<play::Options> {
+    let cache =
+        sekiro_sim::cache::resolve(arg_value(args, "--cache").map(PathBuf::from).as_deref());
     let attack_power = sekiro_sim::progression::AttackPower::from_options(
         arg_value(args, "--attack-power").as_deref(),
         arg_value(args, "--progression").as_deref(),
@@ -217,13 +235,10 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
         phase_enemy.or_else(|| arg_value(args, "--enemy")),
         boss_arena,
     ) {
-        (Some(name), _) => sekiro_sim::enemy::EnemySpec::from_cache(
-            &PathBuf::from(arg_value(args, "--cache").unwrap_or_else(|| "cache".into())),
-            &name,
-        )
-        .map_err(|e| anyhow::anyhow!("--enemy: {e}"))?,
+        (Some(name), _) => sekiro_sim::enemy::EnemySpec::from_cache(&cache, &name)
+            .map_err(|e| anyhow::anyhow!("--enemy: {e}"))?,
         (None, arena) => sekiro_sim::enemy::EnemySpec::from_cache(
-            &PathBuf::from(arg_value(args, "--cache").unwrap_or_else(|| "cache".into())),
+            &cache,
             arena.map_or("soldier", |arena| arena.enemy),
         )
         .map_err(|e| anyhow::anyhow!("--enemy: {e}"))?,
@@ -318,12 +333,13 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
         brain_label,
         window_size,
         attack_power,
-        cache: PathBuf::from(arg_value(args, "--cache").unwrap_or_else(|| "cache".into())),
+        cache,
         script: arg_value(args, "--script"),
         input: arg_value(args, "--input"),
         screenshots,
         exit_after_script: args.iter().any(|a| a == "--exit"),
         enemy: !args.iter().any(|a| a == "--no-enemy" || a == "--passive"),
+        enemy_present: !args.iter().any(|a| a == "--no-enemy"),
         arena: boss_arena,
         full_map: args.iter().any(|a| a == "--full-map"),
         hide: arg_list(args, "--hide"),

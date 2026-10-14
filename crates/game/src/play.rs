@@ -71,8 +71,10 @@ pub struct Options {
     pub screenshots: Vec<(usize, PathBuf)>,
     /// Exit when the script ends and every screenshot is saved.
     pub exit_after_script: bool,
-    /// Let the enemy fight (it always stands there; without this it stays passive).
+    /// Let a present enemy fight (`--passive` disables its AI).
     pub enemy: bool,
+    /// Include an opponent at all (`--no-enemy` disables its spawn and interactions).
+    pub enemy_present: bool,
     /// Which enemy (`--enemy`): its model, animations, scripts, params and AI.
     pub opponent: EnemySpec,
     /// Start locked on to the enemy.
@@ -121,8 +123,8 @@ pub struct Options {
     pub full_map: bool,
     /// On a map, skip map piece models whose name starts with any of these (as `--map --hide`).
     pub hide: Vec<String>,
-    /// On a map, also spawn MSB objects (off by default, as in `--map`: many are event-state
-    /// props).
+    /// Also spawn MSB objects on legacy maps and arenas.
+    /// Ashina Explore includes ordinary Objects by default, with story-state filtering.
     pub objects: bool,
 }
 
@@ -251,6 +253,9 @@ struct Actor(usize);
 #[derive(Component)]
 struct Hud;
 
+#[derive(Resource)]
+struct DebugHud(bool);
+
 #[derive(Component)]
 struct FollowCamera;
 
@@ -271,6 +276,7 @@ struct Sim {
     lock_requested: bool,
     break_posture: bool,
     passive: bool,
+    enemy_present: bool,
     /// Each actor's position and drawn yaw before the last step, to draw between steps.
     previous: [([f32; 3], f32); 2],
     /// Each actor's own clock after the last step: the sum of the time it advanced, which stops
@@ -332,13 +338,20 @@ pub fn run(options: Options) -> Result<()> {
         );
     }
     let roster = sekiro_sim::registry::Registry::load(&cache).map_err(anyhow::Error::msg)?;
-    let anim_chr = roster.anim_chr(&options.opponent.chr, options.opponent.npc_param);
+    // Duel has two mandatory slots; exploration uses an unoccupied soldier slot, never a boss
+    // encounter, and does not spawn its model or controller.
+    let opponent = if options.enemy_present {
+        options.opponent.clone()
+    } else {
+        EnemySpec::from_cache(&cache, "soldier").map_err(anyhow::Error::msg)?
+    };
+    let anim_chr = roster.anim_chr(&opponent.chr, opponent.npc_param);
     let enemy_draw_groups = roster.draw_mask(&cache, &options.opponent);
     let libraries = [
         AnimLibrary::load(&cache, "c0000")?,
         AnimLibrary::load(&cache, &anim_chr)?,
     ];
-    let mut duel = Duel::load_with(&cache, 6.0, options.opponent.clone())
+    let mut duel = Duel::load_with(&cache, 6.0, opponent)
         .map_err(|e| anyhow::anyhow!("loading the simulation: {e}"))?;
     duel.rules
         .set_attack_power(options.attack_power)
@@ -347,7 +360,7 @@ pub fn run(options: Options) -> Result<()> {
     duel.god = options.god;
     duel.immortal = options.immortal;
     duel.force_act = options.force_act;
-    if options.simple_ai {
+    if options.simple_ai || !options.enemy_present {
         duel.use_simple_ai();
     } else {
         let brain = options.brain.build()?;
@@ -428,8 +441,7 @@ pub fn run(options: Options) -> Result<()> {
         map::raise_io_stack();
     } else if let Some(id) = &options.map {
         let dir = map::map_dir(&cache, id)?;
-        let world =
-            Arc::new(CollisionWorld::load(&dir.join("collision.bin")).map_err(anyhow::Error::msg)?);
+        let world = Arc::new(map::world::collision_world(&cache, id)?);
         let (start, yaw_degrees) = match options.spawn {
             Some([x, y, z, yaw]) => {
                 let y = world.floor(x, z, y + 1.0).unwrap_or(y);
@@ -469,6 +481,9 @@ pub fn run(options: Options) -> Result<()> {
         && dir.join("grapple.json").exists()
     {
         duel.player.wire = sekiro_sim::wire::Wire::load(&cache, dir).map_err(anyhow::Error::msg)?;
+    }
+    if !options.enemy_present {
+        vacant_enemy_slot(&mut duel);
     }
     let script = match options.script.as_deref() {
         None => None,
@@ -548,6 +563,7 @@ pub fn run(options: Options) -> Result<()> {
     })
     .insert_resource(EnemyDrawGroups(enemy_draw_groups))
     .insert_resource(LiveInput::default())
+    .insert_resource(DebugHud(options.enemy_present))
     .insert_resource(Orbit {
         focus: Vec3::from_array(duel.player.body.position) + Vec3::Y * duel.camera.chr_org_offset_y,
         // Behind Wolf, so scripted "forward" is the way he faces.
@@ -568,9 +584,10 @@ pub fn run(options: Options) -> Result<()> {
         hit_log: Vec::new(),
         script,
         step: 0,
-        lock_requested: options.lock_on,
+        lock_requested: options.lock_on && options.enemy_present,
         break_posture: options.break_posture,
         passive: !options.enemy,
+        enemy_present: options.enemy_present,
         previous: [([0.0; 3], 0.0); 2],
         clock: [0.0; 2],
         faded: [false; 2],
@@ -578,7 +595,7 @@ pub fn run(options: Options) -> Result<()> {
     })
     .init_resource::<combat_hud::Gauges>()
     .insert_resource(crate::brain_overlay::RecordingBrain {
-        enabled: options.brain_overlay,
+        enabled: options.brain_overlay && options.enemy_present,
         mode: options.brain_label,
         player: options.player,
         view: Default::default(),
@@ -621,11 +638,19 @@ pub fn run(options: Options) -> Result<()> {
     .add_plugins(crate::audio::GameAudioPlugin {
         cache: cache.clone(),
         map: on_map.as_ref().map(|(_, id, _)| id.clone()),
-        enemy: Some((options.opponent.chr.clone(), options.opponent.npc_param)),
+        enemy: options
+            .enemy_present
+            .then(|| (options.opponent.chr.clone(), options.opponent.npc_param)),
     })
     .add_systems(Startup, setup)
     .insert_resource(rope::RopeCache(cache.clone()))
-    .add_systems(Startup, crate::brain_overlay::spawn)
+    .add_systems(
+        Startup,
+        crate::brain_overlay::spawn.run_if({
+            let present = options.enemy_present;
+            move || present
+        }),
+    )
     .insert_resource(FogWalls(fog_walls))
     .add_systems(FixedUpdate, simulate.run_if(crate::menu::active))
     .add_systems(
@@ -661,8 +686,10 @@ pub fn run(options: Options) -> Result<()> {
             .chain(),
     );
     crate::menu::install(&mut app);
-    arena_d_scene::install(&mut app, &cache, options.arena, options.objects)?;
-    arena_c_scene::install(&mut app, &cache, options.arena)?;
+    if options.enemy_present {
+        arena_d_scene::install(&mut app, &cache, options.arena, options.objects)?;
+        arena_c_scene::install(&mut app, &cache, options.arena)?;
+    }
     crate::perf_log::register!(app);
     if std::env::var_os("PF_RESPAWN_PROBE").is_some() {
         app.add_systems(Last, renderer_counts);
@@ -681,6 +708,9 @@ pub fn run(options: Options) -> Result<()> {
             .map_err(anyhow::Error::msg)?
             .unwrap_or_default();
         // The map's sun, ambient light and sky replace the floor setup's.
+        if options.arena.is_some() {
+            app.insert_resource(map::world::ArenaMap);
+        }
         map::add_map(
             &mut app,
             &dir,
@@ -700,7 +730,7 @@ pub fn run(options: Options) -> Result<()> {
                             .flat_map(|a| a.hidden_models.iter().map(|m| m.to_string())),
                     )
                     .collect(),
-                objects: options.objects,
+                objects: options.objects || (options.arena.is_none() && map::world::enabled(&id)),
                 groups: map::GroupMode::Draw,
                 markers: false,
                 hour: options.hour,
@@ -709,12 +739,50 @@ pub fn run(options: Options) -> Result<()> {
             },
         )?;
         app.insert_resource(MapCollision(world));
-        if options.arena.is_some() {
+        if options.arena.is_some() && options.enemy_present {
             crate::arena_b::install(&mut app, &cache, &id)?;
         }
     }
     app.run();
     Ok(())
+}
+
+/// Adapt the two-slot fight simulation to an absent opponent, without defeating a map boss.
+/// A vacant slot cannot collide, be aimed at or trigger an enemy-death restart.
+fn vacant_enemy_slot(duel: &mut Duel) {
+    duel.enemy_active = false;
+    duel.force_act = None;
+    duel.events = None;
+    duel.rules.fighters[ENEMY].vitality.hp = 0;
+    duel.rules.fighters[ENEMY].vitality.deathblows_left = 0;
+    duel.player.lock_target = None;
+    duel.player.aim_candidates.clear();
+    duel.enemy.tae_runtime.frame = Default::default();
+    if !duel.rules.fighters[WOLF].dead() {
+        duel.respawn_in = None;
+    }
+}
+
+fn advance_duel(duel: &mut Duel, frame: &InputFrame, dt: f32, enemy_present: bool) -> DuelReport {
+    if enemy_present {
+        return duel.step(frame, dt);
+    }
+    // A player-death restart recreates both slots. Vacate the opponent before that tick's
+    // lock-on, collision and hit checks, and preserve the normal player restart report.
+    let respawned = duel.rules.fighters[WOLF].dead()
+        && duel.respawn_in.is_some_and(|remaining| remaining <= dt)
+        && duel.reset().is_ok();
+    vacant_enemy_slot(duel);
+    let mut report = duel.step(frame, dt);
+    vacant_enemy_slot(duel);
+    report.respawned |= respawned;
+    report.enemy = Default::default();
+    report.hits.clear();
+    report.perilous = None;
+    report.locked_on = false;
+    report.deathblow = Default::default();
+    report.jump_counter = false;
+    report
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -727,7 +795,7 @@ fn reload_enemy(
     sim: NonSend<Sim>,
     actors: Query<(Entity, &Actor)>,
 ) {
-    if scene.spec == sim.duel.spec {
+    if !sim.enemy_present || scene.spec == sim.duel.spec {
         return;
     }
     let Ok(roster) = sekiro_sim::registry::Registry::load(&scene.cache) else {
@@ -821,6 +889,9 @@ fn setup(
         format!("{}{}.glb", model_path.0, sim.duel.spec.chr),
     ];
     for actor in [WOLF, ENEMY] {
+        if actor == ENEMY && !sim.enemy_present {
+            continue;
+        }
         let lib = &mut libraries.0[actor];
         let mut idle = Animator::new(
             lib.clip("a000_000000").expect("idle clip is extracted"),
@@ -1162,7 +1233,8 @@ fn simulate(
     }
     sim.duel.player.wire.view_pitch = orbit.pitch;
     let cinematic_applied = sim.duel.cinematic.as_ref().is_some_and(|c| c.applied);
-    let mut report = sim.duel.step(&frame, dt);
+    let enemy_present = sim.enemy_present;
+    let mut report = advance_duel(&mut sim.duel, &frame, dt, enemy_present);
     if std::env::var_os("PF_RESPAWN_PROBE").is_some() && sim.step % 60 == 30 {
         report.respawned = true;
     }
@@ -1646,6 +1718,8 @@ fn status_line(status: &sekiro_sim::status::Status, states: &[String]) -> String
 fn hud(
     sim: NonSend<Sim>,
     recording: Res<crate::brain_overlay::RecordingBrain>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut debug: ResMut<DebugHud>,
     mut text: Query<&mut Text, With<Hud>>,
     mut gauges: ResMut<combat_hud::Gauges>,
 ) {
@@ -1654,22 +1728,34 @@ fn hud(
         hp: [0, 1].map(|i| (f[i].vitality.hp, f[i].vitality.max_hp)),
         posture: [0, 1].map(|i| (f[i].posture.remaining, f[i].posture.max)),
         // Just above the enemy's body capsule (NpcParam hitHeight: 1.8 m soldier, 2.5 m Owl).
-        enemy_head: Some(
+        enemy_head: sim.enemy_present.then_some(
             Vec3::from_array(sim.duel.enemy.body.position)
                 + Vec3::Y * (sim.duel.fighters[1].height + 0.2),
         ),
         // Hidden with him while a warp fades him out.
-        enemy_alive: !f[1].dead()
+        enemy_alive: sim.enemy_present
+            && !f[1].dead()
             && sim.duel.enemy_bar_shown()
             && (!sim.faded[1] || sekiro_sim::duel::old_dragons::owns(&sim.duel.spec)),
-        boss_bar: sim
-            .duel
-            .events
-            .as_ref()
-            .is_some_and(|events| events.boss_bar.is_some()),
-        deathblow: sim.duel.deathblow_available() && !sim.duel.brown_deathblow_available(),
-        enemy_name: sim.duel.spec.display_name(),
-        enemy_marks: sim.duel.enemy_bar_marks(),
+        boss_bar: sim.enemy_present
+            && sim
+                .duel
+                .events
+                .as_ref()
+                .is_some_and(|events| events.boss_bar.is_some()),
+        deathblow: sim.enemy_present
+            && sim.duel.deathblow_available()
+            && !sim.duel.brown_deathblow_available(),
+        enemy_name: if sim.enemy_present {
+            sim.duel.spec.display_name()
+        } else {
+            ""
+        },
+        enemy_marks: if sim.enemy_present {
+            sim.duel.enemy_bar_marks()
+        } else {
+            0
+        },
         poison: f[0].status.poison.fraction(),
         status: status_line(&f[0].status, &sim.last.player.behavior.state_path),
         // Lifted from the chest dummy to above Wolf's head (ours; the effect's own offset is in
@@ -1683,30 +1769,41 @@ fn hud(
     let Ok(mut text) = text.single_mut() else {
         return;
     };
-    if recording.enabled {
+    if keys.just_pressed(KeyCode::F3) {
+        debug.0 = !debug.0;
+    }
+    if recording.enabled && sim.enemy_present {
         text.0.clear();
         return;
     }
     let r = &sim.last;
     let mut flags = r.player.action_flags.clone();
     flags.retain(|f| [3, 7, 11, 26, 115, 117, 119].contains(f));
-    let mut s = format!(
-        "Wolf  {}  [{} t={:.2}]  HP {}{}\nrefs {:?}  windows {:?}\nEnemy  {}  [{} t={:.2}]  HP {}\n",
-        r.player.behavior.state_path.join(" / "),
-        r.player.animation.as_deref().unwrap_or("-"),
-        r.player.anim_time,
-        sim.duel.rules.fighters[0].vitality.hp,
-        if r.locked_on { "  LOCKED ON" } else { "" },
-        r.player.behavior_refs,
-        flags,
-        r.enemy.behavior.state_path.join(" / "),
-        r.enemy.animation.as_deref().unwrap_or("-"),
-        r.enemy.anim_time,
-        sim.duel.rules.fighters[1].vitality.hp,
-    );
-    for line in &sim.hit_log {
-        s += line;
-        s.push('\n');
+    let mut s = String::new();
+    if debug.0 {
+        s = format!(
+            "Wolf  {}  [{} t={:.2}]  HP {}{}\nrefs {:?}  windows {:?}\n",
+            r.player.behavior.state_path.join(" / "),
+            r.player.animation.as_deref().unwrap_or("-"),
+            r.player.anim_time,
+            sim.duel.rules.fighters[0].vitality.hp,
+            if r.locked_on { "  LOCKED ON" } else { "" },
+            r.player.behavior_refs,
+            flags,
+        );
+        if sim.enemy_present {
+            s += &format!(
+                "Enemy  {}  [{} t={:.2}]  HP {}\n",
+                r.enemy.behavior.state_path.join(" / "),
+                r.enemy.animation.as_deref().unwrap_or("-"),
+                r.enemy.anim_time,
+                f[1].vitality.hp
+            );
+        }
+        for line in &sim.hit_log {
+            s += line;
+            s.push('\n');
+        }
     }
     match sim.duel.player.behavior.env.action_guide.get() {
         Some((10, 12)) => s += "E / Y: Hug wall\n",
@@ -1731,7 +1828,11 @@ fn hud(
     {
         s += "E / Y: Ring bell\n";
     }
-    s += "WASD move, mouse look, LMB attack, RMB guard, Space jump, Shift step/sprint, C crouch, Q lock-on, Esc pause, -/= volume";
+    s += "WASD move, mouse look, LMB attack, RMB guard, Space jump, Shift step/sprint, C crouch, ";
+    if sim.enemy_present {
+        s += "Q lock-on, ";
+    }
+    s += "Esc pause, F3 debug text, -/= volume";
     text.0 = s;
 }
 
@@ -2009,6 +2110,123 @@ fn grapple_marker(
 mod tests {
     use super::*;
     use sekiro_sim::fight::FighterKind;
+
+    #[test]
+    fn no_enemy_rejects_lock_and_contacts_without_restarting_wolf() {
+        let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let mut duel = Duel::load(&cache, 4.).unwrap();
+        duel.use_simple_ai();
+        let start = duel.player.body.position;
+        // A hidden passive opponent here would push Wolf, be a target and receive attacks.
+        duel.enemy.body.position = start;
+        duel.force_act = Some(3000);
+        let dt = 1. / STEP_HZ as f32;
+        for step in 0..480 {
+            let frame = InputFrame {
+                move_stick: [0., 1.],
+                buttons: Buttons {
+                    lock_on: step % 2 == 0,
+                    attack: step % 120 == 0,
+                    ..default()
+                },
+                ..default()
+            };
+            let report = advance_duel(&mut duel, &frame, dt, false);
+            assert!(duel.player.lock_target.is_none());
+            assert!(duel.player.aim_candidates.is_empty());
+            assert!(!report.locked_on && !report.respawned);
+            assert!(report.hits.is_empty());
+            assert!(duel.respawn_in.is_none());
+            if step == 0 {
+                assert!(
+                    Vec3::from_array(report.player.position).distance(Vec3::from_array(start))
+                        < 0.2,
+                    "absent opponent pushed Wolf"
+                );
+            }
+        }
+        assert!(Vec3::from_array(duel.player.body.position).distance(Vec3::from_array(start)) > 1.);
+        assert_eq!(
+            duel.rules.fighters[WOLF].vitality.hp,
+            duel.rules.fighters[WOLF].vitality.max_hp
+        );
+
+        duel.rules.fighters[WOLF].vitality.hp = 0;
+        let mut respawned = false;
+        for _ in 0..(STEP_HZ as f32 * (sekiro_sim::duel::RESPAWN_DELAY + 1.)) as usize {
+            let report = advance_duel(&mut duel, &InputFrame::default(), dt, false);
+            respawned |= report.respawned;
+            assert!(duel.player.lock_target.is_none());
+            assert!(duel.player.aim_candidates.is_empty());
+        }
+        assert!(respawned, "player death no longer restarts exploration");
+        assert!(!duel.rules.fighters[WOLF].dead());
+        assert!(duel.respawn_in.is_none());
+    }
+
+    #[test]
+    fn explore_hud_hides_enemy_and_debug_text_but_f3_toggles_player_details() {
+        let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let mut duel = Duel::load(&cache, 4.).unwrap();
+        duel.use_simple_ai();
+        vacant_enemy_slot(&mut duel);
+        let sim = Sim {
+            duel,
+            last: Default::default(),
+            started: [None, None],
+            hit_log: Vec::new(),
+            script: None,
+            step: 0,
+            lock_requested: false,
+            break_posture: false,
+            passive: true,
+            enemy_present: false,
+            previous: [([0.; 3], 0.); 2],
+            clock: [0.; 2],
+            faded: [false; 2],
+            perilous_age: None,
+        };
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_non_send(sim)
+            .insert_resource(DebugHud(false))
+            .insert_resource(ButtonInput::<KeyCode>::default())
+            .insert_resource(crate::brain_overlay::RecordingBrain {
+                enabled: false,
+                mode: "lua".into(),
+                player: "default".into(),
+                view: Default::default(),
+                unicode_font: false,
+            })
+            .init_resource::<combat_hud::Gauges>()
+            .add_systems(Startup, |mut commands: Commands| {
+                combat_hud::spawn(&mut commands)
+            })
+            .add_systems(Update, (hud, combat_hud::update).chain());
+        let text_entity = app.world_mut().spawn((Hud, Text::new(""))).id();
+        app.update();
+        for visible in [false, true, false] {
+            if visible != app.world().resource::<DebugHud>().0 {
+                let mut keys = ButtonInput::default();
+                keys.press(KeyCode::F3);
+                app.insert_resource(keys);
+                app.update();
+            }
+            let text = &app.world().get::<Text>(text_entity).unwrap().0;
+            assert!(text.contains("F3 debug text"));
+            assert_eq!(text.contains("refs"), visible);
+            assert!(
+                !text.contains("Enemy") && !text.contains("Ashina") && !text.contains("Q lock-on")
+            );
+            let gauges = app.world().resource::<combat_hud::Gauges>();
+            assert!(!gauges.enemy_alive && !gauges.boss_bar && !gauges.deathblow);
+            assert!(gauges.enemy_head.is_none());
+            assert!(gauges.enemy_name.is_empty());
+            let world = app.world_mut();
+            let mut panels = world.query_filtered::<&Visibility, With<combat_hud::EnemyPanel>>();
+            assert_eq!(*panels.single(world).unwrap(), Visibility::Hidden);
+        }
+    }
 
     #[test]
     fn castle_restart_restores_phase_one_story_lighting() {

@@ -874,3 +874,45 @@ The final map regression and all six active shared lighting-selection tests pass
 `cargo clippy -p sekiro-game --all-targets -j 4 -- -D warnings` and `cargo fmt --all --check` pass in the dedicated target.
 There were no commits, git-state operations, network/model calls, or deliberate writes to protected game-data/log directories.
 Exact native visual equivalence remains blocked by the shared phase/probe/sky/specular/fog issues above and the absence of matched original-game reference frames for this session.
+
+## Genichiro rooftop snow audit (2026-10-14)
+
+The native data does contain settled snow and ordinary falling snow during Genichiro Ashina's rooftop fight.
+The rooftop is `m11_01_00_00`; `m11_00_00_00` is the adjacent Outskirts, whose sub-ID also changes during the Tomoe handover.
+With progression flags 9800-9803 and invasion flag 8302 unset, common event 100 selects its morning branch at instructions 92-97: sky group 8907000 (`m900000`) and environment 1.
+Our Genichiro ArenaSpec has no beaten time-advancing bosses or Tomoe flag 11115802, and the captured runtime selects 06:00, environment 1, sub-ID 0 and `m11_01_0000`.
+Its ordinary pavilion mesh remains active; event 11115943 swaps it for the burnt floor only in the later Shura state, after 8301 and 11115921.
+The roof capture uses collision LightSet 100 with independent fog/scattering/environment row IDs 0, not a storm GPARAM.
+The base GPARAM's morning volumetric fog has GameScale 1.25, fixed density 0.001, far depth 280 and height offset -150; none is a snow-material enable switch.
+
+Native event 11115800 spawns map SFX entity 1114350 at instruction 126 for the ordinary fight, and at instruction 45 when restoring ordinary lighting after the encounter.
+The MSB maps this origin-placed, camera-relative effect to FXR 839500 in the common-effects archive.
+Map event 11115170 also controls it: invasion flag 8302 ends ordinary snowfall, and regions 1112150/1112151 or SpEffect 110040 suppress it indoors.
+Those two composite regions reference nine boxes whose highest top is 53.71 m, below the approximately 54.04 m fighting floor, so their geometric exclusion does not cover the rooftop.
+Composite child indices and box dimensions were decoded using the [SoulsFormatsNEXT shape layout](https://github.com/soulsmods/SoulsFormatsNEXT/blob/master/SoulsFormats/Formats/MSB/Shape.cs).
+Its weather action 10000 uses texture 17004, pale blue-white particles, nominal size 0.025 with variation, downward speed `[0,-1,0]` with variation and a 15-by-15-by-5 emission volume.
+This establishes small falling flakes, not a dense snow cover across the fighting floor; the raw emission count 40 and duration 180 are not a verified particles-per-second rate.
+Event 11115820:24-29 replaces the sky with 8907080 (`m900080`), sets castle sub-ID 10 and Outskirts sub-ID 30, selects lighting variant 3 and deletes 1114350 without changing the environment.
+Its instructions 38-40 spawn entities 1114832/1114835/1114836, mapped by the MSB to FXRs 811240/811241/811242, for the storm.
+The nearby 811201 and camera-relative 811305 FXRs use an orange ember flipbook texture 3000; their placement alone is not evidence for snow.
+
+| Native surface | Active material facet | Snow evidence |
+|---|---|---|
+| Pavilion `m015070`, material 0 | MultipleGround 6 | Dedicated SnowGround geometry, 10,750 vertices, base albedo `m11_snow_20_a` plus snow/detail normals; remains snow even with overlay blending disabled |
+| Pavilion `m015070`, materials 6 and 9 | Multiple 11 | Floor1 enables snow albedo slot 12 and normal slot 10, with upward snow direction and authored masks |
+| Pavilion tatami, material 3 | Multiple 1 | Snow slots 12/10 excluded by the native static switch; exported snow binding absent |
+| Adjacent roof tiles | MultipleGround 18 | Snow albedo/normal slots 11/7 enabled with upward direction |
+| Perimeter boards `m016010` / `m016015` | MultipleGround 6 | Snow texture and mask with upward direction |
+| Broken wood `m016300` / `m016301` | Multiple 21 | Snow albedo slot 12 enabled, snow normal slot 10 excluded |
+
+The inspected reproduction shows discrete white deposits beside railings and pavilion edges while most tatami remains uncovered.
+The same deposits remain in the matched `--no-layers --no-fxr` control, confirming that dedicated base snow geometry is sufficient to explain them.
+Our build supplies these through the native base snow geometry and `map_material.rs` bindings consumed by `map_material.wgsl::game_layers`, with the exported static facets rather than a weather-wide snow toggle.
+There is no separate synthetic snowfall system; additionally `fxr.rs::collect_node` skips native weather action 10000, and ordinary Genichiro staging runs 11115810/11115820 rather than the weather-spawning 11115800.
+Consequently the visible settled snow is supported by the data, while native falling snow remains an unimplemented effect rather than a reason to remove the deposits.
+No story selection, GPARAM or snow-disable special case was changed.
+The new `genichiro_settled_snow_selection` regression checks morning selection, native snowfall spawn/removal and native-versus-exported snow facets, including snow-free tatami.
+Read-only event/material/FXR audits, decoded effect textures and rendered controls are retained under `target/alt-gs/captures/`; the reproduction binary was the existing `target/alt-m11_01/release/sekiro-rs.exe`.
+Exact snow brightness, blend coverage and snowfall density still need a matched original-game frame; this audit establishes presence and selection, not pixel-level equivalence.
+Validation uses `CARGO_TARGET_DIR=target/alt-gs`: `cargo test --release --offline -p sekiro-game -j 4` passes 84 unit tests and six integration tests, with two existing ignores.
+`cargo clippy --release --offline -p sekiro-game --all-targets -j 4 -- -D warnings`, `cargo fmt -p sekiro-game -- --check` and the final `cargo fmt --all --check` pass.

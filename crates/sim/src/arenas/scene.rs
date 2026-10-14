@@ -6,6 +6,8 @@ use sekiro_formats::{emedf::Arg, emevd::Instruction};
 
 #[derive(Debug, Clone, Default)]
 pub struct SceneState {
+    /// Collision enablement is separate from rendered map-part enablement.
+    pub collisions_enabled: HashMap<i32, bool>,
     pub enabled: HashMap<i32, bool>,
     /// Recency of active map-part commands, used when an event overrides the common sky.
     pub enabled_order: Vec<i32>,
@@ -32,6 +34,11 @@ impl SceneState {
     pub fn instruction(&mut self, ins: &Instruction, args: &[Arg]) -> bool {
         let i = |n: usize| args.get(n).map_or(0, |v| v.as_i64());
         match ins.code() {
+            (2011, 1) => {
+                self.collisions_enabled
+                    .insert(ins.i32_at(0).unwrap_or(0), ins.u8_at(4) != Some(0));
+                true
+            }
             (2003, 80) => {
                 self.environment = ins.u8_at(0);
                 true

@@ -1,6 +1,6 @@
-//! Map textures: every `map/mXX/*.tpfbhd` split binder, `other/maptex.tpf` and the TPFs of
-//! placed objects, indexed by texture name. Textures are written out as the DDS files the TPFs already contain, so the GPU
-//! gets the original block-compressed data with its mip chain.
+//! Map textures indexed by exact internal names across area archives and loose map,
+//! object, character and shared banks.
+//! DDS payloads preserve the original compressed data and mip chains.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -17,6 +17,7 @@ enum Source {
 }
 
 struct Binder {
+    path: PathBuf,
     bhd: Vec<u8>,
     bdt: Mmap,
 }
@@ -24,8 +25,15 @@ struct Binder {
 pub struct MapTextures {
     oodle: &'static Oodle,
     binders: Vec<Binder>,
-    tpfs: Vec<Vec<u8>>,
+    tpfs: Vec<PathBuf>,
     by_name: HashMap<String, Source>,
+    /// Cache-relative sources searched, including archives with no matching member.
+    pub searched: Vec<String>,
+    pub source_errors: std::collections::BTreeMap<String, String>,
+    root: PathBuf,
+    /// Outer TPF names that previously triggered a wrong-first-texture substitution.
+    pub rejected_aliases: HashMap<String, Vec<String>>,
+    legacy_archive_names: HashMap<String, bool>,
 }
 
 impl MapTextures {
@@ -36,6 +44,11 @@ impl MapTextures {
             binders: Vec::new(),
             tpfs: Vec::new(),
             by_name: HashMap::new(),
+            searched: Vec::new(),
+            source_errors: std::collections::BTreeMap::new(),
+            root: raw.to_path_buf(),
+            rejected_aliases: HashMap::new(),
+            legacy_archive_names: HashMap::new(),
         };
         let mut bhds: Vec<PathBuf> = Vec::new();
         for area in std::fs::read_dir(raw.join("map"))? {
@@ -61,24 +74,77 @@ impl MapTextures {
             // SAFETY: read-only mapping of a cache file nothing else writes while we run.
             let bdt = unsafe { Mmap::map(&file)? };
             let binder = store.binders.len();
+            store.searched.push(store.relative(&bhd_path));
+            store.searched.push(store.relative(&bdt_path));
             for (entry, f) in bxf4::parse(&bhd, &bdt)?.iter().enumerate() {
-                let stem = tpf_stem(f.file_name());
                 store
-                    .by_name
-                    .entry(stem)
-                    .or_insert(Source::Bxf { binder, entry });
+                    .searched
+                    .push(format!("{}:{}", store.relative(&bhd_path), f.name));
+                let stem = tpf_stem(f.file_name());
+                let data = f.contents(Some(oodle))?;
+                let textures = tpf::parse(&data)?;
+                let exact = textures.iter().any(|t| t.name.eq_ignore_ascii_case(&stem));
+                store
+                    .legacy_archive_names
+                    .entry(stem.clone())
+                    .or_insert(exact);
+                if !exact {
+                    let relative = store.relative(&bhd_path);
+                    store
+                        .rejected_aliases
+                        .entry(stem)
+                        .or_default()
+                        .push(format!(
+                            "{}:{} contains {:?}",
+                            relative,
+                            f.name,
+                            textures.iter().map(|t| &t.name).collect::<Vec<_>>()
+                        ));
+                }
+                for texture in textures {
+                    store
+                        .by_name
+                        .entry(texture.name.to_ascii_lowercase())
+                        .or_insert(Source::Bxf { binder, entry });
+                }
             }
-            store.binders.push(Binder { bhd, bdt });
+            store.binders.push(Binder {
+                path: bhd_path,
+                bhd,
+                bdt,
+            });
         }
         let maptex = raw.join("other/maptex.tpf");
         if maptex.is_file() {
             store.add_tpf(&maptex)?;
+        }
+        // Shared banks, map-local packages and object packages may contain multiple textures.
+        // Index internal names rather than assuming that a package's name identifies its data.
+        for dir in [
+            "map", "obj", "other", "parts", "chr", "sfx", "menu", "font", "facegen",
+        ] {
+            let mut paths = Vec::new();
+            loose_tpfs(&raw.join(dir), &mut paths)?;
+            paths.sort();
+            for path in paths {
+                if path != maptex
+                    && let Err(error) = store.add_tpf(&path)
+                {
+                    store
+                        .source_errors
+                        .insert(store.relative(&path), format!("{error:#}"));
+                }
+            }
         }
         Ok(store)
     }
 
     /// Makes the textures of a loose TPF findable. Earlier sources win on name clashes.
     pub fn add_tpf(&mut self, path: &Path) -> Result<()> {
+        if self.tpfs.iter().any(|p| p == path) {
+            return Ok(());
+        }
+        self.searched.push(self.relative(path));
         let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let file = self.tpfs.len();
         for (index, t) in tpf::parse(&data)?.iter().enumerate() {
@@ -86,12 +152,26 @@ impl MapTextures {
                 .entry(t.name.to_ascii_lowercase())
                 .or_insert(Source::Tpf { file, index });
         }
-        self.tpfs.push(data);
+        self.tpfs.push(path.to_path_buf());
         Ok(())
     }
 
     pub fn len(&self) -> usize {
         self.by_name.len()
+    }
+
+    /// Old resolver behavior, for a fresh-export baseline rather than cached DDS counts.
+    pub fn legacy_status(
+        &self,
+        name: &str,
+        local_names: &std::collections::BTreeSet<String>,
+    ) -> &'static str {
+        match self.legacy_archive_names.get(name) {
+            Some(true) => "resolved",
+            Some(false) => "wrong_first_texture",
+            None if local_names.contains(name) => "resolved",
+            None => "missing",
+        }
     }
 
     /// The DDS file for a texture name, or None when it is unknown.
@@ -100,22 +180,95 @@ impl MapTextures {
         match self.by_name.get(&name) {
             None => Ok(None),
             Some(Source::Tpf { file, index }) => {
-                Ok(Some(tpf::parse(&self.tpfs[*file])?[*index].dds.to_vec()))
+                let data = std::fs::read(&self.tpfs[*file])?;
+                let textures = tpf::parse(&data)?;
+                // Recheck the name in case the cached package changed after indexing.
+                Ok(textures
+                    .get(*index)
+                    .filter(|t| t.name.eq_ignore_ascii_case(&name))
+                    .map(|t| t.dds.to_vec()))
             }
             Some(Source::Bxf { binder, entry }) => {
                 let b = &self.binders[*binder];
                 let files = bxf4::parse(&b.bhd, &b.bdt)?;
                 let data = files[*entry].contents(Some(self.oodle))?;
                 let textures = tpf::parse(&data)?;
-                let t = textures
-                    .iter()
-                    .find(|t| t.name.eq_ignore_ascii_case(&name))
-                    .or(textures.first())
-                    .context("empty TPF")?;
-                Ok(Some(t.dds.to_vec()))
+                Ok(exact_dds(&textures, &name))
             }
         }
     }
+
+    fn relative(&self, path: &Path) -> String {
+        path.strip_prefix(&self.root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+
+    pub fn provenance(&self, name: &str) -> Result<Option<String>> {
+        Ok(match self.by_name.get(&name.to_ascii_lowercase()) {
+            None => None,
+            Some(Source::Tpf { file, .. }) => Some(self.relative(&self.tpfs[*file])),
+            Some(Source::Bxf { binder, entry }) => {
+                let b = &self.binders[*binder];
+                let files = bxf4::parse(&b.bhd, &b.bdt)?;
+                Some(format!("{}:{}", self.relative(&b.path), files[*entry].name))
+            }
+        })
+    }
+}
+
+fn exact_dds(textures: &[tpf::TpfTexture<'_>], name: &str) -> Option<Vec<u8>> {
+    textures
+        .iter()
+        .find(|t| t.name.eq_ignore_ascii_case(name))
+        .map(|t| t.dds.to_vec())
+}
+
+#[cfg(test)]
+mod resolution_tests {
+    use super::*;
+
+    #[test]
+    fn multi_texture_package_requires_the_requested_internal_name() {
+        let textures = [
+            tpf::TpfTexture {
+                name: "unrelated".into(),
+                format: 0,
+                kind: 0,
+                mipmaps: 1,
+                dds: &[1],
+            },
+            tpf::TpfTexture {
+                name: "Actual_Surface".into(),
+                format: 0,
+                kind: 0,
+                mipmaps: 1,
+                dds: &[2],
+            },
+        ];
+        for (name, expected) in [("actual_surface", Some(vec![2])), ("package_name", None)] {
+            assert_eq!(exact_dds(&textures, name), expected);
+        }
+    }
+}
+
+fn loose_tpfs(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            loose_tpfs(&path, out)?;
+        } else if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("tpf"))
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// Converts a Sekiro normal map (X in red, Y in green, DirectX-style Y down, other channels

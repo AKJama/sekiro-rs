@@ -23,6 +23,105 @@ mod tests {
     use sekiro_formats::{emedf, gparam, msb};
     use std::{collections::BTreeSet, path::Path};
 
+    /// Snow deposits belong to the native roof, while tatami's static facet excludes snow.
+    #[test]
+    fn genichiro_settled_snow_selection() {
+        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let arena = sekiro_sim::arena::ArenaSpec::by_name("genichiro").unwrap();
+        let selected = lighting_selection::select(&cache, arena.map, None, Some(arena)).unwrap();
+        assert_eq!(
+            (selected.hour, selected.environment, selected.sub_id),
+            (6., 1, 0)
+        );
+        assert_eq!(selected.source, "m11_01_0000");
+        assert_eq!(selected.sky.as_deref(), Some("m900000"));
+        assert!(!selected.flags.contains(&11115802));
+
+        let effects = sekiro_sim::arena_b::map_effects(&cache, arena.map).unwrap();
+        assert_eq!(
+            effects
+                .iter()
+                .find(|effect| effect.entity == 1114350)
+                .unwrap()
+                .effect,
+            839500
+        );
+        let events = lighting_selection::script(&cache, arena.map).unwrap();
+        for (event_id, code) in [(11115800, (2006, 2)), (11115820, (2006, 1))] {
+            assert!(
+                events
+                    .events
+                    .iter()
+                    .find(|event| event.id == event_id)
+                    .unwrap()
+                    .instructions
+                    .iter()
+                    .any(|instruction| instruction.code() == code
+                        && instruction.i32_at(0) == Some(1114350)),
+                "morning spawns snowfall; Tomoe removes it"
+            );
+        }
+
+        let roof = sekiro_formats::flver::parse(
+            &std::fs::read(cache.join(
+                "raw/map/m11_01_00_00/m11_01_00_00_015070.mapbnd.d/m11_01_00_00_015070.flver",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let bytes = std::fs::read(cache.join("maps/m11_01_00_00/models/m015070.glb")).unwrap();
+        let json_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        let exported: serde_json::Value =
+            serde_json::from_slice(&bytes[20..20 + json_len]).unwrap();
+        for (stem, snow_slot, has_snow) in [
+            ("M[m11_01]_Asset_SnowGround_Multi", 11, true),
+            ("M[m11_01]_Floor1_Multi", 12, true),
+            ("M[m11_01]_tatami_multi", 12, false),
+        ] {
+            let native = sekiro_formats::mtd::parse(
+                &std::fs::read(cache.join(format!("raw/mtd/allmaterialbnd.mtdbnd.d/{stem}.mtd")))
+                    .unwrap(),
+            )
+            .unwrap();
+            let kind = sekiro_formats::map_layers::family(&native.shader);
+            let facet = sekiro_formats::map_layers::variant(&native).unwrap();
+            assert_eq!(
+                sekiro_formats::map_layers::slots(kind, facet).contains(&snow_slot),
+                has_snow,
+                "{stem}"
+            );
+            for (index, material) in roof
+                .materials
+                .iter()
+                .enumerate()
+                .filter(|(_, material)| material.mtd.ends_with(&format!("{stem}.mtd")))
+            {
+                let layers = &exported["materials"][index]["extras"]["sekiro_layers"];
+                assert_eq!(
+                    layers["variant"].as_u64(),
+                    Some(facet as u64),
+                    "{}",
+                    material.name
+                );
+                assert_eq!(
+                    layers["snow"]["uri"].is_string(),
+                    has_snow,
+                    "{}",
+                    material.name
+                );
+                if has_snow {
+                    assert!(sekiro_formats::map_layers::game_params(&native, kind)[14][1] > 0.);
+                }
+            }
+            assert!(
+                roof.materials
+                    .iter()
+                    .any(|material| material.mtd.ends_with(&format!("{stem}.mtd"))),
+                "roof uses {stem}"
+            );
+        }
+    }
+
     /// Validate native Castle event selection and inspect the actual renderer conversion.
     #[test]
     fn castle_installed_story_lighting() {

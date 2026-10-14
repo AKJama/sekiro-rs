@@ -3,7 +3,7 @@
 //! cursor grab, camera orbit, stick building) instead of the simulation-level `--script`.
 //!
 //! One line per segment of rendered frames: `<frames> <keys> [<mouse_dx> <mouse_dy>]`, where
-//! keys is a comma list of `W A S D Q Space Shift C Esc F8 Click` (`Click` is the left mouse
+//! keys is a comma list of `W A S D Q Space Shift C Esc F3 F8 Click` (`Click` is the left mouse
 //! button; a key named in consecutive segments stays held) or `-`, and the mouse moves by the
 //! given counts every frame. `#` starts a comment. Frames count from the first frame the
 //! simulation runs.
@@ -44,6 +44,7 @@ fn key(name: &str) -> Result<KeyCode, String> {
         "Shift" => KeyCode::ShiftLeft,
         "Esc" => KeyCode::Escape,
         "F8" => KeyCode::F8,
+        "F3" => KeyCode::F3,
         other => return Err(format!("unknown key {other:?}")),
     })
 }

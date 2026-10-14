@@ -70,3 +70,4 @@ mod sword_saint;
 mod true_monk;
 mod watering_hole_arena;
 mod wire;
+mod world_events;

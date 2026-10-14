@@ -30,6 +30,11 @@ Map transforms, base textures, collision and GPARAM sun/ambient/fog load from th
 M[Multiple] and M[MultipleGround] now render their static-switch layers, RGB mask selectors, tint, detail normals, wetness and authored snow direction.
 Remaining approximations include ground ripples, variant-18 metal masks, native AO, optional HDR-colour gamma conversion and texture-tiling semantics; other material families retain their existing paths.
 Water lacks its original shader, and large lakes and underground water can appear as pale flat polygons.
+GroundFog and CloudFog surfaces now retain their authored meshes, masks, scrolling constants, coverage and soft-depth intersections.
+Their native forward shadow permutations, instance colour-slot overrides and forward volumetric-fog composition remain incomplete; MTD colour packing uses the sky renderer's calibrated gamma-two convention.
+Irradiance uses the shared map atlas selection, default environment-probe approximation of native instance SH and hemisphere fallback.
+The connected Castle surface diagnostic with probe/global fog disabled exposes a dark foreground card; native forward composition, instance lighting and per-mesh render-group semantics remain to be validated.
+See [MAP-COMPLETENESS.md](MAP-COMPLETENESS.md#fog-surface-inventory-14-october-2026) for the material inventory and validation evidence.
 Local light sets, full exposure/scattering, particles, animated foliage and event-controlled object visibility remain incomplete.
 The collision decoder skips convex primitives; the decoded mesh supports every sampled gameplay start and short walk, but does not establish coverage of all collision shapes.
 The m89 sky library contains co-located dome variants without terrain; sky shaders and variant selection remain incomplete, and play mode has no authored floor there.

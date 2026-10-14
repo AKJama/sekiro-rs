@@ -13,7 +13,9 @@
 mod bc6_hdr;
 mod edges;
 mod env;
+mod layout;
 mod lights;
+mod material_audit;
 mod pieces;
 mod sky;
 mod textures;
@@ -39,12 +41,7 @@ fn mirror(m: Mat4) -> Mat4 {
 
 /// A part's transform in Bevy space as JSON (translation, rotation quaternion xyzw, scale).
 fn transform_json(part: &msb::Part) -> Value {
-    let (s, r, t) = mirror(part.matrix()).to_scale_rotation_translation();
-    json!({
-        "translation": t.to_array(),
-        "rotation": r.normalize().to_array(),
-        "scale": s.to_array(),
-    })
+    layout::transform_json(part)
 }
 
 /// Yaw in degrees about +Y in Bevy space (the mirror negates FromSoftware's Y rotation).
@@ -130,8 +127,8 @@ fn object_flver(raw: &Path, model: &str) -> PathBuf {
     raw.join(format!("obj/{model}.objbnd.d/{model}.flver"))
 }
 
-/// Collisionless cinematic layouts have no collision-driven visibility groups.
-fn exclude_ungrouped(has_collision: bool, masks: &[u32]) -> bool {
+/// Compatibility projection only: never remove canonical parts.
+fn legacy_excludes_ungrouped(has_collision: bool, masks: &[u32]) -> bool {
     has_collision && masks.get(8..16).is_some_and(|g| g.iter().all(|&w| w == 0))
 }
 
@@ -284,9 +281,9 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
     let uri = |name: &str| -> Option<String> {
         written.contains(name).then(|| format!("tex/{name}.dds"))
     };
-    let models: Vec<(String, Value)> = used
+    let outcomes: Vec<(String, (Option<Value>, String))> = used
         .par_iter()
-        .filter_map(|(model, path)| {
+        .map(|(model, path)| {
             let result = (|| -> Result<_> {
                 if model.starts_with('o') && !path.is_file() {
                     let binder = path
@@ -297,7 +294,7 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
                         let bytes = std::fs::read(&binder)?;
                         let files = sekiro_formats::bnd4::parse(&bytes)?;
                         if physics_only_members(files.iter().map(|f| f.file_name())) {
-                            return Ok(None);
+                            return Ok((None, "physics_only".to_owned()));
                         }
                     }
                 }
@@ -306,29 +303,49 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
                 let f = flver::parse(&data)?;
                 let built = pieces::build(&f, &mtds, &uri)?;
                 if built.primitives == 0 {
-                    return Ok(None);
+                    return Ok((None, "no_exported_primitives".to_owned()));
                 }
                 std::fs::write(out.join(format!("models/{model}.glb")), &built.glb)?;
-                Ok(Some(json!({
-                    "glb": format!("models/{model}.glb"),
-                    "triangles": built.triangles,
-                    "primitives": built.primitives,
-                    "min": built.bbox_min,
-                    "max": built.bbox_max,
-                })))
+                Ok((
+                    Some(json!({
+                        "glb": format!("models/{model}.glb"),
+                        "triangles": built.triangles,
+                        "primitives": built.primitives,
+                        "min": built.bbox_min,
+                        "max": built.bbox_max,
+                    })),
+                    "exported".to_owned(),
+                ))
             })();
             match result {
-                Ok(Some(v)) => Some((model.clone(), v)),
-                Ok(None) => None,
+                Ok(outcome) => (model.clone(), outcome),
                 Err(e) => {
                     failed.fetch_add(1, Ordering::Relaxed);
                     eprintln!("  warning: {model}: {e:#}");
-                    None
+                    (
+                        model.clone(),
+                        (
+                            None,
+                            if path.exists() {
+                                "model_export_failed"
+                            } else {
+                                "missing_model_asset"
+                            }
+                            .to_owned(),
+                        ),
+                    )
                 }
             }
         })
         .collect();
-    let models: BTreeMap<String, Value> = models.into_iter().collect();
+    let models: BTreeMap<String, Value> = outcomes
+        .iter()
+        .filter_map(|(name, (model, _))| model.as_ref().map(|m| (name.clone(), m.clone())))
+        .collect();
+    let model_status: BTreeMap<String, String> = outcomes
+        .into_iter()
+        .map(|(name, (_, status))| (name, status))
+        .collect();
     eprintln!(
         "  wrote {} GLBs ({} failed, {} with nothing visible)",
         models.len(),
@@ -352,8 +369,8 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
         let Some(m) = models.get(&model) else {
             continue;
         };
-        if exclude_ungrouped(has_collision, &p.masks) {
-            // No draw groups: the piece never draws.
+        if legacy_excludes_ungrouped(has_collision, &p.masks) {
+            // Only the legacy projection excludes this row; parts retains it.
             never_drawn += 1;
             continue;
         }
@@ -411,7 +428,7 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
         collision.vertices.len()
     );
 
-    let layout = json!({
+    let mut layout = json!({
         "id": id,
         "source": "sekiro-extract map",
         "convention": "Bevy space: FromSoftware x mirrored (x -> -x); rotations are quaternions xyzw",
@@ -436,12 +453,20 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
             "note": collision_note,
         },
     });
+    layout::extend(
+        &mut layout,
+        &msb,
+        &model_status,
+        &ranges,
+        &layout::map_inventory(&raw)?,
+    );
     std::fs::write(out.join("layout.json"), serde_json::to_vec_pretty(&layout)?)?;
     if id == "m89_00_00_99" {
         sky::export(&raw, &out, oodle)?;
     }
+    material_audit::export(cache, id, oodle, &mtds, &store)?;
     eprintln!(
-        "  layout: {} pieces ({never_drawn} without draw groups left out), bounds {:?}..{:?}; wrote {}",
+        "  layout: {} pieces ({never_drawn} zero-group rows retained in parts, excluded from legacy pieces), bounds {:?}..{:?}; wrote {}",
         piece_rows.len(),
         bmin.to_array(),
         bmax.to_array(),
@@ -597,16 +622,16 @@ fn export_collision(
 
 #[cfg(test)]
 mod tests {
-    use super::{exclude_ungrouped, physics_only_members};
+    use super::{legacy_excludes_ungrouped, physics_only_members};
 
     #[test]
     fn cinematic_pieces_do_not_need_collision_draw_groups() {
-        assert!(!exclude_ungrouped(false, &[0; 48]));
-        assert!(exclude_ungrouped(true, &[0; 48]));
+        assert!(!legacy_excludes_ungrouped(false, &[0; 48]));
+        assert!(legacy_excludes_ungrouped(true, &[0; 48]));
         let mut masks = [0; 48];
         masks[8] = 1;
-        assert!(!exclude_ungrouped(true, &masks));
-        assert!(!exclude_ungrouped(true, &[]));
+        assert!(!legacy_excludes_ungrouped(true, &masks));
+        assert!(!legacy_excludes_ungrouped(true, &[]));
     }
 
     #[test]

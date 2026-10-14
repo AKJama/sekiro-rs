@@ -1,5 +1,121 @@
 # Status
 
+## Authored map fog surfaces (2026-10-14)
+
+Outskirts uses 17 fog material entries across five models and Castle uses three entries on one model, all from the native GroundFog and CloudFog shader families.
+The exporter retains their geometry, face culling, UVs, coverage/occlusion streams, all mask textures and MTD constants, preserving the preceding LOD work.
+The independent map_fog_surface material ports scrolling masks, GroundFog's static branch/parallax, lit diffuse/grazing terms and native soft-depth factors, with shared GI and default environment-probe fallback.
+Both maps were re-exported with target/alt-fs and four Rayon workers, yielding 716/768 GLBs and 4487/3624 legacy pieces with canonical parts and connections unchanged.
+Touched-crate release tests pass 131 tests with two existing ignores; all-target release Clippy with warnings denied and formatting pass using four build jobs.
+The shader regression includes environment-probe and single-sample/MSAA depth compositions, and inspected GPU captures and the complete parameter/part inventory are under target/alt-fs.
+Matched Outskirts and connected Castle surface diagnostics show the recovered bands and cloud sea; the current global pass obscures much of the Outskirts difference.
+Both one-view primary-map sweeps report void 0, but their depth diagnostic omits the custom fog material and cannot measure this fix or establish area completeness.
+The connected diagnostic without probe/global fog also exposes a dark foreground card; native forward fog, instance colour/SH overrides, shadow permutations and shared per-mesh render-group semantics remain fidelity work.
+Coverage and identity-transform audits pass, and a final probe-lit Castle control exercises the added environment fallback without shader or asset errors.
+Only the fog job's implementation, its two existing verification fixtures, the requested registration/mod lines and related documentation were edited; paused fog, visibility, LOD and world files were not edited.
+No commits, remote mutations, real-game sessions, save writes, install writes or protected log-directory writes were made.
+
+## Connected Ashina blocks - Job D (2026-10-14)
+
+Outskirts/Castle Explore now warms their bounded six-block neighbourhood, matches signed retail wildcard fields, unions multiple target masks and retains independent collision/request state per block without adding MapOffset again.
+Canonical Objects load by default with declared helper/physics-only reasons skipped, and C's snapshots, E's root visibility writer and F's per-instance detail selector are integrated.
+Other entry maps and arena bootstraps stay on their previous path; Explore physics includes the bounded neighbouring geometry.
+Installed-data tests prove all five directed requests, with a grounded synthetic crossing checking seam unions and stale-mask removal.
+The connected workload needs a 64 MiB IO stack, and map captures now wait for rendered settling and a stable empty pipeline queue; the inspected Castle room capture has walls, floor and neighbouring exterior geometry.
+All 106 game release tests pass with two existing ignores, all-target release Clippy with warnings denied passes, and workspace formatting passes under target/alt-md with offline final checks and four jobs.
+Matched two-view diagnostic controls improve Castle depth-gap/void candidates from 8360/4608 to 809/0, while below-landscape Outskirts candidates worsen from 14659/0 to 18018/9216; reports and pose-identity checks are under target/alt-md.
+These incomplete samples leave visual acceptance open, and normal/all differences rise in both maps.
+The prepared neighbouring-material routing call is outside D's owned files and awaits its owner or the requested integration approval; current native-layer comparisons are therefore not certified.
+Dominant LOD submission, support/tie-band occupancy and retained warm retirement are documented approximations, with live predicates/poses, weighted coverage and exact retail release gates still open.
+No commits, protected log writes, cache/re changes, retail game sessions, save access or install writes were made.
+
+
+## First-visit story state - Job C (2026-10-14)
+
+Outskirts and Castle now run parameter-resolved map/common constructors into typed entity/group visibility and per-part lists for the shared world loader and single visibility writer.
+The documented fixture keeps prologue flag 11120100 on, gives Castle Gyoubu flag 9301, and leaves invasion/endgame flags off; common initialization supplies default quest flags.
+The installed-script replay proves the normal Castle floor, hidden burned floor, invasion gates and completed Object restore; the earlier common-helper truth table and floor names were corrected from the actual instructions.
+Settled ordinary Object gates are 1235 enabled / 274 disabled in Outskirts and 1530 / 144 in Castle, with unsupported world observations and omitted non-presentation actions retained as diagnostics.
+Other maps receive no story override, and the existing arena interpreter remains unchanged.
+All 518 sim release tests pass with 20 ignored, all six game integration tests pass, sim/game all-target release Clippy with warnings denied passes, and touched-crate formatting passes under target/alt-mc with four jobs.
+The final workspace formatting recheck caught in-progress extractor fog additions outside job C's files, which were left to their owner.
+The full game unit run has 99 passes, two ignores and the existing snow assertion failure caused by changed exported material indices; the expected variant is present in the new GLB.
+Paired two-view diagnostic sweeps completed for both maps, with layers/shadows/GIIV disabled to bypass the connected texture-owner routing issue; their increased and decreased candidate counts do not prove area completeness.
+Reports, images, first-visit snapshots and the paired summary are under target/alt-mc; docs/MAP-COMPLETENESS.md records the interfaces, exact controls, counts and remaining live-world/rendering limits.
+No commits, cache/re modifications, protected log writes, game sessions, save access or install writes were made.
+
+## Real map detail representations - Job F (2026-10-14)
+
+All eight affected Outskirts models now retain 59 original LOD0 primitives and 93 separate LOD1/2 meshes for 154 MapPiece instances, with original face flags, mesh/node/material provenance and face-specific culling.
+Lower-level vertex compaction preserves all streams and triangle values, restoring the sampled MikkTSpace check to 95.1% handedness and 93.3% direction agreement; legacy material ordering/reuse also keeps the native roof-snow check passing.
+The new `map_lod.rs` interface loads LodParam/LodPlatform, binds signed-negative MapPiece IDs including 255 to row 0, measures camera-to-oriented-bounds distance and returns strict hysteresis and time/distance crossfade weights.
+Both maps were re-exported using the release extractor in target/alt-mf, with four Rayon workers and unchanged job B per-kind counts, canonical identities/transforms/masks/LOD IDs, 6,489/6,164 parts, 99/298 connections and 712/767 model GLBs.
+The final three-crate release run passes 213 tests and one doctest with four existing ignores; all-target Clippy with warnings denied and workspace formatting pass, using four build jobs.
+The focused exporter module verifies every retained face set in all eight models, stream remapping, level isolation, material-prefix reuse and culling variants; canonical cache checks, tangent and roof-snow regressions all pass.
+Matched-camera before/after captures and audits are under target/alt-mf, reflecting the concurrent C/D/E/F integration rather than an isolated Job F visual effect.
+The first valid Outskirts sweep view changes from void 18,432 and score 38,494 to void 0 and score 20,069, with depth gap unchanged at 20,062; this one-view smoke is not an area-completeness result.
+The earlier larger sweep failed collision-depth validation and subsequent baseline smokes stalled; the final primary-only after smoke completed, and both after-captures were inspected.
+Still open: the renderer's dominant-weight submission needs actual dual-representation crossfade, its coverage shader and extra type/world threshold scales remain untraced, Object ID-255 defaults need model provenance, and connected-block layer texture routing remains with the material/loader owners.
+Fog surfaces remain filtered at pieces::skip_material's fog branch for the later surface-handling job; other map caches were not re-exported.
+The preceding Job E tangent failure note describes the earlier cache and is resolved by this exporter session.
+No commits, remote changes, real-game sessions, save writes, install writes or writes to protected log directories were made.
+
+## One map-root visibility decision - Job E (2026-10-14)
+
+`map_visibility.rs` implements the executable's per-bit draw/backread selection, condition-byte preprocessing, Collision backread union, MapPiece-only zero fallback and additive connected-block target masks.
+The central writer combines optional Job C story state, arena event snapshots, residency, readiness and draw masks; arena staging stops directly writing managed roots.
+Outskirts has one effective-zero MapPiece, `m902000_9002`, expanded to all bits; Castle has none, while zero Object and Collision masks receive no invented universal fallback.
+All eight E regressions and all 100 game release unit tests pass, with two existing ignores; five game integration tests pass and the shared exported-tangent test fails at 0.695 handedness agreement and 0.619 direction agreement.
+Game all-target release Clippy with warnings denied and workspace formatting pass using target/alt-me and four build jobs.
+Four-view baseline scores are 62,172 for Outskirts and 307,586 for Castle; connected sweep and fixed-camera after attempts are blocked by asset paths/readiness, with evidence under target/alt-me and no area-completeness claim.
+The live Castle part diagnostic exposes h018700 and its h018700_1000 contribution to the target block, source masks and independent readiness/residency gates.
+Job D owns final occupancy/navigation and loader behavior; tangent/export and per-block texture routing remain outside E's files, and the integration interface and blockers are documented in docs/MAP-COMPLETENESS.md.
+No commits, remote changes, original-game sessions, save writes or install writes were made.
+
+## Lossless map layout export - Job B (2026-10-14)
+
+Layout version 2 keeps every placed part, original model table, mask, condition, entity/group ID, LOD byte and reader setting, with explicit asset/render reasons and resolved Object/Enemy references.
+Connections retain raw signed collision indices, attached source collision and inventory-matched target blocks, including the authored unbound -1 row.
+The existing viewer projections and field values remain compatible; new world consumers use the complete parts/connections tables documented in docs/MAP-COMPLETENESS.md.
+Re-exported Outskirts has 6,489 parts and 99 connections; Castle has 6,164 parts and 298 connections, with every per-kind count matching target/alt-ma/msb-audit.txt.
+All 20 extractor release tests, extractor all-target Clippy with warnings denied and workspace formatting pass using target/alt-mb and four jobs.
+Game rendering, streaming, event visibility and LOD selection remain with jobs C/D/E/F; job G's material-audit wiring is preserved.
+No commits, game sessions, save writes or install writes were made.
+
+## Runtime cache discovery (2026-10-14)
+
+The simulation default and game CLI now share runtime cache discovery: `--cache`, `SEKIRO_CACHE`, the nearest executable-directory ancestor containing `cache`, then the working directory's `cache`.
+The only non-test cache/log/config `CARGO_MANIFEST_DIR` use was the enemy default; existing test paths were preserved, and menu changes remained with their owner.
+The release executable passes Ashina Castle capture loads from an external temporary folder with `--cache` and from the repository without it, plus executable-ancestor and environment-override launches.
+A relocated Owl session reaches 30 idle ticks and exits successfully with memory disabled; logs, rendered captures and the verification script are under `target/alt-cp`.
+Release tests for sim and game pass 605 tests with 22 ignored, all-target release Clippy passes with warnings denied, and workspace formatting passes.
+All Cargo builds and checks use `target/alt-cp` and four jobs; no commits were made.
+
+## Map material/model provenance - Job G extractor (2026-10-14)
+
+Exact texture names now resolve across cached area, map, object, character and shared banks, with per-material slot/source/error records and all ten map inventories under cache/maps.
+Outskirts missing texture names fall from seven to three, Castle remains at zero, and shared albedo/normal images use separate DDS payloads and GLB references.
+All 56 Outskirts and 61 Castle omitted Object instances are authored helpers: 56 and 60 meshless FLVER instances respectively, plus one Castle physics-only binder, with no visible-model export failures in those sets.
+Both maps were re-exported from target/alt-mg; 18 release unit tests and two integration tests, all-target Clippy and formatting pass with four build jobs.
+The three unresolved Outskirts texture paths and runtime helper/proxy handling remain open; game code, pieces.rs, protected data and saves were not changed by this job, and no commit was made.
+
+## MSBS metadata completeness - Job A (2026-10-14)
+
+The formats reader now preserves named visibility masks and conditions, Object references, complete placed-part flags/settings and MapOffset provenance while retaining the existing caller fields.
+Independent raw-table checks cover all ten cached maps: 55,352 parts, 582 connections (580 resolved and two explicit -1 references), 1,973 Object references, 1,723 Enemy collision references, 160 PatrolInfo references and seven MapOffsets.
+Castle retains all 298 connections; the old h004490_1000-to-h900900 audit example was a negative-indexing error and is corrected in docs/MAP-COMPLETENESS.md.
+The release formats suite passes 84 tests with two existing slow tests ignored; formats/all-target Clippy with warnings denied, workspace compilation and formatting pass using target/alt-ma with four build jobs.
+The remaining jobs own game integration and retail loading/condition semantics; cache/re data and game files were untouched, and no commit was made.
+
+## Genichiro rooftop snow audit (2026-10-14)
+
+Native Castle m11_01 data supports settled snow around pavilion edges and ordinary camera-relative snowfall FXR 839500, removed during the Tomoe storm handover.
+Genichiro correctly selects morning environment 1 and base GPARAM; native snow facets stay enabled on edge surfaces while tatami excludes them, so no snow-selection special case was added.
+Added a native-versus-exported material and event-selection regression in m11_01 and evidence in docs/LIGHTING.md, with inspected ordinary and no-layers/no-FXR controls under target/alt-gs/captures.
+All 90 game release tests pass with two existing ignores; game all-target release Clippy with warnings denied and final workspace formatting pass using target/alt-gs and four jobs.
+Native weather action 10000 remains unsupported, and exact snow brightness/coverage/density awaits matched original-game reference frames.
+No commits, collaboration-board edits, game/save sessions or writes to cache, re or protected log directories were made.
+
 2026-10-14: Hirata's two memory selections, collision rows and ArenaSpec flags are audited, with captures and uncapped frame times under target/alt-m10/captures/; m10, core selection and collision tests plus game all-target Clippy and formatting pass, the broad run's separate Senpou sky assertion is recorded, and shared fog/local-light/material/performance gaps still prevent claiming exact visual parity or steady pacing.
 
 ## Coach-selected break punishes (2026-10-13)
@@ -1287,3 +1403,53 @@ All builds and tests use target/alt-lf and six jobs, with no commits, git-state 
 2026-10-14: Audited Sunken Valley m17_00 against installed event, GPARAM, native probe, collision and sky data; retained faithful presets and both afternoon ArenaSpecs, added an installed-data regression, and verified 110/100/110 walks in all five states; paired captures and uncapped-flag median/p99 measurements are under target/alt-m17/captures, with shared layered-normal/AO/specular gaps, absent dawn probes, unknown missing-row fallback and residual presentation pacing documented; the map regression, seven shared selector tests, collision regression, game all-target Clippy with warnings denied and formatting pass using target/alt-m17 and four jobs, while exact rendered parity and steady uncapped pacing remain unverified.
 2026-10-14: Audited Senpou m20_00 story lighting and fixed the cleared illusion entry sky reference; two native m20 tests, six shared selector tests and the moving-collision regression pass, with game/all-target Clippy and workspace formatting clean using target/alt-m20 and four jobs; accepted before/after pairs, GPARAM/fog/probe measurements and uncapped start median/p99 42.912/62.535 -> 17.966/25.475 ms and heavy 63.371/155.242 -> 16.750/23.467 ms are under target/alt-m20/captures; missing illusion sky/environment-5 GI, empty sub-ID-10 family provenance, shared light/fog/probe omissions, night spikes and an incomplete physical boundary walk prevent claiming exact fidelity or steady frame time across all states; only m20 source and its documentation were changed, with no shared renderer, cache or git-state edits.
 2026-10-14: Audited m11_01's nine lighting states, corrected native Tomoe/Emma/Owl encounter GPARAM presets, verified a grounded 100/110/100 boundary round trip, recorded before/after captures and presentation-limited perf measurements, documented shared renderer blockers, and passed targeted release tests, Clippy and formatting using target/alt-m11_01 with four jobs.
+
+2026-10-14: Completed research-only map completeness audit in docs/MAP-COMPLETENESS.md from Smithbox, DSMapStudio, SoulsFormats and RustSekiro plus installed m11_00/m11_01 data.
+Confirmed omitted Object categories, 99/298 ConnectCollision rows, lost visibility metadata and 93 Outskirts meshes available only at lower detail levels; recorded first-visit event/group branches, ranked gaps and eight separate fix jobs.
+Two focused release MSB tests, formats all-target Clippy with warnings denied and final workspace formatting pass using target/alt-mr and four Cargo jobs.
+Exact retail visibility-condition algebra, streaming policy, ID-255 LOD binding, complete first-visit replay and fresh missing-texture totals remain open; no source, cache/re, commit or publication changes.
+
+## Explore-first menu (2026-10-14)
+
+Explore map is the first/default mode, opens with Map selected, enables map objects and leaves first-visit story lighting to the per-map data; the Hour row is removed and direct --hour/--story testing flags remain available.
+Number shortcuts 1-9/0 plus Enter select any extracted map; starts wrap through authored points and reset on map changes, while full map IDs and saved short-ID migration fix the old menu's invalid launch paths.
+The existing fight choices and settings remain available after Explore; old saved Hour fields are discarded, and unset-hour equivalence uses to_bits for NaN.
+With target/alt-mn and four jobs, the release game build, 84 game unit tests, six integration tests, all eight menu tests, game all-target release Clippy with warnings denied and workspace formatting pass.
+Accepted menu/fight screenshots, Castle Enter and Outskirts Left/Enter launches, and raw WASD movement in all four directions are verified under target/alt-mn/captures; the early Outskirts sky-only shot and pre-walk Castle shot are not accepted as settled walking evidence.
+The job edits menu.rs, docs/INTERFACE.md and this status entry only, with no commits, original-game runs, protected data writes or changes to map loading, lighting or rendering.
+The initial no-enemy capture still rendered a passive soldier and health bar; the authorized follow-up below resolves that issue.
+The extracted m89 sky library has no collision floor, so normal walking there remains an engine/data boundary.
+
+## Executable map-rule research (2026-10-14)
+
+Added the address-cited "Rules from the exe" section to docs/MAP-COMPLETENESS.md from read-only Ghidra inspection of the existing analyzed program.
+Confirmed condition-byte mask preprocessing, the four separate slices inside the editor's CollisionMask, connection Condition as a group index, map-piece LOD ID 255 selecting row 0, bounds-distance hysteresis/crossfade and per-target connection-mask unions.
+Traced navigation-driven Default/Hit request sets with retained retirement demand and staged block resources; exact navigation traversal, final release barriers, object model defaults and final LOD pixel behavior remain explicitly open.
+The batch launcher initially failed on sandboxed Java settings, but direct headless startup with workspace-local settings succeeded using -noanalysis -readOnly; no program edits or re-analysis were requested, although Ghidra maintained transient project housekeeping files.
+All scripts, raw exports and local audit results are under target/alt-gh; the offline version/condition/LOD audit and cargo fmt --all --check pass, with no Rust crate changes requiring Clippy or tests.
+No game session, save/live-memory access, commit or publication occurred; the collaboration-board read was blocked by the configured proxy and the existing claim record was retained.
+
+## Enemy-free Explore follow-up (2026-10-14)
+
+Explore and CLI --no-enemy now omit the opponent model, encounter-specific spawns, name, health bar, lock-on and auto-aim targets; --passive retains its visible testing opponent and disabled AI.
+The game-local adapter for the mandatory opponent slot prevents contacts and enemy-death resets while preserving Wolf's normal death/restart, without editing shared simulation or map loading code.
+Debug details are hidden by default in Explore, F3 toggles player details only, and F3 is listed in both the menu and gameplay controls.
+Fresh castle-start.png and outskirts-walk.png under target/alt-mn/captures are visually inspected with no enemy or enemy UI, zero locked-on frames despite --lock-on and raw Q requests, and successful Outskirts movement in all four directions.
+Captures use the existing --no-connected-blocks switch and a process-local 64 MiB thread stack to isolate concurrent streaming and its IO-stack overflow; no map, lighting, shader or general rendering implementation is modified.
+The complete early follow-up release test run passes 87 unit tests and six integration tests; the final repeat on concurrent source/data updates passes all 100 unit tests and five integration tests, with two slow tests ignored and map_tangents::exported_tangents_match_mikktspace failing on regenerated map data at handedness agreement 0.695.
+Final game all-target release Clippy with warnings denied and workspace formatting pass, using target/alt-mn and four jobs; the tangent export/test remains with its rendering/data owner.
+This follow-up changes play.rs, main.rs, menu.rs, input_replay.rs, docs/INTERFACE.md and this status entry, with no commits or writes to game data, saves, brain memory or session reports.
+
+## Automated visual map sweep (2026-10-14)
+
+Added the windowless --sweep game mode in map_sweep.rs and map_sweep.wgsl, with CLI/material/visibility integration and shader validation coverage.
+It samples stacked walkable collision floors, eye-height yaws and cliff pitches, then measures below-horizon void, collision depth gaps, unavailable textures, grey candidates and normal-versus-all-visible differences.
+Independent CPU collision rays guard each GPU capture against stale poses and invalid depth encoding.
+Per-view JSON, category totals, worst-20 terminal summaries and only the worst screenshot sets are written under target/alt-hs/sweep.
+Connected Castle baselines score 8,054,641 without objects and 8,195,856 with objects across 216 matching views; connected Outskirts scores 23,295,999 and 22,712,108 across 364 matching views.
+The 80 m coarse sweeps take 17.4-25.8 minutes each, with complete sample flags, matching pose lists and exactly 80 retained PNGs per control.
+Run commands, thresholds, baseline counts, executable fingerprint and coverage limits are documented in docs/MAP-COMPLETENESS-SWEEP.md.
+Using target/alt-hs and four jobs, the final release game tests pass 100 unit tests and six integration tests with two existing slow tests ignored; game all-target Clippy with warnings denied and workspace formatting pass.
+The freshly rebuilt executable's isolated Castle objects smoke capture passes in 21.7 seconds and its normal image is visually inspected.
+Finer reachable-route coverage and interpretation of intentional sky, falls, neutral materials and alternate scenery remain open; the underlying renderer/data causes remain with their fix owners.
+No commits, publication, original-game runs or writes to game data, saves, cache/re, brain memory or datasets were made by this job.

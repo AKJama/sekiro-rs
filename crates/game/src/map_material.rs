@@ -15,6 +15,82 @@ mod camera_fade;
 
 type LayeredMaterial = ExtendedMaterial<StandardMaterial, MapLayers>;
 
+/// Retain the native base texture and alpha test in the sweep diagnostic pass.
+pub(super) struct SweepMaterial {
+    pub key: bevy::asset::UntypedAssetId,
+    pub base: StandardMaterial,
+    pub missing: bool,
+    pub pending: bool,
+}
+
+pub(super) fn sweep_base(world: &World, entity: Entity) -> Option<SweepMaterial> {
+    let mut textures = Vec::new();
+    let (key, base) = if let Some(handle) = world.get::<MeshMaterial3d<LayeredMaterial>>(entity) {
+        let material = world.resource::<Assets<LayeredMaterial>>().get(&handle.0)?;
+        let layer = &material.extension;
+        textures.extend(
+            [
+                &layer.overlay,
+                &layer.snow,
+                &layer.c,
+                &layer.overlay_normal,
+                &layer.snow_normal,
+                &layer.c_normal,
+                &layer.mask,
+                &layer.base_normal,
+                &layer.detail,
+                &layer.mask_l,
+                &layer.wet,
+            ]
+            .into_iter()
+            .filter_map(|h| h.as_ref()),
+        );
+        (handle.0.id().untyped(), &material.base)
+    } else {
+        let handle = world.get::<MeshMaterial3d<StandardMaterial>>(entity)?;
+        (
+            handle.0.id().untyped(),
+            world
+                .resource::<Assets<StandardMaterial>>()
+                .get(&handle.0)?,
+        )
+    };
+    textures.extend(
+        [
+            &base.base_color_texture,
+            &base.normal_map_texture,
+            &base.emissive_texture,
+            &base.metallic_roughness_texture,
+            &base.occlusion_texture,
+        ]
+        .into_iter()
+        .filter_map(|h| h.as_ref()),
+    );
+    let images = world.resource::<Assets<Image>>();
+    let assets = world.resource::<AssetServer>();
+    let pending = textures.iter().any(|h| {
+        images.get(*h).is_none()
+            && matches!(
+                assets.get_load_state(h.id()),
+                Some(bevy::asset::LoadState::Loading | bevy::asset::LoadState::NotLoaded)
+            )
+    });
+    // A successfully uploaded RENDER_WORLD-only image may retire its CPU asset.
+    let missing = textures
+        .iter()
+        .any(|h| match assets.get_load_state(h.id()) {
+            Some(bevy::asset::LoadState::Failed(_)) => true,
+            None => images.get(*h).is_none(),
+            _ => false,
+        });
+    Some(SweepMaterial {
+        key,
+        base: base.clone(),
+        missing: base.base_color_texture.is_none() || missing,
+        pending,
+    })
+}
+
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct MaterialStats<'w> {
     materials: Res<'w, Assets<LayeredMaterial>>,

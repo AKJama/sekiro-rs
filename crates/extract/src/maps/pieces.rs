@@ -1,4 +1,4 @@
-//! Map piece FLVERs to static GLBs. LOD0 face sets only, mirrored on X like every export (see
+//! Map piece FLVERs to static GLBs. Authored detail scenes, mirrored on X like every export (see
 //! docs/FORMATS.md). Textures are referenced as external DDS files shared by the whole map.
 
 use std::collections::HashMap;
@@ -29,6 +29,14 @@ pub struct MaterialChoice {
     pub mtd: String,
     pub layers: Option<Layers>,
     pub double_sided: bool,
+    pub fog_surface: Option<FogSurface>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FogSurface {
+    pub family: &'static str,
+    pub params: Value,
+    pub textures: Vec<(u32, TexRef)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -154,8 +162,56 @@ pub fn choose_material(material: &flver::Material, mtd: Option<&mtd::Mtd>) -> Ma
         mtd: texture_stem(&material.mtd).to_string(),
         layers: None,
         double_sided: false,
+        fog_surface: None,
     };
     if let Some(m) = mtd {
+        let family = if m.shader.contains("[LandScape]_GroundFog") {
+            Some("GroundFog")
+        } else if m.shader.contains("[LandScape]_CloudFog") {
+            Some("CloudFog")
+        } else {
+            None
+        };
+        if let Some(family) = family {
+            let mut params = json!({});
+            for p in &m.params {
+                params[&p.name] = match &p.value {
+                    mtd::ParamValue::Bool(v) => json!(v),
+                    mtd::ParamValue::Ints(v) => json!(v),
+                    mtd::ParamValue::Floats(v) => json!(v),
+                };
+            }
+            let textures = m
+                .textures
+                .iter()
+                .filter_map(|t| {
+                    let number = slot_number(&t.kind)?;
+                    let source = material.textures.iter().find(|f| f.param == t.kind);
+                    let path = source
+                        .filter(|f| !f.path.is_empty())
+                        .map_or(&t.path, |f| &f.path);
+                    (!path.is_empty()).then(|| {
+                        (
+                            number,
+                            TexRef {
+                                path: path.clone(),
+                                uv: (t.uv_number - 1).max(0) as usize,
+                                scale: source.map_or([1.; 2], |f| f.scale),
+                            },
+                        )
+                    })
+                })
+                .collect();
+            choice.fog_surface = Some(FogSurface {
+                family,
+                params,
+                textures,
+            });
+            choice.alpha_mode = Some(("BLEND", 0.));
+            // Masks are shader data, not a diffuse texture or a normal map.
+            choice.albedo = None;
+            choice.normal = None;
+        }
         let int = |name: &str| match m.param(name) {
             Some(mtd::ParamValue::Ints(v)) => v.first().copied().unwrap_or(0),
             _ => 0,
@@ -230,8 +286,8 @@ pub fn skip_material(mtd_name: &str) -> bool {
         || m.contains("[dummy]")
         || m.contains("_dummy")
         || m.contains("invisible")
-        // Ground fog and cloud cards: drawn by fog shaders we do not have.
-        || m.contains("fog")
+        // Only the two traced landscape families are visible fog surfaces.
+        || (m.contains("fog") && !m.contains("groundfog") && !m.contains("cloudfog"))
 }
 
 pub struct BuiltPiece {
@@ -250,14 +306,37 @@ pub fn build(
     texture_uri: &dyn Fn(&str) -> Option<String>,
 ) -> Result<BuiltPiece> {
     let mut g = Glb::default();
-    let mut primitives = Vec::new();
+    let mut levels: [Vec<Value>; 4] = std::array::from_fn(|_| Vec::new());
+    let mut auxiliary = Vec::new();
     let mut texture_ids: HashMap<String, usize> = HashMap::new();
+    let mut material_ids: HashMap<(usize, bool), usize> = HashMap::new();
     let mut triangles = 0;
     let mut bmin = Vec3::splat(f32::MAX);
     let mut bmax = Vec3::splat(f32::MIN);
-    for (mi, mesh) in flver.meshes.iter().enumerate() {
-        let Some(lod0) = mesh.lod0() else { continue };
-        let v = &mesh.vertices;
+    let mut faces: Vec<_> = flver
+        .meshes
+        .iter()
+        .enumerate()
+        .flat_map(|(mi, mesh)| {
+            mesh.face_sets
+                .iter()
+                .enumerate()
+                .map(move |(fi, face)| (mi, mesh, fi, face))
+        })
+        .collect();
+    // Existing consumers use the legacy material prefix; append alternate variants after it.
+    faces.sort_by_key(|(_, _, _, face)| face.flags != 0);
+    for (mi, mesh, fi, face) in faces {
+        let mut indices = face.triangles(mesh.vertices.len());
+        if indices.is_empty() {
+            continue;
+        }
+        if indices.iter().any(|&i| i as usize >= mesh.vertices.len()) {
+            bail!("mesh {mi} index out of range");
+        }
+        let compact =
+            (face.detail_level() > 0).then(|| compact_vertices(&mesh.vertices, &mut indices));
+        let v = compact.as_ref().unwrap_or(&mesh.vertices);
         let count = v.len();
         if count == 0 {
             continue;
@@ -267,13 +346,6 @@ pub fn build(
         let choice = choose_material(material, mtd);
         if skip_material(&choice.mtd) {
             continue;
-        }
-        let indices = lod0.triangles(count);
-        if indices.is_empty() {
-            continue;
-        }
-        if indices.iter().any(|&i| i as usize >= count) {
-            bail!("mesh {mi} index out of range");
         }
         let positions: Vec<[f32; 3]> = v.positions.iter().map(|p| [-p[0], p[1], p[2]]).collect();
         for p in &positions {
@@ -323,6 +395,31 @@ pub fn build(
             {
                 attributes["_MAP_COLOR1"] = json!(g.vec4(colors));
             }
+        } else if let Some(fog) = &choice.fog_surface {
+            // Native TEXCOORD1.x is coverage; COLOR1.x is baked occlusion.
+            // CloudFog also forwards TEXCOORD1.yz, so retain the whole stream.
+            let coverage: Vec<_> = (0..count)
+                .map(|i| {
+                    let data = v
+                        .blends
+                        .first()
+                        .and_then(|b| b.get(i))
+                        .copied()
+                        .unwrap_or([255; 4]);
+                    let occlusion = v.colors.first().and_then(|c| c.get(i)).map_or(1., |c| c[0]);
+                    if fog.family == "CloudFog" {
+                        [
+                            data[0] as f32 / 255.,
+                            data[1] as f32 / 255.,
+                            data[2] as f32 / 255.,
+                            occlusion,
+                        ]
+                    } else {
+                        [data[0] as f32 / 255., 0., 0., occlusion]
+                    }
+                })
+                .collect();
+            attributes["COLOR_0"] = json!(g.vec4(&coverage));
         } else if choice.alpha_mode.is_some()
             && let Some(colors) = v.colors.first()
             && colors.len() == count
@@ -347,7 +444,7 @@ pub fn build(
             // Sekiro's semantic-6 vector is the UV bitangent, not glTF's U tangent.
             // Mirror it with the normal, then reconstruct U using the mirrored handedness.
             // Exporting the stored vector directly rotates normal-map detail by 90 degrees.
-            if (choice.normal.is_some() || choice.layers.is_some())
+            if (choice.normal.is_some() || choice.layers.is_some() || choice.fog_surface.is_some())
                 && let Some(t) = v.tangents.first()
                 && t.len() == count
             {
@@ -399,8 +496,22 @@ pub fn build(
         let mut mat = json!({
             "name": format!("m{mi} {} | {}", material.name, choice.mtd),
             "pbrMetallicRoughness": pbr,
-            "doubleSided": !lod0.cull_backfaces || choice.double_sided,
+            "doubleSided": choice.double_sided,
         });
+        if let Some(fog) = &choice.fog_surface {
+            let textures: Vec<_> = fog
+                .textures
+                .iter()
+                .map(|(slot, r)| {
+                    json!({"slot": slot, "name": texture_stem(&r.path).to_ascii_lowercase(),
+                    "uri": texture_uri(&texture_stem(&r.path).to_ascii_lowercase()),
+                    "uv": r.uv, "scale": r.scale})
+                })
+                .collect();
+            mat["extras"]["sekiro_fog_surface"] = json!({"version": 1,
+                "family": fog.family, "params": fog.params, "textures": textures});
+            mat["pbrMetallicRoughness"]["baseColorFactor"] = json!([1., 1., 1., 1.]);
+        }
         if let Some(layers) = &choice.layers {
             let mut extras = json!({"version": 2, "kind": layers.kind, "variant": layers.variant, "params": layers.params,
                 "base_albedo": choice.albedo.is_some()});
@@ -441,32 +552,148 @@ pub fn build(
                 mat["alphaCutoff"] = json!(cutoff);
             }
         }
-        g.materials.push(mat);
-        triangles += indices.len() / 3;
-        primitives.push(json!({
-            "attributes": attributes,
-            "indices": g.indices(&indices),
-            "material": g.materials.len() - 1,
-        }));
+        {
+            let level = face.detail_level();
+            let double_sided = !face.cull_backfaces || choice.double_sided;
+            mat["doubleSided"] = json!(double_sided);
+            let material_id = *material_ids.entry((mi, double_sided)).or_insert_with(|| {
+                g.materials.push(mat);
+                g.materials.len() - 1
+            });
+            let primitive = json!({
+                "attributes": attributes,
+                "indices": g.indices(&indices),
+                "material": material_id,
+                "extras": {"sekiro_lod": level, "face_flags": face.flags,
+                    "source_mesh": mi, "source_face_set": fi, "source_node": mesh.node,
+                "source_material": mesh.material,
+                    "cull_backfaces": face.cull_backfaces},
+            });
+            if face.flags & flver::face_set_flags::MOTION_BLUR != 0 {
+                auxiliary.push(primitive);
+            } else {
+                triangles += indices.len() / 3;
+                levels[level].push(primitive);
+            }
+        }
     }
-    let count = primitives.len();
-    let mut roots = Vec::new();
-    if !primitives.is_empty() {
-        g.meshes.push(json!({ "primitives": primitives }));
-        g.nodes.push(json!({ "mesh": 0 }));
-        roots.push(0);
+    let count = levels.iter().map(Vec::len).sum();
+    let mut scenes = Vec::new();
+    for (level, primitives) in levels.into_iter().enumerate() {
+        let mut roots = Vec::new();
+        if !primitives.is_empty() {
+            let mesh = g.meshes.len();
+            g.meshes
+                .push(json!({"name": format!("LOD{level}"), "primitives": primitives}));
+            roots.push(g.nodes.len());
+            g.nodes.push(json!({"mesh": mesh}));
+        }
+        scenes.push(
+            json!({"name": format!("LOD{level}"), "nodes": roots, "extras": {"sekiro_lod": level}}),
+        );
+    }
+    if !auxiliary.is_empty() {
+        g.meshes
+            .push(json!({"name": "MotionBlur", "primitives": auxiliary}));
     }
     let extras: Value = json!({
         "source": "sekiro-extract map",
         "convention": "FromSoftware x mirrored (x -> -x); see docs/FORMATS.md",
+        "sekiro_model_bounds": {
+            "min": [-flver.bbox_max[0], flver.bbox_min[1], flver.bbox_min[2]],
+            "max": [-flver.bbox_min[0], flver.bbox_max[1], flver.bbox_max[2]],
+        },
     });
     Ok(BuiltPiece {
-        glb: g.finish(&roots, extras),
+        glb: detail_scenes(g.finish(&[], extras), scenes)?,
         triangles,
         primitives: count,
         bbox_min: bmin.to_array(),
         bbox_max: bmax.to_array(),
     })
+}
+
+/// Lower-detail faces usually reference only part of the shared FLVER vertex buffer.
+/// Remap every vertex stream together, retaining authored values and triangle order.
+fn compact_vertices(v: &flver::Vertices, indices: &mut [u32]) -> flver::Vertices {
+    let mut used = vec![false; v.len()];
+    for &index in indices.iter() {
+        used[index as usize] = true;
+    }
+    let selected: Vec<_> = used
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &used)| used.then_some(i))
+        .collect();
+    let mut remap = vec![0; v.len()];
+    for (new, &old) in selected.iter().enumerate() {
+        remap[old] = new as u32;
+    }
+    for index in indices {
+        *index = remap[*index as usize];
+    }
+    fn stream<T: Clone>(data: &[T], selected: &[usize], count: usize) -> Vec<T> {
+        if data.len() == count {
+            selected.iter().map(|&i| data[i].clone()).collect()
+        } else {
+            Vec::new()
+        }
+    }
+    let streams =
+        |data: &[Vec<[f32; 3]>]| data.iter().map(|s| stream(s, &selected, v.len())).collect();
+    flver::Vertices {
+        positions: stream(&v.positions, &selected, v.len()),
+        extra_positions: streams(&v.extra_positions),
+        normals: stream(&v.normals, &selected, v.len()),
+        extra_normals: streams(&v.extra_normals),
+        normal_w: stream(&v.normal_w, &selected, v.len()),
+        tangents: v
+            .tangents
+            .iter()
+            .map(|s| stream(s, &selected, v.len()))
+            .collect(),
+        bitangents: stream(&v.bitangents, &selected, v.len()),
+        uvs: v
+            .uvs
+            .iter()
+            .map(|s| stream(s, &selected, v.len()))
+            .collect(),
+        blends: v
+            .blends
+            .iter()
+            .map(|s| stream(s, &selected, v.len()))
+            .collect(),
+        colors: v
+            .colors
+            .iter()
+            .map(|s| stream(s, &selected, v.len()))
+            .collect(),
+        bone_weights: stream(&v.bone_weights, &selected, v.len()),
+        bone_indices: stream(&v.bone_indices, &selected, v.len()),
+    }
+}
+
+// The shared character writer has one scene; keep its interface unchanged.
+fn detail_scenes(glb: Vec<u8>, scenes: Vec<Value>) -> Result<Vec<u8>> {
+    let json_len = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+    let mut doc: Value = serde_json::from_slice(&glb[20..20 + json_len])?;
+    let source = doc["scenes"][0]["extras"].clone();
+    doc["scenes"] = json!(scenes);
+    doc["extras"] = source;
+    doc["extras"]["sekiro_lod_version"] = json!(1);
+    let mut bytes = serde_json::to_vec(&doc)?;
+    while !bytes.len().is_multiple_of(4) {
+        bytes.push(b' ');
+    }
+    let bin = &glb[20 + json_len..];
+    let total = 20 + bytes.len() + bin.len();
+    let mut out = glb[..12].to_vec();
+    out[8..12].copy_from_slice(&(total as u32).to_le_bytes());
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(b"JSON");
+    out.extend_from_slice(&bytes);
+    out.extend_from_slice(bin);
+    Ok(out)
 }
 
 /// Texture names (lower case) a FLVER's visible materials would use, and whether each is a
@@ -478,6 +705,13 @@ pub fn wanted_textures(flver: &flver::Flver, mtds: &Mtds) -> Vec<(String, bool)>
         let choice = choose_material(material, mtds.get(&material.mtd));
         if skip_material(&choice.mtd) {
             continue;
+        }
+        if let Some(fog) = &choice.fog_surface {
+            out.extend(
+                fog.textures
+                    .iter()
+                    .map(|(_, r)| (texture_stem(&r.path).to_ascii_lowercase(), false)),
+            );
         }
         if let Some(r) = choice.albedo {
             out.push((texture_stem(&r.path).to_ascii_lowercase(), false));
@@ -520,9 +754,133 @@ fn game_texture_name(r: &TexRef, normal: bool) -> String {
 }
 
 #[cfg(test)]
+#[path = "pieces_lod_tests.rs"]
+mod lod_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn authored_fog_surfaces_keep_masks_coverage_and_material_inputs() {
+        let raw = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/raw");
+        if !raw.exists() {
+            return;
+        }
+        let mtds = super::super::load_mtds(&raw).unwrap();
+        for (map, model, family, slots) in [
+            ("m11_00_00_00", "m900100", "GroundFog", vec![0, 2, 3, 4]),
+            ("m11_00_00_00", "m900101", "GroundFog", vec![0, 2, 3, 4]),
+            ("m11_00_00_00", "m911008", "CloudFog", vec![1, 7]),
+            ("m11_00_00_00", "m911009", "CloudFog", vec![1, 7]),
+            ("m11_00_00_00", "m925009", "CloudFog", vec![1, 7]),
+            ("m11_01_00_00", "m920009", "CloudFog", vec![1, 7]),
+        ] {
+            let path = super::super::piece_flver(&raw, map, model);
+            let f = flver::parse(&std::fs::read(path).unwrap()).unwrap();
+            let built = build(&f, &mtds, &|name| Some(format!("tex/{name}.dds"))).unwrap();
+            assert!(built.primitives > 0);
+            let n = u32::from_le_bytes(built.glb[12..16].try_into().unwrap()) as usize;
+            let doc: Value = serde_json::from_slice(&built.glb[20..20 + n]).unwrap();
+            let expected: usize = f
+                .meshes
+                .iter()
+                .filter(|mesh| !skip_material(&f.materials[mesh.material].mtd))
+                .map(|mesh| {
+                    mesh.face_sets
+                        .iter()
+                        .filter(|face| face.flags & flver::face_set_flags::MOTION_BLUR == 0)
+                        .count()
+                })
+                .sum();
+            assert_eq!(built.primitives, expected);
+            for material in doc["materials"].as_array().unwrap() {
+                let fog = &material["extras"]["sekiro_fog_surface"];
+                if fog.is_null() {
+                    continue;
+                }
+                assert_eq!(fog["family"], family);
+                assert_eq!(material["alphaMode"], "BLEND");
+                assert_eq!(
+                    fog["textures"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|t| t["slot"].as_u64().unwrap())
+                        .collect::<Vec<_>>(),
+                    slots
+                );
+                assert!(
+                    fog["textures"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|t| t["uri"].is_string())
+                );
+                let native = mtds.get(&f.materials[0].mtd).unwrap();
+                assert_eq!(
+                    fog["params"].as_object().unwrap().len(),
+                    native.params.len()
+                );
+            }
+            for mesh in doc["meshes"].as_array().unwrap() {
+                for primitive in mesh["primitives"].as_array().unwrap() {
+                    let attributes = &primitive["attributes"];
+                    let source = primitive["extras"]["source_mesh"].as_u64().unwrap() as usize;
+                    let vertices = &f.meshes[source].vertices;
+                    if choose_material(
+                        &f.materials[f.meshes[source].material],
+                        mtds.get(&f.materials[f.meshes[source].material].mtd),
+                    )
+                    .fog_surface
+                    .is_none()
+                    {
+                        continue;
+                    }
+                    assert!(attributes["TEXCOORD_0"].is_number());
+                    assert!(attributes["COLOR_0"].is_number());
+                    eprintln!(
+                        "{map} {model} mesh={source} bounds={:?}/{:?} blends={:?} colors={:?}",
+                        built.bbox_min,
+                        built.bbox_max,
+                        vertices
+                            .blends
+                            .iter()
+                            .map(|b| b.first())
+                            .collect::<Vec<_>>(),
+                        vertices
+                            .colors
+                            .iter()
+                            .map(|c| c.first())
+                            .collect::<Vec<_>>()
+                    );
+                    let accessor =
+                        &doc["accessors"][attributes["COLOR_0"].as_u64().unwrap() as usize];
+                    let view =
+                        &doc["bufferViews"][accessor["bufferView"].as_u64().unwrap() as usize];
+                    let offset = 20 + n + 8 + view["byteOffset"].as_u64().unwrap() as usize;
+                    let first =
+                        f32::from_le_bytes(built.glb[offset..offset + 4].try_into().unwrap());
+                    assert_eq!(first, vertices.blends[0][0][0] as f32 / 255.);
+                }
+            }
+            let wanted = wanted_textures(&f, &mtds);
+            for material in &f.materials {
+                if let Some(fog) = choose_material(material, mtds.get(&material.mtd)).fog_surface {
+                    for (_, texture) in fog.textures {
+                        assert!(
+                            wanted.contains(&(
+                                texture_stem(&texture.path).to_ascii_lowercase(),
+                                false
+                            ))
+                        );
+                    }
+                }
+            }
+        }
+        assert!(skip_material("M_FogWall_Dummy"));
+    }
 
     #[test]
     fn mismatched_foliage_sampler_names_use_primary_mtd_albedo_and_cutout() {

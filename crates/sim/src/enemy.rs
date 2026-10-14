@@ -93,7 +93,7 @@ impl EnemySpec {
     }
 
     fn default_cache() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache")
+        crate::cache::root()
     }
 
     /// The model number ThrowParam's `defChrId` uses (`c1010` -> 1010).

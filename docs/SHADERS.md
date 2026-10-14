@@ -247,7 +247,7 @@ Round-to-nearest byte quantization and direct ray integration in place of a padd
 
 This is global shader-derived fog rather than the complete native froxel renderer.
 Local density boxes and point/spot fog sources are currently zero, and shadowed/reprojected source variants, native pre-exposure packing and local/global write ordering are not implemented.
-The cached exporter still omits fog cards.
+The exporter retains GroundFog and CloudFog cards with their authored masks, scrolling constants and coverage, rendered by `map_fog_surface.rs`; the inventory and validation are in [MAP-COMPLETENESS.md](MAP-COMPLETENESS.md#fog-surface-inventory-14-october-2026).
 Transparent surfaces share the opaque scene depth used by this post pass, so they do not yet receive an independent forward-material fog lookup.
 The direct ray pass uses authored depth slices but does not allocate the native padded 3D volume.
 The shader-input recovery above remains valid independently of these implementation approximations.

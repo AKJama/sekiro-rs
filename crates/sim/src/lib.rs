@@ -14,6 +14,7 @@ pub mod behavior;
 pub mod body;
 pub mod brain;
 pub mod bullets;
+pub mod cache;
 pub mod camera;
 pub mod character;
 pub mod clips;
@@ -48,6 +49,7 @@ pub mod status;
 pub mod story;
 pub mod tae;
 pub mod wire;
+pub mod world_events;
 
 pub use behavior::{AnimOffsets, BehaviorRuntime, ClipDurations, ClipState, HookCall, HookKind};
 pub use character::{Character, ControlKind, NpcControl, PlayerCharacter, StepReport};

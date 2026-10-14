@@ -32,11 +32,23 @@ use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::world_serialization::WorldInstanceReady;
 use serde_json::Value;
 
+#[path = "map_story.rs"]
+pub(crate) mod story;
+
+#[path = "map_visibility.rs"]
+pub(crate) mod visibility;
+
+#[path = "map_lod.rs"]
+pub(crate) mod lod;
 #[path = "map_material.rs"]
 mod map_material;
 pub(crate) use map_material::{ATTR_MAP_BLEND2, MaterialStats};
 #[path = "sky.rs"]
 pub(crate) mod sky;
+#[path = "map_sweep.rs"]
+pub(crate) mod sweep;
+#[path = "map_world.rs"]
+pub(crate) mod world;
 
 use crate::lighting::{
     MapLighting, MapProbes, ProbeRegion, ShadowSettings, apply_lighting, apply_probes,
@@ -63,8 +75,7 @@ pub struct Options {
     pub uncapped: bool,
     /// Draw-group culling: which collision group block selects the visible pieces.
     pub groups: GroupMode,
-    /// Also spawn MSB objects. Off by default: many are event-state props (siege barricades,
-    /// story-gated doors) that the game enables from its event scripts, which we do not run.
+    /// Also spawn MSB objects on legacy maps. Ashina Explore includes ordinary Objects.
     pub objects: bool,
     /// Time of day (hours) and draw param override, see [`MapScene`].
     pub hour: f32,
@@ -109,6 +120,8 @@ struct DrawGroups([u32; 8]);
 #[derive(Component)]
 struct FarScenery;
 
+type LegacyPieceFilter = (Without<FarScenery>, Without<world::BlockPart>);
+
 struct CollisionPart {
     name: String,
     first: usize,
@@ -125,7 +138,7 @@ struct CollisionPart {
 }
 
 #[derive(Resource)]
-struct Groups {
+pub(crate) struct Groups {
     mode: GroupMode,
     parts: Vec<CollisionPart>,
     /// Collision part under the camera and the groups in force.
@@ -138,7 +151,11 @@ struct Groups {
 fn groups8(v: &Value) -> [u32; 8] {
     let mut out = [0u32; 8];
     for (o, x) in out.iter_mut().zip(v.as_array().into_iter().flatten()) {
-        *o = x.as_u64().unwrap_or(0) as u32;
+        *o = x
+            .as_u64()
+            .map(|v| v as u32)
+            .or_else(|| x.as_i64().map(|v| v as u32))
+            .unwrap_or(0);
     }
     out
 }
@@ -221,6 +238,8 @@ struct Capture {
     at: f32,
     started: Instant,
     requested: Option<Instant>,
+    ready_frames: u32,
+    stable_pipelines: u8,
 }
 
 struct Pose {
@@ -319,13 +338,14 @@ pub fn map_dir(cache: &Path, id: &str) -> Result<PathBuf> {
         .with_context(|| format!("cache/maps/{id} not found: run `sekiro-extract map {id}`"))
 }
 
-/// Bevy's IO threads overflow the default 2 MiB stack while loading a whole map's GLBs and DDS
-/// textures at once (still at 4 MiB; 8 MiB is enough). Threads read this when spawned, so call
+/// Bevy's IO threads overflow small stacks while loading a map's GLBs and DDS textures.
+/// The bounded Ashina neighbourhood also overflows 16 MiB; 64 MiB is verified with its warm
+/// asset set. Threads read this when spawned, so call
 /// it before the `App` is built.
 pub fn raise_io_stack() {
     if std::env::var_os("RUST_MIN_STACK").is_none() {
         // SAFETY: no other thread exists yet, so nothing reads the environment concurrently.
-        unsafe { std::env::set_var("RUST_MIN_STACK", (16usize << 20).to_string()) };
+        unsafe { std::env::set_var("RUST_MIN_STACK", (64usize << 20).to_string()) };
     }
 }
 
@@ -394,6 +414,44 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
         .parent()
         .and_then(Path::parent)
         .context("map folder has no cache above it")?;
+    let connected = world::enabled(&id)
+        && scene.within.is_none()
+        && !app.world().contains_resource::<world::ArenaMap>()
+        && !std::env::args().any(|a| a == "--arena" || a == "--no-connected-blocks");
+    if connected {
+        let world = world::MapWorld::load(cache, &id, &scene.prefix)?;
+        let mut story_maps = story::MapStory::default();
+        for (block, layout) in &world.blocks {
+            if let Some(state) = story::load(cache, block, &layout.json)? {
+                info!(
+                    "{block}: first-visit story, {} parts, {} unsupported predicates",
+                    state.parts.len(),
+                    state.state.unsupported.len()
+                );
+                story_maps.maps.insert(block.clone(), state);
+            }
+        }
+        app.insert_resource(story_maps);
+        app.add_plugins(visibility::MapVisibilityPlugin)
+            .insert_resource(world)
+            .add_systems(
+                Update,
+                (world::update, world::update_detail)
+                    .chain()
+                    .after(track_loading)
+                    .after(apply_groups),
+            )
+            .add_systems(
+                PostUpdate,
+                world::publish.in_set(visibility::VisibilityInputs),
+            )
+            .add_systems(
+                PostUpdate,
+                world::debug_hierarchy
+                    .after(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate)
+                    .after(bevy::transform::TransformSystems::Propagate),
+            );
+    }
     // Older extractor output lacks FogParamID; read the installed-data copy without rewriting it.
     if group_parts
         .iter()
@@ -558,6 +616,7 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
         app.insert_resource(probe);
     }
     map_material::install(app, &scene.prefix, dir, &args);
+    crate::map_fog_surface::install(app, &scene.prefix);
     app.insert_resource(ShadowSettings::from_args(&gparam, hour, &args)?);
     app.insert_resource(LocalLights::load(dir, &args)?);
     if args.iter().any(|a| a == "--uncapped") {
@@ -679,7 +738,11 @@ pub fn run(options: Options) -> Result<()> {
                 ..default()
             })
             .set(AssetPlugin {
-                file_path: dir.to_string_lossy().into_owned(),
+                file_path: if world::enabled(&options.id) {
+                    options.cache.to_string_lossy().into_owned()
+                } else {
+                    dir.to_string_lossy().into_owned()
+                },
                 ..default()
             }),
         FrameTimeDiagnosticsPlugin::default(),
@@ -692,11 +755,15 @@ pub fn run(options: Options) -> Result<()> {
         &mut app,
         &dir,
         MapScene {
-            prefix: String::new(),
+            prefix: if world::enabled(&options.id) {
+                format!("maps/{}/", options.id)
+            } else {
+                String::new()
+            },
             collision: options.collision,
             no_pieces: options.no_pieces,
             hide: options.hide,
-            objects: options.objects,
+            objects: options.objects || world::enabled(&options.id),
             groups: options.groups,
             markers: true,
             hour: options.hour,
@@ -720,6 +787,14 @@ pub fn run(options: Options) -> Result<()> {
     })
     .add_systems(Update, (fly, apply_fly, hud).chain());
     if let Some(path) = options.screenshot {
+        if !app
+            .world()
+            .contains_resource::<crate::perf_log::RenderProbe>()
+        {
+            let probe = crate::perf_log::RenderProbe::default();
+            crate::perf_log::add_render_probe(&mut app, probe.clone());
+            app.insert_resource(probe);
+        }
         if path.exists() {
             std::fs::remove_file(&path)?;
         }
@@ -731,6 +806,8 @@ pub fn run(options: Options) -> Result<()> {
             at: options.at,
             started: Instant::now(),
             requested: None,
+            ready_frames: 0,
+            stable_pipelines: 0,
         })
         .add_systems(Update, capture.after(track_loading));
     }
@@ -789,12 +866,15 @@ fn spawn_map(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     shadow: Res<ShadowSettings>,
+    connected: Option<ResMut<world::MapWorld>>,
 ) {
     spawn_lights(&mut commands, &shadow);
 
     let scene = &layout.scene;
     let far_enabled = !std::env::args().any(|a| a == "--no-far-scenery");
-    if !scene.no_pieces {
+    if let Some(mut connected) = connected {
+        world::spawn(&mut commands, &assets, &mut connected, scene, &mut pending);
+    } else if !scene.no_pieces {
         let models = &layout.json["models"];
         let mut spawned = 0;
         let mut seen = std::collections::HashSet::new();
@@ -1101,6 +1181,7 @@ fn apply_fly(fly: Res<Fly>, mut camera: Query<&mut Transform, With<Camera3d>>) {
 
 /// Finds the collision part under the camera (the nearest surface below, else the nearest
 /// above) and takes its groups and lighting configuration whenever the focus moves.
+#[allow(clippy::too_many_arguments)]
 fn pick_groups(
     keys: Res<ButtonInput<KeyCode>>,
     layout: Res<Layout>,
@@ -1109,12 +1190,35 @@ fn pick_groups(
     mut fog: ResMut<crate::lighting::fog::FogSelection>,
     mut region: ResMut<crate::lighting_selection::RegionSelection>,
     focus: Query<&Transform, With<MapFocus>>,
+    connected: Option<Res<world::MapWorld>>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("pick_groups");
     if keys.just_pressed(KeyCode::KeyG) {
         groups.mode = groups.mode.next();
         groups.dirty = true;
         groups.checked_at = None;
+    }
+    if let Some(world) = connected {
+        if let Some((block, collision)) = &world.selected
+            && let Some(row) = world.blocks[block].json["parts"]
+                .as_array()
+                .and_then(|parts| parts.iter().find(|p| p["name"].as_str() == Some(collision)))
+            && let Some(config) = row["gparam"].as_array()
+        {
+            let config =
+                std::array::from_fn(|i| config.get(i).and_then(Value::as_i64).unwrap_or(-1) as i32);
+            region.enter(config);
+            if config[0] >= 0 {
+                lighting.light_set = config[0];
+            }
+            if config[1] >= 0 {
+                fog.0 = config[1];
+            }
+            groups.current = (block == &world.primary)
+                .then(|| groups.parts.iter().position(|p| &p.name == collision))
+                .flatten();
+        }
+        return;
     }
     let (Some(t), Some(c)) = (focus.iter().next(), &layout.collision) else {
         return;
@@ -1183,7 +1287,7 @@ fn vertical_hit(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
 
 fn apply_groups(
     mut groups: ResMut<Groups>,
-    mut pieces: Query<(&DrawGroups, &mut Visibility), Without<FarScenery>>,
+    mut pieces: Query<(&DrawGroups, &mut Visibility), LegacyPieceFilter>,
     added: Query<(), Added<DrawGroups>>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("apply_groups");
@@ -1564,9 +1668,21 @@ fn capture(
     let Some(loaded) = pending.loaded_at else {
         return;
     };
+    capture.ready_frames += 1;
+    let waiting = probe
+        .as_ref()
+        .and_then(|p| p.0.lock().ok().map(|p| p.pipelines_waiting))
+        .unwrap_or(1);
+    capture.stable_pipelines = if waiting == 0 {
+        capture.stable_pipelines.saturating_add(1)
+    } else {
+        0
+    };
     match capture.requested {
         None if loaded.elapsed().as_secs_f32() >= capture.at => {
-            if probe.as_ref().is_some_and(|p| p.take().4 > 0) {
+            // Residency becomes drawable after the prior render's probe was sampled.
+            // Let the visibility change reach specialization before trusting a zero queue.
+            if capture.ready_frames < 12 || capture.stable_pipelines < 3 {
                 return;
             }
             let fps = diagnostics

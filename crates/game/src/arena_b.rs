@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::map::visibility::{ArenaVisibility, EventState, VisibilityInputs, VisibilityPart};
 use bevy::prelude::*;
 use sekiro_sim::arena::scene::SceneState;
 use sekiro_sim::arena_b::MapEffect;
@@ -28,6 +29,9 @@ struct StoryHour {
     explicit: bool,
 }
 
+#[derive(Resource)]
+struct VisibilityMap(String);
+
 pub fn install(app: &mut App, cache: &Path, map: &str) -> anyhow::Result<()> {
     let initial = app.world().resource::<crate::lighting::MapLighting>().hour;
     let bytes = std::fs::read(cache.join(format!("raw/map/MapStudio/{map}.msb")))?;
@@ -46,6 +50,8 @@ pub fn install(app: &mut App, cache: &Path, map: &str) -> anyhow::Result<()> {
         })
         .collect();
     app.insert_resource(Parts(parts))
+        .insert_resource(VisibilityMap(map.to_string()))
+        .init_resource::<ArenaVisibility>()
         .insert_resource(StoryHour {
             initial,
             explicit: std::env::args().any(|a| a == "--hour"),
@@ -54,11 +60,26 @@ pub fn install(app: &mut App, cache: &Path, map: &str) -> anyhow::Result<()> {
         .insert_resource(Effects(
             sekiro_sim::arena_b::map_effects(cache, map).map_err(anyhow::Error::msg)?,
         ))
-        .add_systems(PostUpdate, (visibility, effects, lighting));
+        .add_systems(PostUpdate, visibility.in_set(VisibilityInputs))
+        .add_systems(PostUpdate, (effects, lighting));
     Ok(())
 }
 
-fn visibility(scene: Res<Scene>, mut parts: Query<(&Part, &mut Visibility)>) {
+fn visibility(
+    scene: Res<Scene>,
+    map: Res<VisibilityMap>,
+    mut arena: ResMut<ArenaVisibility>,
+    mut parts: Query<(&Part, &mut Visibility), Without<VisibilityPart>>,
+) {
+    // Managed roots receive one combined decision in Job E's writer.
+    // Replace the snapshot even when empty, so restarts release the previous override.
+    arena.maps.insert(
+        map.0.clone(),
+        EventState {
+            by_name: Default::default(),
+            by_entity: scene.0.enabled.iter().map(|(&id, &on)| (id, on)).collect(),
+        },
+    );
     for (part, mut visibility) in &mut parts {
         let on = scene
             .0
@@ -128,6 +149,152 @@ fn lighting(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_roots_combine_groups_events_and_residency_across_restarts() {
+        use crate::map::visibility::{
+            AuthoredVisibility, BlockRequest, BlockVisibility, MapVisibilityPlugin, SourceMasks,
+            VisibilityBlocks, VisibilityDecision,
+        };
+        let map = "m11_01_00_00";
+        let mut app = App::new();
+        app.add_plugins(MapVisibilityPlugin)
+            .insert_resource(Scene::default())
+            .insert_resource(VisibilityMap(map.into()))
+            .add_systems(PostUpdate, visibility.in_set(VisibilityInputs));
+        let mut draw = [0; 8];
+        draw[0] = 1;
+        let source = SourceMasks {
+            primary_draw: draw,
+            alternative_draw: [0; 8],
+            draw_selector: [0; 8],
+            primary_backread: draw,
+            alternative_backread: [0; 8],
+            backread_selector: [0; 8],
+            condition1: 0,
+            condition2: 0,
+        };
+        let root = app
+            .world_mut()
+            .spawn((
+                VisibilityPart {
+                    map: map.into(),
+                    name: "door".into(),
+                    entity_id: 1101000,
+                    entity_groups: [-1; 8],
+                    effective: source.effective("Object"),
+                    source,
+                },
+                Part {
+                    entity: 1101000,
+                    groups: [-1; 8],
+                },
+                Visibility::Inherited,
+            ))
+            .id();
+        let block = BlockVisibility {
+            resident: true,
+            ready: true,
+            draw,
+            request: BlockRequest {
+                normal: draw,
+                ..default()
+            },
+            ..default()
+        };
+        app.world_mut()
+            .resource_mut::<VisibilityBlocks>()
+            .0
+            .insert(map.into(), block);
+        app.world_mut()
+            .resource_mut::<Scene>()
+            .0
+            .enabled
+            .insert(1101000, true);
+        app.world_mut()
+            .resource_mut::<VisibilityBlocks>()
+            .0
+            .get_mut(map)
+            .unwrap()
+            .draw = [0; 8];
+        app.update();
+        assert_eq!(
+            *app.world().get::<Visibility>(root).unwrap(),
+            Visibility::Hidden
+        );
+        let changed = app
+            .world()
+            .entity(root)
+            .get_ref::<Visibility>()
+            .unwrap()
+            .last_changed();
+        app.update();
+        assert_eq!(
+            app.world()
+                .entity(root)
+                .get_ref::<Visibility>()
+                .unwrap()
+                .last_changed(),
+            changed,
+            "arena staging must not write a managed root even when the final state is hidden"
+        );
+        app.world_mut()
+            .resource_mut::<VisibilityBlocks>()
+            .0
+            .get_mut(map)
+            .unwrap()
+            .draw = draw;
+        app.update();
+        assert_eq!(
+            *app.world().get::<Visibility>(root).unwrap(),
+            Visibility::Inherited
+        );
+        app.world_mut()
+            .resource_mut::<Scene>()
+            .0
+            .enabled
+            .insert(1101000, false);
+        app.update();
+        assert!(!app.world().get::<VisibilityDecision>(root).unwrap().visible);
+        app.world_mut().resource_mut::<Scene>().0 = SceneState::default();
+        app.world_mut()
+            .resource_mut::<VisibilityBlocks>()
+            .0
+            .get_mut(map)
+            .unwrap()
+            .ready = false;
+        app.update();
+        assert_eq!(
+            *app.world().get::<Visibility>(root).unwrap(),
+            Visibility::Hidden
+        );
+        app.world_mut()
+            .resource_mut::<VisibilityBlocks>()
+            .0
+            .get_mut(map)
+            .unwrap()
+            .ready = true;
+        app.update();
+        assert_eq!(
+            *app.world().get::<Visibility>(root).unwrap(),
+            Visibility::Inherited
+        );
+        app.world_mut()
+            .resource_mut::<AuthoredVisibility>()
+            .maps
+            .insert(
+                map.into(),
+                EventState {
+                    by_name: std::collections::BTreeMap::from([("door".into(), false)]),
+                    ..default()
+                },
+            );
+        app.update();
+        assert_eq!(
+            *app.world().get::<Visibility>(root).unwrap(),
+            Visibility::Hidden
+        );
+    }
 
     #[test]
     fn restart_releases_held_map_effects_for_twenty_fights() {

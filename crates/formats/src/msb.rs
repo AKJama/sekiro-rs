@@ -2,7 +2,8 @@
 //! place them (map pieces, objects, enemies, player start points, collision).
 //!
 //! Layout knowledge from SoulsFormatsNEXT `MSBS` (ModelParam, PartsParam), reimplemented. Only
-//! what the map loader needs is decoded; events and routes are skipped over.
+//! placed-part visibility/loading data and MapOffset provenance are retained.
+//! Other events and routes are skipped over.
 //!
 //! Part transforms are in FromSoftware's left-handed space: position in metres, rotation in
 //! degrees about X, Y and Z, composed like FLVER nodes (`T * Ry * Rz * Rx * S` in
@@ -75,13 +76,25 @@ impl PartKind {
 pub struct EnemyData {
     pub think_param_id: i32,
     pub npc_param_id: i32,
+    /// Compatibility alias for SoulsFormats UnkT10, formerly described as TalkID.
     pub talk_id: i32,
+    pub unk_t10: i32,
     pub platoon_id: i16,
     pub chara_init_id: i32,
-    /// Index of the collision part the enemy stands on, or -1.
+    /// Index into the full parts table of the collision the enemy stands on, or -1.
     pub collision_part: i32,
     pub backup_event_anim_id: i32,
     pub event_flag_id: i32,
+    /// Index within the PatrolInfo event list, or -1.
+    pub walk_route_index: i16,
+    pub init_anim_id_type: i16,
+    pub unk_t24: i32,
+    pub event_flag_compare_state: i32,
+    pub unk_t48: i32,
+    pub unk_t4c: i32,
+    pub unk_t50: i32,
+    pub unk_t78: i32,
+    pub unk_t84: f32,
 }
 
 /// Collision (hit) part settings.
@@ -93,12 +106,113 @@ pub struct CollisionData {
     pub disable_start: bool,
     pub play_region_id: i32,
     pub lock_cam_param_id: i16,
+    pub reflect_plane_height: f32,
+    pub unk_t17: u8,
+    pub disable_bonfire_entity_id: i32,
+    pub unk_t24: u8,
+    pub unk_t25: u8,
+    pub unk_t26: u8,
+    pub map_visibility: u8,
+    pub unk_t3c: i32,
+    pub unk_t40: i32,
+    pub unk_t44: f32,
+    pub unk_t48: f32,
+    pub unk_t4c: i32,
+    pub unk_t50: f32,
+    pub unk_t54: f32,
+}
+
+/// SoulsFormats DisplayDataStruct (formerly UnkStruct1).
+/// MSBS has no separately identified BackreadGroups field; do not reinterpret
+/// CollisionMask as that field without evidence of its retail semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayDataStruct {
+    pub display_groups: [u32; 8],
+    pub draw_groups: [u32; 8],
+    pub collision_mask: [u32; 32],
+    pub condition1: u8,
+    pub condition2: u8,
+}
+
+/// SoulsFormats DisplayGroupStruct (formerly UnkStruct2).
+/// Present on Collision and ConnectCollision, separately from DisplayDataStruct.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayGroupStruct {
+    pub condition: i32,
+    pub disp_groups: [i32; 8],
+    pub unk24: i16,
+    pub unk26: i16,
+}
+
+/// ObjectBase data shared by Object and DummyObject.
+#[derive(Debug, Clone)]
+pub struct ObjectData {
+    /// All three ObjPartIndex fields index the full parts table, or are -1.
+    /// The first is believed to control loading; the latter two are described
+    /// as collision references associated with grappling, but are NOT indices
+    /// into the collision-only list (unlike ConnectCollision).
+    pub obj_part_index1: i32,
+    pub obj_part_index2: i32,
+    pub obj_part_index3: i32,
+    pub break_term: u8,
+    pub net_sync_type: bool,
+    pub unk_t0e: u8,
+    pub set_main_obj_structure_booleans: bool,
+    pub anim_id: i16,
+    pub model_sfx_param_relative_id: i16,
+    pub unk_t1a: i16,
+}
+
+/// Remaining common entity flags, with SoulsFormats names and unknowns intact.
+#[derive(Debug, Clone, Default)]
+pub struct EntityData {
+    pub unk_e04: u8,
+    pub unk_e05: u8,
+    pub unk_e06: u8,
+    pub lantern_id: u8,
+    pub unk_e09: u8,
+    pub is_point_light_shadow_src: bool,
+    pub unk_e0b: u8,
+    pub is_shadow_src: bool,
+    pub is_static_shadow_src: u8,
+    pub is_cascade3_shadow_src: u8,
+    pub unk_e0f: u8,
+    pub unk_e10: u8,
+    pub is_shadow_dest: bool,
+    pub draw_by_reflect_cam: bool,
+    pub draw_only_reflect_cam: bool,
+    pub enable_on_above_shadow: u8,
+    pub disable_point_light_effect: bool,
+    pub unk_e17: u8,
+    pub unk_e18: i32,
+    pub unk_e3c: i32,
+    pub unk_e40: i32,
+}
+
+/// SoulsFormats SceneGparamConfig on collision parts.
+#[derive(Debug, Clone)]
+pub struct SceneGparamConfig {
+    pub event_ids: [i8; 4],
+    pub transition_time: f32,
+}
+
+/// SoulsFormats GrassConfigStruct (formerly UnkStruct7), on map pieces.
+#[derive(Debug, Clone)]
+pub struct GrassConfigStruct {
+    pub unk00: i32,
+    pub unk04: i32,
+    pub grass_type_param_id: i32,
+    pub unk0c: i32,
+    pub unk10: i32,
+    pub unk14: i32,
 }
 
 #[derive(Debug, Clone)]
 pub struct Part {
     pub name: String,
     pub kind: PartKind,
+    /// Type-local ID stored in the part header, not an entity or table index.
+    pub id: i32,
     /// Index into [`Msb::models`], or -1.
     pub model_index: i32,
     pub sib_path: String,
@@ -108,19 +222,29 @@ pub struct Part {
     pub scale: [f32; 3],
     pub entity_id: i32,
     pub entity_group_ids: [i32; 8],
-    /// The 48-word mask block most parts carry (SoulsFormats calls it `CollisionMask`; the first
-    /// words are the draw groups). Empty when the part type has none.
+    /// Compatibility view: DisplayGroups[8], DrawGroups[8], CollisionMask[32].
+    /// Empty when DisplayDataStruct is absent; the first words are NOT DrawGroups.
     pub masks: Vec<u32>,
-    /// Display groups of collision parts, empty otherwise.
+    /// Compatibility bit-pattern view of DisplayGroupStruct.DispGroups.
+    /// Present on Collision and ConnectCollision, empty otherwise.
     pub disp_groups: Vec<u32>,
+    pub display_data: Option<DisplayDataStruct>,
+    pub display_group: Option<DisplayGroupStruct>,
+    pub entity_data: EntityData,
     pub lod_param_id: u8,
     pub is_shadow_only: bool,
     pub enemy: Option<EnemyData>,
     pub collision: Option<CollisionData>,
-    /// For connect collisions: (collision part index, target map id bytes).
+    pub object: Option<ObjectData>,
+    /// For connect collisions: (index within the collision-only list, target map ID bytes).
+    /// An index of -1 explicitly means no attached collision.
+    /// Resolve with Msb::collision_by_index, never Msb::parts[index] or the part name.
+    /// Map bytes of 0xFF remain wildcards; no candidate-selection policy is applied here.
     pub connect: Option<(i32, [u8; 4])>,
     /// Draw-param selection: light set, fog, light scattering and environment map ids.
     pub gparam: Option<[i32; 4]>,
+    pub scene_gparam: Option<SceneGparamConfig>,
+    pub grass_config: Option<GrassConfigStruct>,
 }
 
 impl Part {
@@ -143,6 +267,26 @@ pub struct Msb {
     pub models: Vec<Model>,
     pub parts: Vec<Part>,
     pub env_regions: Vec<EnvRegion>,
+    pub map_offsets: Vec<MapOffset>,
+}
+
+/// MapOffset event provenance for ancillary resources.
+/// Its position/rotation are ALREADY accounted for in placed MSB coordinates.
+/// Parsing this event does not apply another transform to parts.
+#[derive(Debug, Clone)]
+pub struct MapOffset {
+    pub name: String,
+    pub event_id: i32,
+    /// Type-local event ID stored in the event header.
+    pub id: i32,
+    /// Byte offset of this event in the source MSB, for audit diagnostics.
+    pub source_offset: usize,
+    /// Base-event references into the full parts and regions tables, or -1.
+    pub part_index: i32,
+    pub region_index: i32,
+    pub entity_id: i32,
+    pub position: [f32; 3],
+    pub rotation_y: f32,
 }
 
 /// Environment probe placement, in the same space and rotation convention as parts.
@@ -158,6 +302,20 @@ pub struct EnvRegion {
 }
 
 impl Msb {
+    /// Resolve a full-table reference (ObjectBase, EnemyBase or event), or -1.
+    pub fn part_by_index(&self, index: i32) -> Option<&Part> {
+        usize::try_from(index).ok().and_then(|i| self.parts.get(i))
+    }
+
+    /// Resolve ConnectCollision.CollisionIndex within Parts.Collisions.
+    pub fn collision_by_index(&self, index: i32) -> Option<&Part> {
+        let index = usize::try_from(index).ok()?;
+        self.parts
+            .iter()
+            .filter(|p| p.kind == PartKind::Collision)
+            .nth(index)
+    }
+
     pub fn model(&self, part: &Part) -> Option<&Model> {
         usize::try_from(part.model_index)
             .ok()
@@ -211,11 +369,52 @@ pub fn parse(data: &[u8]) -> Result<Msb> {
                     }
                 }
             }
+            "EVENT_PARAM_ST" => {
+                for &e in &entries {
+                    if let Some(offset) = read_map_offset(data, e)? {
+                        msb.map_offsets.push(offset);
+                    }
+                }
+            }
             _ => {}
         }
         pos = next;
     }
     Ok(msb)
+}
+
+fn read_map_offset(data: &[u8], start: usize) -> Result<Option<MapOffset>> {
+    let mut r = Reader::at(data, start);
+    let name_offset = r.offset64()?;
+    let event_id = r.i32()?;
+    if r.u32()? != 9 {
+        return Ok(None);
+    }
+    let id = r.i32()?;
+    r.skip(4);
+    let base_offset = r.offset64()?;
+    let type_offset = r.offset64()?;
+    let mut base = Reader::at(data, start + base_offset);
+    let mut t = Reader::at(data, start + type_offset);
+    Ok(Some(MapOffset {
+        name: utf16z(data, start + name_offset)?,
+        event_id,
+        id,
+        source_offset: start,
+        part_index: base.i32()?,
+        region_index: base.i32()?,
+        entity_id: base.i32()?,
+        position: t.vec3()?,
+        rotation_y: t.f32()?,
+    }))
+}
+
+fn read_words<const N: usize>(r: &mut Reader<'_>) -> Result<[u32; N]> {
+    let mut words = [0; N];
+    for word in &mut words {
+        *word = r.u32()?;
+    }
+    Ok(words)
 }
 
 fn read_env_region(data: &[u8], start: usize) -> Result<Option<EnvRegion>> {
@@ -276,7 +475,7 @@ fn read_part(data: &[u8], start: usize) -> Result<Part> {
     let mut r = Reader::at(data, start);
     let name_offset = r.offset64()?;
     let kind = PartKind::from_u32(r.u32()?);
-    let _id = r.i32()?;
+    let id = r.i32()?;
     let model_index = r.i32()?;
     r.skip(4);
     let sib_offset = r.offset64()?;
@@ -289,10 +488,13 @@ fn read_part(data: &[u8], start: usize) -> Result<Part> {
     let entity = r.offset64()?;
     let type_data = r.offset64()?;
     let gparam = r.i64()?;
+    let scene_gparam = r.i64()?;
+    let grass_config = r.i64()?;
 
     let mut part = Part {
         name: utf16z(data, start + name_offset)?,
         kind,
+        id,
         model_index,
         sib_path: utf16z(data, start + sib_offset)?,
         position,
@@ -302,41 +504,126 @@ fn read_part(data: &[u8], start: usize) -> Result<Part> {
         entity_group_ids: [-1; 8],
         masks: Vec::new(),
         disp_groups: Vec::new(),
+        display_data: None,
+        display_group: None,
+        entity_data: EntityData::default(),
         lod_param_id: 0,
         is_shadow_only: false,
         enemy: None,
         collision: None,
+        object: None,
         connect: None,
         gparam: None,
+        scene_gparam: None,
+        grass_config: None,
     };
     if gparam > 0 {
         let mut g = Reader::at(data, start + gparam as usize);
         part.gparam = Some([g.i32()?, g.i32()?, g.i32()?, g.i32()?]);
     }
+    if scene_gparam > 0 {
+        let mut g = Reader::at(data, start + scene_gparam as usize + 0x3c);
+        part.scene_gparam = Some(SceneGparamConfig {
+            event_ids: [g.i8()?, g.i8()?, g.i8()?, g.i8()?],
+            transition_time: g.f32()?,
+        });
+    }
+    if grass_config > 0 {
+        let mut g = Reader::at(data, start + grass_config as usize);
+        part.grass_config = Some(GrassConfigStruct {
+            unk00: g.i32()?,
+            unk04: g.i32()?,
+            grass_type_param_id: g.i32()?,
+            unk0c: g.i32()?,
+            unk10: g.i32()?,
+            unk14: g.i32()?,
+        });
+    }
 
     if unk1 > 0 {
         let mut u = Reader::at(data, start + unk1 as usize);
-        part.masks = (0..48).map(|_| u.u32()).collect::<Result<_>>()?;
+        let display = DisplayDataStruct {
+            display_groups: read_words(&mut u)?,
+            draw_groups: read_words(&mut u)?,
+            collision_mask: read_words(&mut u)?,
+            condition1: u.u8()?,
+            condition2: u.u8()?,
+        };
+        part.masks.extend(display.display_groups);
+        part.masks.extend(display.draw_groups);
+        part.masks.extend(display.collision_mask);
+        part.display_data = Some(display);
     }
     if unk2 > 0 {
         let mut u = Reader::at(data, start + unk2 as usize);
-        let _condition = u.i32()?;
-        part.disp_groups = (0..8).map(|_| u.u32()).collect::<Result<_>>()?;
+        let condition = u.i32()?;
+        let disp_groups = read_words::<8>(&mut u)?.map(|word| word as i32);
+        part.disp_groups.extend(disp_groups.map(|word| word as u32));
+        part.display_group = Some(DisplayGroupStruct {
+            condition,
+            disp_groups,
+            unk24: u.i16()?,
+            unk26: u.i16()?,
+        });
     }
 
     let mut e = Reader::at(data, start + entity);
     part.entity_id = e.i32()?;
-    e.skip(4); // E04..E06, lantern id
+    let flags = &mut part.entity_data;
+    flags.unk_e04 = e.u8()?;
+    flags.unk_e05 = e.u8()?;
+    flags.unk_e06 = e.u8()?;
+    flags.lantern_id = e.u8()?;
     part.lod_param_id = e.u8()?;
-    e.skip(9); // E09..E11
+    flags.unk_e09 = e.u8()?;
+    flags.is_point_light_shadow_src = e.u8()? != 0;
+    flags.unk_e0b = e.u8()?;
+    flags.is_shadow_src = e.u8()? != 0;
+    flags.is_static_shadow_src = e.u8()?;
+    flags.is_cascade3_shadow_src = e.u8()?;
+    flags.unk_e0f = e.u8()?;
+    flags.unk_e10 = e.u8()?;
+    flags.is_shadow_dest = e.u8()? != 0;
     part.is_shadow_only = e.u8()? != 0; // E12
-    e.skip(9); // E13..E17, E18 (i32)
+    flags.draw_by_reflect_cam = e.u8()? != 0;
+    flags.draw_only_reflect_cam = e.u8()? != 0;
+    flags.enable_on_above_shadow = e.u8()?;
+    flags.disable_point_light_effect = e.u8()? != 0;
+    flags.unk_e17 = e.u8()?;
+    flags.unk_e18 = e.i32()?;
     for g in &mut part.entity_group_ids {
         *g = e.i32()?;
     }
+    flags.unk_e3c = e.i32()?;
+    flags.unk_e40 = e.i32()?;
 
     let mut t = Reader::at(data, start + type_data);
     match kind {
+        PartKind::Object | PartKind::DummyObject => {
+            t.skip(8);
+            let obj_part_index1 = t.i32()?;
+            let break_term = t.u8()?;
+            let net_sync_type = t.u8()? != 0;
+            let unk_t0e = t.u8()?;
+            let set_main_obj_structure_booleans = t.u8()? != 0;
+            let anim_id = t.i16()?;
+            t.skip(6);
+            let model_sfx_param_relative_id = t.i16()?;
+            let unk_t1a = t.i16()?;
+            t.skip(4);
+            part.object = Some(ObjectData {
+                obj_part_index1,
+                obj_part_index2: t.i32()?,
+                obj_part_index3: t.i32()?,
+                break_term,
+                net_sync_type,
+                unk_t0e,
+                set_main_obj_structure_booleans,
+                anim_id,
+                model_sfx_param_relative_id,
+                unk_t1a,
+            });
+        }
         PartKind::Enemy | PartKind::DummyEnemy => {
             t.skip(8);
             let think_param_id = t.i32()?;
@@ -346,30 +633,60 @@ fn read_part(data: &[u8], start: usize) -> Result<Part> {
             let platoon_id = t.i16()?;
             let chara_init_id = t.i32()?;
             let collision_part = t.i32()?;
-            t.skip(8 + 16);
+            let walk_route_index = t.i16()?;
+            let init_anim_id_type = t.i16()?;
+            let unk_t24 = t.i32()?;
+            t.skip(16);
             let backup_event_anim_id = t.i32()?;
             t.skip(4);
             let event_flag_id = t.i32()?;
+            let event_flag_compare_state = t.i32()?;
+            let unk_t48 = t.i32()?;
+            let unk_t4c = t.i32()?;
+            let unk_t50 = t.i32()?;
+            t.skip(36);
+            let unk_t78 = t.i32()?;
+            t.skip(8);
+            let unk_t84 = t.f32()?;
             part.enemy = Some(EnemyData {
                 think_param_id,
                 npc_param_id,
                 talk_id,
+                unk_t10: talk_id,
                 platoon_id,
                 chara_init_id,
                 collision_part,
                 backup_event_anim_id,
                 event_flag_id,
+                walk_route_index,
+                init_anim_id_type,
+                unk_t24,
+                event_flag_compare_state,
+                unk_t48,
+                unk_t4c,
+                unk_t50,
+                unk_t78,
+                unk_t84,
             });
         }
         PartKind::Collision => {
             let hit_filter_id = t.u8()?;
             let sound_space_type = t.u8()?;
-            t.skip(2 + 4 + 12);
+            t.skip(2);
+            let reflect_plane_height = t.f32()?;
+            t.skip(12);
             let map_name_id = t.i16()?;
             let disable_start = t.u8()? != 0;
-            t.skip(1 + 4 + 8 + 4);
+            let unk_t17 = t.u8()?;
+            let disable_bonfire_entity_id = t.i32()?;
+            t.skip(8);
+            let unk_t24 = t.u8()?;
+            let unk_t25 = t.u8()?;
+            let unk_t26 = t.u8()?;
+            let map_visibility = t.u8()?;
             let play_region_id = t.i32()?;
             let lock_cam_param_id = t.i16()?;
+            t.skip(14);
             part.collision = Some(CollisionData {
                 hit_filter_id,
                 sound_space_type,
@@ -377,6 +694,20 @@ fn read_part(data: &[u8], start: usize) -> Result<Part> {
                 disable_start,
                 play_region_id,
                 lock_cam_param_id,
+                reflect_plane_height,
+                unk_t17,
+                disable_bonfire_entity_id,
+                unk_t24,
+                unk_t25,
+                unk_t26,
+                map_visibility,
+                unk_t3c: t.i32()?,
+                unk_t40: t.i32()?,
+                unk_t44: t.f32()?,
+                unk_t48: t.f32()?,
+                unk_t4c: t.i32()?,
+                unk_t50: t.f32()?,
+                unk_t54: t.f32()?,
             });
         }
         PartKind::ConnectCollision => {

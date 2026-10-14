@@ -44,8 +44,8 @@ mod tests {
             (b.map, b.start, b.hour.to_bits())
         );
         assert_eq!(
-            (a.enemy, a.god, a.immortal, a.attack_power),
-            (b.enemy, b.god, b.immortal, b.attack_power)
+            (a.enemy, a.enemy_present, a.god, a.immortal, a.attack_power),
+            (b.enemy, b.enemy_present, b.god, b.immortal, b.attack_power)
         );
         assert_eq!(
             (a.brain.name, a.brain_label, a.brain_overlay, a.player),
@@ -127,10 +127,9 @@ mod tests {
     }
     #[test]
     fn soldier_flat_matches_cli() {
-        equivalent(
-            Choices::default(),
-            "--play --enemy soldier --progression castle-roof",
-        );
+        let mut choices = Choices::default();
+        choices.values[0] = "Ashina soldier".into();
+        equivalent(choices, "--play --enemy soldier --progression castle-roof");
     }
     #[test]
     fn owl_coach_alive_overlay_matches_cli() {
@@ -150,20 +149,14 @@ mod tests {
         );
     }
     #[test]
-    fn map_start_hour_no_enemy_matches_cli() {
+    fn explore_map_start_matches_cli() {
         let mut c = Choices::default();
-        for (i, v) in [
-            (0, "No enemy"),
-            (2, "Map + start"),
-            (3, "m11_01"),
-            (4, "2"),
-            (9, "18"),
-        ] {
+        for (i, v) in [(3, "m11_01_00_00"), (4, "2")] {
             c.values[i] = v.into();
         }
         equivalent(
             c,
-            "--play --map m11_01 --start 2 --hour 18 --no-enemy --progression castle-roof",
+            "--play --map m11_01_00_00 --start 2 --no-enemy --objects --simple-ai --progression castle-roof",
         );
     }
     #[test]
@@ -173,22 +166,177 @@ mod tests {
         c.values[2] = "Arena".into();
         equivalent(c, "--arena genichiro --progression castle-roof");
     }
+    #[test]
+    fn no_enemy_removes_the_opponent_while_passive_only_disables_ai() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for (flag, present, active) in [
+            ("--no-enemy", false, false),
+            ("--passive", true, false),
+            ("--simple-ai", true, true),
+        ] {
+            let args = vec![
+                "sekiro-rs".into(),
+                "--play".into(),
+                flag.into(),
+                "--cache".into(),
+                root.join("cache").to_string_lossy().into_owned(),
+            ];
+            let options = crate::play_options_with(&args, &root.join("logs/datasets")).unwrap();
+            assert_eq!(
+                (options.enemy_present, options.enemy),
+                (present, active),
+                "{flag}"
+            );
+        }
+    }
+    #[test]
+    fn explore_options_cover_every_extracted_map_with_first_visit_defaults() {
+        let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        for id in MAPS {
+            let Ok(dir) = crate::map::map_dir(&cache, id) else {
+                continue;
+            };
+            let mut choices = Choices::default();
+            choices.values[3] = id.into();
+            crate::map::player_start(&dir, 0).unwrap();
+            equivalent(
+                choices.clone(),
+                &format!(
+                    "--play --map {id} --start 0 --no-enemy --objects --simple-ai --progression castle-roof"
+                ),
+            );
+            let args = choices.args();
+            assert!(!args.iter().any(|flag| matches!(
+                flag.as_str(),
+                "--hour" | "--story" | "--arena" | "--lock-on"
+            )));
+            let selection = crate::lighting_selection::select(
+                &cache,
+                dir.file_name().unwrap().to_str().unwrap(),
+                None,
+                None,
+            )
+            .unwrap();
+            assert!(selection.hour.is_finite(), "{id}");
+        }
+    }
+    #[test]
+    fn map_changes_reset_start_and_start_selection_wraps_authored_points() {
+        let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let mut choices = Choices::default();
+        for id in MAPS {
+            let Ok(dir) = crate::map::map_dir(&cache, id) else {
+                continue;
+            };
+            choices.values[3] = id.into();
+            choices.values[4] = "0".into();
+            choices.change(4, -1, &cache);
+            let last = choices.values[4].parse().unwrap();
+            crate::map::player_start(&dir, last).unwrap();
+            assert!(crate::map::player_start(&dir, last + 1).is_err());
+            choices.change(4, 1, &cache);
+            assert_eq!(choices.values[4], "0");
+            choices.values[4] = "99".into();
+            choices.change(3, 1, &cache);
+            assert_eq!(choices.values[4], "0");
+        }
+    }
+    #[test]
+    fn explore_ignores_hidden_fight_controls() {
+        let mut choices = Choices::default();
+        for (row, value) in [
+            (1, "c5060"),
+            (2, "Arena"),
+            (5, "Coach brain (codex)"),
+            (7, "on"),
+            (9, "god"),
+            (10, "alice"),
+        ] {
+            choices.values[row] = value.into();
+        }
+        equivalent(
+            choices,
+            "--play --map m11_01_00_00 --start 0 --no-enemy --objects --simple-ai --progression castle-roof",
+        );
+    }
+    #[test]
+    fn explore_keyboard_shortcuts_and_navigation_use_live_menu_system() {
+        let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let mut legacy = Choices::default();
+        legacy.values[3] = "m11_01".into();
+        let args = vec![
+            "--cache".into(),
+            cache.to_string_lossy().into_owned(),
+            "--menu-choices".into(),
+            serde_json::to_string(&legacy.values).unwrap(),
+        ];
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<KeyboardInput>()
+            .insert_resource(ButtonInput::<KeyCode>::default())
+            .insert_resource(PanelState::new(true, &args))
+            .add_systems(Update, update);
+        assert_eq!(
+            app.world().resource::<PanelState>().choices.values[3],
+            "m11_01_00_00"
+        );
+        let press = |app: &mut App, key| {
+            let mut keys = ButtonInput::<KeyCode>::default();
+            keys.press(key);
+            app.insert_resource(keys);
+            app.update();
+        };
+        for (id, key) in MAPS.iter().zip([
+            KeyCode::Digit1,
+            KeyCode::Digit2,
+            KeyCode::Digit3,
+            KeyCode::Digit4,
+            KeyCode::Digit5,
+            KeyCode::Digit6,
+            KeyCode::Digit7,
+            KeyCode::Digit8,
+            KeyCode::Digit9,
+            KeyCode::Digit0,
+        ]) {
+            if crate::map::map_dir(&cache, id).is_err() {
+                continue;
+            }
+            press(&mut app, key);
+            let state = app.world().resource::<PanelState>();
+            assert_eq!(state.selected, 3);
+            assert_eq!(
+                crate::arg_value(&state.choices.args(), "--map").as_deref(),
+                Some(*id)
+            );
+            assert_eq!(state.choices.values[4], "0");
+        }
+        press(&mut app, KeyCode::ArrowDown);
+        assert_eq!(app.world().resource::<PanelState>().selected, 4);
+        press(&mut app, KeyCode::ArrowDown);
+        assert_eq!(app.world().resource::<PanelState>().selected, 12);
+        press(&mut app, KeyCode::ArrowDown);
+        assert_eq!(app.world().resource::<PanelState>().selected, 0);
+        press(&mut app, KeyCode::ArrowRight);
+        assert!(!app.world().resource::<PanelState>().choices.explore());
+        press(&mut app, KeyCode::ArrowLeft);
+        assert!(app.world().resource::<PanelState>().choices.explore());
+    }
 }
 
 const MAPS: [&str; 10] = [
-    "m10_00",
-    "m11_00",
-    "m11_01",
-    "m11_02",
-    "m13_00",
-    "m15_00",
-    "m17_00",
-    "m20_00",
-    "m25_00",
+    "m10_00_00_00",
+    "m11_00_00_00",
+    "m11_01_00_00",
+    "m11_02_00_00",
+    "m13_00_00_00",
+    "m15_00_00_00",
+    "m17_00_00_00",
+    "m20_00_00_00",
+    "m25_00_00_00",
     "m89_00_00_99",
 ];
-const LABELS: [&str; 14] = [
-    "Fight",
+const LABELS: [&str; 13] = [
+    "Mode",
     "Enemy id",
     "Place",
     "Map",
@@ -197,7 +345,6 @@ const LABELS: [&str; 14] = [
     "Brain stage (Owl)",
     "Overlay",
     "Progression / AP",
-    "Hour",
     "Player",
     "Player name",
     "",
@@ -212,16 +359,15 @@ impl Default for Choices {
     fn default() -> Self {
         Self {
             values: [
-                "Ashina soldier",
+                "Explore map",
                 "c1010",
                 "Flat floor",
-                "m11_01",
+                "m11_01_00_00",
                 "0",
                 "Lua",
                 "none",
                 "off",
                 "castle-roof",
-                "story",
                 "normal",
                 "default",
                 "",
@@ -233,7 +379,20 @@ impl Default for Choices {
     }
 }
 impl Choices {
+    fn explore(&self) -> bool {
+        self.values[0] == "Explore map"
+    }
+    fn visible_rows(&self) -> Vec<usize> {
+        if self.explore() {
+            vec![0, 3, 4, 11, 12]
+        } else {
+            (0..LABELS.len()).collect()
+        }
+    }
     fn enabled(&self, row: usize) -> bool {
+        if self.explore() {
+            return matches!(row, 0 | 3 | 4 | 12);
+        }
         match row {
             1 => self.values[0] == "Any enemy id",
             3 | 4 => self.values[2] == "Map + start",
@@ -277,18 +436,19 @@ impl Choices {
         } else {
             None
         };
-        if v[2] == "Arena"
+        if !self.explore()
+            && v[2] == "Arena"
             && let Some(arena) = arena
         {
             pair("--arena", arena);
         }
-        if v[2] == "Map + start" {
+        if self.explore() || v[2] == "Map + start" {
             pair("--map", &v[3]);
             pair("--start", &v[4]);
         }
         pair(
             "--brain",
-            match v[5].as_str() {
+            match if self.explore() { "Lua" } else { v[5].as_str() } {
                 "Coach brain (codex)" => "coach",
                 "Scripted test plans" => "scripted",
                 _ => "lua",
@@ -305,28 +465,36 @@ impl Choices {
             },
             &v[8],
         );
-        // "story" leaves the hour to the arena's story time of day (flat floor and maps: 12).
-        if v[9] != "story" {
-            pair("--hour", &v[9]);
+        pair("--player", if self.explore() { "default" } else { &v[10] });
+        // Map defaults are the area's first visit, selected by its event-authored profile.
+        if self.explore() {
+            args.push("--objects".into());
+            // No enemy means no brain session, coach, or persistent learning side effects.
+            args.push("--simple-ai".into());
         }
-        pair("--player", &v[11]);
-        if v[0] == "No enemy" {
+        if self.explore() || v[0] == "No enemy" {
             args.push("--no-enemy".into());
         }
-        if v[7] == "on" {
+        if !self.explore() && v[7] == "on" {
             args.push("--brain-overlay".into());
         }
-        if v[10] != "normal" {
-            args.push(format!("--{}", v[10]));
+        if !self.explore() && v[9] != "normal" {
+            args.push(format!("--{}", v[9]));
         }
         args
     }
-    fn change(&mut self, row: usize, delta: i32) {
+    fn change(&mut self, row: usize, delta: i32, cache: &std::path::Path) {
         if delta == 0 || !self.enabled(row) {
             return;
         }
+        let maps: Vec<_> = MAPS
+            .iter()
+            .copied()
+            .filter(|id| crate::map::map_dir(cache, id).is_ok())
+            .collect();
         let list: &[&str] = match row {
             0 => &[
+                "Explore map",
                 "Ashina soldier",
                 "Great Shinobi Owl",
                 "Genichiro",
@@ -334,11 +502,11 @@ impl Choices {
                 "No enemy",
             ],
             2 => &["Arena", "Flat floor", "Map + start"],
-            3 => &MAPS,
+            3 => &maps,
             5 => &["Lua", "Coach brain (codex)", "Scripted test plans"],
             6 if self.owl() => &["none", "lua", "early", "alive", "outsmarted"],
             7 => &["off", "on"],
-            10 => &["normal", "god", "immortal"],
+            9 => &["normal", "god", "immortal"],
             _ => &[],
         };
         if !list.is_empty() {
@@ -347,6 +515,9 @@ impl Choices {
                 .position(|v| *v == self.values[row])
                 .unwrap_or(0) as i32;
             self.values[row] = list[(index + delta).rem_euclid(list.len() as i32) as usize].into();
+            if row == 3 {
+                self.values[4] = "0".into();
+            }
         } else if row == 1 {
             let old = self.values[row]
                 .trim_start_matches(['c', 'C'])
@@ -355,17 +526,22 @@ impl Choices {
                 .and_then(|v| v.parse::<i32>().ok())
                 .unwrap_or(1010);
             self.values[row] = format!("c{:04}", (old + delta).clamp(0, 9999));
-        } else if matches!(row, 4 | 8 | 9) {
+        } else if row == 4 {
+            let count = crate::map::map_dir(cache, &self.values[3])
+                .ok()
+                .and_then(|dir| std::fs::read(dir.join("layout.json")).ok())
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|layout| layout["players"].as_array().map(Vec::len))
+                .unwrap_or(1)
+                .max(1);
+            let old = self.values[row].parse::<i32>().unwrap_or(0);
+            self.values[row] = (old + delta).rem_euclid(count as i32).to_string();
+        } else if row == 8 {
             let old = self.values[row].parse::<i32>().unwrap_or(6);
-            let (min, max) = match row {
-                4 => (0, 99),
-                9 => (0, 23),
-                _ => (1, 99),
-            };
             self.values[row] = if row == 8 && old == 1 && delta < 0 {
                 "castle-roof".into()
             } else {
-                (old + delta).clamp(min, max).to_string()
+                (old + delta).clamp(1, 99).to_string()
             };
         }
     }
@@ -376,12 +552,18 @@ impl Choices {
     }
     fn load() -> Self {
         let mut result = Self::default();
-        if let Some(v) = Self::path()
+        if let Some(mut v) = Self::path()
             .and_then(|p| std::fs::read(p).ok())
             .and_then(|b| serde_json::from_slice::<Vec<String>>(&b).ok())
-            && v.len() == LABELS.len()
         {
-            result.values = v;
+            // Migrate the old menu without carrying its testing-only hour into play.
+            if v.len() == LABELS.len() + 1 {
+                v.remove(9);
+            }
+            if v.len() == LABELS.len() {
+                result.values = v;
+                result.values[0] = "Explore map".into();
+            }
         }
         result
     }
@@ -400,6 +582,7 @@ pub struct PanelState {
     pub paused: bool,
     start: bool,
     choices: Choices,
+    cache: PathBuf,
     selected: usize,
     error: String,
     extras: Vec<String>,
@@ -446,11 +629,36 @@ impl PanelState {
             .filter(|v| v.len() == LABELS.len())
             .map(|values| Choices { values })
             .unwrap_or_else(Choices::load);
+        let cache = sekiro_sim::cache::resolve(
+            crate::arg_value(args, "--cache")
+                .map(PathBuf::from)
+                .as_deref(),
+        );
+        let mut choices = choices;
+        if let Some(id) = MAPS.iter().find(|id| id.starts_with(&choices.values[3])) {
+            choices.values[3] = (*id).into();
+        }
+        if crate::map::map_dir(&cache, &choices.values[3]).is_err()
+            && let Some(id) = MAPS
+                .iter()
+                .find(|id| crate::map::map_dir(&cache, id).is_ok())
+        {
+            choices.values[3] = (*id).into();
+            choices.values[4] = "0".into();
+        }
+        if crate::map::map_dir(&cache, &choices.values[3])
+            .and_then(|dir| crate::map::player_start(&dir, choices.values[4].parse().unwrap_or(0)))
+            .is_err()
+        {
+            choices.values[4] = "0".into();
+        }
+        let selected = if choices.explore() { 3 } else { 0 };
         Self {
             paused: start,
             start,
             choices,
-            selected: 0,
+            cache,
+            selected: if start { selected } else { 0 },
             error: String::new(),
             extras,
             fight_script: crate::arg_value(args, "--menu-fight-script"),
@@ -614,7 +822,13 @@ fn update(
     mut typing: MessageReader<KeyboardInput>,
     mut state: ResMut<PanelState>,
     mut panels: Query<&mut Visibility, With<Panel>>,
-    mut rows: Query<(&Row, Ref<Interaction>, &mut BackgroundColor, &Children)>,
+    mut rows: Query<(
+        &Row,
+        Ref<Interaction>,
+        &mut BackgroundColor,
+        &Children,
+        &mut Node,
+    )>,
     mut texts: Query<(&mut Text, &mut TextColor)>,
     help: Query<Entity, With<Help>>,
     mut cursors: Query<&mut CursorOptions>,
@@ -707,7 +921,7 @@ fn update(
         if let Some(setting) = a.strip_prefix("set:")
             && let Some((row, value)) = setting.split_once(':')
             && let Ok(row) = row.parse::<usize>()
-            && row < 12
+            && row < 11
         {
             state.choices.values[row] = value.into();
         }
@@ -720,6 +934,7 @@ fn update(
                 state.selected = count - 1;
                 activate = true;
             }
+            "enter" => activate = true,
             "back" => {
                 state.selected = 1;
                 activate = true;
@@ -727,14 +942,50 @@ fn update(
             _ => {}
         }
     }
-    state.selected = (state.selected as i32 + movement.y).rem_euclid(count as i32) as usize;
-    if state.start && state.selected == 12 {
-        state.selected = if movement.y < 0 { 11 } else { 13 };
+    if state.start && state.choices.explore() {
+        let shortcuts = [
+            KeyCode::Digit1,
+            KeyCode::Digit2,
+            KeyCode::Digit3,
+            KeyCode::Digit4,
+            KeyCode::Digit5,
+            KeyCode::Digit6,
+            KeyCode::Digit7,
+            KeyCode::Digit8,
+            KeyCode::Digit9,
+            KeyCode::Digit0,
+        ];
+        for (id, key) in MAPS.iter().zip(shortcuts) {
+            if keys.just_pressed(key) && crate::map::map_dir(&state.cache, id).is_ok() {
+                state.choices.values[3] = (*id).into();
+                state.choices.values[4] = "0".into();
+                state.selected = 3;
+            }
+        }
+    }
+    let visible: Vec<_> = if state.start {
+        state
+            .choices
+            .visible_rows()
+            .into_iter()
+            .filter(|r| *r != 11)
+            .collect()
+    } else {
+        (0..count).collect()
+    };
+    if movement.y != 0 || !visible.contains(&state.selected) {
+        let index = visible
+            .iter()
+            .position(|r| *r == state.selected)
+            .unwrap_or(0);
+        state.selected =
+            visible[(index as i32 + movement.y).rem_euclid(visible.len() as i32) as usize];
     }
     let row = state.selected;
     if state.start {
-        state.choices.change(row, movement.x);
-        if matches!(row, 1 | 11) && state.choices.enabled(row) {
+        let cache = state.cache.clone();
+        state.choices.change(row, movement.x, &cache);
+        if matches!(row, 1 | 10) && state.choices.enabled(row) {
             for input in typing.read().filter(|i| i.state.is_pressed() && !i.repeat) {
                 if input.key_code == KeyCode::Backspace {
                     state.choices.values[row].pop();
@@ -754,11 +1005,21 @@ fn update(
             typing.clear();
         }
     }
-    for (r, interaction, mut bg, children) in &mut rows {
+    for (r, interaction, mut bg, children, mut node) in &mut rows {
+        let visible = !state.start || state.choices.visible_rows().contains(&r.0);
+        node.display = if visible {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        if !visible {
+            continue;
+        }
         if interaction.is_changed() && *interaction == Interaction::Pressed {
             state.selected = r.0;
             if state.start && r.0 < count - 1 {
-                state.choices.change(r.0, 1);
+                let cache = state.cache.clone();
+                state.choices.change(r.0, 1, &cache);
             } else {
                 activate = true;
             }
@@ -779,8 +1040,13 @@ fn update(
                 };
                 t.0 = if state.start {
                     if r.0 == count - 1 {
-                        "Start".into()
-                    } else if r.0 == 12 {
+                        if state.choices.explore() {
+                            "Explore"
+                        } else {
+                            "Start"
+                        }
+                        .into()
+                    } else if r.0 == 11 {
                         state.error.clone()
                     } else {
                         format!(
@@ -802,11 +1068,25 @@ fn update(
     for e in &help {
         if let Ok((mut t, _)) = texts.get_mut(e) {
             t.0 = if state.start {
-                "Up/Down: select   Left/Right or click: change   Enter/A: start   Type: id/name"
+                if state.choices.explore() {
+                    let maps = MAPS
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, id)| crate::map::map_dir(&state.cache, id).is_ok())
+                        .map(|(i, id)| format!("{}: {}", (i + 1) % 10, &id[..6]))
+                        .collect::<Vec<_>>();
+                    format!(
+                        "Left/Right: map   Down: start point   Enter/A: explore\n{}\n{}\nWASD: walk   Mouse: look   Space: jump   Esc: pause   F3: debug text",
+                        maps[..maps.len().min(5)].join("   "),
+                        maps[maps.len().min(5)..].join("   ")
+                    )
+                } else {
+                    "Up/Down: select   Left/Right or click: change   Enter/A: start   Type: id/name"
+                        .into()
+                }
             } else {
-                "Up/Down: select   Enter/A or click: confirm   Esc/Start: resume"
-            }
-            .into();
+                "Up/Down: select   Enter/A or click: confirm   Esc/Start: resume".into()
+            };
         }
     }
     if activate {

@@ -135,6 +135,19 @@ pub struct FaceSet {
 }
 
 impl FaceSet {
+    /// Authored detail level, independent of motion-blur and other face flags.
+    pub fn detail_level(&self) -> usize {
+        if self.flags & face_set_flags::LOD_EX != 0 {
+            3
+        } else if self.flags & face_set_flags::LOD2 != 0 {
+            2
+        } else if self.flags & face_set_flags::LOD1 != 0 {
+            1
+        } else {
+            0
+        }
+    }
+
     /// Triangle list indices. Strips are unrolled with alternating winding, dropping
     /// degenerate triangles and honouring 0xFFFF primitive restarts.
     pub fn triangles(&self, vertex_count: usize) -> Vec<u32> {
