@@ -34,6 +34,8 @@ Each use is credited where it appears.
 
 From [FFwLo/RustSekiro](https://github.com/FFwLo/RustSekiro), under the MIT licence below:
 
+- RustSekiro commit 265e142bf3b36a5190d8ae4885acad7a4890cd16: layered map shader families, variant sampler tables, material constants and vertex blend routing.
+
 - The deathblow camera (TAE 151 / 153 / 155 rules) in `crates/sim/src/camera.rs` and `crates/game/src/play.rs`, from his `src/camera.rs`.
 - The perilous kanji HUD stand-in in `crates/game/src/combat_hud.rs`, from his `src/hud.rs`.
 - The sweep i-frame and kick-off (env 2004) rules in `crates/sim/src/hits.rs` and `crates/sim/src/duel.rs`, from his `src/combat.rs` and `src/player.rs`.

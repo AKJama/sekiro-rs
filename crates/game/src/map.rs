@@ -34,7 +34,7 @@ use serde_json::Value;
 
 #[path = "map_material.rs"]
 mod map_material;
-pub(crate) use map_material::MaterialStats;
+pub(crate) use map_material::{ATTR_MAP_BLEND2, MaterialStats};
 #[path = "sky.rs"]
 pub(crate) mod sky;
 
@@ -664,6 +664,7 @@ pub fn run(options: Options) -> Result<()> {
     let mut app = App::new();
     app.add_plugins((
         DefaultPlugins
+            .set(layered_gltf_plugin())
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: format!("sekiro-rs map - {}", options.id),
@@ -739,10 +740,26 @@ pub fn run(options: Options) -> Result<()> {
 
 const SKY: Color = Color::srgb(0.62, 0.68, 0.74);
 
+pub(crate) fn layered_gltf_plugin() -> bevy::gltf::GltfPlugin {
+    bevy::gltf::GltfPlugin::default()
+        // gltf-json strips the leading underscore before Bevy looks up custom semantics.
+        .add_custom_vertex_attribute("MAP_BLEND2", ATTR_MAP_BLEND2)
+        .add_custom_vertex_attribute(
+            "MAP_COLOR1",
+            bevy::mesh::MeshVertexAttribute::new(
+                "MapColor1",
+                0x5ec1_0a03,
+                bevy::render::render_resource::VertexFormat::Float32x4,
+            ),
+        )
+}
+
 fn setup_view(mut commands: Commands, start: Vec3) {
     commands.spawn((
         MapFocus,
         Camera3d::default(),
+        bevy::core_pipeline::prepass::DepthPrepass,
+        bevy::core_pipeline::prepass::MotionVectorPrepass,
         Transform::from_translation(start),
     ));
     commands.spawn((
@@ -966,9 +983,9 @@ fn visual_stats(
         .unwrap_or(0.);
     info!("visual stats: {seconds} s after loading, frame {frame:.3} ms");
     if let Some(ref probe) = probe {
-        let (max, sum, frames, _, _, sets) = probe.take();
+        let (max, sum, frames, ready, waiting, sets) = probe.take();
         info!(
-            "profile render: mean {:.3} ms, max {max:.3} ms, sets {sets}",
+            "profile render: mean {:.3} ms, max {max:.3} ms, pipelines {ready} ready / {waiting} waiting, sets {sets}",
             sum / frames.max(1) as f64
         );
         crate::perf_log::report_systems();
@@ -1529,6 +1546,8 @@ fn capture(
     pending: Res<Pending>,
     mut capture: ResMut<Capture>,
     stats: CaptureStats,
+    probe: Option<Res<crate::perf_log::RenderProbe>>,
+
     mut exit: MessageWriter<AppExit>,
 ) {
     let CaptureStats {
@@ -1547,6 +1566,9 @@ fn capture(
     };
     match capture.requested {
         None if loaded.elapsed().as_secs_f32() >= capture.at => {
+            if probe.as_ref().is_some_and(|p| p.take().4 > 0) {
+                return;
+            }
             let fps = diagnostics
                 .get(&FrameTimeDiagnosticsPlugin::FPS)
                 .and_then(|d| d.smoothed())
@@ -1604,6 +1626,100 @@ pub fn parse_camera(arg: Option<&str>) -> Result<Option<[f32; 5]>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gltf_loader_preserves_native_material_blend_streams() {
+        let target = std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into());
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(target)
+            .join(format!("tests/map-stream-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tint_wet = [0.2f32, 0.3, 0.4, 0.5];
+        let mut bin = Vec::new();
+        for value in [0.0f32, 0., 0., 1., 0., 0., 0., 1., 0.] {
+            bin.extend_from_slice(&value.to_le_bytes());
+        }
+        for _ in 0..3 {
+            for value in tint_wet {
+                bin.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        let doc = serde_json::json!({
+            "asset": {"version": "2.0"}, "buffers": [{"byteLength": bin.len()}],
+            "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 36},
+                {"buffer": 0, "byteOffset": 36, "byteLength": 48}],
+            "accessors": [{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                "min": [0,0,0], "max": [1,1,0]},
+                {"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC4"}],
+            "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "_MAP_BLEND2": 1}}]}],
+            "nodes": [{"mesh": 0}], "scenes": [{"nodes": [0]}], "scene": 0
+        });
+        let mut json = serde_json::to_vec(&doc).unwrap();
+        while !json.len().is_multiple_of(4) {
+            json.push(b' ');
+        }
+        let mut glb = b"glTF".to_vec();
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        glb.extend_from_slice(&((28 + json.len() + bin.len()) as u32).to_le_bytes());
+        glb.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        glb.extend_from_slice(b"JSON");
+        glb.extend_from_slice(&json);
+        glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        glb.extend_from_slice(b"BIN\0");
+        glb.extend_from_slice(&bin);
+        std::fs::write(dir.join("stream.glb"), glb).unwrap();
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            AssetPlugin {
+                file_path: dir.to_string_lossy().into_owned(),
+                ..default()
+            },
+            bevy::mesh::MeshPlugin,
+            bevy::image::ImagePlugin::default(),
+            bevy::scene::ScenePlugin,
+            bevy::transform::TransformPlugin,
+            layered_gltf_plugin(),
+        ))
+        .init_asset::<StandardMaterial>()
+        .init_asset::<bevy::world_serialization::WorldAsset>();
+        app.finish();
+        app.cleanup();
+        let handle = app
+            .world()
+            .resource::<AssetServer>()
+            .load::<bevy::gltf::Gltf>("stream.glb");
+        let started = Instant::now();
+        loop {
+            app.update();
+            if let Some(gltf) = app
+                .world()
+                .resource::<Assets<bevy::gltf::Gltf>>()
+                .get(&handle)
+            {
+                let meshes = app.world().resource::<Assets<bevy::gltf::GltfMesh>>();
+                let primitive = &meshes.get(&gltf.meshes[0]).unwrap().primitives[0];
+                let mesh = app
+                    .world()
+                    .resource::<Assets<Mesh>>()
+                    .get(&primitive.mesh)
+                    .unwrap();
+                let Some(bevy::mesh::VertexAttributeValues::Float32x4(values)) =
+                    mesh.attribute(ATTR_MAP_BLEND2)
+                else {
+                    panic!("native tint/wet stream lost");
+                };
+                assert_eq!(values, &[tint_wet; 3]);
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "GLB load timed out"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
 
     #[test]
     fn collision_regions_select_all_four_ids_even_with_culling_off() {

@@ -1,4 +1,4 @@
-//! Original layered-map renderer using exported sampler metadata and packed vertex weights.
+//! Layered-map renderer using exported sampler metadata and packed vertex weights.
 use std::collections::HashMap;
 
 use bevy::asset::{embedded_asset, embedded_path};
@@ -49,7 +49,7 @@ fn release_materials(
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 #[bind_group_data(MapPipelineKey)]
 #[data(50, MapLayersUniform, binding_array(101))]
-#[bindless(index_table(range(50..72), binding(100)))]
+#[bindless(index_table(range(50..80), binding(100)))]
 struct MapLayers {
     // xyz: enabled albedo layers; w: mask present.
     enabled: Vec4,
@@ -60,6 +60,7 @@ struct MapLayers {
     hemi_axis: Vec4,
     hemi_delta: Vec4,
     camera_fade: Vec4,
+    game: MapGame,
     #[texture(51)]
     #[sampler(52)]
     overlay: Option<Handle<Image>>,
@@ -92,17 +93,44 @@ struct MapLayers {
     #[texture(70, dimension = "3d")]
     #[sampler(71)]
     voxels: Option<Handle<Image>>,
+    #[texture(72)]
+    #[sampler(73)]
+    base_normal: Option<Handle<Image>>,
+    #[texture(74)]
+    #[sampler(75)]
+    detail: Option<Handle<Image>>,
+    #[texture(76)]
+    #[sampler(77)]
+    mask_l: Option<Handle<Image>>,
+    #[texture(78)]
+    #[sampler(79)]
+    wet: Option<Handle<Image>>,
 }
+
+#[derive(ShaderType, Reflect, Debug, Clone, Default)]
+struct MapGame {
+    flags: UVec4,
+    p: [Vec4; 16],
+}
+
+pub(crate) const ATTR_MAP_BLEND2: bevy::mesh::MeshVertexAttribute =
+    bevy::mesh::MeshVertexAttribute::new(
+        "MapBlend2",
+        0x5ec1_0a01,
+        bevy::render::render_resource::VertexFormat::Float32x4,
+    );
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct MapPipelineKey {
     camera_fade: bool,
+    game: bool,
 }
 
 impl From<&MapLayers> for MapPipelineKey {
     fn from(layers: &MapLayers) -> Self {
         static LEGACY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         Self {
+            game: layers.game.flags.y != 0,
             camera_fade: layers.camera_fade.x > 0.
                 || *LEGACY.get_or_init(|| std::env::args().any(|a| a == "--legacy-camera-fade")),
         }
@@ -120,6 +148,7 @@ struct MapLayersUniform {
     hemi_axis: Vec4,
     hemi_delta: Vec4,
     camera_fade: Vec4,
+    game: MapGame,
 }
 
 impl From<&MapLayers> for MapLayersUniform {
@@ -133,6 +162,7 @@ impl From<&MapLayers> for MapLayersUniform {
             hemi_axis: layers.hemi_axis,
             hemi_delta: layers.hemi_delta,
             camera_fade: layers.camera_fade,
+            game: layers.game.clone(),
         }
     }
 }
@@ -291,12 +321,52 @@ mod tests {
 
 impl MaterialExtension for MapLayers {
     fn specialize(
-        _pipeline: &bevy::pbr::MaterialExtensionPipeline,
+        pipeline: &bevy::pbr::MaterialExtensionPipeline,
         descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
-        _layout: &bevy::mesh::MeshVertexBufferLayoutRef,
+        layout: &bevy::mesh::MeshVertexBufferLayoutRef,
         key: bevy::pbr::MaterialExtensionKey<Self>,
     ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
+        use bevy::shader::ShaderDefVal;
+        let prepass = descriptor.vertex.shader_defs.iter().any(|d| {
+            matches!(d,
+            ShaderDefVal::Bool(n, true) if n == "PREPASS_PIPELINE")
+        });
+        if !key.bind_group_data.game && !prepass {
+            descriptor.vertex.shader = pipeline.mesh_pipeline.shader.clone();
+        }
+        if key.bind_group_data.game {
+            if let Some(fragment) = descriptor.fragment.as_mut() {
+                fragment.shader_defs.push("GAME_MATERIAL".into());
+            }
+            if !prepass {
+                descriptor.vertex.shader_defs.push("GAME_LAYERS".into());
+                if let Some(fragment) = descriptor.fragment.as_mut() {
+                    fragment.shader_defs.push("GAME_LAYERS".into());
+                }
+                let mut attrs = vec![
+                    Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+                    Mesh::ATTRIBUTE_NORMAL.at_shader_location(1),
+                ];
+                for (a, at) in [
+                    (Mesh::ATTRIBUTE_UV_0, 2),
+                    (Mesh::ATTRIBUTE_UV_1, 3),
+                    (Mesh::ATTRIBUTE_TANGENT, 4),
+                    (Mesh::ATTRIBUTE_COLOR, 5),
+                ] {
+                    if layout.0.contains(a) {
+                        attrs.push(a.at_shader_location(at));
+                    }
+                }
+                attrs.push(ATTR_MAP_BLEND2.at_shader_location(8));
+                descriptor.vertex.buffers = vec![layout.0.get_layout(&attrs)?];
+            }
+        }
         if key.bind_group_data.camera_fade
+            && (!prepass
+                || key.mesh_key.intersects(
+                    bevy::pbr::MeshPipelineKey::MOTION_VECTOR_PREPASS
+                        | bevy::pbr::MeshPipelineKey::NORMAL_PREPASS,
+                ))
             && let Some(fragment) = descriptor.fragment.as_mut()
         {
             fragment.shader_defs.push("CAMERA_FADE".into());
@@ -304,15 +374,25 @@ impl MaterialExtension for MapLayers {
         Ok(())
     }
 
-    fn fragment_shader() -> ShaderRef {
-        ShaderRef::Path(
-            bevy::asset::AssetPath::parse(&format!(
-                "embedded://{}",
-                embedded_path!("map_material.wgsl").to_string_lossy()
-            ))
-            .into_owned(),
-        )
+    fn vertex_shader() -> ShaderRef {
+        shader_path("map_material.wgsl")
     }
+
+    fn fragment_shader() -> ShaderRef {
+        shader_path("map_material.wgsl")
+    }
+
+    fn prepass_fragment_shader() -> ShaderRef {
+        shader_path("map_prepass.wgsl")
+    }
+}
+
+fn shader_path(name: &str) -> ShaderRef {
+    let path = embedded_path!("map_material.wgsl").with_file_name(name);
+    ShaderRef::Path(
+        bevy::asset::AssetPath::parse(&format!("embedded://{}", path.to_string_lossy()))
+            .into_owned(),
+    )
 }
 
 #[derive(Resource)]
@@ -359,6 +439,9 @@ fn sync_actor_materials(
 
 pub(super) fn install(app: &mut App, prefix: &str, dir: &std::path::Path, args: &[String]) {
     embedded_asset!(app, "map_material.wgsl");
+    embedded_asset!(app, "map_prepass.wgsl");
+    bevy::shader::load_shader_library!(app, "map_bindings.wgsl");
+    bevy::shader::load_shader_library!(app, "map_coverage.wgsl");
     app.add_plugins(MaterialPlugin::<LayeredMaterial>::default())
         .insert_resource(LayerSettings {
             prefix: prefix.to_owned(),
@@ -500,7 +583,38 @@ fn replace_materials(
             };
             let uv = |key: &str| data[key]["uv"].as_u64().unwrap_or(0) as f32;
             let present = |key: &str| f32::from(data[key]["uri"].is_string() && settings.enabled);
+            let mut game = MapGame::default();
+            if settings.enabled && data["version"].as_u64() == Some(2) {
+                game.flags.y = data["kind"].as_u64().unwrap_or(0) as u32;
+                game.flags.z = u32::from(settings.debug);
+                for (key, bit) in [
+                    ("base_normal", 1),
+                    ("overlay", 2),
+                    ("overlay_normal", 4),
+                    ("snow", 8),
+                    ("snow_normal", 16),
+                    ("c", 32),
+                    ("c_normal", 64),
+                    ("mask", 128),
+                    ("detail", 256),
+                    ("mask_l", 512),
+                    ("wet", 1024),
+                ] {
+                    if present(key) > 0. {
+                        game.flags.x |= bit;
+                    }
+                }
+                if base.base_color_texture.is_some() {
+                    game.flags.x |= 2048;
+                }
+                for (i, p) in game.p.iter_mut().enumerate() {
+                    *p = Vec4::from_array(std::array::from_fn(|c| {
+                        data["params"][i][c].as_f64().unwrap_or(0.) as f32
+                    }));
+                }
+            }
             let extension = MapLayers {
+                game,
                 enabled: Vec4::new(
                     present("overlay").max(present("overlay_normal")),
                     present("snow").max(present("snow_normal")),
@@ -532,6 +646,10 @@ fn replace_materials(
                 snow_normal: load("snow_normal", false),
                 c_normal: load("c_normal", false),
                 mask: load("mask", false),
+                base_normal: load("base_normal", false),
+                detail: load("detail", false),
+                mask_l: load("mask_l", false),
+                wet: load("wet", false),
                 irradiance: irradiance
                     .as_ref()
                     .map(|i| i.buffer.clone())

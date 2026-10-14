@@ -1051,7 +1051,11 @@ mod tests {
             return;
         }
         // Only the unpacked TAE exists, as after `unpack` followed by `models`.
-        let fixture = cache.join(format!("tests/sword-mask-{}", std::process::id()));
+        let target = std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into());
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(target)
+            .join(format!("tests/sword-mask-{}", std::process::id()));
         let raw = fixture.join("raw/chr/c1010.anibnd.d");
         std::fs::create_dir_all(&raw).unwrap();
         std::fs::copy(source, raw.join("c1010.tae")).unwrap();

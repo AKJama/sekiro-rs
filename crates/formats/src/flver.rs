@@ -677,8 +677,12 @@ fn read_buffer(
                 0
             }
             S::Uv if m.kind == T::UByte4Norm => {
-                out.blends.push(Vec::with_capacity(bytes.len() / stride));
-                out.blends.len() - 1
+                let slot = usize::try_from(m.index.saturating_sub(1)).unwrap_or(0);
+                if out.blends.len() <= slot {
+                    out.blends.resize_with(slot + 1, Vec::new);
+                }
+                out.blends[slot].reserve(bytes.len() / stride);
+                slot
             }
             S::Uv => {
                 let first = out.uvs.len();
@@ -879,5 +883,33 @@ mod blend_tests {
         read_buffer(&bytes, &members, 12, 2048., &mut vertices).unwrap();
         assert_eq!(vertices.blends, vec![vec![[23, 45, 67, 89]]]);
         assert_eq!(vertices.uvs, vec![vec![[1., -2.]], vec![[0.5, 3.]]]);
+    }
+
+    #[test]
+    fn packed_blend_indices_survive_sparse_out_of_order_layouts() {
+        let members = [
+            LayoutMember {
+                kind: LayoutType::UByte4Norm,
+                semantic: LayoutSemantic::Uv,
+                index: 5,
+            },
+            LayoutMember {
+                kind: LayoutType::UByte4Norm,
+                semantic: LayoutSemantic::Uv,
+                index: 1,
+            },
+        ];
+        let mut vertices = Vertices::default();
+        read_buffer(
+            &[0, 200, 0, 0, 128, 0, 0, 0],
+            &members,
+            8,
+            2048.,
+            &mut vertices,
+        )
+        .unwrap();
+        assert_eq!(vertices.blends[0], vec![[128, 0, 0, 0]]);
+        assert_eq!(vertices.blends[4], vec![[0, 200, 0, 0]]);
+        assert!(vertices.blends[1].is_empty());
     }
 }

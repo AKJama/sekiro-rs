@@ -6,5 +6,6 @@ mod grapple;
 mod hkb_graphs;
 mod hks_disasm;
 mod map_data;
+mod map_layers;
 mod params;
 mod sound;

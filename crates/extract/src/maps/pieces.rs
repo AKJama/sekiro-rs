@@ -16,6 +16,7 @@ use crate::models::textures::texture_stem;
 pub struct TexRef {
     pub path: String,
     pub uv: usize,
+    pub scale: [f32; 2],
 }
 
 /// What one FLVER material renders with.
@@ -32,6 +33,13 @@ pub struct MaterialChoice {
 
 #[derive(Clone, Debug, Default)]
 pub struct Layers {
+    pub kind: u8,
+    pub variant: Option<usize>,
+    pub params: [[f32; 4]; 16],
+    pub base_normal: Option<TexRef>,
+    pub detail: Option<TexRef>,
+    pub mask_l: Option<TexRef>,
+    pub wet: Option<TexRef>,
     pub overlay: Option<TexRef>,
     pub overlay_normal: Option<TexRef>,
     pub snow: Option<TexRef>,
@@ -87,7 +95,11 @@ pub fn choose_material(material: &flver::Material, mtd: Option<&mtd::Mtd>) -> Ma
             .map(|m| (m.uv_number - 1).clamp(0, 1) as usize)
             .unwrap_or(0);
         let param = t.param.to_ascii_lowercase();
-        let r = TexRef { path, uv };
+        let r = TexRef {
+            path,
+            uv,
+            scale: t.scale,
+        };
         if param.contains("albedomap") || param.contains("diffuse") {
             albedo.push(r);
         } else if param.contains("normalmap") {
@@ -112,6 +124,7 @@ pub fn choose_material(material: &flver::Material, mtd: Option<&mtd::Mtd>) -> Ma
                 .map(|t| TexRef {
                     path: t.path.clone(),
                     uv: (t.uv_number - 1).clamp(0, 1) as usize,
+                    scale: [1.; 2],
                 })
         };
         albedo.extend(primary("albedomap"));
@@ -156,8 +169,14 @@ pub fn choose_material(material: &flver::Material, mtd: Option<&mtd::Mtd>) -> Ma
             choice.alpha_mode = Some(("MASK", (alpha_ref.max(1) as f32 / 255.0).max(0.3)));
             choice.double_sided = true;
         }
-        if m.shader.contains("M[Multiple]") || m.shader.contains("M[MultipleGround]") {
+        let kind = sekiro_formats::map_layers::family(&m.shader);
+        if kind > 0 {
+            let variant = sekiro_formats::map_layers::variant(m);
+            let used = variant.map(|v| sekiro_formats::map_layers::slots(kind, v));
             let slot = |number, semantic: &str| {
+                if used.is_some_and(|slots| !slots.contains(&(number as u8))) {
+                    return None;
+                }
                 m.textures
                     .iter()
                     .find(|t| slot_number(&t.kind) == Some(number) && t.kind.contains(semantic))
@@ -168,45 +187,36 @@ pub fn choose_material(material: &flver::Material, mtd: Option<&mtd::Mtd>) -> Ma
                             .find(|f| f.param == t.kind && !f.path.is_empty())
                             .map(|f| &f.path)
                             .unwrap_or(&t.path);
-                        // Some authored MTD defaults put a mask in an albedo slot or an
-                        // albedo in a normal slot. Native branch switches are untraced;
-                        // do not use those as colour/normal layers in our approximation.
-                        let stem = texture_stem(path).to_ascii_lowercase();
-                        if (semantic == "AlbedoMap"
-                            && (stem.ends_with("_3m") || stem.ends_with("_n")))
-                            || (semantic == "NormalMap"
-                                && (stem.ends_with("_3m") || stem.ends_with("_a")))
-                        {
-                            return None;
-                        }
                         (!path.is_empty()).then(|| TexRef {
                             path: path.clone(),
                             uv: (t.uv_number - 1).clamp(0, 1) as usize,
+                            scale: material
+                                .textures
+                                .iter()
+                                .find(|f| f.param == t.kind)
+                                .map_or([1.; 2], |f| f.scale),
                         })
                     })
             };
-            let ground = m.shader.contains("M[MultipleGround]");
-            choice.albedo = slot(8, "AlbedoMap").or(choice.albedo);
-            choice.normal = slot(3, "NormalMap").or(choice.normal);
+            let ground = kind == 2;
+            choice.albedo = slot(8, "AlbedoMap");
+            choice.normal = slot(3, "NormalMap");
             choice.layers = Some(Layers {
+                kind,
+                variant,
+                params: sekiro_formats::map_layers::game_params(m, kind),
+                base_normal: slot(3, "NormalMap"),
+                detail: slot(if ground { 12 } else { 0 }, "NormalMap"),
+                mask_l: if ground { None } else { slot(6, "Mask") },
+                wet: slot(if ground { 0 } else { 16 }, "NormalMap"),
                 overlay: slot(5, "AlbedoMap"),
                 overlay_normal: slot(4, "NormalMap"),
                 snow: slot(if ground { 11 } else { 12 }, "AlbedoMap"),
                 snow_normal: slot(if ground { 7 } else { 10 }, "NormalMap"),
-                c: if ground { None } else { slot(7, "AlbedoMap") },
-                c_normal: if ground { None } else { slot(0, "NormalMap") },
+                c: slot(if ground { 1 } else { 7 }, "AlbedoMap"),
+                c_normal: if ground { slot(6, "NormalMap") } else { None },
                 mask: slot(9, "Mask"),
             });
-            if choice.layers.as_ref().is_some_and(|l| {
-                l.overlay.is_none()
-                    && l.overlay_normal.is_none()
-                    && l.snow.is_none()
-                    && l.snow_normal.is_none()
-                    && l.c.is_none()
-                    && l.c_normal.is_none()
-            }) {
-                choice.layers = None;
-            }
         }
     }
     choice
@@ -274,16 +284,45 @@ pub fn build(
         if choice.layers.is_some() {
             let weights: Vec<[f32; 4]> = (0..count)
                 .map(|i| {
-                    let byte = |stream: usize| {
+                    let byte = |stream: usize, channel: usize| {
                         v.blends
                             .get(stream)
                             .and_then(|b| b.get(i))
-                            .map_or(0., |b| b[0] as f32 / 255.)
+                            .map_or(0., |b| b[channel] as f32 / 255.)
                     };
-                    [byte(0), byte(4), byte(2), 1.]
+                    let ground = choice.layers.as_ref().is_some_and(|l| l.kind == 2);
+                    [
+                        byte(0, 0),
+                        byte(1, if ground { 1 } else { 2 }),
+                        byte(4, 1),
+                        byte(5, 2),
+                    ]
                 })
                 .collect();
             attributes["COLOR_0"] = json!(g.vec4(&weights));
+            let blend2: Vec<[f32; 4]> = (0..count)
+                .map(|i| {
+                    let tint = v
+                        .blends
+                        .get(2)
+                        .and_then(|b| b.get(i))
+                        .copied()
+                        .unwrap_or([255; 4]);
+                    let wet = v.blends.get(3).and_then(|b| b.get(i)).map_or(0, |b| b[0]);
+                    [
+                        tint[0] as f32 / 255.,
+                        tint[1] as f32 / 255.,
+                        tint[2] as f32 / 255.,
+                        wet as f32 / 255.,
+                    ]
+                })
+                .collect();
+            attributes["_MAP_BLEND2"] = json!(g.vec4(&blend2));
+            if let Some(colors) = v.colors.first()
+                && colors.len() == count
+            {
+                attributes["_MAP_COLOR1"] = json!(g.vec4(colors));
+            }
         } else if choice.alpha_mode.is_some()
             && let Some(colors) = v.colors.first()
             && colors.len() == count
@@ -363,7 +402,8 @@ pub fn build(
             "doubleSided": !lod0.cull_backfaces || choice.double_sided,
         });
         if let Some(layers) = &choice.layers {
-            let mut extras = json!({"version": 1});
+            let mut extras = json!({"version": 2, "kind": layers.kind, "variant": layers.variant, "params": layers.params,
+                "base_albedo": choice.albedo.is_some()});
             for (key, r) in [
                 ("overlay", &layers.overlay),
                 ("overlay_normal", &layers.overlay_normal),
@@ -372,16 +412,25 @@ pub fn build(
                 ("c", &layers.c),
                 ("c_normal", &layers.c_normal),
                 ("mask", &layers.mask),
+                ("base_normal", &layers.base_normal),
+                ("detail", &layers.detail),
+                ("mask_l", &layers.mask_l),
+                ("wet", &layers.wet),
             ] {
                 if let Some(r) = r
-                    && let Some(uri) = texture_uri(&texture_stem(&r.path).to_ascii_lowercase())
+                    && let Some(uri) = texture_uri(&game_texture_name(
+                        r,
+                        key.contains("normal") || key == "detail" || key == "wet",
+                    ))
                 {
-                    extras[key] = json!({"uri": uri, "uv": if uv_ok(r.uv) {r.uv} else {0}});
+                    extras[key] =
+                        json!({"uri": uri, "uv": if uv_ok(r.uv) {r.uv} else {0}, "scale": r.scale});
                 }
             }
             mat["extras"] = json!({"sekiro_layers": extras});
         }
-        if let Some(r) = &choice.normal
+        if choice.layers.is_none()
+            && let Some(r) = &choice.normal
             && let Some((t, uv)) = texture(r, &mut g)
         {
             mat["normalTexture"] = json!({ "index": t, "texCoord": uv });
@@ -433,7 +482,9 @@ pub fn wanted_textures(flver: &flver::Flver, mtds: &Mtds) -> Vec<(String, bool)>
         if let Some(r) = choice.albedo {
             out.push((texture_stem(&r.path).to_ascii_lowercase(), false));
         }
-        if let Some(r) = choice.normal {
+        if choice.layers.is_none()
+            && let Some(r) = choice.normal
+        {
             out.push((texture_stem(&r.path).to_ascii_lowercase(), true));
         }
         if let Some(l) = choice.layers {
@@ -445,14 +496,27 @@ pub fn wanted_textures(flver: &flver::Flver, mtds: &Mtds) -> Vec<(String, bool)>
                 (l.c, false),
                 (l.c_normal, true),
                 (l.mask, false),
+                (l.base_normal, true),
+                (l.detail, true),
+                (l.mask_l, false),
+                (l.wet, true),
             ] {
                 if let Some(r) = r {
-                    out.push((texture_stem(&r.path).to_ascii_lowercase(), normal));
+                    out.push((game_texture_name(&r, normal), false));
                 }
             }
         }
     }
     out
+}
+
+fn game_texture_name(r: &TexRef, normal: bool) -> String {
+    let name = texture_stem(&r.path).to_ascii_lowercase();
+    if normal {
+        format!("{name}_map_raw")
+    } else {
+        name
+    }
 }
 
 #[cfg(test)]
@@ -520,6 +584,87 @@ mod tests {
         let layers = choice.layers.unwrap();
         assert_eq!(layers.snow.unwrap().path, "snow_a.tif");
         assert_eq!(layers.overlay.unwrap().path, "moss_a.tif");
+    }
+
+    #[test]
+    fn static_switch_routes_detail_layer_masks_and_ground_layer_l() {
+        for (shader, switch, expected) in [
+            ("M[Multiple].spx", 1, (false, false, true, true, 0)),
+            ("M[MultipleGround].spx", 24, (true, false, true, false, 1)),
+            ("M[MultipleGround].spx", 27, (true, true, true, false, 1)),
+        ] {
+            let mat = flver::Material {
+                name: "rock".into(),
+                mtd: "rock.mtd".into(),
+                index: 0,
+                textures: vec![flver::Texture {
+                    param: "M_Texture2D_8_AlbedoMap_0".into(),
+                    path: "override_a.tif".into(),
+                    scale: [1., 1.],
+                }],
+            };
+            let slots = [
+                (0, "NormalMap"),
+                (1, "AlbedoMap"),
+                (3, "NormalMap"),
+                (4, "NormalMap"),
+                (5, "AlbedoMap"),
+                (
+                    6,
+                    if shader.contains("Ground") {
+                        "NormalMap"
+                    } else {
+                        "Mask3Map"
+                    },
+                ),
+                (
+                    7,
+                    if shader.contains("Ground") {
+                        "NormalMap"
+                    } else {
+                        "AlbedoMap"
+                    },
+                ),
+                (8, "AlbedoMap"),
+                (9, "Mask3Map"),
+                (11, "AlbedoMap"),
+                (12, "NormalMap"),
+            ];
+            let mtd = mtd::Mtd {
+                shader: shader.into(),
+                description: String::new(),
+                params: vec![mtd::Param {
+                    name: "GXFT_SATStaticSwitch".into(),
+                    kind: "int".into(),
+                    value: mtd::ParamValue::Ints(vec![switch]),
+                }],
+                textures: slots
+                    .into_iter()
+                    .map(|(slot, semantic)| mtd::Texture {
+                        kind: format!("M_Texture2D_{slot}_{semantic}_0"),
+                        uv_number: 2,
+                        shader_data_index: 0,
+                        path: format!("tex_{slot}.tif"),
+                    })
+                    .collect(),
+            };
+            let choice = choose_material(&mat, Some(&mtd));
+            assert_eq!(choice.albedo.unwrap().path, "override_a.tif");
+            let l = choice.layers.unwrap();
+            assert_eq!(
+                (
+                    l.overlay.is_some(),
+                    l.snow.is_some(),
+                    l.c.is_some(),
+                    l.mask_l.is_some(),
+                    u8::from(l.c_normal.is_some())
+                ),
+                expected
+            );
+            assert!(l.detail.is_some());
+            assert_eq!(l.base_normal.unwrap().path, "tex_3.tif");
+            assert_eq!(l.c.unwrap().uv, 1);
+        }
     }
 
     #[test]

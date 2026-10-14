@@ -1202,3 +1202,43 @@ The final twenty-cycle probe uses one forced Tomoe identity followed by ordinary
 Final verification uses `CARGO_TARGET_DIR=target/alt-pf` and four Cargo jobs: all 59 game unit tests and five integration tests pass, including renderer/map/camera coverage.
 Workspace/all-target Clippy with warnings denied passes, and the final workspace formatting check passes after the concurrent brain formatting changes settled.
 No brain files were edited by this renderer work, and no commits or git-state mutations were made.
+
+## Layered map families (2026-10-13)
+
+Ported RustSekiro commit `265e142bf3b36a5190d8ae4885acad7a4890cd16`'s `M[Multiple]` and `M[MultipleGround]` shader equations, 34-variant sampler tables and 16-vec4 material packing.
+The renderer now uses RGB mask selectors, separate base/layer masks, native blend-stream channels, UV0/UV1 routing, tint, detail normals, wet-flow normals/gloss and material-specific snow direction.
+The exporter retains tint/wet data, vertex AO data, authored texture scales and raw normal DDS channels, with version-2 material extras.
+Shader bindings remain bindless, spatial GI remains in place, and the camera-fade discard is shared with the depth/motion prepass.
+Map and play cameras enable depth and motion vectors without fixing an MSAA sample count.
+Snow coverage is computed before wet-flow perturbation to follow the documented native shader order, which differs from the borrowed WGSL's ordering.
+The tested game data had valid switches throughout; no disagreement with the upstream sampler tables was found, and authored MTD/FLVER values override the old filename and up-facing-snow heuristics.
+
+Accepted captures, commands, raw logs, material audit and a fuller report are under `target/alt-ml/captures/`.
+The matched default-start captures show leaf/dirt and wet highlights in Hirata, darker rocks and distinct snow in Valley, and preserved Castle geometry with authored snow/wet-stone variation.
+The original cache was not written; the before snapshot is `target/alt-ml/before-cache`, and all three maps were re-exported into `target/alt-ml/cache`.
+
+| Map | Before frame ms | After frame ms | Opaque GPU ms, before / after | After prepass GPU ms |
+| --- | --- | --- | --- | --- |
+| Hirata m10 | 16.680 | 16.715 | 11.91 / 7.32 | 1.95 |
+| Valley m17 | 16.700 | 16.710 | 1.42 / 4.97 | 0.36 |
+| Castle m11_01 | 16.759 | 16.674 | 7.65 / 2.56 | 0.25 |
+
+Runs use `--uncapped` (`AutoNoVsync`) at 1600x900 on the shared RTX 5070 Ti.
+Frame numbers are medians of five smoothed readings at seconds 8-12 after loading, and remain near 60 Hz, so they do not establish an uncapped throughput gain.
+GPU columns measure individual passes, not whole-frame GPU duration; Valley's opaque work increased in these observations.
+After captures wait for queued pipelines to finish.
+
+Formats: 49 unit and 32 integration tests pass; extract: 15 pass; game validation includes the real GLB stream loader and shader composition at 1x/4x MSAA.
+The initially observed m13/m25 failures pass on recheck, but the latest unrestricted game run has 74 passes and two new protected-file failures: m11_01's cached export check unwraps None, and m20's illusion-cleared state selects m900010 instead of m900085; none of those map sources were edited by this task.
+Workspace/all-target Clippy with warnings denied and workspace formatting pass using `CARGO_TARGET_DIR=target/alt-ml` and six jobs.
+Ground ripple/metal/AO/HDR-gamma/tiling gaps remain documented in `FIDELITY.md`; this port does not decode `Asset_SnowGround_Multi`.
+Hirata and Valley exports still report missing referenced textures, with no failed GLBs; Castle reports no missing textures.
+
+Player re-export of the real cache, after reviewing these changes:
+
+```powershell
+$env:CARGO_TARGET_DIR='target/alt-ml'
+foreach ($map in @('m10_00_00_00','m17_00_00_00','m11_01_00_00')) {
+    cargo run --release -p sekiro-extract -j 6 -- --cache cache map $map
+}
+```

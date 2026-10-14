@@ -239,10 +239,12 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
             if path.is_file() {
                 return Some(name.clone());
             }
-            let dds = store.dds(name).and_then(|d| match d {
-                Some(d) if *is_normal => textures::normal_to_bc5(&d).map(Some),
-                other => Ok(other),
-            });
+            let dds = store
+                .dds(name.strip_suffix("_map_raw").unwrap_or(name))
+                .and_then(|d| match d {
+                    Some(d) if *is_normal => textures::normal_to_bc5(&d).map(Some),
+                    other => Ok(other),
+                });
             match dds {
                 Ok(Some(dds)) => match std::fs::write(&path, dds) {
                     Ok(()) => Some(name.clone()),

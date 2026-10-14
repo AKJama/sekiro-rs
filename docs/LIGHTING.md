@@ -52,20 +52,103 @@ The clock names `morning`, `afternoon`, `evening`, `night` and `dawn` correspond
 `illusion` uses 8400 and 9303, references event 12005210's sky and sub-ID instructions, and runs region event 12005826.
 `illusion-cleared` additionally sets 62000705 and references event 12005855's clear sub-ID instruction.
 The reservoir defeat and storm names reference events 11125860 and 11125872 respectively, rather than treating the defeat-time clear request as the initial Sword Saint fight state.
-`dragon-defeated` uses 9309 and the reset in event 12505950.
+`dragon-defeated` retains True Monk prerequisite 9309 and sets Divine Dragon defeat 9310 from event 12505880; event 12505950 is True Monk's defeat and its reset does not belong to this preset.
 
 | Map | Default hour / environment | Selectable story states | GPARAM files / sub-IDs used | Collision LightSet IDs | Remaining selection/rendering limits |
 | --- | --- | --- | --- | --- | --- |
-| m10_00, Hirata | 0 / 0 | memory, father-memory (8304) | m10_00_0000 / 0 | 0, 100, 110, 120 | Memory cinematic lighting transitions are not a complete world-event simulation |
-| m11_00, Outskirts | 6 / 1 | five clock names, invasion, tomoe | m11_00_0000, 0020, 0030 / 0, 20, 30 | 0, 100, 110, 130 | Fire sky export and GPARAM family provenance need verification |
-| m11_01, Castle | 6 / 1 | five clock names, invasion, tomoe, shura-fire | m11_01_0000, 0010, 0020, 0740; runtime also 0750 / 0, 10, 20, 40, 50 | 0, 100, 110, 120 | Some event sky models are not exported |
-| m11_02, Reservoir | 0 / 0 | prologue, five clock names, invasion, sword-saint-defeated, sword-saint-storm | m11_02_0000, 0020, 0920, 0930 / 0, 20, 30 | 0, 100, 110, 120 | 09 family pairing is inferred; transitions snap |
-| m13_00, Dungeon | 6 / 1 | five clock names | m13_00_0000 / 0 | 0, 100, 110, 130 | First visit order is player-dependent |
-| m15_00, Depths / Mibu | 6 / 1 | five clock names | m15_00_0000 / 0 | 0, 100, 110, 120 | Event 11505290's palanquin transition is interaction-gated, not a fixed map default |
-| m17_00, Valley | 6 / 1 | five clock names | m17_00_0000 / 0 | 0, 100, 110, 120, 130 | Export has only environment variants 1-4 |
-| m20_00, Senpou | 6 / 1 | five clock names, illusion, illusion-cleared | m20_00_0000, 0010 / 0, 10 | 0, 100, 110, 120, 130 | Illusion region switching uses native region 2002880; export has only variants 1-4 |
-| m25_00, Fountainhead | 22 / 4 | palace, dragon-defeated | m25_00_0000 / 0 | 0, 100, 110, 120, 130 | Dragon-specific rendering remains with its existing arena staging |
+| m10_00, Hirata | 0 / 0, first memory; fixed hour-0 rows | memory, father-memory (8304) | m10_00_0000 / 0 in both states; sky m900060 | 0, 100, 110, 120 | Native selection matches; shared fog-enable lookup and omitted local directional fields remain; see Hirata audit below |
+| m11_00, Outskirts | 6 / 1 | five clock names, invasion, tomoe | m11_00_0000, 0020, 0030 / 0, 20, 30 | 0, 100, 110, 130 | Event/catalog choices and fire/storm dome exports verified; shared four-light/specular and runtime sky-group gaps remain; requested uncapped runs still show a 60 Hz limit |
+| m11_01, Castle | 6 / 1 | five clock names, invasion, tomoe, shura-fire, owl-fight | m11_01_0000, 0010, 0020, 0740, 0750 / 0, 10, 20, 40, 50 | 0, 100, 110, 120 | Native encounter flags restore skipped intro GPARAMs; all selected sky exports are present; shared phase/probe/sky routing and presentation limits remain; see Castle audit |
+| m11_02, Reservoir | 0 / 0 | prologue, five clock names, invasion, sword-saint-defeated, sword-saint-storm | m11_02_0000, 0020, 0920, 0930 / 0, 20, 30 | 0, 100, 110, 120 | Event selection audited; 09 clear pairing remains inferred; global probe fallback and fog-bank routing need shared fixes; see Reservoir audit |
+| m13_00, Dungeon | 6 / 1 | morning, afternoon, evening, night, dawn | m13_00_0000 / 0 in all five states | 0, 100, 110, 130 | Selection agrees with installed data; dark cave rendering and shared-machine frame-time limits are documented in the m13 audit below |
+| m15_00, Depths / Mibu | 6 / 1 | five clock names; dawn returns to 6 / 1 | m15_00_0000 / 0; fixed sky m900015 | 0, 100, 110, 120 | Event 11505290's afternoon transition is interaction-gated; 50 sized probe regions have no exported GIIV planes; exact visual fidelity and isolated steady frame time remain unverified |
+| m17_00, Valley | 6 / 1 | morning, afternoon, evening, night, dawn | m17_00_0000 / 0 in all five states | 0, 100, 110, 120, 130 | Native selection and 110/100 crossing audited; native/exported probes have only variants 1-4; shared material, specular, missing-row and pacing limits remain; see Valley audit |
+| m20_00, Senpou | 6 / 1 | five clock names, illusion, illusion-cleared | m20_00_0000, 0010 / 0, 10 | 0, 100, 110, 120, 130 | Cleared illusion entry sky corrected; native region round trip verified; 85 GI volumes per variant 1-4; empty 0010 family, missing m900085/variant-5 GI and shared light omissions block exact fidelity; see Senpou audit |
+| m25_00, Fountainhead | 22 / 4, fixed authored hour-0 rows | palace, dragon-defeated (9309, 9310) | m25_00_0000 / 0 | 0, 100, 110, 120, 130 | Native selection checked; live 100-to-130 crossing passes in both states; water, exposure defaults and frame-time limits remain shared |
 | m89_00_00_99, sky library | 6 / 1 | five clock names | s89_00_0099 / 0 | No terrain | Cinematic/library map, no default player start |
+
+Fountainhead follow-up, 2026-10-13:
+Both selectable profiles use common event 100's fixed environment 4, sky group 8907070/model m900070 and sub-ID 0, irrespective of world-clock progression.
+The 22-hour selector label is correct: the installed base file has only hour-0 entries, so it does not interpolate ordinary night values into this map.
+The corrected Dragon preset adds flag 9310 and removes the unrelated True Monk reset; its selected file, sky and values remain unchanged.
+The native audit preserves the bridge arena's 22-hour and sanctuary arena's 12-hour starts; the existing Divine Dragon transition still owns its SetLighting(1) phase.
+Native collision fields are checked independently, with fog/scattering/environment banks all zero; the live start-5 hall walks change LightSet 100 to 130 in both profiles.
+LightSet 110 is also selected in the stationary indoor control, while the attempted doorway walks were obstructed and are not counted as crossing proof.
+Collision 130 has no matching GPARAM row and currently falls back to row 0 through `Param::at`; no invented 130-to-220 remapping was added, and the engine's missing-row fallback remains a provenance limit.
+
+At the default start, native sun RGB/W `(0.607843, 0.705882, 0.921569, 1)` becomes linear RGB `(0.369473, 0.498269, 0.849289)` at 4500 lux, and fill W 0.4 becomes 1800 lux.
+The authored hemisphere mean is `(0.165783, 0.230277, 0.321626)`; the shared probe path replaces global ambient when GILM 0/variant 4 is ready and loads 49 GIIV volumes into a 106 MiB atlas.
+Fog GameScale 1.2, fixed density 0.0025, height offset 45 and far depth 700 upload as density 0.00208333, height offset -45 and far depth 840; sky colour becomes `(0.003697, 0.016988, 0.049433)`.
+Both states upload exposure gain 2.143547, middle gray -4.5, adaptation bounds -0.5/0.5 and LUT 20, but auto exposure is false because the native file lacks the enable field queried by `lighting.rs:167`.
+Recovering the native enable/default and calibrating tone, exposure and probe composition belongs to RustSekiro's collaborator; a warmer map tint would contradict the authored light colours.
+Other confirmed shared gaps are omitted local-light colour/enable fields in `lighting.rs:881`, and textureless Water0 exports using the generic opaque grey/roughness fallback in `crates/extract/src/maps/pieces.rs:377,397` instead of native water rendering.
+The water evidence includes m500010 and m810000, with base colour `(0.45, 0.43, 0.40, 1)`, roughness 0.85 and no native material extras.
+
+All new Fountainhead proof is under `target/alt-m25/captures/`, including before/after PNGs for both profiles, start-3 lake views, hall crossing images, raw CSVs, commands, binary/source hashes and `report.md`.
+These runs use `--uncapped`, which selects AutoNoVsync, at 1600 by 900; ready samples use ticks 480-840 after asset loading and exclude ticks 710-750 around screenshot readback.
+Other game processes and compilers were active, and shared `map.rs` changed between the before/after source snapshots, so these are observations rather than an isolated performance comparison of the metadata patch.
+
+| Fountainhead view | Before median / p99 ms | After median / p99 ms | Ready samples before / after |
+| --- | --- | --- | --- |
+| palace, default start 0 | 22.398 / 73.963 | 46.066 / 64.473 | 194 / 114 |
+| dragon-defeated, start 0 | 23.816 / 81.810 | 39.894 / 56.782 | 180 / 134 |
+| palace, lake-side start 3 | 16.610 / 25.409 | 17.401 / 49.924 | 318 / 271 |
+
+Default-start GPU diagnostics before the patch show approximately 14.788 ms opaque, 2.964 ms prepass and 1.969 ms fog; after samples show 31.394, 4.634 and 4.524 ms under different contention.
+The start-3 opaque cost stays near 6 ms in both runs.
+Disabling GIIV reduces the default opaque diagnostic to 12.953 ms, but worsens wall time under contention, so it establishes neither an overall speedup nor a justified reason to remove authored probes.
+The shared per-fragment scan in `map_material.wgsl:84` tests all 49 volumes; spatial candidate filtering that preserves native blending is a concrete optimization for the shared probe implementation.
+No safe map-specific visibility exclusion was established, no native geometry or lighting was hidden to improve timings, and steady frame time or exact rendered parity is not claimed.
+The map regression, all seven shared selection tests including the installed preset census, and six collision/map tests pass; game all-target Clippy with warnings denied and workspace formatting both pass, with results retained under `target/alt-m25/`.
+
+### Valley audit - 2026-10-14
+
+The current layered-material export was audited against common event 100, m17 events, native GPARAM rows, MSB collision tuples and the installed m89 sky library.
+Morning, afternoon, evening, night and dawn select respectively hour/environment 6/1, 12/2, 18/3, 22/4 and 2/5, with skies m900000, m900010, m900020, m900030 and m900050.
+All five retain base file m17_00_0000/sub-ID 0; no m17 event lighting override was found that should replace those presets.
+Watering Hole and Ape's Burrow retain their ArenaSpec afternoon starts, rather than inheriting the map's morning default.
+The map-specific installed-data regression logs each native parameter beside actual LightSet/GameFog conversions and audits the raw environment containers.
+
+Collision fog/scattering/environment banks are independently zero, and the default start selects h000100/LightSet 100.
+The Gun Fort short replay proves LightSet 110 to outdoor 100 and back to 110 without a respawn in every selectable story state.
+Rows 120 and 130 are absent from the base LightSet group and currently fall back to row 0 through `gparam.rs:69-73`.
+Family 0200/0220 contains row 120, but the engine's family/missing-row rule has not been established; no speculative file switch or row remapping was added.
+Both raw m17 environment containers and exported probes contain only variants 1-4, so dawn's correctly selected environment 5 loads no GI volumes and uses the hemisphere fallback.
+Recovering the native absent-variant fallback belongs to shared probe selection, rather than changing the authored dawn clock.
+
+Morning sun RGBA approximately `(1, 0.784314, 0.705882, 3)` becomes linear RGB `(1, 0.615148, 0.498269)` at 13500 lux, and fill W 0.3 becomes 1350 lux.
+The hemisphere mean is `(0.046136, 0.066436, 0.103806)` before ready probe 0 replaces global ambient.
+Each environment 1-4 installs 71 complete coefficient volumes in a 47 MiB atlas.
+Morning fog uploads density 0.001, distribution 0.03, height-density scale 0.05, offset 550 and near/far 0.1/400; afternoon GameScale 2 converts fixed density 0.0025 to 0.00125 and far depth 400 to 800.
+Native auto exposure is enabled in all five states, with exposure stops 0.3/0.4/1.2/1/0.2 and middle gray -3.6/-5.4/-6.6/-4.9/-4.9.
+Those values agree with logged renderer uploads; absolute radiance, tone, metering and probe composition remain the other collaborator's work.
+
+The old claim that m000064 lacks a decoded SnowGround layer is stale: its current export has version 2/kind 2/variant 6 and authored snow/detail raw normals.
+The conspicuous triangular snow pattern disappears with `--no-layers` but persists with `--no-giiv` and `--no-shadow`.
+Its 999 normals are normalized and continuous across coincident vertices, and maximum absolute normal-dot-tangent is 6.1e-8.
+This isolates a shared layered-material normal-path defect around `map_material.wgsl:375-411,438`, but does not yet identify the precise native arithmetic or UV correction.
+Shared follow-ups also include unused native normal-map AO, independent directional SpecColor0/1 omitted by `lighting.rs:881-907`, and per-fragment scanning of all 71 GI records in `map_material.wgsl:84`.
+The proposed shared fixes and exact evidence are in `target/alt-m17/captures/report.md`; no map tint or geometry exclusion was used to conceal them.
+
+Before/after story-state PNGs, raw uncapped perf CSVs, native audits, controls, walks and source/binary hashes are retained under `target/alt-m17/captures/`.
+These are current-export comparisons with an unchanged production profile, not a claimed map-specific rendering speedup.
+The default viewer baseline reports GPU opaque/fog/prepass costs 2.79/1.74/0.40 ms, while the wider start-3 baseline reports approximately 2.70/1.35/0.31 ms.
+The heavier open-valley start-1 view reports approximately 5.04/1.46/0.61 ms; it supplies the heavy-open before/after perf pair, with start 3 retained as an indoor control.
+Active compilers and host scheduling affect the much larger wall times, so exact rendered parity and steady pacing remain unverified.
+
+| Valley view/state | Before median / p99 ms | After median / p99 ms | Ready samples before / after |
+| --- | --- | --- | --- |
+| morning, start 0 | 63.144 / 121.793 | 96.700 / 277.270 | 85 / 50 |
+| afternoon, start 0 | 58.247 / 149.565 | 31.828 / 164.261 | 74 / 122 |
+| evening, start 0 | 59.681 / 206.493 | 16.974 / 96.047 | 71 / 213 |
+| night, start 0 | 107.482 / 264.849 | 71.794 / 209.677 | 52 / 63 |
+| dawn, start 0 | 56.401 / 317.134 | 16.760 / 57.941 | 89 / 276 |
+| morning, heavy open start 1 | 82.958 / 250.793 | 16.704 / 19.904 | 61 / 320 |
+| morning, indoor start 3 | 57.155 / 121.683 | 16.605 / 26.242 | 86 / 320 |
+
+Runs select AutoNoVsync and continuous updates, but the later 16.7 ms plateau still prevents treating their wall medians as demonstrated uncapped throughput.
+Heavy start-1 after diagnostics show opaque/fog/prepass 4.60/1.54/0.47 ms; the default viewer after diagnostics show 3.70/1.14/0.35 ms.
+A per-process DX12 control fails to warm the default view's pipelines within the 60-second run limit, and neither DX12 run has ready samples in the prescribed tick window, so those controls are excluded from the performance table.
 
 ## Regions and environment maps
 
@@ -109,15 +192,15 @@ These are short VSync-capped observations on the shared GPU, with concurrent CPU
 
 | Capture | Median frame ms | Ready-pipeline samples | Visual review |
 | --- | --- | --- | --- |
-| m10-default.png | 16.668 | 360 | Memory sky is selected, but grey/overbright terrain and broken foliage/material layers still look wrong |
+| m10-default.png | 16.668 | 360 | Earlier VSync-capped review; superseded by the post-material-port Hirata audit below |
 | m11_00-default.png | 16.504 | 48 | Dim temple interior with morning light outside; no obvious selection mismatch |
 | m11_01-default.png | 16.582 | 120 | Morning exterior light reaches the start; pale bright snow and layered materials need rendering review |
 | m11_02-default.png | 16.600 | 94 | Dark prologue passage; no obvious selection mismatch |
-| m13-default.png | 16.608 | 120 | Dark cave interior; no obvious selection mismatch |
+| m13-default.png | 16.608 | 120 | Earlier VSync-capped review; superseded by the uncapped m13 audit below |
 | m15-default.png | 16.732 | 54 | Dim rocky passage; no obvious selection mismatch |
 | m17-default.png | 17.491 | 78 | Morning valley; conspicuous pale terrain/material coverage remains |
 | m20-default.png | 16.491 | 120 | Warm entrance interior; no obvious selection mismatch |
-| m25-default.png | 20.522 | 81 | Authored palace sky is selected; bright blue/green night scene still needs tone/probe calibration |
+| m25-default.png | 20.522 | 81 | Historical VSync-capped review; fixed palace selection confirmed and uncapped follow-up recorded in the Fountainhead notes above |
 | castle-top-morning.png | 16.582 | 359 | Rooftop and morning shadow are visible; flat pale fog obscures distant scenery |
 | castle-top-evening.png | 16.728 | 360 | Evening shadow and sky differ from morning; flat brown fog obscures distant scenery |
 
@@ -127,6 +210,272 @@ The specific cause of their brightness/fog mismatch is not established by these 
 Valley and castle snow/foliage problems are visible material issues rather than evidence of a wrong story flag.
 The remaining hard provenance gaps are the 09 reservoir family pairing, unavailable event sky exports, nonzero FogParam/LightScattering/EnvMap bank mappings, and an exact first-visit order for optional areas.
 Those gaps are explicit rather than covered by invented tuning.
+
+### m15_00 review, 2026-10-13
+
+Common event 100's Depths branch uses sky group 8907015 (model m900015) in every selected clock state.
+Morning, afternoon, evening and night select environments 1, 2, 3 and 4 at 6, 12, 18 and 22 h respectively.
+World dawn takes the branch's morning fallback, environment 1 at 6 h, rather than the generic environment 5 at 2 h.
+All use sub-ID 0 and m15_00_0000; the other numbered families are not selected merely because they exist.
+Event 11505290 requests SetLighting(2) after action-button interaction or completion flag 51500050, and does not change the sub-ID or sky.
+The ghost Monk's mibu-bridge ArenaSpec has no mandatory earlier time boss and keeps its morning starting state.
+The m15-only installed-data regression guards this selection, the four native collision tuples and the m15 ArenaSpec hours, and logs raw GPARAM values alongside LightSet and GameFog conversions.
+
+The default passage, watermill approach and ghost Monk approach resolve to light set 100, with independent fog/scattering/environment IDs zero.
+A scripted native village walk near (246.6, -429.5, 1116.4) crosses light sets 100 and 110 and returns to 100, while fog/scattering/environment remain zero; entry and exit screenshots and the selected-row log are retained as boundary captures.
+At morning the renderer logs sun and fill at 900 lux, linear light RGB (0.221453, 0.301423, 0.393695), hemisphere mean (0.061111, 0.076336, 0.093253), and environment intensity 1432.3944 cd/m2.
+The converted hemisphere is not the final active ambient: after camera probe 95 loads, lighting.rs:786-789 sets GlobalAmbientLight.brightness to zero and map_material.rs:638 disables the hemisphere term.
+With zero installed GIIV records, the scene then uses that camera cubemap without the missing native per-receiver coefficient lighting; load the original coefficients before calibrating brightness or probe blending.
+Native post settings log exposure 1.3, uploaded multiplier 2.4622889, middle gray -6, adaptation limits -0.3/0.01 and auto exposure disabled.
+The morning ID-100 raw sun diffuse colour is (0.470588, 0.549020, 0.627451, 0.2), while its separate SpecColor0 has the same RGB and intensity 0.3.
+LightSet::from_gparam at lighting.rs:884-885 reads only DiffColor0/1, and the Bevy direct-light path consequently does not preserve the separate authored specular-light control.
+A shared fidelity fix should recover and carry the native specular-light colours/intensities independently, rather than compensating with a per-map material or exposure gain; its visual impact still needs a matched original-game control.
+The selected fog upload is None despite authored fixed density 0.007, height density scale 0.007, distribution 0.01, height offset -400 and far depth 650 at ID 100.
+The exact shared cause is fog.rs:180-181 asking for "Enable", combined with crates/formats/src/gparam.rs:115 accepting any parameter name containing that substring.
+This selects VolumetricFog EnableAnalyticalFog = 0 and incorrectly disables the entire fog pass instead of only analytical continuation.
+A shared fix should use an exact canonical global-enable name when one exists, otherwise leave volumetric fog enabled, and route EnableAnalyticalFog only to the continuation control.
+The native m15 regression should then expect a nonempty fog upload with fixed density 0.007 and height density 0.0035 at game scale 1; no map-specific fog gain is justified.
+The pale water still has a separate shared material-rendering gap, but absent fog is now a measured rendering error rather than an authored disable.
+The map has 50 sized native probe regions and 50 complete GILM pairs in each selected environment, but no exported GIIV planes; the renderer consequently logs zero complete coefficient volumes.
+The read-only raw TPF census confirms 200 GIIV planes and 50 GILM cubes in each of the four native environment containers, so this is an incomplete local export rather than an authored absence of GIIV.
+The exact data-loading gap is lighting.rs:533-552, which requires four env/giiv<probe>_<variant>_<axis>.rgba8 planes before installing a volume.
+The incomplete-volume guard at lighting.rs:580-581 discards all 50 records, leaving map_material.wgsl's gi_lighting loop without native spatial irradiance or per-receiver reflection-region records.
+The existing exporter writes those planes in crates/extract/src/maps/env.rs:302-310; regenerate the m15 environment export in a separately authorized cache-writing session, then compare the same views before changing map brightness.
+Alternatively, a shared loader can decode the selected raw environment TPF's BC7 coefficient planes into memory using the existing export_volume conversion in crates/extract/src/maps/env.rs:18-40, without writing cache files.
+The missing planes establish absent native spatial irradiance, but do not alone prove the entire brightness difference against the original game.
+Probe blending, tone curve and exposure calibration remain the collaborator's work; no map-specific compensation was invented.
+The pale water and incomplete layered-material rendering remain shared rendering follow-ups described in RUSTSEKIRO-VISUALS.md, without a demonstrated map-specific replacement to borrow.
+
+Review artifacts and uncapped perf logs live under target/alt-m15/captures/.
+The before executable is a copied, hash-recorded prior release from target/alt-lf; after captures use the isolated target/alt-m15 release, so concurrent shared renderer changes may affect comparison.
+An intermediate isolated build showed only sky and HUD despite roughly 12,800 mesh entities and 88 prepared village draw batches, with an opaque GPU pass of approximately 0.002 ms.
+A newer relinked shared-source snapshot restored terrain and actors without an m15 production change.
+Those broken captures, logs and executable are preserved under captures/broken-after and excluded from the accepted frame-time CSV; accepted after captures use the hash-recorded restored snapshot.
+The host had roughly 30 concurrent rustc processes on an eight-core CPU during the before runs, and recorded wall times cannot establish isolated steady frame pacing.
+One before village run saved its screenshot and reached step 600 before Bevy's system_information_diagnostics_plugin.rs:217 panicked on a closed diagnostics channel during shutdown.
+A shared dependency fix should tolerate a failed send during application exit; m15 does not own that worker.
+
+All accepted runs request AutoNoVsync through --uncapped and continuous Winit updates, with pipeline-ready rows at simulation ticks 360-600.
+Before and after values below are median / p99 wall milliseconds; raw sample counts and CSV paths are in captures/frame-times.csv.
+They compare different shared-source snapshots and different host contention, so the improvement is not an m15 lighting or culling optimization.
+
+| m15 state / view | Before median / p99 ms | After median / p99 ms |
+| --- | --- | --- |
+| morning / default | 234.397 / 2388.324 | 16.229 / 1026.608 |
+| afternoon / default | 238.064 / 3526.051 | 16.473 / 656.379 |
+| evening / default | 167.133 / 1598.135 | 16.404 / 688.066 |
+| night / default | 258.982 / 1612.666 | 16.777 / 1073.596 |
+| dawn / default | 199.213 / 1401.975 | 16.313 / 786.834 |
+| morning / village | 128.434 / 1863.534 | 16.645 / 613.017 |
+| afternoon / village | 120.255 / 1851.422 | 16.569 / 508.588 |
+| evening / village | 108.024 / 1781.755 | 16.597 / 570.302 |
+| night / village | 154.831 / 1518.190 | 17.314 / 760.845 |
+| dawn / village | 323.623 / 3836.203 | 16.552 / 571.434 |
+| mibu-bridge ArenaSpec | 180.666 / 2152.951 | 16.672 / 518.072 |
+
+The after village GPU samples put the opaque pass around 1.8-1.9 ms, early prepass around 1.0 ms and native post around 0.08 ms.
+Cloth simulation samples are usually 1.2-1.7 ms, with one default-view sample at 4.124 ms; raw CPU-system and GPU-pass samples are in profile-costs.csv.
+Despite the uncapped request, after medians still cluster near 16.6 ms; a representative row has main CPU 4.911 ms, fixed CPU 1.226 ms and render-schedule CPU 16.176 ms, including an 11.4 ms render-stage interval.
+Effective surface present mode is not logged, and the 16.6 ms plateau plus large p99 spikes prevent a claim of steady uncapped frame time.
+A shared capture fix should log the effective present mode/backend and offer an offscreen timestamp control to exclude presentation waits; add_render_probe is also registered by both --profile-systems and PLAY_LOG_PERF, producing duplicate render-set stamps in these CSVs.
+No map-specific culling cost was demonstrated by these captures.
+The final after boundary run repeatedly respawns instead of completing the before walk, so live after-state region movement remains unverified; its command, spawn, step log and screenshots are retained rather than presented as a passing walk.
+The native m15 data test passes, the collision-system regression passes, and the final combined lighting filter passes 11 tests with two slow tests ignored.
+The separate shared selector filter passes six tests with one slow test ignored; final sekiro-game all-target Clippy with warnings denied and workspace formatting checks pass.
+Transient m25 assertion and shared compilation errors resolved in later shared edits; no other map or shared code was edited in this review.
+
+## Abandoned Dungeon audit (2026-10-13)
+
+Only `lighting/maps/m13.rs` and this map's documentation are changed by this audit.
+The profile remains unchanged because no incorrect story flag, sub-ID or sky selection has been established.
+The installed-data regression logs the native LightSet, fog and exposure rows alongside `LightSet::from_gparam`, including each collision ID and whether it actually has an authored row.
+There is no demonstrated full-map Dungeon fix to borrow in `RUSTSEKIRO-VISUALS.md:106-114`, so no old exposure offsets or guessed brightness multiplier are introduced.
+
+| Story | Flags | Hour / environment | GPARAM / sub-ID | Installed sky model | Selection result |
+| --- | --- | --- | --- | --- | --- |
+| morning | none | 6 / 1 | m13_00_0000 / 0 | m900000 | Matches common event 100 |
+| afternoon | 9800 | 12 / 2 | m13_00_0000 / 0 | m900010 | Matches common event 100 |
+| evening | 9800, 9801 | 18 / 3 | m13_00_0000 / 0 | m900020 | Matches common event 100 |
+| night | 9800, 9801, 9802 | 22 / 4 | m13_00_0000 / 0 | m900030 | Matches common event 100 |
+| dawn | 9800, 9801, 9802, 9803 | 2 / 5 | m13_00_0000 / 0 | m900050 | Matches common event 100 |
+
+The six environment variants have complete probe-0 pairs, with distinct specular DDS hashes rather than a repeated nearest-hour substitute.
+Measured RGBA16F diffuse probe-0 mean luminance is 0.001671/0.001599/0.001682/0.001646/0.001679 for morning/afternoon/evening/night/dawn, or approximately 2.29-2.41 after the renderer's 1432.3944 multiplier.
+This is a cubemap texel average, not a measurement of the final per-receiver GI contribution.
+The default start is `[369.498, -43.974, 285.327]`, on LightSet 110; start 1 provides the wider pool/cage view.
+The exported 46 collision parts comprise 40 with LightSet 110, one with 0, one with 100 and four with 130; installed fog, scattering and environment IDs are zero independently.
+The only LightSet 0 part, `h025500`, is a small elevator-area vertical wall at approximately `[319.9, -42.6, 393.6]`, comprising two triangles with no horizontal surface, rather than a broad outdoor terrain region.
+The LightSet 100/130 parts are at Y -265 through -373, hundreds of metres below the normal starts.
+An ordinary Dungeon walk must not be described as crossing a large exterior morning-light region or a registered boss arena: there is currently no m13 `ArenaSpec` in the arena catalog.
+The shared arena-selection regression remains the check that existing arenas retain their `ArenaSpec.story_time`.
+The scripted elevator-area walk moved from `[319.9, -42.1, 393.55]` to approximately `[322.83, -43, 400.05]` and retained LightSet 110 after the initial row-zero setup.
+The grounded player correctly did not select the vertical LightSet 0 wall through the floor-directed ray; the shared moving-focus regression separately exercises independent ID switching, including zero resets with draw-group culling off.
+Two nearby free-camera captures also retain LightSet 110, and the direct native MSB audit confirms that all 46 exported collision LightSet IDs agree with the installed collision parts.
+Its command, input script, two screenshots and runtime log are retained as `region-walk*`, `walk.txt`, `region-before.png` and `region-after.png` under the capture directory.
+
+At the morning start, authored row 110 has sun RGBW `[0,0,0,0]` and fill RGBW `[0.705882,0.705882,0.705882,0.05]`.
+The renderer logs zero sun and 225 lux fill, consistent with gamma-2 colour conversion and the existing 4500-unit scene scale.
+Inherited hemisphere mean is `[0.046136,0.066436,0.103806]`, delta `[0.030757,0.044291,0.069204]`, and brightness 1432.3944 before probe application.
+The native tone inputs and runtime upload agree: exposure 2.4 gives gain 5.278032, middle grey -6.8, adaptation limits -0.5/0.01, auto exposure enabled and mode 7.
+Fog upload agrees with the authored global row: density `[0.04,0.2,0.5,350]`, depths `[0.01,200,0,0]`, dark sky RGB `[0.001963,0.002586,0.002586]`, zero directional/opposite RGB and extinction `[1,1,1]`.
+The dark fog colour and zero cave sun are authored inputs, so brightening those values would change the game data.
+The no-probe diagnostic increases the same scene-region mean display-code luminance from 0.123626 to 0.228839, while disabling fog reduces it to 0.115417 and reveals the background stairs.
+These measurements use PNG RGB code values in the fixed rectangle X 200-1399, Y 150-699, avoiding the main HUD bands; they are not linear HDR luminance or native-game reference measurements.
+This attributes much of the rendered darkness to the indirect/probe path rather than to the selected hour or fog extinction alone, without establishing which indirect composite is faithful.
+The 36 exported BTL lights contribute no local-light candidates at either start: the nearest is 483.207 m from start 0 and 597.399 m from start 1, outside the shared 60 m plus authored-range activation rule.
+The logs load the bank but never activate a light at those starts.
+`extract/src/maps/lights.rs:26` exports reflected BTL positions, and `game/src/map.rs:1302,1340,1372` loads, culls and spawns them directly.
+The shared lighting/export investigation should validate the BTL coordinate frame and authored placement against MSB/native rendering, and apply a recovered placement transform if one is required; this evidence alone does not justify an invented map offset or a claim that a light must cover these starts.
+
+Shared follow-ups, deliberately left unedited:
+
+- `lighting.rs:786-788`, `apply_probes`, sets global ambient brightness to zero when a camera probe is ready; `map_material.rs:466-485`, `update_hemisphere`, then sets the hemisphere enable bit to zero, and `map_material.wgsl:555-567` skips the authored hemisphere contribution.
+  Runtime evidence is the nonzero LightSet 110 hemisphere followed by `environment probe Some(0)` at the same start.
+  This proves the renderer suppresses those inputs, but does not prove that adding them over native GI would match the original compositing rule.
+  Have the probe-blending collaborator validate the native GI/hemisphere composition and replace the global camera-ready gate with the recovered per-receiver rule; do not simply add a global ambient boost.
+- `formats/src/gparam.rs:69-72` silently inherits row zero for collision LightSet 130, because the selected file has LightSet rows 0, 100, 110 and 120, but no 130.
+  Preserve the native collision ID and report the fallback explicitly in the shared resolver; trace the native missing-bank behavior before introducing any mapping to 120.
+  This does not explain the default-start darkness, since that start selects the authored 110 row.
+- `play.rs:666` invokes `perf_log::register!`, whose `perf_log.rs:327-329` installs a render probe; `map.rs:549-557` installs another probe for `--profile-systems`.
+  The captures therefore show 15 render-set timing intervals for a seven-stage stamp sequence.
+  Make probe installation idempotent and reuse one resource before relying on these CPU render-set labels; wall-frame CSV timing and separate GPU timestamps remain usable.
+- `map.rs:554` enables Bevy `SystemInformationDiagnosticsPlugin` during profiling.
+  Several completed captures panic on shutdown at Bevy 0.19.1 `system_information_diagnostics_plugin.rs:217` with `SendError` after the screenshot is saved.
+  Avoid installing this asynchronous system-information sampler for short render profiling, or adopt its upstream shutdown fix when available.
+
+Exact original-game image equivalence remains unverified because no matched original-game captures were available for these five views.
+Tone curve, auto exposure and probe-blending calibration remain with the other collaborator's project.
+No rendering material, transparency, depth, motion-vector or MSAA behavior is changed here.
+
+Before/after PNGs, commands, native numeric dumps and performance CSVs are under `target/alt-m13/captures/`.
+The five default-start pairs are named `before-<story>-start0.png` and `after-<story>-start0.png`; the wider pool-view pair is `before-morning-start1.png` and `after-morning-start1.png`.
+Both passes use the same immutable review executable, whose SHA-256 is recorded in `baseline-binary.json`, because this audit changes tests and documentation rather than runtime rendering.
+These comparisons therefore demonstrate the remaining problem, not a claimed rendering improvement from a map-specific patch.
+The reusable capture command includes `--uncapped`, which sets `AutoNoVsync` in the map loader, and renders 900 simulation ticks with its screenshot requested at tick 840.
+`PLAY_PERF_DIR` points inside the capture directory for every run.
+The first short attempts with pending pipelines are not used in the following table.
+The statistics use the latest CSV for each correctly named run, simulation ticks 360-840 and `x_pipelines_waiting == 0`; p99 is the empirical nearest-rank quantile, with small samples disclosed.
+
+| View | Before median / p99 ms | After median / p99 ms | Accepted frame rows before / after |
+| --- | --- | --- | --- |
+| morning, start 0 | 209.921 / 479.318 | 156.408 / 305.637 | 18 / 48 |
+| afternoon, start 0 | 260.090 / 525.061 | 209.397 / 333.012 | 21 / 20 |
+| evening, start 0 | 253.491 / 614.788 | 174.417 / 395.433 | 21 / 33 |
+| night, start 0 | 174.198 / 330.290 | 152.103 / 537.190 | 31 / 47 |
+| dawn, start 0 | 179.318 / 412.803 | 157.163 / 380.046 | 24 / 47 |
+| morning, start 1, wider pool/cage view | 107.144 / 209.299 | 104.724 / 232.782 | 48 / 59 |
+
+These wall times are not steady, and their difference must not be attributed to the unchanged map profile.
+Concurrent compilation counted 46 Cargo/rustc processes early in the session and 35 later, with other map runs also using the shared GPU.
+Warm GPU timestamp medians for the final three diagnostic samples were approximately 1.58/1.63 ms for the start-0 opaque pass before/after and 0.692/0.689 ms for fog.
+At the wider pool view they were approximately 1.58/1.33 ms opaque and 0.891/0.885 ms fog.
+Other story captures showed contention-dependent opaque costs up to 6.63 ms and fog up to 1.47 ms.
+The last CPU profile batch's largest named system was cloth simulation, about 1.41 ms at the default start and 6.86/4.09 ms before/after at the pool; `pick_groups` was at most about 0.19 ms in those batches.
+Cloth, simulation scheduling and the duplicate shared profiler are shared costs; no map-specific culling defect was established by these runs.
+An isolated uncapped capture after compilation and the shared profiler fix is still required before claiming a steady frame time or diagnosing a map rendering regression.
+Earlier checks caught shared `map_material.rs:356` cloning a `Copy` attribute, a formatting difference in shared `map.rs:1700`, and an unrelated m25 native-flag assertion.
+Their owners resolved those issues while this audit was running; this map agent did not edit those files.
+Final game-package/all-target Clippy with warnings denied and `cargo fmt --all --check` both pass, using target `alt-m13` and four Cargo jobs.
+Only `lighting/maps/m13.rs` was formatted by this agent.
+The installed m13 regression passes, the moving-focus/all-four-IDs regression passes, and the complete lighting-selection filter passes 11 tests with two slow tests ignored.
+The m13 event audit uses the full installed filename `m13_00_00_00.emevd` and finds no lighting, environment, sub-ID or map-part overrides to add to this map's five clock presets.
+
+The first new-build smoke capture is rejected: it shows only sky/UI while 42 render pipelines remain pending, so it is not a lighting or performance comparison.
+After the ongoing shared changes, `current-validated-morning-start0.png` and `current-validated-morning-start1.png` render complete geometry with 147 ready pipelines and zero pending pipelines.
+Their additional uncapped measurements use the same tick range and pipeline-ready filter as the comparison table:
+
+| Latest validated build view | Median / p99 ms | Accepted rows | GPU opaque / fog ms |
+| --- | --- | --- | --- |
+| morning, start 0 | 24.827 / 40.306 | 314 | 0.606 / 0.973 |
+| morning, start 1 | 29.493 / 40.454 | 279 | 0.660 / 1.480 |
+
+These later results include other agents' shared changes and different machine contention, so their improvement is not credited to an unchanged m13 runtime profile.
+Median main/fixed CPU-frame buckets are 23.944/12.226 ms at start 0 and 28.662/14.968 ms at start 1, while the largest last-batch named system is cloth simulation at about 1.3 ms.
+The gap requires shared simulation/camera/scheduling profiling; the duplicated render-stage intervals must be repaired before assigning that unmeasured CPU time to a render stage.
+The native indirect-light composition and matched original-game comparison remain unresolved, and the measured median/p99 gap still does not establish a steady frame time.
+
+## Reservoir audit (m11_02, 2026-10-13)
+
+The map-local installed-data regression checks all nine presets, the four native collision configurations, and the Reservoir boss arenas without changing their `ArenaSpec` hours or flags.
+No map-specific brightness multiplier, sky substitution, material override or static culling crop was added.
+The existing selection metadata agrees with the event instructions and catalog at the level established below; exact rendered equivalence remains blocked by shared renderer issues and incomplete family provenance.
+
+| Reservoir state | Hour / environment | GPARAM / sub-ID | Event-selected sky | Selection conclusion |
+| --- | --- | --- | --- | --- |
+| prologue | 0 / 0 | m11_02_0000 / 0 | m900040 | Matches common event 100 with 8306 and retained 9810 |
+| morning | 6 / 1 | m11_02_0000 / 0 | m900000 | Matches common event 100 |
+| afternoon | 12 / 2 | m11_02_0000 / 0 | m900010 | Matches common event 100 |
+| evening | 18 / 3 | m11_02_0000 / 0 | m900020 | Matches common event 100 |
+| night | 22 / 4 | m11_02_0000 / 0 | m900030 | Matches common event 100 |
+| dawn | 2 / 5 | m11_02_0000 / 0 | m900050 | Matches common event 100 |
+| invasion | 22 / 4 | m11_02_0020 / 20 | m900095 | Matches common fire branch with 8302 |
+| sword-saint-defeated | 22 / 4 | m11_02_0920 / 20 | m900095 | Event 11125860 instruction 19 requests 20 over five seconds; family 09 companion remains inferred |
+| sword-saint-storm | 22 / 4 | m11_02_0930 / 30 | m900095 | Event 11125872 instruction 12 requests 30 over five seconds; 0930 is the sole installed Reservoir sub-ID-30 file |
+
+The catalog also contains 0900 and other numbered families, and the area-sub-ID instruction does not encode a family.
+The paired 0920 choice is therefore retained as an explicit inference rather than claimed as recovered engine behavior.
+The native collision tuples are `[0,0,0,0]`, `[100,0,0,0]`, `[110,0,0,0]`, and `[120,0,0,0]`, with respectively 10, 45, 16 and one collision parts in the layout.
+These zero collision bank IDs do not establish the meaning of the distinct nonzero GPARAM `VolumetricFog DirLight LightBankId` references.
+That reference is 111020000 in the selected Reservoir files, including both 09 boss files.
+The engine `(LightBankId, LightId)` resolver remains unrecovered as recorded in `SHADER-INPUTS.md`; neither the decimal encoding nor a substitute file lookup is asserted here.
+
+At default start 0, row 110 has authored sun RGBA `(0.60062,0.675698,0.750775,2)` and fill RGBA `(0.74,0.86381,1,0.25)` with zero up/down hemisphere values.
+`lighting.rs:858-915,958-993` converts these to linear sun RGB `(0.360744,0.456568,0.563663)` at 9000 lux and fill RGB `(0.5476,0.746168,1)` at 1125 lux, and the runtime log confirms those inputs.
+Prologue fog has GameScale 12, fixed density 0, height distribution 0.3, height offset -100, and height density scale 0.075; its upload is `(0,0.025,0.003125,100)` with near/far depths 0.12/2400 metres.
+Exposure 0 becomes multiplier 1, auto exposure is enabled, middle gray is -3, and adaptation limits are -0.4/8, matching the raw selected values and logged `GamePost` upload.
+The final comparison in `captures/input-comparison.txt` finds an exact match between the converted row-110 `LightSet` and the runtime light input for all nine states.
+Those uploads establish input agreement, not the correctness of tone-curve or auto-exposure calibration, which belongs to the other collaborator.
+
+The shared probe fallback at `lighting.rs:746-763` chooses the largest available box before calling the position-dependent selector.
+The start is inside boxes 0, 1, 10 and 11, with volumes 125000000000, 11050000, 189182 and 30618 cubic metres respectively, but every captured story state selects probe 0.
+The exported Reservoir has zero GIIV coefficient files, so no spatial coefficient record corrects this global fallback.
+The read-only native-container census finds 100 textures, including 80 GIIV axis textures (20 complete volumes), in each of the six installed Reservoir environment TPFs.
+This establishes a missing derived-data export rather than an absence of authored spatial lighting in the game.
+The current exporter already discovers these containers and writes the coefficient files at `crates/extract/src/maps/env.rs:278-311`; the required repair is to regenerate the Reservoir environment export and verify all 20 volumes for each environment.
+That repair cannot be performed in this task because writing under `cache/` is explicitly forbidden.
+Prologue diffuse-cube mean luminance is 0.04732070 for probe 0 and 0.03480409 for probe 10; global-probe selection is not evidence that increasing ambient intensity would restore fidelity.
+Proposed shared fix: when complete spatial GI records are unavailable, use containing local boxes and the existing position-dependent selection rather than unconditionally using the largest box; preserve the current spatial GI path where complete records exist.
+Probe blending and its calibration remain with the collaborator handling that system.
+
+At `fog.rs:284-291,216-217`, fog direction is the current selected file/row sun, and `LightBankId` is ignored.
+For example, base night row 0 has direction `(0.433013,0.500000,0.750000)`, whereas both selected 09 boss files yield `(0.972957,0.211886,-0.091971)` despite retaining the same authored fog bank reference.
+Proposed shared fix: recover and implement the bank/light resolver with integer identifiers, then supply its resolved direction to the existing fog formula instead of substituting the active scene sun.
+The bright pale ground in the heavy storm view also reaches the shared approximate layer shader at `map_material.wgsl:242-247,284-293`, which uses one height channel and a hard-coded normal-facing snow weight rather than recovered material-family inputs.
+The capture demonstrates a material fidelity gap, but does not isolate its contribution from exposure; the proposed follow-up is the native per-family mask/UV/weight path described in `RUSTSEKIRO-VISUALS.md`, not a Reservoir tint adjustment.
+That audit has no demonstrated full-map Reservoir darkness fix to copy, so no new RustSekiro code or credit entry was added.
+
+Captures, commands, raw parameter/test logs, profiler output and CSVs are under `target/alt-m11_02/captures/` and its parent directory.
+The before executable was copied from the previously built baseline into this isolated target; the after executable was rebuilt from the shared working tree, so unrelated concurrent renderer changes prevent attributing visual or timing differences to this map's test-only source change.
+The initial sky-only morning image was rejected and replaced with a longer-warmed capture.
+All captures use `--uncapped`, which selects `AutoNoVsync` and continuous Winit updates at `map.rs:563-570`.
+Timing samples exclude pending pipelines and screenshot readback, using the 150-tick interval ending 30 ticks before the recorded screenshot command.
+Small sample counts and 100% host CPU usage make these contention observations, not evidence of steady frame time.
+With `PLAY_LOG_PERF=1` and `--profile-systems` together, `map.rs:556-558` and `perf_log.rs:326-329` install render probes twice, so the duplicated stage stamps must not be treated as an unambiguous per-stage GPU breakdown.
+Proposed shared instrumentation fix: install one render probe and reuse it for both consumers.
+Per-pass GPU diagnostics remain separately identified by their named `elapsed_gpu` paths.
+The profiled night run also logs a shutdown-only worker panic at Bevy 0.19.1 `system_information_diagnostics_plugin.rs:217:56`, where a background send unwraps `SendError` after the app receiver is gone.
+The screenshot and measured interval precede this panic; a shared follow-up should remove the unnecessary system-information plugin from short capture runs or make the worker tolerate receiver shutdown.
+
+| Reservoir uncapped view | Before median / p99 ms | After median / p99 ms | Ready-pipeline samples before / after |
+| --- | --- | --- | --- |
+| Default prologue start 0 | 299.567 / 397.812 | 175.889 / 305.877 | 10 / 14 |
+| Heavy storm exterior, spawn 396,-44.3,183,90,0 | 173.143 / 321.931 | 316.523 / 694.636 | 15 / 12 |
+
+The default after-run named GPU measurements are approximately 1.283 ms opaque, 0.847 ms fog, and 0.106 ms bin unpacking; the heavy after-run opaque measurement is approximately 3.733 ms and its authored storm fog is disabled.
+Cloth CPU simulation varies from 1.873 ms to 13.156 ms mean in consecutive heavy-view reporting intervals, with a 44.616 ms maximum under contention.
+No map-specific culling change is justified by those measurements, and no steady-frame-time claim is made.
+The source change adds verification only; the apparent before/after timing differences are not an optimization result.
+All nine before/after state PNG pairs, both heavy-view PNGs, and their contact sheets are present in the capture directory.
+The outdoor walking replays produced movement and entry/out/return captures but stayed in light row 100 after initial selection, so a real indoor/outdoor walking transition is not established by these replays.
+The additional well replay moved from `(304.79,-53.85,305.30)` to `(289.90,-49.82,275.80)` with jumps and remained in row 110; its final capture shows the route stopped against a wall.
+The installed configurations and shared collision-system regression verify independent selection and reset behavior, but they do not substitute for that remaining E2E proof.
+Final validation passes the two Reservoir tests including the ignored native-container census, six shared selector tests with one slow census ignored, and the independent collision-selection regression.
+The earlier broad selector filter also ran other agents' map tests and recorded failures in m13, m15 and m25; those files were left untouched.
+The final broad selector filter records nine passes, two failures and three ignored tests: m13 calls the selector with short map ID `m13_00`, producing a missing `raw/event/m13_00.emevd` error at `lighting/maps/m13.rs:44`, and m25's native Dragon flag assertion fails at `lighting/maps/m25.rs:37`.
+Those are reported to their owners through this audit rather than changed in the Reservoir task.
+An earlier game/all-target Clippy check passed, but the final rerun after concurrent shared edits fails at `map_material.rs:356:42` with `clone_on_copy` on `layout.0.contains(a.clone())`; the proposed shared fix is `layout.0.contains(a)` because `MeshVertexAttribute` is `Copy`.
+The shared file was left untouched as required.
+`cargo fmt --all --check` passes, and all commands use `CARGO_TARGET_DIR=target/alt-m11_02` with four jobs for builds/tests/Clippy.
 
 ## Checks
 
@@ -142,3 +491,386 @@ The GPARAM format filter also passes its two parser tests.
 The final map, lighting, sky, arena-effect, castle-restart, story, flag-range and arena filters all pass against the shared working tree.
 Workspace/all-target Clippy with warnings denied and `cargo fmt --all --check` both pass after the other agent resolved their temporary blockers.
 The local final outcomes are retained in `checks-final-summary.txt`, `clippy-final.txt` and `fmt-final.txt`.
+
+## m11_00 audit (2026-10-14)
+
+The installed-data regression in `lighting/maps/m11_00.rs` verifies all seven selectable states, four collision tuples and both boss defaults.
+The existing profile needed no production flag, file or brightness change.
+Family 00 is present for every requested sub-ID and contains the collision banks; selection follows the shared family-00 resolver, without a new independent recovery of the executable's family-selection mechanism.
+The complete local event/GPARAM/MSB evidence is under `target/alt-m11_00/captures/`, including `raw-gparam.json`, `native-msb.json`, `event-instructions.json` and `selection-tests.txt`.
+
+| State | Hour / environment | File / sub-ID | Native dome | Selection result |
+| --- | --- | --- | --- | --- |
+| morning | 6 / 1 | m11_00_0000 / 0 | m900000 | Matches installed event 100 |
+| afternoon | 12 / 2 | m11_00_0000 / 0 | m900010 | Matches installed event 100 |
+| evening | 18 / 3 | m11_00_0000 / 0 | m900020 | Matches installed event 100 |
+| night | 22 / 4 | m11_00_0000 / 0 | m900030 | Matches installed event 100 |
+| dawn | 2 / 5 | m11_00_0000 / 0 | m900050 | Matches installed event 100 |
+| invasion | 22 / 4 | m11_00_0020 / 20 | m900095 | Matches event 100's 8302 branch; fire dome is exported |
+| tomoe | 18 / 1 | m11_00_0030 / 30 | m900080 | Matches castle event 11115820 instructions 24, 26 and 28; SetLighting changes the clock without changing the environment |
+
+Gyoubu retains ArenaSpec's morning, environment 1 and sub-ID 0; Demon retains night, environment 4, flag 8302 and sub-ID 20.
+Default start 0 stands on h022400 / LightSet 110, and gate start 8 stands on h017700 / LightSet 100.
+The successful `doorway-center` gameplay replay starts at player start 1, walks through the entrance and returns outside, logging 100 -> 110 -> 100.
+Native collision fog, scattering and environment IDs are all zero; the independent-field collision regression also passes with culling disabled.
+
+The morning bank-110 upload agrees with the GPARAM: sun RGB (1, .745098, .627451), W 2 becomes linear (1, .555171, .393695) at 9000 lux; fill W .5 becomes 2250 lux.
+The hemisphere mean is (.046136, .066436, .103806), with the renderer's common 1432.3944-unit ambient bridge.
+Fog uploads density .00080000004 and sky (.157281, .246800, .409826); post uploads exposure 2^1.4 = 2.639016, middle gray -6.8 and adaptation limits -.5 / 2.
+Raw and converted values for every bank and story state are retained in the regression output and capture logs.
+The settled temple remains dim; matching selected inputs does not establish visual equivalence to the original game.
+
+Shared renderer handoff:
+
+- `lighting.rs:880` consumes two DiffColor lights, while `SHADER-INPUTS.md:229-242` records four native lights, separate diffuse/specular colours, local enable flags, sharpness and per-light SSAO weights.
+  Morning bank 110 enables LocalLight1 with RGB (.294118, .392157, .490196), W .7, but that term is not uploaded.
+  Sun specular W is 1.5 versus diffuse W 2; the single Bevy light colour/intensity collapses that distinction.
+  Implement the recovered four-light record and independent diffuse/specular terms in the shared renderer, retaining explicit limits for unrecovered angle defaults and camera-follow behavior rather than compensating with map brightness.
+- `sky.rs:349` overwrites a group's dome with its later cloud model; group 8907080 maps first to m900080 and later to m900180, and group 8907100 maps first to m900095 and later to m900200.
+  The cloud names are absent from the exported dome library, so `sky.rs:465` can discard runtime event selection and fall back to the ordinary clock sky.
+  Resolve each group to its exported dome as the shared selector does, preserving its cloud association separately.
+  Initial presets are protected by their explicit initial sky; runtime transitions still need the shared fix.
+- `play.rs:1100` waits for asset readiness and scene settling, and `play.rs:1738` captures by simulation step without waiting for pipeline readiness.
+  The discarded five-second image showed only clear colour/UI; its log still had pending pipelines, and the first performance run ended with 83 pipelines pending.
+  Add pipeline-ready capture/performance gating in the shared harness; do not report cold blank frames as lighting or steady rendering results.
+- `map.rs:567` requests AutoNoVsync, which Bevy can fall back to FIFO when unsupported.
+  Default, gate and the 800x600 control with shadows/probes/GI/fog/bloom disabled all remained near 16.7 ms.
+  Log the actual configured swapchain mode and supported modes, and provide an explicit supported Immediate mode before initial surface configuration; investigate driver/presentation limiting before attributing the remaining wait to map geometry.
+
+Disabling auto exposure changes the uploaded enable bit from 1 to 0 and lowers the sampled display luma from 57.73 to 55.75 rather than curing the dark room.
+Disabling probes lowers it to 52.17, and disabling GIIV lowers it to 56.64.
+These measurements use 9065 fixed image samples in the lower scene area, excluding the top HUD; they are display-space diagnostics, not recovered scene radiance.
+Tone curve, auto exposure, probe blending and the inferred scene-unit bridge remain with the collaborator's renderer work.
+No exposure multiplier or unconditional hemisphere restoration was applied.
+RustSekiro's documented gate shadow/LOD improvements are useful shared rendering/extraction leads, but its notes contain no verified full-map Outskirts fix to copy into this profile.
+
+### m10_00 Hirata audit, 2026-10-14
+
+Both memory profiles select common event 100's environment 0, sky group 8907060/model m900060 and sub-ID 0/file m10_00_0000.
+The default omits father-memory flag 8304 and is the first Hirata memory, independently of the world clock.
+All entries in the selected native file have hour 0 and IDs 0, 100, 110 or 120; the other numbered families are not selected merely because they exist.
+Map event 11005610's interaction/cinematic clock changes and Butterfly event 11005640 do not supply another environment or sub-ID.
+The m10-only regression checks both profiles, the native collision tuples and the Hirata arenas' retained ArenaSpec hours, prerequisite flags and BossEvents flags.
+The veranda walk near (55.6, -765.15, 455.3) changes LightSet 110 to outdoor 100; native fog/scattering/environment banks remain independently zero.
+Both after-profile exits pass, with a brief authored row-0 selection during the edge drop before returning to 100, retained in the logs.
+The attempted start-6 hall walks hit walls and are retained as diagnostics, and the original walking veranda return reaches lower ground rather than proving re-entry.
+The final reentry.txt controls walk off, settle and jump back onto the veranda in both profiles, restoring LightSet 110 at (53.89, -765.20, 451.60), with landed endpoint PNGs and the full 110-to-100-to-110 log sequence retained.
+The transient authored row-0 samples during drop/jump are documented; this verifies both lighting endpoints without claiming the ledge is a walking doorway.
+
+At the default start, raw sun and fill RGB/W (0.588235, 0.686275, 0.823529, 0.4) become linear RGB (0.346020, 0.470973, 0.678200) at 1800 lux each.
+Indoor row 110 retains the sun but changes fill to linear RGB (0.153787, 0.186083, 0.221453) at 900 lux; row 120 uses 1350 lux and row 0 disables fill.
+The native hemisphere mean converts to (0.059054, 0.092272, 0.144175), before the shared probe path disables global ambient and the hemisphere term.
+The re-export supplies 142 complete GIIV volumes for variant 0 in a 100 MiB atlas, and the memory sky is present.
+Exposure 1.2 uploads as gain 2.297397, middle gray -6, adaptation limits -0.2/2 and LUT 20; the absent queried enable field makes auto exposure false.
+Recovering the native exposure enable/default, tone curve and probe composition remains the RustSekiro collaborator's work.
+The pale cyan wet start and very dark hall remain visible, but a per-map warming or exposure multiplier would not follow the measured game data.
+
+The confirmed shared fog error is fog.rs:180-181 querying "Enable" through formats/src/gparam.rs:115's substring matcher, which resolves to EnableAnalyticalFog=0 and disables the entire pass.
+Native fixed density 0.0032, height distribution 0.13, height offset -840, height density scale 0.015 and far depth 650 are present despite the logged fog upload being None.
+Use an exact global-enable field when present, otherwise retain volumetric fog, and use EnableAnalyticalFog solely for continuation; the existing conversion should produce density (0.0032, 0.13, 0.0075, 840) and far depth 650.
+A second shared omission is lighting.rs:881-922 retaining only sun/fill while native LightSet 100 enables LocalLight1 diffuse/specular RGB (0.274510, 0.392157, 0.490196), W 1, and LocalLight2 specular W 0.5, both with sharpness 0.15.
+Carry the authored local directional fields, enable flags and separate diffuse/specular behavior through shared rendering instead of adding an invented map fill; these differ from the existing BTL point lights.
+
+The current GLBs have 614 models, 2473 materials, 746 material extras and no missing declared image paths, but 23 textureless materials include m209000's M[m10_00]_River_Foam1.
+The shared exporter fallback at extract/src/maps/pieces.rs:377,396-397 makes that effect grey (0.45, 0.43, 0.40) and roughness 0.85; recover its native transparent effect family instead of correcting it through lighting.
+Some textureless records are dummy materials, and omitted original references do not appear as missing declared images, so this does not establish that every pale surface lacks an albedo.
+The RustSekiro material port and its existing credit are retained; its visual notes supply no independently validated m10 tint correction to copy.
+
+The shared GI shader scans all 142 volume records per fragment at map_material.wgsl:84; spatial candidate filtering must preserve native coverage, ordering and blending.
+The courtyard viewer submits all 5388 pieces when h015610 has zero draw groups, whereas the default viewer submits 4161; map.rs:1161 leaves an initial zero group without an active visibility mask.
+Recover native zero-draw/display-group behavior before changing that shared culling fallback; no geometry was hidden without evidence.
+All captures, selected/raw parameter measurements, commands, hashes, raw CSVs, material census and the exact shared-fix proposals are under target/alt-m10/captures/REPORT.md.
+Uncapped runs request AutoNoVsync and continuous Winit updates, and separate GPU profiles avoid the double-probe combination of PLAY_LOG_PERF and --profile-systems.
+The baseline default GPU samples are opaque 5.65 ms and prepass 1.89 ms; the broader courtyard samples are opaque 6.67 ms and prepass 0.71 ms.
+At least 14-16 rustc processes were active during baseline captures, so these shared-machine wall intervals cannot demonstrate steady frame time or an optimization speedup.
+After captures observed eight rustc processes, and the lower wall medians have no accompanying m10 runtime optimization.
+The after default GPU samples are opaque 5.59 ms and prepass 1.89 ms; the broader courtyard samples are opaque 7.33 ms and prepass 0.65 ms.
+Ready-pipeline wall summaries use simulation ticks 360-600 and exclude 470-510 around screenshot readback; all raw rows and sample counts are in the local frame-times.csv.
+
+| Hirata view | Before median / p99 ms | After median / p99 ms | Before / after samples |
+| --- | --- | --- | --- |
+| memory, default start 0 | 102.901 / 177.724 | 19.012 / 89.452 | 33 / 124 |
+| father-memory, default start 0 | 59.641 / 154.970 | 16.473 / 217.449 | 48 / 91 |
+| memory, broader courtyard start 4 | 52.066 / 117.574 | 24.624 / 82.970 | 52 / 116 |
+
+The m10 native-data regression and shared collision-region regression pass.
+The separately focused shared-core selection filter passes six tests with the full installed-preset census ignored as slow; game all-target Clippy with warnings denied and workspace formatting pass using target/alt-m10 and four build jobs, and only m10.rs was formatted.
+The broad lighting_selection filter reports 15 passes, one failure and three ignored tests; its sole failure is the other map owner's m20.rs:174 illusion-cleared sky assertion, actual m900010 versus expected m900085, which was left untouched.
+A matched original-game control was unavailable; exact rendered parity is not claimed.
+
+### m11_00 proof and frame time
+
+Fourteen settled images, `before-<state>.png` and `after-<state>.png`, cover every state in the table above.
+The repeats use the same executable SHA256 recorded in `binary-sha256.txt`; the map change is a regression/audit addition, so these are verification repeats rather than a claimed visual fix.
+`arena-gyoubu.png`, `arena-demon.png` and `doorway-center.png` provide arena and real boundary-walk controls.
+The initial blank five-second image is preserved as `startup-incomplete-morning.png` and is excluded from visual conclusions.
+All runs used target/alt-m11_00, Vulkan on an RTX 5070 Ti, 1600x900 and the optimized dev profile; the reduced controls used 800x600.
+Performance-only runs do not take screenshots or enable per-frame camera logging, and avoid the duplicate render probe installed when perf_log and --profile-systems are combined.
+The summary selects simulation steps 1500-1770 with zero pending pipelines, excluding exit sleep; raw CSVs and `perf-summary.json` retain every run.
+
+| View | Before median / p99 ms (frames) | Final repeat median / p99 ms (frames) |
+| --- | --- | --- |
+| Default temple start | 16.704 / 18.030 (271) | 23.728 / 64.821 (165) |
+| Heavy gate start 8 | 16.685 / 18.070 (271) | 28.684 / 72.059 (146) |
+
+The first after pair was also unstable: temple 74.179 / 272.193 ms (49 frames), gate 44.229 / 141.753 ms (81 frames).
+The reduced Vulkan control remained at 16.617 / 19.081 ms (270 frames), while the separate DX12 low-draw control was much slower at 179.417 / 255.006 ms (25 frames).
+Requested AutoNoVsync therefore did not produce an independently verified uncapped Vulkan scene cost, and the same unchanged binary did not maintain a steady frame time throughout the shared-machine session.
+The actual swapchain mode/driver limiter and the origin of intermittent Prepare stalls remain unresolved shared/environment blockers; no claim of a map-specific performance regression or improvement is made.
+Before repeats, CPU render/presentation occupied about 11.8-11.9 ms and Prepare 1.7-1.9 ms; in final repeats Prepare rose to about 13.4/17.1 ms while the render interval was about 7.0/6.6 ms.
+These are intervals between CPU render-schedule stamps and can include synchronization waits, not isolated GPU costs.
+The independent gate profile reports GPU opaque rendering 2.732 ms, fog 1.322 ms, early prepass .281 ms, bin unpacking .112 ms, native post .062 ms and clustering .058 ms near its end.
+The GPU timings do not explain the much larger CPU stalls by themselves, and do not justify changing this map's authored culling or lighting data.
+
+### m11_00 validation
+
+The installed m11_00 state/region/arena regression passes, as do all seven shared selector tests and the focused collision-system test.
+The broader lighting_selection filter reported 13 passes and one unrelated failure in `lighting/maps/m25.rs:37`, whose dragon-defeat flag assertion belongs to the Fountainhead agent.
+Final `cargo clippy --offline -p sekiro-game --all-targets -j 4 -- -D warnings` and `cargo fmt --all --check` pass; the owned map file also passes its individual rustfmt check.
+Every Cargo command used CARGO_TARGET_DIR=target/alt-m11_00 and four jobs, with offline dependency resolution.
+No other map file, shared renderer, game install, cache/re/logs directory or git state was edited.
+
+## Senpou audit (2026-10-14)
+
+Only `crates/game/src/lighting/maps/m20.rs` and Senpou documentation were changed.
+The existing local `sekiro-collab/WORK.md` already claims this map audit.
+`docs/RUSTSEKIRO-VISUALS.md` does not establish a validated fix for Senpou's colour cast, so no unverified colour correction or source port was applied.
+All assets and installed events were read-only.
+
+### Native selection and limits
+
+| State | Flags seeded by profile | Hour / environment | GPARAM / sub-ID | Requested sky | Result |
+| --- | --- | --- | --- | --- | --- |
+| morning, default | none | 6 / 1 | m20_00_0000 / 0 | m900000 | Event selection agrees; entrance remains dark and brown |
+| afternoon | 9800 | 12 / 2 | m20_00_0000 / 0 | m900010 | Event selection agrees; exact renderer equivalence unverified |
+| evening | 9800, 9801 | 18 / 3 | m20_00_0000 / 0 | m900020 | Event selection agrees; warmed capture shows geometry normally |
+| night | 9800, 9801, 9802 | 22 / 4 | m20_00_0000 / 0 | m900030 | Event selection agrees; frame-time spikes remain |
+| dawn | 9800-9803 | 2 / 5 | m20_00_0000 / 0 | m900050 | Event selection agrees; no complete environment-5 probes or GI coefficients are exported |
+| illusion | 8400, 9303 | 12 / 2 | m20_00_0010 / 10, region switches to 0000 / 0 | m900085 | Event sub-ID/sky agree; selected file has no authored entries and sky export is missing |
+| illusion-cleared | 8400, 9303, 62000705 | 12 / 2 | m20_00_0000 / 0 | m900085 | Fixed missing entry sky command; sky export still missing |
+
+The cleared preset represents entry/re-entry with 8400 and 62000705, not the separate boss-return sequence that disables the illusion sky in event 12005800:42.
+Event 12005210:8-10 skips sub-ID 10 when 62000705 is set, but still enables sky group 8907085 at instruction 25.
+The previous cleared preset referenced only event 12005855:12, so its common sky incorrectly remained m900010.
+The map-local fix adds the original sky activation reference before the clear sub-ID reference.
+The installed-data regression failed on that exact sky mismatch before the change and passes afterward.
+
+Native collision configurations are `[0,0,0,0]`, `[100,0,0,0]`, `[110,0,0,0]`, `[120,0,0,0]` and `[130,0,0,0]`.
+The entrance selects light 110; the cliff heavy view selects h005300 and light 100.
+Light 130 has no authored LightSet row in 0000 and follows the existing id-zero fallback contract rather than an invented map-specific row.
+The native-region regression reads region 2002880's geometry directly from the installed MSB, moves inside/outside/inside, and verifies event 12005826 selects sub-IDs 0/10/0 through the same library used by rendering.
+Setting 62000705 prevents a subsequent outside switch back to 10.
+The moving-focus collision regression also passes with culling off and checks all four independent IDs.
+A physical scripted entrance walk moved about 9 m, stopped before the stair/exit boundary and retained light 110; it does not establish a complete indoor/outdoor walking transition.
+The currently registered Senpou arena, `senpou-screens`, retains its ArenaSpec noon hour, environment 2, sub-ID 10, sky m900085 and beaten/boss flags.
+
+The re-export now supplies 85 complete coefficient volumes for each of variants 1-4, and runtime logs confirm that all 85 are consumed.
+The missing m900085 sky was reported without extracting anything.
+No matched original-game capture was available, so matching event selection must not be read as proof of exact visual fidelity.
+
+### Measured renderer inputs and shared fixes
+
+The complete native parameter audit and converted `LightSet`/`GameFog` values are in `target/alt-m20/captures/audit-before.txt` and `audit-after.txt`.
+Each state logs all collision light IDs, light colours/weights, hemisphere values, fog, tone/exposure and grading rows.
+Runtime logs also record the selected file, actual light set, converted post upload, GI count and active camera probe.
+
+At the morning entrance, authored sun RGBA is `(1,0.72549,0.54902,1.2)` and fill RGBA is `(0.823529,0.705882,0.647059,0.05)`.
+The renderer uses squared linear RGB `(1,0.526336,0.301423)` at 5400 lux and `(0.678200,0.498269,0.418685)` at 225 lux, matching its documented 4500-unit bridge.
+Hemisphere up/down are `(0.509804,0.647059,0.803922)` with weights 1/0.1, producing mean `(0.142945,0.230277,0.355460)` and delta `(0.116955,0.188408,0.290831)`.
+Fog uploads fixed density 0.00105, height coefficient 0.03, height density 0.002, affine height offset 100, near/far 0.01/800 and sky/direct starts 5/0.5.
+Its packed sky/direct/opposite RGB are `(0.190463,0.311181,0.436813)`, `(0.915750,0.358654,0.127530)` and `(0.045427,0.071731,0.098723)`.
+Native post exposure 0.7 uploads gain 1.624505, middle gray -4.3, adaptation limits -0.5/0.5, auto exposure enabled, LUT 0 and tone mode 7.
+Those CPU conversions are reproducible; native scene-to-Bevy calibration and final tone/exposure equivalence remain separate rendering work.
+
+The matched viewer comparisons use identical entrance camera poses and wait for all render pipelines.
+Sampling 9680 display-RGB pixels outside the HUD/capsule gives native mean RGB `(38.856,30.841,27.151)`, R/B 1.431; without fog `(21.943,20.969,20.139)`, R/B 1.090.
+Without grading R/B is 1.481, without BTL lights 1.431 and without GIIV coefficients 1.474.
+Thus fog contributes substantially to the visible warm cast, grading does not introduce that cast, and the entrance BTL lights are not its measured source.
+Authored fog itself is warm in the sunward direction, so these comparisons do not justify suppressing or recolouring it in m20.
+The images and numeric samples are `diagnostic-*.png` and `image-means.csv` in the capture directory.
+
+Shared-code findings and proposed fixes, deliberately left unedited:
+
+- `lighting_selection.rs:129-133` accepts a present family-00 file without validating any authored rows, and `lighting_selection.rs:412-414` replaces the complete active GPARAM with it.
+  Native m20_00_0010 has zero entries, so illusion renders invented default sun/fill at 6750/900 lux, default fog `(0.0015,0.1,0.125,150)` and default post values.
+  The populated 0900/0910 pair is a concrete candidate, but EMEVD provides the sub-ID rather than family provenance.
+  Proposed fix: detect empty full replacements, recover the native family/partial-file inheritance rule, then apply that rule in the shared resolver/library; do not silently select a guessed nearest family or claim generic defaults are native lighting.
+- `lighting.rs:881-927`, `925-951` and `957-995` read/spawn/apply only two directional lights.
+  Morning light 110 sets `Light1 FollowedCamera=1`, `Enable LocalLight1=1` and `Enable LocalLight2=1`, but none of those controls are consumed.
+  LocalLight1 contributes authored blue RGBA `(0.45098,0.511763,0.607843,0.3)`; LocalLight2 has diffuse weight 0 but specular weight 0.1.
+  The sun's separate specular weight is 0.2 versus diffuse 1.2, while the Bevy light uses one illuminance for both responses.
+  Proposed fix: carry camera-follow/enables and all four native light slots through LightSet, and preserve independent diffuse/specular colours and weights in the shared material lighting path instead of compensating with m20 tints or exposure.
+- `lighting.rs:744-764` chooses the largest enclosing volume for the camera fallback, which selects probe 0 despite the entrance lying inside local volume 100.
+  Mean morning diffuse cubemap RGB is `(0.366156,0.262202,0.229525)` for probe 0 versus nearly neutral `(0.005517,0.005210,0.005320)` for probe 100.
+  Spatial receiver GI is separate; these means demonstrate a substantially warmer/brighter fallback, not the exact radiance of every surface.
+  Proposed fix: review local-versus-global fallback selection and receiver coverage with the collaborator responsible for probe blending, retaining global fallback only where the native selection requires it.
+- `fog.rs:172-232` and `fog.wgsl:44-53` do not consume authored `Global ScatteringG=0.25` or `DirLight LightBankId=120000000`; the current source uses a linear directional colour mix and the selected sun direction.
+  Proposed fix: recover and implement the native phase/bank routing before judging whether the remaining fog contribution is excessive; preserve the verified colour packing and avoid a map-specific tint multiplier.
+  Tone curve, auto exposure and probe blending remain the collaborator's project.
+- `sky.rs:397-405` retains an ordinary clock sky when an event-selected model is missing.
+  Both illusion states now correctly request m900085 but visibly retain m900010.
+  Proposed fix: expose the missing authored sky as an explicit incomplete-fidelity condition; exact rendering requires a separately supplied complete read-only export, which this audit did not create.
+- `perf_log.rs:223-255` stores intervals between render-set stamps, including intervening work and possible surface acquisition waits.
+  The heavy profile's 11.9 ms gap before Queue is not a GPU shader duration or an unambiguous Queue-system cost.
+  Proposed fix: split swapchain acquisition/presentation waits from CPU scheduling and add finer system timing before attributing the remaining wall time to map rendering.
+
+### Captures, frame time and validation
+
+Accepted before/after pairs are `before-ready-<state>.png` and `after-ready-<state>.png` for all seven names above, plus the heavy view, under `target/alt-m20/captures/`.
+The corresponding folders contain raw stderr/stdout and perf_log CSVs.
+All application runs request AutoNoVsync through `--uncapped` at 1600x900.
+The matched play runs idle for 900 fixed ticks and capture at tick 720; summaries use ticks 600-840, exclude screenshot ticks 715-735 and require zero pending pipelines.
+Early `before-*.png` trials captured during compilation and are not accepted visual/performance proof.
+In particular, the blue evening frame and blank heavy frame disappeared after proper warm-up; they were not established fog defects.
+
+| State / view | Before median / p99 ms | After median / p99 ms | Before / after ready samples |
+| --- | --- | --- | --- |
+| morning, default | 42.912 / 62.535 | 17.966 / 25.475 | 85 / 199 |
+| afternoon | 46.984 / 137.012 | 18.823 / 28.206 | 66 / 183 |
+| evening | 29.006 / 41.574 | 30.318 / 60.948 | 129 / 117 |
+| night | 34.623 / 59.069 | 55.601 / 134.813 | 99 / 57 |
+| dawn | 36.813 / 61.216 | 18.425 / 25.702 | 93 / 191 |
+| illusion | 50.558 / 335.072 | 16.465 / 20.879 | 44 / 220 |
+| illusion-cleared | 99.551 / 200.765 | 16.297 / 20.502 | 35 / 222 |
+| heavy, start 2 cliff walkway | 63.371 / 155.242 | 16.750 / 23.467 | 53 / 220 |
+
+Separate viewer profiles disable PLAY_LOG_PERF to avoid installing the render probe twice.
+Start/heavy GPU costs are main opaque 2.09/2.65 ms, fog 0.67/1.29 ms and early prepass 0.32/0.25 ms; native post is about 0.06 ms.
+The heavy render schedule reports mean 16.354 ms, maximum 17.058 ms and 113 ready pipelines with none waiting, with an 11.9 ms interval before Queue.
+The heavy scene uses native draw-group culling: 3503/5729 pieces shown and 13751 instantiated mesh entities.
+Measured shadow-budget CPU work is about 0.035 ms mean and 1.036 ms maximum in the warmed heavy profile.
+No data-supported map-specific object removal or performance fix was identified.
+Concurrent machine work and shared-source changes are uncontrolled; the sole production change is a missing sky request, so timing differences are not evidence of a performance optimisation.
+The approximately 16.7 ms wall times must not be equated with GPU cost or proof that presentation pacing is absent.
+Night spikes and the native-data/export gaps prevent claiming steady frame time or exact game lighting across all states.
+
+Two m20 installed-data/region tests, six shared lighting-selection tests and the moving-collision regression pass, with the declared slow full-preset test left ignored.
+Final `cargo clippy --offline -p sekiro-game --all-targets -j 4 -- -D warnings` and `cargo fmt --all --check` both pass.
+Builds and tests use CARGO_TARGET_DIR=target/alt-m20 and four jobs, with no commits, git-state changes, network/model calls or writes to protected data directories.
+
+## Castle audit (2026-10-14)
+
+This audit changes only `lighting/maps/m11_01.rs`, the Castle row and these notes, and one dated `STATUS.md` line.
+All Cargo builds and tests use `CARGO_TARGET_DIR=target/alt-m11_01`, four jobs and offline resolution.
+Original event references and encounter flags select the installed files without changing their light, material, fog or exposure values.
+
+| Story | Seed flags | Hour / environment | GPARAM / sub-ID | Native sky | Selection result |
+| --- | --- | --- | --- | --- | --- |
+| morning | none | 6 / 1 | m11_01_0000 / 0 | m900000 | Matches common event 100 |
+| afternoon | 9800 | 12 / 2 | m11_01_0000 / 0 | m900010 | Matches common event 100 |
+| evening | 9800, 9801 | 18 / 3 | m11_01_0000 / 0 | m900020 | Matches the ordinary evening branch |
+| night | 9800-9802 | 22 / 4 | m11_01_0000 / 0 | m900030 | Matches common event 100 |
+| dawn | 9800-9803 | 2 / 5 | m11_01_0000 / 0 | m900050 | Matches common event 100 |
+| invasion | 9800-9802, 8302 | 22 / 4 | m11_01_0020 / 20 | m900095 | Matches the Ashina fire branch |
+| tomoe | 11115802, 11115801 | 18 / 1 | m11_01_0010 / 10 | m900080 | Matches 11115820:24,25,28 |
+| shura-fire | 9800, 9801 | 18 / 3 | m11_01_0740 / 40 | m900020 | Matches 11115910:29 |
+| owl-fight | 9303-9306, 8301, 11115722 | 18 / 3 | m11_01_0750 / 50 | m900020 | Matches 11115860:54 |
+
+The 07-family files are the sole installed candidates for native sub-IDs 40 and 50; the engine's general family-selection rule is still not recovered.
+The new `owl-fight` name distinguishes the encounter override from an ordinary evening visit.
+Tomoe's native phase-two flag 11115802 now selects its handover instructions for an ArenaSpec that actually starts with c7110.
+Emma's 1270/1276 flags select sub-ID 40, and Owl's 8301/9303/11115722 flags select sub-ID 50.
+The Shura rule precedes the Owl rule because their story and entry flags overlap.
+Their staged event entry labels skip the earlier native intro instructions, which is why restoring the requested GPARAM at selection time is necessary.
+Genichiro retains 6 h, environment 1, m11_01_0000 and m900000; Owl retains 18 h, environment 3 and m900020 while using its authored encounter GPARAM.
+The regression checks all nine presets, their native skies, every exported collision LightSet against the read-only native MSB, and Genichiro/Owl/Shura/Tomoe ArenaSpec selections.
+
+The native collision tuples are `[0,0,0,0]`, `[100,0,0,0]`, `[110,0,0,0]` and `[120,0,0,0]`.
+A grounded scripted round trip beginning near `[93.670,36.700,228.025]` enters bank 110 near `[98.055,36.500,225.594]` and returns to bank 100 near `[93.506,36.700,228.116]`, with zero fall distance in the logged stationary checkpoints.
+Independent fog, scattering and environment banks remain their native zero IDs.
+The accepted evidence is `door-roundtrip*` and `roundtrip-outside.png`, `roundtrip-inside.png`, `roundtrip-return.png` under the capture directory.
+Earlier centroid/scaffold attempts fell or stayed in one bank and are retained as diagnostics, not accepted crossing proof.
+The interior diagnostic camera is occluded by nearby geometry; its lighting-bank and grounded-position logs establish the crossing without claiming a clean native-game camera match.
+
+### Authored inputs and renderer uploads
+
+Raw rows and `LightSet::from_gparam` conversions are logged by `castle_installed_story_lighting`; actual post and fog uploads are recorded in every capture log.
+`lighting-values.json` records the native diffuse/specular and hemisphere colours alongside actual direct-light intensities, fog vectors and exposure inputs.
+The following values are for the default start's bank 100, after the selected file is applied.
+
+| Story | Sun / fill lux | Fixed fog density per metre | Height density / distribution | Height plane Y / far depth metres | Exposure EV / multiplier | Auto exposure |
+| --- | --- | --- | --- | --- | --- | --- |
+| morning | 13500 / 1350 | 0.0008 | 0.2 / 0.08 | -150 / 350 | 0.5 / 1.414214 | on |
+| afternoon | 4500 / 2250 | 0.0006 | 0.05 / 0.04 | -150 / 1000 | 0.5 / 1.414214 | on |
+| evening | 9000 / 1350 | 0.0015 | 0.125 / 0.08 | -110 / 300 | 0.8 / 1.741101 | on |
+| night | 18000 / 2250 | 0.003 | 0.125 / 0.08 | -110 / 200 | 0.3 / 1.231144 | on |
+| dawn | 13500 / 2250 | 0.008823529 | 0.07352941 / 0.29411763 | -85 / 340 | 0.2 / 1.148698 | on |
+| invasion | 18000 / 2250 | 0.005 | 0.125 / 0.08 | -110 / 200 | 0.1 / 1.071773 | on |
+| tomoe | 4500 / 0 | 0 | 0.05 / 0.095 | +20 / 400 | 0.25 / 1.189207 | off |
+| shura-fire | 9900 / 6750 | 0.0015 | 0.35 / 0.07 | -85 / 300 | 0 / 1 | on |
+| owl-fight | 13500 / 6750 | 0.0015 | 0.35 / 0.07 | -85 / 300 | 0 / 1 | on |
+
+At morning bank 100, raw sun RGBW `[1,0.745098,0.627451,3]` becomes linear RGB `[1,0.555171,0.393695]` and 13500 lux, while fill RGBW `[0.784314,0.882353,1,0.3]` becomes `[0.615148,0.778547,1]` and 1350 lux.
+Native hemisphere up/down RGB `[0.392157,0.470588,0.588235]` with multipliers 0.5/0.1 yields mean `[0.046136,0.066436,0.103806]` and nominal brightness 1432.3944 before probe application.
+The captured native post upload uses middle gray -5.2, adaptation limits -0.7/2, mode 7 and multiplier 1.4142135 at this start.
+Morning fog's raw GameScale 1.25, fixed density 0.001, distribution 0.1, height scale 0.5, offset -150 and far depth 280 convert to the uploaded values in the table.
+Owl's native 0750 differs from ordinary evening 0000: sun diffuse multiplier 3 versus 2, fill 1.5 versus 0.3, exposure 0 versus 0.8, sun yaw 2.617994 versus -3.141593, and height offset -85 versus -110.
+At the roof's Y 54.04, its corrected height layer is approximately 139 m below the roof, consistent with the diagnostic observation in `RUSTSEKIRO-VISUALS.md`.
+No validated Castle renderer replacement was demonstrated there, so no MIT source was copied and no credit-file change was needed.
+
+### Shared follow-ups, left unedited
+
+- `map.rs:421-434` reconstructs the named arena's default enemy and then treats any finite scene hour as an override; `lighting_selection.rs:183,283` consequently seeds and times that default enemy instead of the requested starting phase.
+The reproduced `--arena genichiro --genichiro-phase tomoe` capture loads ordinary evening `m11_01_0000`, sub-ID 0, environment 3 and an ordinary sky, while the native Tomoe preset and a Tomoe ArenaSpec select `0010`, sub-ID 10, environment 1 and m900080.
+The shared fix must pass the actual starting EnemySpec/BossEvents into selection and apply the nearest-hour environment/sky diagnostic only for an explicit `--hour`, allowing this map's phase flag rule to run.
+
+- `arena_b.rs:115` calls `lighting_selection.rs:392-398` to derive a probe environment from every changed lighting hour, even without SetAreaEnvmap.
+Native 11115820 changes lighting to 3 and sub-ID to 10 without changing the environment, so a real morning-to-Tomoe handover can incorrectly select camera probes 3 while retaining the loaded GIIV atlas 1.
+Retain `selection.initial.environment` unless the native scene requests an environment change, restore it on restart, and keep camera handles and coefficient layers synchronized when a genuine environment change occurs.
+The independent environment-routing correction is distinct from the collaborator's probe-blending calibration work.
+
+- `sky.rs:488-495` discards the event-selected initial sky whenever the lighting hour differs from the initial hour.
+Native Shura instructions 11115930:50 and 11115943:14 request SetLighting(4) without replacing the sky group, so the renderer can fall back to a generic night dome despite the retained native evening group.
+Preserve the authoritative native sky selection across clock-only changes until an explicit map-part/environment request replaces it.
+
+- `lighting.rs:884-885` reads only DiffColor0/1, and the standard directional-light path uses those intensities for both diffuse and specular response.
+Morning bank 100 has separate native sun specular multiplier 1.5 versus diffuse 3, and fill specular 0.5 versus diffuse 0.3 with the same respective RGB values.
+Recover and carry the separate native specular colours and intensities through shared direct-light shading; scaling this map's materials or exposure cannot preserve both controls.
+This is a measured omitted control, not a quantified explanation of every pale material without an original-game reference.
+
+- `fog.wgsl:22,74,100-117` assigns depth-zero sky pixels an uncalibrated 20 km distance and applies analytical continuation plus a fixed 0-to-0.22 sky-height blend.
+For a representative morning roof-height horizontal ray, the actual density gives cap optical depth 0.280, continued optical depth 4.119 and sky transmission approximately 0.01626.
+The before rooftop horizon patch at X 920-1229, Y 205-274 has display-code luminance mean/std 0.628664/0.025787 with fog and 0.799008/0.051250 without it; a full-map no-fog control gives 0.795444/0.051436 and still lacks distant silhouettes.
+These are PNG code-value measurements, not linear HDR or native-game luminance.
+Recover the native sky/background fog routing and analytical continuation before changing this map's authored density or adding a per-map horizon ramp.
+The remaining featureless background also uses the approximate lower-hemisphere gradient in `sky.wgsl:34,51-54`; the controls do not prove fog alone is responsible for absent silhouettes.
+
+- `lighting.rs:786-789` zeros global ambient once the camera probe is ready, and `map_material.rs:476,485,638` disables the authored hemisphere contribution accordingly.
+Castle loads 107 complete native coefficient volumes in the observed environments, so the missing-GI export diagnosis from other maps does not apply here.
+Evaluate the authored hemisphere, native volume contribution and fallback coverage with the probe owner rather than introducing a Castle brightness gain.
+Tone curve, auto exposure and probe blending remain with the other collaborator's project.
+
+### Proof and timing
+
+All local artifacts are under `target/alt-m11_01/captures/`, including before/after PNGs for the nine story selections, morning Genichiro/evening Owl/Shura arena controls, command manifests, raw perf CSVs, parameter logs and executable hashes.
+The new owl-fight default-start before image reuses the pre-fix evening capture because the old selector used that same hour/environment/sky and ordinary GPARAM; the separately captured `before-owl.png` records the actual pre-fix arena and its encounter flags.
+The final after executable is a frozen dedicated-target build; earlier after snapshots and unsuccessful walk attempts remain as diagnostics.
+Concurrent shared-source changes can affect before/after comparisons, so no rendering or timing improvement is attributed solely to the map metadata change.
+
+All measured commands request `--uncapped`, which sets AutoNoVsync and continuous Winit updates, and redirect perf output through PLAY_PERF_DIR.
+Frame statistics use zero-pending-pipeline rows at simulation steps 360 through 479, excluding the screenshot at step 480, with the median and nearest-rank p99 reported below.
+The per-state samples and all raw rows are in `frame-times.csv`; the accepted final Vulkan state captures have 119-120 ready samples each.
+Initial before captures had concurrent compilation and camera logging enabled, so the repeat start/full-map controls with camera logging disabled are the fairer comparisons.
+
+| View | Before median / p99 ms | After median / p99 ms | Ready samples before / after |
+| --- | --- | --- | --- |
+| Default start, repeated profile | 16.615 / 24.413 | 16.704 / 27.726 | 120 / 120 |
+| Heavy full-map castle-top view | 16.698 / 19.386 | 16.686 / 19.011 | 120 / 120 |
+| Genichiro morning control | 40.797 / 74.887 | 16.661 / 19.983 | 44 / 120 |
+| Owl evening encounter control | 32.626 / 45.309 | 16.632 / 20.071 | 61 / 120 |
+| Shura encounter control, repeated before | 16.676 / 20.251 | 16.678 / 21.558 | 120 / 120 |
+
+Final GPU pass medians are opaque 2.772 ms and fog 1.477 ms at the start, and opaque 4.930 ms and fog 1.377 ms in the heavy view.
+The corresponding logged CPU system medians are cloth simulation 1.237 ms at the start, and moving-focus collision selection 1.133 ms plus cloth 0.788 ms in the heavy view; these system summaries cover logger windows rather than precisely the CSV sample interval.
+The shared per-fragment receiver lookup in `map_material.wgsl:84-86` scans 107 volume bounds before coefficient/reflection sampling; any acceleration must preserve native ordering and weights and belongs with shared probe rendering.
+No demonstrated Castle-specific object or mesh was removed.
+Despite AutoNoVsync, the quiet Vulkan cadence remains near 16.6 ms while GPU passes cost much less and the render schedule includes presentation/waiting time.
+The shared renderer should log the actual configured surface present mode and presentation timestamps, checking driver/compositor limits instead of interpreting wall_ms as exclusive GPU cost.
+A short DX12 backend diagnostic was also attempted; its requested warm interval still had pending pipelines, so those logs are retained separately and excluded from accepted perf statistics.
+Earlier after runs observed another sekiro-rs process and 11 concurrent rustc processes, and their large frame-time spikes remain in the retained intermediate evidence.
+These shared-machine observations do not establish isolated steady frame pacing.
+
+The final map regression and all six active shared lighting-selection tests pass; the existing exhaustive all-map sweep remains ignored.
+`cargo clippy -p sekiro-game --all-targets -j 4 -- -D warnings` and `cargo fmt --all --check` pass in the dedicated target.
+There were no commits, git-state operations, network/model calls, or deliberate writes to protected game-data/log directories.
+Exact native visual equivalence remains blocked by the shared phase/probe/sky/specular/fog issues above and the absence of matched original-game reference frames for this session.

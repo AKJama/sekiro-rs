@@ -1,10 +1,15 @@
+#import sekiro_map_coverage::camera_coverage
 #import bevy_pbr::{
     forward_io::{VertexOutput, FragmentOutput},
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing, calculate_tbn_mikktspace, calculate_F0, calculate_F0_dielectric, calculate_diffuse_color},
     lighting::{EnvBRDFApprox, F_AB, LightingInput, LAYER_BASE, perceptualRoughnessToRoughness},
     mesh_view_bindings::{lights, view},
-    pbr_types::STANDARD_MATERIAL_FLAGS_UNLIT_BIT,
+    pbr_types::{STANDARD_MATERIAL_FLAGS_UNLIT_BIT, PbrInput},
+    mesh_functions,
+    view_transformations::position_world_to_clip,
+    mesh_view_bindings::globals,
+    pbr_bindings,
 }
 #ifdef ENVIRONMENT_MAP
 #import bevy_pbr::environment_map::environment_map_light
@@ -19,71 +24,14 @@ fn gi_multiscatter(f0: vec3<f32>, f_ab: vec2<f32>, missing: f32, occlusion: f32)
     return GiScatter(single,multiple,1.0-single-multiple);
 }
 
-struct Layers {
-    enabled: vec4<f32>,
-    albedo_enabled: vec4<f32>,
-    albedo_uv: vec4<f32>,
-    normal_uv: vec4<f32>,
-    normal_enabled: vec4<f32>,
-    hemi_axis: vec4<f32>,
-    hemi_delta: vec4<f32>,
-    camera_fade: vec4<f32>,
-}
+#import sekiro_map_bindings::{MapGame, Layers}
 #ifdef BINDLESS
 #import bevy_render::bindless::{bindless_textures_2d, bindless_textures_3d, bindless_textures_cube_array, bindless_samplers_filtering}
 #import bevy_pbr::mesh_bindings::mesh
-struct LayerIndices {
-    layers: u32,
-    overlay: u32,
-    overlay_sampler: u32,
-    snow: u32,
-    snow_sampler: u32,
-    layer_c: u32,
-    c_sampler: u32,
-    overlay_normal: u32,
-    overlay_normal_sampler: u32,
-    snow_normal: u32,
-    snow_normal_sampler: u32,
-    c_normal: u32,
-    c_normal_sampler: u32,
-    height_mask: u32,
-    height_sampler: u32,
-    irradiance: u32,
-    specular: u32,
-    specular_sampler: u32,
-    diffuse: u32,
-    diffuse_sampler: u32,
-    voxels: u32,
-    voxels_sampler: u32,
-}
-struct GiivBuffer { words: array<u32>, }
-@group(#{MATERIAL_BIND_GROUP}) @binding(102) var<storage, read> giiv_buffers: binding_array<GiivBuffer>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<storage> layer_indices: array<LayerIndices>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(101) var<storage> layer_array: array<Layers>;
+#import bevy_pbr::pbr_bindings::material_indices
+#import sekiro_map_bindings::{layer_array, layer_indices, giiv_buffers}
 #else
-@group(#{MATERIAL_BIND_GROUP}) @binding(50) var<uniform> layers: Layers;
-@group(#{MATERIAL_BIND_GROUP}) @binding(51) var overlay: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(52) var overlay_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(53) var snow: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(54) var snow_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(55) var layer_c: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(56) var c_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(57) var overlay_normal: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(58) var overlay_normal_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(59) var snow_normal: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(60) var snow_normal_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(61) var c_normal: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(62) var c_normal_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(63) var height_mask: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(64) var height_sampler: sampler;
-struct GiivBuffer { words: array<u32>, }
-@group(#{MATERIAL_BIND_GROUP}) @binding(65) var<storage, read> giiv_buffer: GiivBuffer;
-@group(#{MATERIAL_BIND_GROUP}) @binding(66) var gi_specular: texture_cube_array<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(67) var gi_specular_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(68) var gi_diffuse: texture_cube_array<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(69) var gi_diffuse_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(70) var gi_voxels: texture_3d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(71) var gi_voxels_sampler: sampler;
+#import sekiro_map_bindings::{layers, overlay, overlay_sampler, snow, snow_sampler, layer_c, c_sampler, overlay_normal, overlay_normal_sampler, snow_normal, snow_normal_sampler, c_normal, c_normal_sampler, height_mask, height_sampler, giiv_buffer, gi_specular, gi_specular_sampler, gi_diffuse, gi_diffuse_sampler, gi_voxels, gi_voxels_sampler, base_normal, base_normal_sampler, detail, detail_sampler, mask_l, mask_l_sampler, wet, wet_sampler}
 #endif
 
 fn gi_cube(slot: u32, index: u32, direction: vec3<f32>, mip: f32, diffuse: bool) -> vec3<f32> {
@@ -251,26 +199,323 @@ fn unpack_normal(sample: vec2<f32>) -> vec3<f32> {
     return normalize(vec3(xy, sqrt(max(1.0 - dot(xy, xy), 0.001))));
 }
 
-@fragment
-fn fragment(vertex: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
+fn sample_base_normal(uv: vec2<f32>, slot: u32) -> vec4<f32> {
 #ifdef BINDLESS
+return textureSample(bindless_textures_2d[layer_indices[slot].base_normal], bindless_samplers_filtering[layer_indices[slot].base_normal_sampler], uv);
+#else
+return textureSample(base_normal, base_normal_sampler, uv);
+#endif
+}
+fn sample_detail(uv: vec2<f32>, slot: u32) -> vec4<f32> {
+#ifdef BINDLESS
+return textureSample(bindless_textures_2d[layer_indices[slot].detail], bindless_samplers_filtering[layer_indices[slot].detail_sampler], uv);
+#else
+return textureSample(detail, detail_sampler, uv);
+#endif
+}
+fn sample_mask_l(uv: vec2<f32>, slot: u32) -> vec4<f32> {
+#ifdef BINDLESS
+return textureSample(bindless_textures_2d[layer_indices[slot].mask_l], bindless_samplers_filtering[layer_indices[slot].mask_l_sampler], uv);
+#else
+return textureSample(mask_l, mask_l_sampler, uv);
+#endif
+}
+fn sample_wet(uv: vec2<f32>, slot: u32) -> vec4<f32> {
+#ifdef BINDLESS
+return textureSample(bindless_textures_2d[layer_indices[slot].wet], bindless_samplers_filtering[layer_indices[slot].wet_sampler], uv);
+#else
+return textureSample(wet, wet_sampler, uv);
+#endif
+}
+fn sample_base_albedo(uv: vec2<f32>, slot: u32) -> vec4<f32> {
+#ifdef BINDLESS
+return textureSample(bindless_textures_2d[material_indices[slot].base_color_texture], bindless_samplers_filtering[material_indices[slot].base_color_sampler], uv);
+#else
+return textureSample(pbr_bindings::base_color_texture, pbr_bindings::base_color_sampler, uv);
+#endif
+}
+#ifdef GAME_LAYERS
+struct MapVertex {
+    @builtin(instance_index) instance_index: u32,
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+#ifdef VERTEX_UVS_A
+    @location(2) uv: vec2<f32>,
+#endif
+#ifdef VERTEX_UVS_B
+    @location(3) uv_b: vec2<f32>,
+#endif
+#ifdef VERTEX_TANGENTS
+    @location(4) tangent: vec4<f32>,
+#endif
+#ifdef VERTEX_COLORS
+    @location(5) color: vec4<f32>,
+#endif
+#ifdef GAME_LAYERS
+    @location(8) blend2: vec4<f32>,
+#endif
+}
+
+struct MapVertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) world_position: vec4<f32>,
+    @location(1) world_normal: vec3<f32>,
+#ifdef VERTEX_UVS_A
+    @location(2) uv: vec2<f32>,
+#endif
+#ifdef VERTEX_UVS_B
+    @location(3) uv_b: vec2<f32>,
+#endif
+#ifdef VERTEX_TANGENTS
+    @location(4) world_tangent: vec4<f32>,
+#endif
+#ifdef VERTEX_COLORS
+    @location(5) color: vec4<f32>,
+#endif
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    @location(6) @interpolate(flat) instance_index: u32,
+#endif
+#ifdef VISIBILITY_RANGE_DITHER
+    @location(7) @interpolate(flat) visibility_range_dither: i32,
+#endif
+    @location(8) blend2: vec4<f32>,
+    @location(9) uv_scale: f32,
+}
+
+@vertex
+fn vertex(v: MapVertex) -> MapVertexOutput {
+    var out: MapVertexOutput;
+    let world_from_local = mesh_functions::get_world_from_local(v.instance_index);
+    out.world_normal = mesh_functions::mesh_normal_local_to_world(v.normal, v.instance_index);
+    out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(v.position, 1.0));
+    out.position = position_world_to_clip(out.world_position.xyz);
+#ifdef VERTEX_UVS_A
+    out.uv = v.uv;
+#endif
+#ifdef VERTEX_UVS_B
+    out.uv_b = v.uv_b;
+#endif
+#ifdef VERTEX_TANGENTS
+    out.world_tangent = mesh_functions::mesh_tangent_local_to_world(world_from_local, v.tangent, v.instance_index);
+#endif
+#ifdef VERTEX_COLORS
+    out.color = v.color;
+#endif
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    out.instance_index = v.instance_index;
+#endif
+#ifdef VISIBILITY_RANGE_DITHER
+    out.visibility_range_dither = mesh_functions::get_visibility_range_dither_level(v.instance_index, world_from_local[3]);
+#endif
+#ifdef GAME_LAYERS
+    out.blend2 = v.blend2;
+    out.uv_scale = length(world_from_local[0].xyz);
+#else
+    out.blend2 = vec4(1.0, 1.0, 1.0, 0.0);
+    out.uv_scale = 1.0;
+#endif
+    return out;
+}
+
+
+#endif
+// hb: the game's height blend of a vertex weight against a mask height.
+fn hb(w: f32, h: f32, map_game: MapGame) -> f32 {
+    return saturate((w - h * (1.0 - w)) * (1.0 + map_game.p[6].y));
+}
+
+// H: a mask's height for one layer: the material's float3 picks the channels, k scales it.
+fn H(mask: vec3<f32>, sel: vec3<f32>, k: f32, map_game: MapGame) -> f32 {
+    return (dot(mask, sel) * k + 0.01) * map_game.p[6].x;
+}
+
+// FLV: a game normal map's xy (z rebuilt), DirectX green flipped into Bevy's tangent frame.
+fn flv(n: vec4<f32>) -> vec3<f32> {
+    let xy = vec2(n.r * 2.0 - 1.0, 1.0 - n.g * 2.0);
+    return vec3(xy, sqrt(max(1.0 - dot(xy, xy), 0.0)));
+}
+
+fn has(bit: u32, map_game: MapGame) -> bool {
+    return (map_game.flags.x & bit) != 0u;
+}
+
+#ifdef VERTEX_UVS_A
+fn game_layers(in: VertexOutput, b: vec4<f32>, b2: vec4<f32>, uv_scale: f32, pbr_in: PbrInput, map_game: MapGame, slot: u32) -> PbrInput {
+    var pbr_input = pbr_in;
+    let p = map_game.p;
+    let ground = map_game.flags.y == 2u;
+    let uv0 = in.uv;
+    var uv1 = in.uv;
+#ifdef VERTEX_UVS_B
+    uv1 = in.uv_b;
+#endif
+    let uvs = uv0 * uv_scale;
+    var m9 = vec3(0.0);
+    if has(128u, map_game) { m9 = sample_height_mask(uvs, slot).rgb; }
+    // M[Multiple]'s layer L / wet / tint mask (slot 6) is on uv1; M[MultipleGround] has none and
+    // uses mask 9 for every layer.
+    var m6 = m9;
+    if has(512u, map_game) { m6 = sample_mask_l(uv1, slot).rgb; }
+
+    var wOv = 0.0;
+    if has(2u, map_game) { wOv = hb(b.x, H(m9, p[9].xyz, p[7].x, map_game), map_game); }
+    var wL = 0.0;
+    if has(32u, map_game) {
+        if ground { wL = hb(b.y, H(m9, p[10].xyz, p[7].y, map_game), map_game); } else { wL = hb(b.y, H(m6, p[10].xyz, p[7].y, map_game), map_game); }
+    }
+    var wWet = 0.0;
+    if has(1024u, map_game) {
+        if ground { wWet = saturate(b2.w * p[7].z); } else { wWet = hb(b2.w, H(m6, p[11].xyz, p[7].z, map_game), map_game); }
+    }
+    let lum = dot(1.0 - b2.rgb, vec3(0.29891, 0.58661, 0.11448));
+    let wTint = hb(lum, H(m6, p[12].xyz, p[8].x, map_game), map_game);
+
+    // Normals: base / overlay (B gloss), the detail normal's xy added, layer L (ground).
+    var nb = vec4(0.5, 0.5, 1.0, 0.15);
+    if has(1u, map_game) { nb = sample_base_normal(uvs, slot); }
+    if has(4u, map_game) { nb = mix(nb, sample_overlay_normal(uvs, slot), wOv); }
+    if ground && has(64u, map_game) { nb = mix(nb, sample_c_normal(uvs, slot), wL); }
+    var nt = flv(nb);
+    var gloss = nb.b;
+    if has(256u, map_game) {
+        let d = mix(vec3(0.502, 0.502, 1.0), sample_detail(uv0, slot).rgb, b.w);
+        nt = vec3(nt.xy + flv(vec4(d, 1.0)).xy * p[6].z, nt.z);
+    }
+    var Nw = pbr_input.world_normal;
+#ifdef VERTEX_TANGENTS
+    let N0 = pbr_input.world_normal;
+    let T = in.world_tangent.xyz;
+    let B = in.world_tangent.w * cross(N0, T);
+    Nw = normalize(nt.x * T + nt.y * B + normalize(nt).z * N0);
+#endif
+    // Snow: how much the bumped world normal faces the material's snow direction (not
+    // normalised), times the vertex weight, height-blended on mask 9.
+    var wSnow = 0.0;
+    if has(8u, map_game) {
+        let sd = dot(p[14].xyz, Nw) * b.z;
+        wSnow = hb(sd, H(m9, p[13].xyz, p[7].w, map_game), map_game);
+    }
+    // Wet: a flow normal scrolled on uv1, gloss toward the wet gloss.
+    if wWet > 0.0 {
+        let wn = sample_wet(uv1 + globals.time * p[15].xy, slot);
+        nt = vec3(nt.xy + flv(wn).xy * p[6].w * wWet, nt.z);
+        gloss = mix(gloss, p[8].y, wWet);
+    }
+    if wSnow > 0.0 && has(16u, map_game) {
+        let sn = sample_snow_normal(uvs, slot);
+        if ground {
+            nt = vec3(nt.xy + flv(sn).xy * p[9].w * wSnow, nt.z);
+        } else {
+            nt = mix(nt, flv(sn), wSnow);
+        }
+        gloss = mix(gloss, sn.b, wSnow);
+    }
+
+    // Albedo.
+    var a = vec3(1.0);
+    if has(2048u, map_game) { a = sample_base_albedo(uvs, slot).rgb; }
+    var alpha = pbr_in.material.base_color.a;
+    if ground {
+        if has(2u, map_game) { a = mix(a, sample_overlay(uvs, slot).rgb, wOv); }
+        if has(32u, map_game) { a = mix(a, sample_layer_c(uvs, slot).rgb, wL); }
+        a = a * mix(vec3(1.0), b2.rgb, p[8].x);
+        // gap: M[MultipleGround] wet darkening read as a lerp toward color_1 (kb/map.md).
+        a = mix(a, p[4].rgb, wWet * p[10].w);
+    } else {
+        a = a * mix(p[0].rgb, p[1].rgb, b.x);
+        if has(2u, map_game) { a = mix(a, sample_overlay(uvs, slot).rgb * p[2].rgb, wOv); }
+        if has(32u, map_game) { a = mix(a, sample_layer_c(uv1 + p[8].zw, slot).rgb * p[3].rgb, wL); }
+        a = mix(a, a * b2.rgb * p[4].rgb, wTint);
+    }
+    if has(8u, map_game) { a = mix(a, sample_snow(uvs, slot).rgb * p[5].rgb, wSnow); }
+    a = saturate(a);
+    if map_game.flags.z != 0u {
+        // Debug (SHINOBI_MAP_SHOW_BLEND=1): overlay red, layer L green, snow blue.
+        a = vec3(wOv, wL, wSnow);
+    }
+    pbr_input.material.base_color = vec4(a, alpha);
+    pbr_input.material.perceptual_roughness = clamp(1.0 - saturate(gloss), 0.089, 1.0);
+#ifdef VERTEX_TANGENTS
+    var mapped = normalize(nt.x * T + nt.y * B + nt.z * N0);
+    if dot(N0, pbr_input.V) < 0.0 {
+        mapped = mapped - 2.0 * dot(mapped, N0) / dot(N0, N0) * N0;
+    }
+    pbr_input.N = mapped;
+#endif
+    return pbr_input;
+}
+#endif
+
+
+@fragment
+fn fragment(
+#ifdef GAME_LAYERS
+m: MapVertexOutput,
+#else
+vertex: VertexOutput,
+#endif
+@builtin(front_facing) is_front: bool) -> FragmentOutput {
+#ifdef BINDLESS
+#ifdef GAME_LAYERS
+    var vertex: VertexOutput;
+    vertex.position = m.position;
+    vertex.world_position = m.world_position;
+    vertex.world_normal = m.world_normal;
+#ifdef VERTEX_UVS_A
+    vertex.uv = m.uv;
+#endif
+#ifdef VERTEX_UVS_B
+    vertex.uv_b = m.uv_b;
+#endif
+#ifdef VERTEX_TANGENTS
+    vertex.world_tangent = m.world_tangent;
+#endif
+#ifdef VERTEX_COLORS
+    vertex.color = m.color;
+#endif
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    vertex.instance_index = m.instance_index;
+#endif
+#ifdef VISIBILITY_RANGE_DITHER
+    vertex.visibility_range_dither = m.visibility_range_dither;
+#endif
+#endif
     let slot = mesh[vertex.instance_index].material_and_lightmap_bind_group_slot & 0xffffu;
     let layers = layer_array[layer_indices[slot].layers];
 #else
+#ifdef GAME_LAYERS
+    var vertex: VertexOutput;
+    vertex.position = m.position;
+    vertex.world_position = m.world_position;
+    vertex.world_normal = m.world_normal;
+#ifdef VERTEX_UVS_A
+    vertex.uv = m.uv;
+#endif
+#ifdef VERTEX_UVS_B
+    vertex.uv_b = m.uv_b;
+#endif
+#ifdef VERTEX_TANGENTS
+    vertex.world_tangent = m.world_tangent;
+#endif
+#ifdef VERTEX_COLORS
+    vertex.color = m.color;
+#endif
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    vertex.instance_index = m.instance_index;
+#endif
+#ifdef VISIBILITY_RANGE_DITHER
+    vertex.visibility_range_dither = m.visibility_range_dither;
+#endif
+#endif
     let slot = 0u;
 #endif
     var input = vertex;
 #ifdef CAMERA_FADE
-    if layers.camera_fade.x > 0.0 {
-        let opacity = distance(input.world_position.xyz, view.world_position) * layers.camera_fade.z - layers.camera_fade.y;
-        // Native camera fade samples an 8x8 noise tile; ordered coverage is provisional.
-        let p = vec2<u32>(input.position.xy) & vec2(7u);
-        let a = ((p.x & 1u) ^ (p.y & 1u)) * 2u + (p.y & 1u);
-        let b = (((p.x >> 1u) & 1u) ^ ((p.y >> 1u) & 1u)) * 2u + ((p.y >> 1u) & 1u);
-        let c = (((p.x >> 2u) & 1u) ^ ((p.y >> 2u) & 1u)) * 2u + ((p.y >> 2u) & 1u);
-        let noise = (f32(a * 16u + b * 4u + c) + 0.5) / 64.0;
-        if opacity < 0.01 + 0.99 * noise { discard; }
-    }
+    camera_coverage(input.position.xy, input.world_position.xyz, layers.camera_fade);
+#endif
+    var b = vec4(0.0);
+#ifdef VERTEX_COLORS
+    b = input.color;
 #endif
     var weights = vec3(0.0);
 #ifdef VERTEX_COLORS
@@ -281,6 +526,9 @@ fn fragment(vertex: VertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     }
 #endif
     var pbr = pbr_input_from_standard_material(input, is_front);
+#ifdef GAME_LAYERS
+    pbr = game_layers(input, b, m.blend2, m.uv_scale, pbr, layers.game, slot);
+#else
     var height = 0.5;
     if layers.enabled.w > 0.0 {
         height = sample_height_mask(layer_uv(input, layers.albedo_uv.w), slot).r;
@@ -297,6 +545,7 @@ fn fragment(vertex: VertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     if layers.normal_enabled.x > 0.0 { pbr.N = normalize(mix(pbr.N, normalize(tbn * unpack_normal(sample_overlay_normal(layer_uv(input, layers.normal_uv.x), slot).rg)), w.x)); }
     if layers.normal_enabled.z > 0.0 { pbr.N = normalize(mix(pbr.N, normalize(tbn * unpack_normal(sample_c_normal(layer_uv(input, layers.normal_uv.z), slot).rg)), w.z)); }
     if layers.normal_enabled.y > 0.0 { pbr.N = normalize(mix(pbr.N, normalize(tbn * unpack_normal(sample_snow_normal(layer_uv(input, layers.normal_uv.y), slot).rg)), w.y)); }
+#endif
 #endif
     pbr.material.base_color = alpha_discard(pbr.material, pbr.material.base_color);
     var out: FragmentOutput;

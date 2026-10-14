@@ -499,6 +499,7 @@ pub fn run(options: Options) -> Result<()> {
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
+            .set(crate::map::layered_gltf_plugin())
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "sekiro-rs".into(),
@@ -785,6 +786,8 @@ fn setup(
     commands.spawn((
         FollowCamera,
         Camera3d::default(),
+        bevy::core_pipeline::prepass::DepthPrepass,
+        bevy::core_pipeline::prepass::MotionVectorPrepass,
         Projection::Perspective(PerspectiveProjection {
             fov: sim.duel.camera.cam_fov_y.to_radians(),
             ..default()

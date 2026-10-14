@@ -27,7 +27,8 @@ See [GENICHIRO.md](GENICHIRO.md#hand-over-cinematic-placeholder-2026-10-11) for 
 
 The ten-map baseline and reviewed evidence are in [MAP-BASELINE.md](MAP-BASELINE.md).
 Map transforms, base textures, collision and GPARAM sun/ambient/fog load from the installed data.
-Rendering uses a single albedo layer rather than the original layered moss, snow, blend masks and detail materials.
+M[Multiple] and M[MultipleGround] now render their static-switch layers, RGB mask selectors, tint, detail normals, wetness and authored snow direction.
+Remaining approximations include ground ripples, variant-18 metal masks, native AO, optional HDR-colour gamma conversion and texture-tiling semantics; other material families retain their existing paths.
 Water lacks its original shader, and large lakes and underground water can appear as pale flat polygons.
 Local light sets, full exposure/scattering, particles, animated foliage and event-controlled object visibility remain incomplete.
 The collision decoder skips convex primitives; the decoded mesh supports every sampled gameplay start and short walk, but does not establish coverage of all collision shapes.
