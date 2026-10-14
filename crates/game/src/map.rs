@@ -8,9 +8,14 @@
 //! `--screenshot <png> [--at <seconds>]` waits until every piece and texture has loaded, then
 //! `--at` more seconds, saves a frame and exits. `--camera x,y,z,yaw,pitch` (degrees) places
 //! the camera; otherwise it starts at the first player start point.
+
 //!
 //! [`add_map`] puts the same map (pieces, draw-group culling around a [`MapFocus`] entity, sun,
 //! fog, collision view) into another mode; `--play --map` uses it.
+
+#[cfg(test)]
+#[path = "map_gate_tests.rs"]
+mod gate;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -30,6 +35,7 @@ use bevy::pbr::wireframe::{Wireframe, WireframeColor, WireframePlugin};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::world_serialization::WorldInstanceReady;
+use bevy::world_serialization::{WorldInstance, WorldInstanceSpawner};
 use serde_json::Value;
 
 #[path = "map_story.rs"]
@@ -49,6 +55,9 @@ pub(crate) mod sky;
 pub(crate) mod sweep;
 #[path = "map_world.rs"]
 pub(crate) mod world;
+
+#[path = "map_capture.rs"]
+mod capture;
 
 use crate::lighting::{
     MapLighting, MapProbes, ProbeRegion, ShadowSettings, apply_lighting, apply_probes,
@@ -184,6 +193,7 @@ pub struct Pending {
     /// Map piece scene instances spawned, and how many have finished spawning.
     instances: usize,
     ready: usize,
+    ready_roots: std::collections::HashSet<Entity>,
     /// When [`add_map`] was called, for the load time in the log.
     added_at: Instant,
     loaded_at: Option<Instant>,
@@ -195,6 +205,7 @@ impl Default for Pending {
             handles: Vec::new(),
             instances: 0,
             ready: 0,
+            ready_roots: std::collections::HashSet::new(),
             added_at: Instant::now(),
             loaded_at: None,
         }
@@ -655,9 +666,7 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
             source: stem,
         })
         .init_resource::<Pending>()
-        .add_observer(|_: On<WorldInstanceReady>, mut pending: ResMut<Pending>| {
-            pending.ready += 1;
-        })
+        .add_observer(map_scene_ready)
         .add_systems(Startup, spawn_map)
         .add_systems(
             Update,
@@ -1613,13 +1622,46 @@ fn hud(
     );
 }
 
-fn track_loading(assets: Res<AssetServer>, mut pending: ResMut<Pending>) {
+#[allow(clippy::type_complexity)]
+fn map_scene_ready(
+    event: On<WorldInstanceReady>,
+    roots: Query<(), Or<(With<DrawGroups>, With<world::DetailWeight>)>>,
+    mut pending: ResMut<Pending>,
+) {
+    if roots.contains(event.entity) && pending.ready_roots.insert(event.entity) {
+        pending.ready += 1;
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn track_loading(
+    assets: Res<AssetServer>,
+    mut pending: ResMut<Pending>,
+    instances: Res<WorldInstanceSpawner>,
+    worlds: Query<(Entity, Option<&WorldInstance>), With<WorldAssetRoot>>,
+    parents: Query<&ChildOf>,
+    roots: Query<(), With<DrawGroups>>,
+) {
     let _timer = crate::perf_log::SystemTimer::start("track_loading");
     if pending.loaded_at.is_some() {
         return;
     }
     if pending.ready < pending.instances {
         return;
+    }
+    // A GLTF scene contains nested node worlds. The outer scene's Ready event
+    // does not mean those node instances have finished creating their meshes.
+    for (entity, instance) in &worlds {
+        let mut ancestor = entity;
+        while !roots.contains(ancestor) {
+            let Ok(parent) = parents.get(ancestor) else {
+                break;
+            };
+            ancestor = parent.parent();
+        }
+        if roots.contains(ancestor) && instance.is_none_or(|i| !instances.instance_is_ready(**i)) {
+            return;
+        }
     }
     let done = pending.handles.iter().all(|h| {
         let id: UntypedAssetId = h.id();
@@ -1742,6 +1784,25 @@ pub fn parse_camera(arg: Option<&str>) -> Result<Option<[f32; 5]>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readiness_ignores_nested_worlds_and_repeated_root_events() {
+        let mut app = App::new();
+        app.init_resource::<Pending>().add_observer(map_scene_ready);
+        let root = app.world_mut().spawn(DrawGroups([1; 8])).id();
+        let nested = app.world_mut().spawn(ChildOf(root)).id();
+        let unrelated = app.world_mut().spawn_empty().id();
+        let detail = app.world_mut().spawn(world::DetailWeight(1.)).id();
+        let instance_id = WorldInstanceSpawner::default()
+            .spawn(Handle::<bevy::world_serialization::WorldAsset>::default());
+        for entity in [nested, unrelated, root, root, detail] {
+            app.world_mut().trigger(WorldInstanceReady {
+                entity,
+                instance_id,
+            });
+        }
+        assert_eq!(app.world().resource::<Pending>().ready, 2);
+    }
 
     #[test]
     fn gltf_loader_preserves_native_material_blend_streams() {

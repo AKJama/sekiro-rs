@@ -73,6 +73,9 @@ enum Command {
         /// Only print a summary of the MSB.
         #[arg(long)]
         summary: bool,
+        /// Refresh complete placement metadata using existing geometry and material audit.
+        #[arg(long, conflicts_with = "summary")]
+        layout_only: bool,
     },
     /// Decode FSB5 sound banks in cache/raw/sound to WAV in cache/sound/<bank>/ with an
     /// events.json per bank. Needs the Vorbis headers from tools/sound/vorbis_setups.py.
@@ -93,9 +96,15 @@ fn main() -> Result<()> {
         Command::Params => return params::export(&cli.cache),
         Command::Anims { chrs } => return anims::export(&cli.cache, chrs),
         Command::Sound { banks, all } => return sound::export(&cli.cache, banks, *all),
-        Command::Map { id, summary } => {
+        Command::Map {
+            id,
+            summary,
+            layout_only,
+        } => {
             return if *summary {
                 maps::summary(&cli.cache, id)
+            } else if *layout_only {
+                maps::refresh_layout(&cli.cache, id)
             } else {
                 maps::export(&cli.game, &cli.cache, id)
             };

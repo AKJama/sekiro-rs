@@ -98,6 +98,65 @@ fn read_msb(cache: &Path, id: &str) -> Result<msb::Msb> {
     msb::parse(&data).with_context(|| format!("parsing {}", path.display()))
 }
 
+/// Upgrade placement metadata without changing geometry, textures or collision.
+pub fn refresh_layout(cache: &Path, id: &str) -> Result<()> {
+    let path = cache.join(format!("maps/{id}/layout.json"));
+    let mut exported: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    let msb = read_msb(cache, id)?;
+    let audit: Value = serde_json::from_slice(&std::fs::read(
+        cache.join(format!("maps/{id}/material-audit.json")),
+    )?)?;
+    let mut statuses = BTreeMap::new();
+    for model in audit["models"]
+        .as_array()
+        .context("material audit models")?
+    {
+        let name = model["model"].as_str().context("audit model name")?;
+        let status = if exported["models"].get(name).is_some() {
+            "exported"
+        } else {
+            match model["classification"].as_str() {
+                Some(
+                    "meshless_helper"
+                    | "invisible_shadow_helper"
+                    | "fog_renderer_handoff"
+                    | "no_exportable_lod0",
+                ) => "no_exported_primitives",
+                Some("physics_only_binder") => "physics_only",
+                _ => "model_not_exported",
+            }
+        };
+        statuses.insert(name.to_owned(), status.to_owned());
+    }
+    let ranges: HashMap<_, _> = exported["collisions"]
+        .as_array()
+        .context("collision rows")?
+        .iter()
+        .filter_map(|row| {
+            Some((
+                row["name"].as_str()?.to_owned(),
+                [
+                    row["triangles"][0].as_u64()? as usize,
+                    row["triangles"][1].as_u64()? as usize,
+                ],
+            ))
+        })
+        .collect();
+    layout::extend(
+        &mut exported,
+        &msb,
+        &statuses,
+        &ranges,
+        &layout::map_inventory(&cache.join("raw"))?,
+    );
+    std::fs::write(path, serde_json::to_vec_pretty(&exported)?)?;
+    println!(
+        "{id}: refreshed {} canonical parts without re-exporting assets",
+        msb.parts.len()
+    );
+    Ok(())
+}
+
 fn load_mtds(raw: &Path) -> Result<Mtds> {
     let dir = raw.join("mtd/allmaterialbnd.mtdbnd.d");
     let mut out = HashMap::new();

@@ -1019,3 +1019,132 @@ No game session, save access, live-memory read, commit or publication occurred.
 
 Still open: the object model default's source, extra LOD scale-table provenance, exact FLVER render-group binding and crossfade pixel shader, navigation-distance/gate traversal and fallback rules, every block-request override and final resource-release barrier, and complete upstream collision selection at seams and in the air.
 These limits do not invalidate the specific confirmed branches above, but they prevent claiming a complete retail streaming or visibility implementation.
+
+## Gates and Outskirts regression
+
+### Serial export and the historical regression
+
+The two Ashina maps were exported once each, serially, with the current extractor and four worker threads.
+Both exports had zero model failures: Outskirts exported 716 GLBs and Castle exported 768.
+The canonical placement, transform, model, mask, condition and LOD inventories were identical before and after export.
+Outskirts has 6,489 complete MSB parts versus 4,487 legacy layout rows, and Castle has 6,164 versus 3,624.
+The other eight maps received metadata-only layout refreshes, preserving their existing geometry, textures and collision.
+
+The old two Outskirts eyes were [-280,-118.832954,120] and [-280,-114.090096,40], both looking along yaw 0 at pitch 0.
+The fresh cache reproduces the historical depth and void counts exactly with the old unfiltered collision reference and the same isolated rendering controls.
+
+| Selector | Depth gap | Void | Untextured | Grey | Pop-in |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Legacy, connected blocks disabled | 14,659 | 0 | 0 | 185 | 0 |
+| Current connected visibility | 18,018 | 9,216 | 0 | 0 | 15,045 |
+
+Both eyes select h900001, whose display and draw demand masks are entirely zero and whose hit filter is 13.
+The second eye is roughly 50 m below the real h004100 floor at -64.5096.
+The legacy selector interpreted empty demand as no active filter and submitted all scenery, whereas the confirmed executable algebra requests no scenery.
+The apparent Jobs D/E regression therefore comes from inappropriate survey poses on a helper plane, rather than loss of valid player-facing geometry or a required cache race.
+The larger pop-in count has the same cause: the normal pass has no scenery while the all-visible diagnostic deliberately forces it back on.
+The narrow fix excludes zero-demand and first-visit-disabled collisions from ordinary survey sampling and collision comparison.
+The explicit --sweep-raw-collision control retains historical reproducibility; gameplay physics and the confirmed visibility rule are unchanged.
+The reproduced pop-in total differs from Job D's earlier 12,926, so only the depth and void totals are claimed as exact historical reproduction.
+
+### Data gate and numeric fixtures
+
+The normal map_data_gate test checks all ten extracted maps in 4.83 seconds without a renderer or vertex-buffer reads, including the connected-world oracle.
+It checks 55,352 complete placements, all eight part-type counts, model ownership, drawn-model meshes, declared standard/layer/fog texture URIs, authored missing-texture ceilings and 582 connection rows.
+Two authored collision index -1 connections are explicitly unbound and are checked as such.
+Unavailable maps skip only when their exported layout is absent; a broken extracted map fails.
+Ten spatially dispersed standing collisions in each Ashina area compare the complete visible-part set against a small independent implementation of the exe mask rule using raw MSB fields.
+The comparison includes raw attached-connection indices, the connection's own display mask, signed target matching and requested neighbours, with separate checked-in primary and connected visible counts.
+The oracle assumes ready resident assets and enabled event gates so it isolates the confirmed mask algebra from story and asynchronous loading.
+Each map's checked-in JSON contains only numbers: eight part counts, three missing-resource ceilings and, for Ashina, collision-table indices with expected visible counts.
+Missing exported models and declared image URIs are zero for all ten maps.
+Authored missing-name ceilings are 24, 5, 3, 1, 1, 25, 1, 7, 8 and 0 in the gate's map order.
+These include raw material slots omitted from exported samplers and must not be confused with the exporter's smaller selected-sampler warning counts.
+
+### Capture readiness and speed
+
+The old readiness observer counted nested GLTF node-world notifications as additional placed scenes, allowing its counter to exceed the expected scene total before nested meshes were actually ready.
+Readiness now counts each placed or LOD root once and checks the nested WorldInstance hierarchy before publishing a loaded map.
+Material and fog metadata are parsed once per material rather than once per placed instance.
+Fixed captures instantiate static node/mesh/material subassets directly from the same loaded GLTF assets, preserving hierarchy, transforms, extras and material identities.
+The capture loader conservatively includes the union of every requested frustum plus the renderer's shadow-caster distance, with no far-plane exclusion.
+Interactive loading remains on the ordinary scene path, and --sweep-all-assets provides an ordinary-loader diagnostic control.
+An initial fast-capture prototype exposed a scheduling bug: newly instantiated fog meshes could miss PreUpdate fog conversion and be consumed as ordinary layered materials in Update.
+Those opaque cloud cards produced false untextured counts and artificially hid void pixels.
+Capture instantiation now explicitly precedes the FogConversion system set, preserving the authored fog path before ordinary material wrapping.
+The diagnostic also consults uploaded GPU images instead of treating a retired CPU image asset and missing load-state record as proof of a missing texture.
+The checked-in six-view gates include the first Outskirts idol, cliff/downward views, the Castle and distant landscape, and both sides of the Ashina seam.
+Each area uses one windowless process and loads its neighbourhood once.
+Every view and every metric has its own ceiling, with tolerance max(16 pixels, 1% of its baseline), plus a 120-second total runtime limit.
+Reports retain selected collisions and visible-part names for investigation; the gate never updates its baseline automatically.
+
+Before the exposure correction, the ordinary-loader control at the two Castle roof views measured 1,937 void, 4,668 depth-gap and zero untextured pixels with experimental routing enabled.
+The corrected direct loader matched all three geometry/texture totals exactly, taking 24.1 seconds versus 161.8 seconds for the ordinary scene path.
+Grey was 222 versus 220 and pop-in was 8,873 versus 8,852, so this is diagnostic geometry parity rather than an assertion of identical native RGB.
+
+The original sweep disabled authored auto-exposure to hold brightness constant, producing washed-out outdoor reference captures.
+The corrected sweep keeps authored exposure bounds and grading, meters each normal view with the recovered native reset argument four, then holds that GPU metering history through its screenshot and all-visible comparison.
+The reserved post-control channel is used only by captures; normal interactive exposure behavior is unchanged.
+This makes the comparison independent of asynchronous loading time and avoids comparing two independently adapted images.
+
+### Material-routing decision and final six-view numbers
+
+The prepared Job D patch was tested after the fog scheduling fix with the same serially exported cache, camera lists, native settings and shader clock.
+The first Outskirts camera is at the first idol facing toward the temple, and the remaining five retain cliff, distant Castle and seam coverage.
+
+| Area / routing | Seconds | Void | Depth gap | Untextured | Grey | Pop-in |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Outskirts, production prefix | 33.4 | 0 | 493 | 0 | 402 | 23,807 |
+| Outskirts, owning-GLB routing | 39.6 | 0 | 493 | 0 | 400 | 24,344 |
+| Castle, production prefix | 34.9 | 1,933 | 4,886 | 903 | 568 | 26,580 |
+| Castle, owning-GLB routing | 46.8 | 1,933 | 4,886 | 0 | 618 | 31,688 |
+
+The layer renderer's primary-map texture prefix predates the connected-block viewer, but Job D made that assumption incorrect for borrowed models.
+The failed requests include m13 cliff/ground samplers and m17 mountain/rock samplers under a primary m11 texture directory, despite their files existing under the owning exported block.
+Owning-GLB routing fixes those requests and removes Castle's 903 untextured pixels without changing the selected collisions, visible-part sets, void or depth-gap totals.
+It also changes the colour comparison with forced all-visible neighbour scenery, raising pop-in by 537 pixels in Outskirts and 5,108 in Castle.
+This exceeds the per-view gate's tolerance, so the patch is not enabled in production under the requested no-worse-numbers rule.
+The opt-in --test-material-routing diagnostic retains the exact experiment for review, while canonical gates reject that flag.
+The remaining routing defect is explicitly recorded in FIDELITY.md rather than hidden by a larger pop-in tolerance or a revised visibility mask.
+The final default and experimental controls are retained under target/alt-gt/native-off/ and native-on/.
+The pre-fix fast-capture untextured and void counts are invalid baselines because opaque fog cards affected both categories; the checked-in fixtures use the corrected fog path.
+Remaining positive counts at valid views are regression ceilings and investigation candidates, not proof that legitimate open vistas, authored grey stone or alternate LOD scenery are erroneous.
+
+### Tangent expectation
+
+The earlier handedness failure compared unused index-buffer vertices as though MikkTSpace had computed a tangent for them.
+Those unused LOD vertices have no face-derived MikkTSpace result, so that comparison cannot establish an export error.
+The test now compares only vertices referenced by triangle indices while preserving the existing handedness and direction thresholds.
+On regenerated data, 2,470,531 referenced vertices give 97.1% handedness and 96.0% direction agreement; 69,701 unused vertices are excluded.
+The old all-buffer diagnostic is still printed, and no tangent sign, coordinate conversion or winding was changed to satisfy the test.
+
+### Reference coverage and limits
+
+The external reference index supplies 442 positioned captures out of 444 screenshots, including menu/help frames with positions.
+The gate adds all 150 distinct position-derived camera poses, sharing one windowless map load, and derived side-by-side images are saved under target/alt-gt/reference/.
+Original screenshots remain outside the repository and are read directly for composition.
+The practice-tool overlay gives player position, not camera rotation, so these use player feet plus 1.65 m eye height and the nearest authored player-start yaw.
+The comparison images label that limitation; their camera direction, story state, exposure and menu contents are not retail camera-matched evidence.
+The optional 150-view reference tool is not yet reliable and is excluded from required gates.
+It has a separate 900-second budget; the required six-view gates retain the requested two-minute area budget.
+The final reference baseline, with native exposure and grading retained, took 418.7 seconds.
+Its totals were [183573,158854,305085,195450,1977906] in void/depth-gap/untextured/grey/pop-in order across the 150 distinct poses.
+The large untextured total includes Castle-position captures viewed through the Outskirts primary prefix and reflects the routing defect left off in production, not a claim of absent exported DDS files.
+No exact camera, story or photometric parity is inferred from these aggregate reference counts.
+The 400.7-second repeat failed four tolerances: view 57 pop-in 12136 to 12620, view 61 pop-in 11514 to 12349, view 62 pop-in 6469 to 7340, and view 66 grey 779 to 797.
+Void, depth-gap and untextured totals remained identical; repeat totals were [183573,158854,305085,195544,1978983].
+Shading variability remains unresolved, and further reference-repeat investigation is deferred.
+The required gates consist only of the normal CPU data gate and the two canonical six-view render gates.
+
+### Validation
+
+The final canonical six-view gates passed in 43.5 seconds for Outskirts and 41.2 seconds for Castle.
+Their totals were respectively [0,493,0,398,23814] and [1933,4886,903,562,26585] in void/depth-gap/untextured/grey/pop-in order.
+The final normal cargo test invocation passed the ten-map data gate in 6.56 seconds with no ignored-test opt-in.
+The complete game unit suite passed 107 tests with two existing slow tests ignored; the shader/material/tangent integration binary passed all six tests.
+The extractor passed 23 unit and two integration tests.
+The focused uploaded-image lifecycle test and the expanded connected data oracle passed after their final changes.
+Cargo formatting and Clippy with all targets and warnings denied passed for both touched crates.
+All build/check commands used CARGO_TARGET_DIR=target/alt-gt and -j 4, with offline dependencies.
+Commands are recorded in MAP-COMPLETENESS-SWEEP.md; detailed control logs and reports remain under target/alt-gt.
+No real-game process, install, saves or running-game memory was accessed or modified, and no commit or publication was made.

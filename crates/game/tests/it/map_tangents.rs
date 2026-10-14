@@ -68,7 +68,9 @@ fn exported_tangents_match_mikktspace() {
         .filter(|p| p.extension().is_some_and(|e| e == "glb"))
         .collect();
     paths.sort();
-    let (mut vertices, mut same_sign, mut aligned) = (0usize, 0usize, 0usize);
+    let (mut vertices, mut same_sign, mut aligned, mut unreferenced) =
+        (0usize, 0usize, 0usize, 0usize);
+    let (mut all_vertices, mut all_sign, mut all_aligned) = (0usize, 0usize, 0usize);
     for path in paths.iter().step_by(7) {
         let glb = Glb::read(path);
         for mesh in glb.json["meshes"].as_array().into_iter().flatten() {
@@ -83,6 +85,13 @@ fn exported_tangents_match_mikktspace() {
                 let uvs = glb.floats(uv as usize, 2);
                 let ours = glb.floats(t as usize, 4);
                 let idx = glb.indices(prim["indices"].as_u64().unwrap() as usize);
+                // MikkTSpace writes tangents only for vertices used by this face set.
+                // Authored LODs may share a buffer; untouched vertices have zero generated
+                // tangents, so comparing them measures buffer sparsity, not handedness.
+                let mut referenced = vec![false; ours.len()];
+                for &index in &idx {
+                    referenced[index as usize] = true;
+                }
                 let to3 =
                     |v: &Vec<Vec<f32>>| v.iter().map(|x| [x[0], x[1], x[2]]).collect::<Vec<_>>();
                 let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::all())
@@ -101,8 +110,15 @@ fn exported_tangents_match_mikktspace() {
                 else {
                     continue;
                 };
-                for (a, b) in ours.iter().zip(bevy) {
+                for ((a, b), used) in ours.iter().zip(bevy).zip(referenced) {
                     let dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+                    all_vertices += 1;
+                    all_sign += (a[3].signum() == b[3].signum()) as usize;
+                    all_aligned += (dot > 0.7) as usize;
+                    if !used {
+                        unreferenced += 1;
+                        continue;
+                    }
                     vertices += 1;
                     same_sign += (a[3].signum() == b[3].signum()) as usize;
                     aligned += (dot > 0.7) as usize;
@@ -116,7 +132,14 @@ fn exported_tangents_match_mikktspace() {
     }
     let sign = same_sign as f32 / vertices as f32;
     let dir = aligned as f32 / vertices as f32;
-    eprintln!("{vertices} vertices: handedness agrees {sign:.3}, direction within 45 deg {dir:.3}");
+    eprintln!(
+        "{vertices} referenced vertices ({unreferenced} unused): handedness agrees {sign:.3}, direction within 45 deg {dir:.3}"
+    );
+    eprintln!(
+        "old all-buffer comparison: handedness {:.3}, direction {:.3}",
+        all_sign as f32 / all_vertices as f32,
+        all_aligned as f32 / all_vertices as f32
+    );
     assert!(sign > 0.9, "handedness agrees for only {sign:.3}");
     assert!(dir > 0.8, "directions agree for only {dir:.3}");
 }

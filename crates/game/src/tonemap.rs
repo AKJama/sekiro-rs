@@ -34,7 +34,7 @@ pub struct GamePost {
     pub bloom: Vec4,
     // Table power, ordinary output exponent, mode code, center weight.
     pub transfer: Vec4,
-    // Bloom saturation interpolation, freeze adaptation, reserved.
+    // Bloom saturation interpolation, bypass adaptation, grading, hold meter.
     pub controls: Vec4,
     // LightAdapt, DarkAdapt, FilmicContrast, ReinhardContrast.
     pub curve: Vec4,

@@ -25,6 +25,7 @@
 !/crates/**/*.wgsl
 !/crates/**/scripts/*.txt
 !/crates/game/scripts/fxr_capture.ps1
+!/crates/game/tests/data/*.json
 !/tools/
 !/tools/**/
 !/tools/**/*.ps1
@@ -33,3 +34,4 @@
 !/tools/**/pyproject.toml
 !/tools/**/uv.lock
 
+!/tools/reference_index/README.md

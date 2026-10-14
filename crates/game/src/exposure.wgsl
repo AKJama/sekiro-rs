@@ -10,6 +10,9 @@ var<workgroup> sums: array<vec2<f32>, 256>;
 
 @compute @workgroup_size(256)
 fn main(@builtin(local_invocation_index) lane: u32) {
+    // Capture controls hold the last native gain without resetting adaptation.
+    // This condition is uniform across the entire workgroup.
+    if settings.controls.w > 0.5 { return; }
     let size = textureDimensions(scene);
     var sum = vec2(0.0);
     // 16 samples per 16x16 reduction cell, for a 64x64 stratified meter.

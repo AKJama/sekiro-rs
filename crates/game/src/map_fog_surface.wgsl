@@ -163,5 +163,14 @@ fn fragment(v: VertexOutput) -> @location(0) vec4<f32> {
     let surface_z=-position_world_to_view(v.world_position.xyz).z;
     alpha*=clamp((scene_z-surface_z)*fade_scale,0.0,1.0);
 #endif
+#ifdef FOG_DIAGNOSTIC
+    if alpha<=0.05 { discard; }
+    let distance=length(v.world_position.xyz-view.world_position);
+    let code=floor(clamp(log2(1.0+distance)/16.0,0.0,1.0)*65534.0)+1.0;
+    let bytes=vec3(floor(code/256.0),code%256.0,0.0)/255.0;
+    let linear=select(pow((bytes+vec3(0.055))/1.055,vec3(2.4)),bytes/12.92,bytes<=vec3(0.04045));
+    return vec4(linear,1.0);
+#else
     return vec4(radiance*view.exposure,alpha);
+#endif
 }

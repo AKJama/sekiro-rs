@@ -3,6 +3,12 @@ use std::collections::HashMap;
 
 use bevy::asset::{embedded_asset, embedded_path};
 use bevy::gltf::GltfMaterialExtras;
+
+/// Uploaded images may have retired their MAIN_WORLD assets and load-state entries.
+#[derive(Resource, Clone, Default)]
+pub(super) struct SweepImages(
+    pub std::sync::Arc<std::sync::Mutex<std::collections::HashSet<AssetId<Image>>>>,
+);
 use bevy::image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor};
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
@@ -68,11 +74,16 @@ pub(super) fn sweep_base(world: &World, entity: Entity) -> Option<SweepMaterial>
     );
     let images = world.resource::<Assets<Image>>();
     let assets = world.resource::<AssetServer>();
+    let uploaded = world
+        .get_resource::<SweepImages>()
+        .map(|images| images.0.lock().unwrap());
+    let on_gpu = |h: &Handle<Image>| uploaded.as_ref().is_some_and(|ids| ids.contains(&h.id()));
     let pending = textures.iter().any(|h| {
         images.get(*h).is_none()
+            && !on_gpu(h)
             && matches!(
                 assets.get_load_state(h.id()),
-                Some(bevy::asset::LoadState::Loading | bevy::asset::LoadState::NotLoaded)
+                None | Some(bevy::asset::LoadState::Loading | bevy::asset::LoadState::NotLoaded)
             )
     });
     // A successfully uploaded RENDER_WORLD-only image may retire its CPU asset.
@@ -80,7 +91,7 @@ pub(super) fn sweep_base(world: &World, entity: Entity) -> Option<SweepMaterial>
         .iter()
         .any(|h| match assets.get_load_state(h.id()) {
             Some(bevy::asset::LoadState::Failed(_)) => true,
-            None => images.get(*h).is_none(),
+            None => images.get(*h).is_none() && !on_gpu(h),
             _ => false,
         });
     Some(SweepMaterial {
@@ -246,6 +257,41 @@ impl From<&MapLayers> for MapLayersUniform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_only_images_are_not_reported_as_missing() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<Image>()
+            .init_asset::<StandardMaterial>()
+            .init_asset::<LayeredMaterial>()
+            .init_resource::<SweepImages>();
+        let image = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(Image::default());
+        app.world_mut()
+            .resource_mut::<Assets<Image>>()
+            .remove(image.id());
+        let material = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                base_color_texture: Some(image.clone()),
+                ..default()
+            });
+        let entity = app.world_mut().spawn(MeshMaterial3d(material)).id();
+        assert!(sweep_base(app.world(), entity).unwrap().pending);
+        app.world()
+            .resource::<SweepImages>()
+            .0
+            .lock()
+            .unwrap()
+            .insert(image.id());
+        let status = sweep_base(app.world(), entity).unwrap();
+        assert!(!status.missing);
+        assert!(!status.pending);
+    }
 
     #[test]
     fn map_extension_preserves_standard_material_bindless_batching() {
@@ -588,6 +634,8 @@ fn replace_materials(
     environment: MapEnvironment,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("replace_materials");
+    // Experimental ablation only. The render gate rejects this override.
+    let route_materials = std::env::args().any(|a| a == "--test-material-routing");
     let MapEnvironment {
         lighting,
         ambient,
@@ -616,16 +664,16 @@ fn replace_materials(
             continue;
         }
         // All map surfaces need the hemisphere, even without texture layers.
-        let extras = extras
-            .and_then(|e| serde_json::from_str::<Value>(&e.value).ok())
-            .unwrap_or(Value::Null);
-        let data = &extras["sekiro_layers"];
         let Some(base) = materials.get(&original.0) else {
             continue;
         };
         let handle = if let Some(handle) = settings.materials.get(&original.0.id()) {
             handle.clone()
         } else {
+            let extras = extras
+                .and_then(|e| serde_json::from_str::<Value>(&e.value).ok())
+                .unwrap_or(Value::Null);
+            let data = &extras["sekiro_layers"];
             let camera_fade = if map_surface {
                 settings
                     .camera_fade
@@ -642,9 +690,14 @@ fn replace_materials(
                 if !uri.starts_with("tex/") || uri.contains("..") {
                     return None;
                 }
+                let loader = assets.load_builder();
+                let loader = if route_materials {
+                    loader.override_unapproved()
+                } else {
+                    loader
+                };
                 Some(
-                    assets
-                        .load_builder()
+                    loader
                         .with_settings(move |s: &mut ImageLoaderSettings| {
                             s.is_srgb = srgb;
                             s.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
@@ -654,7 +707,14 @@ fn replace_materials(
                                 ..ImageSamplerDescriptor::linear()
                             });
                         })
-                        .load(format!("{}models/{uri}", settings.prefix)),
+                        .load(
+                            route_materials
+                                .then(|| {
+                                    super::world::material_texture_path(&assets, &original.0, uri)
+                                })
+                                .flatten()
+                                .unwrap_or_else(|| format!("{}models/{uri}", settings.prefix)),
+                        ),
                 )
             };
             let uv = |key: &str| data[key]["uv"].as_u64().unwrap_or(0) as f32;

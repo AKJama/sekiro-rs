@@ -3,8 +3,59 @@
 The sweep measures rendered views above walkable collision using the shared map loader, materials, sky, lighting and draw-group selector.
 It opens no window and never starts the real game or a gameplay/brain session.
 All derived reports and screenshots stay under `target/alt-hs/sweep/<map>/pieces/` or `objects/`.
+The gate commands below explicitly use target/alt-gt; the older broad-sweep default directory remains target/alt-hs.
 
 ## Run
+
+The normal CPU data gate checks all ten extracted maps and skips only maps without a layout.
+It reads MSB placement metadata, GLB JSON headers and file existence, without loading vertex buffers or starting Bevy's renderer.
+The per-map numeric fixtures are `crates/game/tests/data/<map>.json`: type counts in MapPiece/Object/Enemy/Player/Collision/DummyObject/DummyEnemy/ConnectCollision order, missing exported models/declared image URIs/authored texture names, then ten `[MSB collision part index, primary visible count, connected visible count]` rows for each Ashina map.
+The independent raw-MSB oracle also checks attached connection masks, signed target matching and the complete visible-part set across requested exported neighbours.
+The visibility comparison disables event overrides and assumes ready resident assets so it tests the executable mask rule independently of story and loading policy.
+
+```powershell
+$env:CARGO_TARGET_DIR = 'target/alt-gt'
+cargo test --release --offline -p sekiro-game -j 4 map_data_gate -- --nocapture
+cargo build --release --offline -p sekiro-game -j 4
+& target/alt-gt/release/sekiro-rs.exe --render-gate --map m11_00_00_00 --sweep-out target/alt-gt/render-gate
+& target/alt-gt/release/sekiro-rs.exe --render-gate --map m11_01_00_00 --sweep-out target/alt-gt/render-gate
+```
+
+Run both render commands serially before reviewing a commit.
+Each command starts one windowless process, loads the area and its bounded neighbourhood once, and renders every fixed view in that process.
+The numeric `<map>.render.json` fixtures hold width, height and `[x,y,z,yaw,pitch,void,depth_gap,untextured,grey,pop_in]` rows, in Bevy world coordinates.
+The gate uses ordinary Objects, the first-visit story fixture and native material settings, and rejects diagnostic overrides.
+`report.json` retains all measurements, selected collisions and visible-part manifests; `gate.json` records pass/fail details.
+Every category is checked separately at every view, with a tolerance of 16 pixels or 1% of that view's baseline, whichever is greater.
+The gate also rejects a run exceeding 120 seconds, including CPU setup and map loading.
+Baseline edits are manual review actions; running the gate never rewrites a checked-in fixture.
+The fast fixed-view path instances static GLTF subassets directly, retaining native materials, node transforms, extras and LOD policy.
+It loads the union of the requested frusta and nearby shadow casters conservatively, without a far-plane exclusion.
+Use --sweep-all-assets with an ordinary --sweep control to compare against the unbounded ordinary scene loader.
+Use --test-material-routing with an ordinary --sweep control to opt into the prepared connected-block layer-routing experiment; production routing and canonical gates leave it off.
+The loader now waits for nested scene readiness and the texture diagnostic recognizes images already uploaded to the GPU after their CPU assets retire.
+
+The required gates are the normal CPU data gate and the two six-view render commands above.
+The optional reference tool is not yet reliable and is excluded from required gates.
+Its supplementary fixture adds 150 distinct poses from the external screenshot index, at 256 x 144 pixels, with a separate 900-second budget.
+The repeat failed four tolerances: pop-in at views 57, 61 and 62, and grey at view 66.
+Shading variability remains open; further reference-repeat investigation is deferred.
+Its numeric rows use player feet plus 1.65 m and the nearest authored player-start yaw because the position overlay does not supply camera rotation.
+This is position-based reference coverage, not a claim of retail camera or story parity.
+The 442 derived side-by-side comparisons are in target/alt-gt/reference/; source photographs are read directly outside the repository.
+
+```powershell
+& target/alt-gt/release/sekiro-rs.exe --reference-gate --map m11_00_00_00 --sweep-out target/alt-gt/reference-gate
+```
+
+Refresh a previously extracted legacy layout with `sekiro-extract map <id> --layout-only` before running the data gate.
+That operation updates complete placement metadata using the raw MSB and existing material audit, preserving geometry, textures and collision.
+An extracted but outdated or broken map fails the gate instead of silently skipping.
+
+For investigation, `--sweep-views <json>` accepts a numeric array of fixed `[x,y,z,yaw,pitch]` rows and `--sweep-out <directory>` separates control reports.
+`--sweep-raw-collision` retains the historical unfiltered collision reference, including below-landscape zero-demand planes, solely for reproducing old survey results.
+Ordinary surveys exclude zero-demand and first-visit-disabled collision rows from both camera sampling and the collision reference.
+This is a survey eligibility rule; it does not reinterpret retail physics filters or change gameplay collision.
 
 ```powershell
 $env:CARGO_TARGET_DIR = 'target/alt-hs'
@@ -43,10 +94,14 @@ The all-visible comparison disables authored/group visibility and frustum cullin
 The visual diagnostic pass renders geometry at its real instance transform, preserving base texture alpha tests and material face culling.
 A second diagnostic pass renders collision, excluding hit-material IDs 22, 36 and 38 as the simulation raycaster does.
 Native, diagnostic geometry and collision have separate fixed render targets; only the requested pass renders.
+Authored fog surfaces also supply diagnostic depth using their native scrolling masks and vertex coverage, with a 0.05 alpha cutoff.
+Their soft intersection fade needs the native scene depth and remains omitted on the isolated diagnostic target.
 Diagnostic passes exclude the sky and bypass fog, grading, native post processing and anti-aliasing.
 Depth is Euclidean eye distance encoded logarithmically into two 8-bit channels, with zero reserved for no surface and the blue channel marking absent base textures or unavailable declared material textures.
 Shader output compensates for the target's sRGB conversion so the depth bytes survive GPU readback.
-Native normal/all renders use fixed exposure and identical shader time to prevent adaptation or animated clouds/wet surfaces from being counted as visibility changes.
+Native normal/all renders share one authored exposure result and identical shader time to prevent adaptation or animated clouds/wet surfaces from being counted as visibility changes.
+Each normal view meters with the recovered native reset rate, preserving the authored exposure bounds and grading, then holds that GPU history for its screenshot and all-visible comparison.
+The sweep does not disable auto-exposure or change interactive exposure behavior.
 The sweep waits for declared material textures and pending GPU pipelines and fails on permanent shader errors or stalled loading/captures.
 Four sparse CPU collision rays per view independently validate the GPU depth encoding and camera pose; a mismatch exceeding 0.5 m plus 5% stops the run before publishing a baseline.
 
@@ -85,7 +140,11 @@ The sweep advances one deterministic 0.6 s pose-settling step before holding sha
 The shared renderer currently submits the dominant LOD rather than the retail dual-submission coverage shader.
 A zero score only covers the sampled poses, image resolution and current exported assets.
 
-## Baseline
+## Historical coarse baseline
+
+These earlier concurrent-working-tree measurements are not the checked-in fixed-view gate baselines.
+Current ordinary surveys exclude zero-demand helper planes, so their pose count and collision oracle differ from this historical run.
+The --sweep-raw-collision diagnostic retains those planes for investigation, but other intervening renderer changes still prevent treating the old executable/cache snapshot as a current reproducible baseline.
 
 Recorded on 2026-10-14 using the current connected Ashina renderer and extracted cache, with no story/hour override.
 The baseline executable was built from the shared working tree during concurrent renderer and extraction work, so these are session baselines rather than a reproducible committed-source/cache snapshot.
@@ -102,7 +161,7 @@ Category totals count repeated visibility across poses, and the score includes c
 | m11_00_00_00 | off | 364 | 25.84 | 5,887,518 | 8,320,862 | 30,573 | 179,677 | 8,877,369 | 23,295,999 |
 | m11_00_00_00 | on | 364 | 24.53 | 5,886,557 | 8,013,010 | 88,668 | 142,584 | 8,581,289 | 22,712,108 |
 
-Reproduce the coarse baseline with `--spacing 80 --views 4 --settle-frames 4`, adding `--objects` for the objects control.
+The coarse baseline used `--spacing 80 --views 4 --settle-frames 4`, adding `--objects` for the objects control.
 The JSON reports retain the worst 20 poses and every per-view count, and the four matching screenshots for the worst 20 points are in each control folder.
 Both controls have identical pose lists for each map, all four reports mark their coarse sample complete, and each control has exactly 80 retained PNGs.
 Castle without objects ranks point 87 first: eye [120, -13.263, 280], yaw 270 degrees, pitch -50 degrees, with 36,864 void, 35,327 depth-gap and 36,752 pop-in pixels (score 108,943).

@@ -27,6 +27,9 @@ See [GENICHIRO.md](GENICHIRO.md#hand-over-cinematic-placeholder-2026-10-11) for 
 
 The ten-map baseline and reviewed evidence are in [MAP-BASELINE.md](MAP-BASELINE.md).
 Map transforms, base textures, collision and GPARAM sun/ambient/fog load from the installed data.
+Connected-block layer samplers still use the primary map's texture prefix in production.
+The opt-in --test-material-routing control resolves each sampler from its own GLB, but is not enabled by default because the fixed-view per-metric gate records a pop-in increase despite fewer untextured pixels.
+The numeric gates and paired evidence are documented in [MAP-COMPLETENESS.md](MAP-COMPLETENESS.md#gates-and-outskirts-regression).
 M[Multiple] and M[MultipleGround] now render their static-switch layers, RGB mask selectors, tint, detail normals, wetness and authored snow direction.
 Remaining approximations include ground ripples, variant-18 metal masks, native AO, optional HDR-colour gamma conversion and texture-tiling semantics; other material families retain their existing paths.
 Water lacks its original shader, and large lakes and underground water can appear as pale flat polygons.

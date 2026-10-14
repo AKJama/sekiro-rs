@@ -9,6 +9,7 @@ use std::io::Read;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use bevy::camera::primitives::{Aabb, Frustum};
 use bevy::prelude::*;
 use sekiro_formats::hknp::CollisionMesh;
 use serde_json::{Value, json};
@@ -28,10 +29,6 @@ pub(crate) fn enabled(id: &str) -> bool {
 
 /// Material-renderer hook: layer URIs are relative to their own model GLB, not
 /// the primary map. This also preserves Bevy's named asset-source identity.
-#[allow(
-    dead_code,
-    reason = "Prepared material-owner hook; routing call requires the outstanding ownership approval"
-)]
 pub(crate) fn material_texture_path(
     assets: &AssetServer,
     material: &Handle<StandardMaterial>,
@@ -151,6 +148,35 @@ pub(crate) struct MapWorld {
     visibility_maps: BTreeMap<String, visibility::VisibilityMap>,
     requests: BTreeMap<String, visibility::BlockRequest>,
     lod: super::lod::LodTable,
+    /// Fixed offscreen captures need only geometry intersecting their camera volumes
+    /// and the renderer's existing caster budget. Interactive worlds never set this.
+    pub(crate) capture_views: Option<CaptureViews>,
+}
+
+pub(crate) struct CaptureViews {
+    pub(crate) views: Vec<(Frustum, Vec3)>,
+    pub(crate) caster_distance: f32,
+}
+
+impl CaptureViews {
+    fn includes(&self, min: Vec3, max: Vec3, transform: &Transform) -> bool {
+        let bounds = Aabb::from_min_max(min, max);
+        let mut lo = Vec3::splat(f32::INFINITY);
+        let mut hi = Vec3::splat(f32::NEG_INFINITY);
+        for x in [min.x, max.x] {
+            for y in [min.y, max.y] {
+                for z in [min.z, max.z] {
+                    let corner = transform.transform_point(Vec3::new(x, y, z));
+                    lo = lo.min(corner);
+                    hi = hi.max(corner);
+                }
+            }
+        }
+        self.views.iter().any(|(frustum, eye)| {
+            frustum.intersects_obb(&bounds, &transform.compute_affine(), true, false)
+                || eye.distance_squared(eye.clamp(lo, hi)) <= self.caster_distance.powi(2)
+        })
+    }
 }
 
 #[derive(Component)]
@@ -455,6 +481,7 @@ impl MapWorld {
             visibility_maps,
             requests: BTreeMap::new(),
             lod,
+            capture_views: None,
         })
     }
 
@@ -666,6 +693,7 @@ pub(crate) fn spawn(
         return;
     }
     let mut spawned = 0;
+    let mut capture_roots = BTreeMap::new();
     let args: Vec<_> = std::env::args().collect();
     let only_part = crate::arg_value(&args, "--world-part");
     for block in world.blocks.values_mut() {
@@ -702,6 +730,20 @@ pub(crate) fn spawn(
             let Some(pose) = super::pose(row) else {
                 continue;
             };
+            if let (Some(coverage), Some(min), Some(max)) = (
+                world.capture_views.as_ref(),
+                super::vec3(&block.json["models"][model]["min"]),
+                super::vec3(&block.json["models"][model]["max"]),
+            ) {
+                let transform = Transform {
+                    translation: pose.translation,
+                    rotation: pose.rotation,
+                    scale: pose.scale,
+                };
+                if !coverage.includes(min, max, &transform) {
+                    continue;
+                }
+            }
             let (draw, backread) = effective_masks(row);
             if !enabled(&block.id)
                 && !draw
@@ -716,6 +758,23 @@ pub(crate) fn spawn(
                 continue;
             }
             let glb = format!("{}{glb}", block.prefix);
+            let capture_handle: Option<Handle<Gltf>> = world.capture_views.as_ref().map(|_| {
+                assets
+                    .load_builder()
+                    .override_unapproved()
+                    .load(glb.clone())
+            });
+            if capture_handle.is_some() && !capture_roots.contains_key(&glb) {
+                match super::capture::scene_roots(&sekiro_sim::cache::root().join(&glb)) {
+                    Ok(roots) => {
+                        capture_roots.insert(glb.clone(), roots);
+                    }
+                    Err(error) => {
+                        error!("capture {glb}: {error:#}");
+                        continue;
+                    }
+                }
+            }
             if seen.insert(glb.clone()) {
                 // A sweep's legacy asset root is the primary map folder. Its bounded,
                 // inventory-validated sibling paths are explicitly allowed to load.
@@ -778,25 +837,31 @@ pub(crate) fn spawn(
                     if !exists {
                         continue;
                     }
-                    let child = commands
-                        .spawn((
-                            WorldAssetRoot(
-                                assets
-                                    .load_builder()
-                                    .override_unapproved()
-                                    .load(GltfAssetLabel::Scene(level).from_asset(glb.clone())),
-                            ),
-                            Transform::IDENTITY,
-                            if level == first {
-                                Visibility::Inherited
-                            } else {
-                                Visibility::Hidden
-                            },
-                            DetailWeight(f32::from(level == first)),
-                            ChildOf(root),
-                        ))
-                        .id();
-                    slots[level] = Some(child);
+                    let mut child = commands.spawn((
+                        Transform::IDENTITY,
+                        if level == first {
+                            Visibility::Inherited
+                        } else {
+                            Visibility::Hidden
+                        },
+                        DetailWeight(f32::from(level == first)),
+                        ChildOf(root),
+                    ));
+                    if let Some(handle) = &capture_handle {
+                        child.insert(super::capture::CaptureScene {
+                            gltf: handle.clone(),
+                            level,
+                            roots: capture_roots[&glb][level].clone(),
+                        });
+                    } else {
+                        child.insert(WorldAssetRoot(
+                            assets
+                                .load_builder()
+                                .override_unapproved()
+                                .load(GltfAssetLabel::Scene(level).from_asset(glb.clone())),
+                        ));
+                    }
+                    slots[level] = Some(child.id());
                     pending.instances += 1;
                 }
                 commands.entity(root).insert(DetailPart {
@@ -812,12 +877,20 @@ pub(crate) fn spawn(
                     slots,
                 });
             } else {
-                commands.entity(root).insert(WorldAssetRoot(
-                    assets
-                        .load_builder()
-                        .override_unapproved()
-                        .load(GltfAssetLabel::Scene(0).from_asset(glb)),
-                ));
+                if let Some(handle) = &capture_handle {
+                    commands.entity(root).insert(super::capture::CaptureScene {
+                        gltf: handle.clone(),
+                        level: 0,
+                        roots: capture_roots[&glb][0].clone(),
+                    });
+                } else {
+                    commands.entity(root).insert(WorldAssetRoot(
+                        assets
+                            .load_builder()
+                            .override_unapproved()
+                            .load(GltfAssetLabel::Scene(0).from_asset(glb)),
+                    ));
+                }
                 pending.instances += 1;
             }
             spawned += 1;
@@ -954,6 +1027,32 @@ struct HierarchyReported;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fixed_capture_keeps_offscreen_shadow_casters_and_crossing_bounds() {
+        use bevy::camera::CameraProjection;
+        let coverage = super::CaptureViews {
+            views: vec![(
+                PerspectiveProjection::default().compute_frustum(&GlobalTransform::IDENTITY),
+                Vec3::ZERO,
+            )],
+            caster_distance: 5.,
+        };
+        assert!(coverage.includes(
+            Vec3::new(-1., -1., 2.),
+            Vec3::new(1., 1., 3.),
+            &Transform::IDENTITY
+        ));
+        assert!(!coverage.includes(
+            Vec3::new(-1., -1., 20.),
+            Vec3::new(1., 1., 21.),
+            &Transform::IDENTITY
+        ));
+        assert!(coverage.includes(
+            Vec3::new(-1000., -1., -10.),
+            Vec3::new(1000., 1., -9.),
+            &Transform::IDENTITY
+        ));
+    }
     use super::*;
 
     #[test]

@@ -180,6 +180,13 @@ fn layered_map_forward_depth_and_motion_shaders_validate() {
                     cache.get(0, id, &defs).unwrap_or_else(|e| {
                         panic!("{name}: bindless={bindless}, game={game}, msaa={msaa}: {e:?}")
                     });
+                    if name == "map_fog_surface" {
+                        defs.retain(|d| !matches!(d, ShaderDefVal::Bool(name, _) if name == "DEPTH_PREPASS"));
+                        defs.push("FOG_DIAGNOSTIC".into());
+                        cache
+                            .get(0, id, &defs)
+                            .unwrap_or_else(|e| panic!("fog surface sweep diagnostic: {e:?}"));
+                    }
                 }
             }
         }

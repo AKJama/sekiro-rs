@@ -1,5 +1,44 @@
 # Status
 
+## Map gates and Outskirts regression (2026-10-14)
+
+Added a normal CPU data gate for all ten maps, numeric fixtures, twenty independent raw-MSB visibility cases including connected neighbours, and strict windowless six-view render gates for both Ashina areas.
+The final normal cargo test invocation passes the connected data gate in 6.56 seconds; final render gates pass in 43.5 seconds for Outskirts and 41.2 seconds for Castle.
+Both Ashina maps were exported once each, serially, with zero model failures and unchanged canonical placement/mask/LOD inventories; eight older layouts received metadata-only refreshes.
+The historical Outskirts depth/void regression reproduces exactly on h900001's zero-demand helper plane, including a camera roughly 50 m below visible terrain.
+The old selector drew all scenery for empty demand; the confirmed exe selector correctly draws none, so ordinary surveys now reject those poses while a raw-collision control preserves reproduction.
+Fixed nested-scene readiness accounting, cached repeated material/fog metadata parsing, added fast static GLTF capture instancing with conservative coverage, and ordered instantiation before authored fog conversion.
+Capture exposure now meters with the native reset argument and holds the same GPU history through normal/all-visible screenshots, preserving authored bounds and grading.
+The tangent test excludes index-unreferenced vertices while retaining its original thresholds; regenerated referenced data gives 97.1% handedness and 96.0% direction agreement.
+The material-routing experiment removes Castle's 903 untextured pixels but raises pop-in beyond tolerance, so production routing stays off and --test-material-routing retains the reviewed control.
+The game unit suite passed 107 tests with two existing slow tests ignored, shader/material/tangent integration passed six, and the extractor passed 23 unit plus two integration tests; formatting and all-target Clippy with denied warnings pass.
+Reference coverage includes 442 positioned screenshots mapped to 150 distinct camera poses, with derived comparisons under target/alt-gt/reference/ and explicit camera/story limitations.
+The optional 150-pose reference tool is not yet reliable and is excluded from required gates; its repeat failed three pop-in tolerances and one grey tolerance, with shading variability left open.
+The final reference baseline took 418.7 seconds; the four repeat failures and deferred investigation are documented in MAP-COMPLETENESS.md.
+No real-game, save or install access, live-memory work, commit or publication occurred.
+
+## Reference index follow-up (2026-10-14)
+
+Added a post-processing command and Windows PowerShell OCR helper under tools/reference_index for per-shot HUD evidence, consecutive same-position spot grouping and an independent Windows.Media.Ocr overlay read.
+The spot rule uses a 30-second maximum gap and 2 mm coordinate tolerance; read-only analysis of the current index yields 149 spots, including 96 multi-shot spots covering 389 captures.
+The HUD pixel heuristic labels 16 screenshots visible and retains its red vitality and orange posture/boss bar evidence counts per shot.
+Windows OCR disagreements are appended to review.json without changing either reading.
+The current turn grants repository writes only, so the external index.json, spots.json and review.json have not yet been updated with these new fields, and the Windows OCR pass remains to be run where the reference output folder is writable.
+Python compilation, PowerShell syntax parsing, workspace formatting and scoped whitespace checks pass; map code and cache data were not touched.
+
+## Real-game reference screenshot index (2026-10-14)
+
+Added the standalone Pillow/NumPy reader and spatial/contact-sheet tool in tools/reference_index, with runtime calibration and review inputs kept outside tracked source.
+The external reference index covers 444 original screenshots: 439 ordinary views and five menu/help views, with 442 positions assigned to the exported Outskirts and Castle blocks.
+The overlay agrees with source placed coordinates across both blocks; conversion to Bevy mirrors X without adding MapOffset again.
+Twenty-four held-out visual checks pass for both coordinates and IGT, and nine rejected automatic readings have explicit manual transcriptions, including one coordinate correction.
+The external report records idol-distance evidence, alternative-offset comparisons and both travel menus' eleven visible unlocked destinations, including Castle Tower Lookout.
+Area contact sheets, capture-order overviews and a collision-outline map retain the global shot numbers; the two menus without positions remain unpositioned.
+All 442 positions have matching tolerant collision support, and 422 have strict downward floor results; the remaining 20 slightly penetrate the nearby exported floor and retain null strict heights.
+Python compilation, output invariants, held-out checks, workspace formatting and scoped whitespace checks pass; no Rust crate was edited or rebuilt.
+No commits, pushes, real-game runs, source screenshot changes, game/save writes, map-code edits or cache/map writes were made.
+
+
 ## Authored map fog surfaces (2026-10-14)
 
 Outskirts uses 17 fog material entries across five models and Castle uses three entries on one model, all from the native GroundFog and CloudFog shader families.

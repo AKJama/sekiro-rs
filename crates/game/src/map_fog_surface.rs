@@ -32,7 +32,7 @@ struct Inputs {
 
 #[derive(Asset, TypePath, AsBindGroup, Clone, Debug)]
 #[bind_group_data(FogKey)]
-struct FogMaterial {
+pub(super) struct FogMaterial {
     #[uniform(0)]
     inputs: Inputs,
     #[texture(1)]
@@ -56,16 +56,19 @@ struct FogMaterial {
     #[sampler(13)]
     diffuse: Option<Handle<Image>>,
     double_sided: bool,
+    diagnostic: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct FogKey {
+pub(super) struct FogKey {
     double_sided: bool,
+    diagnostic: bool,
 }
 impl From<&FogMaterial> for FogKey {
     fn from(m: &FogMaterial) -> Self {
         Self {
             double_sided: m.double_sided,
+            diagnostic: m.diagnostic,
         }
     }
 }
@@ -77,7 +80,11 @@ impl Material for FogMaterial {
             .into()
     }
     fn alpha_mode(&self) -> AlphaMode {
-        AlphaMode::Blend
+        if self.diagnostic {
+            AlphaMode::Mask(0.05)
+        } else {
+            AlphaMode::Blend
+        }
     }
     fn enable_prepass() -> bool {
         false
@@ -96,8 +103,51 @@ impl Material for FogMaterial {
         } else {
             Some(Face::Back)
         };
+        if key.bind_group_data.diagnostic {
+            descriptor
+                .fragment
+                .as_mut()
+                .unwrap()
+                .shader_defs
+                .push("FOG_DIAGNOSTIC".into());
+        }
         Ok(())
     }
+}
+
+/// Preserve authored masks, scrolling and vertex coverage in the offscreen depth pass.
+/// Soft intersection needs the scene depth, unavailable on the isolated diagnostic target.
+pub(super) fn sweep_material(world: &mut World, entity: Entity) -> Option<Handle<FogMaterial>> {
+    let handle = world.get::<MeshMaterial3d<FogMaterial>>(entity)?.0.clone();
+    let mut material = world
+        .resource::<Assets<FogMaterial>>()
+        .get(&handle)?
+        .clone();
+    material.diagnostic = true;
+    Some(world.resource_mut::<Assets<FogMaterial>>().add(material))
+}
+
+pub(super) fn sweep_pending(world: &World, entity: Entity) -> bool {
+    let Some(handle) = world.get::<MeshMaterial3d<FogMaterial>>(entity) else {
+        return false;
+    };
+    let Some(material) = world.resource::<Assets<FogMaterial>>().get(&handle.0) else {
+        return true;
+    };
+    let assets = world.resource::<AssetServer>();
+    [
+        &material.mask,
+        &material.flow,
+        &material.ground,
+        &material.height,
+    ]
+    .iter()
+    .any(|h| {
+        matches!(
+            assets.get_load_state(h.id()),
+            Some(bevy::asset::LoadState::Loading | bevy::asset::LoadState::NotLoaded)
+        )
+    })
 }
 
 #[derive(Resource)]
@@ -106,7 +156,11 @@ struct Settings {
     enabled: bool,
     empty_gi: Handle<bevy::render::storage::ShaderBuffer>,
     materials: HashMap<AssetId<StandardMaterial>, Handle<FogMaterial>>,
+    definitions: HashMap<AssetId<StandardMaterial>, Option<Value>>,
 }
+
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct FogConversion;
 
 pub(crate) fn install(app: &mut App, prefix: &str) {
     embedded_asset!(app, "map_fog_surface.wgsl");
@@ -120,9 +174,10 @@ pub(crate) fn install(app: &mut App, prefix: &str) {
             enabled: !std::env::args().any(|a| a == "--no-fog-surfaces"),
             empty_gi,
             materials: HashMap::new(),
+            definitions: HashMap::new(),
         })
         // Replace before the ordinary map material wrapper consumes these entities.
-        .add_systems(PreUpdate, replace)
+        .add_systems(PreUpdate, replace.in_set(FogConversion))
         .add_systems(
             PostUpdate,
             update_lighting.after(crate::lighting::apply_lighting),
@@ -196,13 +251,30 @@ fn replace(
         &GltfMaterialExtras,
     )>,
     irradiance: Option<Res<crate::lighting::MapIrradiance>>,
+    mut changed: MessageReader<AssetEvent<StandardMaterial>>,
 ) {
+    for event in changed.read() {
+        if let AssetEvent::Modified { id } | AssetEvent::Removed { id } = event {
+            settings.definitions.remove(id);
+            settings.materials.remove(id);
+        }
+    }
     for (entity, original, extras) in &meshes {
-        let Ok(extras) = serde_json::from_str::<Value>(&extras.value) else {
+        // Most meshes are ordinary surfaces. Parse each shared material once rather
+        // than parsing every material's complete layer metadata for every instance.
+        let definition = settings
+            .definitions
+            .entry(original.0.id())
+            .or_insert_with(|| {
+                let mut extras = serde_json::from_str::<Value>(&extras.value).ok()?;
+                let data = extras["sekiro_fog_surface"].take();
+                (data["version"].as_u64() == Some(1)).then_some(data)
+            })
+            .clone();
+        let Some(data) = definition else {
             continue;
         };
-        let data = &extras["sekiro_fog_surface"];
-        if data["version"].as_u64() != Some(1) || !standard.contains(&original.0) {
+        if !standard.contains(&original.0) {
             continue;
         }
         if !settings.enabled {
@@ -218,7 +290,7 @@ fn replace(
             .materials
             .entry(original.0.id())
             .or_insert_with(|| {
-                let mut inputs = inputs(data);
+                let mut inputs = inputs(&data);
                 let textures = data["textures"].as_array();
                 let slots = if inputs.control.x > 0. {
                     [0, 2, 3, 4]
@@ -271,6 +343,7 @@ fn replace(
                     voxels: irradiance.as_ref().map(|i| i.voxels.clone()),
                     diffuse: irradiance.as_ref().map(|i| i.diffuse.clone()),
                     double_sided: standard.get(&original.0).is_some_and(|m| m.double_sided),
+                    diagnostic: false,
                 })
             })
             .clone();

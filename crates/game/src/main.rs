@@ -95,7 +95,10 @@ fn dispatch() -> anyhow::Result<()> {
         anyhow::bail!("--cache requires a directory");
     }
     sekiro_sim::cache::init(cache.as_deref());
-    if args.iter().any(|a| a == "--sweep") {
+    if args
+        .iter()
+        .any(|a| matches!(a.as_str(), "--sweep" | "--render-gate" | "--reference-gate"))
+    {
         return map::sweep::run(&args);
     }
     if args.len() == 1 || args.iter().any(|a| a == "--menu") {
