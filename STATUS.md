@@ -1,5 +1,15 @@
 # Status
 
+2026-10-15: Authored BTL type, ancillary MapOffset, squared diffuse colour, spot rotation/cone and shadow flags now drive clustered point/spot lights for ready map blocks.
+Outskirts has 16 base-bank points and Castle 32 points plus two spots; the six-block warm catalogue retains 246 records without activating dormant neighbours.
+All four LightSet diffuse/specular slots now contribute with recovered constructor directions, camera-relative transforms and sharpness, missing banks/rows log errors, and render-probe installation is idempotent.
+Both six-view gates pass in 40.7/48.8 seconds with every geometry metric, selected collision and visible-part manifest equal to runtime-off controls; manually reviewed colour-only fixtures and all decisions are in docs/MAP-COMPLETENESS-SWEEP.md.
+The data gate, 806 workspace tests with 24 existing ignores, final focused packet/shader checks, release all-target Clippy with denied warnings and formatting pass under target/alt-lights with six jobs.
+Windowless 1600 x 900 night frame snapshot medians change from 3.801 to 4.845 ms at the Outskirts start and 3.419 to 3.408 ms in the Castle courtyard; opaque GPU costs rise from 1.995 to 3.121 and 0.971 to 1.513 ms.
+Matched runtime-off/on night PNGs are in target/alt-lights/progress/; L1 remains open for bright/blue snow and material/tone fidelity, while E1 still needs flames, smoke, idol effects and fixture-emissive verification.
+Stock-Bevy attenuation, spot shape, independent BTL specular response, flicker and automatic nonzero-bank selection remain explicit fidelity limits in docs/LIGHTING.md and docs/FIDELITY.md.
+Other agents' work is retained, main.rs was not edited by this job, and no commit, publication, real-game run or reference-image modification occurred.
+
 ## Authored Ashina grass - visual parity G1 (2026-10-15)
 
 The new grass exporter reads native surfaces, all six MSB channel bindings, GrassTypeParam models and alpha-tested textures, with Halton and world-space hex placement rules recovered through static executable analysis.

@@ -19,10 +19,14 @@ pub(super) fn export(raw: &Path, out: &Path, id: &str) -> Result<()> {
         let rows = lights
             .into_iter()
             .map(|l| {
-                if l.kind != 1 {
+                if l.kind > 1 {
                     eprintln!("unknown BTL light kind {}: {}", l.kind, l.name);
                 }
-                json!({ "name": l.name, "kind": l.kind, "color": l.color, "intensity": l.intensity,
+                json!({ "name": l.name, "kind": l.kind, "flag_1c": l.flag_1c,
+                "color": l.color, "intensity": l.intensity,
+                "specular_color": l.specular_color, "specular_intensity": l.specular_intensity,
+                "cast_shadows": l.cast_shadows, "cone_angle": l.cone_angle,
+                "near_clip": l.near_clip, "sharpness": l.sharpness, "width": l.width,
                 "position": [-l.position[0], l.position[1], l.position[2]],
                 "rotation": l.rotation, "range": l.range, "raw": l.raw })
             })

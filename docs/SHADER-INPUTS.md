@@ -262,3 +262,19 @@ Our renderer: keep PreExposure at 1, and do not model it unless the formats need
 - Unit of the frame delta feeding `g_AdaptParam`, and the quality scalars from `DAT_143f3b490+0x12620/+0x12628` that scale LocalLightDistScale and bloom.
 - Colour grading LUT id resolution (`14024d9f0`, `1402ab260`), and the colour matrix and vignette producers (`24dca0`).
 - Camera-relative pieces: the exact view-space construction of the local-light collection volume constants (data at `328b000`).
+
+## Light-set defaults and camera-local slots, 2026-10-15
+
+Static analysis of `3114b0`, `30df80`, `311a50` and `310630` resolves the previously missing local directions.
+The constructors derive pitch with `asin(-0.7071)` and yaw with `atan2(0.7071, 0)` for all four slots; the clear operation resets colours and enable flags without clearing those directions.
+The literal pitch input is the executable's float bits `bf350481`, rather than an exact mathematical square-root constant.
+Slots 2 and 3 always rotate their vectors by pi about Y and then by the camera matrix, independently of the optional camera-follow flag on slot 1.
+Their sharpness fields are named `Directional LocalLight Light Sharpness1/2`, including the second `Light` word.
+The native local-light diffuse remap and independent specular colours now participate in the map material's default direct compositor.
+Its material-side gloss and Fresnel inputs still come through the existing glTF/Bevy material representation, so this does not establish complete native G-buffer/BRDF parity.
+
+`3892e0` also squares local-light diffuse and specular RGB before multiplying their separate powers.
+The BTL upload now preserves that diffuse conversion; independent BTL specular power, native source-radius and attenuation conversion remain rendering limitations.
+The existing scene-to-Bevy unit bridge remains inferred, with no new brightness calibration or per-map multiplier.
+The camera-follow branch of slot 1 applies the same pi rotation as the two local slots, so all three camera-relative directions use one conversion in the map compositor.
+Primary sharpness lookup uses its qualified directional name so an absent primary field cannot match a local-light field through substring lookup; the regression preserves the native primary default 50 alongside an authored local value 15.

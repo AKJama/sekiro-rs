@@ -220,3 +220,93 @@ The final `cargo test --release -p sekiro-game -j 4 --offline` run passed 100 un
 `cargo clippy -p sekiro-game --all-targets -j 4 --offline -- -D warnings` and `cargo fmt --all --check` passed.
 All builds and checks used `CARGO_TARGET_DIR=target/alt-hs`.
 The freshly rebuilt executable also passed an isolated Castle objects smoke capture in 21.7 s with CPU depth validation and a visually inspected normal image.
+
+## Authored-light colour fixture review, 2026-10-15
+
+The matched three-way controls are `target/alt-lights/final-compare/{before,btl-only,after}/gates/`.
+They use one frozen executable: runtime-off restores this job's old lighting, BTL-only retains corrected local placement/upload with the four-slot compositor disabled, and after enables both corrections.
+Every void, depth-gap and untextured count is identical across all three controls at all twelve views.
+Every selected collision and sorted visible-part manifest is also identical.
+Outskirts retains geometry totals 0/493/0; Castle retains 1933/4885/903 in these matched controls.
+Castle view 0 already measures depth gap 148 in the runtime-off control against the older fixture's 149; its unchanged geometry fixture is retained within the existing tolerance.
+
+Only the two colour columns are updated.
+Camera coordinates, resolution, geometry fixture columns, first-visit state, 16-pixel-or-1-percent tolerances and the 120-second budget are unchanged.
+The following table accounts for every changed colour fixture value; the middle columns isolate the much smaller BTL-only response from the recovered LightSet compositor.
+Grey is the existing neutral-colour threshold, and pop-in is the existing normal/all-visible colour threshold, so neither is a geometry measurement.
+
+| Map | View | Grey old fixture | Grey off / BTL / new fixture | Pop-in old fixture | Pop-in off / BTL / new fixture |
+| --- | ---: | ---: | --- | ---: | --- |
+| Outskirts | 0 | 17 | 16 / 16 / 215 | 8753 | 8751 / 8751 / 8711 |
+| Outskirts | 1 | 97 | 97 / 102 / 183 | 191 | 191 / 189 / 294 |
+| Outskirts | 2 | 15 | 18 / 18 / 383 | 2415 | 2420 / 2420 / 2484 |
+| Outskirts | 3 | 155 | 155 / 155 / 655 | 5131 | 5131 / 5131 / 5503 |
+| Outskirts | 4 | 0 | 0 / 0 / 648 | 3586 | 3590 / 3586 / 6831 |
+| Outskirts | 5 | 37 | 37 / 37 / 147 | 4277 | 4277 / 4277 / 4817 |
+| Castle | 0 | 31 | 31 / 33 / 196 | 5097 | 5062 / 5056 / 5083 |
+| Castle | 1 | 7 | 7 / 8 / 288 | 7451 | 7451 / 7447 / 7488 |
+| Castle | 2 | 200 | 198 / 198 / 517 | 4975 | 4976 / 4976 / 5023 |
+| Castle | 3 | 34 | 35 / 35 / 49 | 3785 | 3764 / 3764 / 3743 |
+| Castle | 4 | 107 | 119 / 116 / 482 | 2514 | 2523 / 2527 / 2400 |
+| Castle | 5 | 20 | 18 / 21 / 92 | 2842 | 2768 / 2769 / 2871 |
+
+Outskirts view 0 has no measured BTL-only change; its grey increase and reduced colour difference come from the four-slot diffuse/specular response and its exposure metering.
+View 1 has a small BTL-only shift of +5 grey and -2 pop-in pixels, followed by the larger native-LightSet changes shown above.
+View 2 has no BTL-only shift, isolating its increased neutral pixels and normal/all-visible contrast to LightSet shading.
+View 3 likewise isolates both increases to the recovered direct response on the already different normal/all-visible surfaces.
+View 4 keeps zero BTL-only grey pixels and a four-pixel pop-in shift, while the full compositor moves many wall pixels into the neutral band and increases contrast against its existing all-visible geometry.
+View 5 has no BTL-only shift; both increases are from the direct compositor and held-per-pair exposure.
+
+Castle view 0 has BTL-only changes of +2 grey and -6 pop-in pixels; the larger neutral-colour increase is from LightSet, while the complete change reduces pop-in from the old fixture.
+View 1 has BTL-only changes of +1 grey and -4 pop-in pixels, with its full increase following the direct response.
+View 2 has no BTL-only shift, isolating both full changes to independent diffuse/specular lighting.
+View 3 has no BTL-only shift, and the direct compositor adds 14 neutral pixels while reducing the colour-difference count by 21.
+View 4 has small BTL-only shifts of -3 grey and +4 pop-in pixels, then a larger LightSet neutral-colour increase and reduced normal/all-visible contrast.
+View 5 has small BTL-only shifts of +3 grey and +1 pop-in pixels, then the full direct response raises both criteria.
+Small differences between an old fixture and its fresh runtime-off control remain within the original tolerances and are not attributed to a particular lamp.
+The larger four-slot changes are accepted because they implement recovered input, direction and accumulation rules; no authored colour, intensity or gate threshold was adjusted to achieve these counts.
+
+The runtime-off, BTL-only and full controls take respectively 40.6/41.0/42.2 seconds for Outskirts and 48.1/55.2/70.4 seconds for Castle.
+The full controls deliberately fail the preceding colour fixtures before this manual review, while passing every geometry and time check.
+These controls establish the cause of the fixture changes, not retail pixel parity or a claim that the existing all-visible differences are repaired.
+
+The final independently rerun production-default gates pass all six views in 40.7 seconds for Outskirts and 48.8 seconds for Castle.
+Their reports are under `target/alt-lights/final/gates/`, and `accepted-comparison.json` proves all twelve final geometry measurements, selected collisions and sorted visible-part manifests equal the runtime-off controls.
+Final totals are Outskirts geometry 0/493/0, grey 2231, pop-in 28639; Castle geometry 1933/4885/903, grey 1619, pop-in 26630.
+The reviewed fixture tolerances remain unchanged, including the small independent colour-repeat differences.
+
+Night PNGs are under `target/alt-lights/progress/` with paired `lights-<view>-before.png` and `lights-<view>-after.png` names.
+The requested views are `shrine`, `interior`, `fire` and `outskirts-start`; additional pairs cover `castle-idol` and the first Castle gate camera labelled `castle-start`.
+The before control uses `SEKIRO_MAP_LIGHTS_LEGACY=1` in the same executable as after, preserving the preceding GI, fog, sky and material work.
+The pair-derived eye, FOV and indexed player position are reused, with equal capture metadata and selected collisions verified for all six pairs.
+The final capture executable is `target/alt-lights/frozen-final/sekiro-rs.exe`, SHA-256 `15c26c2dd0de14ad70dd0ae885253ab95e5b8166cb4b36c335f1b792a7b0f628`.
+The optional camera-follow fill uses the same recovered conversion as the two local slots; that fill-follow flag is off in the observed Ashina packets.
+
+The shrine and hall show substantially more interior/wood detail with all four LightSet slots active.
+Night snow remains excessively bright and blue against the retail pairs, with hard lighting and material/normal differences still visible, so L1 is not closed.
+The battlefield fire at spot-045 still has no flame or smoke, and the Castle idol at spot-123 still has no blue flame, mist or effect glow.
+Those missing effect presentations belong to E1 FX integration; these images do not certify that every remaining dark fixture is FX-only or that its emissive response is correct.
+The hut at spot-016 was reviewed from its existing external pair and the native-radius census, rather than counted as an additional fresh capture.
+No external reference image was copied or modified.
+
+Stationary performance uses windowless 1600 x 900 native-colour rendering at the Outskirts start and first Castle gate camera, with the same night state and a frozen shader clock.
+Each process warms the first capture, then measures seven further identical poses with 1000 settling frames each, staying within the existing CLI bound.
+Statistics exclude the first second after every preceding readback and the final 0.2 seconds before the next image, avoiding capture/PNG work in the measured intervals.
+The table reports the median of one-second smoothed frame-time and GPU-opaque diagnostic snapshots, not per-frame percentiles or an unbounded interactive-viewer FPS guarantee.
+The scene loader retains the same conservative fixed-frustum/shadow-caster scope in both modes, and no CPU compiler was running in the retained steady intervals.
+Commands, complete diagnostics, sample counts and ranges are in `target/alt-lights/performance-long/` and `frame-comparison.json`.
+
+| Night camera | Frame ms before / after | Opaque GPU ms before / after | Retained snapshots before / after |
+| --- | ---: | ---: | ---: |
+| Outskirts start | 3.801 / 4.845 | 1.995 / 3.121 | 17 / 31 |
+| Castle courtyard | 3.419 / 3.408 | 0.971 / 1.513 | 14 / 16 |
+
+The extra direct response raises opaque GPU cost in both views; Castle wall-frame timing remains near its CPU/scheduling floor rather than demonstrating a speedup.
+The six-view end-to-end budget remains 120 seconds and both final runs pass it.
+
+`cargo test --release --offline --workspace -j 6` passes 806 tests with 24 existing ignores across the workspace binaries and doctests.
+That run includes 122 game unit tests, six game integration tests and the normal all-map data gate.
+The final sharpness-field separation check and all layered shader permutations also pass after the last packet/shader corrections.
+Release workspace all-target Clippy with denied warnings, workspace formatting and scoped whitespace checks pass under `CARGO_TARGET_DIR=target/alt-lights` with six jobs.
+The implementation changes are the BTL reader/export metadata, new `map_lights.rs`, LightSet packing/composition, idempotent performance-probe installation and the small `map.rs` integration; `main.rs` was not edited by this job.
+The existing grass, GI, fog, sky, presentation and material work is retained, and no commit or publication was made.

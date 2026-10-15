@@ -3,6 +3,7 @@ use super::*;
 
 #[derive(Clone)]
 struct LocalLight {
+    block: String,
     position: Vec3,
     color: Color,
     intensity: f32,
@@ -126,13 +127,27 @@ impl LocalLights {
                 "BTL range/intensity"
             );
             result.lights.push(LocalLight {
+                block: dir
+                    .file_name()
+                    .context("map ID")?
+                    .to_string_lossy()
+                    .into_owned(),
                 position: {
                     // MSB parts are already placed; only ancillary BTL coordinates use MapOffset.
                     let p = map_rotation * Vec3::from_array(native.position) + map_translation;
                     Vec3::new(-p.x, p.y, p.z)
                 },
-                // Match GPARAM's linear RGB convention; BTL's colour space is untraced.
-                color: Color::linear_rgb(color[0] / 255., color[1] / 255., color[2] / 255.),
+                // 3892e0 squares the local-light diffuse RGB before multiplying power.
+                // Keep the old upload only for the matched runtime control.
+                color: {
+                    let rgb = Vec3::from_array(color) / 255.;
+                    let rgb = if crate::lighting::legacy_map_lights() {
+                        rgb
+                    } else {
+                        rgb * rgb
+                    };
+                    Color::linear_rgb(rgb.x, rgb.y, rgb.z)
+                },
                 intensity: intensity * scale,
                 range,
                 spot: if native.kind == 1 && !crate::lighting::legacy_map_lights() {
@@ -162,6 +177,7 @@ pub(super) fn update_local_lights(
     time: Res<Time>,
     mut lights: ResMut<LocalLights>,
     focus: Query<&GlobalTransform, With<MapFocus>>,
+    world: Option<Res<world::MapWorld>>,
     mut last: Local<f32>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("update_local_lights");
@@ -179,6 +195,16 @@ pub(super) fn update_local_lights(
         .iter()
         .enumerate()
         .filter_map(|(i, l)| {
+            if !legacy
+                && world.as_ref().is_some_and(|world| {
+                    world
+                        .blocks
+                        .get(&l.block)
+                        .is_some_and(|b| b.state != world::RequestState::Ready)
+                })
+            {
+                return None;
+            }
             let distance = l.position.distance_squared(position);
             (l.intensity > 0. && l.range > 0. && (!legacy || distance <= (60. + l.range).powi(2)))
                 .then_some((i, distance))
@@ -258,7 +284,7 @@ mod tests {
                 .chain(&castle.lights)
                 .all(|l| !l.shadows)
         );
-        let before = Vec3::new(139.60899, -144.677, 1.99318);
+        let before = Vec3::new(139.609, -144.677, 1.99318);
         assert!(outskirts.lights[0].position.distance(before) > 90.);
         assert!((outskirts.lights[0].position.y - (-141.677)).abs() < 0.001);
         assert!(
@@ -282,6 +308,7 @@ mod tests {
             .insert_resource(LocalLights {
                 lights: (0..100)
                     .map(|i| LocalLight {
+                        block: String::new(),
                         position: Vec3::X * i as f32 * 0.1,
                         color: Color::WHITE,
                         intensity: 1.,

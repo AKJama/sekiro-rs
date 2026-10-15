@@ -5,7 +5,7 @@ No code from these projects is vendored; their documentation and source were rea
 
 ## Formats and data
 
-- [soulsmods/SoulsFormatsNEXT](https://github.com/soulsmods/SoulsFormatsNEXT) and [JKAnderson/SoulsFormats](https://github.com/JKAnderson/SoulsFormats): BND4, BXF4, DCX, FLVER, TPF, MTD, MSB, TAE, PARAM and EMEVD layouts.
+- [soulsmods/SoulsFormatsNEXT](https://github.com/soulsmods/SoulsFormatsNEXT) and [JKAnderson/SoulsFormats](https://github.com/JKAnderson/SoulsFormats): BND4, BXF4, DCX, FLVER, TPF, MTD, MSB, BTL, TAE, PARAM and EMEVD layouts.
 - [soulsmods/Paramdex](https://github.com/soulsmods/Paramdex): param definitions and row names (fetched at setup, not vendored).
 - [vawser/Smithbox](https://github.com/vawser/Smithbox): param field descriptions and enums.
 - [Meowmaritus/DSAnimStudio](https://github.com/Meowmaritus/DSAnimStudio): Sekiro TAE event templates (fetched at setup).

@@ -129,3 +129,10 @@ Guarded combo posture totals predict a breaking prefix only if the contacts are 
 
 Posture-break punish facts use nominal radial hit envelopes and constant-velocity projectile interception, rather than full facing, obstacle and target-dependent root-motion prediction.
 Hit-stun timings are selected by the installed grounded Wolf HKS and read from TAE execution cancels without situational SpEffects; recorded punish outcomes use actual combat telemetry.
+
+### Authored local lights, 2026-10-15
+
+BTL type decoding, ancillary MapOffset placement, connected-bank loading and all four LightSet diffuse/specular slots are implemented; see [LIGHTING.md](LIGHTING.md#authored-map-lights-2026-10-15).
+The stock Bevy local-light bridge still approximates native attenuation, source radius, spot aspect/edge sharpness, independent BTL specular response and flicker, and automatic nonzero BTL bank selection is untraced.
+Native material/G-buffer gloss, Fresnel and SSAO routing also remain approximate in the recovered four-slot compositor.
+Map FX emitters and their flame, smoke and transient light contributions remain a separate E1 task.

@@ -1088,7 +1088,12 @@ impl LightSet {
                 Quat::from_rotation_y(angle[1]) * Quat::from_rotation_x(angle[0]) * Vec3::Z;
             let direction = Vec3::new(-native.x, native.y, native.z);
             direct[i * 3] = direction.extend(if i >= 2 { 2. } else { f32::from(follow) });
-            let sharpness = get(&format!("{prefix}Sharpness{index}"))
+            let sharpness_name = if i >= 2 {
+                format!("LocalLight Light Sharpness{index}")
+            } else {
+                format!("Directional Light Sharpness{index}")
+            };
+            let sharpness = get(&sharpness_name)
                 .and_then(|v| v.first().copied())
                 .unwrap_or(50.);
             direct[i * 3 + 1] = pack(&diffuse).extend(sharpness);
@@ -1428,6 +1433,7 @@ mod probe_tests {
                     ("Enable LocalLight2", [1., 0., 0., 0.]),
                     ("LocalLight DiffColor1", [0.5, 1., 0.25, 2.]),
                     ("LocalLight SpecColor1", [0.25, 1., 0.5, 3.]),
+                    ("Directional LocalLight Light Sharpness1", [15., 0., 0., 0.]),
                     ("LocalLight DiffColor2", [0., 0., 0., 0.]),
                     ("LocalLight SpecColor2", [0.5, 0.25, 1., 0.5]),
                     ("Light1 FollowedCamera", [1., 0., 0., 0.]),
@@ -1463,6 +1469,8 @@ mod probe_tests {
         assert_eq!(set.direct[10].xyz(), Vec3::ZERO);
         assert!((set.direct[6].xyz().length() - 1.).abs() < 0.00001);
         assert_eq!(set.direct[6].w, 2.);
+        assert_eq!(set.direct[7].w, 15.);
+        assert_eq!(set.direct[4].w, 50.);
         assert_eq!(set.direct[8].w, 1.);
         assert_eq!(set.direct[9], set.direct[6]);
         assert_eq!(set.direct[11].w, 1.);

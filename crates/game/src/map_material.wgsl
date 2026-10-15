@@ -187,10 +187,10 @@ fn native_direct(pbr: PbrInput, layers: Layers) -> vec3<f32> {
         let specular_rgb = layers.direct[i*3u+2u].rgb;
         if all(diffuse==vec3(0.0)) && all(specular_rgb==vec3(0.0)) { continue; }
         var direction = layers.direct[i*3u].xyz;
-        // Undo the world X mirror and convert native camera +Z to Bevy camera -Z.
-        if layers.direct[i*3u].w==1.0 { direction = (view.world_from_view*vec4(-direction.x,direction.y,-direction.z,0.0)).xyz; }
-        // 310630 always rotates the two local slots by pi around Y then by the camera.
-        if layers.direct[i*3u].w==2.0 { direction = (view.world_from_view*vec4(direction,0.0)).xyz; }
+        // 310630 applies the same pi rotation then camera transform to a followed
+        // fill and to both local slots. The world X mirror and camera -Z conversion
+        // cancel that rotation into the packed direction used here.
+        if layers.direct[i*3u].w>0.0 { direction = (view.world_from_view*vec4(direction,0.0)).xyz; }
         var derived = derive_lighting_input(pbr.N,pbr.V,normalize(direction));
         let nl = max(dot(pbr.N,normalize(direction)),0.0);
         let h = normalize(pbr.V+normalize(direction));

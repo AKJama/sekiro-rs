@@ -671,7 +671,7 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
                 toggle_collision,
                 track_loading,
                 budget_map_shadows,
-                update_local_lights,
+                update_local_lights.after(world::update),
                 (pick_groups, apply_groups, apply_lighting, apply_probes).chain(),
             ),
         );

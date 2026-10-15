@@ -379,8 +379,8 @@ The [shared GI correction](#spatial-gi-and-fallback-2026-10-15) retains the auth
 With zero installed GIIV records, the scene then uses that camera cubemap without the missing native per-receiver coefficient lighting; load the original coefficients before calibrating brightness or probe blending.
 Native post settings log exposure 1.3, uploaded multiplier 2.4622889, middle gray -6, adaptation limits -0.3/0.01 and auto exposure disabled.
 The morning ID-100 raw sun diffuse colour is (0.470588, 0.549020, 0.627451, 0.2), while its separate SpecColor0 has the same RGB and intensity 0.3.
-LightSet::from_gparam at lighting.rs:884-885 reads only DiffColor0/1, and the Bevy direct-light path consequently does not preserve the separate authored specular-light control.
-A shared fidelity fix should recover and carry the native specular-light colours/intensities independently, rather than compensating with a per-map material or exposure gain; its visual impact still needs a matched original-game control.
+~~LightSet::from_gparam at lighting.rs:884-885 reads only DiffColor0/1, and the Bevy direct-light path consequently does not preserve the separate authored specular-light control.~~
+The [authored map-light correction](#authored-map-lights-2026-10-15) now carries all four slots and their independent specular colours through the default map compositor; material-side fidelity limits remain explicit.
 The selected fog upload is None despite authored fixed density 0.007, height density scale 0.007, distribution 0.01, height offset -400 and far depth 650 at ID 100.
 The exact shared cause is fog.rs:180-181 asking for "Enable", combined with crates/formats/src/gparam.rs:115 accepting any parameter name containing that substring.
 This selects VolumetricFog EnableAnalyticalFog = 0 and incorrectly disables the entire fog pass instead of only analytical continuation.
@@ -993,7 +993,8 @@ Native Shura instructions 11115930:50 and 11115943:14 request SetLighting(4) wit
 ~~Preserve the authoritative native sky selection across clock-only changes until an explicit map-part/environment request replaces it.~~
 Corrected 2026-10-15: the latest enabled native sky group or initial authored sky survives clock-only changes, independently of environment selection.
 
-- `lighting.rs:884-885` reads only DiffColor0/1, and the standard directional-light path uses those intensities for both diffuse and specular response.
+- ~~`lighting.rs:884-885` reads only DiffColor0/1, and the standard directional-light path uses those intensities for both diffuse and specular response.~~
+  Superseded by the [authored map-light correction](#authored-map-lights-2026-10-15), retaining the independent diffuse/specular colours and all four slots.
 Morning bank 100 has separate native sun specular multiplier 1.5 versus diffuse 3, and fill specular 0.5 versus diffuse 0.3 with the same respective RGB values.
 Recover and carry the separate native specular colours and intensities through shared direct-light shading; scaling this map's materials or exposure cannot preserve both controls.
 This is a measured omitted control, not a quantified explanation of every pale material without an original-game reference.
@@ -1090,3 +1091,55 @@ Read-only event/material/FXR audits, decoded effect textures and rendered contro
 Exact snow brightness, blend coverage and snowfall density still need a matched original-game frame; this audit establishes presence and selection, not pixel-level equivalence.
 Validation uses `CARGO_TARGET_DIR=target/alt-gs`: `cargo test --release --offline -p sekiro-game -j 4` passes 84 unit tests and six integration tests, with two existing ignores.
 `cargo clippy --release --offline -p sekiro-game --all-targets -j 4 -- -D warnings`, `cargo fmt -p sekiro-game -- --check` and the final `cargo fmt --all --check` pass.
+
+## Authored map lights, 2026-10-15
+
+This follow-up supersedes the earlier two-light production path and the statement that every BTL entry is a point light.
+BTL record offset `0x18` is the 32-bit type: point 0 or spot 1 in the installed files.
+Offset `0x1c`, previously mistaken for the type, is a separate flag.
+The runtime decodes the preserved raw sidecar records, so existing version-1 exports remain usable without re-exporting the maps or disturbing the grass exporter.
+
+Outskirts bank 0000 contains 16 points; bank 0002 contains six points.
+Castle bank 0000 contains 32 points and two spots; bank 0002 contains 25 points and one spot; bank 0004 repeats 32 points and two spots.
+All entries in these Ashina banks author the shadow flag off.
+Bank 0000 remains the default; `--light-bank` explicitly selects another bank, and a missing sidecar, selected bank or LightSet row is reported as an error rather than disappearing silently.
+Automatic story selection of nonzero BTL banks remains untraced.
+
+Ancillary BTL coordinates now receive the MSB MapOffset before the common X reflection.
+Outskirts authors translation `(90, 3, -40)` and Y rotation 20 degrees; Castle has no MapOffset.
+Placed MSB geometry receives no additional transform.
+This resource relationship is independently documented by [Smithbox's MapOffset and BTL parenting](https://github.com/vawser/Smithbox/blob/cbd477a8fd6d436b3e011c8548e1de8fd8876918/src/Smithbox.Program/Editors/Map%20Editor/Data/MapContainer.cs#L91).
+The [BTL field layout](https://github.com/soulsmods/SoulsFormatsNEXT/blob/master/SoulsFormats/Formats/BTL.cs) supplies type, rotation, range, cone, separate powers and shadow provenance.
+
+Connected Ashina views load all six warm blocks' base banks, totalling 246 lights before zero-intensity/range rejection.
+Bevy's clustered GPU range/frustum culling replaces the arbitrary 64-light, 60-metre CPU cutoff.
+Authored point ranges and shadow flags are preserved, and native diffuse RGB is squared before its authored power.
+The current Bevy bridge interprets the spot cone in degrees as a full angle, converts it to a half angle and reflects its rotation, including the native forward-axis conversion.
+Exact native spot width/aspect, cone-edge sharpness, source radius, independent local specular powers, flicker and attenuation are not yet reproduced by Bevy's stock point/spot response.
+These are explicit approximations, not values adjusted against screenshots.
+
+All four LightSet diffuse/specular records now contribute by default, including camera-relative local slots, constructor defaults, authored enables and sharpness.
+The recovered accumulation uses ordinary Lambert diffuse for the first two slots, the native wrapped diffuse for the extra slots and the documented tuned specular expression.
+Material gloss/Fresnel routing still uses the existing exported material representation.
+`SEKIRO_MAP_LIGHTS_LEGACY=1` restores this job's old two-light compositor, unplaced point-only BTL upload and CPU cap for matched-camera controls while retaining the preceding GI and fog corrections.
+`SEKIRO_GI_NATIVE_LIGHTS=0` disables only the new LightSet compositor, leaving corrected BTL placement active for ablation.
+
+The render-stage probe now has one idempotent installation shared by map profiling and play performance logging.
+This fixes the duplicate performance probe; it does not remove a GI volume or an environment-map probe.
+Warm catalogues retain all 246 records, while only blocks in the shared ready state activate their lights; dormant/requested/retiring neighbours cannot illuminate the current block.
+
+The read-only installed-bank census also decodes Hirata 147 points/30 spots, Reservoir 3/3, Dungeon 36/0, Depths 98/14, Valley 30/7, Senpou 82/35 and Fountainhead 32/6 in their base banks.
+Hirata authors three local shadow flags and Valley seven; all other base-bank local shadow flags are off.
+No unsupported light type occurs in the installed nine-map bank census.
+
+The requested external reference positions are outside every primary base-bank BTL radius: shrine spot-003, hut spot-016, hall entrance spot-044, battlefield spot-045 and Castle idol spot-123.
+The nearest distance/range pairs are respectively 61.53/4, 240.69/10, 9.95/6, 25.26/5 and 49.72/8 metres.
+These are distances from the indexed player positions, not claims that no visible surface in those views receives a local light.
+In particular, the hall's farther floor and fixtures can be inside a light even while the entrance camera/player is outside it.
+Missing flames, smoke and effect-generated lights cannot be repaired by increasing a BTL range or inventing fixture lights.
+The frozen matched-camera evidence and remaining fixture/emissive observations are recorded with the final render-gate review in MAP-COMPLETENESS-SWEEP.md.
+
+Final validation and all per-view colour-fixture decisions are in [the sweep review](MAP-COMPLETENESS-SWEEP.md#authored-light-colour-fixture-review-2026-10-15).
+Both final six-view gates pass in 40.7/48.8 seconds with unchanged geometry; the data gate, 806 workspace tests, final focused packet/shader checks, all-target Clippy and formatting pass.
+The matched night controls expose interior detail but leave excessive blue/bright snow, absent flames/smoke/idol effects, uncertain fixture emissive fidelity and the documented stock-Bevy local-light response approximations.
+No L1 or E1 spot count is declared resolved from this limited camera sample.
