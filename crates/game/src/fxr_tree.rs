@@ -1022,14 +1022,16 @@ pub fn particle_color(
 
 /// The game's effect pixel shaders split the particle colour into its length and direction,
 /// square the texture times the direction and scale by the length (FwLo's disassembly of
-/// GXFfxtexture.ppo): the hue is gamma 2, the brightness linear. Here: c_i^2 / |c|, times sqrt 3
-/// so a grey keeps its value.
+/// GXFfxtexture.ppo): the hue is gamma 2, the brightness linear. Here: c_i^2 / |c|, exactly the
+/// shader's (texture x c/|c|)^2 x |c| for a texture of one. An earlier version multiplied by
+/// sqrt 3 so a grey kept its value; the disassembly has no such factor (it made every effect
+/// 1.73 times too bright, the map fires a floodlight).
 fn hue_squared(c: [f32; 3]) -> [f32; 3] {
     let len = (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt();
     if len < 1e-5 {
         return [0.0; 3];
     }
-    c.map(|v| v * v / len * 3f32.sqrt())
+    c.map(|v| v * v / len)
 }
 
 /// The appearance's camera-distance fade: hidden nearer than minDistance, opacity rising linearly

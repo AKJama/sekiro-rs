@@ -1019,7 +1019,9 @@ fn collect_node(n: &NodeInst, c: &Value, f: &mut Frame) {
                     scalar(a, "alphaFadeThreshold", p.age, &mut rnd, 0.0) / 255.0,
                     scalar(a, "alphaThreshold", active_t, &mut rnd, 0.0) / 255.0,
                     soft,
-                    0.0,
+                    // g_ps_bPreAlphaMult: the texture colour is multiplied by its alpha before
+                    // the shader squares it.
+                    (a["premultiplyAlpha"].as_bool() == Some(true)) as u8 as f32,
                 ];
                 f.bufs
                     .entry((tex, additive(blend)))

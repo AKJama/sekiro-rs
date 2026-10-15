@@ -34,6 +34,13 @@ fn position_world_to_clip(p: vec3<f32>) -> vec4<f32> { return vec4(p, 1.0); }",
             "#define_import_path bevy_pbr::mesh_functions
 fn get_world_from_local(i: u32) -> mat4x4<f32> { return mat4x4<f32>(); }",
         ),
+        (
+            "prepass_utils",
+            "#define_import_path bevy_pbr::prepass_utils
+#ifdef DEPTH_PREPASS
+fn prepass_depth(frag_coord: vec4<f32>, sample_index: u32) -> f32 { return frag_coord.z + f32(sample_index); }
+#endif",
+        ),
         ("fxr", include_str!("../../src/fxr.wgsl")),
         ("fxr_multi", include_str!("../../src/fxr_multi.wgsl")),
     ] {
@@ -41,7 +48,11 @@ fn get_world_from_local(i: u32) -> mat4x4<f32> { return mat4x4<f32>(); }",
         let id = assets.add(shader.clone()).id();
         cache.set_shader(id, shader);
         if name == "fxr" || name == "fxr_multi" {
-            for additive in [false, true] {
+            for (index, (additive, prepass)) in
+                [(false, false), (true, false), (false, true), (true, true)]
+                    .into_iter()
+                    .enumerate()
+            {
                 let mut definitions = vec![
                     ShaderDefVal::UInt("MATERIAL_BIND_GROUP".into(), 3),
                     "VERTEX_OUTPUT_INSTANCE_INDEX".into(),
@@ -49,7 +60,11 @@ fn get_world_from_local(i: u32) -> mat4x4<f32> { return mat4x4<f32>(); }",
                 if additive {
                     definitions.push("BLEND_PREMULTIPLIED_ALPHA".into());
                 }
-                cache.get(usize::from(additive), id, &definitions).unwrap();
+                if prepass {
+                    // Single-sample captures read Bevy's depth prepass for the soft fade.
+                    definitions.push("DEPTH_PREPASS".into());
+                }
+                cache.get(index, id, &definitions).unwrap();
             }
         }
     }

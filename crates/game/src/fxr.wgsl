@@ -1,6 +1,6 @@
 // FXR sprite and tracer batches: unlit texture x vertex colour, scaled by the camera exposure
 // (the colour arrives in scene units, see fxr.rs). Two alpha controls per vertex ride in the
-// tangent: x the fade threshold, y the hard threshold. z is the soft distance: where a particle
+// tangent: x the fade threshold, y the hard threshold. w is g_ps_bPreAlphaMult. z is the soft distance: where a particle
 // meets the scene its alpha fades over that distance (soft particles, after the game's soft
 // shaders as traced by FwLo's RustSekiro); 0 keeps a hard edge.
 #import bevy_pbr::{
@@ -37,10 +37,22 @@ fn fragment(v: VertexOutput) -> @location(0) vec4<f32> {
     let fade = clamp(v.world_tangent.x, 0.0, 1.0);
     texture_color.a = clamp((texture_color.a - fade) / max(1.0 - fade, 0.00001), 0.0, 1.0);
     if texture_color.a < v.world_tangent.y { discard; }
+    // g_ps_bPreAlphaMult (GXFfxtessellateBlendSoftTexture.ppo): the texture colour is scaled by
+    // its alpha, then squared, so a soft glow's edge fades with alpha cubed rather than linearly.
+    if v.world_tangent.w > 0.5 {
+        texture_color = vec4(texture_color.rgb * texture_color.a * texture_color.a, texture_color.a);
+    }
     var color = texture_color * v.color;
     let soft = v.world_tangent.z;
     if soft > 0.0001 {
-        let scene = -depth_ndc_to_view_z(textureLoad(fx_depth, vec2<i32>(v.position.xy), 0));
+        #ifdef DEPTH_PREPASS
+        // Single-sample captures (the map sweep and pose server) carry Bevy's depth prepass,
+        // whose depth cannot be copied into the four-sample slot below.
+        let raw_depth = bevy_pbr::prepass_utils::prepass_depth(v.position, 0u);
+#else
+        let raw_depth = textureLoad(fx_depth, vec2<i32>(v.position.xy), 0);
+#endif
+        let scene = -depth_ndc_to_view_z(raw_depth);
         let me = -depth_ndc_to_view_z(v.position.z);
         color.a = color.a * clamp(min(scene - me, soft) / soft, 0.0, 1.0);
     }

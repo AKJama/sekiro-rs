@@ -141,7 +141,14 @@ fn fragment(in: VOut) -> @location(0) vec4<f32> {
     a = clamp(a, 0.0, 1.0);
     var out_a = clamp(in.color.a * a, 0.0, 1.0);
     if in.soft > 0.0001 {
-        let scene = -depth_ndc_to_view_z(textureLoad(fx_depth, vec2<i32>(in.position.xy), 0));
+        #ifdef DEPTH_PREPASS
+        // Single-sample captures (the map sweep and pose server) carry Bevy's depth prepass,
+        // whose depth cannot be copied into the four-sample slot below.
+        let raw_depth = bevy_pbr::prepass_utils::prepass_depth(in.position, 0u);
+#else
+        let raw_depth = textureLoad(fx_depth, vec2<i32>(in.position.xy), 0);
+#endif
+        let scene = -depth_ndc_to_view_z(raw_depth);
         let me = -depth_ndc_to_view_z(in.position.z);
         out_a *= clamp(min(scene - me, in.soft) / in.soft, 0.0, 1.0);
     }

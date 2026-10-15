@@ -157,3 +157,73 @@ The CPU fallback and shared FXR tree/property/batch work add substantial frame c
 The live effect/particle/light pools and range sleeping bound this work; a native GPU particle implementation remains a performance and fidelity follow-up.
 These camera-specific results do not establish a global frame-time limit or a GPU speedup.
 Complete capture metadata, timing windows, sample counts/ranges and logs are under target/alt-fx/performance/ and comparison.json.
+
+## Fire brightness audit, 2026-10-15
+
+Spot-022 (shot 074, rendered with `--story afternoon`) showed the whole wall and ground saturated orange.
+The causes were measured by ablation on the pose-server path (same camera, one term removed at a time), not guessed.
+
+| Variant (spot-022) | Result |
+| --- | --- |
+| All map FX off (`SEKIRO_NO_MAP_FX`) | Grey-blue wall and ground, no orange. |
+| FXR lights removed, particles kept | Still orange across the frame. |
+| BTL lights off (`--no-local-lights`) | Identical to the default: no BTL light is within range of this view. |
+| Only texture 1000 removed | Orange gone, the same as FX off. |
+
+The whole wash is one layer.
+FXR 800140 (placement `o116060_2000`, 6 m from the camera) has a camera-facing additive 603 layer: texture 1000 (a 64 by 64 radial alpha gradient), width 15 with uniform scale, `depthBlend` on, `premultiplyAlpha` on, colour (1, 0.5, 0.25).
+The same layer exists in the other fire effects, which is why distant fires in spot-047 had a halo several times larger than the real flames.
+
+### Cause 1: no soft-particle depth in single-sample captures
+
+The soft fade (`alpha * saturate(min(sceneZ - quadZ, soft) / soft)`, from `GXFfxtessellateBlendSoftTexture.ppo`) reads the `DepthCopy` image.
+That image is four-sample and is only filled when the camera is four-sample.
+The map sweep, render gate and pose server use `Msaa::Off` with Bevy's depth prepass, so the copy was never written, `sceneZ` read as infinitely far and every soft sprite kept full alpha.
+A 15 m disc 6 m from the camera therefore covered the frame.
+The live viewer (four-sample) was already correct: the same pose there shows the glow confined around the fire.
+Fix: `fxr.wgsl` and `fxr_multi.wgsl` read `bevy_pbr::prepass_utils::prepass_depth` when the view has `DEPTH_PREPASS`, and keep the copy for four-sample views.
+The shader composition test now also validates the `DEPTH_PREPASS` variant.
+
+### Cause 2: an invented sqrt 3 and a missing alpha square
+
+The pixel shader splits the particle colour into length and direction, squares texture times direction and multiplies by the length.
+For a texture of one that is `c_i^2 / |c|`.
+`hue_squared` multiplied this by sqrt 3 "so a grey keeps its value".
+The disassembly has no such factor, so every effect was 1.73 times too bright.
+It is removed.
+`g_ps_bPreAlphaMult` (constant buffer offset 544) multiplies the texture colour by its alpha before the square, so the colour of a soft glow falls off with alpha cubed at its edge.
+The single-texture shader (`fxr.wgsl`) ignored the flag; it now receives it in the tangent w component and applies `rgb * a * a`.
+The multi-texture path already honoured it.
+
+### Lights: measured, not changed
+
+No light was the cause.
+Removing every FXR light changes spot-022 only slightly, and no BTL light is in range.
+The FXR 609 lights are authored at diffuse 6.4 (brazier, two stacked nodes, radius 5) and 19.2 (800140, radius 5) with colour not squared; BTL fire lights in bank 0002 are 10 to 12 with squared colour and radius 10, so the magnitudes agree in order.
+The deferred point-light shader (`GXLightAcc_DPointLight1.ppo`, disassembled with d3dcompiler) gives, for squared distance `d2`, radius `R`, colour w `b`:
+
+```text
+fall = saturate(1 - d2 / R^2)
+t = 1.4 / (1.4 + d * b)
+wrap = t^2 + (1 - t^2) * max(N.L, 0)
+diffuse = Diff.rgb * fall * wrap / (1 + 0.7 * (d * b)^2)
+```
+
+There is no inverse-square term and the light is finite at its centre.
+Bevy's stock point light is `I / d^2` with a range window, which is brighter than the native curve inside about 1 m and dimmer outside it (at 2 m with R 5 native is 0.84, Bevy 0.25).
+So our lights are, if anything, under-lit at wall distance and over-lit only when a surface is within a metre of the flame.
+The native `b` (DiffColor.w) and the CPU light path for FXR 609 are not traced (the recovered `3892e0` builds map spot lights only), so no change was made.
+Reproducing the curve needs a custom term in `map_material.wgsl`, which is outside this job.
+
+### Remaining differences at spot-022
+
+The real frame shows a burning building with flames, layered smoke and rising embers.
+Those effects (810101, 810115, 811300, 811320, 800150 near the camera) are gated off in the first-visit story state (events 11105109 and others), so they are absent, not wrong.
+Matching the reference needs the burning story state (VISUAL-PARITY S1), not a renderer change.
+Bloom was not edited; with the wash removed the bloom around the remaining flames is modest.
+
+### Cost
+
+The two changes add one branch and three multiplies per sprite fragment, and the prepass read replaces a load of an unwritten texture, so the depth-load count is unchanged.
+No frame-time measurement was taken.
+The gate times stayed within 56 to 61 seconds for Outskirts.
