@@ -5,6 +5,95 @@ The shared implementation is `crates/game/src/lighting_selection.rs`.
 Each map's original flags and event references live in one module under `crates/game/src/lighting/maps/`.
 No game asset or decoded event body is copied into those modules.
 
+## Extra LightSet slots and sun shadows, 2026-10-15
+
+The native deferred directional accumulator leaves slots 1, 2 and 3 unattenuated by the sun's shadow map.
+Only slot 0 receives the sun-shadow colour factor, for both its diffuse and specular contributions.
+The separate `SpecColor` values belong to those same four slots, rather than a fifth independent shadow-casting light.
+Consequently the existing `map_material.wgsl` slot-0-only sun attenuation is retained, with no packing or BTL change.
+Applying the sun factor to every slot would contradict the inspected native shader, even if it darkened the image toward a particular reference.
+
+The evidence is the installed renderer bundle's `GXLightAcc_DDirLightShadowed1.ppo`, compared with `GXLightAcc_DDirLight1.ppo` and `GXLightAcc_DDirLightShadowed1_Cloud.ppo` in the ignored shader inventory and disassembly described in [SHADERS.md](SHADERS.md#evidence-and-coverage).
+The shadowed shader samples red and alpha from `g_ShadowTexture` at t32.
+At disassembly lines 195-201, red supplies the four-component `1 + FC_SsaoWeight * (red - 1)` factor, while alpha supplies the RGB factor `1 - FC_ShadowColor.rgb + alpha * FC_ShadowColor.rgb`.
+The preceding `GXRend_CompositeShadowMask.ppo` explicitly copies `g_SSAOTexture.r` into output red and initializes alpha to one, independently of its G-buffer-derived green/blue channels.
+Thus the shared texture name does not mean that its red SSAO channel is the sun shadow.
+
+In the shadowed accumulator's ordinary diffuse branch, lines 242-248 apply the RGB sun factor to `Col_0`, but apply only the second SSAO weight to `Col_1`.
+Lines 250-251 apply the sun factor to `Spc_0`; line 288 applies only the second SSAO weight to `Spc_1`.
+The enabled local branches at lines 325-367 and 369-411 use the third/fourth SSAO weights with `Col_2/3` and `Spc_2/3`, without the sun factor or additional shadow samples.
+The positive material-channel diffuse branch and the cloud-shadow sibling retain that same slot distinction.
+The unshadowed sibling samples only red and omits the sun factor altogether.
+These operations establish no independent shadow map for the three extra directional slots in the inspected accumulation path.
+
+A read-only census of installed `m11_00_0000.gparam` and `m11_01_0000.gparam` LightSet groups confirms four angle/diffuse/specular slots, hemisphere colours and two local-enable switches, with no per-extra-slot shadow selector.
+For example, at hour 22 the Outskirts row 100 enables both local slots and supplies local-1 diffuse `(0.676345,0.790052,0.926500,1)` and specular `(0.431373,0.549020,0.764706,0.5)`.
+The Castle row 100 supplies the same local-1 RGB with diffuse power 0.5 and enables both local slots.
+These are authored fill/specular contributions, not evidence of omitted sun-shadow flags.
+The CPU blend described in [SHADER-INPUTS.md](SHADER-INPUTS.md#lights-and-ambient-function-310630-the-lightset-blend) separately uploads all four SSAO weights; that visibility response remains distinct from sun-shadow attenuation and is not newly implemented by this audit.
+The existing Bevy shadow response also does not reproduce native `FC_ShadowColor` tinting, so this finding establishes slot routing rather than full lighting parity.
+
+The earlier legacy/current comparison isolates excessive output to the native direct compositor as a whole, but does not establish that unshadowed extra slots are a defect.
+The remaining brightness regression requires a separate material/BRDF, SSAO, unit-bridge or composition investigation; no brightness multiplier or shadow heuristic is introduced here.
+
+### Shadow audit measurements
+
+Before images are the preceding current-light captures; after images are freshly rendered with the same saved camera/player/FOV, night story, 2560 x 1440 matcher renderer and unchanged game-source hashes.
+The same scene/ground masks, exact inverse-sRGB transfer and Rec.709 weights are reused.
+Y statistics are percent linear white, RGB means are display bytes, ground contrast is ground Y P95/P05, and `>90%` is the percentage above 0.90 display brightness.
+These are unchanged-renderer controls, not an improvement claim.
+
+| Shot / setup | Mean Y | P05 Y | P95 Y | Ground contrast | Mean R | Mean G | Mean B | B/R | >90% |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 002 / real | 7.02082 | 1.46816 | 26.12795 | 13.49085 | 54.48552 | 65.08182 | 71.46529 | 1.31164 | 0.01377 |
+| 002 / before | 19.70544 | 1.55635 | 65.73266 | 47.92656 | 82.21704 | 102.94774 | 115.33511 | 1.40281 | 2.07724 |
+| 002 / after | 19.70544 | 1.55635 | 65.73266 | 47.92656 | 82.21704 | 102.94774 | 115.33511 | 1.40281 | 2.07724 |
+| 003 / real | 7.50628 | 1.17112 | 22.61886 | 6.63697 | 57.72892 | 66.47912 | 75.43655 | 1.30674 | 0.00024 |
+| 003 / before | 22.72757 | 0.83534 | 65.16383 | 2.39233 | 85.27277 | 104.40159 | 118.30477 | 1.38737 | 0.33798 |
+| 003 / after | 22.72755 | 0.83534 | 65.16383 | 2.39233 | 85.27271 | 104.40153 | 118.30470 | 1.38737 | 0.33798 |
+| 025 / real | 10.60234 | 2.32630 | 42.36289 | 5.93134 | 73.56626 | 79.78949 | 84.84180 | 1.15327 | 0.00005 |
+| 025 / before | 12.95241 | 1.19072 | 70.19357 | 7.88895 | 65.99703 | 82.22550 | 92.95315 | 1.40844 | 3.74569 |
+| 025 / after | 12.95186 | 1.19072 | 70.19357 | 7.94986 | 65.99586 | 82.22424 | 92.95193 | 1.40845 | 3.74564 |
+| 092 / real | 4.34681 | 1.26413 | 12.77151 | 4.16246 | 44.53931 | 53.69585 | 57.30477 | 1.28661 | 0.00000 |
+| 092 / before | 6.98900 | 1.05396 | 33.03845 | 10.84215 | 48.16652 | 63.47323 | 74.32054 | 1.54299 | 0.16966 |
+| 092 / after | 6.98299 | 1.05396 | 33.03135 | 10.93505 | 48.13876 | 63.44132 | 74.29480 | 1.54335 | 0.16966 |
+
+The shots are spot-002-shot-004, spot-003-shot-012, spot-025-shot-085 and Castle spot-092-shot-293.
+Masked RGB mean absolute differences are respectively 0, 0.00006118, 0.03753040 and 0.08672587 display bytes.
+The sorted complete visibility records, collision choices and camera settings agree in all four pairs.
+The requested temple PNGs and real/before/after panel are retained in the external progress collection, with the complete measurements, mask provenance, source-hash comparison and render requests.
+Small repeat differences do not establish a fidelity gain; the excessive output remains unresolved.
+
+### Shadow audit render gates
+
+Both canonical six-view gates pass with `target/alt-sf`, six Cargo jobs, serial windowless processes and unchanged fixtures/tolerances.
+Outskirts takes 45.296 seconds with totals `(void, depth gap, untextured, grey, pop-in) = (0,493,0,2356,28846)`.
+Castle takes 64.342 seconds with totals `(1933,4885,0,1702,31552)`.
+The following table records every colour-category difference from the committed fixture, rather than changing that fixture to match this run.
+Grey changes reflect crossing the neutral-RGB criterion; pop-in changes reflect crossing the normal/all-visible threshold of 12 display values with the existing renderer.
+They are observations from unmodified rendering, not effects of a sun-shadow fix, and are not assigned to individual emitters.
+
+| Map / view | Grey fixture -> measured | Pop-in fixture -> measured |
+| --- | ---: | ---: |
+| Outskirts 0 | 274 -> 274 | 8711 -> 8650 |
+| Outskirts 1 | 183 -> 189 | 294 -> 295 |
+| Outskirts 2 | 383 -> 378 | 2484 -> 2484 |
+| Outskirts 3 | 725 -> 724 | 5503 -> 5420 |
+| Outskirts 4 | 648 -> 641 | 6831 -> 6756 |
+| Outskirts 5 | 147 -> 150 | 5245 -> 5241 |
+| Castle 0 | 196 -> 205 | 5083 -> 5097 |
+| Castle 1 | 288 -> 288 | 7488 -> 7488 |
+| Castle 2 | 588 -> 588 | 5879 -> 5879 |
+| Castle 3 | 49 -> 51 | 3782 -> 3782 |
+| Castle 4 | 482 -> 480 | 2400 -> 2362 |
+| Castle 5 | 92 -> 90 | 6958 -> 6944 |
+
+Void and untextured counts equal their fixtures in every view.
+Depth gaps also agree except Castle view 0, which measures 148 rather than 149, within the original 16-pixel minimum tolerance.
+Raw reports and logs are under `target/alt-sf/render-gate/`.
+Workspace formatting and release all-target Clippy with warnings denied pass.
+The release game suite passes 126 unit tests, including the installed-data gate, and six integration tests, with two existing unit-test ignores.
+
 ## Selection
 
 The loader evaluates installed `common.emevd` event 100 through the shared event interpreter with the current map and story flags.

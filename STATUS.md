@@ -1,5 +1,40 @@
 # Status
 
+## Extra LightSet sun-shadow audit (2026-10-15)
+
+Native deferred shader disassembly applies the sun-shadow colour factor only to slot 0 diffuse/specular; the other three slots receive separate SSAO visibility weights and have no independent shadow sample in this path.
+The installed LightSet data has no extra-slot shadow selector, so no Rust/WGSL, packing, fixture or tolerance change was made.
+The evidence, all nine retail/before/after metrics for four matched night cameras, and all twelve per-view colour comparisons are in docs/LIGHTING.md.
+Fresh captures reuse the preceding current-light images as before; the temple's masked RGB difference is zero, and the remaining three pairs differ by at most 0.08673 display bytes on average, with identical sorted visibility decisions and camera/collision settings.
+These repeat differences are not a visual improvement; excessive brightness remains open.
+Both six-view gates pass in 45.296/64.342 seconds, with totals `(void,depth_gap,untextured,grey,pop_in)` of `(0,493,0,2356,28846)` and `(1933,4885,0,1702,31552)`.
+Formatting, release workspace all-target Clippy with warnings denied, the installed-data gate, 126 game unit tests and six integration tests pass, with two existing unit-test ignores.
+All Cargo work uses target/alt-sf and six jobs; rendering is serial and windowless.
+Requested before/after temple PNGs, the real/before/after panel and complete local audit records are saved in the external progress collection's dated shadow-fix folder.
+Existing status/visual-parity edits are preserved; no commit or publishing operation was made, and cache/reference data remained read-only.
+
+## Verified map-light capture labels (2026-10-15)
+
+All eight earlier light pairs retain the expected mapping: before is legacy (`SEKIRO_MAP_LIGHTS_LEGACY=1`), and after is current (the variable absent).
+The stronger-shadow Outskirts example is legacy; both states retain the preceding GI and fog corrections.
+Reproducing the original fourth-pose sequence reduces Outskirts before-to-legacy RGB MAD to 0.001913 and after-to-current MAD to 0.000217, versus about 39.253 for the opposite states.
+The original frozen capture executable, recorded per-image FOVs, map arguments, night story, resolutions and benchmark warm-up are reused, with one windowless renderer at a time after waiting for the snow audit's process.
+The media progress date folder contains `rerender-2026-10-15/` with 16 state-named PNGs, process-environment/commit/binary-hash/time JSON records, eight labelled contact sheets and all per-file pixel comparisons.
+The 16 old PNGs are preserved with matching hashes in `superseded-2026-10-15/`, and `lights-README.txt` records the verified mapping.
+The six-job release build passes in `target/alt-lightsfix`; no engine source, game install or saves were modified, and no commit was made.
+
+## Snow-tone data audit - visual parity M1 (2026-10-15)
+
+M1 remains open: this session audits the authored snow albedo/facets, night GPARAMs, grading LUTs and environment selection without changing the renderer or inventing replacement colour values.
+The snow texture and night lights author a blue contribution; matched grading-disabled and layer-disabled controls retain the cold cast, while exact excess brightness/contrast relative to retail remains unresolved.
+The numbers, limitations and all twelve per-view gate comparisons are recorded under M1 in docs/VISUAL-PARITY.md.
+Both unchanged canonical six-view gates pass in 72.902 seconds for Outskirts and 80.769 seconds for Castle, with geometry/visibility equal to the preceding FX final controls and no fixture or tolerance edits.
+Totals `(void,depth_gap,untextured,grey,pop_in)` are `(0,493,0,2357,28850)` and `(1933,4885,0,1702,31552)` respectively.
+The release game suite passes 126 unit tests and six integration tests with two existing ignores, including the data gate and native settled-snow facet regression; formatting and diff checks pass.
+Independent matching-camera baseline and audit-repeat PNGs are pixel-identical under target/alt-snow/progress/snow-before.png and snow-after.png, with verified copies in the external progress root's 2026-10-15 directory.
+These names do not imply a visual correction; the unsupported generic snow-family, material/lighting composition and post-calibration questions remain explicit.
+All Cargo commands use target/alt-snow and six jobs, game rendering is serial and windowless, reference images and cache stay read-only, and no commit or publication occurs.
+
 ## Authored map FX - visual parity E1/E2 (2026-10-15)
 
 Outskirts and Castle now place their native MSB SFX, ModelSfxParam dummy attachments, event-created object FX and registered-idol TAE through the existing FXR player in the shared map loader.

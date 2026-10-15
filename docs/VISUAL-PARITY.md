@@ -121,6 +121,101 @@ Separate L1's exposure/lighting contribution before changing authored material c
 
 Examples: `pairs/spot-003-shot-012.png`, `pairs/spot-013-shot-044.png`, `pairs/spot-050-shot-174.png`, `pairs/spot-073-shot-251.png`.
 
+#### M1 data audit - 2026-10-15
+
+Decision: retain the authored snow albedo, material tints, night lights and post settings.
+The data establishes a slightly blue snow texture and strongly blue incident light, but does not supply a replacement contrast, scene-radiance scale or global saturation value that would establish retail parity.
+No renderer adjustment is justified by these inputs alone, and M1 remains open.
+This is an audit and diagnostic control, not a completed snow-tone fix.
+
+The read-only inputs are both maps' base `cache/raw/param/drawparam/m11_0*_0000.gparam` files, `cache/maps/<map>/grading`, `env.json`, the selected variant-4 environment resources, material-audit records and exported GLB material extras.
+The shared board already assigns native tone/exposure/night-snow calibration to RustSekiro; this local task does not replace that claim.
+The local task claim, raw parameter census, material/facet census, texture statistics and LUT probes are retained under `target/alt-snow/audit/`.
+No extracted asset is changed or copied into tracked source.
+
+| Input | Outskirts | Castle | Interpretation |
+| --- | --- | --- | --- |
+| Night story hour / environment / sub-ID | 22 / 4 / 0 | 22 / 4 / 0 | Ordinary night base family, distinct from the morning first-visit gates |
+| Grading enable / LUT | 1 / 20 | 1 / 20 | Both strips are present; existing selection and recovered strip-axis routing agree |
+| Exposure stops / gain | -0.2 / 0.870551 | 0.3 / 1.231144 | Retain the authored gain rather than decreasing snow alone |
+| Auto exposure / Middle Gray / bounds | 1 / -4.9 / -0.5 to 0.5 | 1 / -4.9 / -0.5 to 0.5 | Existing native post settings already consume these fields |
+| Bloom threshold / alpha / saturation control | 0 / 0.5 / 0 | 0.05 / 0.3 / 0 | Sturate Ctrl is the bloom bright-pass interpolation, not a whole-image saturation control |
+| LightSet row-0 primary diffuse RGBA | (0.450980,0.588235,0.764706,2) | (0.450980,0.588235,0.764706,1.5) | Squared RGB times W is blue: approximately (0.406767,0.692042,1.16955) and (0.305075,0.519031,0.877163) |
+| Hemisphere up RGBA | (0.4284,0.473573,0.51,0.5) | Same | Also authored cool; changing its hue would contradict the data |
+| Hemisphere down RGBA | (0.4128,0.4464,0.48,0.5) | Same | GI coverage replaces this fallback in the existing shader |
+
+The matched spot-002 camera selects collision `h022700`, whose native LightSet is 100, with independent fog/scattering/environment bank IDs all zero.
+Its night primary diffuse is `(0.431373,0.549020,0.764706,4)`, becoming approximately `(0.744330,1.205691,2.339101)` before the common scene bridge.
+Its fill is the same RGB at W 0.25, and local slot 1 is `(0.676345,0.790052,0.9265,1)`.
+Thus row 0 is a catalogue comparison, not a substitution for the actual capture bank.
+
+Night LUT 20 maps neutral display inputs 51, 102, 153, 204 and 255 to `(42,47,49)`, `(98,102,102)`, `(156,158,158)`, `(209,210,208)` and `(255,255,255)` respectively in both maps.
+It slightly cools shadows and is nearly neutral in the highlights; it does not explain a large blue-white highlight cast on its own.
+The current shader's red-fastest `(r,16*b+g)` strip layout, trilinear interpolation and ordering after ordinary output power agree with the native shader recovery in `SHADERS.md`.
+No authored global saturation or contrast field is present in these base files' tone/bloom/grading groups.
+Tone mode 7 and FilmicContrast 0.5 therefore remain traced constructor defaults, rather than new values selected from the screenshots.
+The unresolved colour-matrix/vignette producers, native LUT blending and inferred `SCENE_TO_BEVY=4500` bridge do not provide a supported replacement number.
+
+The shared `m11_snow_01_a` top mip has mean byte RGB `(228.81,233.11,243.13)` and per-channel 10th/90th percentiles `(222,227,239)` / `(233,237,247)`.
+The dedicated `m11_snow_20_a` has mean `(225.94,226.11,225.94)` and percentiles `(219,220,219)` / `(231,231,231)`.
+These are full-texture statistics before material masks, lighting and grading, not measured retail snow colours or desired output values.
+The BC1 sRGB payload is decoded read-only in memory for this census; the runtime continues to sample the existing albedos as sRGB and the raw normal/mask textures as linear data.
+Thus the texture itself supports some blue in ordinary snow and fine brightness variation, but not removing warm colour from unrelated wood and ground.
+
+Concrete layered facets include Outskirts `m005100` Ground1, MultipleGround variant 16, with `m11_snow_01_a`, its raw snow normal and a white snow tint `(1,1,1)`.
+Its authored snow direction is `(-0.2,0.85,0.2)` and height-mask selector `(0,0.5,0.7)`; those inputs already reach the layer shader.
+Its Rock1 facet is Multiple variant 20, with the same snow albedo, tint `(1,1,1)` and direction `(0,1,-0.25)`, without an enabled snow-normal slot.
+Castle pavilion `m015070` includes the previously verified dedicated SnowGround MultipleGround-6 facet using `m11_snow_20_a`; roof deposits use MultipleGround-18, while snow-free tatami uses Multiple-1.
+The retained facet switches are evidence against globally reducing snow coverage or adding an invented grey multiplier.
+Separate `M[Snow]`/`Snow_mb*` families and native gloss/normal response still have generic-material limitations; their names alone do not establish replacement arithmetic.
+
+The broad blue cast and extreme light/shadow contrast remain shared L1/material-response candidates.
+Authored cool albedo and illumination contribute to colour, while the exact excess relative to retail is not isolated by static parameter agreement.
+Keep unknown radiance/BRDF, normal/detail, matrix and post-composition terms explicit instead of compensating through a map tint, arbitrary desaturation, stronger fog or geometry changes.
+
+Matched night diagnosis uses the external spot-002-shot-004 camera `[-138.888512,-49.454685,-154.160263,353.307100,-0.534677]`, player `[-138.41,-50.993,-158.238]`, 43-degree FOV and 1600 by 900 output.
+All four controls retain equal poses, FOVs, selected collisions and sorted visible-part identities.
+Disabling grading changes full-frame RGB by mean absolute 3.515/255, with maximum channel difference 10/255.
+In the fixed mixed foreground rectangle `(80,630)-(1440,855)`, blue/red changes only from 1.40380 to 1.39034, so the cold cast remains without grading.
+Disabling layers removes authored snow deposits and detail, with foreground blue/red still 1.33971; this is a destructive diagnostic of the material contribution, not a parity correction or an isolated test of snow albedo.
+These controls retain native tone/exposure, whose meter can respond to layer changes.
+The rectangles contain multiple surfaces and are not pure-snow measurements, retail target colours or tuning objectives.
+The independent baseline and final audit-repeat captures are pixel-identical because no rendering setting or implementation changed.
+They are saved as `target/alt-snow/progress/snow-before.png` and `snow-after.png`; the latter means after the audit, not after a claimed visual fix.
+Both are also exported under the requested date in the external progress root, with matching SHA-256 `a69c8df0e0f081a41cf13934ee841d45846061a5992c705d7de23c7429c38bfb`.
+Reference pairs were inspected in place without copying their images into the repository.
+
+Both canonical six-view gates use the unchanged first-visit story, 128 by 72 fixtures, per-category tolerances of 16 pixels or 1% and 120-second budget.
+They pass in 72.902 seconds for Outskirts and 80.769 seconds for Castle, using `target/alt-snow/release/sekiro-rs.exe`, SHA-256 `c7c7c0efbbef606738592d1e06c8c8e8c400854f9a1f82935ee3c7de6fddb93f`.
+Outskirts totals `(void,depth_gap,untextured,grey,pop_in)` are `(0,493,0,2357,28850)`; Castle totals are `(1933,4885,0,1702,31552)`.
+Every per-view geometry count, selected collision and sorted visible-part set equals the preceding FX job's final report.
+Castle view 0 retains that preceding run's depth gap 148 versus fixture 149, a pre-existing one-pixel difference within the unchanged tolerance; the other eleven views equal their geometry fixtures.
+All resident blocks retain zero failed texture requests.
+No fixture, camera, source, material setting or tolerance changes in this audit.
+The table compares the checked-in colour fixture with this fresh capture at each view.
+These small threshold differences are observations against earlier captures, not effects of a snow correction; their individual particle/readback causes are not isolated.
+
+| Map | View | Grey fixture / measured | Pop-in fixture / measured | Per-view interpretation |
+| --- | ---: | --- | --- | --- |
+| Outskirts | 0 | 274 / 274 | 8711 / 8650 | Grey delta +0; pop-in delta -61; within existing tolerances. |
+| Outskirts | 1 | 183 / 189 | 294 / 295 | Grey delta +6; pop-in delta +1; within existing tolerances. |
+| Outskirts | 2 | 383 / 378 | 2484 / 2486 | Grey delta -5; pop-in delta +2; within existing tolerances. |
+| Outskirts | 3 | 725 / 725 | 5503 / 5422 | Grey delta +0; pop-in delta -81; within existing tolerances. |
+| Outskirts | 4 | 648 / 641 | 6831 / 6756 | Grey delta -7; pop-in delta -75; within existing tolerances. |
+| Outskirts | 5 | 147 / 150 | 5245 / 5241 | Grey delta +3; pop-in delta -4; within existing tolerances. |
+| Castle | 0 | 196 / 205 | 5083 / 5097 | Grey delta +9; pop-in delta +14; within existing tolerances. |
+| Castle | 1 | 288 / 288 | 7488 / 7488 | Equal colour counts. |
+| Castle | 2 | 588 / 588 | 5879 / 5879 | Equal colour counts. |
+| Castle | 3 | 49 / 51 | 3782 / 3782 | Grey delta +2; pop-in delta +0; within existing tolerances. |
+| Castle | 4 | 482 / 480 | 2400 / 2362 | Grey delta -2; pop-in delta -38; within existing tolerances. |
+| Castle | 5 | 92 / 90 | 6958 / 6944 | Grey delta -2; pop-in delta -14; within existing tolerances. |
+
+The game release suite passes 126 unit tests and six integration tests with two existing ignores, including `map_data_gate` and `genichiro_settled_snow_selection`.
+Workspace formatting and `git diff --check` pass.
+The requested Cargo target directory and six-job limit are retained; captures and gates run serially as windowless processes after checking for other game processes.
+The full game test run takes 257.38 seconds under concurrent host compilation, and is not a steady performance claim.
+No renderer code changed, so this session does not claim a new Clippy result or a completed visual-parity fix.
+
 ### E1 Fire, lantern, ember and idol effects
 
 Kind: effects and local light.
