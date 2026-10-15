@@ -103,6 +103,7 @@ Native normal/all renders share one authored exposure result and identical shade
 Each normal view meters with the recovered native reset rate, preserving the authored exposure bounds and grading, then holds that GPU history for its screenshot and all-visible comparison.
 The sweep does not disable auto-exposure or change interactive exposure behavior.
 The sweep waits for declared material textures and pending GPU pipelines and fails on permanent shader errors or stalled loading/captures.
+The shared checks live in `crates/game/src/capture_ready.rs` and are also used by ordinary screenshots and play, viewer and arena captures.
 Four sparse CPU collision rays per view independently validate the GPU depth encoding and camera pose; a mismatch exceeding 0.5 m plus 5% stops the run before publishing a baseline.
 
 The per-view counts are:

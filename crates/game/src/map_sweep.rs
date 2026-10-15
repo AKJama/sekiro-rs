@@ -1,4 +1,5 @@
 //! Offscreen, deterministic visual coverage measurements using the shared map renderer.
+use super::ready::Pipelines;
 use super::*;
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::asset::{embedded_asset, embedded_path};
@@ -10,16 +11,9 @@ use bevy::render::view::screenshot::ScreenshotCaptured;
 use bevy::shader::ShaderRef;
 use serde_json::json;
 use std::collections::BTreeMap;
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
 
 #[path = "map_pose.rs"]
 mod pose;
-
-#[derive(Resource, Clone, Default)]
-struct Pipelines(Arc<(AtomicUsize, AtomicUsize)>);
 
 #[derive(Clone, Asset, TypePath, AsBindGroup)]
 struct Diagnostic {
@@ -455,53 +449,7 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
             connected.capture_views = Some(capture_views);
         }
     }
-    let pipelines = Pipelines::default();
-    let uploaded_images = map_material::SweepImages::default();
-    app.insert_resource(uploaded_images.clone());
-    pipelines.0.0.store(1, Ordering::Relaxed);
-    app.insert_resource(pipelines.clone());
-    app.sub_app_mut(bevy::render::RenderApp)
-        .insert_resource(pipelines)
-        .insert_resource(uploaded_images)
-        .add_systems(
-            bevy::render::Render,
-            (|status: Res<map_material::SweepImages>,
-              images: Res<
-                bevy::render::render_asset::RenderAssets<bevy::render::texture::GpuImage>,
-            >| {
-                *status.0.lock().unwrap() = images.iter().map(|(id, _)| id).collect();
-            })
-            .in_set(bevy::render::RenderSystems::Cleanup),
-        )
-        .add_systems(
-            bevy::render::Render,
-            (|status: Res<Pipelines>, cache: Res<bevy::render::render_resource::PipelineCache>| {
-                status
-                    .0
-                    .0
-                    .store(cache.waiting_pipelines().count(), Ordering::Relaxed);
-                status.0.1.store(
-                    cache
-                        .pipelines()
-                        .filter(|p| {
-                            let failed = matches!(
-                                p.state,
-                                bevy::render::render_resource::CachedPipelineState::Err(
-                                    bevy::shader::ShaderCacheError::ProcessShaderError(_)
-                                        | bevy::shader::ShaderCacheError::CreateShaderModule(_)
-                                )
-                            );
-                            if failed {
-                                error!("sweep GPU pipeline failed: {:?}", p.state);
-                            }
-                            failed
-                        })
-                        .count(),
-                    Ordering::Relaxed,
-                );
-            })
-            .in_set(bevy::render::RenderSystems::PostCleanup),
-        );
+    super::ready::install(&mut app);
     let image = Image::new_target_texture(
         options.width,
         options.height,
@@ -864,7 +812,7 @@ fn tick(world: &mut World) {
             bevy::light::Skybox,
         )>();
     }
-    if world.resource::<Pipelines>().0.1.load(Ordering::Relaxed) > 0 {
+    if world.resource::<Pipelines>().status().failed > 0 {
         error!("sweep aborted: a render pipeline failed");
         world.write_message(AppExit::error());
         world.insert_resource(sweep);
@@ -900,10 +848,7 @@ fn tick(world: &mut World) {
             .iter(world)
             .filter(|e| map_root(world, *e))
             .collect();
-        if sources.iter().any(|e| {
-            map_material::sweep_base(world, *e).is_some_and(|m| m.pending)
-                || crate::map_fog_surface::sweep_pending(world, *e)
-        }) {
+        if super::ready::textures_pending(world, &sources) {
             if Instant::now() >= sweep.next_loading_log {
                 println!("sweep loading: material textures pending");
                 sweep.next_loading_log = Instant::now() + Duration::from_secs(15);
@@ -1046,7 +991,7 @@ fn tick(world: &mut World) {
     if !sweep.waiting {
         if sweep.countdown > 0 {
             sweep.countdown -= 1;
-        } else if world.resource::<Pipelines>().0.0.load(Ordering::Relaxed) == 0 {
+        } else if world.resource::<Pipelines>().status().pending == 0 {
             sweep.stable_pipelines += 1;
             if sweep.stable_pipelines < 3 {
                 world.insert_resource(sweep);

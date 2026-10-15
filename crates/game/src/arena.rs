@@ -79,6 +79,7 @@ pub fn run(options: Options) -> Result<()> {
                 primary_window: Some(Window {
                     title: "sekiro-rs".into(),
                     resolution: (1600, 900).into(),
+                    present_mode: crate::presentation::requested_mode(),
                     ..default()
                 }),
                 ..default()
@@ -124,8 +125,10 @@ pub fn run(options: Options) -> Result<()> {
             since_bound: None,
             requested: false,
         })
-        .add_systems(Update, capture.after(animate));
+        .add_systems(Last, capture);
     }
+    crate::map::ready::install(&mut app);
+    app.add_plugins(crate::presentation::PresentationPlugin);
     app.run();
     Ok(())
 }
@@ -272,6 +275,7 @@ fn hud(
 
 fn capture(
     mut commands: Commands,
+    mut readiness: crate::map::ready::Ready,
     time: Res<Time>,
     mut cap: ResMut<Capture>,
     rigs: Query<&Rig>,
@@ -284,6 +288,9 @@ fn capture(
     *since += time.delta_secs();
     let since = *since;
     if !cap.requested && since >= cap.at {
+        if !readiness.allow() {
+            return;
+        }
         commands
             .spawn(Screenshot::primary_window())
             .observe(save_to_disk(cap.path.clone()));

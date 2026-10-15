@@ -27,6 +27,7 @@ struct Effects(Vec<MapEffect>);
 struct StoryHour {
     initial: f32,
     explicit: bool,
+    legacy_sky: bool,
 }
 
 #[derive(Resource)]
@@ -55,6 +56,7 @@ pub fn install(app: &mut App, cache: &Path, map: &str) -> anyhow::Result<()> {
         .insert_resource(StoryHour {
             initial,
             explicit: std::env::args().any(|a| a == "--hour"),
+            legacy_sky: crate::map::sky::legacy_selection(),
         })
         .init_resource::<Scene>()
         .insert_resource(Effects(
@@ -133,14 +135,21 @@ fn lighting(
     if light.hour != hour {
         light.hour = hour;
         light.applied = None;
-        probes.variant = selection.environment_for_hour(hour);
-        probes.active = None;
-        probes.handles.clear();
+        if story.legacy_sky {
+            probes.variant = selection.environment_for_hour(hour);
+            probes.active = None;
+            probes.handles.clear();
+        }
     }
-    if let Some(variant) = scene.0.environment
-        && probes.variant != u32::from(variant)
+    let environment = scene
+        .0
+        .environment
+        .map(u32::from)
+        .or_else(|| (!story.legacy_sky).then_some(selection.initial.environment));
+    if let Some(variant) = environment
+        && probes.variant != variant
     {
-        probes.variant = u32::from(variant);
+        probes.variant = variant;
         probes.active = None;
         probes.handles.clear();
     }
@@ -149,6 +158,63 @@ fn lighting(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lighting_clock_preserves_environment_until_its_own_event_and_restart() {
+        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let id = "m11_01_00_00";
+        let initial = crate::lighting_selection::select(&cache, id, None, None).unwrap();
+        let selection =
+            crate::lighting_selection::LightingSelection::load(&cache, id, initial, false).unwrap();
+        let mut app = App::new();
+        app.insert_resource(Scene::default())
+            .insert_resource(StoryHour {
+                initial: 6.,
+                explicit: false,
+                legacy_sky: false,
+            })
+            .insert_resource(crate::lighting::MapLighting {
+                gparam: default(),
+                hour: 6.,
+                light_set: 0,
+                applied: Some(0),
+                source: String::new(),
+            })
+            .insert_resource(crate::lighting::MapProbes {
+                regions: vec![],
+                available: default(),
+                prefix: String::new(),
+                variant: 1,
+                active: Some(123),
+                handles: default(),
+            })
+            .insert_resource(selection)
+            .add_systems(Update, lighting);
+        app.world_mut().resource_mut::<Scene>().0.lighting = Some(4);
+        app.update();
+        assert_eq!(
+            app.world().resource::<crate::lighting::MapLighting>().hour,
+            22.
+        );
+        let probes = app.world().resource::<crate::lighting::MapProbes>();
+        assert_eq!(probes.variant, 1);
+        assert_eq!(probes.active, Some(123));
+        app.world_mut().resource_mut::<Scene>().0.environment = Some(3);
+        app.update();
+        let probes = app.world().resource::<crate::lighting::MapProbes>();
+        assert_eq!(probes.variant, 3);
+        assert_eq!(probes.active, None);
+        app.world_mut().resource_mut::<Scene>().0 = default();
+        app.update();
+        assert_eq!(
+            app.world().resource::<crate::lighting::MapLighting>().hour,
+            6.
+        );
+        assert_eq!(
+            app.world().resource::<crate::lighting::MapProbes>().variant,
+            1
+        );
+    }
 
     #[test]
     fn managed_roots_combine_groups_events_and_residency_across_restarts() {

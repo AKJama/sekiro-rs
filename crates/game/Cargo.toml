@@ -18,3 +18,4 @@ sekiro-sim.workspace = true
 sekiro-brain-net.workspace = true
 sekiro-fmod.workspace = true
 serde_json.workspace = true
+wgpu = { version = "29", default-features = false }

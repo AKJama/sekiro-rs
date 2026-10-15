@@ -84,7 +84,7 @@ pub(super) fn tick(world: &mut World) {
 
 fn step(world: &mut World, server: &mut Server, sweep: &mut Sweep) -> Result<()> {
     anyhow::ensure!(
-        world.resource::<Pipelines>().0.1.load(Ordering::Relaxed) == 0,
+        world.resource::<Pipelines>().status().failed == 0,
         "render pipeline failed"
     );
     if server.directory.join("stop").exists() {
@@ -252,7 +252,7 @@ fn step(world: &mut World, server: &mut Server, sweep: &mut Sweep) -> Result<()>
         );
         if sweep.countdown > 0 {
             sweep.countdown -= 1;
-        } else if world.resource::<Pipelines>().0.0.load(Ordering::Relaxed) == 0 {
+        } else if world.resource::<Pipelines>().status().pending == 0 {
             sweep.stable_pipelines += 1;
             if sweep.stable_pipelines >= 3 {
                 world

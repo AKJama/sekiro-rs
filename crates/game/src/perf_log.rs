@@ -197,13 +197,18 @@ impl RenderProbe {
 }
 
 /// Adds the render-world half of [`RenderProbe`].
-pub fn add_render_probe(app: &mut App, probe: RenderProbe) {
+pub fn install_render_probe(app: &mut App) -> RenderProbe {
+    if let Some(probe) = app.world().get_resource::<RenderProbe>() {
+        return probe.clone();
+    }
+    let probe = RenderProbe::default();
+    app.insert_resource(probe.clone());
     use bevy::render::render_resource::{CachedPipelineState, PipelineCache};
     use bevy::render::{Render, RenderApp, RenderSystems};
     let Some(render) = app.get_sub_app_mut(RenderApp) else {
-        return;
+        return probe;
     };
-    render.insert_resource(probe);
+    render.insert_resource(probe.clone());
     if std::env::var_os("PF_RESPAWN_PROBE").is_some() {
         render.add_systems(Render, count_draw_batches.in_set(RenderSystems::Render));
     }
@@ -263,6 +268,7 @@ pub fn add_render_probe(app: &mut App, probe: RenderProbe) {
         })
         .in_set(RenderSystems::PostCleanup),
     );
+    probe
 }
 
 fn count_draw_batches(
@@ -324,8 +330,7 @@ pub fn enabled() -> bool {
 macro_rules! register {
     ($app:ident) => {
         if crate::perf_log::enabled() {
-            let probe = crate::perf_log::RenderProbe::default();
-            crate::perf_log::add_render_probe(&mut $app, probe.clone());
+            let probe = crate::perf_log::install_render_probe(&mut $app);
             $app.insert_resource(crate::perf_log::PerfLog::open()?)
                 .insert_resource(probe)
                 .add_systems(First, |mut log: ResMut<crate::perf_log::PerfLog>| {

@@ -13,6 +13,7 @@
 mod bc6_hdr;
 mod edges;
 mod env;
+mod grass;
 mod layout;
 mod lights;
 mod material_audit;
@@ -218,6 +219,9 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
         return sky::export(&raw, &out, oodle);
     }
     let msb = read_msb(cache, id)?;
+    if std::env::var_os("SEKIRO_MAP_GRASS_ONLY").is_some() {
+        return grass::export(cache, id, &msb, oodle);
+    }
     lights::export(&raw, &out, id)?;
     if std::env::var_os("SEKIRO_MAP_LIGHTS_ONLY").is_some() {
         return Ok(());
@@ -524,6 +528,7 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
         sky::export(&raw, &out, oodle)?;
     }
     material_audit::export(cache, id, oodle, &mtds, &store)?;
+    grass::export(cache, id, &msb, oodle)?;
     eprintln!(
         "  layout: {} pieces ({never_drawn} zero-group rows retained in parts, excluded from legacy pieces), bounds {:?}..{:?}; wrote {}",
         piece_rows.len(),

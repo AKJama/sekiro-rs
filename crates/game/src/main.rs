@@ -45,9 +45,11 @@ mod lighting_selection;
 mod lightning_fx;
 mod map;
 mod map_fog_surface;
+mod map_grass;
 mod menu;
 mod perf_log;
 mod play;
+mod presentation;
 mod viewer;
 
 use std::path::PathBuf;
@@ -111,12 +113,19 @@ fn dispatch() -> anyhow::Result<()> {
         "--window-size",
         "--hour",
         "--story",
+        "--present-mode",
     ] {
         if args.iter().any(|a| a == flag)
             && arg_value(&args, flag).is_none_or(|v| v.starts_with("--"))
         {
             anyhow::bail!("{flag} requires a value");
         }
+    }
+    if let Some(mode) = arg_value(&args, "--present-mode") {
+        anyhow::ensure!(
+            matches!(mode.as_str(), "immediate" | "mailbox" | "fifo"),
+            "--present-mode wants immediate, mailbox or fifo"
+        );
     }
     let _attack_power = sekiro_sim::progression::AttackPower::from_options(
         arg_value(&args, "--attack-power").as_deref(),

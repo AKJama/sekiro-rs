@@ -1,6 +1,7 @@
 #define_import_path sekiro_map_bindings
 struct MapGame { flags: vec4<u32>, p: array<vec4<f32>, 16>, }
 struct Layers {
+    direct: array<vec4<f32>, 13>,
     enabled: vec4<f32>,
     albedo_enabled: vec4<f32>,
     albedo_uv: vec4<f32>,

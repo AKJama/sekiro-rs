@@ -5113,6 +5113,7 @@ dependencies = [
  "sekiro-formats",
  "sekiro-sim",
  "serde_json",
+ "wgpu",
 ]
 
 [[package]]

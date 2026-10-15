@@ -138,6 +138,7 @@ fn release_materials(
 #[data(50, MapLayersUniform, binding_array(101))]
 #[bindless(index_table(range(50..80), binding(100)))]
 struct MapLayers {
+    direct: [Vec4; 13],
     // xyz: enabled albedo layers; w: mask present.
     enabled: Vec4,
     albedo_enabled: Vec4,
@@ -211,6 +212,7 @@ pub(crate) const ATTR_MAP_BLEND2: bevy::mesh::MeshVertexAttribute =
 struct MapPipelineKey {
     camera_fade: bool,
     game: bool,
+    native_direct: bool,
 }
 
 impl From<&MapLayers> for MapPipelineKey {
@@ -218,6 +220,7 @@ impl From<&MapLayers> for MapPipelineKey {
         static LEGACY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         Self {
             game: layers.game.flags.y != 0,
+            native_direct: layers.direct[12].x > 0.,
             camera_fade: layers.camera_fade.x > 0.
                 || *LEGACY.get_or_init(|| std::env::args().any(|a| a == "--legacy-camera-fade")),
         }
@@ -227,6 +230,7 @@ impl From<&MapLayers> for MapPipelineKey {
 // Packed once per material; bindless slabs preserve Bevy's multi-draw batching.
 #[derive(Clone, ShaderType)]
 struct MapLayersUniform {
+    direct: [Vec4; 13],
     enabled: Vec4,
     albedo_enabled: Vec4,
     albedo_uv: Vec4,
@@ -241,6 +245,7 @@ struct MapLayersUniform {
 impl From<&MapLayers> for MapLayersUniform {
     fn from(layers: &MapLayers) -> Self {
         Self {
+            direct: layers.direct,
             enabled: layers.enabled,
             albedo_enabled: layers.albedo_enabled,
             albedo_uv: layers.albedo_uv,
@@ -456,6 +461,12 @@ impl MaterialExtension for MapLayers {
         if !key.bind_group_data.game && !prepass {
             descriptor.vertex.shader = pipeline.mesh_pipeline.shader.clone();
         }
+        if key.bind_group_data.native_direct
+            && !prepass
+            && let Some(fragment) = descriptor.fragment.as_mut()
+        {
+            fragment.shader_defs.push("NATIVE_DIRECT".into());
+        }
         if key.bind_group_data.game {
             if let Some(fragment) = descriptor.fragment.as_mut() {
                 fragment.shader_defs.push("GAME_MATERIAL".into());
@@ -608,6 +619,7 @@ fn update_hemisphere(
     let delta =
         (set.hemi_delta * crate::lighting::ENV_PER_UNIT).extend(crate::lighting::ENV_PER_UNIT);
     for (_, material) in materials.iter_mut() {
+        material.extension.direct = set.direct;
         if material.extension.hemi_axis != axis || material.extension.hemi_delta != delta {
             material.extension.hemi_axis = axis;
             material.extension.hemi_delta = delta;
@@ -771,6 +783,7 @@ fn replace_materials(
                     present("c_normal"),
                     f32::from(settings.debug),
                 ),
+                direct: set.direct,
                 hemi_axis: set.hemi_axis.extend(f32::from(ambient.brightness > 0.)),
                 hemi_delta: (set.hemi_delta * crate::lighting::ENV_PER_UNIT)
                     .extend(crate::lighting::ENV_PER_UNIT),

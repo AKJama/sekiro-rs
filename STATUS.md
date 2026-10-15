@@ -1,5 +1,21 @@
 # Status
 
+## Authored Ashina grass - visual parity G1 (2026-10-15)
+
+The new grass exporter reads native surfaces, all six MSB channel bindings, GrassTypeParam models and alpha-tested textures, with Halton and world-space hex placement rules recovered through static executable analysis.
+Outskirts exports 7,740 clumps on 113 source parts with 11 models and 24 textures; Castle exports 6,813 clumps on 45 source parts with seven models and 18 textures.
+The new map_grass module shares mesh/material assets for GPU instancing, inherits terrain-root visibility and keeps authored no-shadow flags after the shared caster budget.
+Only these two maps were re-exported with the job's own extractor under target/alt-grass and six jobs; both complete canonical layouts compare equal to their saved baselines.
+The two six-view gates pass in 40.7/47.6 seconds, retaining every visible-part set and selected collision, with Outskirts geometry totals unchanged at 0/493/0 and Castle at 1933/4885/903 for void/depth-gap/untextured.
+Castle's sole geometry change removes one depth-gap pixel through added grass; a grass-off control restores that pixel with byte-identical collision depth, and no fixtures were edited.
+Matched spot-013 and spot-060 before/after PNGs are under target/alt-grass/progress/, with grass rules, all colour totals and the pixel calculation documented in MAP-COMPLETENESS.md.
+Release game tests pass 121 unit and six integration tests with two existing ignores, extractor tests pass 25 unit and two integration tests, and the normal data gate, workspace all-target release Clippy with denied warnings and workspace formatting pass.
+The game unit run took 212.1 seconds in the concurrent tree, including existing long installed lighting/story checks.
+Native seed/BVH grouping, transform jitter, grass LOD, wind waveform/units and near-camera grass handling remain documented approximations; the Castle capture exposes a foreground blade intersecting the camera.
+No commit, publication, retail-game run, save access, install write, reference-image write, protected-log write or edit to another agent's assigned source files occurred.
+
+2026-10-15: Ordered spatial GI candidates reduce Hirata/Sunken Valley/Fountainhead opaque GPU samples from 5.85/3.08/15.35 to 3.48/1.93/11.02 ms with matched fallback coverage; the data gate, both six-view gates and measured-before comparisons, 120 game unit tests, six integration tests, workspace Clippy and formatting pass under target/alt-gi with six jobs; D: PNG export is access-denied, and L1 plus the opt-in direct-light compositor remain open; proof is in target/alt-gi/captures/2026-10-15-validated/.
+
 2026-10-15: Native fog enable, integer bank/light routing, finite sky geometry, analytical padding and HDR radiance conversion are corrected locally.
 The fog-on/off control disproves a normal/all-visible fog mismatch, and the sweep now rejects unequal fog uniforms between the two colour captures.
 The manually reviewed grey/pop-in fixtures preserve all geometry counts, visible-part sets and gate tolerances; both six-view gates pass in 37.4/42.4 seconds under target/alt-fog/final/render-gate/.
@@ -1512,3 +1528,5 @@ The final build, all-target game Clippy with warnings denied and workspace forma
 The five Python matcher tests, source compilation, matcher CLI and both review/report commands pass using uv with the existing cached-wheel wrapper.
 One formatting check caught a concurrent map_sweep.rs log-statement edit; the owner's correction passed the final recheck without this job editing that protected file.
 No renderer/map fixes, game window, re-match, real-game/save/install access, commits or publication were performed for this completion.
+2026-10-15: Corrected all 13 m89 dome-group overwrites, synchronized exported cloud layers and separated event sky/environment selection from clock-only changes in sky.rs and arena_b.rs; eight sky regressions, the environment/restart regression, before/after data gates, 118 game unit tests plus six integration tests, workspace Clippy and fmt pass using target/alt-sky and six jobs; matched spot-011/091 captures and gate numbers are under target/alt-sky/progress, with no per-view metric regression beyond tolerance and identical collision/visible-part manifests, but both canonical render gates remain blocked by shared grey/pop-in fixture failures already present with the correction off, and F1/D1 plus missing m900085 remain open.
+2026-10-15: Shared sweep texture/pipeline readiness with ordinary, play, viewer and arena captures; fixed --uncapped being ignored outside maps and logged concrete supported presentation modes; historical/current ordinary and play proofs plus before/after six-view gates live under target/alt-capture/progress; 120 game unit and six integration tests pass with two ignored, workspace Clippy and fmt are clean, and both gates preserve per-view geometry exactly, with Castle's three pre-existing grey failures and sustained uncapped throughput still open (Vulkan Immediate/Mailbox medians 16.682/16.693 ms).

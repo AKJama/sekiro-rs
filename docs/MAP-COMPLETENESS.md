@@ -1,5 +1,71 @@
 # Map completeness: Ashina Outskirts and Castle
 
+## Grass
+
+Grass is attached to a MapPiece model through the sibling `.grass` member of its map binder, rather than placed as MSB Objects.
+The version-1 file has a 40-byte header, 20-byte BVH nodes, 36-byte vertices containing local position and six painted density floats, 24-byte faces containing a normal and three indices, and 24-byte BVH bounds.
+These are [SoulsFormats format facts](https://github.com/soulsmods/SoulsFormatsNEXT/blob/master/SoulsFormats/Formats/GRASS.cs).
+The six consecutive MSBS grass-config integers bind those six channels to GrassTypeParam rows, in byte order; the reader's inherited `grass_type_param_id` name identifies only the third integer.
+Zero IDs disable individual channels even where their density surface is painted.
+Types 135 and 136 in the first two slots select the large and small dry-grass models `o007600` and `o007610`, explaining why counting only positive third-slot IDs missed most grass-bearing parts.
+Surface positions and normals are transformed to world space before sampling, so scaled parts change density counts and the hex grid stays anchored in world XZ.
+Finished placements are converted back under the mirrored parent, cancelling its scale on the clump model; MapOffset is not added again.
+
+Static analysis of the installed executable identifies distribution type 0 as Halton with bases 2 and 3, and type 1 as a hexagonal XZ grid.
+RVA `f93320` initializes the Halton bases, `f93970` counts triangle area times the mean of its three channel densities times the type's baseDensity, and `f93e50` warps barycentric weights by each corner density plus one third before normalization.
+The Halton path carries fractional counts between faces; spacing belongs to the hex-grid path, not the Halton density divisor.
+RVA `f945d0` uses the authored spacing, projected triangle containment and interpolated height for the hex grid; dithering value 3 bypasses its coverage threshold.
+The type row also supplies the FLVER model, scale ranges in percent, normal influence, inclination, orientation, shadow and wind settings.
+Models and their alpha-tested materials/textures use the existing FLVER/MTD export path, retaining scene lighting and snow metadata.
+Research dumps remain local under `re/exports/grass/`; no decompiler output is included in source.
+
+`sekiro-extract map` writes an independent `grass/grass.json` with source-part bindings, type provenance and parent-local placements, plus `grass/models/` and its DDS textures, for the two Ashina maps only.
+The canonical layout, model inventory and visibility identities remain independent of this additional geometry.
+`map_grass.rs` shares mesh and material handles for automatic GPU instancing and parents clumps to the existing terrain roots, inheriting draw, story and residency decisions without adding visibility-manifest parts.
+Its temporary hidden asset-loading scenes participate in the existing readiness walk and are removed before diagnostic enumeration.
+`SEKIRO_NO_GRASS=1` provides a paired control without changing fixtures or cache data.
+
+Remaining fidelity limits are the native BVH leaf seed and cross-channel fractional-count ordering, exact transform jitter and hex dither for values other than 3, grass-specific distance representations, and the wind waveform and units.
+Placements are deterministic, but their seed/rounding grouping is an approximation, and clumps currently retain their authored rest pose rather than using an invented wind animation.
+The authored wind and all type-row fields remain in the manifest for a later verified shader implementation.
+
+### Grass verification (15 October 2026)
+
+Only Outskirts and Castle were fully re-exported, using the job's release extractor under `target/alt-grass` with six Cargo jobs and six Rayon workers.
+A grass-only refresh with that extractor then incorporated world-space sampling without changing either canonical layout.
+Both complete `layout.json` documents compare equal to their pre-export snapshots, including model inventories, transforms, masks and every part.
+The grass provenance audit resolves every emitted channel back to its MSB configuration and checks all declared model image URIs exist.
+
+| Map | Clumps | Source parts | Channel bindings | Models | DDS textures |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Outskirts | 7,740 | 113 | 241 | 11 | 24 |
+| Castle | 6,813 | 45 | 88 | 7 | 18 |
+
+Both required six-view render gates pass with the existing fixtures and tolerances, taking 40.7 seconds for Outskirts and 47.6 seconds for Castle.
+All twelve selected collisions and sorted visible-part sets are exactly unchanged; grass adds child geometry without adding canonical part identities.
+The following totals report every geometry and colour category without changing colour fixtures.
+
+| Map | Void before / after | Depth gap before / after | Untextured before / after | Grey before / after | Pop-in before / after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Outskirts | 0 / 0 | 493 / 493 | 0 / 0 | 321 / 324 | 24,353 / 24,369 |
+| Castle | 1,933 / 1,933 | 4,886 / 4,885 | 903 / 903 | 398 / 409 | 26,629 / 26,537 |
+
+The only geometry-metric change is Castle view 0, whose depth-gap count decreases from 149 to 148.
+A six-view `SEKIRO_NO_GRASS=1` control with the same new executable restores 4,886 total depth-gap pixels and also passes the gate in 59.9 seconds while tests run concurrently.
+Its collision PNG is byte-identical to the grass-enabled capture.
+At pixel `(88, 39)`, collision depth remains 5.485 m while the diagnostic visual depth changes from 10.048 m to 7.358 m, so the added grass clears the existing 7.485 m gap threshold.
+Every other view and geometry category remains numerically identical.
+The per-view colour counts and visible-part comparisons are recorded in `target/alt-grass/gate-comparison.json`, and the independent pixel calculation is in `target/alt-grass/castle-grass-pixel.json`.
+
+The fixed cameras reuse the reviewed matcher poses for Outskirts spot 013 / shot 044 and Castle spot 060 / shot 213, at the recorded player focus, 43-degree FOV and 2560 x 1440 resolution.
+Visual inspection confirms dry grass and weeds on the previously bare foreground slopes and beside the aligned walls and paths.
+The Castle camera can intersect a generated foreground blade because exact distribution phase and native near-camera grass handling remain unresolved; the source screenshot does not prove exact tuft positions.
+The four requested original renderer captures are `target/alt-grass/progress/grass-outskirts-before.png`, `grass-outskirts-after.png`, `grass-castle-before.png` and `grass-castle-after.png`.
+Reference PNGs were only read, and no external implementation source was copied.
+Release tests pass 121 game unit tests with two existing ignores, six game integration tests, 25 extractor unit tests and two extractor integration tests, including the normal map data gate.
+The game unit suite took 212.1 seconds in the concurrent shared tree, with existing installed lighting/story checks accounting for the long-running cases; the game integration suite took 5.7 seconds.
+Workspace all-target release Clippy with warnings denied, workspace formatting and scoped whitespace checks pass.
+
 ## Layout schema (job B)
 
 `layout.json` declares `layout_version: 2`; absence means the legacy unversioned format.

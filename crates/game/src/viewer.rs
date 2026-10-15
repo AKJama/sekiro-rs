@@ -86,6 +86,7 @@ pub fn run(options: Options) -> Result<()> {
                 primary_window: Some(Window {
                     title: format!("sekiro-rs viewer - {file}"),
                     resolution: (1280, 960).into(),
+                    present_mode: crate::presentation::requested_mode(),
                     ..default()
                 }),
                 ..default()
@@ -135,8 +136,10 @@ pub fn run(options: Options) -> Result<()> {
             requested_at: None,
             started: Instant::now(),
         })
-        .add_systems(Update, capture);
+        .add_systems(Last, capture);
     }
+    crate::map::ready::install(&mut app);
+    app.add_plugins(crate::presentation::PresentationPlugin);
     app.run();
     Ok(())
 }
@@ -221,6 +224,7 @@ fn apply_orbit(orbit: Res<Orbit>, mut camera: Query<&mut Transform, With<Camera3
 
 fn capture(
     mut commands: Commands,
+    mut readiness: crate::map::ready::Ready,
     mut loaded: ResMut<Loaded>,
     mut capture: ResMut<Capture>,
     mut exit: MessageWriter<AppExit>,
@@ -238,6 +242,9 @@ fn capture(
         None if loaded.frames_since >= SETTLE_FRAMES
             && loaded.ready_at.is_some_and(|t| t.elapsed() >= SETTLE_TIME) =>
         {
+            if !readiness.allow() {
+                return;
+            }
             commands
                 .spawn(Screenshot::primary_window())
                 .observe(save_to_disk(capture.path.clone()));

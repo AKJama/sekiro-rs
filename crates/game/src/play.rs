@@ -519,6 +519,7 @@ pub fn run(options: Options) -> Result<()> {
                 primary_window: Some(Window {
                     title: "sekiro-rs".into(),
                     resolution: options.window_size.into(),
+                    present_mode: crate::presentation::requested_mode(),
                     // Make the first input frame's request a false -> true transition.
                     // Bevy's winit backend only calls focus_window on that transition.
                     focused: false,
@@ -681,7 +682,7 @@ pub fn run(options: Options) -> Result<()> {
             combat_hud::update,
             combat_hud::update_status,
             combat_hud::update_perilous,
-            (capture, log_camera).chain(),
+            log_camera,
         )
             .chain(),
     );
@@ -743,6 +744,9 @@ pub fn run(options: Options) -> Result<()> {
             crate::arena_b::install(&mut app, &cache, &id)?;
         }
     }
+    map::ready::install(&mut app);
+    app.add_plugins(crate::presentation::PresentationPlugin)
+        .add_systems(Last, capture);
     app.run();
     Ok(())
 }
@@ -1155,9 +1159,9 @@ fn simulate(
     live: Res<LiveInput>,
     mut orbit: ResMut<Orbit>,
     rigs: Query<&Rig, With<Actor>>,
+    map_pending: Option<Res<map::Pending>>,
     mut sounds: ResMut<crate::audio::SoundLibrary>,
     mut cues: MessageWriter<crate::audio::SoundCue>,
-    map_pending: Option<Res<map::Pending>>,
     replay: Option<ResMut<crate::input_replay::InputReplay>>,
 ) {
     // Hold the simulation until the models (and the map) are on screen, so scripted runs line
@@ -1838,16 +1842,20 @@ fn hud(
 
 fn capture(
     mut commands: Commands,
+    mut readiness: crate::map::ready::Ready,
     sim: NonSend<Sim>,
     mut cap: ResMut<Captures>,
     rigs: Query<&Rig>,
     mut exit: MessageWriter<AppExit>,
     replay: Option<Res<crate::input_replay::InputReplay>>,
 ) {
-    if !rigs.iter().all(|r| r.bound) {
+    if rigs.is_empty() || !rigs.iter().all(|r| r.bound) {
         return;
     }
     let step = sim.step;
+    if cap.pending.iter().any(|(s, _)| *s <= step) && !readiness.allow() {
+        return;
+    }
     let due: Vec<PathBuf> = cap
         .pending
         .iter()

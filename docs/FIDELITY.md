@@ -1,5 +1,24 @@
 # Known fidelity approximations
 
+## Authored map grass
+
+Ashina grass reads the six native surface-density channels, type rows, FLVERs and textures.
+The Halton bases, area/mean-density count and density-weighted barycentric warp follow static executable analysis, while leaf seed selection, cross-channel fractional-count grouping, exact transform jitter and non-3 hex dithering remain approximate.
+The renderer currently instances the authored first-detail meshes in their rest pose; native grass LOD transitions, wind waveform/units and interaction bending remain open.
+Exact distribution phase and native near-camera grass handling remain unresolved, and the matched Castle camera can intersect a foreground blade.
+The retained wind settings do not justify inventing an animation amplitude or period.
+See the Grass section of `MAP-COMPLETENESS.md` for the data and runtime interfaces.
+
+## Native map light composition
+
+Spatial GI candidate filtering preserves the existing volume order, bounds, coefficient sampling and fade arithmetic.
+Hemisphere fallback is removed with matching diffuse and specular coverage where spatial GI contributes, rather than disabled globally when a camera probe loads.
+The four native diffuse/specular RGB records and enable flags are retained, but the separate-light compositor is opt-in under `SEKIRO_GI_NATIVE_LIGHTS=1` because it fails Castle's grey gate.
+Production retains the existing direct lighting, and local-light directions absent from both the selected bank and bank zero are not invented in the experimental path.
+For example, Outskirts authors its local angles only in bank 120, so banks 100/110 still need the executable's native default-direction recovery before those local terms can render.
+Direct lighting still uses Bevy's material BRDF and sun shadow filtering; native light sharpness, per-light SSAO weights, separate ambient-reflection composition and exact angle construction remain unrecovered.
+The existing HDR unit bridge, exposure and tone mappings are unchanged, so this does not close visual-parity item L1.
+
 ## Folding Screen Monkeys
 
 Independent monkey combat, screen deaths, shared controller health and map victory run from installed params, animations, Lua and EMEVD.

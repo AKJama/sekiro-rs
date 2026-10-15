@@ -177,9 +177,20 @@ fn layered_map_forward_depth_and_motion_shaders_validate() {
                         defs.push("DEPTH_PREPASS".into());
                         defs.push("ENVIRONMENT_MAP".into());
                     }
-                    cache.get(0, id, &defs).unwrap_or_else(|e| {
-                        panic!("{name}: bindless={bindless}, game={game}, msaa={msaa}: {e:?}")
-                    });
+                    let native_variants: &[bool] = if name == "map_material" {
+                        &[false, true]
+                    } else {
+                        &[false]
+                    };
+                    for native_direct in native_variants {
+                        let mut variant = defs.clone();
+                        if *native_direct {
+                            variant.push("NATIVE_DIRECT".into());
+                        }
+                        cache.get(0, id, &variant).unwrap_or_else(|e| {
+                            panic!("{name}: bindless={bindless}, game={game}, msaa={msaa}, native_direct={native_direct}: {e:?}")
+                        });
+                    }
                     if name == "map_fog_surface" {
                         defs.retain(|d| !matches!(d, ShaderDefVal::Bool(name, _) if name == "DEPTH_PREPASS"));
                         defs.push("FOG_DIAGNOSTIC".into());

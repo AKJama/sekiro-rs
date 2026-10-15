@@ -56,8 +56,14 @@ pub(crate) mod sweep;
 #[path = "map_world.rs"]
 pub(crate) mod world;
 
+#[path = "map_lights.rs"]
+mod local_lights;
+use local_lights::{LocalLights, update_local_lights};
+
 #[path = "map_capture.rs"]
 mod capture;
+#[path = "capture_ready.rs"]
+pub(crate) mod ready;
 
 use crate::lighting::{
     MapLighting, MapProbes, ProbeRegion, ShadowSettings, apply_lighting, apply_probes,
@@ -250,7 +256,6 @@ struct Capture {
     started: Instant,
     requested: Option<Instant>,
     ready_frames: u32,
-    stable_pipelines: u8,
 }
 
 struct Pose {
@@ -622,22 +627,13 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
             bevy::diagnostic::EntityCountDiagnosticsPlugin::default(),
             bevy::diagnostic::SystemInformationDiagnosticsPlugin,
         ));
-        let probe = crate::perf_log::RenderProbe::default();
-        crate::perf_log::add_render_probe(app, probe.clone());
-        app.insert_resource(probe);
+        crate::perf_log::install_render_probe(app);
     }
     map_material::install(app, &scene.prefix, dir, &args);
     crate::map_fog_surface::install(app, &scene.prefix);
+    crate::map_grass::install(app, dir, &scene.prefix)?;
     app.insert_resource(ShadowSettings::from_args(&gparam, hour, &args)?);
-    app.insert_resource(LocalLights::load(dir, &args)?);
-    if args.iter().any(|a| a == "--uncapped") {
-        app.insert_resource(bevy::winit::WinitSettings::continuous());
-        app.add_systems(Startup, |mut windows: Query<&mut Window>| {
-            for mut window in &mut windows {
-                window.present_mode = bevy::window::PresentMode::AutoNoVsync;
-            }
-        });
-    }
+    LocalLights::install(app, dir, &args)?;
     app.add_plugins(WireframePlugin::default())
         .insert_resource(ClearColor(SKY))
         .insert_resource(GlobalAmbientLight {
@@ -737,11 +733,10 @@ pub fn run(options: Options) -> Result<()> {
                 primary_window: Some(Window {
                     title: format!("sekiro-rs map - {}", options.id),
                     resolution: (1600, 900).into(),
-                    present_mode: if options.uncapped {
-                        bevy::window::PresentMode::AutoNoVsync
-                    } else {
-                        bevy::window::PresentMode::AutoVsync
-                    },
+                    present_mode: crate::presentation::mode(
+                        options.uncapped,
+                        bevy::window::PresentMode::AutoVsync,
+                    ),
                     ..default()
                 }),
                 ..default()
@@ -796,14 +791,6 @@ pub fn run(options: Options) -> Result<()> {
     })
     .add_systems(Update, (fly, apply_fly, hud).chain());
     if let Some(path) = options.screenshot {
-        if !app
-            .world()
-            .contains_resource::<crate::perf_log::RenderProbe>()
-        {
-            let probe = crate::perf_log::RenderProbe::default();
-            crate::perf_log::add_render_probe(&mut app, probe.clone());
-            app.insert_resource(probe);
-        }
         if path.exists() {
             std::fs::remove_file(&path)?;
         }
@@ -816,10 +803,11 @@ pub fn run(options: Options) -> Result<()> {
             started: Instant::now(),
             requested: None,
             ready_frames: 0,
-            stable_pipelines: 0,
         })
-        .add_systems(Update, capture.after(track_loading));
+        .add_systems(Last, capture);
     }
+    ready::install(&mut app);
+    app.add_plugins(crate::presentation::PresentationPlugin);
     app.run();
     Ok(())
 }
@@ -1321,177 +1309,6 @@ fn apply_groups(
     }
 }
 
-#[derive(Clone)]
-struct LocalLight {
-    position: Vec3,
-    color: Color,
-    intensity: f32,
-    range: f32,
-}
-
-#[derive(Resource, Default)]
-struct LocalLights {
-    lights: Vec<LocalLight>,
-    active: std::collections::BTreeMap<usize, Entity>,
-}
-
-impl LocalLights {
-    fn load(dir: &Path, args: &[String]) -> Result<Self> {
-        let mut result = Self::default();
-        if args.iter().any(|a| a == "--no-local-lights") {
-            return Ok(result);
-        }
-        let scale = args
-            .iter()
-            .position(|a| a == "--local-light-scale")
-            .map(|i| {
-                args.get(i + 1)
-                    .context("--local-light-scale needs a multiplier")?
-                    .parse::<f32>()
-                    .context("invalid local light scale")
-            })
-            .transpose()?
-            .unwrap_or(1.);
-        anyhow::ensure!(
-            scale.is_finite() && scale >= 0.,
-            "local light scale must be finite and nonnegative"
-        );
-        let path = dir.join("lights.json");
-        if !path.exists() {
-            warn!("no BTL sidecar: {} (re-extract map)", path.display());
-            return Ok(result);
-        }
-        let value: Value = serde_json::from_slice(&std::fs::read(path)?)?;
-        anyhow::ensure!(value["version"] == 1, "unsupported lights.json version");
-        let banks = value["banks"].as_array().context("BTL banks array")?;
-        let bank = args
-            .iter()
-            .position(|a| a == "--light-bank")
-            .map(|i| {
-                args.get(i + 1)
-                    .context("--light-bank needs a bank number")?
-                    .parse::<u32>()
-                    .context("invalid BTL bank")
-            })
-            .transpose()?;
-        let selected = if let Some(bank) = bank {
-            banks
-                .iter()
-                .find(|b| {
-                    b["source"]
-                        .as_str()
-                        .is_some_and(|s| s.ends_with(&format!("_{bank:04}.btl")))
-                })
-                .with_context(|| format!("BTL bank {bank:04} is absent"))?
-        } else {
-            let Some(first) = banks.first() else {
-                return Ok(result);
-            };
-            first
-        };
-        for row in selected["lights"].as_array().context("BTL lights array")? {
-            if row["kind"] != 1 {
-                warn!("unsupported BTL kind {} ({})", row["kind"], row["name"]);
-                continue;
-            }
-            let vector = |key: &str| -> Result<[f32; 3]> {
-                let a = row[key].as_array().context("BTL vector")?;
-                anyhow::ensure!(a.len() == 3, "BTL vector length");
-                let values = [0, 1, 2].map(|i| a[i].as_f64().map(|v| v as f32));
-                let [Some(x), Some(y), Some(z)] = values else {
-                    anyhow::bail!("BTL vector values")
-                };
-                anyhow::ensure!([x, y, z].iter().all(|v| v.is_finite()), "BTL finite vector");
-                Ok([x, y, z])
-            };
-            let color = vector("color")?;
-            let intensity = row["intensity"].as_f64().context("BTL intensity")? as f32;
-            let range = row["range"].as_f64().context("BTL range")? as f32;
-            anyhow::ensure!(
-                intensity.is_finite() && intensity >= 0. && range.is_finite() && range >= 0.,
-                "BTL range/intensity"
-            );
-            result.lights.push(LocalLight {
-                position: Vec3::from(vector("position")?),
-                // Match GPARAM's linear RGB convention; BTL's colour space is untraced.
-                color: Color::linear_rgb(color[0] / 255., color[1] / 255., color[2] / 255.),
-                intensity: intensity * scale,
-                range,
-            });
-        }
-        info!(
-            "BTL bank {}: {} lights, scale {scale}, 60 m focus cull, cap 64, no shadows",
-            selected["source"],
-            result.lights.len()
-        );
-        Ok(result)
-    }
-}
-
-fn update_local_lights(
-    mut commands: Commands,
-    time: Res<Time>,
-    mut lights: ResMut<LocalLights>,
-    focus: Query<&GlobalTransform, With<MapFocus>>,
-    mut last: Local<f32>,
-) {
-    let _timer = crate::perf_log::SystemTimer::start("update_local_lights");
-    if time.elapsed_secs() - *last < 0.5 {
-        return;
-    }
-    *last = time.elapsed_secs();
-    let Some(focus) = focus.iter().next() else {
-        return;
-    };
-    let position = focus.translation();
-    let mut candidates: Vec<_> = lights
-        .lights
-        .iter()
-        .enumerate()
-        .filter_map(|(i, l)| {
-            let distance = l.position.distance_squared(position);
-            (l.intensity > 0. && l.range > 0. && distance <= (60. + l.range).powi(2))
-                .then_some((i, distance))
-        })
-        .collect();
-    candidates.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
-    let wanted: std::collections::BTreeSet<_> =
-        candidates.into_iter().take(64).map(|(i, _)| i).collect();
-    let old_count = lights.active.len();
-    let removed: Vec<_> = lights
-        .active
-        .keys()
-        .copied()
-        .filter(|i| !wanted.contains(i))
-        .collect();
-    for i in removed {
-        commands.entity(lights.active.remove(&i).unwrap()).despawn();
-    }
-    for i in wanted {
-        if lights.active.contains_key(&i) {
-            continue;
-        }
-        let light = &lights.lights[i];
-        let entity = commands
-            .spawn((
-                PointLight {
-                    color: light.color,
-                    intensity: light.intensity * crate::lighting::LOCAL_LUMENS_PER_UNIT,
-                    range: light.range,
-                    radius: 0.,
-                    shadow_maps_enabled: false,
-                    ..default()
-                },
-                Transform::from_translation(light.position),
-            ))
-            .id();
-        lights.active.insert(i, entity);
-    }
-    if lights.active.len() != old_count {
-        info!("BTL active lights: {}", lights.active.len());
-    }
-}
-
 /// Only map descendants are budgeted; character meshes always retain their shadows.
 /// Use the world-space bounds, not the instance origin, to retain large nearby walls.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
@@ -1692,8 +1509,7 @@ fn capture(
     pending: Res<Pending>,
     mut capture: ResMut<Capture>,
     stats: CaptureStats,
-    probe: Option<Res<crate::perf_log::RenderProbe>>,
-
+    mut readiness: crate::map::ready::Ready,
     mut exit: MessageWriter<AppExit>,
 ) {
     let CaptureStats {
@@ -1711,20 +1527,11 @@ fn capture(
         return;
     };
     capture.ready_frames += 1;
-    let waiting = probe
-        .as_ref()
-        .and_then(|p| p.0.lock().ok().map(|p| p.pipelines_waiting))
-        .unwrap_or(1);
-    capture.stable_pipelines = if waiting == 0 {
-        capture.stable_pipelines.saturating_add(1)
-    } else {
-        0
-    };
     match capture.requested {
         None if loaded.elapsed().as_secs_f32() >= capture.at => {
             // Residency becomes drawable after the prior render's probe was sampled.
             // Let the visibility change reach specialization before trusting a zero queue.
-            if capture.ready_frames < 12 || capture.stable_pipelines < 3 {
+            if capture.ready_frames < 12 || !readiness.allow() {
                 return;
             }
             let fps = diagnostics
@@ -2079,59 +1886,5 @@ mod tests {
             .advance_by(Duration::from_secs(1));
         app.update();
         assert!(app.world().get::<NotShadowCaster>(far).is_none());
-    }
-
-    #[test]
-    fn local_lights_cap_nearest_and_despawn_outside_range() {
-        let mut app = App::new();
-        app.insert_resource(Time::<()>::default())
-            .insert_resource(LocalLights {
-                lights: (0..100)
-                    .map(|i| LocalLight {
-                        position: Vec3::X * i as f32 * 0.1,
-                        color: Color::WHITE,
-                        intensity: 1.,
-                        range: 4.,
-                    })
-                    .collect(),
-                active: default(),
-            })
-            .add_systems(Update, update_local_lights);
-        let focus = app
-            .world_mut()
-            .spawn((MapFocus, GlobalTransform::default()))
-            .id();
-        app.world_mut()
-            .resource_mut::<Time>()
-            .advance_by(Duration::from_secs(1));
-        app.update();
-        let lights = app.world().resource::<LocalLights>();
-        assert_eq!(lights.active.len(), 64);
-        assert_eq!(
-            lights.active.keys().copied().collect::<Vec<_>>(),
-            (0..64).collect::<Vec<_>>()
-        );
-        for entity in lights.active.values() {
-            assert!(
-                !app.world()
-                    .get::<PointLight>(*entity)
-                    .unwrap()
-                    .shadow_maps_enabled
-            );
-        }
-        *app.world_mut().get_mut::<GlobalTransform>(focus).unwrap() =
-            GlobalTransform::from_translation(Vec3::X * 1000.);
-        app.world_mut()
-            .resource_mut::<Time>()
-            .advance_by(Duration::from_secs(1));
-        app.update();
-        assert!(app.world().resource::<LocalLights>().active.is_empty());
-        assert_eq!(
-            app.world_mut()
-                .query::<&PointLight>()
-                .iter(app.world())
-                .count(),
-            0
-        );
     }
 }

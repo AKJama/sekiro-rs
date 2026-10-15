@@ -509,6 +509,131 @@ fn probe_array(dir: &std::path::Path, probes: &MapProbes, diffuse: bool) -> anyh
     Ok(image)
 }
 
+/// Diagnostic control keeps the current renderer available without changing source or fixtures.
+struct GiOptions {
+    legacy: bool,
+    hemisphere: bool,
+    local_fallback: bool,
+    native_lights: bool,
+}
+
+fn gi_options() -> &'static GiOptions {
+    static OPTIONS: std::sync::OnceLock<GiOptions> = std::sync::OnceLock::new();
+    OPTIONS.get_or_init(|| {
+        let legacy = std::env::var_os("SEKIRO_GI_LEGACY").is_some_and(|v| v == "1");
+        let enabled = |name| !legacy && std::env::var_os(name).is_none_or(|v| v != "0");
+        GiOptions {
+            legacy,
+            hemisphere: enabled("SEKIRO_GI_HEMISPHERE"),
+            local_fallback: enabled("SEKIRO_GI_LOCAL_FALLBACK"),
+            native_lights: !legacy
+                && !legacy_map_lights()
+                && std::env::var_os("SEKIRO_GI_NATIVE_LIGHTS").is_none_or(|v| v != "0"),
+        }
+    })
+}
+
+pub(crate) fn legacy_gi() -> bool {
+    gi_options().legacy
+}
+
+/// Matched-camera control of this job only, preserving the preceding GI/fog fixes.
+pub(crate) fn legacy_map_lights() -> bool {
+    std::env::var_os("SEKIRO_MAP_LIGHTS_LEGACY").is_some_and(|v| v == "1")
+}
+
+/// Conservative cell lists preserve the original large-to-small blending order.
+fn irradiance_grid(data: &mut Vec<u32>, records: &[[u32; 52]]) {
+    if records.is_empty() {
+        return;
+    }
+    let bounds: Vec<_> = records
+        .iter()
+        .map(|r| {
+            (
+                Vec3::from_array(std::array::from_fn(|i| f32::from_bits(r[24 + i]))),
+                Vec3::from_array(std::array::from_fn(|i| f32::from_bits(r[28 + i]))),
+            )
+        })
+        .collect();
+    let global: Vec<_> = bounds
+        .iter()
+        .map(|(lo, hi)| (*hi - *lo).max_element() > 512.)
+        .collect();
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    for ((lo, hi), global) in bounds.iter().zip(&global) {
+        if !global {
+            min = min.min(*lo);
+            max = max.max(*hi);
+        }
+    }
+    let mut size = 32.;
+    let (origin, dims) = if min.is_finite() {
+        loop {
+            let origin = (min / size).floor() * size;
+            let dims = ((max - origin) / size).ceil().as_uvec3() + UVec3::ONE;
+            if dims.max_element() <= 128 && dims.as_u64vec3().element_product() <= 32768 {
+                break (origin, dims);
+            }
+            size *= 2.;
+        }
+    } else {
+        (Vec3::ZERO, UVec3::ONE)
+    };
+    let mut lists = vec![Vec::<u32>::new(); dims.element_product() as usize];
+    let mut outside = Vec::new();
+    for (i, ((lo, hi), global)) in bounds.iter().zip(&global).enumerate() {
+        if *global {
+            outside.push(i as u32);
+            for list in &mut lists {
+                list.push(i as u32);
+            }
+        } else {
+            // A cell of padding conservatively covers CPU/GPU boundary rounding.
+            let lo = (((*lo - origin) / size).floor() - Vec3::ONE)
+                .max(Vec3::ZERO)
+                .as_uvec3();
+            let hi = (((*hi - origin) / size).floor() + Vec3::ONE)
+                .max(Vec3::ZERO)
+                .as_uvec3()
+                .min(dims - UVec3::ONE);
+            for z in lo.z..=hi.z {
+                for y in lo.y..=hi.y {
+                    for x in lo.x..=hi.x {
+                        lists[(x + dims.x * (y + dims.y * z)) as usize].push(i as u32);
+                    }
+                }
+            }
+        }
+    }
+    let grid = data.len();
+    data[2] = grid as u32;
+    data.extend(origin.to_array().map(f32::to_bits));
+    data.push(0);
+    data.extend([size.recip().to_bits(); 4]);
+    data.extend(dims.to_array());
+    data.push(0);
+    data.extend([0; 4]);
+    let table = data.len();
+    data.resize(table + lists.len() * 2, 0);
+    data[grid + 12] = data.len() as u32;
+    data[grid + 13] = outside.len() as u32;
+    data.extend(&outside);
+    for (cell, list) in lists.iter().enumerate() {
+        data[table + cell * 2] = data.len() as u32;
+        data[table + cell * 2 + 1] = list.len() as u32;
+        data.extend(list);
+    }
+    info!(
+        "GIIV grid: {dims:?}, cell {size} m, candidates mean {:.2}, max {}, outside {}, {} KiB",
+        lists.iter().map(Vec::len).sum::<usize>() as f64 / lists.len() as f64,
+        lists.iter().map(Vec::len).max().unwrap_or(0),
+        outside.len(),
+        (data.len() - grid) * 4 / 1024
+    );
+}
+
 pub fn install_irradiance(
     app: &mut App,
     dir: &std::path::Path,
@@ -617,8 +742,12 @@ pub fn install_irradiance(
     let count = records.len();
     let atlas = irradiance_atlas(&mut records, &voxels)?;
     let mut data = vec![count as u32, u32::from(enabled), 0, 0];
-    for record in records {
+    for record in &records {
         data.extend(record);
+    }
+    irradiance_grid(&mut data, &records);
+    if legacy_gi() || std::env::var_os("SEKIRO_GI_FULL_SCAN").is_some_and(|v| v == "1") {
+        data[2] = 0;
     }
     let buffer = app
         .world_mut()
@@ -741,23 +870,33 @@ pub fn apply_probes(
             );
         }
     }
-    let selected = probes
-        .regions
-        .iter()
-        .filter(|r| probes.available.contains(&r.probe) && r.size.is_some())
-        .max_by(|a, b| {
-            a.size
-                .unwrap()
-                .element_product()
-                .total_cmp(&b.size.unwrap().element_product())
-        })
-        .map(|r| r.probe)
-        .or_else(|| {
-            focus
-                .iter()
-                .next()
-                .and_then(|t| probes.choose(t.translation))
-        });
+    let largest = || {
+        probes
+            .regions
+            .iter()
+            .filter(|r| probes.available.contains(&r.probe) && r.size.is_some())
+            .max_by(|a, b| {
+                a.size
+                    .unwrap()
+                    .element_product()
+                    .total_cmp(&b.size.unwrap().element_product())
+            })
+            .map(|r| r.probe)
+            .or_else(|| {
+                focus
+                    .iter()
+                    .next()
+                    .and_then(|t| probes.choose(t.translation))
+            })
+    };
+    let selected = if !gi_options().local_fallback {
+        largest()
+    } else {
+        focus
+            .iter()
+            .next()
+            .and_then(|t| probes.choose(t.translation))
+    };
     let maps = selected.map(|id| {
         if !probes.handles.contains_key(&id) {
             let specular = assets.load(format!(
@@ -783,9 +922,11 @@ pub fn apply_probes(
         );
         probes.active = active;
     }
-    let brightness = if ready.is_some() { 0. } else { ENV_PER_UNIT };
-    if ambient.brightness != brightness {
-        ambient.brightness = brightness;
+    if !gi_options().hemisphere {
+        let brightness = if ready.is_some() { 0. } else { ENV_PER_UNIT };
+        if ambient.brightness != brightness {
+            ambient.brightness = brightness;
+        }
     }
     for (entity, current, current_sky) in &cameras {
         if let Some((specular, diffuse)) = &ready {
@@ -833,6 +974,8 @@ pub struct MapLighting {
 /// One light set at one time of day, in Bevy terms.
 #[derive(Debug, Clone)]
 pub struct LightSet {
+    /// Four native direction/diffuse/specular triples, then runtime controls.
+    pub direct: [Vec4; 13],
     pub sun_toward: Vec3,
     pub sun_color: Color,
     pub sun_lux: f32,
@@ -898,7 +1041,62 @@ impl LightSet {
             (up_l.green * up_w + down_l.green * down_w) * 0.5,
             (up_l.blue * up_w + down_l.blue * down_w) * 0.5,
         );
+        let mut direct = [Vec4::ZERO; 13];
+        let flag = |name: &str| {
+            g.param("LightSet", name)
+                .and_then(|p| p.nearest(id, hour))
+                .and_then(|v| v.first().copied())
+                .is_some_and(|v| v != 0.)
+        };
+        for i in 0..4 {
+            let prefix = if i < 2 {
+                String::new()
+            } else {
+                "LocalLight ".into()
+            };
+            let index = if i < 2 { i } else { i - 1 };
+            let enabled = i < 2 || flag(&format!("Enable LocalLight{index}"));
+            if !enabled {
+                continue;
+            }
+            let diffuse = get(&format!("{prefix}DiffColor{index}")).unwrap_or_else(|| {
+                if i == 0 {
+                    vec![1., 0.95, 0.85, 1.5]
+                } else if i == 1 {
+                    vec![0.5, 0.6, 0.7, 0.2]
+                } else {
+                    vec![0.; 4]
+                }
+            });
+            let specular =
+                get(&format!("{prefix}SpecColor{index}")).unwrap_or_else(|| diffuse.clone());
+            let pack = |v: &[f32]| {
+                let (c, w) = colour(v);
+                Vec3::from_array(c.to_linear().to_f32_array_no_alpha()) * w * SCENE_TO_BEVY
+            };
+            let follow = i >= 2 || (i == 1 && flag("Light1 FollowedCamera"));
+            let angle = get(&format!("{prefix}Angle{index}"));
+            // 3114b0/30df80 initialize every slot to asin(-0.7071), atan2(0.7071,0).
+            // 311a50 clears colours/enables but retains those constructor directions.
+            let angle = angle.unwrap_or_else(|| {
+                vec![
+                    f32::from_bits(0xbf35_0481).asin(),
+                    std::f32::consts::FRAC_PI_2,
+                ]
+            });
+            let native =
+                Quat::from_rotation_y(angle[1]) * Quat::from_rotation_x(angle[0]) * Vec3::Z;
+            let direction = Vec3::new(-native.x, native.y, native.z);
+            direct[i * 3] = direction.extend(if i >= 2 { 2. } else { f32::from(follow) });
+            let sharpness = get(&format!("{prefix}Sharpness{index}"))
+                .and_then(|v| v.first().copied())
+                .unwrap_or(50.);
+            direct[i * 3 + 1] = pack(&diffuse).extend(sharpness);
+            direct[i * 3 + 2] = pack(&specular).extend(1.);
+        }
+        direct[12].x = f32::from(gi_options().native_lights);
         Self {
+            direct,
             sun_toward: toward(&get("Angle0").unwrap_or_default()),
             sun_color,
             sun_lux: sun_w * SCENE_TO_BEVY,
@@ -966,6 +1164,16 @@ pub fn apply_lighting(
         return;
     }
     let set = LightSet::from_gparam(&lighting.gparam, lighting.light_set, lighting.hour);
+    if lighting
+        .gparam
+        .param("LightSet", "DiffColor0")
+        .is_none_or(|p| !p.entries.iter().any(|e| e.id == lighting.light_set))
+    {
+        error!(
+            "missing LightSet bank row {} in {}; parameter fallback is in use",
+            lighting.light_set, lighting.source
+        );
+    }
     if lighting.applied != Some(lighting.light_set) {
         info!(
             "light set {} at {:.1} h from {}: {set:?}",
@@ -991,6 +1199,91 @@ pub fn apply_lighting(
 #[cfg(test)]
 mod probe_tests {
     use super::*;
+    #[test]
+    fn gi_grid_retains_ordered_coverage_at_rotated_bounds_and_cell_faces() {
+        let mut records = Vec::new();
+        let mut bounds = Vec::new();
+        for i in 0..143 {
+            let center = Vec3::new((i % 12) as f32 * 32. - 160., -768., (i / 12) as f32 * 32.);
+            let size = if i == 0 {
+                Vec3::splat(5000.)
+            } else if i == 142 {
+                // A thin enclosing record can sort after local boxes by native volume.
+                Vec3::new(5000., 0.1, 0.1)
+            } else {
+                Vec3::new(20., 32., 24.)
+            };
+            let extent = Mat3::from_quat(Quat::from_rotation_y(i as f32 * 0.17)).abs() * size * 0.5;
+            let (min, max) = (center - extent, center + extent);
+            bounds.push((min, max));
+            let mut r = [0; 52];
+            r[24..27].copy_from_slice(&min.to_array().map(f32::to_bits));
+            r[28..31].copy_from_slice(&max.to_array().map(f32::to_bits));
+            records.push(r);
+        }
+        for records in [&records[..0], &records[..1], &records[..]] {
+            let mut data = vec![records.len() as u32, 1, 0, 0];
+            for r in records {
+                data.extend(r);
+            }
+            irradiance_grid(&mut data, records);
+            if records.is_empty() {
+                assert_eq!(data[2], 0);
+                continue;
+            }
+            let grid = data[2] as usize;
+            let origin = Vec3::from_array(std::array::from_fn(|i| f32::from_bits(data[grid + i])));
+            let inv = f32::from_bits(data[grid + 4]);
+            let dims = UVec3::new(data[grid + 8], data[grid + 9], data[grid + 10]);
+            let mut positions = vec![Vec3::splat(-10000.), Vec3::splat(10000.)];
+            for (min, max) in &bounds[..records.len()] {
+                for corner in 0..8 {
+                    for e in [-0.001, 0., 0.001] {
+                        positions.push(
+                            Vec3::new(
+                                if corner & 1 == 0 { min.x } else { max.x },
+                                if corner & 2 == 0 { min.y } else { max.y },
+                                if corner & 4 == 0 { min.z } else { max.z },
+                            ) + Vec3::splat(e),
+                        );
+                    }
+                }
+                positions.push((*min + *max) * 0.5);
+            }
+            for z in 0..=dims.z {
+                for x in 0..=dims.x {
+                    positions.push(origin + Vec3::new(x as f32, 1., z as f32) / inv);
+                }
+            }
+            for p in positions {
+                let c = ((p - origin) * inv).floor();
+                let entry = if c.cmpge(Vec3::ZERO).all() && c.cmplt(dims.as_vec3()).all() {
+                    let c = c.as_uvec3();
+                    grid + 16 + 2 * (c.x + dims.x * (c.y + dims.y * c.z)) as usize
+                } else {
+                    grid + 12
+                };
+                let offset = data[entry] as usize;
+                let candidates = &data[offset..offset + data[entry + 1] as usize];
+                assert!(candidates.windows(2).all(|w| w[0] < w[1]));
+                let contains = |i: usize| p.cmpge(bounds[i].0).all() && p.cmple(bounds[i].1).all();
+                let full: Vec<_> = (0..records.len()).filter(|i| contains(*i)).collect();
+                let filtered: Vec<_> = candidates
+                    .iter()
+                    .map(|i| *i as usize)
+                    .filter(|i| contains(*i))
+                    .collect();
+                assert_eq!(full, filtered, "receiver {p:?}");
+            }
+            if records.len() > 1 {
+                assert!(
+                    (0..dims.element_product() as usize)
+                        .all(|i| data[grid + 16 + i * 2 + 1] < records.len() as u32 / 2)
+                );
+            }
+        }
+    }
+
     #[test]
     fn atlas_preserves_independent_coefficient_resolutions() {
         let mut record = [0u32; 52];
@@ -1130,6 +1423,14 @@ mod probe_tests {
                 display_name: String::new(),
                 params: [
                     ("DiffColor0", [0.5, 0.25, 1., 2.]),
+                    ("SpecColor0", [0.25, 0.5, 1., 3.]),
+                    ("Enable LocalLight1", [1., 0., 0., 0.]),
+                    ("Enable LocalLight2", [1., 0., 0., 0.]),
+                    ("LocalLight DiffColor1", [0.5, 1., 0.25, 2.]),
+                    ("LocalLight SpecColor1", [0.25, 1., 0.5, 3.]),
+                    ("LocalLight DiffColor2", [0., 0., 0., 0.]),
+                    ("LocalLight SpecColor2", [0.5, 0.25, 1., 0.5]),
+                    ("Light1 FollowedCamera", [1., 0., 0., 0.]),
                     ("Hemi Color Up", [0.5, 1., 0.25, 2.]),
                     ("Hemi Color Down", [1., 0.5, 0.5, 0.5]),
                 ]
@@ -1147,6 +1448,29 @@ mod probe_tests {
             }],
         };
         let set = LightSet::from_gparam(&g, 0, 12.);
+        assert_eq!(
+            set.direct[2].xyz() / SCENE_TO_BEVY,
+            Vec3::new(0.1875, 0.75, 3.)
+        );
+        assert_eq!(
+            set.direct[7].xyz() / SCENE_TO_BEVY,
+            Vec3::new(0.5, 2., 0.125)
+        );
+        assert_eq!(
+            set.direct[8].xyz() / SCENE_TO_BEVY,
+            Vec3::new(0.1875, 3., 0.75)
+        );
+        assert_eq!(set.direct[10].xyz(), Vec3::ZERO);
+        assert!((set.direct[6].xyz().length() - 1.).abs() < 0.00001);
+        assert_eq!(set.direct[6].w, 2.);
+        assert_eq!(set.direct[8].w, 1.);
+        assert_eq!(set.direct[9], set.direct[6]);
+        assert_eq!(set.direct[11].w, 1.);
+        assert_eq!(
+            set.direct[11].xyz() / SCENE_TO_BEVY,
+            Vec3::new(0.125, 0.03125, 0.5)
+        );
+        assert_eq!(set.direct[3].w, 1.);
         let c = set.sun_color.to_linear();
         assert_eq!(
             Vec3::new(c.red, c.green, c.blue) * set.sun_lux / SCENE_TO_BEVY,

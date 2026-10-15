@@ -13,6 +13,8 @@ Flag-range conditions distinguish all on, all off, any on and any off, and map-m
 Event 100 selects the environment variant and the enabled m89 sky group, including the Hirata memory, Fountainhead and the Ashina fire branch.
 The selected sky group's model comes from the installed m89 MSB rather than an invented map-to-sky table.
 The most recent enabled map-part command wins over the common sky, with a bounded recency list so repeated events do not grow scene state indefinitely.
+The renderer retains the first m89 MSB part as each group's dome, matching the shared selector, and keeps each exported companion cloud primitive with that dome.
+Clock-only changes retain the authored sky and environment; only their independent native commands replace them, while explicit `--hour` remains a diagnostic override.
 `SetLighting` supplies a story-hour override, and `SetAreaEnvmap` supplies an independent environment override.
 The existing authored variant/hour mapping is 0/0, 1/6, 2/12, 3/18, 4/22 and 5/2.
 The native fixed Hirata and Fountainhead GPARAM rows have only hour 0, so their single authored values apply regardless of the story clock.
@@ -97,7 +99,8 @@ Other game processes and compilers were active, and shared `map.rs` changed betw
 Default-start GPU diagnostics before the patch show approximately 14.788 ms opaque, 2.964 ms prepass and 1.969 ms fog; after samples show 31.394, 4.634 and 4.524 ms under different contention.
 The start-3 opaque cost stays near 6 ms in both runs.
 Disabling GIIV reduces the default opaque diagnostic to 12.953 ms, but worsens wall time under contention, so it establishes neither an overall speedup nor a justified reason to remove authored probes.
-The shared per-fragment scan in `map_material.wgsl:84` tests all 49 volumes; spatial candidate filtering that preserves native blending is a concrete optimization for the shared probe implementation.
+~~The shared per-fragment scan in `map_material.wgsl:84` tests all 49 volumes; spatial candidate filtering that preserves native blending is a concrete optimization for the shared probe implementation.~~
+Fixed by the [shared spatial GI lookup](#spatial-gi-and-fallback-2026-10-15), with the original record order and blend arithmetic retained.
 No safe map-specific visibility exclusion was established, no native geometry or lighting was hidden to improve timings, and steady frame time or exact rendered parity is not claimed.
 The map regression, all seven shared selection tests including the installed preset census, and six collision/map tests pass; game all-target Clippy with warnings denied and workspace formatting both pass, with results retained under `target/alt-m25/`.
 
@@ -127,7 +130,8 @@ The old claim that m000064 lacks a decoded SnowGround layer is stale: its curren
 The conspicuous triangular snow pattern disappears with `--no-layers` but persists with `--no-giiv` and `--no-shadow`.
 Its 999 normals are normalized and continuous across coincident vertices, and maximum absolute normal-dot-tangent is 6.1e-8.
 This isolates a shared layered-material normal-path defect around `map_material.wgsl:375-411,438`, but does not yet identify the precise native arithmetic or UV correction.
-Shared follow-ups also include unused native normal-map AO, independent directional SpecColor0/1 omitted by `lighting.rs:881-907`, and per-fragment scanning of all 71 GI records in `map_material.wgsl:84`.
+Shared follow-ups also include unused native normal-map AO, independent directional SpecColor0/1 routing, and ~~per-fragment scanning of all 71 GI records in `map_material.wgsl:84`~~.
+Spatial candidates are fixed; the four diffuse/specular input records are retained, but the [experimental native direct compositor](#spatial-gi-and-fallback-2026-10-15) remains opt-in because it fails Castle's grey gate.
 The proposed shared fixes and exact evidence are in `target/alt-m17/captures/report.md`; no map tint or geometry exclusion was used to conceal them.
 
 Before/after story-state PNGs, raw uncapped perf CSVs, native audits, controls, walks and source/binary hashes are retained under `target/alt-m17/captures/`.
@@ -166,7 +170,84 @@ Missing complete probe pairs for an authored environment are reported rather tha
 The existing GI coefficient/reflection atlas is constructed at map load; changing its hourly layers dynamically is still a rendering follow-up, independent of the selector and camera cubemap handle reset.
 These limits mean selection is reviewable against the event data, but exact visual equivalence for every story state is not yet established.
 
+## Spatial GI and fallback, 2026-10-15
+
+The GI upload now appends a conservative world-space grid to the existing storage buffer once per map.
+Each cell retains the original large-to-small record order, and the shader still runs the original AABB, oriented-box fade, coefficient sampling and reflection blend on those candidates.
+Whole-map boxes participate in every cell and in the outside-grid list; a cell of padding prevents CPU/GPU boundary rounding from removing a contributing box.
+The boundary regression compares ordered receiver coverage against a full scan, including rotated AABBs, negative coordinates, inclusive faces, empty maps and outside-grid receivers.
+Outskirts averages 3.89 candidates instead of 55 records, and Castle averages 5.45 instead of 107, using 70/67 KiB additional storage respectively.
+
+Camera probe readiness no longer zeros the authored hemisphere globally.
+The shader removes the same diffuse and specular hemisphere response under spatial GI coverage that the fallback adds, preventing an ambient-specular remainder inside covered regions.
+Camera fallback now uses the existing smallest-containing-box and nearest-point selection instead of unconditionally choosing the largest box.
+Outskirts logs confirm local probes 10 and 200 replacing the old camera-wide probe-0 choice.
+
+LightSet and the material upload retain four separate diffuse/specular RGB records, with RGB squared and multiplied by W, native enable flags and camera-follow control.
+Production retains the existing direct lighting while native material routing and BRDF details remain unrecovered.
+The opt-in `SEKIRO_GI_NATIVE_LIGHTS=1` compositor uses the current material BRDF and sun shadow with separate diffuse/specular inputs; its code is excluded from production shaders by a material pipeline define.
+The raw Outskirts GPARAM contains local-angle entries only for bank 120, while banks 100/110 enable those lights and author their colours without supplying angles or a bank-zero angle fallback.
+Those colours remain retained, but the unresolved local directions are masked rather than replaced with generic angles.
+Applying guessed local angles failed the six-view gates; disabling that compositor isolated the regression, and masking missing directions restored the Outskirts gate.
+Castle still rejects the experimental compositor at grey views 0/1/2, measuring 117/25/291 against fixture values 31/7/200, so it is not enabled by default.
+The default GI and fallback path passes the independent Castle ablation with grey total 396 and unchanged geometry counts.
+Native default directions, sharpness, per-light SSAO, ambient-reflection composition and the existing HDR/exposure/tone bridge remain fidelity work; visual-parity item L1 stays open.
+
+`SEKIRO_GI_LEGACY=1` restores the pre-change lookup, hemisphere suppression, camera fallback and direct-light behavior for matched comparisons.
+`SEKIRO_GI_FULL_SCAN=1` disables only spatial filtering while preserving the corrected lighting path.
+The component controls `SEKIRO_GI_HEMISPHERE=0` and `SEKIRO_GI_LOCAL_FALLBACK=0` support isolated diagnosis without changing source or gate fixtures.
+Proof, commands, executable hashes, rejected experiments and the native field census are local to `target/alt-gi/captures/`.
+
+The final proof is in `target/alt-gi/captures/2026-10-15-validated/`, using one executable and runtime switches for before/after.
+Default-start Vulkan GPU timestamp samples at 1600 x 900 are:
+
+| Map | Opaque before / after ms | Early prepass before / after ms | Candidates mean / maximum |
+| --- | --- | --- | --- |
+| Hirata | 5.85 / 3.48 | 1.41 / 1.45 | 5.35 / 39, from 142 |
+| Sunken Valley | 3.08 / 1.93 | 0.36 / 0.36 | 2.73 / 18, from 71 |
+| Fountainhead | 15.35 / 11.02 | 2.88 / 2.83 | 2.92 / 15, from 49 |
+
+These are short GPU pass observations, not an overall FPS or steady pacing claim.
+The filter-only comparison keeps the corrected fallback path active on both sides and switches only `SEKIRO_GI_FULL_SCAN`.
+The separate frozen-time Sunken Valley pair is pixel-identical; Hirata and Fountainhead retain small frame differences with mean absolute channel errors 0.0681/255 and 0.00488/255, so exact whole-frame equality is not claimed for those maps.
+The ordered-coverage regression and unchanged shader blend arithmetic guard the receiver lighting itself.
+
+Both canonical six-view gates and the independent comparison against the measured before runs pass every per-view tolerance without editing fixtures.
+Outskirts totals `(void, depth gap, untextured, grey, pop-in)` change from `(0,493,0,321,24353)` to `(0,493,0,322,24363)`.
+Castle totals change from `(1933,4886,903,399,26652)` to `(1933,4886,903,397,26632)`.
+Before/after gate durations are 45.71/51.21 seconds for Outskirts and 50.59/54.87 seconds for Castle, below the 120-second budget.
+The data gate, 120 game unit tests, six integration tests, the focused probe tests and workspace all-target Clippy pass with `target/alt-gi` and six Cargo jobs.
+The owned Rust files and the final workspace formatting check pass.
+
+The night proof retains matched temple/shrine poses from spot-002/spot-003, the checked Castle courtyard camera `(343,-37.68,100,90,0)`, and the accepted great-hall interior pose from spot-044.
+The first automatic Castle pose was rejected during image QA and replaced; it is not accepted lighting evidence.
+All eight requested-name PNGs are ready under `target/alt-gi/captures/2026-10-15-validated/media/export/`.
+Copying them to `D:/sekiro-rs-media/progress/2026-10-15/` was denied by filesystem permissions, so that export remains blocked.
+Comparison against the read-only retail pairs confirms L1's hard blue-white illumination, cold cast and dark shrine/hall remain; this optimisation does not close L1 or justify an exposure/tint adjustment.
+
 ## Verification
+
+### Shared sky selection correction (2026-10-15)
+
+The read-only m89 measurement found 13 exported dome groups overwritten by later unexported cloud models.
+`sky.rs` now retains the first MSB part, as the shared selector does, and stores each exported companion cloud mesh/material separately so both layers change together.
+The runtime `SEKIRO_LEGACY_SKY_SELECTION=1` control restores the old mapping, cloud and clock behavior for comparison without changing git state.
+`arena_b.rs` no longer derives an environment from a clock-only update, and `sky.rs` retains the authored initial sky until a native sky command replaces it.
+Explicit `--hour` remains an intentional diagnostic override.
+Missing Senpou m900085 is reported as incomplete sky fidelity and retains the last available dome; no export was changed.
+
+All eight sky regressions and the complete game suite pass: 118 unit tests and six integration tests, with two existing ignored tests.
+The CPU data gate passes before and after, and workspace Clippy with denied warnings and formatting pass using `target/alt-sky` and six jobs.
+Both canonical six-view render gates currently fail their checked-in grey/pop-in fixtures even with this correction disabled.
+No measured category worsens beyond the unchanged 16-pixel/1% per-view tolerance when enabling the sky correction, and all twelve selected collisions and sorted visible-part manifests match.
+Geometry totals remain 0/493/0 for Outskirts and 1933/4886/903 for Castle in void/depth-gap/untextured order.
+Outskirts grey/pop-in totals are 1047/27440 before and 1025/27443 after; Castle totals are 1163/26379 before and 1166/26389 after.
+Those shared colour-baseline failures still block claiming that the required render gates pass; their fixtures were not edited.
+Reports, fixed executable/source hashes, camera requests, gate comparisons and matched spot-011/spot-091 captures are under `target/alt-sky/progress/`.
+The matched night-sky regions change by at most one display code value: 15/102000 sampled Outskirts pixels and 41/175000 Castle pixels differ.
+These static initial-state captures already select m900030 before the correction; the changed group and clock behavior is proven by the eight sky regressions and the independent environment-event regression.
+The pale retail sky and readable distant snowy range in the external reference pairs remain F1/D1 work: the protected initial night sky already agrees before/after, so this correction does not establish static sky, fog, material or distant-scenery parity.
+Genuine environment changes still require coefficient-atlas synchronization in the GI/material owner's code.
 
 ### Shared native fog correction (2026-10-15)
 
@@ -220,6 +301,34 @@ For Senpou, `--story illusion` enables the original region event, which alternat
 Redirect `PLAY_PERF_DIR` into `target/alt-lf/captures/` before enabling `PLAY_LOG_PERF=1` so verification never writes into cache or logs.
 Captures and raw performance CSVs stay under that target directory and are not tracked.
 
+## Shared capture readiness and presentation, 2026-10-15
+
+`capture_ready.rs` now supplies the sweep, render gates, ordinary map screenshots, play shots, model viewer and arena captures with one pipeline monitor and the sweep's declared-texture checks.
+The monitor retains GPU image residency after CPU assets retire, rejects permanent shader failures and starts with an unknown/pending render state.
+Window captures require three distinct completed renders without pending pipelines or textures, in addition to their existing scene/rig readiness and map residency settling.
+Play keeps due shots queued while waiting, including when the input script ends before compilation finishes.
+The interim ordinary map path already waited twelve residency frames and three pipeline polls; it now uses the shared texture-aware checks instead of a profiling probe.
+
+The historical ordinary `--map m13_00_00_00 --screenshot ... --at 0` reproduction is blank apart from UI, while the new capture defers at 18 ready / 97 pending pipelines and saves at 115 ready / zero pending with textures ready.
+`target/alt-capture/progress/capture-before.png` uses the executable preserved during the 2026-10-14 session, and `capture-after.png` uses the new implementation.
+The current-tree control, `current-tree-before.png`, was already complete with the interim guard; these images establish startup readiness, not colour fidelity between renderer revisions.
+The final play smoke test retains its tick-1 shot at 8 ready / 51 pending pipelines and saves `play-ready.png` at 59 ready / zero pending with textures ready.
+
+`presentation.rs` applies `--uncapped` to every window entry point, including the floor scene that previously ignored it, and resolves supported concrete modes before Bevy configures the surface.
+It logs backend, requested/configured mode and supported modes, with an explicit warning when an uncapped request must fall back to FIFO.
+`--present-mode immediate|mailbox|fifo` provides a diagnostic override, and frame-time logs include only pipeline-ready render intervals.
+Vulkan reports supported `[Fifo, FifoRelaxed, Mailbox, Immediate]` and configures Immediate for `--uncapped` on this host.
+The warm floor control remains capped: median 16.633 ms before, 16.682 ms with Immediate, and 16.693 ms with explicit Mailbox.
+A zero-delay polling control also stayed at 16.684 ms and was removed; a DX12 control was slower under concurrent validation and is not a throughput claim.
+Representative Immediate rows have about 2.3 ms main CPU time and a 12.5 ms render/presentation interval.
+Sustained throughput above 60 Hz remains unproven and requires further host/backend presentation investigation; individual sub-16.6 ms frames do not establish an uncapped result.
+
+Both six-view gates preserve every per-view void, depth-gap and untextured count exactly against the same-session before executable.
+Outskirts passes with totals 0 / 493 / 0, while Castle retains 1933 / 4886 / 903 and its pre-existing grey fixture failures at views 0, 1 and 2.
+Castle's before grey values are 115 / 25 / 291 and after values are 117 / 25 / 290, against fixtures 31 / 7 / 200; no fixture was changed.
+These colour failures preceded this job in the shared tree containing in-progress lighting work.
+Commands, raw logs, CSV summaries, gate reports and image provenance are under `target/alt-capture/progress/`.
+
 ## Capture results
 
 All nine gameplay maps were captured at their default start 0, and castle top was captured at both Genichiro's morning and Owl's evening story state.
@@ -265,7 +374,8 @@ The m15-only installed-data regression guards this selection, the four native co
 The default passage, watermill approach and ghost Monk approach resolve to light set 100, with independent fog/scattering/environment IDs zero.
 A scripted native village walk near (246.6, -429.5, 1116.4) crosses light sets 100 and 110 and returns to 100, while fog/scattering/environment remain zero; entry and exit screenshots and the selected-row log are retained as boundary captures.
 At morning the renderer logs sun and fill at 900 lux, linear light RGB (0.221453, 0.301423, 0.393695), hemisphere mean (0.061111, 0.076336, 0.093253), and environment intensity 1432.3944 cd/m2.
-The converted hemisphere is not the final active ambient: after camera probe 95 loads, lighting.rs:786-789 sets GlobalAmbientLight.brightness to zero and map_material.rs:638 disables the hemisphere term.
+~~The converted hemisphere is not the final active ambient: after camera probe 95 loads, lighting.rs:786-789 sets GlobalAmbientLight.brightness to zero and map_material.rs:638 disables the hemisphere term.~~
+The [shared GI correction](#spatial-gi-and-fallback-2026-10-15) retains the authored hemisphere as fallback and replaces it per receiver under native GI coverage.
 With zero installed GIIV records, the scene then uses that camera cubemap without the missing native per-receiver coefficient lighting; load the original coefficients before calibrating brightness or probe blending.
 Native post settings log exposure 1.3, uploaded multiplier 2.4622889, middle gray -6, adaptation limits -0.3/0.01 and auto exposure disabled.
 The morning ID-100 raw sun diffuse colour is (0.470588, 0.549020, 0.627451, 0.2), while its separate SpecColor0 has the same RGB and intensity 0.3.
@@ -319,7 +429,8 @@ The after village GPU samples put the opaque pass around 1.8-1.9 ms, early prepa
 Cloth simulation samples are usually 1.2-1.7 ms, with one default-view sample at 4.124 ms; raw CPU-system and GPU-pass samples are in profile-costs.csv.
 Despite the uncapped request, after medians still cluster near 16.6 ms; a representative row has main CPU 4.911 ms, fixed CPU 1.226 ms and render-schedule CPU 16.176 ms, including an 11.4 ms render-stage interval.
 Effective surface present mode is not logged, and the 16.6 ms plateau plus large p99 spikes prevent a claim of steady uncapped frame time.
-A shared capture fix should log the effective present mode/backend and offer an offscreen timestamp control to exclude presentation waits; add_render_probe is also registered by both --profile-systems and PLAY_LOG_PERF, producing duplicate render-set stamps in these CSVs.
+A shared capture fix should ~~log the effective present mode/backend and~~ offer an offscreen timestamp control to exclude presentation waits; add_render_probe is also registered by both --profile-systems and PLAY_LOG_PERF, producing duplicate render-set stamps in these CSVs.
+The mode/backend logging item is fixed by `presentation.rs`; offscreen timing isolation and duplicate profiler installation remain separate follow-ups.
 No map-specific culling cost was demonstrated by these captures.
 The final after boundary run repeatedly respawns instead of completing the before walk, so live after-state region movement remains unverified; its command, spawn, step log and screenshots are retained rather than presented as a passing walk.
 The native m15 data test passes, the collision-system regression passes, and the final combined lighting filter passes 11 tests with two slow tests ignored.
@@ -371,7 +482,8 @@ The shared lighting/export investigation should validate the BTL coordinate fram
 
 Shared follow-ups, deliberately left unedited:
 
-- `lighting.rs:786-788`, `apply_probes`, sets global ambient brightness to zero when a camera probe is ready; `map_material.rs:466-485`, `update_hemisphere`, then sets the hemisphere enable bit to zero, and `map_material.wgsl:555-567` skips the authored hemisphere contribution.
+- ~~`lighting.rs:786-788`, `apply_probes`, sets global ambient brightness to zero when a camera probe is ready; `map_material.rs:466-485`, `update_hemisphere`, then sets the hemisphere enable bit to zero, and `map_material.wgsl:555-567` skips the authored hemisphere contribution.~~
+  Fixed by the [per-receiver hemisphere fallback](#spatial-gi-and-fallback-2026-10-15), without an unconditional ambient boost.
   Runtime evidence is the nonzero LightSet 110 hemisphere followed by `environment probe Some(0)` at the same start.
   This proves the renderer suppresses those inputs, but does not prove that adding them over native GI would match the original compositing rule.
   Have the probe-blending collaborator validate the native GI/hemisphere composition and replace the global camera-ready gate with the recovered per-receiver rule; do not simply add a global ambient boost.
@@ -477,7 +589,8 @@ This establishes a missing derived-data export rather than an absence of authore
 The current exporter already discovers these containers and writes the coefficient files at `crates/extract/src/maps/env.rs:278-311`; the required repair is to regenerate the Reservoir environment export and verify all 20 volumes for each environment.
 That repair cannot be performed in this task because writing under `cache/` is explicitly forbidden.
 Prologue diffuse-cube mean luminance is 0.04732070 for probe 0 and 0.03480409 for probe 10; global-probe selection is not evidence that increasing ambient intensity would restore fidelity.
-Proposed shared fix: when complete spatial GI records are unavailable, use containing local boxes and the existing position-dependent selection rather than unconditionally using the largest box; preserve the current spatial GI path where complete records exist.
+~~Proposed shared fix: when complete spatial GI records are unavailable, use containing local boxes and the existing position-dependent selection rather than unconditionally using the largest box; preserve the current spatial GI path where complete records exist.~~
+Implemented by the [shared fallback selection](#spatial-gi-and-fallback-2026-10-15), while retaining spatial GI blending.
 Probe blending and its calibration remain with the collaborator handling that system.
 
 ~~At `fog.rs:284-291,216-217`, fog direction is the current selected file/row sun, and `LightBankId` is ignored.~~
@@ -566,20 +679,24 @@ The settled temple remains dim; matching selected inputs does not establish visu
 
 Shared renderer handoff:
 
-- `lighting.rs:880` consumes two DiffColor lights, while `SHADER-INPUTS.md:229-242` records four native lights, separate diffuse/specular colours, local enable flags, sharpness and per-light SSAO weights.
+- ~~`lighting.rs:880` consumes two DiffColor lights~~; the [shared correction](#spatial-gi-and-fallback-2026-10-15) retains all four diffuse/specular records and enables, with unresolved local directions masked in its opt-in compositor.
+  Production direct-light composition remains unchanged because that compositor fails the Castle gate.
+  `SHADER-INPUTS.md:229-242` also records native sharpness and per-light SSAO weights, which remain fidelity work.
   Morning bank 110 enables LocalLight1 with RGB (.294118, .392157, .490196), W .7, but that term is not uploaded.
   Sun specular W is 1.5 versus diffuse W 2; the single Bevy light colour/intensity collapses that distinction.
   Implement the recovered four-light record and independent diffuse/specular terms in the shared renderer, retaining explicit limits for unrecovered angle defaults and camera-follow behavior rather than compensating with map brightness.
-- `sky.rs:349` overwrites a group's dome with its later cloud model; group 8907080 maps first to m900080 and later to m900180, and group 8907100 maps first to m900095 and later to m900200.
-  The cloud names are absent from the exported dome library, so `sky.rs:465` can discard runtime event selection and fall back to the ordinary clock sky.
-  Resolve each group to its exported dome as the shared selector does, preserving its cloud association separately.
-  Initial presets are protected by their explicit initial sky; runtime transitions still need the shared fix.
-- `play.rs:1100` waits for asset readiness and scene settling, and `play.rs:1738` captures by simulation step without waiting for pipeline readiness.
+- ~~`sky.rs:349` overwrites a group's dome with its later cloud model; group 8907080 maps first to m900080 and later to m900180, and group 8907100 maps first to m900095 and later to m900200.~~
+  ~~The cloud names are absent from the exported dome library, so `sky.rs:465` can discard runtime event selection and fall back to the ordinary clock sky.~~
+  ~~Resolve each group to its exported dome as the shared selector does, preserving its cloud association separately.~~
+  Corrected 2026-10-15 for all 13 exported dome groups, with cloud mesh/material swaps tied to the selected export.
+- ~~`play.rs:1100` waits for asset readiness and scene settling, and `play.rs:1738` captures by simulation step without waiting for pipeline readiness.~~
   The discarded five-second image showed only clear colour/UI; its log still had pending pipelines, and the first performance run ended with 83 pipelines pending.
-  Add pipeline-ready capture/performance gating in the shared harness; do not report cold blank frames as lighting or steady rendering results.
+  ~~Add pipeline-ready capture/performance gating in the shared harness; do not report cold blank frames as lighting or steady rendering results.~~
+  Fixed by the shared texture/pipeline monitor and ready-frame timing logs described above.
 - `map.rs:567` requests AutoNoVsync, which Bevy can fall back to FIFO when unsupported.
   Default, gate and the 800x600 control with shadows/probes/GI/fog/bloom disabled all remained near 16.7 ms.
-  Log the actual configured swapchain mode and supported modes, and provide an explicit supported Immediate mode before initial surface configuration; investigate driver/presentation limiting before attributing the remaining wait to map geometry.
+  ~~Log the actual configured swapchain mode and supported modes, and provide an explicit supported Immediate mode before initial surface configuration~~; investigate driver/presentation limiting before attributing the remaining wait to map geometry.
+  Mode selection and logging are fixed; the measured 60 Hz plateau remains open.
 
 Disabling auto exposure changes the uploaded enable bit from 1 to 0 and lowers the sampled display luma from 57.73 to 55.75 rather than curing the dark room.
 Disabling probes lowers it to 52.17, and disabling GIIV lowers it to 56.64.
@@ -603,7 +720,7 @@ The transient authored row-0 samples during drop/jump are documented; this verif
 
 At the default start, raw sun and fill RGB/W (0.588235, 0.686275, 0.823529, 0.4) become linear RGB (0.346020, 0.470973, 0.678200) at 1800 lux each.
 Indoor row 110 retains the sun but changes fill to linear RGB (0.153787, 0.186083, 0.221453) at 900 lux; row 120 uses 1350 lux and row 0 disables fill.
-The native hemisphere mean converts to (0.059054, 0.092272, 0.144175), before the shared probe path disables global ambient and the hemisphere term.
+The native hemisphere mean converts to (0.059054, 0.092272, 0.144175), ~~before the shared probe path disables global ambient and the hemisphere term~~ and is now retained as [per-receiver fallback](#spatial-gi-and-fallback-2026-10-15).
 The re-export supplies 142 complete GIIV volumes for variant 0 in a 100 MiB atlas, and the memory sky is present.
 Exposure 1.2 uploads as gain 2.297397, middle gray -6, adaptation limits -0.2/2 and LUT 20; the absent queried enable field makes auto exposure false.
 Recovering the native exposure enable/default, tone curve and probe composition remains the RustSekiro collaborator's work.
@@ -621,7 +738,8 @@ The shared exporter fallback at extract/src/maps/pieces.rs:377,396-397 makes tha
 Some textureless records are dummy materials, and omitted original references do not appear as missing declared images, so this does not establish that every pale surface lacks an albedo.
 The RustSekiro material port and its existing credit are retained; its visual notes supply no independently validated m10 tint correction to copy.
 
-The shared GI shader scans all 142 volume records per fragment at map_material.wgsl:84; spatial candidate filtering must preserve native coverage, ordering and blending.
+~~The shared GI shader scans all 142 volume records per fragment at map_material.wgsl:84; spatial candidate filtering must preserve native coverage, ordering and blending.~~
+Fixed by the [shared spatial candidates](#spatial-gi-and-fallback-2026-10-15), retaining the existing receiver coverage and blend order.
 The courtyard viewer submits all 5388 pieces when h015610 has zero draw groups, whereas the default viewer submits 4161; map.rs:1161 leaves an initial zero group without an active visibility mask.
 Recover native zero-draw/display-group behavior before changing that shared culling fallback; no geometry was hidden without evidence.
 All captures, selected/raw parameter measurements, commands, hashes, raw CSVs, material census and the exact shared-fix proposals are under target/alt-m10/captures/REPORT.md.
@@ -745,7 +863,8 @@ Shared-code findings and proposed fixes, deliberately left unedited:
   LocalLight1 contributes authored blue RGBA `(0.45098,0.511763,0.607843,0.3)`; LocalLight2 has diffuse weight 0 but specular weight 0.1.
   The sun's separate specular weight is 0.2 versus diffuse 1.2, while the Bevy light uses one illuminance for both responses.
   Proposed fix: carry camera-follow/enables and all four native light slots through LightSet, and preserve independent diffuse/specular colours and weights in the shared material lighting path instead of compensating with m20 tints or exposure.
-- `lighting.rs:744-764` chooses the largest enclosing volume for the camera fallback, which selects probe 0 despite the entrance lying inside local volume 100.
+- ~~`lighting.rs:744-764` chooses the largest enclosing volume for the camera fallback, which selects probe 0 despite the entrance lying inside local volume 100.~~
+  Fixed by the [existing smallest-containing-box selection](#spatial-gi-and-fallback-2026-10-15).
   Mean morning diffuse cubemap RGB is `(0.366156,0.262202,0.229525)` for probe 0 versus nearly neutral `(0.005517,0.005210,0.005320)` for probe 100.
   Spatial receiver GI is separate; these means demonstrate a substantially warmer/brighter fallback, not the exact radiance of every surface.
   Proposed fix: review local-versus-global fallback selection and receiver coverage with the collaborator responsible for probe blending, retaining global fallback only where the native selection requires it.
@@ -755,7 +874,9 @@ Bank 120000000 now resolves its native light independently, and the verified war
   Tone curve, auto exposure and probe blending remain the collaborator's project.
 - `sky.rs:397-405` retains an ordinary clock sky when an event-selected model is missing.
   Both illusion states now correctly request m900085 but visibly retain m900010.
-  Proposed fix: expose the missing authored sky as an explicit incomplete-fidelity condition; exact rendering requires a separately supplied complete read-only export, which this audit did not create.
+  ~~Proposed fix: expose the missing authored sky as an explicit incomplete-fidelity condition.~~
+  Corrected 2026-10-15: missing requests warn once per changed request with `incomplete sky fidelity` and retain the last available dome and its matching clouds.
+  Exact rendering still requires a separately supplied complete read-only export; this job did not extract or modify game data.
 - `perf_log.rs:223-255` stores intervals between render-set stamps, including intervening work and possible surface acquisition waits.
   The heavy profile's 11.9 ms gap before Queue is not a GPU shader duration or an unambiguous Queue-system cost.
   Proposed fix: split swapchain acquisition/presentation waits from CPU scheduling and add finer system timing before attributing the remaining wall time to map rendering.
@@ -860,14 +981,17 @@ No validated Castle renderer replacement was demonstrated there, so no MIT sourc
 The reproduced `--arena genichiro --genichiro-phase tomoe` capture loads ordinary evening `m11_01_0000`, sub-ID 0, environment 3 and an ordinary sky, while the native Tomoe preset and a Tomoe ArenaSpec select `0010`, sub-ID 10, environment 1 and m900080.
 The shared fix must pass the actual starting EnemySpec/BossEvents into selection and apply the nearest-hour environment/sky diagnostic only for an explicit `--hour`, allowing this map's phase flag rule to run.
 
-- `arena_b.rs:115` calls `lighting_selection.rs:392-398` to derive a probe environment from every changed lighting hour, even without SetAreaEnvmap.
+- ~~`arena_b.rs:115` calls `lighting_selection.rs:392-398` to derive a probe environment from every changed lighting hour, even without SetAreaEnvmap.~~
 Native 11115820 changes lighting to 3 and sub-ID to 10 without changing the environment, so a real morning-to-Tomoe handover can incorrectly select camera probes 3 while retaining the loaded GIIV atlas 1.
-Retain `selection.initial.environment` unless the native scene requests an environment change, restore it on restart, and keep camera handles and coefficient layers synchronized when a genuine environment change occurs.
+~~Retain `selection.initial.environment` unless the native scene requests an environment change and restore it on restart.~~
+Corrected 2026-10-15: clock-only updates preserve the probe environment and handles; explicit environment events invalidate handles, and restart restores the initial environment.
+Synchronizing coefficient atlases with genuine environment changes remains the GI owner's work; this sky correction does not edit material or probe-shading code.
 The independent environment-routing correction is distinct from the collaborator's probe-blending calibration work.
 
-- `sky.rs:488-495` discards the event-selected initial sky whenever the lighting hour differs from the initial hour.
+- ~~`sky.rs:488-495` discards the event-selected initial sky whenever the lighting hour differs from the initial hour.~~
 Native Shura instructions 11115930:50 and 11115943:14 request SetLighting(4) without replacing the sky group, so the renderer can fall back to a generic night dome despite the retained native evening group.
-Preserve the authoritative native sky selection across clock-only changes until an explicit map-part/environment request replaces it.
+~~Preserve the authoritative native sky selection across clock-only changes until an explicit map-part/environment request replaces it.~~
+Corrected 2026-10-15: the latest enabled native sky group or initial authored sky survives clock-only changes, independently of environment selection.
 
 - `lighting.rs:884-885` reads only DiffColor0/1, and the standard directional-light path uses those intensities for both diffuse and specular response.
 Morning bank 100 has separate native sun specular multiplier 1.5 versus diffuse 3, and fill specular 0.5 versus diffuse 0.3 with the same respective RGB values.
@@ -882,7 +1006,8 @@ These are PNG code-value measurements, not linear HDR or native-game luminance.
 The 2026-10-15 correction uses the live authored sky geometry, native volume slice thickness and the analytical source padding layer, with unchanged authored densities.
 The remaining featureless background also uses the approximate lower-hemisphere gradient in `sky.wgsl:34,51-54`; the controls do not prove fog alone is responsible for absent silhouettes.
 
-- `lighting.rs:786-789` zeros global ambient once the camera probe is ready, and `map_material.rs:476,485,638` disables the authored hemisphere contribution accordingly.
+- ~~`lighting.rs:786-789` zeros global ambient once the camera probe is ready, and `map_material.rs:476,485,638` disables the authored hemisphere contribution accordingly.~~
+  Fixed by the [shared per-receiver fallback](#spatial-gi-and-fallback-2026-10-15).
 Castle loads 107 complete native coefficient volumes in the observed environments, so the missing-GI export diagnosis from other maps does not apply here.
 Evaluate the authored hemisphere, native volume contribution and fallback coverage with the probe owner rather than introducing a Castle brightness gain.
 Tone curve, auto exposure and probe blending remain with the other collaborator's project.
@@ -909,10 +1034,12 @@ Initial before captures had concurrent compilation and camera logging enabled, s
 
 Final GPU pass medians are opaque 2.772 ms and fog 1.477 ms at the start, and opaque 4.930 ms and fog 1.377 ms in the heavy view.
 The corresponding logged CPU system medians are cloth simulation 1.237 ms at the start, and moving-focus collision selection 1.133 ms plus cloth 0.788 ms in the heavy view; these system summaries cover logger windows rather than precisely the CSV sample interval.
-The shared per-fragment receiver lookup in `map_material.wgsl:84-86` scans 107 volume bounds before coefficient/reflection sampling; any acceleration must preserve native ordering and weights and belongs with shared probe rendering.
+~~The shared per-fragment receiver lookup in `map_material.wgsl:84-86` scans 107 volume bounds before coefficient/reflection sampling; any acceleration must preserve native ordering and weights and belongs with shared probe rendering.~~
+Fixed by the [shared ordered spatial lookup](#spatial-gi-and-fallback-2026-10-15).
 No demonstrated Castle-specific object or mesh was removed.
 Despite AutoNoVsync, the quiet Vulkan cadence remains near 16.6 ms while GPU passes cost much less and the render schedule includes presentation/waiting time.
-The shared renderer should log the actual configured surface present mode and presentation timestamps, checking driver/compositor limits instead of interpreting wall_ms as exclusive GPU cost.
+~~The shared renderer should log the actual configured surface present mode~~; presentation timestamps and driver/compositor limits still need investigation instead of interpreting wall_ms as exclusive GPU cost.
+`presentation.rs` now logs the concrete supported mode, but the shared host still shows the 60 Hz plateau in Immediate and Mailbox controls.
 A short DX12 backend diagnostic was also attempted; its requested warm interval still had pending pipelines, so those logs are retained separately and excluded from accepted perf statistics.
 Earlier after runs observed another sekiro-rs process and 11 concurrent rustc processes, and their large frame-time spikes remain in the retained intermediate evidence.
 These shared-machine observations do not establish isolated steady frame pacing.

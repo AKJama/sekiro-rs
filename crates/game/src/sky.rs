@@ -95,6 +95,41 @@ struct Library {
     materials: BTreeMap<String, Handle<SkyMaterial>>,
     current: String,
     groups: BTreeMap<i32, String>,
+    clouds: BTreeMap<String, CloudLayer>,
+    missing: Option<String>,
+    legacy: bool,
+    clock_override: bool,
+}
+
+#[derive(Clone, Default)]
+struct CloudLayer {
+    mesh: Handle<Mesh>,
+    material: Handle<SkyMaterial>,
+}
+
+/// Comparison control for the pre-correction group, cloud and clock behavior.
+pub(crate) fn legacy_selection() -> bool {
+    std::env::var_os("SEKIRO_LEGACY_SKY_SELECTION").is_some()
+}
+
+fn group_models(msb: &sekiro_formats::msb::Msb, legacy: bool) -> BTreeMap<i32, String> {
+    let mut groups = BTreeMap::new();
+    for part in &msb.parts {
+        if let Some(model) = msb.model(part) {
+            for &group in &part.entity_group_ids {
+                if group > 0 {
+                    // The native selector takes the first part: the dome precedes
+                    // its separate cloud model in each installed m89 group.
+                    if legacy {
+                        groups.insert(group, model.name.clone());
+                    } else {
+                        groups.entry(group).or_insert_with(|| model.name.clone());
+                    }
+                }
+            }
+        }
+    }
+    groups
 }
 
 #[derive(Component)]
@@ -338,19 +373,15 @@ pub(super) fn install(app: &mut App, cache: &Path, id: &str, hour: f32) -> Resul
         materials: BTreeMap::new(),
         current: selection(id, hour).into(),
         groups: BTreeMap::new(),
+        clouds: BTreeMap::new(),
+        missing: None,
+        legacy: legacy_selection(),
+        clock_override: std::env::args().any(|a| a == "--hour"),
     };
     let msb = sekiro_formats::msb::parse(&std::fs::read(
         cache.join("raw/map/mapstudio/m89_00_00_99.msb"),
     )?)?;
-    for part in &msb.parts {
-        if let Some(model) = msb.model(part) {
-            for &group in &part.entity_group_ids {
-                if group > 0 {
-                    library.groups.insert(group, model.name.clone());
-                }
-            }
-        }
-    }
+    library.groups = group_models(&msb, library.legacy);
     let mut images = BTreeMap::<String, Handle<Image>>::new();
     for name in json["models"]
         .as_object()
@@ -386,6 +417,29 @@ pub(super) fn install(app: &mut App, cache: &Path, id: &str, hour: f32) -> Resul
                 row["material_index"].as_u64().unwrap_or(0) as usize,
             )?),
         );
+        let cloud = &row["cloud"];
+        if !cloud.is_null() {
+            let slots = texture_slots(app, &dir, cloud, &mut images)?;
+            let mut cloud_inputs = inputs(cloud);
+            cloud_inputs.control.y = value.control.y;
+            let material = app
+                .world_mut()
+                .resource_mut::<Assets<SkyMaterial>>()
+                .add(SkyMaterial {
+                    inputs: cloud_inputs,
+                    high: slots[0].clone(),
+                    low: slots.last().unwrap().clone(),
+                });
+            let mesh = app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh(
+                &dir.join(format!("models/{name}.glb")),
+                cloud["material_index"]
+                    .as_u64()
+                    .context("cloud material index")? as usize,
+            )?);
+            library
+                .clouds
+                .insert(name.into(), CloudLayer { mesh, material });
+        }
     }
     if let Some(name) = app
         .world()
@@ -398,9 +452,10 @@ pub(super) fn install(app: &mut App, cache: &Path, id: &str, hour: f32) -> Resul
             library.current.clone_from(name);
         } else {
             warn!(
-                "event-selected sky {name} is not exported; retaining {}",
+                "incomplete sky fidelity: event-selected sky {name} is not exported; retaining {}",
                 library.current
             );
+            library.missing = Some(name.clone());
         }
     }
     app.world_mut().spawn((
@@ -412,36 +467,24 @@ pub(super) fn install(app: &mut App, cache: &Path, id: &str, hour: f32) -> Resul
         NotShadowCaster,
         NotShadowReceiver,
     ));
-    let cloud = &json["models"][&library.current]["cloud"];
-    if !cloud.is_null() {
-        let slots = texture_slots(app, &dir, cloud, &mut images)?;
-        if let Some(high) = slots.first() {
-            let mut cloud_inputs = inputs(cloud);
-            cloud_inputs.control.y = inputs(&json["models"][&library.current]).control.y;
-            let material = app
-                .world_mut()
-                .resource_mut::<Assets<SkyMaterial>>()
-                .add(SkyMaterial {
-                    inputs: cloud_inputs,
-                    high: high.clone(),
-                    low: slots.last().unwrap().clone(),
-                });
-            let mesh = app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh(
-                &dir.join(format!("models/{}.glb", library.current)),
-                cloud["material_index"]
-                    .as_u64()
-                    .context("cloud material index")? as usize,
-            )?);
-            app.world_mut().spawn((
-                CloudDome,
-                Mesh3d(mesh),
-                MeshMaterial3d(material),
-                Transform::default(),
-                NoFrustumCulling,
-                NotShadowCaster,
-                NotShadowReceiver,
-            ));
-        }
+    let cloud = library.clouds.get(&library.current).cloned();
+    if cloud.is_some() || !library.legacy {
+        let visibility = if cloud.is_some() {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        let cloud = cloud.unwrap_or_default();
+        app.world_mut().spawn((
+            CloudDome,
+            Mesh3d(cloud.mesh),
+            MeshMaterial3d(cloud.material),
+            Transform::default(),
+            visibility,
+            NoFrustumCulling,
+            NotShadowCaster,
+            NotShadowReceiver,
+        ));
     }
     info!("authored sky {} for {id} at {hour}h", library.current);
     app.insert_resource(library)
@@ -455,7 +498,8 @@ type Clouds<'w, 's> = Query<
     'w,
     's,
     (
-        &'static MeshMaterial3d<SkyMaterial>,
+        &'static mut Mesh3d,
+        &'static mut MeshMaterial3d<SkyMaterial>,
         &'static mut Visibility,
     ),
     (With<CloudDome>, Without<Dome>),
@@ -480,21 +524,35 @@ fn update(
             .enabled_order
             .iter()
             .rev()
+            .filter(|_| library.legacy || !library.clock_override)
             .filter(|group| scene.enabled.get(group) == Some(&true))
             .filter_map(|group| library.groups.get(group))
-            .find(|name| library.meshes.contains_key(*name))
+            .find(|name| !library.legacy || library.meshes.contains_key(*name))
             .map(String::as_str)
     };
-    let initial_sky = (lighting.hour == story.initial.hour)
+    let initial_sky = (!library.legacy || lighting.hour == story.initial.hour)
         .then_some(story.initial.sky.as_deref())
         .flatten();
     let selected = sky_override
         .0
-        .filter(|name| library.meshes.contains_key(*name))
+        .filter(|name| !library.legacy || library.meshes.contains_key(*name))
         .or(event_sky)
-        .or(initial_sky.filter(|name| library.meshes.contains_key(*name)))
+        .or(initial_sky.filter(|name| !library.legacy || library.meshes.contains_key(*name)))
         .unwrap_or_else(|| selection(&library.id, lighting.hour));
     let selected = selected.to_owned();
+    let selected = if library.meshes.contains_key(&selected) {
+        library.missing = None;
+        selected
+    } else {
+        if library.missing.as_deref() != Some(&selected) {
+            warn!(
+                "incomplete sky fidelity: event-selected sky {selected} is not exported; retaining {}",
+                library.current
+            );
+            library.missing = Some(selected);
+        }
+        library.current.clone()
+    };
     if library.current != selected {
         for (mut mesh, mut material) in &mut domes {
             mesh.0 = library.meshes[&selected].clone();
@@ -508,12 +566,24 @@ fn update(
         material.inputs.sun = set.sun_toward.extend(0.);
         material.inputs.control.z = time.elapsed_secs();
     }
-    for (handle, mut visibility) in &mut clouds {
-        *visibility = if sky_override.0.is_some() {
-            Visibility::Hidden
+    for (mut mesh, mut handle, mut visibility) in &mut clouds {
+        if library.legacy {
+            *visibility = if sky_override.0.is_some() {
+                Visibility::Hidden
+            } else {
+                Visibility::Inherited
+            };
+        } else if let Some(cloud) = library.clouds.get(&selected) {
+            if mesh.0 != cloud.mesh {
+                mesh.0 = cloud.mesh.clone();
+            }
+            if handle.0 != cloud.material {
+                handle.0 = cloud.material.clone();
+            }
+            *visibility = Visibility::Inherited;
         } else {
-            Visibility::Inherited
-        };
+            *visibility = Visibility::Hidden;
+        }
         if let Some(mut material) = materials.get_mut(&handle.0) {
             material.inputs.sun = set.sun_toward.extend(0.);
             material.inputs.control.z = time.elapsed_secs();
@@ -524,6 +594,189 @@ fn update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sky_app() -> App {
+        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let id = "m11_01_00_00";
+        let initial = crate::lighting_selection::select(&cache, id, None, None).unwrap();
+        let story =
+            crate::lighting_selection::LightingSelection::load(&cache, id, initial, false).unwrap();
+        let mut meshes = Assets::<Mesh>::default();
+        let mut materials = Assets::<SkyMaterial>::default();
+        let mut library = Library {
+            id: id.into(),
+            meshes: BTreeMap::new(),
+            materials: BTreeMap::new(),
+            current: story.initial.sky.clone().unwrap(),
+            groups: BTreeMap::new(),
+            clouds: BTreeMap::new(),
+            missing: None,
+            legacy: false,
+            clock_override: false,
+        };
+        let msb = sekiro_formats::msb::parse(
+            &std::fs::read(cache.join("raw/map/mapstudio/m89_00_00_99.msb")).unwrap(),
+        )
+        .unwrap();
+        library.groups = group_models(&msb, false);
+        let json: Value = serde_json::from_slice(
+            &std::fs::read(cache.join("maps/m89_00_00_99/sky.json")).unwrap(),
+        )
+        .unwrap();
+        for (name, row) in json["models"].as_object().unwrap() {
+            if row.is_null() {
+                continue;
+            }
+            let material = |row| SkyMaterial {
+                inputs: inputs(row),
+                high: default(),
+                low: default(),
+            };
+            let geometry = || {
+                Mesh::new(
+                    PrimitiveTopology::TriangleList,
+                    RenderAssetUsages::default(),
+                )
+            };
+            library.meshes.insert(name.clone(), meshes.add(geometry()));
+            library
+                .materials
+                .insert(name.clone(), materials.add(material(row)));
+            if !row["cloud"].is_null() {
+                library.clouds.insert(
+                    name.clone(),
+                    CloudLayer {
+                        mesh: meshes.add(geometry()),
+                        material: materials.add(material(&row["cloud"])),
+                    },
+                );
+            }
+        }
+        let mut app = App::new();
+        app.world_mut().spawn((
+            Dome,
+            Mesh3d(library.meshes[&library.current].clone()),
+            MeshMaterial3d(library.materials[&library.current].clone()),
+        ));
+        app.world_mut().spawn((
+            CloudDome,
+            Mesh3d::default(),
+            MeshMaterial3d::<SkyMaterial>::default(),
+            Visibility::Hidden,
+        ));
+        app.insert_resource(crate::lighting::MapLighting {
+            gparam: default(),
+            hour: story.initial.hour,
+            light_set: 0,
+            applied: None,
+            source: String::new(),
+        })
+        .insert_resource(story)
+        .insert_resource(library)
+        .insert_resource(materials)
+        .insert_resource(Time::<()>::default())
+        .init_resource::<SkyOverride>()
+        .init_resource::<crate::lighting_selection::MapEventScene>()
+        .add_systems(Update, update);
+        app
+    }
+
+    #[test]
+    fn native_group_mapping_keeps_all_exported_domes() {
+        let app = sky_app();
+        let library = app.world().resource::<Library>();
+        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let msb = sekiro_formats::msb::parse(
+            &std::fs::read(cache.join("raw/map/mapstudio/m89_00_00_99.msb")).unwrap(),
+        )
+        .unwrap();
+        let before = group_models(&msb, true);
+        let mut fixed = 0;
+        for (&group, name) in &library.groups {
+            if library.meshes.contains_key(name) {
+                println!("sky group {group}: {} -> {name}", before[&group]);
+                assert!(!library.meshes.contains_key(&before[&group]));
+                fixed += 1;
+            }
+        }
+        assert_eq!(fixed, 13);
+        assert_eq!(library.groups[&8907080], "m900080");
+        assert_eq!(library.groups[&8907100], "m900095");
+        assert_eq!(library.groups[&8907085], "m900085");
+        assert!(!library.meshes.contains_key("m900085"));
+    }
+
+    #[test]
+    fn event_sky_survives_clock_changes_and_missing_exports() {
+        let mut app = sky_app();
+        app.world_mut()
+            .resource_mut::<crate::lighting::MapLighting>()
+            .hour = 22.;
+        app.update();
+        assert_eq!(app.world().resource::<Library>().current, "m900000");
+        for (group, expected, missing) in [
+            (8907080, "m900080", None),
+            (8907085, "m900080", Some("m900085")),
+            (8907100, "m900095", None),
+        ] {
+            let mut scene = app
+                .world_mut()
+                .resource_mut::<crate::lighting_selection::MapEventScene>();
+            scene.0.enabled.insert(group, true);
+            scene.0.enabled_order.push(group);
+            app.update();
+            let library = app.world().resource::<Library>();
+            assert_eq!(library.current, expected);
+            assert_eq!(library.missing.as_deref(), missing);
+        }
+    }
+
+    #[test]
+    fn explicit_hour_keeps_its_diagnostic_sky_despite_story_events() {
+        let mut app = sky_app();
+        app.world_mut().resource_mut::<Library>().clock_override = true;
+        app.world_mut()
+            .resource_mut::<crate::lighting_selection::LightingSelection>()
+            .initial
+            .sky = None;
+        app.world_mut()
+            .resource_mut::<crate::lighting::MapLighting>()
+            .hour = 22.;
+        let mut scene = app
+            .world_mut()
+            .resource_mut::<crate::lighting_selection::MapEventScene>();
+        scene.0.enabled.insert(8907080, true);
+        scene.0.enabled_order.push(8907080);
+        app.update();
+        assert_eq!(app.world().resource::<Library>().current, "m900030");
+    }
+
+    #[test]
+    fn sky_switches_matching_exported_cloud_mesh_and_material() {
+        let mut app = sky_app();
+        for name in ["m900060", "m900070", "m900000"] {
+            app.world_mut().resource_mut::<SkyOverride>().0 = Some(name);
+            app.update();
+            let world = app.world_mut();
+            let mut query = world.query_filtered::<(&Mesh3d, &MeshMaterial3d<SkyMaterial>, &Visibility), With<CloudDome>>();
+            let (mesh, material, visibility) = query.single(world).unwrap();
+            if let Some(layer) = world.resource::<Library>().clouds.get(name) {
+                assert_eq!(mesh.0, layer.mesh);
+                assert_eq!(material.0, layer.material);
+                assert_eq!(*visibility, Visibility::Inherited);
+                assert_eq!(
+                    world
+                        .resource::<Assets<SkyMaterial>>()
+                        .get(&material.0)
+                        .unwrap()
+                        .alpha_mode(),
+                    AlphaMode::Blend
+                );
+            } else {
+                assert_eq!(*visibility, Visibility::Hidden);
+            }
+        }
+    }
     #[test]
     fn sky_radiance_uses_the_same_bridge_as_white_diffuse_sunlight() {
         let exposure = bevy::camera::Exposure::default().exposure();

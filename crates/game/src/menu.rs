@@ -700,6 +700,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         primary_window: Some(Window {
             title: "Sekiro-rs".into(),
             resolution: size.into(),
+            present_mode: crate::presentation::requested_mode(),
             ..default()
         }),
         ..default()
@@ -717,6 +718,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     )
     .add_systems(Update, update)
     .add_systems(Last, save_on_exit);
+    app.add_plugins(crate::presentation::PresentationPlugin);
     app.run();
     Ok(())
 }

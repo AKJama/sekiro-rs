@@ -7,10 +7,18 @@ use crate::reader::{Reader, Result, bail, slice, utf16z};
 #[derive(Debug, Clone)]
 pub struct Light {
     pub name: String,
-    /// Observed value 1 for every local light in the nine installed gameplay maps.
-    pub kind: u8,
+    /// 0 = point, 1 = spot, 2 = directional.
+    pub kind: u32,
+    pub flag_1c: u8,
     pub color: [u8; 3],
     pub intensity: f32,
+    pub specular_color: [u8; 3],
+    pub specular_intensity: f32,
+    pub cast_shadows: bool,
+    pub cone_angle: f32,
+    pub near_clip: f32,
+    pub sharpness: f32,
+    pub width: f32,
     pub position: [f32; 3],
     pub rotation: [f32; 3],
     pub range: f32,
@@ -46,38 +54,66 @@ pub fn parse(data: &[u8]) -> Result<Vec<Light>> {
             return bail("invalid BTL name offset");
         }
         let name = utf16z(strings, name_offset)?;
-        r.seek(28);
-        let kind = r.u8()?;
-        let color = [r.u8()?, r.u8()?, r.u8()?];
-        let intensity = r.f32()?;
-        r.seek(56);
-        let position = [r.f32()?, r.f32()?, r.f32()?];
-        let rotation = [r.f32()?, r.f32()?, r.f32()?];
-        r.seek(88);
-        let range = r.f32()?;
-        if !intensity.is_finite()
-            || intensity < 0.
-            || !range.is_finite()
-            || range < 0.
-            || position
-                .iter()
-                .chain(rotation.iter())
-                .any(|v| !v.is_finite())
-        {
-            return bail("invalid BTL light values");
-        }
-        lights.push(Light {
-            name,
-            kind,
-            color,
-            intensity,
-            position,
-            rotation,
-            range,
-            raw: raw.to_vec(),
-        });
+        lights.push(parse_record(raw, name)?);
     }
     Ok(lights)
+}
+
+/// Decode a preserved sidecar record without trusting older sidecar field labels.
+pub fn parse_record(raw: &[u8], name: String) -> Result<Light> {
+    let mut r = Reader::new(raw);
+    if raw.len() != 232 {
+        return bail("invalid BTL record size");
+    }
+    r.seek(24);
+    let kind = r.u32()?;
+    let flag_1c = r.u8()?;
+    let color = [r.u8()?, r.u8()?, r.u8()?];
+    let intensity = r.f32()?;
+    let specular_color = [r.u8()?, r.u8()?, r.u8()?];
+    let cast_shadows = r.u8()? != 0;
+    let specular_intensity = r.f32()?;
+    let cone_angle = r.f32()?;
+    r.seek(56);
+    let position = [r.f32()?, r.f32()?, r.f32()?];
+    let rotation = [r.f32()?, r.f32()?, r.f32()?];
+    r.seek(88);
+    let range = r.f32()?;
+    r.seek(156);
+    let near_clip = r.f32()?;
+    r.seek(164);
+    let sharpness = r.f32()?;
+    r.seek(184);
+    let width = r.f32()?;
+    if !intensity.is_finite()
+        || intensity < 0.
+        || !range.is_finite()
+        || range < 0.
+        || position
+            .iter()
+            .chain(rotation.iter())
+            .any(|v| !v.is_finite())
+    {
+        return bail("invalid BTL light values");
+    }
+    Ok(Light {
+        name,
+        kind,
+        flag_1c,
+        color,
+        intensity,
+        specular_color,
+        specular_intensity,
+        cast_shadows,
+        cone_angle,
+        near_clip,
+        sharpness,
+        width,
+        position,
+        rotation,
+        range,
+        raw: raw.to_vec(),
+    })
 }
 
 #[cfg(test)]
@@ -95,6 +131,12 @@ mod tests {
         assert_eq!(lights[0].color, [255, 121, 12]);
         assert_eq!(lights[0].intensity, 0.3);
         assert_eq!(lights[0].range, 1.);
+        assert_eq!(lights[0].kind, 0);
+        assert_eq!(lights[0].flag_1c, 1);
+        let spot = lights.iter().find(|l| l.kind == 1).unwrap();
+        assert_eq!(spot.cone_angle, 8.);
+        assert_eq!(spot.width, 90.);
+        assert!(!spot.cast_shadows);
         assert!((lights[0].position[0] + 344.742).abs() < 0.001);
         assert!(!lights[0].name.is_empty());
         for length in [0, 23, 59, 1580, data.len() - 1] {
@@ -117,7 +159,7 @@ mod tests {
                 .filter(|e| e.path().extension().is_some_and(|s| s == "btl"))
             {
                 let lights = parse(&std::fs::read(file.path()).unwrap()).unwrap();
-                assert!(lights.iter().all(|l| l.kind == 1 && l.range > 0.));
+                assert!(lights.iter().all(|l| l.kind <= 2 && l.range > 0.));
             }
         }
     }
