@@ -77,3 +77,38 @@ Positioned shots in consecutive capture order share a spot when their positions 
 Both grouping thresholds can be changed with `--position-tolerance` and `--max-gap-seconds`.
 Every positioned entry receives a `spot_id`, including a spot containing only one shot; unpositioned menus have a null spot ID.
 `spots.json` records each spot's representative position, block, nearest landmark and member filenames.
+
+## Camera matching against our renderer
+
+`match_poses.py` finds, for each indexed screenshot, the camera in our windowless renderer that best matches it, and writes side-by-side pair images for visual review.
+It needs a release build of `sekiro-rs.exe` whose `--sweep` mode accepts `--pose-server` (implemented in `crates/game/src/map_pose.rs`, included from `map_sweep.rs`).
+The renderer is started once per map block, headless, and serves pose requests through a file queue in `<output-root>/pose-search/<map>/`.
+
+```powershell
+$env:CARGO_TARGET_DIR = 'target/alt-pt'
+cargo build --release -p sekiro-game -j 6
+uv run --no-project --with pillow --with numpy --with scipy python tools/reference_index/match_poses.py --reference <reference-root> --output <output-root> --game target/alt-pt/release/sekiro-rs.exe --map m11_01 --limit-spots 20
+```
+
+`--reference` is the folder holding `index.json`, `spots.json` and the `m11_00/` screenshot folder; `--output` must be outside the repository.
+Use a separate writable output folder when the reference collection is read-only; the matcher reads source screenshots from `--reference` and keeps the queue, poses and generated pairs under `--output`.
+Spots are taken in `spots.json` order; each spot contributes its first HUD-hidden shot, plus a second shot when the spot is within 4 m of an idol.
+Shots already present in `poses.json` are skipped unless `--force` is given; `--only-shots 311,319` restricts a run to listed shot numbers and `--map m11_00|m11_01` to one block.
+Each finished shot writes `pairs/<spot>-shot-<n>.png` (real | ours | edge difference), `.search.json` (ranked candidates) and `.visibility.json` (the per-part visibility decision for that render), and appends a row to `poses.json`.
+The camera uses the extracted default parameters (43 degree vertical FOV, 4.5 m distance, 1.5 m focus height) and Play's wall pull-in rule through `pose_collision.py`, reading `cache/maps/<map>/collision.bin`.
+Yaw and pitch are Bevy YXZ degrees with positive pitch looking up; positions are already in the Bevy frame.
+A spot takes about 45 seconds; the renderer stays hidden and no real-game process is involved.
+
+The match score is a structural edge cost and is not proof of a correct camera: review every pair by eye and accept it only when the same landmarks line up.
+`uv run --no-project --with pillow --with numpy --with scipy python -m tools.reference_index.triage_pairs --reference <capture-root> --sheets --sheet-output <review-folder>` writes review contact sheets to a separate writable folder.
+Here `<capture-root>` is the root holding `poses.json` and `pairs/`, which may differ from the source screenshot root.
+Without `--sheet-output`, contact sheets go under the capture root's `pairs/review/`; `--inventory --maps cache/maps` adds projected part bounds beside each pair and requires a writable capture root.
+`report_parity.py` turns a hand-written `pairs/triage.json` annotation file into a Markdown summary; `--annotations <external-ledger.json>` selects a separate reviewed ledger.
+Write that summary outside the repository; the tracked `docs/VISUAL-PARITY.md` contains the separately reviewed work list and should not be overwritten by the summary generator.
+The completed review ledger is `2026-10-15/parity-review.json` under the external progress root and supersedes the incomplete inherited triage file.
+Known weaknesses: when the coarse grid misses the heading the score prefers nearby dense texture (ground, walls) over distant structure, and the collision choice can land on a zero-demand helper plane (`h9*`) and render an empty frame.
+
+Tests: `uv run --no-project --with pillow --with numpy --with scipy python -m unittest tools.reference_index.test_match_poses` from the repository root.
+Add `--offline` after `uv run` when the dependencies are already available locally and networking is blocked.
+For this workspace's restricted cache, the existing gitignored `target/alt-pt/run-python.ps1` wrapper runs uv with locally cached wheels and a writable cache directory.
+Build and check with `CARGO_TARGET_DIR=target/alt-pt`, `cargo build --release -p sekiro-game -j 6`, `cargo clippy --release -p sekiro-game --all-targets -j 6 -- -D warnings` and `cargo fmt --all --check`.

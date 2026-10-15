@@ -1,5 +1,12 @@
 # Status
 
+2026-10-15: Native fog enable, integer bank/light routing, finite sky geometry, analytical padding and HDR radiance conversion are corrected locally.
+The fog-on/off control disproves a normal/all-visible fog mismatch, and the sweep now rejects unequal fog uniforms between the two colour captures.
+The manually reviewed grey/pop-in fixtures preserve all geometry counts, visible-part sets and gate tolerances; both six-view gates pass in 37.4/42.4 seconds under target/alt-fog/final/render-gate/.
+The data gate, 112 game unit tests, six integration tests, release all-target Clippy with warnings denied and workspace formatting pass with target/alt-fog and six Cargo jobs.
+Matched runtime fog-off/on night PNGs cover the temple idol, Castle courtyard and Outskirts cliff in the external progress collection; remaining retail lighting, material, sky and snowfall differences are documented in docs/LIGHTING.md and the per-metric fixture review in docs/MAP-COMPLETENESS-SWEEP.md.
+No commit, game-install/save access or reference-image modification occurred.
+
 ## Map gates and Outskirts regression (2026-10-14)
 
 Added a normal CPU data gate for all ten maps, numeric fixtures, twenty independent raw-MSB visibility cases including connected neighbours, and strict windowless six-view render gates for both Ashina areas.
@@ -1492,3 +1499,16 @@ Using target/alt-hs and four jobs, the final release game tests pass 100 unit te
 The freshly rebuilt executable's isolated Castle objects smoke capture passes in 21.7 seconds and its normal image is visually inspected.
 Finer reachable-route coverage and interpretation of intentional sky, falls, neutral materials and alternate scenery remain open; the underlying renderer/data causes remain with their fix owners.
 No commits, publication, original-game runs or writes to game data, saves, cache/re, brain memory or datasets were made by this job.
+
+## Visual parity work list completed (2026-10-15)
+
+Finished docs/VISUAL-PARITY.md with 51 accepted pairs at 48 spots and 63 rejected pairs from the 114 available comparisons, plus a ranked list of twelve causes with owning tracks, counts, asset candidates and evidence filenames.
+Fog and sky remain one item, the seven uncertain valley cameras contribute no accepted defect count, and the two zero-demand helper collisions remain tool exceptions.
+The final external progress review ledger supersedes the incomplete reference triage ledger, and eight byte-identical copies of accepted example pairs are retained under the progress root's 2026-10-15 directory.
+Corrected unsupported draft claims about thousands of active grass emitters, absent layered-material handling, fog-surface identity/placement and story-state evidence from the already-closed gate view.
+The contact-sheet tool now rebuilds pages after pose insertion/reordering and accepts a separate writable sheet output; the summary tool accepts an external annotation ledger, distinguishes rejected from unreviewed pairs and documents six build jobs without overwriting the hand-reviewed work list.
+An initial contact-sheet command refreshed derived review sheets in the reference root; source screenshots were unchanged, and subsequent generated artifacts were directed to the progress root.
+The final build, all-target game Clippy with warnings denied and workspace formatting pass with Cargo builds using target/alt-pt and six jobs.
+The five Python matcher tests, source compilation, matcher CLI and both review/report commands pass using uv with the existing cached-wheel wrapper.
+One formatting check caught a concurrent map_sweep.rs log-statement edit; the owner's correction passed the final recheck without this job editing that protected file.
+No renderer/map fixes, game window, re-match, real-game/save/install access, commits or publication were performed for this completion.

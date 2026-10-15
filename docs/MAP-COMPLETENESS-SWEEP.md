@@ -140,6 +140,46 @@ The sweep advances one deterministic 0.6 s pose-settling step before holding sha
 The shared renderer currently submits the dominant LOD rather than the retail dual-submission coverage shader.
 A zero score only covers the sampled poses, image resolution and current exported assets.
 
+## Fog fixture review (2026-10-15)
+
+The corrected native fog changes colour-sensitive measurements without changing submitted geometry.
+The suspected unfogged all-visible colour render was disproved: phases 0 and 1 reuse the same native camera, and fog is removed only from the separate diagnostic cameras.
+The sweep now compares the complete optional GameFog uniform at both colour captures and fails immediately if it differs, including an enabled/disabled mismatch.
+The one-view Outskirts control uses the canonical view-0 pose and 128 x 72 resolution, ordinary Objects and the default story.
+With `--no-fog` in both colour renders it gives grey 5 and pop-in 8707; with identical authored fog in both it gives grey 17 and pop-in 8753.
+Both controls give void 0, depth gap 75 and untextured 0.
+These controls are under `target/alt-fog/final/control-off/` and `control-on/`, with complete capture-time uniforms in `target/alt-fog/control-off.log` and `control-on.log`.
+Disabling fog is an isolation control, not an exact reconstruction of the previous implementation's incorrect bank direction, sky endpoint and integration.
+
+The following table lists every manually reviewed fixture change from the committed baseline.
+Each grey change follows from the fog's corrected scattering colour and attenuation moving pixels across the existing neutral-colour criterion.
+Each pop-in change follows from applying the corrected depth-dependent fog to the existing normal/all-visible surfaces before the unchanged 12-code-value comparison; different visible surfaces retain different depths and incident lighting even with identical fog parameters.
+Fog can therefore move an existing colour difference across that threshold in either direction.
+The normal view's authored exposure metering also sees the corrected scattering, and its result remains held through the comparison.
+The fixed cameras, all geometry metrics, visibility fixtures, tolerance of 16 pixels or 1%, and 120-second budget are unchanged.
+
+| Map | View | Grey before -> fixture | Pop-in before -> fixture |
+| --- | ---: | ---: | ---: |
+| Outskirts | 0 | 6 -> 17 | 8663 -> 8753 |
+| Outskirts | 1 | 111 -> 97 | 198 -> 191 |
+| Outskirts | 2 | 9 -> 15 | 2415 (unchanged) |
+| Outskirts | 3 | 249 -> 155 | 4752 -> 5131 |
+| Outskirts | 4 | 0 (unchanged) | 3607 -> 3586 |
+| Outskirts | 5 | 27 -> 37 | 4172 -> 4277 |
+| Castle | 0 | 13 -> 31 | 5088 -> 5097 |
+| Castle | 1 | 9 -> 7 | 7507 -> 7451 |
+| Castle | 2 | 264 -> 200 | 4597 -> 4975 |
+| Castle | 3 | 154 -> 34 | 3983 -> 3785 |
+| Castle | 4 | 106 -> 107 | 2518 -> 2514 |
+| Castle | 5 | 22 -> 20 | 2887 -> 2842 |
+
+The final independently rerun gates pass all six views in 37.4 seconds and 42.4 seconds respectively, under `target/alt-fog/final/render-gate/`.
+Outskirts repeats every reviewed fixture count exactly.
+Castle's repeat grey/pop-in pairs are 31/5098, 7/7452, 201/4975, 34/3785, 104/2520 and 24/2851, all within the unchanged tolerances.
+Sorting the visible-part identities before comparison proves all twelve manifests and selected collisions equal the preceding fog-correction run; entity iteration order is not a visibility change.
+Outskirts totals remain void/depth-gap/untextured 0/493/0, and Castle retains 1933/4886/903.
+The gate still measures existing all-visible differences, including alternate scenery and LOD; passing these fixtures is not a claim of zero pop-in or retail pixel parity.
+
 ## Historical coarse baseline
 
 These earlier concurrent-working-tree measurements are not the checked-in fixed-view gate baselines.

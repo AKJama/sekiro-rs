@@ -5,7 +5,9 @@ struct Fog {
     density: vec4<f32>, depths: vec4<f32>, sky: vec4<f32>,
     direct: vec4<f32>, opposite: vec4<f32>, direction: vec4<f32>, extinction: vec4<f32>,
     slices: vec4<f32>,
-    sky_blend: vec4<f32>,
+    background_control: vec4<f32>,
+    background: array<vec4<f32>,16>,
+    radiance_scale: vec4<f32>,
 }
 #ifdef MULTISAMPLED_DEPTH
 @group(0) @binding(0) var depth_texture: texture_depth_multisampled_2d;
@@ -18,8 +20,37 @@ struct Fog {
 @group(0) @binding(3) var<uniform> fog: Fog;
 #endif
 
-// Renderer quality and background distance choices, not recovered CPU uploads.
-const SKY_DISTANCE_METRES: f32 = 20000.0;
+// Intersect the live authored dome's polygon-ring profile, in camera-centred world space.
+// Native SkyDome forward permutations use this finite geometry depth for fog continuation.
+fn background_distance(ray: vec3<f32>, ray_cos: f32) -> f32 {
+    let count = u32(fog.background_control.x);
+    if count < 2u { return fog.depths.y/ray_cos; }
+    let angle = atan2(ray.z,ray.x);
+    let step = fog.background_control.y;
+    let sector = floor((angle-fog.background_control.z)/step);
+    let normal_angle = fog.background_control.z+(sector+0.5)*step;
+    let radial = length(ray.xz)*cos(angle-normal_angle);
+    var result = 1.0e30;
+    var found = false;
+    for (var i=1u; i<count; i+=1u) {
+        let a = fog.background[i-1u].xy;
+        let b = fog.background[i].xy;
+        let delta = b-a;
+        let denominator = radial*delta.y-ray.y*delta.x;
+        if abs(denominator) < 0.000001 { continue; }
+        let distance = (a.x*delta.y-a.y*delta.x)/denominator;
+        if distance <= 0.0 { continue; }
+        let point = vec2(radial,ray.y)*distance;
+        let along = dot(point-a,delta)/dot(delta,delta);
+        if along >= -0.00001 && along <= 1.00001 {
+            result = min(result,distance);
+            found = true;
+        }
+    }
+    // Clear pixels outside an exported dome have no finite surface endpoint.
+    // Use the terminal authored volume there; do not invent a continuation distance.
+    return select(fog.depths.y/ray_cos,result,found);
+}
 
 fn profile(q: f32) -> f32 {
     return select(2.0 - exp(min(q, 0.0)), exp(-max(q, 0.0)), q >= 0.0);
@@ -48,7 +79,15 @@ fn source_at(h: f32, z0: f32, z1: f32, ray: vec3<f32>) -> vec3<f32> {
     let sky_gate = clamp((z1-fog.depths.z)/(z1-z0),0.0,1.0);
     let dir_gate = clamp((z1-fog.depths.w)/(z1-z0),0.0,1.0);
     return rho*(fog.sky.xyz*exp(-optical_column*fog.sky.w)*sky_gate
-        + cd*exp(-optical_column*fog.direction.w*fog.direct.w*fog.extinction.xyz)*dir_gate);
+        + cd*exp(-optical_column*fog.direction.w*fog.direct.w*fog.extinction.xyz)*dir_gate)*fog.radiance_scale.x;
+}
+fn terminal_source(h: f32, ray: vec3<f32>) -> vec3<f32> {
+    let angular = clamp(0.5 + 0.5*dot(ray,fog.direction.xyz),0.0,1.0);
+    let cd = mix(fog.opposite.xyz,fog.direct.xyz,angular);
+    let optical_column = fog.density.z*column(h,fog.density.y);
+    // SolveVolumetricFog's final padding slice stores source colour, not integrated light.
+    return (fog.sky.xyz*exp(-optical_column*fog.sky.w)
+        + cd*exp(-optical_column*fog.direction.w*fog.direct.w*fog.extinction.xyz))*fog.radiance_scale.x;
 }
 
 @fragment
@@ -68,10 +107,11 @@ fn fragment(in: FullscreenVertexOutput,
     let reconstructed = view.world_from_clip*vec4(ndc,max(depth,0.000001),1.0);
     let relative = reconstructed.xyz/reconstructed.w - view.world_position;
     let ray = normalize(relative);
-    // Integration slices use view depth; segment lengths use the complete ray.
+    // Native volume integration uses view-depth thickness; height samples use world space.
     let forward = -view.world_from_view[2].xyz;
     let ray_cos = max(dot(ray,forward),0.0001);
-    let distance = select(length(relative),SKY_DISTANCE_METRES,depth <= 0.0);
+    var distance = length(relative);
+    if depth <= 0.0 { distance = background_distance(ray,ray_cos); }
     let end_depth = distance*ray_cos;
     let cap = min(end_depth,fog.depths.y);
     let near = min(fog.depths.x,cap);
@@ -88,7 +128,7 @@ fn fragment(in: FullscreenVertexOutput,
         let boundary = base*pow(ratio,f32(i+1u)/f32(count))-offset;
         let z1 = min(cap,boundary);
         if z1 <= z0 { break; }
-        let ds = (z1-z0)/ray_cos;
+        let ds = z1-z0;
         let sample_depth = clamp(base*pow(ratio,(f32(i)+fog.slices.z)/f32(count))-offset,z0,z1);
         let h = fog.extinction.w*(view.world_position.y + ray.y*sample_depth/ray_cos) + fog.density.w;
         let rho = fog.density.x + fog.density.z*profile(fog.density.y*h);
@@ -101,21 +141,16 @@ fn fragment(in: FullscreenVertexOutput,
         let start_length = fog.depths.y/ray_cos;
         let h0 = fog.extinction.w*(view.world_position.y + ray.y*start_length) + fog.density.w;
         let h1 = fog.extinction.w*(view.world_position.y + ray.y*distance) + fog.density.w;
-        let terminal_light = light;
-        let delta = optical_segment(h0,h1,distance-start_length)*(1.0-exp(-tau));
+        let terminal_light = terminal_source(h0,ray);
+        // The analytical source padding slice has alpha zero, so (1 - padding alpha) is one.
+        let delta = optical_segment(h0,h1,distance-start_length);
         // Zero extinction channels use the continuous delta limit, not a division by zero.
         let e = max(fog.extinction.xyz,vec3(0.000001));
         let integral = select((vec3(1.0)-exp(-e*delta))/e,vec3(delta),fog.extinction.xyz < vec3(0.000001));
         light += exp(-fog.extinction.xyz*tau)*terminal_light*integral;
         tau += delta;
     }
-    var transmission = exp(-fog.extinction.xyz*tau);
-    if depth <= 0.0 && fog.sky_blend.x > 0.5 {
-        // Keep the recovered 20 km background integration at the horizon; sky overhead is unattenuated.
-        let sky_weight = smoothstep(fog.sky_blend.y,fog.sky_blend.z,ray.y);
-        transmission = mix(transmission,vec3(1.0),sky_weight);
-        light *= 1.0-sky_weight;
-    }
+    let transmission = exp(-fog.extinction.xyz*tau);
 #ifdef MULTISAMPLED_DEPTH
 #ifdef FOG_ATTENUATION
     // Multiply the existing sample colour using destination * source blending.

@@ -168,6 +168,47 @@ These limits mean selection is reviewable against the event data, but exact visu
 
 ## Verification
 
+### Shared native fog correction (2026-10-15)
+
+The exact global `Enable` lookup no longer matches `EnableAnalyticalFog`, restoring Hirata and Depths without changing authored density.
+Fog light references stay as integers and resolve the native map bank plus independent LightSet row, with bank 1 / light 0 and the decoded dummy light as native fallbacks.
+The recovered map-bank encoding is `((area + 100) * 100 + block) * 10000` from executable functions `f47270` and `f472a0`.
+The current area's bank uses its event-selected GPARAM snapshot; references to another area read that area's base bank, with cross-area event sub-file selection still a fidelity limit.
+The bank resolver's time blend rotates resolved directions as in `169080`, `30d730` and `30d3e0`, rather than interpolating identifiers or substituting the collision-selected scene sun.
+Global fog retains the verified linear direct/opposite colour mix, byte quantization and gamma 2.2 packing; the local-light `ScatteringG` path remains separate.
+Scattering uses the same scene radiance bridge and camera exposure as sky and diffuse lighting.
+Native SkyDome forward shaders sample finite mesh depth, so the post pass now intersects the live dome's authored polygon rings instead of assigning every clear-depth pixel 20 km or applying a horizon ramp.
+An independent triangle intersection regression checks the supported exported SkyDome meshes, including Hirata and the night variants.
+The native solver integrates view-depth slice thickness and writes far-plane scattering colour with alpha zero in its analytical padding layer; continuation now uses that source and the full added optical depth.
+Background uploads run after sky swaps without reintroducing fog on the sweep's diagnostic cameras.
+Clear pixels outside a supported finite dome use the terminal authored volume; separate transparent-surface depth, local fog sources and shadowed fog remain renderer fidelity work.
+Captured inputs, source/binary hashes, before/after images, the review sheet and gate measurements are retained under `target/alt-fog/captures/`.
+The follow-up disproves the suspected normal/all-visible fog mismatch: both colour passes reuse one native camera, while only the independent depth and collision cameras strip fog.
+An Outskirts view-0 control with fog disabled in both colour renders measures grey/pop-in 5/8707, versus 17/8753 with identical fog uniforms in both renders, retaining void/depth-gap/untextured 0/75/0.
+The sweep now rejects a colour pair if any fog uniform or its enabled state changes between screenshots, and logs the complete state for each capture.
+Both required six-view gates pass with the manually reviewed fog-sensitive fixtures, in 37.4 seconds for Outskirts and 42.4 seconds for Castle.
+Every selected collision, visible-part set and void/depth-gap/untextured count remains unchanged; the complete grey/pop-in fixture review is recorded in MAP-COMPLETENESS-SWEEP.md.
+No threshold, camera, visibility fixture, authored density or scattering colour was relaxed to pass the gates.
+Matched night captures use the runtime `--no-fog` switch for the before control and the authored fog for after, at the temple idol, Castle courtyard and Outskirts cliff.
+The retail temple and Castle reference pairs remain softer and less blue, with weaker distant contrast than our rendering.
+The corrected aerial perspective should be assessed separately from the remaining probe/hemisphere, direct-light specular, material-normal, sky-background and absent falling-snow differences; these images do not establish exact retail visual parity.
+The cliff control visibly replaces near-black distant rock contrast with grey-blue haze while retaining foreground detail, which moves in the direction of the retail references.
+The temple remains excessively blue and crisp at short range, where simply increasing distance fog would obscure geometry instead of correcting its lighting or material response.
+The reviewed external pairs include `spot-002-shot-004.png` at the temple, `spot-061-shot-218.png` over a walled courtyard, `spot-070-shot-242.png` among roofs and `spot-133-shot-380.png` above Castle.
+The high Castle reference contains pale distant mountain silhouettes that our background still lacks; the approximate sky background and incomplete distant composition remain separate from the restored fog and are not repaired by increasing density.
+The relative contribution of the remaining renderer differences to retail's softer look has not been isolated.
+The final 1600 x 900 night controls retain these exact `[x,y,z,yaw,pitch]` cameras in both states:
+
+| Capture stem | Camera |
+| --- | --- |
+| fog-outskirts | `[-138.8885,-49.4547,-154.1603,353.307,-0.535]` |
+| fog-castle | `[343,-37.68,100,90,0]` |
+| fog-cliff | `[-197.4507,-46.5,150.72162,225,-15]` |
+
+Capture manifests and diagnostic companions are under `target/alt-fog/final/captures/`; before uses explicit `--no-fog`, and capture-time logs verify no GameFog component on either colour pass.
+The normal game suite passes 112 unit tests and six integration tests, including the installed-data gate; release all-target Clippy with warnings denied and `cargo fmt --all --check` pass.
+All follow-up builds and checks use `CARGO_TARGET_DIR=target/alt-fog` and six Cargo jobs.
+
 Use `CARGO_TARGET_DIR=target/alt-lf` and six Cargo jobs for every command in this work.
 `cargo run --offline -p sekiro-formats --example lighting_audit -j 6` produces a read-only census of relevant installed event instructions, GPARAM keys and collision tuples.
 Its local output is `target/alt-lf/lighting-audit.txt`.
@@ -233,7 +274,8 @@ A shared fidelity fix should recover and carry the native specular-light colours
 The selected fog upload is None despite authored fixed density 0.007, height density scale 0.007, distribution 0.01, height offset -400 and far depth 650 at ID 100.
 The exact shared cause is fog.rs:180-181 asking for "Enable", combined with crates/formats/src/gparam.rs:115 accepting any parameter name containing that substring.
 This selects VolumetricFog EnableAnalyticalFog = 0 and incorrectly disables the entire fog pass instead of only analytical continuation.
-A shared fix should use an exact canonical global-enable name when one exists, otherwise leave volumetric fog enabled, and route EnableAnalyticalFog only to the continuation control.
+~~A shared fix should use an exact canonical global-enable name when one exists, otherwise leave volumetric fog enabled, and route EnableAnalyticalFog only to the continuation control.~~
+Fixed on 2026-10-15: Depths uploads authored density 0.007 and height density 0.0035 with analytical continuation still disabled; see the shared native fog correction below.
 The native m15 regression should then expect a nonempty fog upload with fixed density 0.007 and height density 0.0035 at game scale 1; no map-specific fog gain is justified.
 The pale water still has a separate shared material-rendering gap, but absent fog is now a measured rendering error rather than an authored disable.
 The map has 50 sized native probe regions and 50 complete GILM pairs in each selected environment, but no exported GIIV planes; the renderer consequently logs zero complete coefficient volumes.
@@ -417,7 +459,8 @@ The paired 0920 choice is therefore retained as an explicit inference rather tha
 The native collision tuples are `[0,0,0,0]`, `[100,0,0,0]`, `[110,0,0,0]`, and `[120,0,0,0]`, with respectively 10, 45, 16 and one collision parts in the layout.
 These zero collision bank IDs do not establish the meaning of the distinct nonzero GPARAM `VolumetricFog DirLight LightBankId` references.
 That reference is 111020000 in the selected Reservoir files, including both 09 boss files.
-The engine `(LightBankId, LightId)` resolver remains unrecovered as recorded in `SHADER-INPUTS.md`; neither the decimal encoding nor a substitute file lookup is asserted here.
+~~The engine `(LightBankId, LightId)` resolver remains unrecovered as recorded in `SHADER-INPUTS.md`; neither the decimal encoding nor a substitute file lookup is asserted here.~~
+The 2026-10-15 static recovery decodes native map banks and their independent LightSet row IDs, including the native fallback and direction blending.
 
 At default start 0, row 110 has authored sun RGBA `(0.60062,0.675698,0.750775,2)` and fill RGBA `(0.74,0.86381,1,0.25)` with zero up/down hemisphere values.
 `lighting.rs:858-915,958-993` converts these to linear sun RGB `(0.360744,0.456568,0.563663)` at 9000 lux and fill RGB `(0.5476,0.746168,1)` at 1125 lux, and the runtime log confirms those inputs.
@@ -437,9 +480,10 @@ Prologue diffuse-cube mean luminance is 0.04732070 for probe 0 and 0.03480409 fo
 Proposed shared fix: when complete spatial GI records are unavailable, use containing local boxes and the existing position-dependent selection rather than unconditionally using the largest box; preserve the current spatial GI path where complete records exist.
 Probe blending and its calibration remain with the collaborator handling that system.
 
-At `fog.rs:284-291,216-217`, fog direction is the current selected file/row sun, and `LightBankId` is ignored.
+~~At `fog.rs:284-291,216-217`, fog direction is the current selected file/row sun, and `LightBankId` is ignored.~~
 For example, base night row 0 has direction `(0.433013,0.500000,0.750000)`, whereas both selected 09 boss files yield `(0.972957,0.211886,-0.091971)` despite retaining the same authored fog bank reference.
-Proposed shared fix: recover and implement the bank/light resolver with integer identifiers, then supply its resolved direction to the existing fog formula instead of substituting the active scene sun.
+~~Proposed shared fix: recover and implement the bank/light resolver with integer identifiers, then supply its resolved direction to the existing fog formula instead of substituting the active scene sun.~~
+Implemented in the shared native fog correction, with integer references and independently resolved bank/light directions.
 The bright pale ground in the heavy storm view also reaches the shared approximate layer shader at `map_material.wgsl:242-247,284-293`, which uses one height channel and a hard-coded normal-facing snow weight rather than recovered material-family inputs.
 The capture demonstrates a material fidelity gap, but does not isolate its contribution from exposure; the proposed follow-up is the native per-family mask/UV/weight path described in `RUSTSEKIRO-VISUALS.md`, not a Reservoir tint adjustment.
 That audit has no demonstrated full-map Reservoir darkness fix to copy, so no new RustSekiro code or credit entry was added.
@@ -565,9 +609,10 @@ Exposure 1.2 uploads as gain 2.297397, middle gray -6, adaptation limits -0.2/2 
 Recovering the native exposure enable/default, tone curve and probe composition remains the RustSekiro collaborator's work.
 The pale cyan wet start and very dark hall remain visible, but a per-map warming or exposure multiplier would not follow the measured game data.
 
-The confirmed shared fog error is fog.rs:180-181 querying "Enable" through formats/src/gparam.rs:115's substring matcher, which resolves to EnableAnalyticalFog=0 and disables the entire pass.
+~~The confirmed shared fog error is fog.rs:180-181 querying "Enable" through formats/src/gparam.rs:115's substring matcher, which resolves to EnableAnalyticalFog=0 and disables the entire pass.~~
 Native fixed density 0.0032, height distribution 0.13, height offset -840, height density scale 0.015 and far depth 650 are present despite the logged fog upload being None.
-Use an exact global-enable field when present, otherwise retain volumetric fog, and use EnableAnalyticalFog solely for continuation; the existing conversion should produce density (0.0032, 0.13, 0.0075, 840) and far depth 650.
+~~Use an exact global-enable field when present, otherwise retain volumetric fog, and use EnableAnalyticalFog solely for continuation; the existing conversion should produce density (0.0032, 0.13, 0.0075, 840) and far depth 650.~~
+Fixed on 2026-10-15: Hirata now uploads those authored values and retains its disabled analytical continuation.
 A second shared omission is lighting.rs:881-922 retaining only sun/fill while native LightSet 100 enables LocalLight1 diffuse/specular RGB (0.274510, 0.392157, 0.490196), W 1, and LocalLight2 specular W 0.5, both with sharpness 0.15.
 Carry the authored local directional fields, enable flags and separate diffuse/specular behavior through shared rendering instead of adding an invented map fill; these differ from the existing BTL point lights.
 
@@ -704,8 +749,9 @@ Shared-code findings and proposed fixes, deliberately left unedited:
   Mean morning diffuse cubemap RGB is `(0.366156,0.262202,0.229525)` for probe 0 versus nearly neutral `(0.005517,0.005210,0.005320)` for probe 100.
   Spatial receiver GI is separate; these means demonstrate a substantially warmer/brighter fallback, not the exact radiance of every surface.
   Proposed fix: review local-versus-global fallback selection and receiver coverage with the collaborator responsible for probe blending, retaining global fallback only where the native selection requires it.
-- `fog.rs:172-232` and `fog.wgsl:44-53` do not consume authored `Global ScatteringG=0.25` or `DirLight LightBankId=120000000`; the current source uses a linear directional colour mix and the selected sun direction.
-  Proposed fix: recover and implement the native phase/bank routing before judging whether the remaining fog contribution is excessive; preserve the verified colour packing and avoid a map-specific tint multiplier.
+- ~~`fog.rs:172-232` and `fog.wgsl:44-53` do not consume authored `Global ScatteringG=0.25` or `DirLight LightBankId=120000000`; the current source uses a linear directional colour mix and the selected sun direction.~~
+The recovered global shader correctly uses the linear direct/opposite colour mix; `ScatteringG` belongs to local point/spot fog, which remains unimplemented.
+Bank 120000000 now resolves its native light independently, and the verified warm direct colour remains `(0.91575015, 0.35865393, 0.12752977)` before the common camera radiance conversion.
   Tone curve, auto exposure and probe blending remain the collaborator's project.
 - `sky.rs:397-405` retains an ordinary clock sky when an event-selected model is missing.
   Both illusion states now correctly request m900085 but visibly retain m900010.
@@ -828,11 +874,12 @@ Morning bank 100 has separate native sun specular multiplier 1.5 versus diffuse 
 Recover and carry the separate native specular colours and intensities through shared direct-light shading; scaling this map's materials or exposure cannot preserve both controls.
 This is a measured omitted control, not a quantified explanation of every pale material without an original-game reference.
 
-- `fog.wgsl:22,74,100-117` assigns depth-zero sky pixels an uncalibrated 20 km distance and applies analytical continuation plus a fixed 0-to-0.22 sky-height blend.
+- ~~`fog.wgsl:22,74,100-117` assigns depth-zero sky pixels an uncalibrated 20 km distance and applies analytical continuation plus a fixed 0-to-0.22 sky-height blend.~~
 For a representative morning roof-height horizontal ray, the actual density gives cap optical depth 0.280, continued optical depth 4.119 and sky transmission approximately 0.01626.
 The before rooftop horizon patch at X 920-1229, Y 205-274 has display-code luminance mean/std 0.628664/0.025787 with fog and 0.799008/0.051250 without it; a full-map no-fog control gives 0.795444/0.051436 and still lacks distant silhouettes.
 These are PNG code-value measurements, not linear HDR or native-game luminance.
-Recover the native sky/background fog routing and analytical continuation before changing this map's authored density or adding a per-map horizon ramp.
+~~Recover the native sky/background fog routing and analytical continuation before changing this map's authored density or adding a per-map horizon ramp.~~
+The 2026-10-15 correction uses the live authored sky geometry, native volume slice thickness and the analytical source padding layer, with unchanged authored densities.
 The remaining featureless background also uses the approximate lower-hemisphere gradient in `sky.wgsl:34,51-54`; the controls do not prove fog alone is responsible for absent silhouettes.
 
 - `lighting.rs:786-789` zeros global ambient once the camera probe is ready, and `map_material.rs:476,485,638` disables the authored hemisphere contribution accordingly.

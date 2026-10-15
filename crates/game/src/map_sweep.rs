@@ -15,6 +15,9 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+#[path = "map_pose.rs"]
+mod pose;
+
 #[derive(Resource, Clone, Default)]
 struct Pipelines(Arc<(AtomicUsize, AtomicUsize)>);
 
@@ -319,6 +322,7 @@ struct Sweep {
     collision_target: Handle<Image>,
     next_loading_log: Instant,
     normal_manifest: Value,
+    normal_fog: Option<crate::lighting::fog::GameFog>,
     stable_pipelines: usize,
 }
 
@@ -617,6 +621,7 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
             collision_target,
             next_loading_log: Instant::now() + Duration::from_secs(15),
             normal_manifest: Value::Null,
+            normal_fog: None,
             stable_pipelines: 0,
         })
         .add_systems(First, apply_pending_view.after(bevy::time::TimeSystems))
@@ -630,6 +635,9 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
             PostUpdate,
             tick.after(bevy::transform::TransformSystems::Propagate),
         );
+    if let Some(directory) = crate::arg_value(args, "--pose-server") {
+        pose::install(&mut app, PathBuf::from(directory))?;
+    }
     let exit = app.run();
     anyhow::ensure!(exit == AppExit::Success, "sweep failed; see diagnostics");
     Ok(())
@@ -838,6 +846,10 @@ fn apply_view(world: &mut World, sweep: &mut Sweep) {
 }
 
 fn tick(world: &mut World) {
+    if world.contains_resource::<pose::Server>() {
+        pose::tick(world);
+        return;
+    }
     let mut sweep = world.remove_resource::<Sweep>().unwrap();
     // Keep native post operators off diagnostic targets even during asset warm-up.
     let cameras: Vec<_> = world
@@ -1039,6 +1051,25 @@ fn tick(world: &mut World) {
             if sweep.stable_pipelines < 3 {
                 world.insert_resource(sweep);
                 return;
+            }
+            if sweep.phase < 2 {
+                let fog = world
+                    .query_filtered::<Option<&crate::lighting::fog::GameFog>, With<SweepCamera>>()
+                    .single(world)
+                    .expect("one native sweep camera")
+                    .cloned();
+                if sweep.phase == 0 {
+                    sweep.normal_fog = fog.clone();
+                } else if fog != sweep.normal_fog {
+                    error!("sweep normal/all-visible fog uniforms differ");
+                    world.write_message(AppExit::error());
+                    world.insert_resource(sweep);
+                    return;
+                }
+                info!(
+                    "sweep view {} phase {} fog={fog:?}",
+                    sweep.index, sweep.phase
+                );
             }
             world
                 .spawn(Screenshot::image(match sweep.phase {
