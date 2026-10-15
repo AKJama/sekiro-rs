@@ -269,12 +269,21 @@ fn native_point_lights() -> bool {
     *ON.get_or_init(|| std::env::var_os("SEKIRO_MAP_POINT_LIGHTS_BEVY").is_none_or(|v| v != "1"))
 }
 
-/// Untraced unit calibration for the native point/spot curve (`direct[12].z`).
-/// The 4500 lux-per-unit bridge was inferred under Bevy's inverse-square curve, which
-/// matches the native curve at 1 m but is 3 to 5 times dimmer at 2 to 3 m, so the native
-/// curve at the same units over-lights walls several times relative to the references.
-/// `SEKIRO_MAP_POINT_LIGHT_SCALE` overrides it for ablations.
-const NATIVE_POINT_LIGHT_SCALE: f32 = 0.25;
+/// Scale from the native light accumulation buffer to the sun/fill units (`direct[12].z`).
+/// Traced: the light builders (`3892e0` spot, `388130` point) store `c^2 * power * blink *
+/// distance fade * 2^(-AntiExposureRate * EV)` with `EV` the scene context float at `+0x458`.
+/// Shipped builds keep that EV at 0 (`SC_PreExposure` is `2^EV` at `+0x45c`, also 1) and the
+/// FXR 609 `adaptationExponent` is 0 in the effects checked, so the buffer is in the same units
+/// as the directional light and the factor is exactly 1.
+const NATIVE_LIGHT_BUFFER_SCALE: f32 = 1.0;
+
+/// The remaining, untraced gap between the native curve and the references: at the 4500 lux
+/// per unit bridge the native point/spot curve over-lights walls 3 to 5 times against the
+/// spot-056 reference, although the traced arithmetic above has no factor left to explain it.
+/// Candidates not yet checked: the 4500 bridge itself, the unit of BTL/FXR `power`, and the
+/// per-frame `blink` multiplier (FXR flickerBrightness 0.75). This is the earlier by-eye value,
+/// kept under its own name and not a measurement.
+const NATIVE_POINT_LIGHT_UNEXPLAINED_RESIDUAL: f32 = 0.25;
 
 fn native_point_light_scale() -> f32 {
     static SCALE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
@@ -283,7 +292,7 @@ fn native_point_light_scale() -> f32 {
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
             .filter(|v| v.is_finite() && *v >= 0.)
-            .unwrap_or(NATIVE_POINT_LIGHT_SCALE)
+            .unwrap_or(NATIVE_LIGHT_BUFFER_SCALE * NATIVE_POINT_LIGHT_UNEXPLAINED_RESIDUAL)
     })
 }
 

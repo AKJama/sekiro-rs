@@ -441,6 +441,11 @@ pub fn make_node(lib: &mut FxrLib, node: &Value, seed: u32, depth: u32) -> Optio
                 rot[i] += (rnd.next() * 2.0 - 1.0) * rv[i];
             }
         }
+        // The pitch sign of a node's authored rotation is the inverse of `game_rot`'s: designers
+        // rotate +90 about X to stand a Z-axis emitter upright (64 of the rising disc/point
+        // nodes in the common effects), and a +X rotation that sent Z downward would bury the
+        // brazier sparks (+45) and the ground-fire smoke (+90) in the floor.
+        rot[0] = -rot[0];
         local = Transform::from_translation(game_vec(off)).with_rotation(game_rot(rot));
     }
     let is_node_emitter = cfg
@@ -505,7 +510,7 @@ fn spread_dir(n: Vec3, angle: f32, rnd: &mut Rnd) -> Vec3 {
 }
 
 /// Emission point and direction in the node's frame, from its emitter shape and spread.
-fn emit_point(c: &Value, t: f32, rnd: &mut Rnd) -> (Vec3, Vec3) {
+fn emit_point(c: &Value, t: f32, rnd: &mut Rnd, frame: Quat) -> (Vec3, Vec3) {
     let shape = &c["emitterShape"];
     let st = shape["type"].as_i64().unwrap_or(400);
     let dirmode = int(shape, "direction", 0);
@@ -567,11 +572,16 @@ fn emit_point(c: &Value, t: f32, rnd: &mut Rnd) -> (Vec3, Vec3) {
         }
         _ => (Vec3::ZERO, Vec3::Z),
     };
-    // InitialDirection: 0 by shape, 1 / 2 global up / down, 3 global north, 4-6 local.
+    // InitialDirection: 0 by shape, 1 / 4 up, 2 / 5 down, 3 forward, 6 world up (the 6 was
+    // read from the data: see docs/MAP-FX.md, flame height).
+    // 6 is world up: the torch and brazier sparks (gravity -1, a 5.6 degree cone, no node
+    // rotation) and flame cores of the common effects only rise if it is, wherever the node
+    // is tilted.
     let base = match dirmode {
         1 | 4 => Vec3::Y,
         2 | 5 => Vec3::NEG_Y,
-        3 | 6 => Vec3::Z,
+        6 => frame.inverse() * Vec3::Y,
+        3 => Vec3::Z,
         _ => outward,
     };
     let sp = &c["directionSpread"];
@@ -809,7 +819,7 @@ fn emit(n: &mut NodeInst, c: &Arc<Value>, active_t: f32, rnd: &mut Rnd, lib: &mu
             .wrapping_add((n.emissions * 64 + i) as u32);
         let mut prnd = Rnd { seed: pseed, k: 0 };
         let active = active_t;
-        let (p, d) = emit_point(c, active, &mut prnd);
+        let (p, d) = emit_point(c, active, &mut prnd, n.world.rotation);
         if !n.templates.is_empty() {
             // NodeEmitter: child nodes at the emission point (200 all / 201 one at random).
             let pick: Vec<Arc<Value>> = if c["nodeSelector"]["type"].as_i64() == Some(201) {

@@ -260,12 +260,25 @@ It runs for the native direct path only (`direct[12].x`, the existing `SEKIRO_GI
 `SEKIRO_MAP_POINT_LIGHTS_BEVY=1` restores Bevy's inverse-square response for A/B captures.
 Light range, position and colour still come from the BTL and FXR code unchanged.
 
-Open: the unit.
-The inferred 4500 lux per unit bridge was fitted under Bevy's curve, which equals the native curve at 1 m but is 3.4 times dimmer at 2 m and 5 times dimmer at 3 m (R 5).
-At those units the native curve over-lit walls several times against the references (spot-056 wall washed to white).
-`NATIVE_POINT_LIGHT_SCALE = 0.25` in `map_material.rs` (override `SEKIRO_MAP_POINT_LIGHT_SCALE`) is an untraced calibration chosen by eye against the spot-056 reference.
-It scales the native term only.
-The real value probably lives in the untraced 0x258 / 0xf8 / 0xfc modulation above, so tracing those would replace the constant.
+Light unit (traced 2026-10-15, residual still open).
+The two builders (`3892e0` for spot lights, `388130` for point lights, both reached through the virtual `210e00` / `210010` with a flag pair that is `{scattering pass, shadows allowed}`) compute the diffuse vec4 as:
+
+```text
+rgb = c^2 * power * blink * distFade * 2^(-AntiExposureRate * EV)
+w   = 1 / R
+```
+
+`c` and `power` are the diffuse colour and its alpha (property block offsets 0x70 and 0x7c).
+`blink` is object offset 0x258 (spot) or 0x1dc (point), constructed as 1.0 and rewritten by the effect's flicker (FXR 609 `flickerBrightness`, `flickerIntervalMin/Max`).
+`distFade` is `20d9c0`: 1 inside the view distance, a linear ramp to 0 at `ViewDist`.
+Offsets 0xf8 (`ScatteringScale`, FXR `volumeDensity`) and 0xfc (`ScatteringBlinkInfluence`) are read only when the first flag is set, which is the volumetric-fog scattering pass; the deferred pass never uses them.
+Offset 0x108 is `AntiExposureRate` (FXR `adaptationExponent`, default 0, 0 in 800140, 800150 and the brazier effects).
+The factor is `powf(2, -(rate * ctx[0x458]))`; `ctx[0x458]` is the scene EV, which `SHADER-INPUTS.md` records as 0 in shipped builds (`SC_PreExposure = 2^EV = 1`).
+So the native buffer is in the same units as the directional light and the unit factor is exactly 1 (`NATIVE_LIGHT_BUFFER_SCALE`).
+The FXR 800140 light also ramps its multiplier from 0 to 19.2 over 2 s, and the flicker (brightness 0.75 to 1 every 0.125 to 0.25 s) is not modelled; both only lower the mean.
+Nothing traced explains the 3 to 5 times excess at the 4500 bridge, so the earlier by-eye 0.25 stays as `NATIVE_POINT_LIGHT_UNEXPLAINED_RESIDUAL` (override `SEKIRO_MAP_POINT_LIGHT_SCALE` for the total).
+Open: whether the 4500 lux per unit bridge (fitted under Bevy's curve) or the BTL/FXR `power` unit carries the missing factor.
+The renderer output is unchanged by this split.
 
 ### Brazier flames: white-hot and small (fixed, size open)
 
@@ -274,8 +287,7 @@ The installed particle DDS files are plain UNORM (BC1 for 3000, 11622, BC7 UNORM
 Mid-tone flame body was crushed to near black while the peak texels stayed at one, so only the hot core (rgbMultiplier 5 to 15) survived and clipped to white, which also made the flame look small.
 `fxr.rs` now loads sprite textures as UNORM.
 Brazier flames at spot-056 are now orange with the soft body back; the colour curve, `hue_squared` and the blend state were checked against the disassembly and are correct.
-Remaining difference: the flame is still shorter and lower than the real tongue above the coals, and there are no rising sparks.
-This was not resolved here; the sprite widths (0.375 to 1.25 m) agree with the data, so the missing height needs the node motion and emitter data checked next.
+Height was fixed separately; see "Flame height" below.
 
 ### Spot-022 fire gating
 
@@ -286,4 +298,27 @@ The group-off effects on `o115840` (811320, 800150) are toggled by event 2000411
 So the gating we read is a real flag test.
 If the user's reference was taken with 8302 set, the reference shows those effects and our first-visit state correctly omits them.
 Whether 8302 should be on for the afternoon story state is a decision in `map_story.rs`, which the story-state agent owns; no edit was made there.
-The flame sprites of 800140 render far smaller than the real fire, the same unresolved size difference as the brazier.
+The flame sprites of 800140 were short for the same direction reason as the brazier (see "Flame height").
+
+## Flame height and rising sparks, 2026-10-15
+
+Symptom: the brazier (spot-056, FXR 839530) and the ground fire 800140 had short, low flames and no rising sparks, although the sprite sizes matched the data.
+Size, emitter rate, lifetime and velocity curves were checked against the data first and agree.
+The cause was the emission direction, in two places.
+
+1. Node rotation pitch.
+   Rotating a node by +X sent its Z emission axis downward (the previous mapping).
+   Designers use +90 (64 rising disc and point nodes in the common effects, 40 of them with upward gravity) and +45 to stand the emitter upright or tilt a spark fountain, so the real sign is the opposite.
+   With the old sign the brazier sparks and the 800140 smoke discs travelled into the floor and only gravity pulled them up.
+   `make_node` now negates the X angle of `nodeTransform`.
+   The Y and Z angle signs were not touched and are not independently verified.
+2. Emitter direction 6.
+   It was read as local forward (+Z).
+   The torch effect 300163 (sparks with gravity -1 and a 5.6 degree cone, no node rotation) and the flame cores of 839530 only make sense if 6 is world up, so it is now the world up axis whatever the node tilt.
+   Directions 1 to 5 are unchanged.
+
+Result at spot-056: the flame rises about 0.5 m above the coals with sparks above it, as in the reference (the coals themselves are still dark).
+At the 800140 pile the flames are about 1 m tall, which is what the data gives (height 1 to 2 times scale 0.56, plus 0.375 m/s for 1.5 s).
+Disc emitters (shape 401) still emit radially for direction 0; with the corrected rotation the 800140 smoke discs now rise through gravity and speed, the radial default is unverified.
+Open: spark sprites (width 0.05 times 0.56, texture 3000, rgb multiplier 15) are still fainter and fewer than in the reference, possibly a minimum screen size or bloom difference in the game.
+
