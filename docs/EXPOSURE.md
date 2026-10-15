@@ -1,5 +1,11 @@
 # Exposure and tone audit, 2026-10-15
 
+The historical comparisons below used night lighting against daytime retail screenshots.
+The later [reference-state audit](VISUAL-PARITY.md#reference-state-and-snow-remeasurement-2026-10-15) supersedes their use as a current retail brightness or snow-colour ranking.
+It retains the same linear-luminance, saturation and circular-hue formulas and the six existing scene masks, but selects time from the known boss-progression candidate rather than `--story night`.
+Snow-region masks are separate, manually reviewed fixed polygons on settled snow, without luminance or colour threshold selection.
+They measure the visible snow-covered surface including its dirt, tile gaps, sparse vegetation, shading and any local haze, rather than a pure albedo texel or a snow material buffer.
+
 The subsequent [post-chain colour audit](COLOUR.md) checks the remaining gamma/LUT/exposure inputs, adds the missing pre-gamma matrix and full authored bloom pyramid, and records a new six-view comparison.
 The measurements below remain the historical isolated exponential-base comparison.
 

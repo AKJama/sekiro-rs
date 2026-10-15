@@ -1,5 +1,9 @@
 # Post-chain colour audit, 2026-10-15
 
+The isolated formula comparisons below remain historical night-state controls.
+Their retail target is daytime overcast, so current retail colour and snow conclusions use the later [reference-state remeasurement](VISUAL-PARITY.md#reference-state-and-snow-remeasurement-2026-10-15).
+The state correction does not change the post-chain implementation audited here.
+
 The renderer omitted the native pre-gamma colour matrix and rendered an incomplete bloom pyramid.
 The filmic-contrast reader also missed the actual `GS Presents - ToneMap-Contrast` GPARAM name.
 These are shared post-chain corrections, with no replacement light colours, exposure offsets, snow tints or map-specific adjustments.

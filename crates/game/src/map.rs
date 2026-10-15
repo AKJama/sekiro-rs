@@ -440,7 +440,7 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
         for (block, layout) in &world.blocks {
             if let Some(state) = story::load(cache, block, &layout.json)? {
                 info!(
-                    "{block}: first-visit story, {} parts, {} unsupported predicates",
+                    "{block}: offline story, {} parts, {} unsupported predicates",
                     state.parts.len(),
                     state.state.unsupported.len()
                 );
@@ -497,7 +497,7 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
     let arena = arena_name
         .as_deref()
         .and_then(|name| sekiro_sim::arena::ArenaSpec::by_name(name).ok());
-    let story = crate::arg_value(&args, "--story");
+    let story = story::selection(&args);
     let mut selection = crate::lighting_selection::select(cache, &id, story.as_deref(), arena)?;
     if scene.hour.is_finite() {
         let hour_changed = scene.hour != selection.hour;

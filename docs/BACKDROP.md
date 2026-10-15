@@ -88,6 +88,9 @@ The first before/final diagnostic images are pixel-identical; the independent re
 
 ## Second pass: arc cause and haze state, 2026-10-15
 
+The follow-up [reference progression audit](LIGHTING.md#reference-progression-audit-2026-10-15) identifies post-Genichiro afternoon as the best-supported candidate and replaces the night-state reference-tool default.
+The remaining snow, colour and haze measurements are in [VISUAL-PARITY.md](VISUAL-PARITY.md#reference-state-and-snow-remeasurement-2026-10-15).
+
 The reference pairs were captured with `--story night`, but the retail frames are daytime overcast.
 Matched renders of spot-011 with the `afternoon` story show no blue arc and a sky that matches the retail structure.
 The panels in the external progress collection's `2026-10-15/backdrop-2/` directory show real, night story and afternoon story for all six spots.
@@ -117,4 +120,4 @@ Haze findings:
 - The retail frames are hazier at 200 to 500 m than hour-12 data predicts, so the remaining difference is not explained by the fog volume formulas and no multiplier was added.
 - `mapbase.gparam` also authors `Global ScatteringG` 0.5 and `HeightFogReferenceOffset/ModeRate`, which we do not read; these are candidates for the next pass.
 
-Open: retail haze at mid distance (which story and GPARAM state the retail frames use), `ShLightMask` and `aColor` for fog cards, `ScatteringG` phase.
+Open: retail haze at mid distance in the selected post-Genichiro afternoon state, `ShLightMask` and `aColor` for fog cards, and `ScatteringG` phase.

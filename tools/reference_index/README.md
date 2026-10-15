@@ -13,6 +13,30 @@ Supply folder paths as arguments; the tool has no machine-specific paths.
 If the default uv cache is unavailable, set `UV_CACHE_DIR` to a writable local directory.
 An offline environment can use already installed Pillow and NumPy with `uv run --no-project python tools/reference_index/index.py ...`.
 
+## Reference story and exact replay
+
+Pose matching defaults to `--story genichiro-defeated`, using boss progression flags rather than an hour override.
+Gyoubu alone (`gyoubu-defeated`, flag 9301) retains morning at 06:00.
+Genichiro (`genichiro-defeated`, flags 9301 and 9303) raises 9800 through the event-820 rule and selects afternoon at 12:00 in both Ashina areas.
+The reference's Castle Tower Lookout travel destination, Attack Power 3 and overcast sky support the latter candidate; playtime alone cannot identify flags.
+Unknown quest, pickup and interaction flags remain unset.
+
+Replay accepted cameras without searching again into a fresh external collection:
+
+```powershell
+uv run --no-project --with pillow --with numpy --with scipy python -m tools.reference_index.regenerate_pairs --reference <reference-root> --output <reference-root>/pairs-genichiro-defeated --game target/alt-story/release/sekiro-rs.exe --annotations <review-ledger.json>
+uv run --no-project --with pillow --with numpy --with scipy python -m tools.reference_index.triage_pairs --reference <reference-root>/pairs-genichiro-defeated --sheets --sheet-output <external-review-folder>
+uv run --no-project python -m tools.reference_index.report_parity --reference <reference-root>/pairs-genichiro-defeated --annotations <renewed-review-ledger.json> --output <external-summary.md>
+```
+
+Replay writes full-resolution pairs, individual ours images, visibility records and its own `poses.json` directly in that collection.
+It preserves saved camera/player/FOV fields exactly, records the executable digest and story, and refuses to overwrite a completed collection.
+Replay retains the original camera-fit score as a saved score and records its source executable separately; it does not present that score as a new camera search.
+Camera acceptance can carry forward from the original ledger, but each visible defect needs renewed review before its count is treated as current.
+The original `pairs/` and `poses.json` remain untouched.
+Reports reject a mismatched or mixed capture state by default; use an explicit historical `--story` only when reporting an older collection.
+The matcher also rejects resuming a collection captured under a different story, so old night poses cannot silently be treated as finished daytime poses or overwritten by a state change.
+
 ## Recognition and review
 
 Colour-distance masks isolate the red X, green Y and blue Z text in native pixels `(45,292)-(470,316)`.

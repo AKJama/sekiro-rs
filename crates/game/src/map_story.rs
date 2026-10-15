@@ -1,8 +1,9 @@
-//! Job C handoff: first-visit story input for the single Job E visibility decision.
+//! Offline story input for the single map visibility decision.
 //!
 //! `load(cache, map, layout)` returns None outside Outskirts/Castle, preserving old maps.
 //! `enabled(entity_id, name)` supplies the story gate for each real part.
-//! Job E combines this gate with masks/residency; this module never writes Visibility.
+//! Visibility combines this gate with masks/residency; this module never writes Visibility.
+//! Named reference progression adds known boss defeats to the first-visit fixture.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -11,6 +12,8 @@ use anyhow::{Context, Result};
 use bevy::prelude::Resource;
 use sekiro_sim::world_events::{self, PartState, WorldState};
 use serde_json::Value;
+
+pub const REFERENCE_STORY: &str = "genichiro-defeated";
 
 #[derive(Debug, Resource, Default)]
 pub struct MapStory {
@@ -24,6 +27,14 @@ pub struct StoryMap {
     by_name: HashMap<String, usize>,
 }
 
+pub fn selection(args: &[String]) -> Option<String> {
+    crate::arg_value(args, "--story").or_else(|| {
+        args.iter()
+            .any(|a| a == "--render-gate" || a == "--reference-gate")
+            .then(|| REFERENCE_STORY.into())
+    })
+}
+
 impl StoryMap {
     pub fn enabled(&self, entity_id: i32, name: &str) -> Option<bool> {
         let part = self.part(name)?;
@@ -35,12 +46,36 @@ impl StoryMap {
     }
 }
 
+pub(crate) fn initial_state(
+    cache: &Path,
+    map: &str,
+    story: Option<&str>,
+) -> Result<Option<WorldState>> {
+    let Some(mut fixture) = world_events::FirstVisit::for_map(map) else {
+        return Ok(None);
+    };
+    if let Some(name) = story {
+        match name {
+            // Persistent writes of 11105800, then 11115800 through its final cutscene guard.
+            "gyoubu-defeated" => fixture.flags.extend([9301, 11100800, 6801, 6078]),
+            "genichiro-defeated" => fixture
+                .flags
+                .extend([9301, 11100800, 6801, 6078, 9303, 11110800, 6803, 9403]),
+            _ => {}
+        }
+    }
+    world_events::evaluate(cache, map, fixture)
+        .map(Some)
+        .map_err(anyhow::Error::msg)
+}
+
 pub fn load(cache: &Path, map: &str, layout: &Value) -> Result<Option<StoryMap>> {
     // Diagnostic control for paired hole-sweep runs with identical loaded geometry.
     if std::env::args().any(|arg| arg == "--no-map-story") {
         return Ok(None);
     }
-    let Some(state) = world_events::first_visit(cache, map).map_err(anyhow::Error::msg)? else {
+    let args: Vec<_> = std::env::args().collect();
+    let Some(state) = initial_state(cache, map, selection(&args).as_deref())? else {
         return Ok(None);
     };
     anyhow::ensure!(

@@ -10,9 +10,17 @@ import json
 from pathlib import Path
 
 
-def report(root, output, annotation_path=None):
+def require_story(poses, story):
+    captured_stories = {p.get('render_settings', {}).get('story', 'unrecorded') for p in poses}
+    if poses and captured_stories != {story}:
+        raise ValueError(f'Expected {story} captures, found {sorted(captured_stories)}; regenerate pairs in a fresh output directory or explicitly select their historical --story')
+
+
+def report(root, output, annotation_path=None, story='genichiro-defeated'):
     poses = json.loads((root / 'poses.json').read_text())
-    annotation_path = annotation_path or root / 'pairs' / 'triage.json'
+    require_story(poses, story)
+    annotation_path = annotation_path or (root / 'triage.json' if (root / 'triage.json').exists()
+                                          else root / 'pairs' / 'triage.json')
     annotations = json.loads(annotation_path.read_text())
     by_shot = {row['shot']: row for row in poses}
     reviews = {row['shot']: row for row in annotations['pairs']}
@@ -42,7 +50,7 @@ def report(root, output, annotation_path=None):
         f'{len(accepted & set(by_shot))} pairs have passed visual camera review; {len(rejected & set(by_shot))} are rejected and {len(pending)} remain unreviewed.',
         'The two menu-only spots are excluded rather than assigned a camera.',
         'The selected gameplay images prefer hidden HUDs and the settled default view, with second views at nearby idol anchors.',
-        'The reference story is later than the existing first-visit geometry fixture, as shown by its unlocked travel destinations.',
+        'The reference travel destinations and overcast daylight support the post-Genichiro progression preset.',
         'A fixture difference is not automatically a missing model or an incorrect render group.',
         'Wolf, other characters and HUD differences are ignored.',
         '',
@@ -57,7 +65,7 @@ def report(root, output, annotation_path=None):
         'Practice-tool backing/text, HUD bars/corners, crosshair and a conservative Wolf silhouette envelope are excluded from scoring.',
         'The exact-render score combines local contrast structure, unsigned gradient orientation and symmetric thin-edge alignment; lower is better.',
         'A low score alone does not establish a correct camera, and a poor pose contributes no geometry-defect count.',
-        'Native night lighting and exposure remain enabled, with a fixed shader animation phase and normal CPU lighting/LOD settling.',
+        f'Captured story presets: {", ".join(sorted({p.get("render_settings", {}).get("story", "unrecorded") for p in poses}))}; native exposure, fixed shader phase and normal CPU lighting/LOD settling.',
         '',
         'Lighting, fog and sky are being changed by another agent during this job.',
         'Each pose records its capture executable SHA-256; the visible lighting differences may shift after that other work is integrated.',
@@ -123,15 +131,16 @@ def report(root, output, annotation_path=None):
     else:
         lines.append('Every selected pair has a visual camera review and a per-pair difference list in the external triage ledger.')
     lines += ['', '## Reproduce and verify', '',
-              'All Cargo commands use CARGO_TARGET_DIR=target/alt-pt and six build jobs.',
+              'All Cargo commands use CARGO_TARGET_DIR=target/alt-story and six build jobs.',
               'The reference root is an external path supplied at runtime; no personal path is embedded in tracked source.',
               '', '```powershell',
-              "$env:CARGO_TARGET_DIR = 'target/alt-pt'",
+              "$env:CARGO_TARGET_DIR = 'target/alt-story'",
               "$referenceRoot = '<external-reference-root>'",
+              "$captureRoot = '<fresh-external-story-capture-root>'",
               'cargo build --release --offline -p sekiro-game --bin sekiro-rs -j 6',
-              'uv run tools/reference_index/match_poses.py --reference $referenceRoot --output $referenceRoot --game target/alt-pt/release/sekiro-rs.exe',
-              'uv run --no-project --with pillow --with numpy --with scipy python -m tools.reference_index.triage_pairs --reference $referenceRoot --maps cache/maps --inventory --sheets',
-              'uv run --no-project python -m tools.reference_index.report_parity --reference $referenceRoot --output <external-summary.md>',
+              'uv run --no-project --with pillow --with numpy --with scipy python -m tools.reference_index.regenerate_pairs --reference $referenceRoot --output $captureRoot --game target/alt-story/release/sekiro-rs.exe --annotations <review-ledger.json>',
+              'uv run --no-project --with pillow --with numpy --with scipy python -m tools.reference_index.triage_pairs --reference $captureRoot --maps cache/maps --inventory --sheets',
+              'uv run --no-project python -m tools.reference_index.report_parity --reference $captureRoot --annotations <renewed-review-ledger.json> --output <external-summary.md>',
               'cargo test --release --offline -p sekiro-game -j 6',
               'cargo clippy --release --offline -p sekiro-game --all-targets -j 6 -- -D warnings',
               'cargo fmt --all --check', '```', '',
@@ -148,8 +157,9 @@ def main():
     parser.add_argument('--reference', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--annotations', type=Path, help='External review ledger; defaults to pairs/triage.json')
+    parser.add_argument('--story', default='genichiro-defeated', help='Expected captured preset; explicitly override for historical reports')
     args = parser.parse_args()
-    report(args.reference, args.output, args.annotations)
+    report(args.reference, args.output, args.annotations, args.story)
 
 
 if __name__ == '__main__':

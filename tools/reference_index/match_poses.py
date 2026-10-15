@@ -26,8 +26,10 @@ from scipy.signal import fftconvolve
 
 if __package__:
     from .pose_collision import CameraCollision
+    from .report_parity import require_story
 else:
     from pose_collision import CameraCollision
+    from report_parity import require_story
 
 
 class FeatureSet(list):
@@ -190,7 +192,7 @@ class Renderer:
             '--sweep-views', str(self.directory / 'load-views.json'),
             '--sweep-out', str(self.directory / 'unused-sweep'),
             '--sweep-width', '384', '--sweep-height', '216',
-            '--pose-server', str(self.directory), '--story', 'night', *args.render_arg,
+            '--pose-server', str(self.directory), '--story', args.story, *args.render_arg,
         ], stdout=self.log, stderr=subprocess.STDOUT,
            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS)
         try:
@@ -375,6 +377,7 @@ def main():
     parser.add_argument('--limit-spots', type=int)
     parser.add_argument('--map', choices=['m11_00', 'm11_01'])
     parser.add_argument('--render-arg', action='append', default=[])
+    parser.add_argument('--story', default='genichiro-defeated', help='Event-flag preset, shared with accepted-pose regeneration')
     parser.add_argument('--seeds', type=Path, help='External shot-number to yaw/pitch/distance review seeds')
     parser.add_argument('--only-shots', help='Comma-separated selected shot numbers for a review rerun')
     parser.add_argument('--force', action='store_true', help='Replace selected existing poses after successful capture')
@@ -408,6 +411,10 @@ def main():
     poses_path = args.output / 'poses.json'
     poses = json.loads(poses_path.read_text()) if poses_path.exists() else []
     poses = [r for r in poses if r.get('matcher_version') in (2, 3, 4)]
+    try:
+        require_story(poses, args.story)
+    except ValueError as error:
+        parser.error(str(error))
     finished = set() if args.force else {r['shot'] for r in poses}
     review_run = bool(args.only_shots or args.force or args.seeds)
     selection_name = 'pose-review-selection.json' if review_run else 'pose-selection.json'
@@ -422,8 +429,8 @@ def main():
         'search': '30-degree yaw / pitch coarse grid; two yaw basins; 10-degree then 4-degree refinement; verified subdegree axis/quadratic refinement; distance .4 to 7 metres',
         'score': 'coarse masked contrast correlation with bounded translation; exact-render local contrast, gradient orientation and thin-edge chamfer refinement',
         'mask': 'practice overlay/backing, HUD corners and bars, crosshair, conservative central lower Wolf silhouette',
-        'lighting': 'night profile; shader phase held at 1 second; native exposure reset each pose',
-        'story_limit': 'Existing first-visit geometry fixture; reference travel menus show later progression.',
+        'lighting': f'{args.story} event preset; shader phase held at 1 second; native exposure reset each pose',
+        'story_limit': 'Boss progression is replayed; unknown quest, pickup and interaction flags remain unset.',
         'review_limit': 'Automatic candidates require visual review; score is not proof of correct pose or missing geometry.',
     })
     print(f'Selected {len(selected)} spots / {sum(len(r) for _, r in selected)} shots; renderer {digest}', flush=True)
@@ -523,7 +530,7 @@ def main():
                                 coarse_to_fine_improvement=improvement, pair=str(pair_path.relative_to(args.output)),
                                 visibility=str(manifest_path.relative_to(args.output)), renderer_sha256=digest,
                                 camera_status='automatic candidate; visual review required', hud=row.get('hud'))
-                    pose['render_settings'] = {'story': 'night', 'extra_args': args.render_arg,
+                    pose['render_settings'] = {'story': args.story, 'extra_args': args.render_arg,
                                                'search_size': [384, 216], 'final_size': [2560, 1440]}
                     if str(row['index']) in manual_seeds:
                         pose['review_seed'] = manual_seeds[str(row['index'])]

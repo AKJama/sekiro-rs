@@ -544,6 +544,51 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache")
     }
     #[test]
+    fn reference_progression_uses_installed_boss_and_clock_events() {
+        let cache = cache();
+        for (map, event, flags) in [
+            ("m11_00_00_00", 11105800, &[9301, 11100800, 6801, 6078][..]),
+            ("m11_01_00_00", 11115800, &[9303, 11110800, 6803, 9403][..]),
+        ] {
+            let file = script(&cache, map).unwrap();
+            for &flag in flags {
+                assert!(file.event(event).unwrap().instructions.iter().any(|i| {
+                    i.code() == (2003, 2) && i.i32_at(0) == Some(flag) && i.u8_at(4) == Some(1)
+                }));
+            }
+        }
+        for map in ["m11_00_00_00", "m11_01_00_00"] {
+            for (name, flags, hour, environment, sky) in [
+                ("gyoubu-defeated", vec![9301], 6., 1, "m900000"),
+                ("genichiro-defeated", vec![9301, 9303], 12., 2, "m900010"),
+            ] {
+                let selected = select(&cache, map, Some(name), None).unwrap();
+                assert_eq!(
+                    (selected.hour, selected.environment, selected.sub_id),
+                    (hour, environment, 0)
+                );
+                assert_eq!(selected.source, format!("{}_0000", &map[..6]));
+                assert_eq!(selected.sky.as_deref(), Some(sky));
+                assert!(flags.iter().all(|f| selected.flags.contains(f)));
+                let state = crate::map::story::initial_state(&cache, map, Some(name))
+                    .unwrap()
+                    .unwrap();
+                assert!(flags.iter().all(|f| state.flags.contains(f)));
+                if name == "genichiro-defeated" {
+                    assert!(
+                        state.flags.contains(&9403),
+                        "post-fight cutscene must remain completed"
+                    );
+                }
+                println!(
+                    "{map} {name}: {selected:?}; {} visibility writes, {} unsupported",
+                    state.visibility.len(),
+                    state.unsupported.len()
+                );
+            }
+        }
+    }
+    #[test]
     fn defaults_follow_installed_common_event() {
         for (map, hour, environment) in [
             ("m10_00", 0., 0),

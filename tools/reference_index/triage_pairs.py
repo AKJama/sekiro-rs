@@ -36,8 +36,9 @@ def sheets(root, poses, per_sheet=6, output=None):
         for i, pose in enumerate(subset):
             with Image.open(root / pose['pair']) as image:
                 sheet.paste(image.resize((1920, 384), Image.Resampling.LANCZOS), (0, i*408+24))
+            cost_label = 'saved cost' if pose.get('source_pose_renderer_sha256') else 'cost'
             ImageDraw.Draw(sheet).text((5, i*408+3),
-                f'{pose["spot"]} | shot {pose["shot"]} | yaw {pose["yaw"]:.1f} pitch {pose["pitch"]:.1f} distance {pose["distance"]:.1f} | cost {pose["match_score"]:.3f}',
+                f'{pose["spot"]} | shot {pose["shot"]} | yaw {pose["yaw"]:.1f} pitch {pose["pitch"]:.1f} distance {pose["distance"]:.1f} | {cost_label} {pose["match_score"]:.3f}',
                 fill='white', font=ImageFont.load_default(size=19))
         sheet.save(sheet_path, quality=92)
 

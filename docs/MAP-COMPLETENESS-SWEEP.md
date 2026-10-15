@@ -24,7 +24,9 @@ cargo build --release --offline -p sekiro-game -j 4
 Run both render commands serially before reviewing a commit.
 Each command starts one windowless process, loads the area and its bounded neighbourhood once, and renders every fixed view in that process.
 The numeric `<map>.render.json` fixtures hold width, height and `[x,y,z,yaw,pitch,void,depth_gap,untextured,grey,pop_in]` rows, in Bevy world coordinates.
-The gate uses ordinary Objects, the first-visit story fixture and native material settings, and rejects diagnostic overrides.
+The canonical Ashina gate uses ordinary Objects, the named post-Genichiro reference progression and native material settings, and rejects diagnostic overrides.
+Each render fixture declares `story: genichiro-defeated`, which must agree with the canonical selection policy.
+Ordinary exploration and unqualified broad surveys keep their first-visit default.
 `report.json` retains all measurements, selected collisions and visible-part manifests; `gate.json` records pass/fail details.
 Every category is checked separately at every view, with a tolerance of 16 pixels or 1% of that view's baseline, whichever is greater.
 The gate also rejects a run exceeding 120 seconds, including CPU setup and map loading.
@@ -39,7 +41,8 @@ The loader now waits for nested scene readiness and the texture diagnostic recog
 The required gates are the normal CPU data gate and the two six-view render commands above.
 The optional reference tool is not yet reliable and is excluded from required gates.
 Its supplementary fixture adds 150 distinct poses from the external screenshot index, at 256 x 144 pixels, with a separate 900-second budget.
-The repeat failed four tolerances: pop-in at views 57, 61 and 62, and grey at view 66.
+The earlier first-visit repeat failed four tolerances: pop-in at views 57, 61 and 62, and grey at view 66.
+The optional reference gate now also selects the named reference story, but its old supplementary colour cells have not been re-baselined for that state and are not claimed as passing.
 Shading variability remains open; further reference-repeat investigation is deferred.
 Its numeric rows use player feet plus 1.65 m and the nearest authored player-start yaw because the position overlay does not supply camera rotation.
 This is position-based reference coverage, not a claim of retail camera or story parity.
@@ -676,3 +679,92 @@ The contact sheets and raw per-view records are retained in the external colour 
 The final shared-tree Castle view 4 was reviewed again against the isolated post snapshot in both phases.
 Its pop-in colour count is 2638 rather than the isolated 2607, with identical tree, snow, paving and wall coverage and the same geometry triple (0,5,0).
 Only that additional colour cell is refreshed; the 16-pixel/1-percent tolerance and every geometry field remain unchanged.
+
+## Reference story fixture review, 2026-10-15
+
+The canonical gate now uses `genichiro-defeated`, the best-supported reference candidate documented in [LIGHTING.md](LIGHTING.md#reference-progression-audit-2026-10-15).
+This changes its former morning first-visit default to event-selected afternoon, rather than changing night into a hand-picked hour.
+The reference matcher previously forced night; those are separate former defaults.
+Both fixtures declare the named state and the gate rejects a fixture whose story disagrees with its canonical policy.
+The two normal controls use the same frozen executable, fixed views, native materials and exposure policy, differing only in their story preset.
+Neither uses an hour override.
+
+Every measured void/depth-gap/untextured triple is unchanged between the morning and progression controls.
+Outskirts totals remain 0/493/0 and Castle totals remain 1933/4885/0.
+Castle view 0 measures 148 depth-gap pixels in both controls, versus its retained fixture baseline of 149; this one-pixel improvement is not a geometry re-baseline.
+Every camera field, geometry fixture cell, resolution, 16-pixel/1-percent tolerance and 120-second budget is retained.
+Selected collisions agree at every view, every old visible-part set is a subset of the new set, and visible counts never decrease.
+Known progression enables idol props `o005000_0005` in Outskirts and `o005000_0006` in Castle, plus three group-1106700 objects at Outskirts views 0 and 1.
+These additions are story content, not replacements for missing geometry.
+Collision diagnostic images are pixel-identical in all twelve views.
+Depth images differ at 12 pixels in Outskirts view 0, 39 in Outskirts view 4 and one pixel in Castle view 4, without worsening any geometry category.
+The source IDs and full added/removed sets are retained in the external story collection's `gate-comparison.json`.
+
+Normal and all-visible images were reviewed separately at every view before accepting the colour cells below.
+Grey and pop-in are image-colour threshold counts, so their change under a different LightSet, probe environment and sky does not establish lost geometry.
+The preceding colour audit's per-view notes remain historical evidence above.
+
+| Map / view | Grey fixture -> afternoon | Pop-in fixture -> afternoon | Review note |
+| --- | ---: | ---: | --- |
+| Outskirts / 0 | 116 -> 10 | 9154 -> 2728 | Temple courtyard changes from warm direct light to cool overcast light; bamboo, steps, stones and walls retain their silhouettes, with additional enabled story props. |
+| Outskirts / 1 | 50 -> 342 | 215 -> 239 | Timber passage receives flatter grey-blue fill; the doorway and snow-floor boundary remain aligned, with three additional group-1106700 props. |
+| Outskirts / 2 | 152 -> 6 | 2377 -> 2562 | Overhead path changes from peach highlights to blue-white snow; path, roof and rock boundaries remain aligned. |
+| Outskirts / 3 | 1861 -> 3 | 5521 -> 6551 | Snow ledge becomes cool and the backdrop haze changes; the ledge, structure and cliff retain their depth coverage. |
+| Outskirts / 4 | 589 -> 2921 | 6398 -> 7867 | Timber gate loses the warm directional wash and gains neutral wood fill; leaves, posts and floor retain coverage, with the progression idol now enabled. |
+| Outskirts / 5 | 230 -> 0 | 4798 -> 5392 | Roof and branches acquire cool highlights; their silhouettes and wall coverage remain aligned. |
+| Castle / 0 | 169 -> 66 | 4976 -> 5077 | Corridor wood and outside snow change from warm to cool; doorway, pillars and the exterior depth boundary remain aligned, with two additional enabled idol props across the loaded neighbourhood. |
+| Castle / 1 | 249 -> 43 | 8641 -> 5770 | Cart and stone wall lose orange illumination; wheel, wall and snow coverage remain aligned with identical visible-part sets. |
+| Castle / 2 | 656 -> 1 | 5627 -> 5487 | Rooftop panorama changes to the pale overcast sky and cool snow; skyline and roofs retain coverage, with the Castle progression idol enabled. |
+| Castle / 3 | 297 -> 0 | 4951 -> 6149 | Angled roof receives cool daylight and a different distant sky; roof edges and existing open-depth regions remain aligned. |
+| Castle / 4 | 668 -> 7 | 2638 -> 0 | Tree courtyard becomes blue-white under afternoon light; tree, paving and walls retain the same visible-part set, with the same geometry counts. |
+| Castle / 5 | 79 -> 5 | 7412 -> 2099 | Stone walkway loses the warm wash and gains the pale daylight backdrop; walkway, masonry and skyline retain coverage. |
+
+Review images are `outskirts-gate-review.png` and `castle-gate-review.png` under the external progress collection's `2026-10-15/story/` directory.
+These fixtures guard the selected story's coverage and repeatability; their acceptance does not certify retail snow, brightness or colour parity.
+
+## Fire brightness colour fixture review, 2026-10-15
+
+The soft-particle depth fade now works in the single-sample capture path and the effect colour no longer carries an invented sqrt 3 (see MAP-FX.md, fire brightness audit).
+Geometry is unchanged: Outskirts 0/493/0 and Castle 1933/4885/0 for void/depth-gap/untextured, and every per-view geometry field equals the same-executable `SEKIRO_NO_MAP_FX` control.
+
+| Map / view | Grey fixture -> reviewed | Review note |
+| --- | ---: | --- |
+| m11_00_00_00 / 4 | 589 -> 2916 | Timber gate close-up: the warm orange wash from the 15 m fire glow disc is gone, so the gate and floor read neutral grey-blue like the effects-off control, with the same gate geometry. |
+
+Other regressions seen in the same run (Outskirts views 1-5 pop-in and view 1 grey, Castle views 0 and 3 pop-in) are identical with `SEKIRO_NO_MAP_FX=1`, so they come from the concurrent colour-chain work and were not edited here.
+
+
+### Concurrent point-light colour refresh and final gates
+
+A parallel renderer task changed point/spot response and FX-light RGB packing after the isolated story comparison.
+The state job preserves those implementation edits and their earlier colour notes.
+The refreshed 51 daytime pairs and 11 matched night controls use comparison executable `f8e67514fb15979464ce3de41c7a116ff97d5de39815706c633377fbbf9bd18c`.
+Subsequent FX/fog edits remain outside that measurement snapshot.
+The final gate executable is `875ffe4329a1a6edf070a4cbb961cb593df14c8eb24497d7bd181d9740a4072f`, including the FX-light colour-packing change present when it was built.
+All twelve refreshed gate views retain exactly the progression control's geometry triples, selected collisions and visible-part sets.
+The first current-build gates reject only four colour cells: Outskirts views 0 and 1 grey, Outskirts view 1 pop-in, and Castle view 0 grey.
+All normal/all-visible pairs were reviewed again, and the current colour cells below are retained to guard the reviewed response; geometry cells, camera fields, tolerances and budget remain unchanged.
+
+| Map / view | Grey story baseline -> latest | Pop-in story baseline -> latest | Review note |
+| --- | ---: | ---: | --- |
+| m11_00_00_00 / 0 | 10 -> 76 | 2728 -> 2642 | Temple courtyard local glow changes; bamboo, stones and steps retain coverage. |
+| m11_00_00_00 / 1 | 342 -> 2274 | 239 -> 292 | Timber passage receives a broader warm local-light contribution; doorway and snow-floor edges remain aligned. |
+| m11_00_00_00 / 2 | 6 -> 8 | 2562 -> 2557 | Only small colour-threshold changes; path and roof edges remain aligned. |
+| m11_00_00_00 / 3 | 3 -> 6 | 6551 -> 6553 | Only small colour-threshold changes; ledge and cliff coverage remain aligned. |
+| m11_00_00_00 / 4 | 2921 -> 2 | 7867 -> 6992 | Timber gate receives a strong warm local-light wash; gate leaves, posts, floor and enabled idol retain coverage. |
+| m11_00_00_00 / 5 | 0 -> 0 | 5392 -> 5392 | No colour-cell change; branch, roof and wall silhouettes retain coverage. |
+| m11_01_00_00 / 0 | 66 -> 469 | 5077 -> 5084 | Corridor gains a warm edge/pillar contribution; doorway, exterior snow and pillars retain coverage. |
+| m11_01_00_00 / 1 | 43 -> 43 | 5770 -> 5758 | Small colour-threshold change; cart, wall and snow retain coverage. |
+| m11_01_00_00 / 2 | 1 -> 0 | 5487 -> 5485 | Small colour-threshold change; skyline and roof coverage remain aligned. |
+| m11_01_00_00 / 3 | 0 -> 0 | 6149 -> 6139 | Small colour-threshold change; angled roof and existing open-depth regions remain aligned. |
+| m11_01_00_00 / 4 | 7 -> 7 | 0 -> 0 | No colour-cell change; tree, paving and walls retain coverage. |
+| m11_01_00_00 / 5 | 5 -> 7 | 2099 -> 2107 | Small colour-threshold changes; stone walkway and masonry retain coverage. |
+
+The independent final repeats pass both complete canonical gates: Outskirts in 57.474 seconds and Castle in 68.480 seconds.
+Their totals remain void/depth-gap/untextured 0/493/0 and 1933/4885/0.
+The review images are `current-outskirts-gate-review.png` and `current-castle-gate-review.png` in the external story collection, with `concurrent-colour-review.json` and `final-gates.json`.
+The frozen pre-point-response controls also pass independently in 61.749 and 68.449 seconds, with the same geometry categories.
+The workspace release suite passes 817 tests with 25 existing ignores.
+The refreshed material build passes all 137 non-ignored game tests with three existing ignores, and the later FX build passes 11 focused FX/shader tests.
+Workspace all-target release Clippy with warnings denied and workspace formatting pass under `CARGO_TARGET_DIR=target/alt-story`.
+The six Python checks pass, including rejection of a historical-state report; the same guard prevents the matcher from silently resuming night poses as daytime captures.

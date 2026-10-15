@@ -5,6 +5,8 @@ pub const PROFILE: &str = r#"
   "map": "m11_00",
   "states": [
     {"flags":[],"name":"morning"},
+    {"flags":[9301],"name":"gyoubu-defeated"},
+    {"flags":[9301,9303],"name":"genichiro-defeated"},
     {"flags":[9800],"name":"afternoon"},
     {"flags":[9800,9801],"name":"evening"},
     {"flags":[9800,9801,9802],"name":"night"},

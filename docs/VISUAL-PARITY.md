@@ -1,11 +1,154 @@
 # Visual parity work list: Ashina Outskirts and Castle
 
 This is the reviewed work list of visible differences found between the real game and our renderer in Ashina Outskirts (m11_00_00_00) and Ashina Castle (m11_01_00_00), grouped by cause and ranked by reach and visibility.
-It is a work list, not a fix: no rendering or map code was changed for it.
-The reference is the user's own 2560x1440 screenshot collection (game 1.06.0, night, falling snow, story up to Ashina Castle Gate in the Outskirts and the Upper Tower in the Castle), indexed as described in `tools/reference_index/README.md`.
+The original work list is retained as historical evidence below the current story-state review.
+The reference is the user's own 2560x1440 screenshot collection (game 1.06.0, overcast daytime, falling snow, Outskirts through Ashina Castle Gate and Castle through the Upper Tower), indexed as described in `tools/reference_index/README.md`.
 Screenshots, matched camera poses, side-by-side pair images and per-pair visibility dumps live outside the repository under the external reference root; nothing from them is copied into source.
 
-## Summary
+## Reference state and snow remeasurement, 2026-10-15
+
+The reference is overcast daytime.
+Use `genichiro-defeated`, selected by boss progression and the installed common event, for reference matching, exact-camera pair regeneration and the canonical Ashina gates.
+The two candidate saves do not render identically.
+
+| Candidate | Known global defeat flags | Clock selected by the data | Both maps: environment / sub-ID / sky |
+| --- | --- | --- | --- |
+| Gyoubu defeated, Genichiro alive | 9301 | Morning, 06:00 | 1 / 0 / m900000 |
+| Both defeated | 9301, 9303 | Afternoon, 12:00 | 2 / 0 / m900010 |
+
+Common event 820 counts defeated bosses 9303-9306, raising 9800 after one and 9801 after three; Gyoubu's 9301 is outside that range.
+Common event 100 then selects the environment and sky, while both candidates retain their area's ordinary base GPARAM.
+The named map-story snapshots also retain the known local defeat writes and Genichiro's completed-cutscene guard 9403.
+The installed-data regression verifies these writes and both maps' resolved hour, environment, sub-ID, file and sky; see [LIGHTING.md](LIGHTING.md#reference-progression-audit-2026-10-15).
+
+The Castle Tower Lookout travel destination, loading-screen Attack Power 3 and pale overcast skyline favour the post-Genichiro candidate.
+The eight-view `candidate-stories.jpg` comparison shows the Gyoubu-only candidate's orange/pink morning sky and warm directional wash, versus the afternoon candidate's closer pale sky and cool fill.
+Indexed playtime is 01:54:03.34 at spot 002 and 02:24:17.94 at spot 092; playtime is not the world-lighting hour.
+This selects the best-supported candidate without claiming a recovered save snapshot.
+Unknown quest, idol and interaction flags remain unset, and the gate at spot 053 still differs from the reference's open leaf.
+
+### Current capture and review
+
+All 51 previously accepted pairs were replayed into `pairs-genichiro-defeated/`, preserving each saved camera, player position and FOV without a new search or hour override.
+The original `pairs/` and original `poses.json` are retained untouched.
+The renewed ledger accepts 50 pairs at 47 distinct spots and rejects spot 046/shot 164 because foreground obstruction prevents enough shared camp landmarks from being identified.
+That rejection contributes no current defect count, and its cause is not inferred from the image.
+The other broad camera matches retain perspective offsets, so they support regional measurements and triage rather than subpixel geometry claims.
+Replay records the original camera-fit score as a saved score, with its source executable identified separately; no new camera fit is claimed.
+Wolf, NPCs and HUD differences remain excluded.
+
+The measured comparison executable SHA-256 is `f8e67514fb15979464ce3de41c7a116ff97d5de39815706c633377fbbf9bd18c`.
+A late parallel material edit added native point/spot response after the first controlled capture set, so the accepted daytime pairs, night controls and measurements were refreshed for the current build.
+The original controlled story comparison and its measurements remain separately archived in `controlled-before-native-points/`.
+The two-candidate sky comparison uses that internally consistent controlled build; the event-selected hours and sky groups are unchanged by the parallel lighting work.
+Subsequent concurrent FX and fog edits are outside this comparison snapshot; the separately identified final gate build includes the later FX-light colour packing present when it was built.
+This job changes state selection and tooling, and makes no tone, exposure, fog or material implementation edits.
+
+The canonical gate also adopts this state because it is the state supported by the reference evidence.
+Every controlled geometry triple and selected collision is retained, every old visible-part set is a subset of the new set, and no visible count decreases.
+Only named-state metadata and reviewed colour cells change in the render fixtures.
+Per-view evidence, additional enabled story props and the final gate results are recorded in [MAP-COMPLETENESS-SWEEP.md](MAP-COMPLETENESS-SWEEP.md#reference-story-fixture-review-2026-10-15).
+
+### Current ranking
+
+These counts come from the renewed daytime ledger and supersede the historical night ranking below.
+Priority remains distinct accepted spots times visual prominence, with overlapping symptoms counted in their relevant categories rather than treated as independent pixel measurements.
+
+| Rank | Current cause | Spots / pairs | Prominence | Priority |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | L1: Residual lighting and exposure | 47 / 50 | 5 | 235 |
+| 2 | M1: Snow, ground, rock and plaster response | 46 / 49 | 4 | 184 |
+| 3 | F1: Mid-distance haze and backdrop response | 36 / 37 | 4 | 144 |
+| 4 | E1: Fire, smoke, lantern and idol response | 24 / 26 | 4 | 96 |
+| 5 | M2: Foliage and tree snow response | 22 / 23 | 3 | 66 |
+| 6 | W1: Water surfaces | 2 / 2 | 5 | 10 |
+| 7 | O1: Object cloth and prop pose | 2 / 2 | 4 | 8 |
+| 8 | S1: Reference story and interaction state | 1 / 1 | 5 | 5 |
+| 9 | O2: Sky gap between gate leaves | 1 / 1 | 3 | 3 |
+
+The old broad missing-grass count is withdrawn because low clumps are visibly present in the current pairs.
+Their density, placement and treatment still require local evidence before any new geometry count is assigned.
+The painted range is visible, so residual horizon contrast and profile differences remain under F1 without an unsupported missing-mass count.
+Ordinary weather particles are also visible; unmatched single-frame particle phases do not establish a missing-snowfall count or certify native density, motion or indoor occlusion.
+Fire/smoke shape and local emission balance remain E1 residuals in the measured build.
+
+### Measurements
+
+The six requested spots are 002/004, 003/012, 009/034, 025/085, 091/290 and 092/293.
+The four additional snow-heavy spots are 008/033, 013/044, 089/282 and 090/288.
+All measurements use original 2560x1440 PNG pixels, exact inverse-sRGB Rec.709 luminance, mean display-HSV saturation and saturation-weighted circular hue, following [EXPOSURE.md](EXPOSURE.md#measurement-method).
+The six existing scene masks are reused, and the four additional views use the matcher's fixed overlay/player exclusion mask.
+Snow uses separate manually reviewed polygons, selected from surface identity before reading results and without brightness or colour thresholding.
+The same polygon is applied to real and ours, excluding characters, HUD and obvious emitters.
+These are visible snow-covered regions including tile gaps, dirt, sparse vegetation, shading and local haze, rather than isolated albedo samples.
+The smallest snow region is the distant alley patch at spot 092, with 5,655 pixels; all ten masks and real/ours overlays are retained for review.
+Y and saturation are percentages; hue is degrees with red at zero.
+Each pair in the table is real / current ours.
+
+| Spot | Scene Y real / ours % | Scene S real / ours % | Scene hue real / ours degrees | Snow Y real / ours % | Snow ratio |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| spot-002 | 7.021 / 30.562 | 23.96 / 19.75 | 202.91 / 205.50 | 20.247 / 87.213 | 4.31x |
+| spot-003 | 7.506 / 42.151 | 23.90 / 19.87 | 209.90 / 209.84 | 19.218 / 90.562 | 4.71x |
+| spot-009 | 10.473 / 23.276 | 22.07 / 26.23 | 206.72 / 212.70 | 33.299 / 91.219 | 2.74x |
+| spot-025 | 10.602 / 26.279 | 17.63 / 21.37 | 206.31 / 211.29 | 37.417 / 97.900 | 2.62x |
+| spot-091 | 19.733 / 49.871 | 15.43 / 15.81 | 197.00 / 204.66 | 11.730 / 56.371 | 4.81x |
+| spot-092 | 4.347 / 20.841 | 22.50 / 26.07 | 196.32 / 207.85 | 21.059 / 71.504 | 3.40x |
+| spot-008 | 7.543 / 20.798 | 24.41 / 25.08 | 209.53 / 214.03 | 39.012 / 94.160 | 2.41x |
+| spot-013 | 12.464 / 39.283 | 17.32 / 17.66 | 204.76 / 210.55 | 12.755 / 58.736 | 4.60x |
+| spot-089 | 22.309 / 53.451 | 19.76 / 14.87 | 198.14 / 203.44 | 24.886 / 91.110 | 3.66x |
+| spot-090 | 12.433 / 68.074 | 22.38 / 12.24 | 201.54 / 203.91 | 10.996 / 90.351 | 8.22x |
+
+Every measured scene remains brighter than retail, by 2.22x to 5.62x mean linear luminance.
+Every snow region is brighter, by 2.41x to 8.22x; 6 of the ten current snow-region means exceed 90 percent linear white.
+The very bright roof at spot 090 therefore remains a measured problem after selecting the correct story.
+Saturation errors have both signs, and spot 003's whole-scene hue is already close to retail, so a global warmer tint or desaturation is not established by these statistics.
+Whole-scene hue does not identify a pure snow material colour.
+The complete JSON retains real, same-build night and current-state scene and snow Y/S/H, pixel counts and luminance P95.
+
+### L1 Current residual lighting and exposure
+
+Current reach is 47 accepted spots.
+Snow, plaster, stone and timber remain over-bright in the daytime pairs, so the residual is broader than a snow-only texture or tint issue.
+The confirmed night-reference mismatch is removed from the current cause list.
+Ranked remaining candidates are:
+
+1. Native scene-radiance units and the material/direct-light accumulation response.
+   The `SCENE_TO_BEVY=4500` bridge remains inferred, and broad non-snow over-illumination makes this a shared candidate before any snow-specific compensation.
+2. Native ambient/probe, SSAO and shadow-colour response.
+   These can explain different local contrast and fill; the prior native audit still establishes sun-shadow attenuation only for directional slot 0, rather than justifying shadows on every extra slot.
+3. Metering reduction layout, reset/adaptation history and the retail brightness setting.
+   Existing formula audits remain evidence, while a fixed screenshot comparison cannot recover every real-game history or configuration input.
+4. Distance-specific atmosphere and instance inputs under F1.
+   These affect distant views but cannot alone explain the near snow patches at spots 002 and 003.
+
+These are investigation priorities, not proven replacement parameters.
+The varying scene and snow ratios do not supply a supported exposure offset, radiance multiplier or new tone curve.
+
+### M1 Current snow and surface response
+
+Current reach is 46 accepted spots.
+The separate snow measurements confirm the user's bright-snow observation on ground, exposed rock, roof tiles and the distant alley patch.
+Ranked remaining candidates are:
+
+1. L1's shared illumination and highlight compression erase fine dirty breakup when large snow regions approach display white.
+   Snow-region means near white make apparent coverage and saturation unreliable evidence for changing an authored snow mask or albedo.
+2. Native view-dependent BRDF, roughness/gloss and detail-normal response, including the generic handling of separate `M[Snow]`/`Snow_mb*` families.
+   The large roof/ground ratio variation warrants this isolation after the shared radiance path is understood.
+3. Layer coverage, mask/UV selection and snow-normal facets, plus local occlusion around tile gutters, stones and vegetation.
+   The data audits already establish authored textures, neutral tints and several correct facet switches; the images do not prove that every affected material has the same defect.
+4. Albedo/tint or grading compensation.
+   The known slightly blue ordinary snow albedo and neutral authored colour controls remain data, while these regional measurements do not establish a replacement tint, saturation value or fog multiplier.
+
+### External evidence
+
+The reference root contains `pairs-genichiro-defeated/poses.json`, direct full-resolution pair PNGs, individual `-ours.png` files, visibility records and the renewed `triage.json`.
+The external progress collection's `2026-10-15/story/` directory contains `measurements.json`, `measurements.md`, `snow-regions.json`, scene/snow masks, ten `-snow-review.jpg` overlays, the renewed `parity-review.json` and generated `parity-summary.md`.
+Its eight full-resolution `-real-night-genichiro-defeated.png` panels cover spots 002, 003, 008, 009, 025, 089, 091 and 092.
+`candidate-stories.jpg` retains the controlled real/Gyoubu-only/both-defeated sky comparison.
+`binary.json`, `source-at-capture.json`, replay metadata and per-part manifests retain capture provenance.
+Build/check logs remain under `target/alt-story/`, and raw installed-event audits remain ignored under `re/research/story-2026-10-15/audit/`.
+
+## Historical night-capture summary
 
 - 114 matched pairs at 106 spots were reviewed: 51 accepted pairs at 48 distinct spots, and 63 rejected pairs.
 - Accepted coverage is 29 Outskirts pairs at 28 spots and 22 Castle pairs at 20 spots; 43 of the 149 indexed spots have no rendered pair.
@@ -35,7 +178,7 @@ That ledger supersedes the incomplete inherited `pairs/triage.json`; the referen
 
 The matcher's first 101 pairs were rendered with the renderer build recorded in `poses.json` (`renderer_sha256` starting 994e411c); the Castle pairs added for coverage on 15 October used the build starting 361b6dec, which includes the in-progress fog work, so their fog and sky reading can differ from the earlier pairs.
 
-## Ranked work list
+## Historical night-capture work list
 
 Priority is accepted spot count multiplied by visual prominence (5 fills or transforms a major part of the frame, 4 conspicuous, 3 local, 2 individually small but widespread).
 This places area-wide causes before isolated defects; rows are overlapping evidence, so their counts must not be added.
@@ -64,7 +207,7 @@ Seen at 48 accepted spots.
 What is wrong:
 
 - Hard, bright directional illumination produces crisp shadows, so snow and white plaster blow out to blue-white while shadowed rock, wood and interiors crush to near black.
-- The real game is a soft overcast night: snow is light grey with texture, shadows are wide and open, and rock, wood and stone keep their warm brown and grey albedo.
+- The real game is soft overcast daytime: snow is light grey with texture, shadows are wide and open, and rock, wood and stone keep their warm brown and grey albedo.
 - Everything in ours sits in a cold blue cast; retail is neutral to slightly warm, with warm pools around fires and lamps (see E1).
 - Sheltered places are nearly unreadable in ours: the small shrine at spot-003 is black, the hut at spot-016, the great hall at spot-044 and the gatehouses at spot-053, spot-056 and spot-066 lose all interior detail.
 - Moonlight-like bright patches with sharp shadow edges appear on ground, roofs and walls (spot-025, spot-092, spot-094 tree shadow on the moat); retail has none at night.

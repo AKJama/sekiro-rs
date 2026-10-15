@@ -138,6 +138,36 @@ The existing cached probe handles are cleared on environment changes so a restar
 
 ## Story states and first visits
 
+### Reference progression audit, 2026-10-15
+
+The external reference collection is overcast daytime, not night.
+Two explicit Ashina presets encode the user's candidate boss progression without an hour override.
+
+| Candidate preset | Defeat flags | Event-820 clock result | Both maps: hour / environment / sub-ID | Sky | GPARAM |
+| --- | --- | --- | --- | --- | --- |
+| `gyoubu-defeated` | 9301 | No time-advancing boss; 9800 remains off | 6 / 1 / 0 | m900000 | Area's ordinary 0000 file |
+| `genichiro-defeated` | 9301, 9303 | One boss in 9303-9306 raises 9800 | 12 / 2 / 0 | m900010 | Area's ordinary 0000 file |
+
+Installed Outskirts event 11105800 instruction 14 sets Gyoubu flag 9301, while Castle event 11115800 instruction 16 sets Genichiro flag 9303.
+Common event 820 counts flags 9303-9306, requiring one for afternoon and three for evening; Gyoubu's 9301 is outside that range.
+Common event 100 resolves the resulting environment and m89 sky group.
+The installed-data regression `reference_progression_uses_installed_boss_and_clock_events` verifies both defeat writes and both maps' selected hour, environment, file, sub-ID and sky.
+These candidates therefore have different lighting, even though neither selects invasion, fire or Tomoe weather.
+
+The reference's reviewed travel menu at shot 25 offers Castle Tower Lookout, and its loading screen shows Attack Power 3.
+Together with the overcast afternoon skyline this supports `genichiro-defeated`; the user's approximate playtime alone does not prove or disprove a boss flag.
+The indexed clocks read 01:54:03.34 at spot 002, 01:58:40.95 at the Castle travel menu, and 02:24:17.94 at spot 092.
+Those are playtime readings, not the world lighting hour.
+This is the best-supported candidate rather than a recovered save snapshot.
+Unknown quest, idol, pickup and interaction flags remain unset, so gate pose and NPC state cannot independently certify every flag.
+Named progression presets seed offline map-story evaluation with those boss flags and their known persistent defeat writes.
+Gyoubu adds 11100800, 6801 and 6078 from event 11105800; Genichiro additionally adds 11110800, 6803 and the completed-cutscene guard 9403 from event 11115800.
+The regression checks every one of those positive writes against the installed event instructions.
+Retaining 9403 prevents a post-defeat load from replaying the completion sequence merely because the sparse fixture omitted its completion guard.
+Generic clock presets retain their existing first-visit object policy.
+Reference matching, exact-camera replay and canonical Ashina gates now use the post-Genichiro preset.
+Ordinary exploration and boss-arena defaults keep their earlier earliest-visit policy.
+
 The default is the earliest reachable lighting state, not a guessed average time of day.
 The reservoir is the opening prologue, where the installed event conditions use 8306 and the retained past-night flag 9810 without time-advancing boss flags.
 Hirata is a memory and event 100 selects variant 0 for the map independently of world progression.
@@ -1248,3 +1278,12 @@ Final validation and all per-view colour-fixture decisions are in [the sweep rev
 Both final six-view gates pass in 40.7/48.8 seconds with unchanged geometry; the data gate, 806 workspace tests, final focused packet/shader checks, all-target Clippy and formatting pass.
 The matched night controls expose interior detail but leave excessive blue/bright snow, absent flames/smoke/idol effects, uncertain fixture emissive fidelity and the documented stock-Bevy local-light response approximations.
 No L1 or E1 spot count is declared resolved from this limited camera sample.
+
+## Native point and spot light falloff, 2026-10-15
+
+Map point and spot lights (BTL and FXR 609) no longer use Bevy's inverse-square response in `map_material.wgsl`.
+The native deferred shaders use `saturate(1 - d^2/R^2) * max(t^2 + (1 - t^2) N.L, 0) / (1 + 0.7 d^2/R^2)` with `t = 1.4/(1.4 + d/R)`, and the spot adds `max(1 - (tan/tan_outer)^2, 0)`.
+`DiffColor.w` is `1/range` (builder `3892e0` offset 0x4c), so the light range already carried by Bevy is the only extra input.
+The full derivation, the specular term, the untraced inputs and the traced unit factor `NATIVE_LIGHT_BUFFER_SCALE` (1.0) with the separate `NATIVE_POINT_LIGHT_UNEXPLAINED_RESIDUAL` are in `docs/MAP-FX.md` ("Native point-light falloff and flame colour").
+FXR 609 diffuse colour is squared like the BTL colour, because both go through `3892e0`.
+`SEKIRO_MAP_POINT_LIGHTS_BEVY=1` restores the previous curve for matched-camera controls and `SEKIRO_MAP_POINT_LIGHT_SCALE` overrides the unit constant.

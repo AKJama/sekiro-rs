@@ -139,6 +139,12 @@ impl Options {
         } else {
             None
         };
+        if !reference_gate && let Some(gate) = &gate {
+            anyhow::ensure!(
+                gate["story"].as_str() == Some(super::story::REFERENCE_STORY),
+                "render fixture story must match the canonical reference preset"
+            );
+        }
         Ok(Self {
             map,
             spacing,

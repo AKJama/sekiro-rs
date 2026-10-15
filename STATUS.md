@@ -1,5 +1,31 @@
 # Status
 
+## Reference story and snow remeasurement (2026-10-15)
+
+Selected the named `genichiro-defeated` reference state from the installed defeat flags, common clock events and the retail overcast sky/travel-menu evidence.
+Gyoubu-only remains 06:00, while adding Genichiro flag 9303 raises 9800 and selects 12:00, environment 2, sub-ID 0 and sky m900010 in both Ashina areas.
+Known local defeat writes and the completed-cutscene guard 9403 also seed the offline story snapshot; unknown quest and interaction flags remain unset.
+Reference matching, exact-camera replay, report validation and canonical render gates now use this state, with guards against silently reusing night captures.
+Replayed all 51 previously accepted pairs into the external reference collection's `pairs-genichiro-defeated/`, preserving all camera/player/FOV fields.
+Renewed triage accepts 50 pairs at 47 spots and excludes the obstructed spot-046 camera; current leading counts are L1 47, M1 46 and F1 36 spots.
+All 430 original pair/pose file fingerprints remain unchanged.
+
+The six requested views plus snow-heavy spots 008, 013, 089 and 090 were measured with the existing scene masks and independently reviewed snow-region polygons.
+Snow-region mean linear luminance remains 2.41x to 8.22x retail, with mixed saturation errors and persistent excess brightness across non-snow surfaces.
+No tone, exposure, fog or material implementation was changed by this state job.
+The measured snapshot is f8e67514, including a refreshed capture after the parallel point-light material edit; later concurrent FX/fog changes are excluded from those measurements.
+The separately recorded final gate build 875ffe43 includes the later FX-light colour-packing edit present when built.
+Both canonical gates pass in 57.474 and 68.480 seconds after reviewed colour-only baselines, with identical geometry categories, collisions and visible-part sets relative to the progression controls.
+Geometry fixture cells, cameras, tolerances and the 120-second budget remain unchanged.
+
+Release workspace tests pass 817 tests with 25 existing ignores, the refreshed material build passes 137 game tests with three existing ignores, and the later FX build passes 11 focused tests.
+The final installed-data gate, workspace all-target release Clippy with warnings denied, formatting and six Python checks pass.
+An end-to-end CLI check confirms the default matcher rejects an existing night collection before starting a renderer.
+All Cargo work uses target/alt-story.
+Eight full-resolution real/night/new-state panels, ten snow-mask overlays, all measurements, camera checks, binary/source manifests, renewed triage and gate proofs are in the external progress collection's 2026-10-15/story directory.
+Details, remaining ranked L1/M1 candidates and per-view colour notes are in docs/VISUAL-PARITY.md, docs/LIGHTING.md and docs/MAP-COMPLETENESS-SWEEP.md.
+No staging, commit, worktree, publication, retail-game session, save edit or game-install write was performed.
+
 ## Post-chain colour audit (2026-10-15)
 
 Implemented the native pre-gamma hue/saturation/value/contrast matrix, accepted the authored ToneMap-Contrast name and restored the full authored spatial bloom pyramid.
