@@ -225,3 +225,52 @@ It is kept as the earlier by-eye total, rewritten relative to the corrected brid
 Retail, before and after for the ten spots are in [VISUAL-PARITY.md](VISUAL-PARITY.md#brightness-audit-and-unit-bridge-2026-10-15).
 The change lowers every scene by about 20 to 30 percent and leaves all geometry gate counts unchanged.
 Diagnostic switches for the ablations are `SEKIRO_ABLATE` (`nosun,nofill,nolocal,nospec,noamb,nogi`), `SEKIRO_SCALE_DIRECT` and `SEKIRO_SCALE_AMBIENT`; they default to the identity.
+
+## Brightness audit, second pass (2026-10-15)
+
+Each candidate from the first pass was traced in the executable and the shader disassembly, then tested with ablations at the matched cameras.
+Panels and measurements are in the external `2026-10-15/brightness-2/` collection.
+
+### Ambient occlusion (GXLightDeferredAO)
+
+- `GXRend_CompositeShadowMask` writes `x = SSAO.x`, `y = FC_Mult.y * G1.z + FC_Add.y`, `z = FC_Mult.z * G1.z + FC_Add.z`, `w = 1`.
+  The constants are read from the image (`2751b0` uploads two static float4): `FC_Mult = (0, 1, 0, 0)` and `FC_Add = (1, 0, 1, 1)`.
+  So `y = G1.z` with no remap, and `GXLightDeferredAO` multiplies the whole irradiance and its specular by `SSAO.x * G1.z`.
+- `G1.z` is the interpolated vertex `COLOR1.x` (the map G-buffer pixel shaders write `o1.z = COLOR1.x`).
+  In the extracted Outskirts models `_MAP_COLOR1` is (1, 0, 0, 1) on 99.7 percent of 10.8 million vertices; only 80 of 5484 primitives (the mountains) have values below 0.5.
+- The SSAO value is `AOScale * ao + AOOffset` with `ao = 1` on an unoccluded flat surface (worked through `ScreenSpaceAO2_WithNormal`).
+  `default.gparam` gives scale 1 and offset 0; the `m11_00_0200` and `m11_00_0220` post banks set `Ver2 AO Scale` 0.7 and `Sample Offset` 7.
+- `FC_SsaoWeight` comes from the LightSet fields, which are absent from every Ashina file, so the `default.gparam` value 0 gives `1 + 0 * (ssao - 1) = 1` for direct light.
+- Verdict: ambient occlusion is at most a factor 0.7 on open surfaces and cannot explain a 4 to 7 times excess.
+  It is not implemented as a pass: the eight-pair sample table and the rotation texture are CPU-generated and were not recovered, and an approximation would be an invented term.
+
+### FC_ShadowColor
+
+The sun factor is `(1 - K) + K * shadow` with `K = cbSceneParam.FC_ShadowColor.rgb` (byte 464).
+Every GPARAM that carries `Directional Shadow Color` authors the bytes `000000ff` (s_template, remobase, m95/m96, mapoverride); `default.gparam` and the Ashina files omit it.
+This changes only shadowed pixels, so it cannot change the brightness of an unshadowed lit surface.
+The constructor default of the omitted field was not located.
+
+### GI scale uploads
+
+The Env Map group (`Env Map: ColorScale`) exists only in m95 files with values 1.0 (and 1.5, 0.7, 0.5 in a few rows); Ashina files omit it.
+Per-region `Specular Color Scale` and `Diffuse Color Scale` are editor fields of the EnvMapRegion record.
+The executable default of those fields was not located, so the unit scale stays.
+
+### Shadow parameters
+
+`default.gparam` carries `ShadowParam`: cascade distances 10 / 30 / 70, far fade start 1000 and distance 10, blur count 0.
+Map files override two or three fields only, so these defaults apply to Ashina; the renderer falls back to 15 and 60 m instead.
+Not changed here: the semantics of the distances (cut points or lengths) are unproven.
+
+### Measurement that localises the excess: the LightSet row
+
+At spot-002 the sun-only snow value is x = (0.71, 0.94, 1.27), 4.3 times the arithmetic prediction for LightSet 0.
+It equals the prediction for the authored row: 133 of 166 Outskirts collisions carry LightSet 100, whose hour-12 sun is `(0.784, 0.882, 1.0)^2 * 1.0 = (0.61, 0.78, 1.0)` against `(0.139, 0.189, 0.26)` for row 0.
+Our pipeline reproduces the native arithmetic for either row (flat test of the tonemap chain: a constant scene 0.2 returns x = 0.28 = 0.2 * 1.41).
+Forcing row 0 (`SEKIRO_LIGHT_SET=0`, diagnostic, default unchanged) gives scene Y 1.06 to 1.54 times retail at 7 of 10 spots (before 2.2 to 5.5), and 2.33 times at spot-090.
+So the excess is the authored hour-12 row-100 sun and fill, not a unit or a missing occlusion factor.
+Why the retail frames do not show that sun is open: no engine element that attenuates it was found (cloud shadow groups are empty for Ashina; AO is at most 0.7).
+Candidates not yet traced: how the engine layers row 100 over row 0 and over `default.gparam`, and the scene-event gparam overrides (`SceneGparam EventID`, `s11_00_*` files).
+
+Other observations: at spot-091 a warm light on the roof survives `--no-local-lights` and all ablations and has no counterpart in the retail frame; retail snow coverage on roofs is thin (dark tile visible), which is a material issue separate from light.

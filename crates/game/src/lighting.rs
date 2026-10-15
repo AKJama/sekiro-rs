@@ -351,6 +351,11 @@ pub fn scale(name: &str) -> f32 {
         .unwrap_or(1.)
 }
 
+/// Diagnostic `SEKIRO_LIGHT_SET=<id>` forces one LightSet row for every collision (unset: authored).
+pub fn forced_light_set() -> Option<i32> {
+    std::env::var("SEKIRO_LIGHT_SET").ok()?.parse().ok()
+}
+
 /// Bevy lux per native scene unit, traced from the native accumulation arithmetic.
 ///
 /// The deferred accumulators store `Col * N.L` with no `1/pi` and no photometric unit

@@ -755,3 +755,24 @@ Examples: `pairs/spot-041-shot-141.png`, `pairs/spot-076-shot-255.png`.
 - S1/O2: which controller and leaf submeshes own the open gate state and closed seam, and which reference flags should a comparison fixture replay?
 - Coverage: Upper Tower interior matches remain rejected, so interior completeness and lighting cannot be certified there; improve specific guided cameras before adding defect counts.
 - Rejected spot-051 and spot-149 textures look smeared, but the cameras do not match; no texture defect or count is assigned from them.
+
+### Brightness second pass, 2026-10-15
+
+Direct light is not explained by AO, shadow colour or a GI scale (see [EXPOSURE.md](EXPOSURE.md#brightness-audit-second-pass-2026-10-15)).
+The excess follows the authored LightSet row 100 sun and fill; the diagnostic `SEKIRO_LIGHT_SET=0` brings scene Y to 1.06-1.54 times retail at seven spots.
+Retail / current HEAD (row 100) / forced row 0, scene Y % and snow Y %:
+
+| Spot | Scene Y | Snow Y |
+| --- | ---: | ---: |
+| spot-002 | 7.0 / 23.9 / 10.6 | 20.2 / 78.3 / 29.8 |
+| spot-003 | 7.5 / 34.4 / 11.6 | 19.2 / 82.4 / 29.3 |
+| spot-009 | 10.5 / 17.7 / 11.1 | 33.3 / 85.2 / 56.2 |
+| spot-025 | 10.6 / 18.6 / 11.7 | 37.4 / 88.1 / 69.2 |
+| spot-091 | 19.7 / 36.6 / 26.9 | 11.7 / 44.0 / 18.6 |
+| spot-092 | 4.3 / 14.3 / 4.8 | 21.1 / 57.8 / 28.3 |
+| spot-008 | 7.5 / 16.5 / 8.9 | 39.0 / 88.2 / 57.2 |
+| spot-013 | 12.5 / 28.6 / 13.7 | 12.8 / 46.1 / 18.3 |
+| spot-089 | 22.3 / 40.7 / 29.1 | 24.9 / 84.4 / 49.7 |
+| spot-090 | 12.4 / 58.3 / 29.0 | 11.0 / 82.3 / 43.6 |
+
+Saturation and hue are in the JSON in the external collection (`measurements.json`).

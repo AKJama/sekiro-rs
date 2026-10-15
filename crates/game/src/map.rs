@@ -1207,7 +1207,7 @@ fn pick_groups(
                 std::array::from_fn(|i| config.get(i).and_then(Value::as_i64).unwrap_or(-1) as i32);
             region.enter(config);
             if config[0] >= 0 {
-                lighting.light_set = config[0];
+                lighting.light_set = crate::lighting::forced_light_set().unwrap_or(config[0]);
             }
             if config[1] >= 0 {
                 fog.0 = config[1];
@@ -1257,7 +1257,7 @@ fn pick_groups(
     }
     groups.current = Some(pi);
     if light_set >= 0 && lighting.light_set != light_set {
-        lighting.light_set = light_set;
+        lighting.light_set = crate::lighting::forced_light_set().unwrap_or(light_set);
     }
     // A collision with no groups leaves the previous selection in force.
     if g.iter().any(|&w| w != 0) && groups.active != Some(g) {

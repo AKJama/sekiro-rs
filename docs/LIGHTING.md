@@ -1294,3 +1294,9 @@ The native deferred shaders use `saturate(1 - d^2/R^2) * max(t^2 + (1 - t^2) N.L
 The full derivation, the specular term, the untraced inputs and the traced unit factor `NATIVE_LIGHT_BUFFER_SCALE` (1.0) with the separate `NATIVE_POINT_LIGHT_UNEXPLAINED_RESIDUAL` are in `docs/MAP-FX.md` ("Native point-light falloff and flame colour").
 FXR 609 diffuse colour is squared like the BTL colour, because both go through `3892e0`.
 `SEKIRO_MAP_POINT_LIGHTS_BEVY=1` restores the previous curve for matched-camera controls and `SEKIRO_MAP_POINT_LIGHT_SCALE` overrides the unit constant.
+
+## Second brightness audit, 2026-10-15
+
+See [EXPOSURE.md](EXPOSURE.md#brightness-audit-second-pass-2026-10-15).
+Recovered here: the deferred AO multiplier is `SSAO.x * G1.z` with the identity remap (`FC_Mult = (0,1,0,0)`, `FC_Add = (1,0,1,1)`), baked occlusion is vertex `COLOR1.x` and is 1 on 99.7 percent of Outskirts vertices.
+`SEKIRO_LIGHT_SET=<id>` is a diagnostic that forces one LightSet row; unset keeps the collision's authored row.
