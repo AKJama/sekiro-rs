@@ -3,7 +3,8 @@
 //!
 //! Layout knowledge from SoulsFormatsNEXT `MSBS` (ModelParam, PartsParam), reimplemented. Only
 //! placed-part visibility/loading data and MapOffset provenance are retained.
-//! Other events and routes are skipped over.
+//! Region identity, shapes and native SFX settings are also retained for map effects.
+//! Other event payloads and routes are skipped over.
 //!
 //! Part transforms are in FromSoftware's left-handed space: position in metres, rotation in
 //! degrees about X, Y and Z, composed like FLVER nodes (`T * Ry * Rz * Rx * S` in
@@ -268,6 +269,78 @@ pub struct Msb {
     pub parts: Vec<Part>,
     pub env_regions: Vec<EnvRegion>,
     pub map_offsets: Vec<MapOffset>,
+    pub regions: Vec<MapRegion>,
+}
+
+/// MSBS region identity and effect placement, in native map space.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MapRegion {
+    pub name: String,
+    pub kind: u32,
+    pub entity_id: i32,
+    pub activation_part: i32,
+    pub position: [f32; 3],
+    pub rotation: [f32; 3],
+    pub shape: u32,
+    pub dimensions: Vec<f32>,
+    pub children: Vec<i32>,
+    pub effect: Option<i32>,
+    pub start_disabled: bool,
+}
+
+fn read_map_region(data: &[u8], start: usize) -> Result<MapRegion> {
+    let mut r = Reader::at(data, start);
+    let name = utf16z(data, start + r.offset64()?)?;
+    let kind = r.u32()?;
+    r.skip(4);
+    let shape = r.u32()?;
+    let position = r.vec3()?;
+    let rotation = r.vec3()?;
+    let shape_offset = Reader::at(data, start + 0x48).offset64()?;
+    let base_offset = Reader::at(data, start + 0x50).offset64()?;
+    let type_offset = Reader::at(data, start + 0x58).offset64()?;
+    let mut base = Reader::at(data, start + base_offset);
+    let activation_part = base.i32()?;
+    let entity_id = base.i32()?;
+    let mut dimensions = Vec::new();
+    let mut children = Vec::new();
+    if shape_offset != 0 {
+        let mut s = Reader::at(data, start + shape_offset);
+        if shape == 6 {
+            for _ in 0..8 {
+                children.push(s.i32()?);
+                s.skip(4);
+            }
+        } else {
+            for _ in 0..match shape {
+                1 | 2 => 1,
+                3 | 4 => 2,
+                5 => 3,
+                _ => 0,
+            } {
+                dimensions.push(s.f32()?);
+            }
+        }
+    }
+    let effect = if matches!(kind, 5 | 6) {
+        Some(Reader::at(data, start + type_offset).i32()?)
+    } else {
+        None
+    };
+    let start_disabled = kind == 5 && Reader::at(data, start + type_offset + 20).i32()? != 0;
+    Ok(MapRegion {
+        name,
+        kind,
+        entity_id,
+        activation_part,
+        position,
+        rotation,
+        shape,
+        dimensions,
+        children,
+        effect,
+        start_disabled,
+    })
 }
 
 /// MapOffset event provenance for ancillary resources.
@@ -364,6 +437,7 @@ pub fn parse(data: &[u8]) -> Result<Msb> {
             }
             "POINT_PARAM_ST" => {
                 for &e in &entries {
+                    msb.regions.push(read_map_region(data, e)?);
                     if let Some(region) = read_env_region(data, e)? {
                         msb.env_regions.push(region);
                     }

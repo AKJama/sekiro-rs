@@ -43,6 +43,7 @@ mod hirata_hall_arena;
 mod isshin_ashina;
 mod lightning;
 mod map_collision;
+mod map_effects;
 mod mibu_bridge;
 mod mobility;
 mod owl;

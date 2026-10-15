@@ -1,5 +1,38 @@
 # Status
 
+## Authored map FX - visual parity E1/E2 (2026-10-15)
+
+Outskirts and Castle now place their native MSB SFX, ModelSfxParam dummy attachments, event-created object FX and registered-idol TAE through the existing FXR player in the shared map loader.
+The local 599-row inventory lists 312 placements / 240 story-enabled in Outskirts and 287 / 223 in Castle, with positions, camera-relative classification and event provenance.
+Native weather action 10000 draws falling flakes, 607 draws normal-map heat distortion and 609 supplies bounded effect lights; effects beyond 120 metres sleep, and meshless activation helpers retain their authored residency gate.
+The inventory and native event/TAE/FXR evidence are under cache/map-fx-audit/2026-10-15-alt-fx/, with implementation and limits in docs/MAP-FX.md.
+The six requested runtime-off/on PNGs are under target/alt-fx/progress/, with an additional spot-053 review preserving its pre-Gyoubu idol-state mismatch.
+Both final six-view gates pass in 75.5/88.1 seconds, preserving every off/on geometry metric, selected collision and sorted visible-part set at totals 0/493/0 and 1933/4885/0.
+Only Outskirts views 0 and 3 gain reviewed grey-fixture updates; every colour shift and Castle view 4's single encoded depth-pixel step are documented in docs/MAP-COMPLETENESS-SWEEP.md.
+The release workspace run reports 811 passed and 24 existing ignores, including 126 game unit tests and six integration tests; the final dedicated data gate exits zero, and release all-target Clippy with denied warnings plus formatting pass under target/alt-fx with six jobs.
+Stationary 1600 by 900 night frame-snapshot medians rise from 10.724 to 16.385 ms at the battlefield fire view and 3.551 to 7.854 ms in the Castle courtyard, with nearly unchanged opaque GPU time.
+The bounded CPU particle fallback remains a measurable cost; native GPU scheduling, exact bonfire idle selection, soft-depth and particle-lighting fidelity, unsupported model/wind/spot-light appearances and live quest/arena-phase FX control remain open.
+No commit, publication, retail-game run, save access, game-install write or reference-image modification occurred, and map.rs receives only one install line from this job.
+
+## Owning-block neighbour textures (2026-10-15)
+
+Additional map-layer samplers now resolve from their owning GLB and block's existing models/tex directory, preserving the original material cache keys and exporter layout.
+The frozen preceding build reproduces 459/429 distinct missing DDS requests for Outskirts/Castle primary; the corrected controls and both final default gates have zero failed texture requests across all six resident blocks.
+The capture audit counts neighbour materials and mesh instances even when normally hidden or occluded, rejects failed declared requests, waits for GPU image uploads before every phase and requires equal normal/all-visible material identities and readiness.
+Shared-material readiness checks are deduplicated per poll to retain the unchanged 120-second gate budget.
+Final default six-view gates pass in 67.5/67.3 seconds with Outskirts void/depth-gap/untextured 0/493/0 and Castle 1933/4885/0; all geometry counts, selected collisions and visible-part sets equal the before controls.
+One Castle diagnostic-depth pixel has a one-code repeat rounding difference without changing any geometry metric, and every collision-depth pixel is identical.
+GPU-ready and triple-settling controls prove that the larger normal/all colour differences follow corrected rendering of existing alternate neighbour scenery, with no material re-keying or unequal texture readiness.
+Only seven reviewed texture/colour fixture cells change, with every view's decision and the unchanged tolerances documented in MAP-COMPLETENESS-SWEEP.md.
+The release game suite passes 126 unit and six integration tests with two existing ignores, including the normal data gate; the final focused hidden-neighbour/shared-material audit checks also pass.
+Release workspace all-target Clippy with denied warnings and formatting pass under target/alt-tr with six jobs.
+Read-only retail-pair review and matched night PNGs are retained as target/alt-tr/progress/routing-outskirts-before.png, routing-outskirts-after.png, routing-castle-before.png and routing-castle-after.png.
+Lighting/material tone, excessive blue/bright snow and incomplete distant Castle appearance remain fidelity work, and the existing spatial normal/all-visible differences are not claimed as repaired streaming or retail parity.
+Concurrent FX work is preserved; this job makes no map.rs edit and only adds a missing mutable binding needed to compile the concurrent FX mesh update.
+The final gate executable is frozen as target/alt-tr/routing-final.exe with its hash in the sweep review; routing-isolation controls disable the concurrent map FX while final default gates include the compiled FX integration.
+The shared-plan read/claim could not be completed because the configured GitHub proxy was unavailable.
+No commit, remote mutation, retail-game run, save/install write, cache/re change, reference-image write or protected-log write occurred.
+
 2026-10-15: Authored BTL type, ancillary MapOffset, squared diffuse colour, spot rotation/cone and shadow flags now drive clustered point/spot lights for ready map blocks.
 Outskirts has 16 base-bank points and Castle 32 points plus two spots; the six-block warm catalogue retains 246 records without activating dormant neighbours.
 All four LightSet diffuse/specular slots now contribute with recovered constructor directions, camera-relative transforms and sharpness, missing banks/rows log errors, and render-probe installation is idempotent.

@@ -112,6 +112,30 @@ pub struct WorldState {
     pub started: usize,
     pub ended: usize,
     pub ticks: usize,
+    /// Ordered, parameter-resolved map and object FX commands, including deletes.
+    pub effects: Vec<EffectWrite>,
+    pub effect_controls: Vec<EffectWrite>,
+    pub bonfires: BTreeMap<i32, Bonfire>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Bonfire {
+    pub flag: i32,
+    pub kindling: i32,
+    pub event: i64,
+    pub slot: i32,
+    pub instruction: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EffectWrite {
+    pub event: i64,
+    pub slot: i32,
+    pub instruction: usize,
+    pub command: i32,
+    pub entity: i32,
+    pub dummy: i32,
+    pub effect: i32,
 }
 
 impl WorldState {
@@ -227,11 +251,34 @@ impl Interpreter {
                 ));
             }
         }
+        let code = ev.resolve(args);
+        for (instruction, ins) in code
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| i.bank == 2006 && matches!(i.id, 1..=5))
+        {
+            let i = |offset| ins.i32_at(offset).unwrap_or(-1);
+            self.state.effect_controls.push(EffectWrite {
+                event,
+                slot,
+                instruction,
+                command: ins.id,
+                entity: i(if ins.id == 3 { 4 } else { 0 }),
+                dummy: if ins.id == 4 { i(4) } else { -1 },
+                effect: if ins.id == 4 {
+                    i(8)
+                } else if ins.id == 3 {
+                    i(12)
+                } else {
+                    -1
+                },
+            });
+        }
         self.instances.push(Instance {
             file,
             event,
             slot,
-            code: ev.resolve(args),
+            code,
             pc: 0,
             groups: BTreeMap::new(),
             finished: BTreeMap::new(),
@@ -568,6 +615,36 @@ impl Interpreter {
                 (2005, 7) => {
                     self.state.scene.animations.insert(i(0), (i(4), false));
                 }
+                (2006, 1..=5) => {
+                    self.state.effects.push(EffectWrite {
+                        event: r.event,
+                        slot: r.slot,
+                        instruction: r.pc,
+                        command: ins.id,
+                        entity: i(if ins.id == 3 { 4 } else { 0 }),
+                        dummy: if ins.id == 4 { i(4) } else { -1 },
+                        effect: if ins.id == 4 {
+                            i(8)
+                        } else if ins.id == 3 {
+                            i(12)
+                        } else {
+                            -1
+                        },
+                    });
+                    self.state.scene.instruction(&ins, &a);
+                }
+                (2009, 3) => {
+                    self.state.bonfires.insert(
+                        i(4),
+                        Bonfire {
+                            flag: i(0),
+                            kindling: i(16),
+                            event: r.event,
+                            slot: r.slot,
+                            instruction: r.pc,
+                        },
+                    );
+                }
                 (2005, 3) | (2012, 1) | (2011, 1) | (2004, 5) => {
                     let kind = match ins.bank {
                         2005 => PartKind::Object,
@@ -651,6 +728,9 @@ pub fn evaluate_files(
         started: 0,
         ended: 0,
         ticks: 720,
+        effects: Vec::new(),
+        effect_controls: Vec::new(),
+        bonfires: BTreeMap::new(),
     };
     let mut vm = Interpreter {
         files,

@@ -15,6 +15,9 @@ use std::collections::BTreeMap;
 #[path = "map_pose.rs"]
 mod pose;
 
+#[path = "map_sweep_materials.rs"]
+mod material_audit;
+
 #[derive(Clone, Asset, TypePath, AsBindGroup)]
 struct Diagnostic {
     #[uniform(100)]
@@ -317,7 +320,9 @@ struct Sweep {
     next_loading_log: Instant,
     normal_manifest: Value,
     normal_fog: Option<crate::lighting::fog::GameFog>,
+    normal_materials: Value,
     stable_pipelines: usize,
+    last_pipeline_frame: u64,
 }
 
 pub(crate) fn run(args: &[String]) -> Result<()> {
@@ -570,7 +575,9 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
             next_loading_log: Instant::now() + Duration::from_secs(15),
             normal_manifest: Value::Null,
             normal_fog: None,
+            normal_materials: Value::Null,
             stable_pipelines: 0,
+            last_pipeline_frame: 0,
         })
         .add_systems(First, apply_pending_view.after(bevy::time::TimeSystems))
         .add_systems(
@@ -842,17 +849,35 @@ fn tick(world: &mut World) {
         world.insert_resource(sweep);
         return;
     }
+    // Check all resident blocks before every phase, not just the first normal view.
+    let sources: Vec<_> = world
+        .query_filtered::<Entity, With<Mesh3d>>()
+        .iter(world)
+        .filter(|e| map_root(world, *e))
+        .collect();
+    if super::ready::textures_pending(world, &sources) {
+        if Instant::now() >= sweep.next_loading_log {
+            println!("sweep loading: material textures pending");
+            sweep.next_loading_log = Instant::now() + Duration::from_secs(15);
+        }
+        sweep.stable_pipelines = 0;
+        world.insert_resource(sweep);
+        return;
+    }
     if !sweep.initialized {
-        let sources: Vec<_> = world
-            .query_filtered::<Entity, With<Mesh3d>>()
-            .iter(world)
-            .filter(|e| map_root(world, *e))
-            .collect();
-        if super::ready::textures_pending(world, &sources) {
-            if Instant::now() >= sweep.next_loading_log {
-                println!("sweep loading: material textures pending");
-                sweep.next_loading_log = Instant::now() + Duration::from_secs(15);
-            }
+        let audit = material_audit::snapshot(world);
+        if let Err(error) = std::fs::write(
+            sweep.options.out.join("texture-audit.json"),
+            serde_json::to_vec_pretty(&audit).unwrap(),
+        ) {
+            error!("sweep texture audit: {error}");
+            world.write_message(AppExit::error());
+        }
+        if sweep.options.gate.is_some() && material_audit::failed_requests(&audit) > 0 {
+            error!(
+                "render gate aborted: declared textures failed in the connected neighbourhood; see texture-audit.json"
+            );
+            world.write_message(AppExit::error());
             world.insert_resource(sweep);
             return;
         }
@@ -931,6 +956,8 @@ fn tick(world: &mut World) {
             ) {
                 Ok(mut report) => {
                     report["visibility"] = std::mem::take(&mut sweep.normal_manifest);
+                    report["material_blocks"] = material_audit::summary(&sweep.normal_materials);
+                    report["normal_all_materials_equal"] = json!(true);
                     let score = report["score"].as_u64().unwrap();
                     sweep.reports.push(report);
                     // Retain progress so interrupted long runs still have useful measurements.
@@ -992,12 +1019,27 @@ fn tick(world: &mut World) {
         if sweep.countdown > 0 {
             sweep.countdown -= 1;
         } else if world.resource::<Pipelines>().status().pending == 0 {
-            sweep.stable_pipelines += 1;
+            let frame = world.resource::<Pipelines>().status().frame;
+            if frame != sweep.last_pipeline_frame {
+                sweep.stable_pipelines += 1;
+            }
+            sweep.last_pipeline_frame = frame;
             if sweep.stable_pipelines < 3 {
                 world.insert_resource(sweep);
                 return;
             }
             if sweep.phase < 2 {
+                let materials = material_audit::snapshot(world);
+                if sweep.phase == 0 {
+                    sweep.normal_materials = materials;
+                } else if materials != sweep.normal_materials {
+                    error!(
+                        "sweep normal/all-visible material bindings or texture readiness differ"
+                    );
+                    world.write_message(AppExit::error());
+                    world.insert_resource(sweep);
+                    return;
+                }
                 let fog = world
                     .query_filtered::<Option<&crate::lighting::fog::GameFog>, With<SweepCamera>>()
                     .single(world)

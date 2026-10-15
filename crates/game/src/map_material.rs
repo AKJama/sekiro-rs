@@ -21,12 +21,27 @@ mod camera_fade;
 
 type LayeredMaterial = ExtendedMaterial<StandardMaterial, MapLayers>;
 
+#[derive(Component)]
+pub(super) struct MaterialOrigin(pub bevy::asset::AssetPath<'static>);
+
 /// Retain the native base texture and alpha test in the sweep diagnostic pass.
 pub(super) struct SweepMaterial {
     pub key: bevy::asset::UntypedAssetId,
     pub base: StandardMaterial,
     pub missing: bool,
     pub pending: bool,
+    pub textures: Vec<Handle<Image>>,
+}
+
+pub(super) fn sweep_key(world: &World, entity: Entity) -> Option<bevy::asset::UntypedAssetId> {
+    world
+        .get::<MeshMaterial3d<LayeredMaterial>>(entity)
+        .map(|h| h.0.id().untyped())
+        .or_else(|| {
+            world
+                .get::<MeshMaterial3d<StandardMaterial>>(entity)
+                .map(|h| h.0.id().untyped())
+        })
 }
 
 pub(super) fn sweep_base(world: &World, entity: Entity) -> Option<SweepMaterial> {
@@ -79,11 +94,15 @@ pub(super) fn sweep_base(world: &World, entity: Entity) -> Option<SweepMaterial>
         .map(|images| images.0.lock().unwrap());
     let on_gpu = |h: &Handle<Image>| uploaded.as_ref().is_some_and(|ids| ids.contains(&h.id()));
     let pending = textures.iter().any(|h| {
-        images.get(*h).is_none()
-            && !on_gpu(h)
+        !on_gpu(h)
+            && (uploaded.is_some() || images.get(*h).is_none())
             && matches!(
                 assets.get_load_state(h.id()),
-                None | Some(bevy::asset::LoadState::Loading | bevy::asset::LoadState::NotLoaded)
+                None | Some(
+                    bevy::asset::LoadState::Loading
+                        | bevy::asset::LoadState::NotLoaded
+                        | bevy::asset::LoadState::Loaded
+                )
             )
     });
     // A successfully uploaded RENDER_WORLD-only image may retire its CPU asset.
@@ -99,6 +118,7 @@ pub(super) fn sweep_base(world: &World, entity: Entity) -> Option<SweepMaterial>
         base: base.clone(),
         missing: base.base_color_texture.is_none() || missing,
         pending,
+        textures: textures.into_iter().cloned().collect(),
     })
 }
 
@@ -287,6 +307,15 @@ mod tests {
             });
         let entity = app.world_mut().spawn(MeshMaterial3d(material)).id();
         assert!(sweep_base(app.world(), entity).unwrap().pending);
+        // CPU availability alone must not allow either colour capture to start.
+        app.world_mut()
+            .resource_mut::<Assets<Image>>()
+            .insert(image.id(), Image::default())
+            .unwrap();
+        assert!(sweep_base(app.world(), entity).unwrap().pending);
+        app.world_mut()
+            .resource_mut::<Assets<Image>>()
+            .remove(image.id());
         app.world()
             .resource::<SweepImages>()
             .0
@@ -320,6 +349,7 @@ mod tests {
             .insert_resource(bevy::light::GlobalAmbientLight::default())
             .insert_resource(LayerSettings {
                 prefix: String::new(),
+                primary_texture_prefix: false,
                 enabled: true,
                 debug: false,
                 materials: HashMap::new(),
@@ -531,6 +561,7 @@ fn shader_path(name: &str) -> ShaderRef {
 #[derive(Resource)]
 struct LayerSettings {
     prefix: String,
+    primary_texture_prefix: bool,
     enabled: bool,
     debug: bool,
     materials: HashMap<AssetId<StandardMaterial>, Handle<LayeredMaterial>>,
@@ -578,6 +609,7 @@ pub(super) fn install(app: &mut App, prefix: &str, dir: &std::path::Path, args: 
     app.add_plugins(MaterialPlugin::<LayeredMaterial>::default())
         .insert_resource(LayerSettings {
             prefix: prefix.to_owned(),
+            primary_texture_prefix: args.iter().any(|s| s == "--test-primary-material-prefix"),
             enabled: !args.iter().any(|s| s == "--no-layers"),
             debug: args.iter().any(|s| s == "--show-blend"),
             materials: HashMap::new(),
@@ -646,8 +678,6 @@ fn replace_materials(
     environment: MapEnvironment,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("replace_materials");
-    // Experimental ablation only. The render gate rejects this override.
-    let route_materials = std::env::args().any(|a| a == "--test-material-routing");
     let MapEnvironment {
         lighting,
         ambient,
@@ -698,18 +728,14 @@ fn replace_materials(
                     return None;
                 }
                 let uri = data[key]["uri"].as_str()?;
-                // Exported paths are relative to models/*.glb, rooted in this map only.
+                // Exported paths are relative to the owning GLB, including neighbours.
                 if !uri.starts_with("tex/") || uri.contains("..") {
                     return None;
                 }
-                let loader = assets.load_builder();
-                let loader = if route_materials {
-                    loader.override_unapproved()
-                } else {
-                    loader
-                };
                 Some(
-                    loader
+                    assets
+                        .load_builder()
+                        .override_unapproved()
                         .with_settings(move |s: &mut ImageLoaderSettings| {
                             s.is_srgb = srgb;
                             s.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
@@ -720,7 +746,7 @@ fn replace_materials(
                             });
                         })
                         .load(
-                            route_materials
+                            (!settings.primary_texture_prefix)
                                 .then(|| {
                                     super::world::material_texture_path(&assets, &original.0, uri)
                                 })
@@ -818,6 +844,11 @@ fn replace_materials(
             .entity(entity)
             .remove::<MeshMaterial3d<StandardMaterial>>()
             .insert(MeshMaterial3d(handle));
+        if let Some(path) = assets.get_path(original.0.id()) {
+            commands
+                .entity(entity)
+                .insert(MaterialOrigin(path.into_owned()));
+        }
         if actor_surface {
             commands
                 .entity(entity)

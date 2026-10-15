@@ -45,6 +45,7 @@ mod lighting_selection;
 mod lightning_fx;
 mod map;
 mod map_fog_surface;
+mod map_fx;
 mod map_grass;
 mod menu;
 mod perf_log;

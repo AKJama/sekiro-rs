@@ -34,10 +34,13 @@ pub(crate) fn material_texture_path(
     material: &Handle<StandardMaterial>,
     uri: &str,
 ) -> Option<String> {
+    relative_material_texture(&assets.get_path(material.id())?, uri)
+}
+
+fn relative_material_texture(path: &bevy::asset::AssetPath<'_>, uri: &str) -> Option<String> {
     if !uri.starts_with("tex/") || uri.contains("..") {
         return None;
     }
-    let path = assets.get_path(material.id())?;
     path.without_label()
         .resolve_embed_str(uri)
         .ok()
@@ -1027,6 +1030,22 @@ struct HierarchyReported;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn material_layers_resolve_from_the_owning_model_and_preserve_asset_source() {
+        for owner in ["m11_00_00_00", "m11_01_00_00", "m13_00_00_00"] {
+            for source in ["", "cache://"] {
+                let model = format!("{source}maps/{owner}/models/ground.glb#Material0");
+                let path = bevy::asset::AssetPath::parse(&model);
+                assert_eq!(
+                    super::relative_material_texture(&path, "tex/ground.dds")
+                        .map(|p| p.replace('\\', "/")),
+                    Some(format!("{source}maps/{owner}/models/tex/ground.dds"))
+                );
+                assert!(super::relative_material_texture(&path, "tex/../other.dds").is_none());
+            }
+        }
+    }
+
     #[test]
     fn fixed_capture_keeps_offscreen_shadow_casters_and_crossing_bounds() {
         use bevy::camera::CameraProjection;

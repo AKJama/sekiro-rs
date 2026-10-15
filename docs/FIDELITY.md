@@ -46,8 +46,8 @@ See [GENICHIRO.md](GENICHIRO.md#hand-over-cinematic-placeholder-2026-10-11) for 
 
 The ten-map baseline and reviewed evidence are in [MAP-BASELINE.md](MAP-BASELINE.md).
 Map transforms, base textures, collision and GPARAM sun/ambient/fog load from the installed data.
-Connected-block layer samplers still use the primary map's texture prefix in production.
-The opt-in --test-material-routing control resolves each sampler from its own GLB, but is not enabled by default because the fixed-view per-metric gate records a pop-in increase despite fewer untextured pixels.
+Connected-block layer samplers resolve from their owning GLB and exported block texture directory.
+The render gate audits failed declared requests across resident neighbours independently of frontmost pixels and verifies equal material bindings and GPU readiness through each normal/all-visible pair.
 The numeric gates and paired evidence are documented in [MAP-COMPLETENESS.md](MAP-COMPLETENESS.md#gates-and-outskirts-regression).
 M[Multiple] and M[MultipleGround] now render their static-switch layers, RGB mask selectors, tint, detail normals, wetness and authored snow direction.
 Remaining approximations include ground ripples, variant-18 metal masks, native AO, optional HDR-colour gamma conversion and texture-tiling semantics; other material families retain their existing paths.
@@ -136,3 +136,12 @@ BTL type decoding, ancillary MapOffset placement, connected-bank loading and all
 The stock Bevy local-light bridge still approximates native attenuation, source radius, spot aspect/edge sharpness, independent BTL specular response and flicker, and automatic nonzero BTL bank selection is untraced.
 Native material/G-buffer gloss, Fresnel and SSAO routing also remain approximate in the recovered four-slot compositor.
 Map FX emitters and their flame, smoke and transient light contributions remain a separate E1 task.
+
+## Native map effects, 15 October 2026
+
+Ashina map effects now use MSB SFX regions, ModelSfxParam dummy attachments, event-created object FX and registered-idol TAE through the shared FXR player.
+Native weather action 10000, distortion 607 and effect point lights 609 are implemented with bounded pools and sleeping distant effects.
+The two six-view gates retain every runtime-off geometry metric and visible-part set; the two reviewed grey-fixture updates affect colour only.
+The GPU emission scheduler/shape details, native bonfire idle selection, particle lighting, four-sample soft-depth limitation and unsupported model/wind/spot-light appearances remain explicit approximations in MAP-FX.md.
+Ongoing quest and arena-phase effect control beyond the first-visit snapshot remains open.
+The data-fed presentation closes the complete absence of map snow, fire/smoke and idol effects in exploration, but does not establish full E1/E2 retail pixel parity or repair emissive-material fidelity.

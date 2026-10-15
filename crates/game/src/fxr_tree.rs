@@ -294,6 +294,31 @@ impl FxrLib {
         self.get(id).is_some()
     }
 
+    pub fn uses_action(&mut self, id: i64, slot: &str, action: i64) -> bool {
+        fn walk(lib: &mut FxrLib, node: &Value, slot: &str, action: i64, depth: usize) -> bool {
+            if depth > 12 {
+                return false;
+            }
+            if node["configs"]
+                .as_array()
+                .is_some_and(|cs| cs.iter().any(|c| c[slot]["type"].as_i64() == Some(action)))
+            {
+                return true;
+            }
+            if let Some(id) = node["sfx"].as_i64()
+                && let Some(tree) = lib.get(id)
+                && walk(lib, &tree["root"], slot, action, depth + 1)
+            {
+                return true;
+            }
+            node["nodes"]
+                .as_array()
+                .is_some_and(|cs| cs.iter().any(|n| walk(lib, n, slot, action, depth + 1)))
+        }
+        self.get(id)
+            .is_some_and(|tree| walk(self, &tree["root"], slot, action, 0))
+    }
+
     /// Whether the effect (or an effect it references) draws a model (appearance 605), which the
     /// player does not draw yet: a stand-in for the model's own subject should stay.
     pub fn has_model(&mut self, id: i64) -> bool {
@@ -564,6 +589,7 @@ fn emit_point(c: &Value, t: f32, rnd: &mut Rnd) -> (Vec3, Vec3) {
 
 /// Advances one node (and its children) by `dt`; `parent` is the parent's world transform.
 pub fn step_node(n: &mut NodeInst, lib: &mut FxrLib, parent: Transform, dt: f32, stop: bool) {
+    let previous = n.world.translation;
     n.world = match n.detached {
         Some(w) => w * n.local,
         None => parent * n.local,
@@ -578,6 +604,12 @@ pub fn step_node(n: &mut NodeInst, lib: &mut FxrLib, parent: Transform, dt: f32,
     let active_t = n.time - n.delay;
     let alive = !stop && (n.duration < 0.0 || active_t < n.duration);
     if let Some(c) = n.cfg.clone() {
+        if c["appearance"]["type"].as_i64() == Some(10000) {
+            weather(n, &c["appearance"], dt, alive, previous);
+            n.time += dt;
+            n.finished = !alive && n.particles.is_empty();
+            return;
+        }
         let mv = &c["nodeMovement"];
         let mut rnd = Rnd {
             seed: n.seed ^ 0xabc,
@@ -660,6 +692,63 @@ pub fn step_node(n: &mut NodeInst, lib: &mut FxrLib, parent: Transform, dt: f32,
         && n.particles.is_empty()
         && n.children.is_empty()
         && (stop || n.duration >= 0.0 && n.time - n.delay >= n.duration || n.cfg.is_none());
+}
+
+/// CPU fallback for GPUStandardParticle. Integer durations/intervals use the FXR 30 Hz clock.
+fn weather(n: &mut NodeInst, a: &Value, dt: f32, alive: bool, previous: Vec3) {
+    for p in &mut n.particles {
+        let mut rnd = Rnd { seed: p.seed, k: 0 };
+        let follow = scalar(a, "particleFollowFactor", p.age, &mut rnd, 0.);
+        if n.time > 0. {
+            p.pos += (n.world.translation - previous) * follow;
+        }
+        p.age += dt;
+        p.pos += p.dir * p.speed * dt;
+    }
+    n.particles.retain(|p| p.age < p.life);
+    let mut rnd = Rnd {
+        seed: n.seed.wrapping_add(n.emissions as u32),
+        k: 0,
+    };
+    let mut guard = 0;
+    while alive && n.emit_next <= n.time && guard < 4 {
+        let count = int(a, "emissionParticleCount", 0).max(0) as usize;
+        let size = game_vec(prop(a.get("emitterSize"), 0., &mut rnd, [1.; 4]));
+        let rotation = game_rot(prop(a.get("emitterRotation"), 0., &mut rnd, [0.; 4]));
+        for i in 0..count.min(2048usize.saturating_sub(n.particles.len())) {
+            let seed = n
+                .seed
+                .wrapping_add((n.emissions as u32).wrapping_mul(4001))
+                .wrapping_add(i as u32);
+            let mut r = Rnd { seed, k: 0 };
+            let spread = Vec3::new(r.next() - 0.5, r.next() - 0.5, r.next() - 0.5) * size;
+            let vmin = game_vec(prop(a.get("particleSpeedMin"), 0., &mut r, [0.; 4]));
+            let vmax = game_vec(prop(a.get("particleSpeedMax"), 0., &mut r, [0.; 4]));
+            let velocity = game_vec(prop(a.get("particleSpeed"), 0., &mut r, [0.; 4]))
+                + vmin
+                + (vmax - vmin) * Vec3::new(r.next(), r.next(), r.next());
+            let life = int(a, "particleDuration", 30).max(1) as f32 / 30.
+                * scalar(a, "particleDurationMultiplier", 0., &mut r, 1.);
+            n.particles.push(Particle {
+                pos: n.world.translation + rotation * spread,
+                dir: velocity.normalize_or(Vec3::NEG_Y),
+                speed: velocity.length(),
+                age: 0.,
+                life,
+                emit_t: n.time,
+                seed,
+                attached: false,
+                trail: Vec::new(),
+                next_seg: 0.,
+                dead: false,
+                ended: false,
+            });
+        }
+        n.emissions += 1;
+        let interval = int(a, "emissionIntervalMin", 0).max(1) as f32 / 30.;
+        n.emit_next += interval;
+        guard += 1;
+    }
 }
 
 fn emit(n: &mut NodeInst, c: &Arc<Value>, active_t: f32, rnd: &mut Rnd, lib: &mut FxrLib) {
@@ -1070,5 +1159,36 @@ mod tests {
         }
         assert!(node.particles.is_empty());
         assert!(node.finished);
+    }
+
+    #[test]
+    fn weather_falls_in_world_space_follows_camera_and_expires() {
+        let tree = json!({"type":2200,"configs":[{"nodeAttributes":{"duration":-1.},"appearance":{
+            "type":10000,"emissionParticleCount":2,"emitterSize":[2.,2.,2.],"particleDuration":30,
+            "particleSpeed":[0.,-1.,0.],"particleFollowFactor":0.5}}],"nodes":[]});
+        let mut lib = FxrLib::default();
+        let mut n = make_node(&mut lib, &tree, 7, 0).unwrap();
+        step_node(&mut n, &mut lib, Transform::IDENTITY, 1. / 60., false);
+        assert_eq!(n.particles.len(), 2);
+        let first = n.particles[0].pos;
+        step_node(
+            &mut n,
+            &mut lib,
+            Transform::from_xyz(4., 0., 0.),
+            1. / 60.,
+            false,
+        );
+        assert!((n.particles[0].pos.x - first.x - 2.).abs() < 1e-5);
+        assert!(n.particles[0].pos.y < first.y);
+        for _ in 0..90 {
+            step_node(
+                &mut n,
+                &mut lib,
+                Transform::from_xyz(4., 0., 0.),
+                1. / 60.,
+                true,
+            );
+        }
+        assert!(n.finished && n.particles.is_empty());
     }
 }

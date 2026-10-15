@@ -490,6 +490,7 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
         }
     }
     app.init_resource::<crate::lighting::fog::FogSelection>();
+    crate::map_fx::install(app, dir)?;
     app.init_resource::<crate::lighting_selection::RegionSelection>();
     let args: Vec<_> = std::env::args().collect();
     let arena_name = crate::arg_value(&args, "--arena");

@@ -505,7 +505,8 @@ Do not edit the existing sky/fog work or automated map-sweep work as part of the
 | G. Resolve material and model provenance | crates/extract/src/maps/textures.rs; new crates/extract/src/maps/material_audit.rs; crates/game/src/map_material.rs diagnostics | Record every missing texture and provenance, eliminate silent wrong-first-texture fallbacks, classify omitted render models and grey proxies; hand fog cards to the already claimed fog job |
 | H. Pose and animate world Objects faithfully | new crates/extract/src/maps/objects.rs; new crates/game/src/map_objects.rs; focused Object-pose integration module | Preserve rigid mesh-owner transforms and authored initial object animations/destruction; prove castle door and gate geometry against their bind/reference pose and EMEVD state |
 
-**Job D done - connected loader/bootstrap (14 October 2026), with material routing still awaiting its owner or an approved integration edit.**
+**Job D done - connected loader/bootstrap (14 October 2026), with owning-block material routing integrated on 15 October 2026.**
+The routing follow-up adds per-block material/mesh audits and GPU-ready capture checks; its controls and seven reviewed fixture cells are documented in [the sweep review](MAP-COMPLETENESS-SWEEP.md#owning-block-texture-routing-review-2026-10-15).
 Outskirts/Castle exploration uses a bounded six-block warm cache, retail signed wildcard matching, independent collision and normal/additional masks, multi-target unions and requested/ready/retiring/dormant states, without another MapOffset transform.
 Canonical MapPiece/Object roots combine C's first-visit snapshots, E's single visibility writer and F's per-instance detail selector; ordinary Objects are enabled by default and declared helpers/physics-only assets are skipped.
 Other entry maps and arena sessions retain their previous bootstrap, and Explore's broad-phase collision contains the same bounded neighbourhood.
@@ -1154,6 +1155,10 @@ The reserved post-control channel is used only by captures; normal interactive e
 This makes the comparison independent of asynchronous loading time and avoids comparing two independently adapted images.
 
 ### Material-routing decision and final six-view numbers
+
+This section records the historical 14 October decision.
+Production owning-block routing supersedes it on 15 October after equal-binding/GPU-readiness controls isolate the larger colour difference to correctly textured, already different normal/all-visible neighbour scenery.
+See [the routing review](MAP-COMPLETENESS-SWEEP.md#owning-block-texture-routing-review-2026-10-15) for the independent block audit, unchanged geometry and per-view fixture decisions.
 
 The prepared Job D patch was tested after the fog scheduling fix with the same serially exported cache, camera lists, native settings and shader clock.
 The first Outskirts camera is at the first idol facing toward the temple, and the remaining five retain cliff, distant Castle and seam coverage.

@@ -32,7 +32,8 @@ Baseline edits are manual review actions; running the gate never rewrites a chec
 The fast fixed-view path instances static GLTF subassets directly, retaining native materials, node transforms, extras and LOD policy.
 It loads the union of the requested frusta and nearby shadow casters conservatively, without a far-plane exclusion.
 Use --sweep-all-assets with an ordinary --sweep control to compare against the unbounded ordinary scene loader.
-Use --test-material-routing with an ordinary --sweep control to opt into the prepared connected-block layer-routing experiment; production routing and canonical gates leave it off.
+Layer textures resolve from their owning GLB in production, preserving the block's existing `models/tex/` layout.
+Use `--test-primary-material-prefix` with an ordinary `--sweep` control to reproduce the former wrong-folder requests; canonical gates reject that diagnostic flag.
 The loader now waits for nested scene readiness and the texture diagnostic recognizes images already uploaded to the GPU after their CPU assets retire.
 
 The required gates are the normal CPU data gate and the two six-view render commands above.
@@ -102,7 +103,11 @@ Shader output compensates for the target's sRGB conversion so the depth bytes su
 Native normal/all renders share one authored exposure result and identical shader time to prevent adaptation or animated clouds/wet surfaces from being counted as visibility changes.
 Each normal view meters with the recovered native reset rate, preserving the authored exposure bounds and grading, then holds that GPU history for its screenshot and all-visible comparison.
 The sweep does not disable auto-exposure or change interactive exposure behavior.
-The sweep waits for declared material textures and pending GPU pipelines and fails on permanent shader errors or stalled loading/captures.
+The sweep waits for declared material textures to reach the GPU before every capture phase, then waits for three distinct completed renders with no pending pipelines.
+It also checks that normal/all-visible material handles, declared texture handles and readiness are identical within each pair.
+Permanent shader errors, stalled loading/captures and failed declared texture requests in any resident block fail the render gate.
+`texture-audit.json` records material GLB provenance and texture requests by owning block, including normally hidden and occluded pieces.
+Each view's `material_blocks` records material, mesh-instance, untextured-material and untextured-mesh-instance counts plus distinct failed requests per block, independently of the frontmost-pixel metric.
 The shared checks live in `crates/game/src/capture_ready.rs` and are also used by ordinary screenshots and play, viewer and arena captures.
 Four sparse CPU collision rays per view independently validate the GPU depth encoding and camera pose; a mismatch exceeding 0.5 m plus 5% stops the run before publishing a baseline.
 
@@ -310,3 +315,181 @@ The final sharpness-field separation check and all layered shader permutations a
 Release workspace all-target Clippy with denied warnings, workspace formatting and scoped whitespace checks pass under `CARGO_TARGET_DIR=target/alt-lights` with six jobs.
 The implementation changes are the BTL reader/export metadata, new `map_lights.rs`, LightSet packing/composition, idempotent performance-probe installation and the small `map.rs` integration; `main.rs` was not edited by this job.
 The existing grass, GI, fog, sky, presentation and material work is retained, and no commit or publication was made.
+
+## Owning-block texture routing review, 2026-10-15
+
+The historical routing decision above is superseded by production owning-GLB routing and an independent connected-block texture audit.
+The defect was in additional layer samplers: standard GLTF textures already resolved from the owning model, but `sekiro_layers` requests used the primary map's prefix.
+No textures were copied, and no exporter layout or cached asset was changed.
+The same original-material cache key is retained, so changing visibility does not rebuild or re-key a material.
+
+The frozen preceding lights executable reproduces 459 distinct failed DDS paths with Outskirts primary and 429 with Castle primary.
+All requests target the primary block's `models/tex/` despite matching declarations and files under neighbouring blocks.
+The following inventory intersects those runtime failures with owning-model GLB declarations and existing exported files.
+Shared sampler names can have multiple owners, so these columns deliberately do not sum to the distinct failed-path totals.
+The complete model, texture-name and requested-folder inventories are in `target/alt-tr/texture-errors.json`.
+
+| Owning models | Outskirts primary failures | Castle primary failures |
+| --- | ---: | ---: |
+| Outskirts | 0 | 86 |
+| Castle | 59 | 0 |
+| Reservoir | 85 | 64 |
+| Dungeon | 95 | 96 |
+| Valley | 104 | 104 |
+| Senpou | 144 | 91 |
+
+The pixel diagnostic already traversed neighbour roots and checked their layer handles.
+Its zero Outskirts count was a frontmost-normal-view coverage limit, not proof that every resident material was valid.
+Affected neighbour surfaces can be hidden by normal visibility or occluded, while contributing to the deliberately forced all-visible comparison.
+The new `material_blocks` counts and `texture-audit.json` include those materials regardless of visible pixel coverage, and any failed declared request is a hard gate failure without a numeric tolerance.
+Intentional materials with no base sampler remain separately identifiable through `untextured_materials`; they are not treated as failed file requests.
+
+The old routing flag was replayed in the frozen preceding executable, separately from the current readiness changes.
+All twelve void/depth-gap measurements, selected collisions and visible-part sets remain equal to the wrong-prefix controls.
+Outskirts view 5 gains 480 newly flagged normal/all-visible colour pixels and loses 52, of which 477 new candidates have byte-identical normal pixels.
+Castle view 5 gains 4,124 and loses 37, of which 3,341 new candidates have byte-identical normal pixels.
+Those pixels therefore change because the all-visible neighbour rendering changes, not because a newly appearing surface changed the normal image.
+The complete per-view byte comparisons are in `target/alt-tr/old-patch-comparison.json`.
+
+The corrected controls wait for GPU texture uploads before every phase and verify identical resident material/texture identities and readiness between normal/all-visible captures.
+They reproduce the old-patch Outskirts view 5 count of 5,245 and Castle views 2/3/5 counts of 5,879/3,782/6,958 exactly.
+This rules out unequal texture-loading times and material re-keying as the cause of those increases.
+Correct neighbour texture bindings change the rendering of already different normal/all-visible surfaces; the metric is a spatial colour comparison, not a measurement of temporal streaming transitions.
+The existing intentional alternate scenery and highest-detail all-visible control remain unchanged.
+An independent control triples settling from four to twelve frames in every phase, retaining GPU readiness and binding checks, and takes 83.3/104.8 seconds.
+Its key Outskirts view 5 pop-in count is 5243, while Castle views 2/3/5 give 5879/3782/6959, within two pixels of the corrected four-frame controls.
+Every void/depth-gap/untextured count remains unchanged, and `target/alt-tr/settled/` plus `settled-comparison.json` retain this control.
+The original large colour increases therefore persist with extra settling and are not accepted as a texture-loading race.
+
+Only the following seven fixture cells are revised after this review.
+No camera, resolution, void/depth-gap fixture, geometry tolerance, colour tolerance or runtime budget is changed.
+
+| Map | View | Changed fixture cells | Reason |
+| --- | ---: | --- | --- |
+| Outskirts | 0 | None | No material-related metric shift beyond the existing tolerance. |
+| Outskirts | 1 | None | Both native images and all pixel metrics match the wrong-prefix control. |
+| Outskirts | 2 | None | Correct layers slightly change colour on existing surfaces, within tolerance. |
+| Outskirts | 3 | None | Correct layers change existing surface colour and 16 additional normal/all candidates, within tolerance. |
+| Outskirts | 4 | None | The small colour-repeat differences remain within tolerance. |
+| Outskirts | 5 | Pop-in 4817 -> 5245 | Correctly textured forced-visible neighbours add 480 and remove 52 threshold candidates; 477 additions leave the normal pixel unchanged. |
+| Castle | 0 | None | Existing geometry is unchanged and the small colour response remains within tolerance. |
+| Castle | 1 | None | Correct layers slightly change existing colours, within tolerance. |
+| Castle | 2 | Untextured 898 -> 0, grey 517 -> 588, pop-in 5023 -> 5879 | Neighbour layer requests succeed; corrected roof-vista shading removes every missing-texture pixel and changes neutral/normal-all colour thresholds on existing geometry. |
+| Castle | 3 | Untextured 5 -> 0, pop-in 3743 -> 3782 | The remaining five missing-texture pixels are repaired; 42 new and three resolved colour candidates give the +39 net change, with 35 additions leaving the normal pixel unchanged. |
+| Castle | 4 | None | Correct layers slightly change existing colours, within tolerance. |
+| Castle | 5 | Pop-in 2871 -> 6958 | Correctly textured forced-visible neighbours add 4124 and remove 37 candidates; 3341 additions leave the normal pixel unchanged. |
+
+The corrected controls retain all twelve void/depth-gap counts, selected collisions and sorted visible-part manifests.
+Collision PNGs are byte-identical in decoded RGB at every view, and diagnostic depth RG is byte-identical at all twelve views.
+The independent retained controls are in `target/alt-tr/before/gates/`, `target/alt-tr/old-patch/` and `target/alt-tr/after/gates/`, with measurements in `corrected-comparison.json`.
+
+The final optimized production-default gates pass all six views in 67.5 seconds for Outskirts and 67.3 seconds for Castle under `target/alt-tr/final/gates/`.
+Their totals are Outskirts void/depth-gap/untextured 0/493/0, grey 2229 and pop-in 29009; Castle 1933/4885/0, grey 1693 and pop-in 31544.
+All six blocks report zero failed declared texture requests, and every view confirms equal resident normal/all-visible material bindings and readiness.
+The per-phase readiness poll deduplicates shared material handles, retaining the complete mesh-instance audit without repeating image checks for every instance.
+The earlier unoptimized GPU-ready control took 99.2/132.6 seconds, with Castle failing the unchanged 120-second budget; it is retained as an explicit performance failure, not accepted as a gate pass.
+
+Final selected collisions and sorted visible-part sets equal the frozen before controls at all twelve views, and every void/depth-gap count is unchanged.
+Decoded collision depth is identical everywhere; one Castle view 4 diagnostic-depth pixel at [88,42] moves from encoded 11217 to 11218, with no changed geometry count or texture flag.
+That one-code rounding difference also occurs in the old-patch repeat; the earlier corrected control gives fully identical diagnostic depth.
+The comparisons are in `target/alt-tr/final-comparison.json` and `depth_delta.py`.
+No geometry fixture cell is updated for that repeat variation.
+
+The frozen final executable is `target/alt-tr/routing-final.exe`, SHA-256 `447a0aaacfb36362b79739bec4a4193b0ce83e51baeed88d9edff1f964c551cf`.
+The production-default final gates include the concurrent map-FX integration available in that build; the routing-isolation controls and progress PNGs explicitly use `SEKIRO_NO_MAP_FX=1` to match the preceding executable's absence of those effects.
+No fixture is changed for the small additional FX-on colour shifts.
+
+Read-only reference review uses external `pairs/spot-006-shot-026.png` for the Castle vista from Outskirts and `pairs/spot-145-shot-428.png` for the Castle return view over the Outskirts scenery.
+The indexed camera/player positions and 43-degree FOV are reused for matched 1600 by 900 night captures, with 32 settling frames.
+`target/alt-tr/progress/` contains `routing-outskirts-before.png`, `routing-outskirts-after.png`, `routing-castle-before.png` and `routing-castle-after.png`.
+The pose, FOV, selected collision and sorted visible-part set are equal in each pair, as checked by `photo-comparison.json`.
+Only 37/396 pixels respectively change by more than 12 RGB code values in these normal views, consistent with the missing requests mainly affecting hidden, occluded or distant neighbour surfaces.
+The reference review still shows excessive blue/bright snow and dark or incomplete distant Castle shading, so this routing fix does not close retail material, lighting, sky or visibility fidelity work.
+No external reference image was copied into the repository or modified.
+
+The release game suite passes 126 unit tests and six integration tests, with two existing ignored tests.
+The normal data gate passes, and the final focused audit tests also verify two hidden neighbour mesh instances sharing one material are both counted.
+Release workspace all-target Clippy with denied warnings passes with six jobs under `CARGO_TARGET_DIR=target/alt-tr`.
+
+## Native map FX colour review, 2026-10-15
+
+The MSB, ModelSfxParam, event-object and registered-idol TAE paths are documented in MAP-FX.md.
+The frozen executable for this comparison is target/alt-fx/frozen/sekiro-rs.exe, SHA-256 7aa59510e01da0f3f75dc778f00799db9bc8f7e301d7ae877e1394238f53c476.
+SEKIRO_NO_MAP_FX=1 supplies the before control in that same executable.
+All twelve off/on void, depth-gap and untextured measurements are identical, with the same selected collisions and sorted visible-part sets.
+Geometry totals remain Outskirts 0/493/0 and Castle 1933/4885/0, including the concurrent owning-block texture-routing fix.
+Every collision PNG and eleven depth PNGs are byte-identical.
+Castle view 4 differs at depth pixel (88,42), from encoded RGB (43,209,0) to (43,210,0), a single quantization step; no measured geometry category changes.
+The pixel record and complete comparison are under target/alt-fx/gates/.
+
+Only Outskirts view 0 grey changes from 215 to 274 and view 3 grey from 655 to 725 in the checked-in fixtures.
+No camera, geometry fixture, other colour fixture, tolerance, resolution, story flag or time budget changes.
+The following table retains every view's prior fixture, fresh runtime-off control and FX-on colour result.
+Grey and pop-in are colour thresholds, not geometry counts.
+
+| Map | View | Grey old / off / on | Pop-in old / off / on |
+| --- | ---: | --- | --- |
+| Outskirts | 0 | 215 / 215 / 274 | 8711 / 8711 / 8650 |
+| Outskirts | 1 | 183 / 183 / 189 | 294 / 294 / 295 |
+| Outskirts | 2 | 383 / 378 / 378 | 2484 / 2484 / 2486 |
+| Outskirts | 3 | 655 / 657 / 725 | 5503 / 5519 / 5422 |
+| Outskirts | 4 | 648 / 648 / 641 | 6831 / 6832 / 6756 |
+| Outskirts | 5 | 147 / 147 / 150 | 5245 / 5245 / 5241 |
+| Castle | 0 | 196 / 197 / 202 | 5083 / 5093 / 5098 |
+| Castle | 1 | 288 / 287 / 290 | 7488 / 7488 / 7487 |
+| Castle | 2 | 588 / 587 / 586 | 5879 / 5878 / 5878 |
+| Castle | 3 | 49 / 50 / 51 | 3782 / 3782 / 3782 |
+| Castle | 4 | 482 / 486 / 480 | 2400 / 2447 / 2362 |
+| Castle | 5 | 92 / 89 / 90 | 6958 / 6960 / 6943 |
+
+Outskirts view 0 gains 59 neutral pixels and loses 61 colour-difference pixels with the native temple idol, snow and effect lighting active.
+View 1 changes by six neutral pixels and one colour-difference pixel, within the existing colour tolerances.
+View 2 has no off/on grey change and a two-pixel pop-in increase; its five-pixel grey difference from the older fixture is already in the runtime-off control.
+View 3 gains 68 neutral pixels and loses 97 colour-difference pixels with authored local effects, their light and snowfall; only its grey fixture needs review.
+View 4's brazier/fire presentation reduces grey by seven and pop-in by 76 pixels; the pre-Gyoubu boss idol stays disabled.
+View 5 changes by three neutral pixels and four fewer colour-difference pixels, without exceeding its original tolerances.
+
+Castle view 0 changes by five pixels in each colour category with the map effects active, within the existing tolerances.
+View 1 gains three grey pixels and loses one pop-in pixel.
+View 2 loses one grey pixel with unchanged pop-in; the small difference is not attributed to an individual emitter.
+View 3 gains one grey pixel with unchanged pop-in, while retaining its existing void and depth-gap counts.
+View 4 loses six grey and 85 pop-in pixels with FX; its runtime-off control already differs from the older pop-in fixture by 47 pixels and deliberately fails that colour threshold.
+That prior/control difference is not evidence of an FX regression and no Castle fixture is changed for it.
+View 5 gains one grey pixel and loses 17 pop-in pixels, remaining within the existing fixtures.
+These small shifts are threshold observations rather than proof of individual particle contributions or retail pixel parity.
+
+The off controls take 85.1 seconds for Outskirts and 91.1 seconds for Castle, and the initial on controls take 70.2 and 80.7 seconds under concurrent workspace testing.
+The initial Outskirts on gate fails only the two reviewed grey cells; Castle on passes every gate.
+The 120-second budget and the existing 16-pixel-or-one-percent category tolerances are retained.
+
+Matched 1600 by 900 night PNGs use the stored external pair camera, player and 43-degree FOV for spot-002 shots 004/005, spot-045 shot-160 and the extra spot-053 shot-186 review.
+All four pairs retain equal poses, FOVs, selected collisions and visible-part sets, as checked by target/alt-fx/progress/photo-comparison.json.
+The requested images are fx-snow-before/after.png, fx-fire-before/after.png and fx-idol-before/after.png under target/alt-fx/progress/.
+The extra fx-idol-053-review pair retains the reference's story mismatch: the native first-visit fixture disables Gyoubu's idol, so the temple idol supplies the glow check.
+Reference images were read in place, without copying them into the repository.
+The captures show flakes, the blue idol flame and authored fire/smoke, while fire density/shape, particle lighting, the scene's blue cast and the documented native GPU/bonfire-controller approximations remain fidelity work.
+
+The final independently rerun default gates pass in 75.5 seconds for Outskirts and 88.1 seconds for Castle after the two grey-cell updates.
+Every final per-view geometry metric, selected collision and sorted visible-part set still equals the runtime-off control, as recorded in target/alt-fx/gates/final-comparison.json.
+Final colour totals are grey 2353 and pop-in 28842 for Outskirts, and grey 1700 and pop-in 31551 for Castle.
+Small repeat changes from the initial on captures stay within the unchanged tolerances and do not prompt further fixture edits.
+The normal release workspace run reports 811 passed and 24 existing ignores, including 126 game unit tests and six integration tests, and the final focused data gate exits zero.
+Release workspace all-target Clippy with denied warnings and workspace formatting pass with six jobs under target/alt-fx.
+
+## Stationary FX performance
+
+The same frozen executable renders one 1600 by 900 night camera per area, with eight captures separated by 1000 settling frames.
+SEKIRO_MAP_FX_REALTIME=1 advances FX with real time while the map shader clock stays fixed.
+The before control sets SEKIRO_NO_MAP_FX=1; the after control runs authored effects normally.
+Samples exclude the first capture, one second after each preceding readback, the last 0.2 seconds before the next readback and every timestamp before the final data-gate/build completion plus one second.
+The table reports medians of one-second smoothed diagnostic snapshots, not per-frame percentiles or an interactive-viewer FPS guarantee.
+
+| Night camera | Frame ms off / on | Opaque GPU ms off / on | Transparent GPU ms off / on | Retained snapshots off / on |
+| --- | ---: | ---: | ---: | ---: |
+| Outskirts battlefield fire | 10.724 / 16.385 | 3.679 / 3.709 | 0.026 / 0.096 | 50 / 108 |
+| Castle courtyard | 3.551 / 7.854 | 1.540 / 1.533 | 0.003 / 0.008 | 16 / 48 |
+
+The CPU fallback and shared FXR tree/property/batch work add substantial frame cost even though measured opaque GPU work stays nearly unchanged.
+The live effect/particle/light pools and range sleeping bound this work; a native GPU particle implementation remains a performance and fidelity follow-up.
+These camera-specific results do not establish a global frame-time limit or a GPU speedup.
+Complete capture metadata, timing windows, sample counts/ranges and logs are under target/alt-fx/performance/ and comparison.json.

@@ -90,7 +90,11 @@ impl Ready<'_> {
 }
 
 pub(crate) fn textures_pending(world: &World, entities: &[Entity]) -> bool {
+    let mut checked = std::collections::HashSet::new();
     entities.iter().any(|e| {
+        if super::map_material::sweep_key(world, *e).is_some_and(|key| !checked.insert(key)) {
+            return false;
+        }
         super::map_material::sweep_base(world, *e).is_some_and(|m| m.pending)
             || crate::map_fog_surface::sweep_pending(world, *e)
             || world

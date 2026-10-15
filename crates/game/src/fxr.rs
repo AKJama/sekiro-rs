@@ -49,11 +49,17 @@ pub fn plugin(cache: PathBuf, bridge: impl Fn(&mut App) + Send + Sync + 'static)
     }
     impl<S: Fn(&mut App) + Send + Sync + 'static> Plugin for PlayerPlugin<S> {
         fn build(&self, app: &mut App) {
+            if app.world().contains_resource::<FxrPlayer>() {
+                (self.bridge)(app);
+                return;
+            }
             embedded_asset!(app, "fxr.wgsl");
             embedded_asset!(app, "fxr_multi.wgsl");
+            embedded_asset!(app, "fxr_distort.wgsl");
             app.add_plugins((
                 MaterialPlugin::<FxrMaterial>::default(),
                 MaterialPlugin::<MultiMaterial>::default(),
+                MaterialPlugin::<DistortMaterial>::default(),
             ));
             app.insert_resource(FxrPlayer::new(self.cache.clone()))
                 .init_resource::<DepthCopy>()
@@ -77,6 +83,7 @@ pub fn plugin(cache: PathBuf, bridge: impl Fn(&mut App) + Send + Sync + 'static)
 fn shader(name: &'static str) -> ShaderRef {
     bevy::asset::AssetPath::from_path_buf(match name {
         "fxr.wgsl" => embedded_path!("fxr.wgsl"),
+        "fxr_distort.wgsl" => embedded_path!("fxr_distort.wgsl"),
         _ => embedded_path!("fxr_multi.wgsl"),
     })
     .with_source("embedded")
@@ -98,6 +105,7 @@ struct Effect {
     persistent: bool,
     root: Option<NodeInst>,
     age: f32,
+    asleep: bool,
 }
 
 /// A stain a hit asks for: DecalParam row, contact point, blow direction on the floor plane.
@@ -110,6 +118,7 @@ pub struct FxrPlayer {
     effects: Vec<Effect>,
     batches: HashMap<(i64, bool), (Handle<Mesh>, Entity)>,
     multi_batches: HashMap<MultiKey, (Handle<Mesh>, Entity)>,
+    distort_batches: HashMap<i64, (Handle<Mesh>, Entity)>,
     textures: HashMap<i64, Handle<Image>>,
     bullets: HashMap<u64, i32>,
     bullet_sfx: HashMap<i32, i32>,
@@ -158,6 +167,7 @@ impl FxrPlayer {
             effects: Vec::new(),
             batches: HashMap::new(),
             multi_batches: HashMap::new(),
+            distort_batches: HashMap::new(),
             textures: HashMap::new(),
             bullets: HashMap::new(),
             bullet_sfx,
@@ -199,6 +209,13 @@ impl FxrPlayer {
     /// Whether this effect id is installed and can play (a stand-in is used otherwise).
     pub fn has(&mut self, id: i32) -> bool {
         self.enabled && id > 0 && self.lib.has(i64::from(id))
+    }
+
+    pub(crate) fn map_actions(&mut self, id: i32) -> (bool, bool) {
+        (
+            self.lib.uses_action(i64::from(id), "nodeMovement", 46),
+            self.lib.uses_action(i64::from(id), "appearance", 10000),
+        )
     }
 
     /// Loads the hit tables (effects, stains) for this fight's NPC when they are not loaded yet.
@@ -262,6 +279,7 @@ impl FxrPlayer {
             persistent: false,
             root: None,
             age: 0.0,
+            asleep: false,
         });
     }
 
@@ -311,6 +329,42 @@ impl FxrPlayer {
             }
             _ => {}
         }
+    }
+
+    /// Independent map namespace. Sleeping preserves the tree but submits no particles.
+    pub(crate) fn map_effect(
+        &mut self,
+        id: i32,
+        serial: i32,
+        at: Transform,
+        awake: bool,
+        frozen: bool,
+    ) {
+        let key = (5, id, serial);
+        if let Some(e) = self.effects.iter_mut().find(|e| e.key == key) {
+            if frozen && awake && at.translation != e.at.translation {
+                e.root = None;
+                e.age = 0.;
+            }
+            e.at = at;
+            e.asleep = !awake;
+        } else if awake {
+            if self.effects.len() >= EFFECT_CAP
+                && let Some(i) = self.effects.iter().position(|e| e.key.0 == 5 && e.asleep)
+            {
+                self.effects.remove(i);
+            }
+            let before = self.effects.len();
+            self.request(id, key, at, true, false);
+            if self.effects.len() > before {
+                let e = self.effects.last_mut().unwrap();
+                e.persistent = true;
+            }
+        }
+    }
+
+    pub(crate) fn advance_map(&mut self, dt: f32) {
+        self.advance_selected(dt, true);
     }
 
     /// Effects for the step's hits: sparks on a deflect or block, blood on a landed hit, at the
@@ -454,10 +508,17 @@ impl FxrPlayer {
     }
 
     pub(crate) fn advance(&mut self, dt: f32) {
+        self.advance_selected(dt, false);
+    }
+
+    fn advance_selected(&mut self, dt: f32, map: bool) {
         let _timer = crate::perf_log::SystemTimer::start("fxr_step");
         let mut live = 0usize;
         let lib = &mut self.lib;
         for e in &mut self.effects {
+            if (e.key.0 == 5) != map || e.asleep {
+                continue;
+            }
             if e.root.is_none() {
                 let Some(def) = lib.get(e.id) else {
                     e.age = EFFECT_DROP + 1.0;
@@ -469,6 +530,15 @@ impl FxrPlayer {
                     .wrapping_add(e.key.2 as u32)
                     .wrapping_add(self.steps as u32 * 31);
                 e.root = make_node(lib, &def["root"], seed, 0);
+                if map
+                    && dt == 0.
+                    && let Some(root) = &mut e.root
+                {
+                    for _ in 0..60 {
+                        step_node(root, lib, e.at, 1. / 30., false);
+                    }
+                    e.age = 2.;
+                }
                 if e.root.is_none() {
                     e.age = EFFECT_DROP + 1.0;
                     e.persistent = false;
@@ -499,7 +569,13 @@ impl FxrPlayer {
         }
         self.effects
             .retain(|e| e.persistent || e.age <= EFFECT_DROP);
-        self.particles = live;
+        self.particles = self
+            .effects
+            .iter()
+            .filter(|e| !e.asleep)
+            .filter_map(|e| e.root.as_ref())
+            .map(count_particles)
+            .sum();
     }
 }
 
@@ -650,10 +726,61 @@ fn layer_uv(a: &Value, n: u32, age: f32, rnd: &mut Rnd) -> [[f32; 2]; 4] {
 
 const QUAD_UV: [[f32; 2]; 4] = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
 
+fn layer_uv_distort(a: &Value, age: f32, rnd: &mut Rnd) -> [[f32; 2]; 4] {
+    let su = scalar(a, "normalMapScaleU", 0., rnd, 1.);
+    let sv = scalar(a, "normalMapScaleV", 0., rnd, 1.);
+    let ou = scalar(a, "normalMapOffsetU", 0., rnd, 0.)
+        + scalar(a, "normalMapSpeedU", age, rnd, 0.) * age;
+    let ov = scalar(a, "normalMapOffsetV", 0., rnd, 0.)
+        + scalar(a, "normalMapSpeedV", age, rnd, 0.) * age;
+    QUAD_UV.map(|[u, v]| [u * su + ou, v * sv + ov])
+}
+
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+struct DistortMaterial {
+    #[texture(0)]
+    #[sampler(1)]
+    texture: Handle<Image>,
+}
+impl Material for DistortMaterial {
+    fn vertex_shader() -> ShaderRef {
+        shader("fxr_distort.wgsl")
+    }
+    fn fragment_shader() -> ShaderRef {
+        shader("fxr_distort.wgsl")
+    }
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Blend
+    }
+    fn reads_view_transmission_texture(&self) -> bool {
+        true
+    }
+    fn enable_prepass() -> bool {
+        false
+    }
+    fn enable_shadows() -> bool {
+        false
+    }
+    fn specialize(
+        _: &MaterialPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _: &MeshVertexBufferLayoutRef,
+        _: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        descriptor.primitive.cull_mode = None;
+        if let Some(depth) = &mut descriptor.depth_stencil {
+            depth.depth_write_enabled = Some(false);
+        }
+        Ok(())
+    }
+}
+
 struct Frame<'a> {
     cam: &'a GlobalTransform,
     bufs: HashMap<(i64, bool), Buf>,
     multi: HashMap<MultiKey, MultiBuf>,
+    lights: Vec<(Vec3, Color, f32, f32)>,
+    distort: HashMap<i64, Buf>,
 }
 
 fn collect(n: &NodeInst, f: &mut Frame) {
@@ -668,7 +795,7 @@ fn collect(n: &NodeInst, f: &mut Frame) {
 fn collect_node(n: &NodeInst, c: &Value, f: &mut Frame) {
     let a = &c["appearance"];
     let at = a["type"].as_i64().unwrap_or(0);
-    if !matches!(at, 600 | 602 | 603 | 604 | 606 | 10012) {
+    if !matches!(at, 600 | 602 | 603 | 604 | 606 | 607 | 609 | 10000 | 10012) {
         return;
     }
     let active_t = (n.time - n.delay).max(0.0);
@@ -684,6 +811,32 @@ fn collect_node(n: &NodeInst, c: &Value, f: &mut Frame) {
         cam.forward().as_vec3(),
     );
     let env = crate::lighting::ENV_PER_UNIT;
+    if at == 10000 {
+        for p in &n.particles {
+            let mut rnd = Rnd { seed: p.seed, k: 0 };
+            let fade = view_fade(a, p.pos.distance(cam.translation()));
+            let size = scalar(a, "particleSizeX", p.age, &mut rnd, 0.025)
+                + scalar(a, "particleSizeXMin", 0., &mut rnd, 0.)
+                + rnd.next()
+                    * (scalar(a, "particleSizeXMax", 0., &mut rnd, 0.)
+                        - scalar(a, "particleSizeXMin", 0., &mut rnd, 0.));
+            let size = size * scalar(a, "particleSizeMultiplier", p.age, &mut rnd, 1.);
+            let mut col = prop(a.get("color"), p.age, &mut rnd, [1.; 4]);
+            let rgb = scalar(a, "rgbMultiplier", p.age, &mut rnd, 1.);
+            for v in &mut col[..3] {
+                *v *= env * rgb;
+            }
+            col[3] *= fade * scalar(a, "alphaMultiplier", p.age, &mut rnd, 1.);
+            let (r, u) = (cam_r * size * 0.5, cam_u * size * 0.5);
+            f.bufs.entry((tex, additive(blend))).or_default().quad(
+                [p.pos - r - u, p.pos + r - u, p.pos + r + u, p.pos - r + u],
+                QUAD_UV,
+                col,
+                [0., 0., size, 0.],
+            );
+        }
+        return;
+    }
     for p in &n.particles {
         let mut rnd = Rnd {
             seed: p.seed ^ 0x9999,
@@ -711,6 +864,62 @@ fn collect_node(n: &NodeInst, c: &Value, f: &mut Frame) {
             scalar(pmod, "scaleY", p.emit_t, &mut rnd, 1.0)
         };
         match at {
+            607 => {
+                let screen = prop(a.get("color"), p.age, &mut rnd, [1.; 4]);
+                let modifier = prop(
+                    c["particleModifier"].get("color"),
+                    active_t,
+                    &mut rnd,
+                    [1.; 4],
+                );
+                col[3] = (screen[3]
+                    * modifier[3]
+                    * scalar(a, "alphaMultiplier", active_t, &mut rnd, 1.)
+                    * fade)
+                    .clamp(0., 1.);
+                let texture = int(a, "normalMap", 0);
+                if texture <= 0 {
+                    continue;
+                }
+                let w = scalar(a, "sizeX", p.age, &mut rnd, 1.) * sx;
+                let h = scalar(a, "sizeY", p.age, &mut rnd, 1.) * sy;
+                let (right, up) = match int(a, "orientation", 1) {
+                    0 | 3 => (Vec3::X, Vec3::Y),
+                    2 => (n.world.rotation * Vec3::X, n.world.rotation * Vec3::Y),
+                    _ => (cam_r, cam_u),
+                };
+                let (r, u) = (right * w * 0.5, up * h * 0.5);
+                let uv = layer_uv_distort(a, p.age, &mut rnd);
+                let intensity = scalar(a, "intensity", p.age, &mut rnd, 0.);
+                let radius = scalar(a, "radius", p.age, &mut rnd, 1.).max(0.001);
+                let buf = f.distort.entry(texture).or_default();
+                let corners = [world - r - u, world + r - u, world + r + u, world - r + u];
+                for i in [0, 1, 2, 0, 2, 3] {
+                    buf.pos.push(corners[i].to_array());
+                    buf.uv.push(uv[i]);
+                    buf.col.push([1., 1., 1., col[3]]);
+                    buf.tan
+                        .push([intensity, 1. / radius, QUAD_UV[i][0], QUAD_UV[i][1]]);
+                }
+            }
+            609 => {
+                let limit = scalar(a, "maxViewDistance", active_t, &mut rnd, -1.);
+                if limit > 0. && world.distance_squared(cam.translation()) > limit * limit {
+                    continue;
+                }
+                let color = prop(a.get("diffuseColor"), p.age, &mut rnd, [1.; 4]);
+                let intensity =
+                    scalar(a, "diffuseMultiplier", active_t, &mut rnd, 1.) * color[3].max(0.);
+                let radius = scalar(a, "radius", active_t, &mut rnd, 0.);
+                if radius > 0. && intensity > 0. {
+                    f.lights.push((
+                        world,
+                        Color::linear_rgb(color[0], color[1], color[2]),
+                        intensity * fade,
+                        radius,
+                    ));
+                }
+            }
             600 | 603 | 604 => {
                 let w = if at == 600 {
                     scalar(a, "size", p.age, &mut rnd, 1.0) * sx
@@ -1120,7 +1329,7 @@ fn copy_depth(
 
 // ---------------------------------------------------------------- render system
 
-fn load_texture(lib: &FxrLib, id: i64) -> Option<Image> {
+fn load_texture(lib: &FxrLib, id: i64, srgb: bool) -> Option<Image> {
     let path = lib.texture_path(id)?;
     let data = std::fs::read(path).ok()?;
     let tpf = sekiro_formats::tpf::parse(&data).ok()?;
@@ -1130,7 +1339,7 @@ fn load_texture(lib: &FxrLib, id: i64) -> Option<Image> {
         first.dds,
         bevy::image::ImageType::Extension("dds"),
         bevy::image::CompressedImageFormats::all(),
-        true,
+        srgb,
         bevy::image::ImageSampler::Descriptor(bevy::image::ImageSamplerDescriptor {
             address_mode_u: bevy::image::ImageAddressMode::Repeat,
             address_mode_v: bevy::image::ImageAddressMode::Repeat,
@@ -1153,7 +1362,7 @@ fn texture_handle(
     if let Some(h) = player.textures.get(&id) {
         return h.clone();
     }
-    let handle = match load_texture(&player.lib, id) {
+    let handle = match load_texture(&player.lib, id, true) {
         Some(image) => images.add(image),
         None => {
             warn!("FXR texture {id} is not installed or cannot be decoded");
@@ -1196,9 +1405,11 @@ fn render(
     mut meshes: ResMut<Assets<Mesh>>,
     mut sprite_materials: ResMut<Assets<FxrMaterial>>,
     mut multi_materials: ResMut<Assets<MultiMaterial>>,
+    mut distort_materials: ResMut<Assets<DistortMaterial>>,
     mut images: ResMut<Assets<Image>>,
     depth: Res<DepthCopy>,
     mut white: Local<Option<Handle<Image>>>,
+    mut lights: Local<Vec<Entity>>,
 ) {
     if !player.enabled {
         return;
@@ -1226,13 +1437,73 @@ fn render(
         cam,
         bufs: HashMap::new(),
         multi: HashMap::new(),
+        lights: Vec::new(),
+        distort: HashMap::new(),
     };
-    for e in &player.effects {
+    for e in player.effects.iter().filter(|e| !e.asleep) {
         if let Some(root) = &e.root {
             collect(root, &mut frame);
         }
     }
+    frame.lights.sort_by(|a, b| b.2.total_cmp(&a.2));
+    frame.lights.truncate(16);
+    while lights.len() > frame.lights.len() {
+        commands.entity(lights.pop().unwrap()).despawn();
+    }
+    for (i, (position, color, intensity, range)) in frame.lights.into_iter().enumerate() {
+        let light = PointLight {
+            color,
+            intensity: intensity * crate::lighting::LOCAL_LUMENS_PER_UNIT,
+            range,
+            shadow_maps_enabled: false,
+            ..default()
+        };
+        let transform = Transform::from_translation(position);
+        if let Some(&entity) = lights.get(i) {
+            commands.entity(entity).insert((light, transform));
+        } else {
+            lights.push(commands.spawn((light, transform)).id());
+        }
+    }
     let (bufs, multi) = (frame.bufs, frame.multi);
+    for key in frame.distort.keys() {
+        if player.distort_batches.contains_key(key) {
+            continue;
+        }
+        let texture = load_texture(&player.lib, *key, false)
+            .map(|image| images.add(image))
+            .unwrap_or_else(|| white.clone());
+        let material = distort_materials.add(DistortMaterial { texture });
+        let (mesh, entity) = new_batch(&mut commands, &mut meshes);
+        commands.entity(entity).insert(MeshMaterial3d(material));
+        player.distort_batches.insert(*key, (mesh, entity));
+    }
+    let empty_distort = Buf::default();
+    for (key, (mesh, _)) in &player.distort_batches {
+        let Some(mut m) = meshes.get_mut(mesh) else {
+            continue;
+        };
+        let b = frame.distort.get(key).unwrap_or(&empty_distort);
+        let n = b.pos.len() + 3;
+        m.insert_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            [vec![PAD; 3], b.pos.clone()].concat(),
+        );
+        m.insert_attribute(
+            Mesh::ATTRIBUTE_UV_0,
+            [vec![[0.; 2]; 3], b.uv.clone()].concat(),
+        );
+        m.insert_attribute(
+            Mesh::ATTRIBUTE_COLOR,
+            [vec![[0.; 4]; 3], b.col.clone()].concat(),
+        );
+        m.insert_attribute(
+            Mesh::ATTRIBUTE_TANGENT,
+            [vec![[0.; 4]; 3], b.tan.clone()].concat(),
+        );
+        m.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0., 0., 1.]; n]);
+        m.insert_indices(Indices::U32((0..n as u32).collect()));
+    }
     // New batches for keys seen for the first time.
     for key in bufs.keys() {
         if player.batches.contains_key(key) {
