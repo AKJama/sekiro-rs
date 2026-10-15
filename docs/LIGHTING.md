@@ -1300,3 +1300,66 @@ FXR 609 diffuse colour is squared like the BTL colour, because both go through `
 See [EXPOSURE.md](EXPOSURE.md#brightness-audit-second-pass-2026-10-15).
 Recovered here: the deferred AO multiplier is `SSAO.x * G1.z` with the identity remap (`FC_Mult = (0,1,0,0)`, `FC_Add = (1,0,1,1)`), baked occlusion is vertex `COLOR1.x` and is 1 on 99.7 percent of Outskirts vertices.
 `SEKIRO_LIGHT_SET=<id>` is a diagnostic that forces one LightSet row; unset keeps the collision's authored row.
+
+## LightSet selection audit, 2026-10-15
+
+See [EXPOSURE.md](EXPOSURE.md#lightset-row-100-selection-audit-2026-10-15).
+Collision `SceneGparam` event bytes select overlay family files per layer and are parsed but unused; `mapbase.gparam` is an unread base layer.
+Neither explains the row-100 sun excess, and `SEKIRO_LIGHT_SET=0` remains a diagnostic only.
+
+## Layer stack and record defaults, 2026-10-15
+
+The executable evaluates a map block as a stack of GPARAM files, not as one file.
+This section replaces the "unread base layer" and "parsed but unused" statements above; the loader now implements it.
+The recovered functions are `ed5cd0` (per-block layer manager), `f46300`, `f46340`, `f46480`, `f46fc0`, `f47580`, `189d20`, `167840` (LightSet manager), `17af10` (priority slots), `17b9a0` (evaluator) and the key resolvers `168e10` and `1410a7f20`.
+
+Priority table (`0x142b54500`, indexed by the file kind of `143b146f0`), lowest first:
+
+| Priority | File kind |
+| ---: | --- |
+| 1 | `default` |
+| 2 | `M_template`, `ML_template`, `S_template`, `empty` |
+| 3 | `MDLVW_*` |
+| 4 | `MapBase` (`mapbase.gparam`) |
+| 5 to 9 | the five layers of the block, layer 0 to 4 |
+| 10 | `MapOverride_NNNN` |
+| 11 and up | remo, dying and `eclipse` banks |
+
+- A block registers every file under its bank, `((area + 100) * 100 + block) * 10000`, in a slot indexed by priority (up to 21 slots).
+  `MapBase` sits under the block layers, so it supplies only what the block files do not author.
+- The evaluator (`17b9a0`) walks the slots in ascending priority for every bound field of a record.
+  A slot whose file carries the record's row for that field writes the value; a higher slot overwrites a lower one.
+  The unit is the field and the row: the whole time-keyed list of one value id comes from one file.
+- Rows (`(bank, row)` records) are created by the registration of each file for the value ids of that file's first parameter of the group.
+  The union over the stack is the set of rows; `mapbase` registers 0, 100, 110, 120 and 130 for every block, so row 120 exists in Outskirts although the block file never registers it.
+- A new record starts from the template record and a field that no slot writes keeps that default (`1403125b0` copies the template, `140227f30` stages the copy).
+  The template is the `(0, 1)` record, which falls back to `(1, 0)` and then to the built-in default blob.
+  A missing field therefore never inherits row 0 of the same file.
+  The default blob is taken to be `default.gparam` (inferred, not traced to its loader).
+- A lookup of a `(bank, row)` that was never registered returns the `(1, 0)` record (`168e10`), here the same default values.
+- The collision's key is `(MSB block bank, first collision gparam int)`; the second int is the fog key.
+- Layer 0 of a block is the file `m<area>_<block>_<d><sub>` named by the story sub-ID.
+  Layers 1 to 4 take the four signed bytes of the collision `SceneGparam` struct as the hundreds digit `d` of the same family: `number = (d - base / 100) * 100 + base`, so `m11_00_0000` with byte 5 selects `m11_00_0500` and `m11_02_0930` with byte 5 selects `m11_02_0530`.
+  A byte outside 0 to 9 (-1 in all installed data) leaves the layer empty; it does not keep the previous overlay.
+  The fourth `SceneGparam` float is the fade time between old and new overlays; the loader switches at once (open).
+- `mapoverride_0000` to `_0003` use GPARAM game id 3 (value ids without times).
+  They parse now.
+  Their LightSet group is empty and they would sit at priority 10, but the block field that selects `MapOverride_NNNN` was not found (no event instruction sets it), so they are not applied.
+
+Implemented in `sekiro_formats::gparam::layer` (priorities in `gparam::priority`) and `lighting_selection::LayerFiles`.
+`LightSet` rows get record defaults and the `(1, 0)` fallback (`Gparam::light_row`); every other group is layered per parameter and id but keeps the former fallback to row 0, because the row used by the other group managers was not recovered.
+The stack is `default`, `mapbase`, the story file, then the overlays of the collision under the focus (`set_overlays`, from the layout's `scene_gparam`).
+`SEKIRO_ABLATE=nolayers` restores the single-file lookup for before/after captures.
+The read-only `gparam_inspect` example (`cargo run --release -p sekiro-formats --example gparam_inspect -- <file> [group] [param]`) lists the value ids each parameter carries, or the authored values with a parameter filter.
+
+Effect on the installed Outskirts rows:
+
+- Row 100 (133 of 166 collisions): `Hemi Color Up/Down`, `Angle1`, `Sharpness0/1/2` and `SsaoWeight0..3` are not authored by `m11_00_0000`.
+  They now come from `mapbase` row 100 (sharpness 1 and 0.15 instead of the former default 50, SSAO weights 1, and the `mapbase` fill direction instead of the row-0 one).
+  The sun and fill colours and powers are the block's own row-100 values and are unchanged.
+- Overlays `0100`, `0300`, `0400` and `0600` to `0900` author LightSet fields for row 0 only (`0200` has none), so for row-100 collisions they change the tone-map and post groups (which keep the row-0 lookup) but not the row-100 light.
+  `0500` also authors rows 100, 110 and 120; it is selected by four Outskirts collisions in layer 2, including the ones at spot-002 and spot-003.
+  Installed layer-2 selections: file 8 for 29 collisions, file 7 for 14, file 1 for 10, file 5 for 4 and file 3 for 4; layer 1 files 9, 8, 1 and 6 are used by a few.
+- `mapbase` also supplies post fields that the Ashina block files omit, most visibly `ToneMapMode` 8 (the old fallback was 7), tone contrast, Reinhard contrast and white balance, `ColorH/S/V`, auto-exposure adaptation speeds, `LightMask Influence` and the SSAO block.
+  221 parameters with values exist only in `mapbase` for `m11_00_0000`.
+- The measured default-render effect is in [EXPOSURE.md](EXPOSURE.md#layer-stack-result-2026-10-15): the noon row-100 sun is still 4.4 times row 0 and scenes stay 2 to 5 times retail.

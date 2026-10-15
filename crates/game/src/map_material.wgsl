@@ -506,10 +506,26 @@ fn H(mask: vec3<f32>, sel: vec3<f32>, k: f32, map_game: MapGame) -> f32 {
     return (dot(mask, sel) * k + 0.01) * map_game.p[6].x;
 }
 
+// Wet exclusion precedes the height operation and final saturation in Ground facets.
+fn snow_coverage(facing: f32, vertex_weight: f32, wet: f32, height: f32, sharpness: f32) -> f32 {
+    let w = facing * vertex_weight * (1.0 - wet);
+    return saturate((w - height * (1.0 - w)) * (1.0 + sharpness));
+}
+
 // FLV: a game normal map's xy (z rebuilt), DirectX green flipped into Bevy's tangent frame.
 fn flv(n: vec4<f32>) -> vec3<f32> {
     let xy = vec2(n.r * 2.0 - 1.0, 1.0 - n.g * 2.0);
     return vec3(xy, sqrt(max(1.0 - dot(xy, xy), 0.0)));
+}
+
+fn layer_world_normal(nt: vec3<f32>, normal: vec3<f32>, tangent: vec4<f32>, is_front: bool) -> vec3<f32> {
+    // Native FLVER normalizes each interpolated basis vector independently.
+    // Only the geometric normal flips on a back face.
+    let ng = normalize(normal);
+    let n = select(-ng, ng, is_front);
+    let t = normalize(tangent.xyz);
+    let b = normalize(tangent.w * cross(ng, t));
+    return normalize(nt.x * t + nt.y * b + nt.z * n);
 }
 
 fn has(bit: u32, map_game: MapGame) -> bool {
@@ -517,7 +533,7 @@ fn has(bit: u32, map_game: MapGame) -> bool {
 }
 
 #ifdef VERTEX_UVS_A
-fn game_layers(in: VertexOutput, b: vec4<f32>, b2: vec4<f32>, uv_scale: f32, pbr_in: PbrInput, map_game: MapGame, slot: u32) -> PbrInput {
+fn game_layers(in: VertexOutput, b: vec4<f32>, b2: vec4<f32>, uv_scale: f32, is_front: bool, pbr_in: PbrInput, map_game: MapGame, slot: u32) -> PbrInput {
     var pbr_input = pbr_in;
     let p = map_game.p;
     if map_game.flags.y == 3u {
@@ -555,11 +571,11 @@ fn game_layers(in: VertexOutput, b: vec4<f32>, b2: vec4<f32>, uv_scale: f32, pbr
 #endif
     let uvs = uv0 * uv_scale;
     var m9 = vec3(0.0);
-    if has(128u, map_game) { m9 = sample_height_mask(uvs, slot).rgb; }
+    if has(128u, map_game) { m9 = sample_height_mask(uvs * map_game.tiling[8].xy, slot).rgb; }
     // M[Multiple]'s layer L / wet / tint mask (slot 6) is on uv1; M[MultipleGround] has none and
     // uses mask 9 for every layer.
     var m6 = m9;
-    if has(512u, map_game) { m6 = sample_mask_l(uv1, slot).rgb; }
+    if has(512u, map_game) { m6 = sample_mask_l(uv1 * map_game.tiling[10].xy, slot).rgb; }
 
     var wOv = 0.0;
     if has(2u, map_game) { wOv = hb(b.x, H(m9, p[9].xyz, p[7].x, map_game), map_game); }
@@ -569,44 +585,46 @@ fn game_layers(in: VertexOutput, b: vec4<f32>, b2: vec4<f32>, uv_scale: f32, pbr
     }
     var wWet = 0.0;
     if has(1024u, map_game) {
-        if ground { wWet = saturate(b2.w * p[7].z); } else { wWet = hb(b2.w, H(m6, p[11].xyz, p[7].z, map_game), map_game); }
+        if ground { wWet = b2.w * p[7].z; } else { wWet = hb(b2.w, H(m6, p[11].xyz, p[7].z, map_game), map_game); }
     }
     let lum = dot(1.0 - b2.rgb, vec3(0.29891, 0.58661, 0.11448));
     let wTint = hb(lum, H(m6, p[12].xyz, p[8].x, map_game), map_game);
 
     // Normals: base / overlay (B gloss), the detail normal's xy added, layer L (ground).
     var nb = vec4(0.5, 0.5, 1.0, 0.15);
-    if has(1u, map_game) { nb = sample_base_normal(uvs, slot); }
-    if has(4u, map_game) { nb = mix(nb, sample_overlay_normal(uvs, slot), wOv); }
-    if ground && has(64u, map_game) { nb = mix(nb, sample_c_normal(uvs, slot), wL); }
+    if has(1u, map_game) { nb = sample_base_normal(uvs * map_game.tiling[1].xy, slot); }
+    if has(4u, map_game) { nb = mix(nb, sample_overlay_normal(uvs * map_game.tiling[3].xy, slot), wOv); }
+    if ground && has(64u, map_game) { nb = mix(nb, sample_c_normal(uvs * map_game.tiling[7].xy, slot), wL); }
     var nt = flv(nb);
     var gloss = nb.b;
     if has(256u, map_game) {
-        let d = mix(vec3(0.502, 0.502, 1.0), sample_detail(uv0, slot).rgb, b.w);
-        nt = vec3(nt.xy + flv(vec4(d, 1.0)).xy * p[6].z, nt.z);
+        let d = sample_detail(uv0 * map_game.tiling[9].xy, slot);
+        var detail_xy = flv(d).xy * b.w;
+        if !ground {
+            // Multiple's native neutral is 0.502016; Ground multiplies decoded XY.
+            detail_xy = flv(mix(vec4(0.502016, 0.502016, 1.0, 1.0), d, b.w)).xy;
+        }
+        nt = vec3(nt.xy + detail_xy * p[6].z, nt.z);
     }
     var Nw = pbr_input.world_normal;
 #ifdef VERTEX_TANGENTS
-    let N0 = pbr_input.world_normal;
-    let T = in.world_tangent.xyz;
-    let B = in.world_tangent.w * cross(N0, T);
-    Nw = normalize(nt.x * T + nt.y * B + normalize(nt).z * N0);
+    Nw = layer_world_normal(nt, in.world_normal, in.world_tangent, is_front);
 #endif
     // Snow: how much the bumped world normal faces the material's snow direction (not
     // normalised), times the vertex weight, height-blended on mask 9.
     var wSnow = 0.0;
     if has(8u, map_game) {
-        let sd = dot(p[14].xyz, Nw) * b.z;
-        wSnow = hb(sd, H(m9, p[13].xyz, p[7].w, map_game), map_game);
+        wSnow = snow_coverage(dot(p[14].xyz, Nw), b.z, select(0.0, wWet, ground),
+            H(m9, p[13].xyz, p[7].w, map_game), p[6].y);
     }
-    // Wet: a flow normal scrolled on uv1, gloss toward the wet gloss.
-    if wWet > 0.0 {
-        let wn = sample_wet(uv1 + globals.time * p[15].xy, slot);
+    // Multiple's flow normal is added before the replacement snow normal.
+    if !ground && has(1024u, map_game) {
+        let wn = sample_wet((uv1 + globals.time * p[15].xy) * map_game.tiling[11].xy, slot);
         nt = vec3(nt.xy + flv(wn).xy * p[6].w * wWet, nt.z);
         gloss = mix(gloss, p[8].y, wWet);
     }
     if wSnow > 0.0 && has(16u, map_game) {
-        let sn = sample_snow_normal(uvs, slot);
+        let sn = sample_snow_normal(uvs * map_game.tiling[5].xy, slot);
         if ground {
             nt = vec3(nt.xy + flv(sn).xy * p[9].w * wSnow, nt.z);
         } else {
@@ -614,24 +632,29 @@ fn game_layers(in: VertexOutput, b: vec4<f32>, b2: vec4<f32>, uv_scale: f32, pbr
         }
         gloss = mix(gloss, sn.b, wSnow);
     }
+    // Ground's flow normal replaces the snow-composited normal afterwards.
+    if ground && has(1024u, map_game) {
+        let wn = sample_wet((uv1 + globals.time * p[15].xy) * map_game.tiling[11].xy, slot);
+        nt = mix(nt, vec3(flv(wn).xy * p[6].w, 1.0), wWet);
+        gloss = mix(gloss, p[8].y, wWet);
+    }
 
     // Albedo.
     var a = vec3(1.0);
-    if has(2048u, map_game) { a = sample_base_albedo(uvs, slot).rgb; }
+    if has(2048u, map_game) { a = sample_base_albedo(uvs * map_game.tiling[0].xy, slot).rgb; }
     var alpha = pbr_in.material.base_color.a;
     if ground {
-        if has(2u, map_game) { a = mix(a, sample_overlay(uvs, slot).rgb, wOv); }
-        if has(32u, map_game) { a = mix(a, sample_layer_c(uvs, slot).rgb, wL); }
+        if has(2u, map_game) { a = mix(a, sample_overlay(uvs * map_game.tiling[2].xy, slot).rgb, wOv); }
+        if has(32u, map_game) { a = mix(a, sample_layer_c(uvs * map_game.tiling[6].xy, slot).rgb, wL); }
         a = a * mix(vec3(1.0), b2.rgb, p[8].x);
-        // gap: M[MultipleGround] wet darkening read as a lerp toward color_1 (kb/map.md).
-        a = mix(a, p[4].rgb, wWet * p[10].w);
     } else {
         a = a * mix(p[0].rgb, p[1].rgb, b.x);
-        if has(2u, map_game) { a = mix(a, sample_overlay(uvs, slot).rgb * p[2].rgb, wOv); }
-        if has(32u, map_game) { a = mix(a, sample_layer_c(uv1 + p[8].zw, slot).rgb * p[3].rgb, wL); }
+        if has(2u, map_game) { a = mix(a, sample_overlay(uvs * map_game.tiling[2].xy, slot).rgb * p[2].rgb, wOv); }
+        if has(32u, map_game) { a = mix(a, sample_layer_c((uv1 + p[8].zw) * map_game.tiling[6].xy, slot).rgb * p[3].rgb, wL); }
         a = mix(a, a * b2.rgb * p[4].rgb, wTint);
     }
-    if has(8u, map_game) { a = mix(a, sample_snow(uvs, slot).rgb * p[5].rgb, wSnow); }
+    if has(8u, map_game) { a = mix(a, sample_snow(uvs * map_game.tiling[4].xy, slot).rgb * p[5].rgb, wSnow); }
+    if ground { a = mix(a, p[4].rgb * mix(a, vec3(1.0), wWet * p[10].w), wWet); }
     a = saturate(a);
     if map_game.flags.z != 0u {
         // Debug (SHINOBI_MAP_SHOW_BLEND=1): overlay red, layer L green, snow blue.
@@ -640,11 +663,7 @@ fn game_layers(in: VertexOutput, b: vec4<f32>, b2: vec4<f32>, uv_scale: f32, pbr
     pbr_input.material.base_color = vec4(a, alpha);
     pbr_input.material.perceptual_roughness = clamp(1.0 - saturate(gloss), 0.089, 1.0);
 #ifdef VERTEX_TANGENTS
-    var mapped = normalize(nt.x * T + nt.y * B + nt.z * N0);
-    if dot(N0, pbr_input.V) < 0.0 {
-        mapped = mapped - 2.0 * dot(mapped, N0) / dot(N0, N0) * N0;
-    }
-    pbr_input.N = mapped;
+    pbr_input.N = layer_world_normal(nt, in.world_normal, in.world_tangent, is_front);
 #endif
     return pbr_input;
 }
@@ -731,7 +750,7 @@ vertex: VertexOutput,
 #endif
     var pbr = pbr_input_from_standard_material(input, is_front);
 #ifdef GAME_LAYERS
-    pbr = game_layers(input, b, m.blend2, m.uv_scale, pbr, layers.game, slot);
+    pbr = game_layers(input, b, m.blend2, m.uv_scale, is_front, pbr, layers.game, slot);
 #else
     var height = 0.5;
     if layers.enabled.w > 0.0 {

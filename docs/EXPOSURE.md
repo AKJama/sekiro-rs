@@ -274,3 +274,70 @@ Why the retail frames do not show that sun is open: no engine element that atten
 Candidates not yet traced: how the engine layers row 100 over row 0 and over `default.gparam`, and the scene-event gparam overrides (`SceneGparam EventID`, `s11_00_*` files).
 
 Other observations: at spot-091 a warm light on the roof survives `--no-local-lights` and all ablations and has no counterpart in the retail frame; retail snow coverage on roofs is thin (dark tile visible), which is a material issue separate from light.
+
+## LightSet row 100 selection audit, 2026-10-15
+
+Question: why does retail not show the authored row-100 sun at hour 12, when 133 of 166 Outskirts collisions select row 100.
+No selection fix is made, because no engine rule that dims row 100 was proven.
+What was recovered from the executable (read-only Ghidra decompiles, scratch outputs only):
+
+- The key is a pair `(bank, row)`: `eb3e70` and `10a7f20` build it from the block bank at `+0x620` and the first collision gparam int.
+  The block bank of a file is `((area + 100) * 100 + block) * 10000` (`f472a0`, `f47270`), the same number that the VolumetricFog `LightBankId` fields hold (111020000 is m11_02).
+- Lookups (`28f4e0`, `293720`) hash bank then row, and fall back to `(1, 0)` when the row is absent.
+  Rows of a group are enumerated from the value ids of the first parameter of the group (`17ad40`), so a row that the first parameter (`Angle0`) lacks is never registered; this is why Outskirts row 120 does not exist.
+- Each block loads ten family files `m<area>_<block>_<d><sub>` for d = 0..9 (`ed5cd0`, number `(d - B/100) * 100 + B`), and has five layers.
+  Layer 0 is the base file; layers 1 to 4 take the file index from the four signed bytes of the MSB collision `SceneGparam` struct (`1410a8110`, the debug string `SceneGparam EventID[%d][%d][%d][%d]`), with the struct's transition time as the fade.
+  Our loader parses these bytes (`msb.rs`, `scene_gparam`) but nothing consumes them.
+  At the ten reference spots the collision events are: spot-002 and 003 layer 2 = 5, spot-089, 090 layer 1 = 7, spot-092 layer 2 = 7, the others none.
+  Overlays 0500/0700/0800 re-author the same row-100 sun (0700 lacks row 100 entirely), so they cannot explain the excess, and the no-overlay spots (009, 025, 008, 013, 091) match forced row 0 equally well.
+- `mapbase.gparam` is the engine base layer for all map blocks ("MapBase"); it is not read by our loader.
+  It authors `SsaoWeight0..3 = 1`, SSAO scale 1.35 offset -0.35, shadow cascades 10/50/200, blur count 2 and `LightMask Influence` 1, none of which the Ashina files override.
+  Whether these change direct light by a large factor is untested; AO alone is bounded near 1 on open surfaces.
+- Overlay files carry only some groups and rows, and row records are independent per `(bank, row)`; a missing field of row 100 is reset to record defaults (`228040` memcpy of defaults), not proven to inherit file row 0.
+
+Not found: any condition (flag, weather, time, scene event) that makes the engine use row 0 or a dimmer row for collision LightSet 100.
+Open candidates: the unread `mapbase.gparam` layer, the unrecovered record evaluation that merges layers, `LightMask Influence` with per-instance `ShLightMask`, and the metering/exposure gain at the pinned noon adaptation limits.
+
+## Layer stack result, 2026-10-15
+
+The exe layer stack (priorities, record defaults and the overlay selection) is recovered and implemented; see [LIGHTING.md](LIGHTING.md#layer-stack-and-record-defaults-2026-10-15) for the rules.
+It answers the open candidates of the previous section, and it does not explain the excess.
+
+- The effective row-100 sun at hour 12 is the block file's own value after layering: diffuse (0.784, 0.882, 1.0) squared times W 1, which is (0.615, 0.779, 1.0).
+  Neither `mapbase` (priority 4) nor `default` can override it, and the overlays carry row 0 only.
+  Row 0 at the same hour is (0.139, 0.189, 0.260), so row 100 is 4.4, 4.1 and 3.8 times row 0 in R, G and B.
+- That ratio, 0.226 to 0.260 in the inverse, equals the 0.1 to 0.25 of native `Col * albedo * N.L` that the ablations found retail carries (see the L1 list in [VISUAL-PARITY.md](VISUAL-PARITY.md)).
+  Retail's direct light behaves like the row-0 noon light on every collision, but no layer rule, default or field recovered here produces that.
+- `LightMask Influence` is the fourth component of the AmbientReflection vector (record offset 0x240 in `310630`), not a direct-light factor.
+  `Sharpness` only changes the specular roughness term in `native_direct`.
+  `SsaoWeight0..3 = 1` gives `1 + 1 * (ssao - 1)` and the SSAO value is `1.35 * ao - 0.35`, so an unoccluded surface keeps factor 1.
+  None of the three can scale the diffuse sun by 4.
+- The `(bank, row)` key is confirmed: bank `((area + 100) * 100 + block) * 10000` from the MSB file name (`1410957c0`), row the first of the four collision gparam ints (`1410a7f20`), with the second int the fog key (`1410a7780`).
+  No branch forces row 0.
+- Remaining candidates: the A/B set blend factor in the scene context (`ctx + 0x111b8`, written outside the code read here), the time-of-day key actually used for these blocks, and whatever selects the group rows of tone map and post (not the light key).
+
+Measured with `SEKIRO_ABLATE=nolayers` (before) against the default (after), the same executable, the ten matched cameras, 2560 by 1440:
+
+| Spot / shot | Scene Y % real / before / after | Saturation % real / before / after | Hue degrees real / before / after | Snow Y % real / before / after |
+| --- | --- | --- | --- | --- |
+| spot-002 / 4 | 7.0 / 24.3 / 26.1 | 24.0 / 21.0 / 20.9 | 203 / 207 / 204 | 20.2 / 78.4 / 73.5 |
+| spot-003 / 12 | 7.5 / 34.5 / 32.3 | 23.9 / 21.5 / 24.2 | 210 / 211 / 211 | 19.2 / 82.4 / 76.2 |
+| spot-008 / 33 | 7.5 / 16.6 / 16.4 | 24.4 / 25.0 / 28.0 | 210 / 214 / 214 | 39.0 / 88.3 / 81.0 |
+| spot-009 / 34 | 10.5 / 17.7 / 17.8 | 22.1 / 26.6 / 28.3 | 207 / 213 / 212 | 33.3 / 85.4 / 78.3 |
+| spot-013 / 44 | 12.5 / 28.6 / 28.8 | 17.3 / 20.2 / 20.7 | 205 / 210 / 210 | 12.8 / 46.1 / 44.6 |
+| spot-025 / 85 | 10.6 / 18.6 / 21.8 | 17.6 / 22.8 / 24.7 | 206 / 213 / 211 | 37.4 / 88.1 / 79.3 |
+| spot-089 / 282 | 22.3 / 40.8 / 40.5 | 19.8 / 17.8 / 15.9 | 198 / 206 / 206 | 24.9 / 84.9 / 78.0 |
+| spot-090 / 288 | 12.4 / 58.7 / 57.1 | 22.4 / 15.2 / 13.9 | 202 / 205 / 205 | 11.0 / 83.5 / 77.4 |
+| spot-091 / 290 | 19.7 / 36.9 / 37.1 | 15.4 / 19.2 / 18.7 | 197 / 207 / 207 | 11.7 / 45.0 / 46.6 |
+| spot-092 / 293 | 4.3 / 14.2 / 17.5 | 22.5 / 26.3 / 25.7 | 196 / 208 / 207 | 21.1 / 57.8 / 57.7 |
+
+Scene Y changes by -2.2 to +3.3 points and snow-region Y falls by 4.9 to 8.8 points in seven views, by 1.5 at spot-013, rises 1.6 at spot-091 and is flat at spot-092.
+Saturation and hue move by a few points either way.
+Every scene stays 2 to 5 times retail luminance (spot-002 26.1 against 7.0, spot-090 57.1 against 12.4), so L1 item 1 remains open.
+The default render changes only through proven data: the `mapbase` and overlay fields above.
+Panels (real, before, after) are in the external `2026-10-15/lightset/` directory.
+
+Other recoveries:
+
+- `mapoverride_0000` to `_0003` parse as game id 3 (no value times) and hold no LightSet rows; their post and environment fields are not applied because the block field that selects `MapOverride_NNNN` is not found, and no event instruction writes it.
+- The default record for a LightSet row is not the block's row 0: a field that no layer authors for row R takes the template value, so the earlier per-field fallback to row 0 was wrong for 17 of the 26 LightSet fields of row 100.

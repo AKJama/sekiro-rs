@@ -219,6 +219,7 @@ struct MapLayers {
 struct MapGame {
     flags: UVec4,
     p: [Vec4; 16],
+    tiling: [Vec4; 12],
 }
 
 pub(crate) const ATTR_MAP_BLEND2: bevy::mesh::MeshVertexAttribute =
@@ -804,6 +805,31 @@ fn replace_materials(
             if settings.enabled && data["version"].as_u64() == Some(2) {
                 game.flags.y = data["kind"].as_u64().unwrap_or(0) as u32;
                 game.flags.z = u32::from(settings.debug);
+                // Native cbTextureTilingScale applies each FLVER texture's scale separately.
+                for (i, key) in [
+                    "base_uv",
+                    "base_normal",
+                    "overlay",
+                    "overlay_normal",
+                    "snow",
+                    "snow_normal",
+                    "c",
+                    "c_normal",
+                    "mask",
+                    "detail",
+                    "mask_l",
+                    "wet",
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    game.tiling[i] = Vec4::new(
+                        data[key]["scale"][0].as_f64().unwrap_or(1.) as f32,
+                        data[key]["scale"][1].as_f64().unwrap_or(1.) as f32,
+                        0.,
+                        0.,
+                    );
+                }
                 for (key, bit) in [
                     ("base_normal", 1),
                     ("overlay", 2),

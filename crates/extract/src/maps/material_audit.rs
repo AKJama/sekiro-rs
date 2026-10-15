@@ -294,6 +294,28 @@ fn audit_map(
                 }));
             }
             let used = f.meshes.iter().any(|mesh| mesh.material == index);
+            let layer_inputs = choice
+                .layers
+                .as_ref()
+                .filter(|l| matches!(l.kind, 1 | 2))
+                .map(|layer| {
+                    let texture = |t: &Option<pieces::TexRef>| {
+                        t.as_ref().map(|t| {
+                            json!({"texture": texture_stem(&t.path),
+                        "uv": t.uv, "scale": t.scale})
+                        })
+                    };
+                    json!({"kind": layer.kind, "variant": layer.variant,
+                    "snow": texture(&layer.snow), "snow_normal": texture(&layer.snow_normal),
+                    "height_mask": texture(&layer.mask), "detail": texture(&layer.detail),
+                    "wet": texture(&layer.wet), "base_uv": texture(&choice.albedo),
+                    "params": layer.params,
+                    "snow_vertex": {"packed_stream": 4, "channel": 1},
+                    "detail_vertex": {"packed_stream": 5, "channel": 2},
+                    "wet_vertex": {"packed_stream": 3, "channel": 0},
+                    "snow_height_channels": "linear RGB dot params[13].xyz",
+                    "snow_weather_scale": "none in Multiple/MultipleGround pixel inputs"})
+                });
             materials.push(json!({"model": model, "material_index": index, "material": mat.name,
                 "mtd": mat.mtd, "mtd_found": mtd.is_some(), "mesh_uses_material": used,
                 "renderer_skips_material": pieces::skip_material(&choice.mtd),
@@ -304,7 +326,8 @@ fn audit_map(
                     checked.get(&(name, false)) == Some(&false)
                 }) { Some("selected albedo is missing; exporter uses constant material colour") } else { None },
                 "selected_albedo": choice.albedo.as_ref().map(|t| &t.path),
-                "selected_normal": choice.normal.as_ref().map(|t| &t.path), "slots": slots}));
+                "selected_normal": choice.normal.as_ref().map(|t| &t.path),
+                "layer_inputs": layer_inputs, "slots": slots}));
         }
         let visible = f
             .meshes

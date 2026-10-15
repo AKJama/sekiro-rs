@@ -329,7 +329,8 @@ fn apply_post_effects(
     }
 }
 
-/// Diagnostic ablation switch: `SEKIRO_ABLATE=nosun,nofill,nolocal,nospec,noamb,nogi` (comma list).
+/// Diagnostic ablation switch: `SEKIRO_ABLATE=nosun,nofill,nolocal,nospec,noamb,nogi,nolayers`
+/// (comma list).
 pub fn ablate(name: &str) -> bool {
     static LIST: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     LIST.get_or_init(|| {
@@ -1104,6 +1105,8 @@ fn toward(angle: &[f32]) -> Vec3 {
 
 impl LightSet {
     pub fn from_gparam(g: &Gparam, id: i32, hour: f32) -> Self {
+        // A layered file resolves a row that no layer registered to the default record.
+        let id = g.light_row(id);
         let get = |name: &str| g.param("LightSet", name).and_then(|p| p.at(id, hour));
         let fog = |name: &str| g.param("VolumetricFog", name).and_then(|p| p.at(id, hour));
         let (sun_color, sun_w) = colour(&get("DiffColor0").unwrap_or(vec![1.0, 0.95, 0.85, 1.5]));
@@ -1284,6 +1287,7 @@ pub fn apply_lighting(
         .gparam
         .param("LightSet", "DiffColor0")
         .is_none_or(|p| !p.entries.iter().any(|e| e.id == lighting.light_set))
+        && !lighting.gparam.is_layered()
     {
         error!(
             "missing LightSet bank row {} in {}; parameter fallback is in use",

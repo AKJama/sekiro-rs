@@ -48,6 +48,8 @@ fn authored_mask_selectors_intensity_and_snow_direction_survive_packing() {
             (snow, vec![-0.3, 0.8, -0.3]),
             ("color_1", vec![0.2, 0.4, 0.6]),
             ("color_1-Intensity", vec![2.]),
+            ("float_11", vec![0.25]),
+            ("float_12", vec![0.75]),
         ] {
             d.params.push(Param {
                 name: format!("{prefix}__snp_0_{name}"),
@@ -56,6 +58,10 @@ fn authored_mask_selectors_intensity_and_snow_direction_survive_packing() {
             });
         }
         let p = map_layers::game_params(&d, kind);
+        if kind == 2 {
+            // Ground flow amplitude reads float_11 (cbMtdParam byte 448), not float_12.
+            assert_eq!(p[6][3], 0.25);
+        }
         assert_eq!(&p[9][..3], &[0., 1., 0.]);
         assert_eq!(&p[13][..3], &[0., 0., 1.]);
         assert_eq!(&p[14][..3], &[0.3, 0.8, -0.3]);

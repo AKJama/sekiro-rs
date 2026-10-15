@@ -557,6 +557,9 @@ pub fn build(
         if let Some(layers) = &choice.layers {
             let mut extras = json!({"version": 2, "kind": layers.kind, "variant": layers.variant, "params": layers.params,
                 "base_albedo": choice.albedo.is_some()});
+            if let Some(r) = &choice.albedo {
+                extras["base_uv"] = json!({"uv": r.uv, "scale": r.scale});
+            }
             for (key, r) in [
                 ("overlay", &layers.overlay),
                 ("overlay_normal", &layers.overlay_normal),

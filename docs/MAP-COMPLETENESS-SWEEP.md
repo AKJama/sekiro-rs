@@ -811,3 +811,32 @@ Every colour cell was re-measured; geometry totals stay at depth gap 493 / 4885 
 Final totals (void, depth gap, untextured, grey, pop-in) are Outskirts 0 / 493 / 0 / 898 / 24118 in 43.3 seconds and Castle 1933 / 4885 / 0 / 266 / 23199 in 41.9 seconds, both under the 120-second limit and both passing every per-view tolerance against the refreshed fixtures.
 The cells were taken from the first post-change runs; the second runs used for the pass agree within 3 pixels in every total.
 Raw reports are under `target/alt-bright/gate-head/` and `target/alt-bright/gate-after/`.
+
+## Layer stack colour fixture review, 2026-10-15
+
+The default render now resolves LightSet and post fields through the executable's layer stack (`default`, `mapbase`, block file, collision overlays), see [LIGHTING.md](LIGHTING.md#layer-stack-and-record-defaults-2026-10-15).
+Colour fields (grey, pop-in) of both render fixtures are re-baselined; geometry fields (position, yaw, pitch, void, depth gap, untextured), resolution, story and tolerances are unchanged.
+No per-pixel attribution was made: the change moves tone-map mode (`mapbase` supplies 8, the old fallback was 7), tone and colour-correction fields, row-100 hemisphere, fill direction and sharpness, and the overlay fields of the collision under each camera.
+
+The control is the same executable with `SEKIRO_ABLATE=nolayers`, so it includes the concurrent snow-coverage work in the shared tree.
+The control's differences from the previous fixture (Outskirts 1 grey, Outskirts 2 pop-in and Castle 1 pop-in, the cells that task reports as rejected) come from that work, not from this change.
+Raw reports are under `target/alt-bright/gate-nolayers/` (control), `gate-layers/` (first layered run) and `gate-final/` (pass against the new fixtures).
+
+| Map / view | Grey fixture -> control -> new | Pop-in fixture -> control -> new | Note |
+| --- | ---: | ---: | --- |
+| Outskirts 0 | 69 -> 65 -> 68 | 2777 -> 2768 -> 2491 | Pop-in falls by 277 with the layered tone curve |
+| Outskirts 1 | 467 -> 498 -> 1623 | 183 -> 179 -> 245 | Grey rises by 1125: the large snow-lit plane crosses the neutral-RGB criterion under the mode-8 curve |
+| Outskirts 2 | 8 -> 8 -> 14 | 2669 -> 2736 -> 2255 | Pop-in falls by 481 |
+| Outskirts 3 | 3 -> 3 -> 49 | 6498 -> 6425 -> 6240 | Grey rises by 46 |
+| Outskirts 4 | 351 -> 350 -> 754 | 6759 -> 6756 -> 7435 | Grey rises by 404 and pop-in by 679 |
+| Outskirts 5 | 0 -> 0 -> 0 | 5231 -> 5222 -> 5377 | Pop-in rises by 155 |
+| Castle 0 | 187 -> 194 -> 198 | 4982 -> 4982 -> 5040 | Within the old tolerance |
+| Castle 1 | 45 -> 40 -> 56 | 4930 -> 4987 -> 4892 | Within the old tolerance |
+| Castle 2 | 0 -> 0 -> 3 | 5772 -> 5741 -> 5426 | Pop-in falls by 315 |
+| Castle 3 | 0 -> 0 -> 0 | 5411 -> 5466 -> 5787 | Pop-in rises by 321 |
+| Castle 4 | 9 -> 10 -> 13 | 0 -> 9 -> 0 | Within the old tolerance |
+| Castle 5 | 22 -> 21 -> 55 | 2106 -> 2088 -> 1878 | Grey rises by 33, pop-in falls by 210 |
+
+Final totals (void, depth gap, untextured, grey, pop-in) are Outskirts 0 / 493 / 0 / 2508 / 24043 in 55.5 seconds and Castle 1933 / 4885 / 0 / 325 / 23017 in 56.8 seconds, both under the 120-second limit and both passing every per-view tolerance.
+The geometry columns of the layered runs equal the control runs and the fixtures in every view.
+The first layered Outskirts run gave the same totals as the final one (deterministic); the Castle pop-in total moved 23023 -> 23017.

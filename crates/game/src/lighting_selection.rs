@@ -327,6 +327,83 @@ fn sky_model(cache: &Path, scene: &SceneState) -> Result<Option<String>> {
         }))
 }
 
+/// Stem of the family file that holds layer `index` of the block whose layer 0 is `stem`.
+///
+/// A block loads ten files `m<area>_<block>_<d><sub>`; the executable derives the number of the
+/// file for index `d` as `(d - base / 100) * 100 + base` (`ed5cd0`), where `base` is the number
+/// of the layer-0 file.
+/// Layers 1 to 4 take `d` from the four signed bytes of the collision `SceneGparam` struct, and
+/// a byte outside `0..=9` leaves the layer empty.
+pub fn family_stem(stem: &str, index: i8) -> Option<String> {
+    let (prefix, number) = stem.split_at_checked(stem.len().checked_sub(4)?)?;
+    let valid = prefix.len() == 7
+        && prefix.starts_with('m')
+        && prefix.ends_with('_')
+        && stem.bytes().filter(u8::is_ascii_digit).count() == 8;
+    let base: i32 = number.parse().ok().filter(|_| valid)?;
+    let d = i32::from(index);
+    let number = (d - base / 100) * 100 + base;
+    ((0..=9).contains(&d) && (0..10_000).contains(&number)).then(|| format!("{prefix}{number:04}"))
+}
+
+fn read_gparam(cache: &Path, stem: &str) -> Result<Option<Gparam>> {
+    let path = cache.join(format!("raw/param/drawparam/{stem}.gparam"));
+    path.is_file()
+        .then(|| Ok(gparam::parse(&std::fs::read(&path)?)?))
+        .transpose()
+}
+
+/// The engine layer stack for one map: `default.gparam` and `mapbase.gparam` under the block's
+/// own file and the four collision-selected overlay files (priorities in [`gparam::priority`]).
+/// `MapOverride_NNNN` (priority 10) is not applied: the block field that selects it was not
+/// recovered, and the installed files carry no LightSet rows.
+#[derive(Default)]
+struct LayerFiles {
+    defaults: Option<Gparam>,
+    mapbase: Option<Gparam>,
+    family: BTreeMap<String, Gparam>,
+}
+
+impl LayerFiles {
+    fn load(cache: &Path, stems: &[&str]) -> Result<Self> {
+        let mut family = BTreeMap::new();
+        for stem in stems {
+            for d in 0..=9 {
+                if let Some(name) = family_stem(stem, d)
+                    && !family.contains_key(&name)
+                    && let Some(g) = read_gparam(cache, &name)?
+                {
+                    family.insert(name, g);
+                }
+            }
+        }
+        Ok(Self {
+            defaults: read_gparam(cache, "default")?,
+            mapbase: read_gparam(cache, "mapbase")?,
+            family,
+        })
+    }
+
+    /// The resolved stack for `own` (the file `stem`) with the given collision overlay bytes.
+    fn compose(&self, stem: &str, own: &Gparam, overlays: [i8; 4]) -> Gparam {
+        // Diagnostic `SEKIRO_ABLATE=nolayers` restores the single-file lookup.
+        if crate::lighting::ablate("nolayers") {
+            return own.clone();
+        }
+        let mut layers: Vec<(u8, &Gparam)> = Vec::new();
+        if let Some(g) = &self.mapbase {
+            layers.push((gparam::priority::MAP_BASE, g));
+        }
+        layers.push((gparam::priority::BLOCK_LAYER, own));
+        for (i, &d) in overlays.iter().enumerate() {
+            if let Some(g) = family_stem(stem, d).and_then(|name| self.family.get(&name)) {
+                layers.push((gparam::priority::BLOCK_LAYER + 1 + i as u8, g));
+            }
+        }
+        gparam::layer(&layers, self.defaults.as_ref())
+    }
+}
+
 /// Loaded once per map. Runtime event overrides use the same resolver as initial selection.
 #[derive(Resource)]
 pub struct LightingSelection {
@@ -337,6 +414,11 @@ pub struct LightingSelection {
     current: Option<u8>,
     pinned: bool,
     fixed_environment: bool,
+    layers: LayerFiles,
+    /// Overlay layers 1 to 4 chosen by the collision under the focus (-1: none), and the ones
+    /// last resolved into the lighting.
+    overlays: [i8; 4],
+    applied_overlays: [i8; 4],
 }
 
 impl LightingSelection {
@@ -378,6 +460,12 @@ impl LightingSelection {
         let base = gparam::parse(&std::fs::read(
             cache.join(format!("raw/param/drawparam/{}.gparam", initial.source)),
         )?)?;
+        let stems: Vec<&str> = files
+            .values()
+            .map(|(source, _)| source.as_str())
+            .chain([initial.source.as_str()])
+            .collect();
+        let layers = LayerFiles::load(cache, &stems)?;
         Ok(Self {
             initial,
             area,
@@ -386,7 +474,25 @@ impl LightingSelection {
             current: None,
             pinned,
             fixed_environment: profile["fixed_environment"].as_bool().unwrap_or(false),
+            layers,
+            overlays: [-1; 4],
+            applied_overlays: [-1; 4],
         })
+    }
+
+    /// Resolves the initial file through the layer stack. Pinned or substituted files (explicit
+    /// `--gparam`, cinematic banks) are used as they are.
+    pub fn resolve_initial(&self, stem: &str, plain: Gparam) -> Gparam {
+        if self.pinned || stem != self.initial.source {
+            plain
+        } else {
+            self.layers.compose(stem, &plain, [-1; 4])
+        }
+    }
+
+    /// The overlay layers of the collision under the focus; applied on the next `sync_events`.
+    pub fn set_overlays(&mut self, overlays: [i8; 4]) {
+        self.overlays = overlays;
     }
 
     pub fn environment_for_hour(&self, hour: f32) -> u32 {
@@ -398,22 +504,29 @@ impl LightingSelection {
     }
 
     pub fn apply_sub(&mut self, requested: Option<u8>, light: &mut crate::lighting::MapLighting) {
-        if self.pinned || requested == self.current {
+        if self.pinned || (requested == self.current && self.overlays == self.applied_overlays) {
             return;
         }
         let Some(sub) = requested else {
-            light.gparam.clone_from(&self.base);
+            light.gparam = self
+                .layers
+                .compose(&self.initial.source, &self.base, self.overlays);
             light.source.clone_from(&self.initial.source);
             light.applied = None;
             self.current = None;
+            self.applied_overlays = self.overlays;
             return;
         };
         if let Some((source, g)) = self.files.get(&sub) {
-            light.gparam.clone_from(g);
+            light.gparam = self.layers.compose(source, g, self.overlays);
             light.source.clone_from(source);
             light.applied = None;
             self.current = Some(sub);
-            info!("event lighting: {source}, sub-ID {sub}");
+            self.applied_overlays = self.overlays;
+            info!(
+                "event lighting: {source}, sub-ID {sub}, overlays {:?}",
+                self.overlays
+            );
         } else {
             warn!("event lighting: unavailable sub-ID {sub}");
         }
@@ -697,6 +810,188 @@ mod tests {
             let map = format!("{}_00_00", p["map"].as_str().unwrap());
             for state in p["states"].as_array().unwrap() {
                 select(&cache(), &map, state["name"].as_str(), None).unwrap();
+            }
+        }
+    }
+
+    fn drawparam(stem: &str) -> Gparam {
+        read_gparam(&cache(), stem).unwrap().unwrap()
+    }
+
+    fn value(g: &Gparam, name: &str, row: i32, hour: f32) -> Vec<f32> {
+        g.param("LightSet", name)
+            .and_then(|p| p.at(g.light_row(row), hour))
+            .unwrap()
+    }
+
+    #[test]
+    fn family_files_follow_the_executable_numbering() {
+        assert_eq!(
+            family_stem("m11_00_0000", 5).as_deref(),
+            Some("m11_00_0500")
+        );
+        assert_eq!(
+            family_stem("m11_00_0000", 0).as_deref(),
+            Some("m11_00_0000")
+        );
+        assert_eq!(
+            family_stem("m11_02_0930", 5).as_deref(),
+            Some("m11_02_0530")
+        );
+        assert_eq!(
+            family_stem("m11_02_0930", 9).as_deref(),
+            Some("m11_02_0930")
+        );
+        assert_eq!(
+            family_stem("m11_00_0020", 3).as_deref(),
+            Some("m11_00_0320")
+        );
+        assert_eq!(family_stem("m11_00_0000", -1), None);
+        assert_eq!(family_stem("m11_00_0000", 10), None);
+        assert_eq!(family_stem("s89_00_0099", 1), None);
+        assert_eq!(family_stem("default", 1), None);
+    }
+
+    #[test]
+    fn map_override_files_parse_and_carry_no_light_rows() {
+        // Game id 3 (value ids without times): the files exist, but hold no LightSet rows.
+        for i in 0..4 {
+            let g = drawparam(&format!("mapoverride_{i:04}"));
+            assert!(g.rows("LightSet").is_empty(), "mapoverride_{i:04}");
+            assert!(g.groups.len() == if i == 0 { 0 } else { 25 }, "{i}");
+        }
+        let env = drawparam("mapoverride_0001");
+        let ids: Vec<i32> = env
+            .param("Env Map", "EnvMapId")
+            .unwrap()
+            .entries
+            .iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(ids, (0..=16).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn mapbase_and_row_defaults_layer_under_the_ashina_block_file() {
+        let library = LayerFiles::load(&cache(), &["m11_00_0000"]).unwrap();
+        let own = drawparam("m11_00_0000");
+        let base = drawparam("mapbase");
+        let defaults = drawparam("default");
+        let g = library.compose("m11_00_0000", &own, [-1; 4]);
+        assert!(g.is_layered());
+        // The block's own row-100 sun beats the map base.
+        assert_eq!(
+            value(&g, "Directional Light DiffColor0", 100, 12.),
+            value(&own, "Directional Light DiffColor0", 100, 12.)
+        );
+        assert_ne!(
+            value(&g, "Directional Light DiffColor0", 100, 12.),
+            value(&base, "Directional Light DiffColor0", 100, 12.)
+        );
+        // Fields the block file never authors for row 100 come from the map base for that row,
+        // not from the block's row 0 and not from the shared default.
+        for name in [
+            "Hemi Color Up",
+            "Hemi Color Down",
+            "Sharpness0",
+            "SsaoWeight0",
+        ] {
+            let name = format!("Directional Light {name}");
+            assert_eq!(
+                value(&g, &name, 100, 18.),
+                value(&base, &name, 100, 18.),
+                "{name}"
+            );
+        }
+        assert_ne!(
+            value(&g, "Directional Light Hemi Color Up", 100, 18.),
+            value(&g, "Directional Light Hemi Color Up", 0, 18.),
+            "row 100 must not inherit the block's row 0"
+        );
+        assert_eq!(value(&g, "Directional Light Sharpness0", 100, 12.), [1.]);
+        // The block's row 0 still wins for row 0.
+        assert_eq!(
+            value(&g, "Directional Light Hemi Color Up", 0, 18.),
+            value(&own, "Directional Light Hemi Color Up", 0, 18.)
+        );
+        // Rows only the map base registers exist for every block, but row 140 does not.
+        assert!(g.rows("LightSet").contains(&130));
+        assert_eq!(g.light_row(130), 130);
+        assert_eq!(g.light_row(140), gparam::DEFAULT_ROW);
+        assert_eq!(
+            value(&g, "Directional Light DiffColor0", 140, 12.),
+            value(&defaults, "Directional Light DiffColor0", 0, 12.)
+        );
+    }
+
+    #[test]
+    fn collision_overlays_win_over_the_block_file_by_priority() {
+        let stem = "m11_00_0000";
+        let library = LayerFiles::load(&cache(), &[stem]).unwrap();
+        let own = drawparam(stem);
+        let plain = library.compose(stem, &own, [-1; 4]);
+        // Layer 2 = file 5 authors a row-100 second light that the block file lacks.
+        let layered = library.compose(stem, &own, [-1, -1, 5, -1]);
+        let overlay = drawparam("m11_00_0500");
+        let angle = "Directional Light Angle1";
+        assert_ne!(
+            value(&plain, angle, 100, 12.),
+            value(&layered, angle, 100, 12.)
+        );
+        assert_eq!(
+            value(&layered, angle, 100, 12.),
+            value(&overlay, angle, 100, 12.)
+        );
+        // Overlay 1 authors a different tone-map exposure bank than the base file.
+        let exposure = |g: &Gparam| {
+            g.param("Tone Map", "ToneMap-Exposure")
+                .and_then(|p| p.at(0, 12.))
+                .unwrap()
+        };
+        let overlay1 = library.compose(stem, &own, [1, -1, -1, -1]);
+        assert_eq!(exposure(&overlay1), exposure(&drawparam("m11_00_0100")));
+        // The collision order matters: a later layer beats an earlier one.
+        let both = library.compose(stem, &own, [1, 5, -1, -1]);
+        assert_eq!(
+            exposure(&both),
+            exposure(&drawparam("m11_00_0500")),
+            "layer 2 outranks layer 1"
+        );
+    }
+
+    #[test]
+    fn every_ashina_collision_resolves_to_registered_rows_with_complete_records() {
+        for map in ["m11_00_00_00", "m11_01_00_00", "m11_02_00_00"] {
+            let stem = format!("{}_0000", &map[..6]);
+            let library = LayerFiles::load(&cache(), &[stem.as_str()]).unwrap();
+            let own = drawparam(&stem);
+            let layout: Value = serde_json::from_slice(
+                &std::fs::read(cache().join(format!("maps/{map}/layout.json"))).unwrap(),
+            )
+            .unwrap();
+            for part in layout["collisions"].as_array().unwrap() {
+                let layers = [0, 1, 2, 3].map(|i| {
+                    part["scene_gparam"]["event_ids"][i]
+                        .as_i64()
+                        .map_or(-1, |v| v as i8)
+                });
+                let g = library.compose(&stem, &own, layers);
+                let row = part["light_set"].as_i64().unwrap() as i32;
+                // Every field of every light slot has a value for the row, from some layer.
+                for name in [
+                    "Directional Light DiffColor0",
+                    "Directional Light Angle0",
+                    "Directional Light Hemi Color Up",
+                    "Directional Light Sharpness1",
+                    "Directional Light SsaoWeight0",
+                ] {
+                    assert!(
+                        g.param("LightSet", name)
+                            .is_some_and(|p| p.entries.iter().any(|e| e.id == g.light_row(row))),
+                        "{map} {} row {row} {name}",
+                        part["name"]
+                    );
+                }
             }
         }
     }

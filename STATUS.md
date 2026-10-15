@@ -1,5 +1,18 @@
 # Status
 
+## Snow layer coverage audit (2026-10-15)
+
+Traced Multiple/MultipleGround snow weights against native Gbuf vertex/pixel shaders and installed MTD/FLVER inputs.
+Corrected per-texture tiling, the snow-facing normal transform, Ground wet exclusion, detail decoding, Ground flow amplitude packing and wet/snow composition order.
+Retained authored mask channels, vertex channels, directions, height scale, sharpness and tints; no weather-wide snow multiplier was found in the inspected pixel inputs.
+The six frozen-lighting retail/before/after panels show that these corrections do not solve the thick-white appearance: snow-region Y changes by -0.01 to +1.20 percentage points and M1 remains open.
+Both after gates preserve every geometry count, collision, visible-part set and all 24 collision/depth diagnostic images, while reporting three colour fixture failures without changing fixtures.
+The release workspace suite passes 819 tests with 25 existing ignores, including the GPU snow regression, shader composition regression and installed-data gate.
+Workspace all-target Clippy with warnings denied, formatting and diff whitespace checks pass; two concurrent temporary examples received rustfmt formatting only.
+The detailed input trace, six luminance comparisons and all twelve per-view colour deltas are in docs/VISUAL-PARITY.md's M1 coverage audit.
+Evidence is retained externally under the requested 2026-10-15/snow-cover collection; Cargo uses target/alt-snow.
+No staging, commit, worktree or publication was performed.
+
 ## Reference story and snow remeasurement (2026-10-15)
 
 Selected the named `genichiro-defeated` reference state from the installed defeat flags, common clock events and the retail overcast sky/travel-menu evidence.

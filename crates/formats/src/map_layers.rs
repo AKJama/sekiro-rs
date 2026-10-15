@@ -171,7 +171,7 @@ pub fn game_params(d: &mtd::Mtd, kind: u8) -> [[f32; 4]; 16] {
             one,
             col("color_1"),
             col("color_0"),
-            [f("float_4"), f("float_5"), f("float_23"), f("float_12")],
+            [f("float_4"), f("float_5"), f("float_23"), f("float_11")],
             [f("float_10"), f("float_6"), f("float_7"), f("float_22")],
             [f("float_2"), f("float_3"), 0.0, 0.0],
             w(v3("float3_0"), f("float_31")),

@@ -150,6 +150,8 @@ struct CollisionPart {
     fog_set: i32,
     scattering_set: i32,
     env_map: i32,
+    /// `SceneGparam` event bytes: the family file index of layers 1 to 4 (-1: none).
+    layers: [i8; 4],
 }
 
 #[derive(Resource)]
@@ -416,6 +418,7 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
                 fog_set: row["fog_set"].as_i64().unwrap_or(-1) as i32,
                 scattering_set: row["scattering_set"].as_i64().unwrap_or(-1) as i32,
                 env_map: row["env_map"].as_i64().unwrap_or(-1) as i32,
+                layers: scene_layers(&row["scene_gparam"]),
             });
         }
     }
@@ -544,6 +547,7 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
         selection,
         scene.gparam.is_some(),
     )?;
+    let gparam = selection.resolve_initial(&stem, gparam);
     let selected_environment = selection.initial.environment;
     app.insert_resource(selection);
     crate::lighting_selection::MapStoryEvents::install(app, cache, &id, story.as_deref())?;
@@ -1177,6 +1181,16 @@ fn apply_fly(fly: Res<Fly>, mut camera: Query<&mut Transform, With<Camera3d>>) {
     }
 }
 
+/// The four layer file indices of a collision's `SceneGparam` (-1 where absent).
+fn scene_layers(scene_gparam: &Value) -> [i8; 4] {
+    std::array::from_fn(|i| {
+        scene_gparam["event_ids"][i]
+            .as_i64()
+            .and_then(|v| i8::try_from(v).ok())
+            .unwrap_or(-1)
+    })
+}
+
 /// Finds the collision part under the camera (the nearest surface below, else the nearest
 /// above) and takes its groups and lighting configuration whenever the focus moves.
 #[allow(clippy::too_many_arguments)]
@@ -1187,6 +1201,7 @@ fn pick_groups(
     mut lighting: ResMut<MapLighting>,
     mut fog: ResMut<crate::lighting::fog::FogSelection>,
     mut region: ResMut<crate::lighting_selection::RegionSelection>,
+    mut selection: Option<ResMut<crate::lighting_selection::LightingSelection>>,
     focus: Query<&Transform, With<MapFocus>>,
     connected: Option<Res<world::MapWorld>>,
 ) {
@@ -1206,6 +1221,11 @@ fn pick_groups(
             let config =
                 std::array::from_fn(|i| config.get(i).and_then(Value::as_i64).unwrap_or(-1) as i32);
             region.enter(config);
+            if block == &world.primary
+                && let Some(selection) = selection.as_mut()
+            {
+                selection.set_overlays(scene_layers(&row["scene_gparam"]));
+            }
             if config[0] >= 0 {
                 lighting.light_set = crate::lighting::forced_light_set().unwrap_or(config[0]);
             }
@@ -1251,6 +1271,9 @@ fn pick_groups(
         _ => part.draw,
     };
     let light_set = part.light_set;
+    if let Some(selection) = selection.as_mut() {
+        selection.set_overlays(part.layers);
+    }
     region.enter([light_set, part.fog_set, part.scattering_set, part.env_map]);
     if part.fog_set >= 0 {
         fog.0 = part.fog_set;
@@ -1735,6 +1758,7 @@ mod tests {
                 fog_set: config[1],
                 scattering_set: config[2],
                 env_map: config[3],
+                layers: [-1; 4],
             })
             .collect();
         let mut app = App::new();

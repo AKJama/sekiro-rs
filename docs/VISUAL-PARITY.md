@@ -393,6 +393,105 @@ The requested Cargo target directory and six-job limit are retained; captures an
 The full game test run takes 257.38 seconds under concurrent host compilation, and is not a steady performance claim.
 No renderer code changed, so this session does not claim a new Clippy result or a completed visual-parity fix.
 
+#### M1 snow coverage arithmetic audit - 2026-10-15
+
+The supported layer corrections below do not solve the thick-white appearance in the six matched views.
+Their snow-region luminance changes range from -0.01 to +1.20 percentage points, while retail remains much darker.
+M1 stays open; these measurements do not justify reducing an authored snow weight, mask selector, threshold or tint.
+
+The evidence is the installed MTD/FLVER data, exported GLB extras and the native `M[Multiple]` / `M[MultipleGround]` Gbuf vertex and pixel shader disassembly in the ignored shader research collection.
+Representative pixel facets checked are Multiple 11/20/27 and MultipleGround 6/16/18/27, including wet, overlay, extra ground layer and snow-normal switches.
+The existing 34-facet sampler tables retain their authored selections.
+The shared local WORK.md rendering claim covers the afternoon snow investigation; no shared-board commit or publication was made.
+
+| Coverage input | Multiple | MultipleGround | Audit result |
+| --- | --- | --- | --- |
+| Snow vertex weight | Packed stream 4, G | Packed stream 4, G | Existing export is correct; this is TEXCOORD5.w after the native vertex shader |
+| Overlay / extra layer | Stream 0 R / stream 1 B | Stream 0 R / stream 1 G | Existing export is correct |
+| Detail / wet vertex weights | Stream 5 B / stream 3 R | Same | Existing export is correct |
+| Snow direction | float3_7 | float3_5 | Mirrored X for Bevy, without normalizing the authored vector |
+| Height selector | float3_5 | float3_3 | Dot product of linear mask-9 RGB, not an alpha or fixed single-channel lookup |
+| Snow mask scale | float_32 | float_22 | Applied before the native 0.01 addition |
+| Common height / sharpness | float_4 / float_5 | Same | Final saturation follows the complete height operation |
+| Detail-normal amplitude | float_1 | float_23 | RG detail, weighted by the detail vertex channel, enters the facing normal |
+| Wet-normal amplitude | float_0 | float_11 | Ground incorrectly packed float_12; corrected to native byte offset 448 |
+| Snow normal | Slot 10, replacement | Slot 7, additive XY times float_31 | Static facets retain their distinct normal behavior |
+| Texture tiling | Separate scale for every slot | Same | Exported non-unit scales were ignored by the layer shader; now uploaded and sampled |
+
+The recovered coverage is `h = (dot(mask9.rgb, selector) * snow_mask_scale + 0.01) * height_scale`, `w = dot(snow_direction, bumped_world_normal) * snow_vertex_weight`, and `snow = saturate((w - h * (1 - w)) * (1 + sharpness))`.
+Wet-enabled Ground facets multiply `w` by `1 - wet_vertex_weight * float_7` before the height operation, without an intermediate saturation; our shader omitted that exclusion.
+Multiple has no corresponding wet exclusion from its snow coverage.
+The height and sharpness packing, RGB channel selectors and snow vertex channel were already correct.
+No separate invented snow threshold or contrast term is added.
+
+The snow-facing normal incorrectly normalized only its tangent-space Z component before transformation.
+It now transforms the complete base/overlay/ground-layer/detail normal with individually normalized basis vectors and normalizes the resulting world vector, matching the inspected shader operations.
+Back faces flip the geometric normal before the facing calculation.
+Ground decodes detail RG before multiplying its vertex weight; Multiple retains the native 0.502016 neutral instead of the former rounded 0.502.
+Ground's flow normal follows snow and replaces the composed normal; Multiple adds flow before its replacement snow normal.
+Ground wet albedo now follows snow and uses the recovered nested multiplication/interpolation rather than the previous approximate lerp toward wet colour.
+
+Mask 9 uses instance-scaled UV0 with its own FLVER texture scale; Multiple mask 6 uses UV1 and its separate scale for extra-layer/wet/tint heights.
+Detail uses unscaled-by-instance UV0 with its authored texture scale, and wet flow uses UV1 plus authored time scrolling before texture tiling.
+The tiling omission affects real inputs, including masks scaled 2 by 2.2 and normal/detail textures scaled up to 16 in the audited Ashina snow materials.
+The exporter now retains base-albedo scale as `base_uv`, the runtime uploads the twelve texture scales, and the material audit records the layer inputs and source channels.
+Existing cached map metadata was refreshed from raw FLVER/MTD data in 933 GLBs, with each binary mesh/vertex payload unchanged byte for byte.
+
+The inspected snow arithmetic has no active story/weather GPARAM snow-amount uniform.
+Its inputs are the material constants, vertex channels, textures, instance UV scale and bumped normal; the active per-frame time only scrolls wet flow.
+The dynamic wet parameter declarations in these shaders are unused, so they do not establish a weather-wide snow reduction.
+This does not certify every possible CPU-side material override, separate M[Snow]/Snow_mb family or native tangent quantization path.
+Native detail alpha contributes to Multiple's G-buffer occlusion rather than an additional snow-coverage mask; that occlusion response is outside this coverage correction.
+
+All six captures use `genichiro-defeated`, the saved player/camera/FOV and 2560 by 1440 output, with one windowless renderer at a time.
+Checked lighting, story, tone and fog source hashes are equal between the frozen before and after builds.
+The production shader is verified verbatim in each executable; their digests and source comparison are retained externally.
+Existing reviewed snow polygons and exact inverse-sRGB Rec.709 luminance are reused, without brightness-based pixel selection.
+Small regional deltas can include native particle phase variation and do not measure pure albedo or isolated coverage.
+
+| Spot | Retail snow Y % | Before Y % | After Y % | Change in percentage points |
+| --- | ---: | ---: | ---: | ---: |
+| 002/004 | 20.247 | 78.325 | 78.397 | +0.071 |
+| 003/012 | 19.218 | 82.448 | 82.436 | -0.011 |
+| 008/033 | 39.012 | 88.215 | 88.250 | +0.035 |
+| 025/085 | 37.417 | 88.096 | 88.135 | +0.039 |
+| 090/288 | 10.996 | 82.296 | 83.499 | +1.204 |
+| 091/290 | 11.730 | 44.002 | 45.018 | +1.016 |
+
+Real | before | after full-resolution panels, previews, individual renders, measurements and executable provenance are in the external progress collection's `2026-10-15/snow-cover/` directory.
+The six panel stems are `spot-002-shot-004`, `spot-003-shot-012`, `spot-008-shot-033`, `spot-025-shot-085`, `spot-090-shot-288` and `spot-091-shot-290`, each ending in `-real-before-after.png`.
+No lighting-selection source, render fixture or MAP-COMPLETENESS-SWEEP.md is edited by this task.
+
+Both frozen before gates pass, in 82.424 seconds for Outskirts and 101.971 seconds for Castle.
+After gates finish in 68.284 and 91.877 seconds, retaining the same geometry triples, selected collisions and sorted visible-part sets in all twelve views.
+All twelve collision images and all twelve depth images are pixel-identical between before and after.
+Void/depth-gap/untextured totals remain Outskirts 0/493/0 and Castle 1933/4885/0.
+The full after gates reject three colour cells: Outskirts view 1 grey, Outskirts view 2 pop-in and Castle view 1 pop-in.
+These failures are reported without editing the fixtures or their tolerances.
+Normal and all-visible phases were reviewed separately in the external `outskirts-gate-review.png` and `castle-gate-review.png` sheets.
+The colour deltas below are after minus frozen before; fixture deltas retain the small pre-existing capture variance as well.
+
+| Map / view | Grey before -> after | Grey delta / fixture delta | Pop-in before -> after | Pop-in delta / fixture delta |
+| --- | ---: | ---: | ---: | ---: |
+| Outskirts 0 | 69 -> 65 | -4 / -4 | 2777 -> 2768 | -9 / -9 |
+| Outskirts 1 | 467 -> 498 | +31 / +31 | 183 -> 179 | -4 / -4 |
+| Outskirts 2 | 6 -> 7 | +1 / -1 | 2668 -> 2735 | +67 / +66 |
+| Outskirts 3 | 2 -> 2 | 0 / -1 | 6494 -> 6422 | -72 / -76 |
+| Outskirts 4 | 351 -> 350 | -1 / -1 | 6758 -> 6758 | 0 / -1 |
+| Outskirts 5 | 0 -> 0 | 0 / 0 | 5231 -> 5222 | -9 / -9 |
+| Castle 0 | 193 -> 194 | +1 / +7 | 4980 -> 4982 | +2 / 0 |
+| Castle 1 | 44 -> 40 | -4 / -5 | 4932 -> 4985 | +53 / +55 |
+| Castle 2 | 0 -> 0 | 0 / 0 | 5774 -> 5748 | -26 / -24 |
+| Castle 3 | 0 -> 0 | 0 / 0 | 5409 -> 5466 | +57 / +55 |
+| Castle 4 | 9 -> 10 | +1 / +1 | 0 -> 0 | 0 / 0 |
+| Castle 5 | 22 -> 21 | -1 / -1 | 2105 -> 2089 | -16 / -17 |
+
+Raw reports are retained under `target/alt-snow/snow-gate-before/` and `snow-gate-after/`, with external `gate-deltas.json` preserving each geometry and colour comparison.
+The release workspace suite passes 819 tests with 25 existing ignores, including the installed-data gate, native height/wet/basis GPU samples and full layered shader composition validation.
+Source changes are confined to map_material.wgsl, material/layer handling in map_material.rs and map_bindings.wgsl, formats/map_layers.rs, extractor material_audit.rs and layer metadata in pieces.rs, the existing map_shader.rs/map_layers.rs test modules, this M1 section and STATUS.md.
+Workspace all-target Clippy with warnings denied, cargo fmt --all --check and git diff --check pass under CARGO_TARGET_DIR=target/alt-snow.
+The format check initially found two concurrently created temporary formats examples; rustfmt was applied to zz_pick_tmp.rs and zz_sg_tmp.rs, without semantic changes or staging them.
+
 ### E1 Fire, lantern, ember and idol effects
 
 Kind: effects and local light.
@@ -776,3 +875,17 @@ Retail / current HEAD (row 100) / forced row 0, scene Y % and snow Y %:
 | spot-090 | 12.4 / 58.3 / 29.0 | 11.0 / 82.3 / 43.6 |
 
 Saturation and hue are in the JSON in the external collection (`measurements.json`).
+
+### LightSet row selection audit, 2026-10-15
+
+The engine key is `(block bank, collision LightSet id)` with a `(1, 0)` fallback, plus per-collision overlay layers from `SceneGparam` bytes.
+No rule was found that dims row 100; the brightness excess (L1 item 1) stays open and nothing was changed in rendering.
+Details and open candidates are in [EXPOSURE.md](EXPOSURE.md#lightset-row-100-selection-audit-2026-10-15).
+
+
+### LightSet layer stack, 2026-10-15
+
+The engine layer stack is recovered and implemented in the loader: `default`, `mapbase`, the block file and the four collision overlays, with record defaults for fields a row does not author (details in [LIGHTING.md](LIGHTING.md#layer-stack-and-record-defaults-2026-10-15)).
+It does not dim the row-100 sun: the block's own noon row 100 (0.615, 0.779, 1.0 times W 1) outranks `mapbase`, and it stays 4.1 to 4.4 times row 0, the same ratio as retail's measured 0.1 to 0.25.
+The default render changes only through data (`mapbase` post fields, tone mode 8, row-100 hemisphere, fill direction and sharpness, overlay post fields); scene luminance stays 2 to 5 times retail, so item 1 remains open.
+The ten-spot comparison and the ruled-out fields (`LightMask Influence`, `SsaoWeight`, `Sharpness`) are in [EXPOSURE.md](EXPOSURE.md#layer-stack-result-2026-10-15).
