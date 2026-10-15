@@ -277,13 +277,13 @@ fn native_point_lights() -> bool {
 /// as the directional light and the factor is exactly 1.
 const NATIVE_LIGHT_BUFFER_SCALE: f32 = 1.0;
 
-/// The remaining, untraced gap between the native curve and the references: at the 4500 lux
-/// per unit bridge the native point/spot curve over-lights walls 3 to 5 times against the
-/// spot-056 reference, although the traced arithmetic above has no factor left to explain it.
-/// Candidates not yet checked: the 4500 bridge itself, the unit of BTL/FXR `power`, and the
-/// per-frame `blink` multiplier (FXR flickerBrightness 0.75). This is the earlier by-eye value,
-/// kept under its own name and not a measurement.
-const NATIVE_POINT_LIGHT_UNEXPLAINED_RESIDUAL: f32 = 0.25;
+/// The remaining, untraced gap between the native curve and the references. The earlier by-eye
+/// value 0.25 was fitted at the former 4500 lux per unit bridge; the bridge is now traced
+/// (`SCENE_TO_BEVY = pi / exposure`, 0.697 of 4500), so the same total is kept as 0.25 * 4500 /
+/// `SCENE_TO_BEVY`. It is not a measurement. The 2026-10-15 brightness audit found the same order
+/// of excess (0.15 to 0.35 of the traced native value) on the sun, fill and local directional
+/// slots, so this is probably one shared unexplained direct-light factor, see EXPOSURE.md.
+const NATIVE_POINT_LIGHT_UNEXPLAINED_RESIDUAL: f32 = 0.25 * 4_500. / crate::lighting::SCENE_TO_BEVY;
 
 fn native_point_light_scale() -> f32 {
     static SCALE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
@@ -685,8 +685,14 @@ fn update_hemisphere(
     let set =
         crate::lighting::LightSet::from_gparam(&lighting.gparam, lighting.light_set, lighting.hour);
     let axis = set.hemi_axis.extend(f32::from(ambient.brightness > 0.));
-    let delta =
+    let mut delta =
         (set.hemi_delta * crate::lighting::ENV_PER_UNIT).extend(crate::lighting::ENV_PER_UNIT);
+    delta *= crate::lighting::scale("AMBIENT");
+    if crate::lighting::ablate("noamb") {
+        delta = Vec4::ZERO;
+    } else if crate::lighting::ablate("nogi") {
+        delta.w = 0.;
+    }
     for (_, material) in materials.iter_mut() {
         material.extension.direct = set.direct;
         if material.extension.hemi_axis != axis || material.extension.hemi_delta != delta {
@@ -848,8 +854,17 @@ fn replace_materials(
                 ),
                 direct: set.direct,
                 hemi_axis: set.hemi_axis.extend(f32::from(ambient.brightness > 0.)),
-                hemi_delta: (set.hemi_delta * crate::lighting::ENV_PER_UNIT)
-                    .extend(crate::lighting::ENV_PER_UNIT),
+                hemi_delta: {
+                    let mut d = (set.hemi_delta * crate::lighting::ENV_PER_UNIT)
+                        .extend(crate::lighting::ENV_PER_UNIT);
+                    d *= crate::lighting::scale("AMBIENT");
+                    if crate::lighting::ablate("noamb") {
+                        d = Vec4::ZERO;
+                    } else if crate::lighting::ablate("nogi") {
+                        d.w = 0.;
+                    }
+                    d
+                },
                 camera_fade,
                 overlay: load("overlay", true),
                 snow: load("snow", true),

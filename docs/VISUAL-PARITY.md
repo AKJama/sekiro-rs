@@ -105,6 +105,30 @@ Saturation errors have both signs, and spot 003's whole-scene hue is already clo
 Whole-scene hue does not identify a pure snow material colour.
 The complete JSON retains real, same-build night and current-state scene and snow Y/S/H, pixel counts and luminance P95.
 
+### Brightness audit and unit bridge, 2026-10-15
+
+The cause search is in [EXPOSURE.md](EXPOSURE.md#brightness-audit-2026-10-15).
+It proves one cause and fixes it: the lux-per-unit bridge was fitted (4500) and the traced native arithmetic gives `pi / exposure = 3135.61`, which lowers every light, hemisphere, probe, sky and fog term by 0.697.
+It also localises the rest of the excess to the directional light slots, which are about 4 to 7 times too bright against retail even though the sky, fog and ambient units now agree with retail.
+Each pair below is retail / before / after, using the same masks and formulas as the Measurements table above; saturation is mean display-HSV percent and hue is degrees.
+
+| Spot | Scene Y % | Scene saturation % | Scene hue | Snow Y % |
+| --- | ---: | ---: | ---: | ---: |
+| spot-002 | 7.0 / 29.4 / 23.9 | 24.0 / 20.1 / 21.1 | 203 / 206 / 207 | 20.2 / 87.5 / 78.3 |
+| spot-003 | 7.5 / 40.9 / 34.4 | 23.9 / 19.9 / 21.5 | 210 / 211 / 210 | 19.2 / 90.8 / 82.4 |
+| spot-009 | 10.5 / 23.1 / 17.7 | 22.1 / 26.3 / 26.6 | 207 / 213 / 213 | 33.3 / 91.2 / 85.2 |
+| spot-025 | 10.6 / 24.0 / 18.6 | 17.6 / 22.4 / 22.8 | 206 / 212 / 213 | 37.4 / 92.5 / 88.1 |
+| spot-091 | 19.7 / 45.8 / 36.6 | 15.4 / 16.6 / 19.2 | 197 / 207 / 207 | 11.7 / 56.7 / 44.0 |
+| spot-092 | 4.3 / 20.9 / 14.3 | 22.5 / 26.1 / 26.2 | 196 / 208 / 208 | 21.1 / 71.5 / 57.8 |
+| spot-008 | 7.5 / 20.9 / 16.5 | 24.4 / 25.0 / 25.0 | 210 / 214 / 214 | 39.0 / 94.2 / 88.2 |
+| spot-013 | 12.5 / 37.3 / 28.6 | 17.3 / 18.6 / 20.2 | 205 / 210 / 210 | 12.8 / 58.8 / 46.1 |
+| spot-089 | 22.3 / 51.6 / 40.7 | 19.8 / 14.8 / 17.9 | 198 / 205 / 206 | 24.9 / 91.1 / 84.4 |
+| spot-090 | 12.4 / 68.2 / 58.3 | 22.4 / 12.1 / 15.4 | 202 / 204 / 205 | 11.0 / 90.4 / 82.3 |
+
+The scene excess over retail falls from 2.2-5.5 times to 1.7-4.7 times, and the snow excess from 2.4-8.2 times to 2.3-7.5 times.
+Real photographs of spot-002 and spot-091 show an overcast scene with soft or absent sun shadows and thin snow over grey gravel, so part of the snow-region excess is also coverage (M1 item 3), not light.
+Panels and measurements are in the external `2026-10-15/brightness/` collection.
+
 ### L1 Current residual lighting and exposure
 
 Current reach is 47 accepted spots.
@@ -112,8 +136,9 @@ Snow, plaster, stone and timber remain over-bright in the daytime pairs, so the 
 The confirmed night-reference mismatch is removed from the current cause list.
 Ranked remaining candidates are:
 
-1. Native scene-radiance units and the material/direct-light accumulation response.
-   The `SCENE_TO_BEVY=4500` bridge remains inferred, and broad non-snow over-illumination makes this a shared candidate before any snow-specific compensation.
+1. The directional light slots (sun, fill, local 1 and 2).
+   The scene-radiance unit is now traced (`SCENE_TO_BEVY = pi / exposure`) and checked against the sky; the ablations show retail carries only about 0.1 to 0.25 of the native `Col * albedo * N.L` on open lit surfaces, with the sky, fog and ambient units agreeing.
+   Candidates are the deferred AO multiplying the whole irradiance (we have no SSAO and no baked occlusion outside mountains), the untraced `FC_ShadowColor` default and the untraced `FC_SsaoWeight` source; see [EXPOSURE.md](EXPOSURE.md#remaining-unexplained-factor).
 2. Native ambient/probe, SSAO and shadow-colour response.
    These can explain different local contrast and fill; the prior native audit still establishes sun-shadow attenuation only for directional slot 0, rather than justifying shadows on every extra slot.
 3. Metering reduction layout, reset/adaptation history and the retail brightness setting.
@@ -130,8 +155,9 @@ Current reach is 46 accepted spots.
 The separate snow measurements confirm the user's bright-snow observation on ground, exposed rock, roof tiles and the distant alley patch.
 Ranked remaining candidates are:
 
-1. L1's shared illumination and highlight compression erase fine dirty breakup when large snow regions approach display white.
-   Snow-region means near white make apparent coverage and saturation unreliable evidence for changing an authored snow mask or albedo.
+1. L1's directional-slot excess and highlight compression erase fine dirty breakup when large snow regions approach display white.
+   After the traced bridge the snow regions are still 2.3 to 7.5 times retail, and 7 of the ten means remain above 78 percent, so coverage and saturation are still unreliable evidence for changing an authored snow mask or albedo.
+   The retail spot-002 and spot-091 photographs show thin snow over grey gravel and tiles, while ours renders thick white cover on the same surfaces, so layer coverage (item 3) is now ranked as a joint cause of the snow-region numbers.
 2. Native view-dependent BRDF, roughness/gloss and detail-normal response, including the generic handling of separate `M[Snow]`/`Snow_mb*` families.
    The large roof/ground ratio variation warrants this isolation after the shared radiance path is understood.
 3. Layer coverage, mask/UV selection and snow-normal facets, plus local occlusion around tile gutters, stones and vegetation.
@@ -305,7 +331,7 @@ It slightly cools shadows and is nearly neutral in the highlights; it does not e
 The current shader's red-fastest `(r,16*b+g)` strip layout, trilinear interpolation and ordering after ordinary output power agree with the native shader recovery in `SHADERS.md`.
 No authored global saturation or contrast field is present in these base files' tone/bloom/grading groups.
 Tone mode 7 and FilmicContrast 0.5 therefore remain traced constructor defaults, rather than new values selected from the screenshots.
-The unresolved colour-matrix/vignette producers, native LUT blending and inferred `SCENE_TO_BEVY=4500` bridge do not provide a supported replacement number.
+The unresolved colour-matrix/vignette producers, native LUT blending and former inferred `SCENE_TO_BEVY=4500` bridge (now traced) do not provide a supported replacement number.
 
 The shared `m11_snow_01_a` top mip has mean byte RGB `(228.81,233.11,243.13)` and per-channel 10th/90th percentiles `(222,227,239)` / `(233,237,247)`.
 The dedicated `m11_snow_20_a` has mean `(225.94,226.11,225.94)` and percentiles `(219,220,219)` / `(231,231,231)`.

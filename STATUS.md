@@ -778,7 +778,7 @@ No commits, network, worktrees or protected-path changes.
 ## Exe-traced renderer CPU uploads (2026-10-11)
 
 Fog now uses verified GameScale lengths/inverse densities, raw signed height, geometric slices, byte/gamma colours, extinction and directional slant from `docs/SHADER-INPUTS.md`.
-LightSet colours are squared times W; all map surfaces retain directional hemisphere coefficients with one inferred Bevy calibration `SCENE_TO_BEVY=4500`.
+LightSet colours are squared times W; all map surfaces retain directional hemisphere coefficients with one Bevy bridge `SCENE_TO_BEVY` (3135.61 = pi / default camera exposure since 2026-10-15, formerly an inferred 4500).
 Separate sun/ambient/local tuning and the post 0.5 multiplier are removed; existing EV adaptation, bloom and sensitometric mode 7 were checked against the trace.
 All seven v7 before/final scenes were inspected against v5/v6: clearer foreground fog, retained snow detail, cool noon shade and warmer dawn/dusk; an extra probe-disabled capture verifies the hemisphere fallback.
 Formatting, workspace/all-target Clippy, requested release game/formats/extract tests and release game build pass offline with six jobs in `target/alt`.

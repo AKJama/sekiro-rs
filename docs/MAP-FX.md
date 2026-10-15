@@ -276,9 +276,9 @@ Offset 0x108 is `AntiExposureRate` (FXR `adaptationExponent`, default 0, 0 in 80
 The factor is `powf(2, -(rate * ctx[0x458]))`; `ctx[0x458]` is the scene EV, which `SHADER-INPUTS.md` records as 0 in shipped builds (`SC_PreExposure = 2^EV = 1`).
 So the native buffer is in the same units as the directional light and the unit factor is exactly 1 (`NATIVE_LIGHT_BUFFER_SCALE`).
 The FXR 800140 light also ramps its multiplier from 0 to 19.2 over 2 s, and the flicker (brightness 0.75 to 1 every 0.125 to 0.25 s) is not modelled; both only lower the mean.
-Nothing traced explains the 3 to 5 times excess at the 4500 bridge, so the earlier by-eye 0.25 stays as `NATIVE_POINT_LIGHT_UNEXPLAINED_RESIDUAL` (override `SEKIRO_MAP_POINT_LIGHT_SCALE` for the total).
-Open: whether the 4500 lux per unit bridge (fitted under Bevy's curve) or the BTL/FXR `power` unit carries the missing factor.
-The renderer output is unchanged by this split.
+Nothing traced explains the 3 to 5 times excess at the former 4500 bridge, so the earlier by-eye 0.25 stays as `NATIVE_POINT_LIGHT_UNEXPLAINED_RESIDUAL` (override `SEKIRO_MAP_POINT_LIGHT_SCALE` for the total).
+The bridge itself is now traced as `pi / exposure = 3135.61` (see [EXPOSURE.md](EXPOSURE.md#brightness-audit-2026-10-15)), which is 0.697 of 4500, so the constant is rewritten as 0.25 * 4500 / 3135.61 = 0.359 to keep the same by-eye total.
+The same audit found the sun, fill and local directional slots 4 to 7 times too bright against retail, so the point-light residual is probably the same unexplained direct-light factor rather than a point-light unit.
 
 ### Brazier flames: white-hot and small (fixed, size open)
 

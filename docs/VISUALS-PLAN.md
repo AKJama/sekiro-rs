@@ -18,7 +18,7 @@ Borrowed facts get a light credit in `CREDITS.md` where used (one FwLo entry alr
 
 **[V]** `SHADER-INPUTS.md` now drives fog GameScale lengths and inverse densities, raw signed world height, geometric depth slices, source gates, extinction `1+AbsorptionScale`, directional slant and byte/gamma-2.2 colours.
 **[V]** LightSet RGB is squared before multiplying W; map surfaces evaluate the hemisphere mean and directional coefficient, including surfaces without texture layers.
-**[I]** A single `SCENE_TO_BEVY=4500` bridges native light units to Bevy; hemisphere/probes use the derived `/pi` scale and BTL uses the inferred `4*pi` lumen conversion.
+**[I]** A single `SCENE_TO_BEVY` bridges native light units to Bevy (4500 when written, traced as `pi / exposure = 3135.61` on 2026-10-15); hemisphere/probes use the derived `/pi` scale and BTL uses the inferred `4*pi` lumen conversion.
 The former sun 9000, ambient 1800, local-light 0.1 multiplier and post-input 0.5 are removed.
 **[V]** The existing native post implementation matches EV soft limits, log2 MiddleGray, dt adaptation, raw bloom threshold, normalized final bloom colour and sensitometric mode 7 with final gamma 1/2.2; no extra post radiance scale remains.
 Seven matched `target/alt/visuals/v7-*-before.png` and `v7-*-final.png` pairs cover Owl noon, Genichiro 18, Outskirts start 3 at 6/12/18, Castle start 1 and Hirata start 0.

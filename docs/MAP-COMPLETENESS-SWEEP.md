@@ -768,3 +768,46 @@ The workspace release suite passes 817 tests with 25 existing ignores.
 The refreshed material build passes all 137 non-ignored game tests with three existing ignores, and the later FX build passes 11 focused FX/shader tests.
 Workspace all-target release Clippy with warnings denied and workspace formatting pass under `CARGO_TARGET_DIR=target/alt-story`.
 The six Python checks pass, including rejection of a historical-state report; the same guard prevents the matcher from silently resuming night poses as daytime captures.
+
+## Brightness bridge colour fixture review, 2026-10-15
+
+Two reviews, both colour fields only; geometry fields (position, yaw, pitch, void, depth gap, untextured), resolution, story and tolerances are unchanged.
+No per-pixel attribution was made: grey counts cross a fixed neutral-RGB criterion and pop-in counts cross a fixed 12-display-value threshold, so a global radiance change moves them without any asset change.
+
+### Drift before the change (HEAD e89596c)
+
+Both gates were run on a fresh build of HEAD (`target/alt-bright`).
+Castle passed.
+Outskirts failed three colour cells that moved after the fixtures were baselined.
+The recent effect commits `1a1036f`, `38a6039` and `1213844` touch lights, effect textures and effect colour, but their individual contributions were not isolated.
+No geometry cell moved.
+
+| Outskirts view | Cell | Fixture | HEAD measured |
+| --- | --- | ---: | ---: |
+| 0 | pop-in | 2642 | 2761 |
+| 4 | grey | 2 | 533 |
+| 4 | pop-in | 6992 | 7649 |
+
+### After the `SCENE_TO_BEVY` correction
+
+The bridge changes from 4500 to 3135.61 (0.697), so all light, hemisphere, probe, sky and fog radiance falls by 30 percent.
+Every colour cell was re-measured; geometry totals stay at depth gap 493 / 4885 and void 0 / 1933, identical to the HEAD controls.
+
+| Map / view | Grey fixture -> new | Pop-in fixture -> new | Reason |
+| --- | ---: | ---: | --- |
+| Outskirts 0 | 76 -> 69 | 2642 -> 2777 | Pop-in includes the HEAD drift (2761), a further 16 from the bridge |
+| Outskirts 1 | 2274 -> 467 | 292 -> 183 | Grey falls by 1807 and pop-in by 109 as the 0.697 radiance change moves pixels across both criteria |
+| Outskirts 2 | 8 -> 8 | 2557 -> 2669 | Pop-in rises by 112 from the radiance change; grey unchanged |
+| Outskirts 3 | 6 -> 3 | 6553 -> 6498 | Both differences are within the old tolerance |
+| Outskirts 4 | 2 -> 351 | 6992 -> 6759 | Grey includes the HEAD drift (533 at 4500), 351 after the bridge; pop-in falls by 233 |
+| Outskirts 5 | 0 -> 0 | 5392 -> 5231 | Pop-in falls by 161 |
+| Castle 0 | 469 -> 187 | 5084 -> 4982 | Grey falls by 282 and pop-in by 102 |
+| Castle 1 | 43 -> 45 | 5758 -> 4930 | Pop-in falls by 828 |
+| Castle 2 | 0 -> 0 | 5485 -> 5772 | Pop-in rises by 287 |
+| Castle 3 | 0 -> 0 | 6139 -> 5411 | Pop-in falls by 728 |
+| Castle 4 | 7 -> 9 | 0 -> 0 | Grey differs by 2 |
+| Castle 5 | 7 -> 22 | 2107 -> 2106 | Grey rises by 15 |
+
+Final totals (void, depth gap, untextured, grey, pop-in) are Outskirts 0 / 493 / 0 / 898 / 24118 in 43.3 seconds and Castle 1933 / 4885 / 0 / 266 / 23199 in 41.9 seconds, both under the 120-second limit and both passing every per-view tolerance against the refreshed fixtures.
+The cells were taken from the first post-change runs; the second runs used for the pass agree within 3 pixels in every total.
+Raw reports are under `target/alt-bright/gate-head/` and `target/alt-bright/gate-after/`.

@@ -5,6 +5,13 @@ The shared implementation is `crates/game/src/lighting_selection.rs`.
 Each map's original flags and event references live in one module under `crates/game/src/lighting/maps/`.
 No game asset or decoded event body is copied into those modules.
 
+## Light unit bridge, 2026-10-15
+
+The lux-per-native-unit bridge is now traced rather than fitted: the deferred accumulators have no `1/pi`, so `SCENE_TO_BEVY = pi / exposure = 3135.61` and hemisphere, probe, sky and fog radiance use `1 / exposure` per native unit.
+The previous 4500 was 1.435 times too large.
+The directional slots remain about 4 to 7 times brighter than retail; ablations and the candidate list are in [EXPOSURE.md](EXPOSURE.md#brightness-audit-2026-10-15).
+The `reference progression` and light-set selection described below are unchanged.
+
 ## Sensitometric exposure audit, 2026-10-15
 
 The subsequent [post-chain colour audit](COLOUR.md) wires the missing pre-gamma colour matrix, accepts the authored filmic-contrast field name and replaces the three-level bloom approximation with the native authored pyramid.

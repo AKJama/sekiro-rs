@@ -329,11 +329,40 @@ fn apply_post_effects(
     }
 }
 
-/// Inferred engine bridge, not a GPARAM transform: Bevy lux per native scene unit.
-/// 4500 folds the former 9000-lux and 0.5 post calibration into one light scale.
-/// With Bevy's default EV 9.7, diffuse radiance is scale * exposure / pi.
-pub const SCENE_TO_BEVY: f32 = 4_500.0;
-/// Inferred BTL candela mapping shares the bridge; BTL native units remain open.
+/// Diagnostic ablation switch: `SEKIRO_ABLATE=nosun,nofill,nolocal,nospec,noamb,nogi` (comma list).
+pub fn ablate(name: &str) -> bool {
+    static LIST: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        std::env::var("SEKIRO_ABLATE")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::to_owned)
+            .collect()
+    })
+    .iter()
+    .any(|n| n == name)
+}
+
+/// Diagnostic multiplier from `SEKIRO_SCALE_<NAME>` (default 1).
+pub fn scale(name: &str) -> f32 {
+    std::env::var(format!("SEKIRO_SCALE_{name}"))
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1.)
+}
+
+/// Bevy lux per native scene unit, traced from the native accumulation arithmetic.
+///
+/// The deferred accumulators store `Col * N.L` with no `1/pi` and no photometric unit
+/// (`GXLightAcc_DDirLight1`), and `GXLightCmbAlbedo` multiplies that by the G-buffer albedo, so a
+/// white Lambert surface under `Col * N.L = 1` has native radiance 1. Bevy's diffuse term is
+/// `albedo / pi * lux * exposure`, so lux = pi / exposure gives native radiance 1 under Bevy's
+/// default camera (`Exposure::default()`, EV100 9.7, exposure `1 / (2^9.7 * 1.2)`).
+/// The same relation holds for the sky dome and fog colours, whose native radiance is unity.
+/// This replaces the earlier fitted 4500, which was 1.435 times too large; the independent check
+/// is the sky at spot-091, whose retail/ours ratio was 1.25 to 1.43 at 4500.
+pub const SCENE_TO_BEVY: f32 = 3_135.61;
+/// BTL candela mapping shares the bridge; BTL native units remain open.
 pub const LOCAL_LUMENS_PER_UNIT: f32 = SCENE_TO_BEVY * 4.0 * std::f32::consts::PI;
 
 #[derive(Resource, Clone, Debug)]
@@ -1148,6 +1177,31 @@ impl LightSet {
             direct[i * 3 + 2] = pack(&specular).extend(1.);
         }
         direct[12].x = f32::from(gi_options().native_lights);
+        let zero = |direct: &mut [Vec4; 13], slots: &[usize]| {
+            for &i in slots {
+                direct[i] = direct[i].with_xyz(Vec3::ZERO);
+            }
+        };
+        if ablate("nosun") {
+            zero(&mut direct, &[1, 2]);
+        }
+        if ablate("nofill") {
+            zero(&mut direct, &[4, 5]);
+        }
+        if ablate("nolocal") {
+            zero(&mut direct, &[7, 8, 10, 11]);
+        }
+        if ablate("nospec") {
+            zero(&mut direct, &[2, 5, 8, 11]);
+        }
+        let k = scale("DIRECT");
+        for i in [1, 2, 4, 5, 7, 8, 10, 11] {
+            direct[i] = direct[i].with_xyz(direct[i].xyz() * k);
+        }
+        let (sun_w, fill_w) = (
+            if ablate("nosun") { 0. } else { sun_w * k },
+            if ablate("nofill") { 0. } else { fill_w * k },
+        );
         Self {
             direct,
             sun_toward: toward(&get("Angle0").unwrap_or_default()),
@@ -1157,7 +1211,11 @@ impl LightSet {
             fill_color,
             fill_lux: fill_w * SCENE_TO_BEVY,
             ambient,
-            ambient_brightness: ENV_PER_UNIT,
+            ambient_brightness: if ablate("noamb") {
+                0.
+            } else {
+                ENV_PER_UNIT * scale("AMBIENT")
+            },
             // Verified coefficient packing; default axis is up. Axis field resolution inferred.
             hemi_axis: get("Hemi Direction")
                 .filter(|v| v.len() >= 3)
@@ -1539,6 +1597,19 @@ mod probe_tests {
         let fog = fog_colour(Vec3::new(0.5, 1., -1.), 2.);
         assert!((fog.x - 2. * (128_f32 / 255.).powf(2.2)).abs() < 0.000001);
         assert_eq!(fog.yz(), Vec2::new(2., 0.));
+    }
+    #[test]
+    fn scene_bridge_is_pi_over_the_default_camera_exposure() {
+        let exposure = bevy::camera::Exposure::default().exposure();
+        let expected = std::f32::consts::PI / exposure;
+        assert!(
+            (SCENE_TO_BEVY / expected - 1.).abs() < 1e-4,
+            "{SCENE_TO_BEVY} vs {expected}"
+        );
+        // Native radiance of a white Lambert surface at Col * N.L = 1, in Bevy HDR units.
+        let radiance = SCENE_TO_BEVY / std::f32::consts::PI * exposure;
+        assert!((radiance - 1.).abs() < 1e-4);
+        assert!((ENV_PER_UNIT * exposure - 1.).abs() < 1e-4);
     }
     #[test]
     fn shadow_options_reject_unbounded_or_unsupported_configurations() {

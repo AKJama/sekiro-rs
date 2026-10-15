@@ -49,7 +49,7 @@ The CPU soft-limit routine `24d920` calls a natural-exponential implementation; 
 Neither should be changed to the sensitometric curve's exponent coefficients.
 Missing auto-exposure enable remains false, consistent with the tone-record constructor clearing its enable field and `2565a0` copying the authored integer to the filter enable byte.
 
-The fixed `SCENE_TO_BEVY=4500` bridge remains inferred, not a recovered native unit conversion.
+The earlier fixed `SCENE_TO_BEVY=4500` bridge was inferred, not a recovered native unit conversion; the [brightness audit](#brightness-audit-2026-10-15) below replaces it with the traced relation.
 The exact material/BRDF response, SSAO, matrix/vignette producers, full bloom scheduling/feedback and metering reduction layout remain fidelity limits.
 An observed luminance ratio cannot establish replacement values for any of those terms.
 The correction therefore does not claim to solve all L1 brightness, hard shadows or M1 snow colour.
@@ -135,3 +135,93 @@ The external `2026-10-15/exposure/` collection contains six full-resolution `spo
 `capture-verification.json`, `verification.json` and `final-checks.json` retain the equality checks and final gate results.
 Raw gate reports and Cargo logs remain under `target/alt-exposure/`.
 Nothing was staged or committed, and the protected mountain/visibility/sky-ordering code was not edited by this task.
+
+## Brightness audit, 2026-10-15
+
+The reference comparisons use the `genichiro-defeated` afternoon state (12:00; Outskirts exposure 0.4 and MiddleGray -4.2, Castle exposure 0.5 and MiddleGray -5.4).
+Both areas author auto exposure on, with Adaption Min -0.01 and Max 0.5 (Castle Max 0.01), so the soft limit bounds the adaptation offset to about -0.01 to +0.5 stops.
+Exposure therefore cannot rescue a scene whose radiance is several stops off; the radiance scale itself has to be right.
+
+### Method
+
+Every ablation uses the matcher windowless renderer at the saved camera, player and FOV of the ten reference spots, 2560x1440, `genichiro-defeated`, one process at a time.
+Real and ours are compared as linear scene values as well as display luminance.
+LUT 30 is the identity for greys (the cached strip returns 0, 2, 4, ... 15 for those cell inputs), so a retail pixel is inverted through `display^2.2` and the mode-7 tone function (base-two form, contrast 0.5, checked against the documented samples) to the post-exposure scene value `x`.
+The inverse is a monotone table over `x` in 0 to 10, so values above about 4 are saturated and only ratios up to that level are trusted.
+Real bloom and glare are not removed, which slightly inflates the retail values.
+The external `2026-10-15/brightness/` collection holds the panels, `measurements-before-after.json`, the ablation tables and the scripts (`tools/`).
+
+### Native arithmetic that fixes the unit
+
+- `GXLightAcc_DDirLight1` accumulates `Col * N.L` with no `1/pi` and no photometric unit, then multiplies by `SC_PreExposure`.
+- `GXLightCmbAlbedo` multiplies that irradiance by the G-buffer albedo (`g_IrradianceTexture * g_GBuffer2Texture`) and `GXLightComposite` only adds irradiance, specular and emissive.
+  A white Lambert surface with `Col * N.L = 1` therefore has native radiance exactly 1.
+- `SC_PreExposure` is `2^EV` with EV zeroed by the scene constructor (`13cb60` writes zero to `+0x112a4`, `13dd90` clears the auto-adjust byte), so it is 1.
+- The tone gain is `2^Exposure / AvgLuminance * 2^(-softclamp)` (`250060`, re-read), and the table shader's `x / (x + 0.2)` address is cancelled by the table writer, so the post chain adds no hidden factor.
+- The SDR post shader has no further scale: the scene value is multiplied by `g_ToneMapSceneLumScale` and added to glare, nothing else.
+- Bevy's diffuse term is `albedo / pi * lux * exposure` with `Exposure::default()` (EV100 9.7, `exposure = 1 / (2^9.7 * 1.2)`).
+  Equating the two gives `SCENE_TO_BEVY = pi / exposure = 3135.61`, and `ENV_PER_UNIT = SCENE_TO_BEVY / pi = 1 / exposure`.
+  The fitted 4500 was 1.435 times too large for every light, hemisphere, probe, sky and fog term.
+
+Independent check of the unit: the sky dome and fog colours carry native radiance.
+At the Castle roof (spot-091, open sky region) the retail sky has `x` = 0.504/0.622/0.691, and ours at 4500 was 0.632/0.842/0.992, a ratio of 1.25 to 1.44.
+Scaling by 3135.61 / 4500 = 0.697 gives 0.440/0.587/0.691, which matches retail in blue exactly and within 13 percent in red and green.
+A unit test asserts the relation, so a change of the default camera exposure fails it.
+
+### Ablations
+
+All values are the mean post-exposure scene value `x` over the reference scene mask / snow mask, measured before the bridge change (4500).
+Retail is 0.097 / 0.262 (spot-002), 0.104 / 0.253 (spot-003) and 0.170 / 0.152 (spot-090).
+
+| Setup | spot-002 | spot-003 | spot-090 |
+| --- | --- | --- | --- |
+| all terms | 0.469 / 1.675 | 0.733 / 1.879 | 1.425 / 2.050 |
+| no sun slot 0 (Bevy and native) | 0.267 / 0.734 | 0.373 / 0.789 | 0.719 / 1.004 |
+| no fill slot 1 | 0.380 / 1.394 | 0.551 / 1.503 | 1.173 / 1.683 |
+| no local slots 2 and 3 | 0.374 / 1.346 | 0.595 / 1.549 | 1.219 / 1.788 |
+| no directional specular | 0.435 / 1.625 | 0.687 / 1.831 | 1.275 / 1.855 |
+| no hemisphere or GI bounce | 0.448 / 1.626 | 0.716 / 1.832 | 1.199 / 1.676 |
+| no sun, fill or local slots | 0.093 / 0.096 | 0.058 / 0.083 | 0.261 / 0.377 |
+| no map point lights | 0.457 / 1.677 | 0.728 / 1.880 | 1.424 / 2.050 |
+| no sun shadows | 0.540 / 1.798 | 0.793 / 1.879 | 1.470 / 2.058 |
+
+Findings from the table:
+
+- Everything that is not a directional slot (hemisphere, GI, environment probe, sky) gives 0.06 to 0.26 and is the same order as retail.
+  With the three light slots removed, scene Y is within 15 percent of retail at spots 009, 025 and 092 (1.04, 1.09 and 1.15 times), and 0.87 and 0.48 times at 002 and 003.
+  At the open Castle views 089, 090 and 091 it is 1.5 to 1.7 times retail.
+- The sun slot contributes 0.94, the fill 0.28 and the local slots 0.33 at the spot-002 snow, so the three slots add about 1.5 against a retail snow total of 0.26.
+  The retail snow therefore carries at most about 0.1 to 0.25 of the native `Col * albedo * N.L` that the traced arithmetic predicts for an open lit surface.
+- Retail roofs (spot-091) show a lit to shaded ratio of about 8 in `x`, ours about 7.5, so the sun to non-sun balance is not the discrepancy; lit and shaded roof pixels are both 6 to 7 times too bright at 4500.
+- Map point lights and sun shadows change the result by 2 to 10 percent, so neither is the cause.
+- Scaling the three slots by 0.1 and 0.2 (and by 0.25 together with ambient 0.25) leaves per-spot scene Y errors of 1.2 to 2.4 times, 1.3 to 3.1 times and 1.1 to 2.5 times respectively.
+  No single factor fits all ten spots, so a global multiplier would be a fit rather than a cause, and none is applied.
+
+### What the audit rules out
+
+- Tone curve, colour matrix, LUT 30 (identity), bloom and the exposure gain formula, which are all re-read.
+- Adaptation: the retail log-mean scene value after the 2^0.4 gain is 0.035 to 0.106, within 2 times of `2^MiddleGray * gain`, so the real game sits near zero offset, and our offsets (about 0.5 stops, the soft limit) cannot account for a 4 to 7 times error.
+- Pre-exposure and anti-exposure terms (constructor-zeroed, see above).
+- G-buffer albedo multipliers: `g_DiffuseMapColor` is exactly (1,1,1) in 3040 of the installed MTDs; the first 25 of the 77 exceptions listed are all character, rope and effect materials, and the Outskirts rock and simple wall MTDs read directly are (1,1,1).
+- Albedo colour space: the snow and roof albedos checked are BC1 sRGB (DXGI 72), decoded as sRGB.
+
+### Remaining unexplained factor
+
+The excess is carried by the directional light slots, not by the sky, fog or ambient units.
+The most specific structural gaps found in the deferred pipeline, none proven to explain the magnitude, are:
+
+1. `GXLightDeferredAO` multiplies the whole irradiance accumulator, direct and indirect, by `g_ShadowTexture.x * g_ShadowTexture.y` (SSAO red times a remapped G-buffer baked-occlusion channel).
+   We apply occlusion to ambient terms only, ordinary map pieces carry no baked COLOR1 occlusion, and there is no SSAO.
+2. The sun shadow factor is `(1 - K) + K * shadow` with `K = FC_ShadowColor`.
+   Its default (the GPARAM `Directional Shadow Color`, absent from every Ashina file) was not traced, and our sun shadows black out fully and stop at 60 m.
+3. `FC_SsaoWeight` for the four slots comes from LightSet fields that default to 0 in `default.gparam`; whether the engine takes that default for a map file that omits them was not traced.
+4. The GI scale uploads `g_envMapDiffuseColorScale` and `g_giLightingScale` are CPU values that were not found, so the absolute ambient scale could still differ from ours by a common factor.
+
+The point-light residual (`NATIVE_POINT_LIGHT_UNEXPLAINED_RESIDUAL`) is in the same range as the slot excess (0.15 to 0.35 of the traced native value), so it is probably the same missing factor.
+It is kept as the earlier by-eye total, rewritten relative to the corrected bridge (0.25 * 4500 / 3135.61 = 0.359).
+
+### Result
+
+Retail, before and after for the ten spots are in [VISUAL-PARITY.md](VISUAL-PARITY.md#brightness-audit-and-unit-bridge-2026-10-15).
+The change lowers every scene by about 20 to 30 percent and leaves all geometry gate counts unchanged.
+Diagnostic switches for the ablations are `SEKIRO_ABLATE` (`nosun,nofill,nolocal,nospec,noamb,nogi`), `SEKIRO_SCALE_DIRECT` and `SEKIRO_SCALE_AMBIENT`; they default to the identity.

@@ -551,7 +551,7 @@ Fog SkyColor must not automatically be equated to skybox material tint.
 Current Bevy selects GILM probes by spatial regions with `ENV_PER_UNIT=SCENE_TO_BEVY/pi` and squared-RGB hemisphere mean fallback; all map materials also evaluate the directional coefficient.
 The v8 renderer samples native GIIV coefficients per fragment, uses cubic spatial region fades and retains GILM for specular with box parallax correction.
 The exported Lambert cube remains the diffuse fallback outside complete volumes and under `--no-giiv`; specular mip filtering remains approximate.
-Sun and fill use squared RGB times W with SCENE_TO_BEVY=4500; hemisphere/probes use that scale divided by pi, while BTL uses the same inferred candela bridge times 4*pi for lumens.
+Sun and fill use squared RGB times W with SCENE_TO_BEVY (4500 when this section was written, now the traced `pi / exposure = 3135.61`); hemisphere/probes use that scale divided by pi, while BTL uses the same inferred candela bridge times 4*pi for lumens.
 **Implemented portion of recommendation 3:** GIIV decoding/basis evaluation, receiver-based region blending and box reflection correction.
 Preserving independent authored diffuse/specular source scales and replacing Bevy's material BRDF still require further CPU recovery.
 
