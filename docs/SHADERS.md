@@ -453,11 +453,11 @@ Missing authored controls use traced constructor defaults: mode 7, FilmicContras
 Unimplemented mode codes warn and fall back to mode 7.
 
 Bright extraction uses `c*max(Y-Threshold,0)/(Y+0.0001)`, the recovered luminance weights and saturation interpolation.
-Three spatial levels at half, quarter and eighth resolution receive separable seven-tap Gaussian filtering and the recovered `level0+0.5*level1+0.25*level2` composition.
+The authored spatial levels form a half-size-and-smaller pyramid, with separable seven-tap Gaussian filtering followed by recursive upward accumulation using Smooth.
 The final gain is the recovered `Alpha*Luminance/sum(Smooth^i)`, using authored GlareNumLevels, with native glare luminance one.
 The remaining renderer quality scale is explicitly named `BLOOM_QUALITY_SCALE=1`.
-The seven-tap kernel has sigma 1.4 with normalized weights; its exact CPU tap spacing remains unverified, and GaussianRadiusScale multiplies that spacing.
-The authored level count determines the verified normalization, but the full native level allocation/upscale schedule and temporal feedback are still unimplemented.
+The seven-tap kernel has native sigma 1.5 with normalized weights, and GaussianRadiusScale multiplies the integer sample spacing.
+The authored level count controls allocation and normalization; temporal feedback remains unimplemented.
 `--no-bloom` skips extraction and blur work.
 
 The unorm 16x256 LUT retains the proven `(r,16*b+g)` layout and exact eight-cell trilinear lookup.
@@ -466,7 +466,8 @@ Grading reverses that storage conversion before lookup and stores its result lin
 Half-LSB display dither runs after grading, or in the tone pass when grading is disabled.
 Per-view history is independent, retained across resize and released when its camera disappears.
 
-Remaining post gaps are the exact full-screen reduction/downsample layout, native table interpolation precision, reset-counter timing, frame-delta units, quality scale, full bloom/temporal schedule, colour matrix/vignette, LUT blending and HDR display branch.
+The subsequent [colour audit](COLOUR.md) implements the pre-gamma colour matrix and the full authored bloom downsample/blur/upsample schedule, with native bilinear downsampling, Smooth weights and upward-rounded level dimensions.
+Remaining post gaps are the exact full-screen metering reduction layout, native table interpolation precision, reset-counter timing, frame-delta units, quality scale, bloom temporal history, vignette, intermediate-hour LUT resource blending and HDR display branch.
 Bevy's existing daylight camera/light-unit calibration remains outside this post replacement.
 The v7 follow-up ports fog and LightSet colour/hemisphere CPU transforms.
 GIIV was subsequently implemented by the v8 work documented under spatial ambient below.

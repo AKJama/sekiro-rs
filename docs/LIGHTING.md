@@ -7,6 +7,9 @@ No game asset or decoded event body is copied into those modules.
 
 ## Sensitometric exposure audit, 2026-10-15
 
+The subsequent [post-chain colour audit](COLOUR.md) wires the missing pre-gamma colour matrix, accepts the authored filmic-contrast field name and replaces the three-level bloom approximation with the native authored pyramid.
+The exact-night colour controls are neutral and LUT 20 is already sampled in the recovered display domain; no warmer tint or exposure offset is substituted.
+
 The shared mode-7 tone curve used natural exponentials where the native shader's `exp` instructions require base-two powers.
 The corrected `tonemap.wgsl` uses `exp2` with the original coefficients and authored contrast, without changing exposure, light colours, snow textures or the inferred scene-unit bridge.
 The controlled spot-002 mean linear luminance falls from 19.70435 to 13.63111 percent white, compared with retail 7.02082.

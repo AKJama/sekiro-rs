@@ -75,6 +75,8 @@ Examples: `pairs/spot-002-shot-004.png`, `pairs/spot-003-shot-012.png`, `pairs/s
 
 The 2026-10-15 [exposure follow-up](EXPOSURE.md) corrects a proven mode-7 exponential-base error and measures six controlled retail/before/after views.
 Luminance moves closer in four views and farther away in two, while saturation and B/R worsen in all six; L1 and M1 remain open.
+The subsequent [post-chain colour audit](COLOUR.md) implements the missing pre-gamma colour matrix and full authored bloom pyramid, while preserving the exact-night neutral correction defaults and verified LUT sampling.
+Its new six-view measurements retain the residual brightness and blue-snow limitations rather than fitting a tint or exposure compensation.
 
 ### F1 Fog, haze and sky
 

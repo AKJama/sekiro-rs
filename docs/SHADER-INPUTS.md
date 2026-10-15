@@ -269,7 +269,9 @@ Our renderer: keep PreExposure at 1, and do not model it unless the formats need
 - The (LightBankId, LightId) resolver (`140169080`) and the time-blend factor between parameter sets A and B.
 - Whether the shipped build runs the CPU adaptation path or the GPU-gain vertex shader (the global is set in the image, so CPU is assumed).
 - Unit of the frame delta feeding `g_AdaptParam`, and the quality scalars from `DAT_143f3b490+0x12620/+0x12628` that scale LocalLightDistScale and bloom.
-- Colour grading LUT id resolution (`14024d9f0`, `1402ab260`), and the colour matrix and vignette producers (`24dca0`).
+- Intermediate-hour colour grading resource resolution/blending (`2ab260`), and vignette application.
+  The pre-gamma colour matrix producer `24dca0` and its GPARAM uploads are now implemented; `24d9f0` is the vignette parameter producer, not a LUT resolver.
+  See [COLOUR.md](COLOUR.md) for the corrected attribution, full bloom pyramid and remaining unknowns.
 - Camera-relative pieces: the exact view-space construction of the local-light collection volume constants (data at `328b000`).
 
 ## Light-set defaults and camera-local slots, 2026-10-15

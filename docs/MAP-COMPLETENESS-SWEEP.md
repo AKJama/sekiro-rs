@@ -645,3 +645,34 @@ Workspace all-target release Clippy with warnings denied, formatting and `git di
 The frozen before and final executables both embed the exact current tone and exposure shader source, confirming that their correction is retained and unchanged by this task.
 All Cargo work uses `CARGO_TARGET_DIR=target/alt-backdrop`.
 No staging, commit, worktree, remote publication or retail-game session was performed.
+
+## Post-chain colour fixture review, 2026-10-15
+
+The [post-chain audit](COLOUR.md) restores the authored spatial bloom pyramid and wires native pre-gamma colour correction.
+
+All twelve fixed views were reviewed in normal and all-visible phases against their frozen before controls.
+
+Every void/depth-gap/untextured triple is identical between those controls; only colour threshold counts are re-baselined.
+
+Camera fields, resolution, geometry baselines, tolerances and the 120-second limit remain unchanged.
+
+The contact sheets and raw per-view records are retained in the external colour collection.
+
+| Map / view | Grey fixture -> reviewed | Pop-in fixture -> reviewed | Review note |
+| --- | ---: | ---: | --- |
+| m11_00_00_00 / 0 | 233 -> 116 | 8360 -> 9154 | Snow courtyard: wider glow around the idol and snow, with the same bamboo, steps and stone silhouettes. |
+| m11_00_00_00 / 1 | 48 -> 50 | 219 -> 215 | Dark timber passage: small threshold changes, with the same doorway and snow coverage. |
+| m11_00_00_00 / 2 | 333 -> 152 | 2581 -> 2377 | Overhead snow path: broader snow highlights and roof-edge glow, with the same path and roof boundaries. |
+| m11_00_00_00 / 3 | 1434 -> 1861 | 4894 -> 5521 | Snowy ledge: brighter foreground bloom and softer background contrast, with the same structure and cliff silhouette. |
+| m11_00_00_00 / 4 | 505 -> 589 | 5321 -> 6398 | Timber gate close-up: lifted warm timber and beam shading, with the same gate geometry in both phases. |
+| m11_00_00_00 / 5 | 259 -> 230 | 4804 -> 4798 | Roof and branches: lifted dark surfaces and distant glow, with the same roof, branch and wall edges. |
+| m11_01_00_00 / 0 | 152 -> 169 | 4932 -> 4976 | Timber corridor: warmer and brighter wood around the doorway, with the same corridor silhouette. |
+| m11_01_00_00 / 1 | 35 -> 249 | 7359 -> 8641 | Cart and stone wall: wider highlight spill across snow, wheel and masonry, with the same object coverage. |
+| m11_01_00_00 / 2 | 558 -> 656 | 5628 -> 5627 | Rooftop panorama: broader snow highlights and reduced local contrast, with the same skyline and roofs. |
+| m11_01_00_00 / 3 | 155 -> 297 | 4100 -> 4951 | Angled roof: brighter snow and shadow fill, with the same roof edges and open depth regions. |
+| m11_01_00_00 / 4 | 228 -> 668 | 2167 -> 2638 | Tree courtyard: warmer snow and lifted blue shadows, with the same tree, paving and surrounding walls. |
+| m11_01_00_00 / 5 | 67 -> 79 | 6779 -> 7412 | Stone walkway: wider light spill along masonry and snow, with the same walkway and skyline. |
+
+The final shared-tree Castle view 4 was reviewed again against the isolated post snapshot in both phases.
+Its pop-in colour count is 2638 rather than the isolated 2607, with identical tree, snow, paving and wall coverage and the same geometry triple (0,5,0).
+Only that additional colour cell is refreshed; the 16-pixel/1-percent tolerance and every geometry field remain unchanged.

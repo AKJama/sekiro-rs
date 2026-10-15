@@ -1,5 +1,8 @@
 # Exposure and tone audit, 2026-10-15
 
+The subsequent [post-chain colour audit](COLOUR.md) checks the remaining gamma/LUT/exposure inputs, adds the missing pre-gamma matrix and full authored bloom pyramid, and records a new six-view comparison.
+The measurements below remain the historical isolated exponential-base comparison.
+
 The mode-7 sensitometric reconstruction used the wrong exponential base.
 The native table writer uses base-two shader instructions; the previous WGSL and research transcription used natural exponentials with the same coefficients.
 This is a shared post-processing correction, with no authored GPARAM changes or map-specific colour adjustment.

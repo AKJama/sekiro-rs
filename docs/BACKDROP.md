@@ -85,3 +85,36 @@ Both canonical render gates pass after the reviewed colour-only fixture changes,
 Release workspace tests pass 815 tests with 25 existing ignores, and the final game/extractor rerun passes 163 tests with three existing ignores.
 Workspace all-target release Clippy with warnings denied, formatting and diff whitespace checks pass.
 The first before/final diagnostic images are pixel-identical; the independent repeat differs at one Castle view-4 depth pixel by one channel code without changing any geometry category.
+
+## Second pass: arc cause and haze state, 2026-10-15
+
+The reference pairs were captured with `--story night`, but the retail frames are daytime overcast.
+Matched renders of spot-011 with the `afternoon` story show no blue arc and a sky that matches the retail structure.
+The panels in the external progress collection's `2026-10-15/backdrop-2/` directory show real, night story and afternoon story for all six spots.
+The matcher metadata records `story: night` for every pose, so this was a capture-state mismatch and not a per-map decision.
+
+Arc ablation at spot-011 (night, fixed camera, one term disabled at a time in the fog-card shader):
+
+| Term disabled | Arc |
+| --- | --- |
+| Ambient (probe and GI) | unchanged |
+| Specular | unchanged |
+| Direct light `FC_DirLightCol_0 * nl` | gone |
+
+At night the CloudFog1 cards (`m925009_9000`, kilometre-scale shell, white albedo, `g_BlendMode` 2) are lit by the moon diffuse light and read as bright as lit snow against a dark sky.
+The native Fwd and Fwd_[A] pixel shaders were re-read: mask channel selection, scroll registers, density bias, soft-depth fade and alpha all match our shader.
+The native shader multiplies the direct and specular terms by the per-instance `ShLightMask.x` (instance record row 10) and the colour/alpha by instance `aColor[FC_ColorSlotNo]` (row 13).
+Neither value is authored in the MSB or GPARAM data we extract, so they cannot be reproduced yet.
+No change was made to the card shader, because no authored value explains hiding the card at night.
+The arc is therefore open for night states only, and the next step is recovering the instance record source.
+
+Haze findings:
+
+- The m11_00 base GPARAM authors fog rows per hour: hour 12 is fixed density 0.0015, GameScale 2.5, far 400, height scale 0.25, offset -150, giving uploaded density 0.0006 and far 1000 m.
+- Hour 22 is 0.005 with far 200, hour 2 is 0.015 with GameScale 1.7, hour 6 is 0.001.
+- `EnableAnalyticalFog` is authored as 1 only in `m11_00_0030` (Tomoe) and a few cutscene `s*` files; `mapbase.gparam` authors 0, so the finite volume is correct for ordinary Outskirts states.
+- Past the far depth, transmission is therefore the constant value at the cap, and the native card shader confirms this by clamping its volume lookup to the same cap.
+- The retail frames are hazier at 200 to 500 m than hour-12 data predicts, so the remaining difference is not explained by the fog volume formulas and no multiplier was added.
+- `mapbase.gparam` also authors `Global ScatteringG` 0.5 and `HeightFogReferenceOffset/ModeRate`, which we do not read; these are candidates for the next pass.
+
+Open: retail haze at mid distance (which story and GPARAM state the retail frames use), `ShLightMask` and `aColor` for fog cards, `ScatteringG` phase.

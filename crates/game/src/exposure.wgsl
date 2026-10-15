@@ -2,6 +2,7 @@
 struct Settings {
     exposure: vec4<f32>, adaptation: vec4<f32>, bloom: vec4<f32>,
     transfer: vec4<f32>, controls: vec4<f32>, curve: vec4<f32>, reinhard: vec4<f32>,
+    colour: mat4x4<f32>,
 }
 @group(0) @binding(0) var scene: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> settings: Settings;

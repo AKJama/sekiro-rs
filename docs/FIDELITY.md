@@ -4,7 +4,9 @@
 
 Mode 7 now uses the native base-two sensitometric exponentials; the earlier natural-exponential transcription is corrected.
 The weighted log meter, base-ten adaptation response, authored exposure and CPU natural-exponential soft limits retain the recovered rules.
-Tone tables are evaluated analytically, while exact table precision, reduction layout, reset timing, renderer delta units, bloom scheduling/feedback, colour matrix/vignette producers and HDR output remain incomplete.
+Tone tables are evaluated analytically, while exact table precision, reduction layout, reset timing, renderer delta units, bloom temporal feedback, vignette and HDR output remain incomplete.
+The [colour audit](COLOUR.md) adds the native pre-gamma hue/saturation/value/contrast matrix and full authored bloom pyramid, and corrects the filmic-contrast field lookup.
+Intermediate-hour LUT resource blending and the renderer-global bloom-quality scalar remain unresolved.
 The scene-to-Bevy unit bridge remains inferred.
 Matched captures still show excess brightness and blue saturation, so this correction does not close L1 or M1 and supplies no replacement tint or multiplier.
 See [EXPOSURE.md](EXPOSURE.md) for the native evidence and measured limits.

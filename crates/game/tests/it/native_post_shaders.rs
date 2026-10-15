@@ -48,7 +48,14 @@ fn native_post_shaders_compose_and_validate() {
         (
             "tonemap",
             include_str!("../../src/tonemap.wgsl"),
-            vec![vec!["BRIGHT"], vec!["BLUR_H"], vec!["BLUR_V"], vec!["TONE"]],
+            vec![
+                vec!["BRIGHT"],
+                vec!["BLUR_H"],
+                vec!["BLUR_V"],
+                vec!["TONE"],
+                vec!["COPY"],
+                vec!["UPSAMPLE"],
+            ],
         ),
         (
             "grading",

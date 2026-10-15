@@ -38,8 +38,10 @@ pub struct GamePost {
     pub controls: Vec4,
     // LightAdapt, DarkAdapt, FilmicContrast, ReinhardContrast.
     pub curve: Vec4,
-    // Reinhard white balance, reserved.
+    // Reinhard white balance, bloom level count, authored Smooth, reserved.
     pub reinhard: Vec4,
+    // Native tone correction before output power and the display-space LUT.
+    pub colour: Mat4,
 }
 
 pub struct NativePostPlugin;
@@ -81,7 +83,7 @@ struct PostPipeline {
     layout: BindGroupLayoutDescriptor,
     meter_layout: BindGroupLayoutDescriptor,
     meter: CachedComputePipelineId,
-    passes: [CachedRenderPipelineId; 4],
+    passes: [CachedRenderPipelineId; 6],
     sampler: Sampler,
 }
 
@@ -124,7 +126,7 @@ fn init_pipeline(
         shader: load_embedded_asset!(assets.as_ref(), "exposure.wgsl"),
         ..default()
     });
-    let passes = ["BRIGHT", "BLUR_H", "BLUR_V", "TONE"].map(|variant| {
+    let passes = ["BRIGHT", "BLUR_H", "BLUR_V", "TONE", "COPY", "UPSAMPLE"].map(|variant| {
         cache.queue_render_pipeline(RenderPipelineDescriptor {
             label: Some(format!("Sekiro {variant}").into()),
             layout: vec![layout.clone()],
@@ -160,7 +162,7 @@ struct ViewBuffers {
     size: UVec2,
     state: Buffer,
     // Each level has extraction/vertical output and horizontal scratch.
-    levels: [(Texture, TextureView, Texture, TextureView); 3],
+    levels: Vec<(Texture, TextureView, Texture, TextureView)>,
 }
 
 #[derive(Resource, Default)]
@@ -195,7 +197,7 @@ fn native_post(
         .iter()
         .filter_map(|id| cache.get_render_pipeline(*id))
         .collect();
-    if passes.len() != 4 || target.main_texture_format() != TextureFormat::Rgba16Float {
+    if passes.len() != 6 || target.main_texture_format() != TextureFormat::Rgba16Float {
         return;
     }
     let size = UVec2::new(
@@ -205,10 +207,10 @@ fn native_post(
     let b = buffers
         .0
         .entry(entity)
-        .or_insert_with(|| new_buffers(size, ctx.render_device()));
-    if b.size != size {
+        .or_insert_with(|| new_buffers(size, settings.reinhard.y as usize, ctx.render_device()));
+    if b.size != size || b.levels.len() != settings.reinhard.y as usize {
         let history = b.state.clone();
-        *b = new_buffers(size, ctx.render_device());
+        *b = new_buffers(size, settings.reinhard.y as usize, ctx.render_device());
         b.state = history;
     }
     let post = target.post_process_write();
@@ -232,11 +234,15 @@ fn native_post(
         pass.set_bind_group(0, &meter_bindings, &[index.index()]);
         pass.dispatch_workgroups(1, 1, 1);
     }
-    let views = [&b.levels[0].1, &b.levels[1].1, &b.levels[2].1];
     if settings.bloom.y > 0. {
-        for level in &b.levels {
+        for (i, level) in b.levels.iter().enumerate() {
+            let source = if i == 0 {
+                post.source
+            } else {
+                &b.levels[i - 1].1
+            };
             for (step, source, destination) in [
-                (0, post.source, &level.1),
+                (if i == 0 { 0 } else { 4 }, source, &level.1),
                 (1, &level.1, &level.3),
                 (2, &level.3, &level.1),
             ] {
@@ -262,15 +268,35 @@ fn native_post(
                 );
             }
         }
+        // 2536c0 folds the smaller blurred level into the next larger one.
+        for i in (1..b.levels.len()).rev() {
+            let level = &b.levels[i - 1];
+            let bindings = ctx.render_device().create_bind_group(
+                "native bloom upsample",
+                &cache.get_bind_group_layout(&pipeline.layout),
+                &BindGroupEntries::sequential((
+                    &level.1,
+                    &b.levels[i].1,
+                    &level.1,
+                    &level.1,
+                    &pipeline.sampler,
+                    binding.clone(),
+                    b.state.as_entire_binding(),
+                )),
+            );
+            draw(&mut ctx, passes[5], &bindings, index.index(), &level.3);
+            let level = &mut b.levels[i - 1];
+            std::mem::swap(&mut level.1, &mut level.3);
+        }
     }
     let bindings = ctx.render_device().create_bind_group(
         "native tone",
         &cache.get_bind_group_layout(&pipeline.layout),
         &BindGroupEntries::sequential((
             post.source,
-            views[0],
-            views[1],
-            views[2],
+            &b.levels[0].1,
+            &b.levels[0].1,
+            &b.levels[0].1,
             &pipeline.sampler,
             binding,
             b.state.as_entire_binding(),
@@ -286,35 +312,42 @@ fn native_post(
     span.end(ctx.command_encoder());
 }
 
-fn new_buffers(size: UVec2, device: &bevy::render::renderer::RenderDevice) -> ViewBuffers {
+fn new_buffers(
+    size: UVec2,
+    count: usize,
+    device: &bevy::render::renderer::RenderDevice,
+) -> ViewBuffers {
     let state = device.create_buffer_with_data(&BufferInitDescriptor {
         label: Some("adapted biased log and gain"),
         contents: &[0; 16],
         usage: BufferUsages::STORAGE,
     });
-    let levels = [2, 4, 8].map(|divisor| {
-        let make = || {
-            let texture = device.create_texture(&TextureDescriptor {
-                label: Some("native bloom level"),
-                size: Extent3d {
-                    width: (size.x / divisor).max(1),
-                    height: (size.y / divisor).max(1),
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: TextureFormat::Rgba16Float,
-                usage: TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&TextureViewDescriptor::default());
-            (texture, view)
-        };
-        let (a, av) = make();
-        let (b, bv) = make();
-        (a, av, b, bv)
-    });
+    let levels = (0..count)
+        .map(|i| {
+            let divisor = 1 << (i + 1);
+            let make = || {
+                let texture = device.create_texture(&TextureDescriptor {
+                    label: Some("native bloom level"),
+                    size: Extent3d {
+                        width: size.x.div_ceil(divisor).max(1),
+                        height: size.y.div_ceil(divisor).max(1),
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: TextureDimension::D2,
+                    format: TextureFormat::Rgba16Float,
+                    usage: TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                });
+                let view = texture.create_view(&TextureViewDescriptor::default());
+                (texture, view)
+            };
+            let (a, av) = make();
+            let (b, bv) = make();
+            (a, av, b, bv)
+        })
+        .collect();
     ViewBuffers {
         size,
         state,

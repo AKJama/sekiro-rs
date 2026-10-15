@@ -126,6 +126,9 @@ struct PostSettings {
     reinhard: f32,
     white_balance: f32,
     bloom_normalizer: f32,
+    bloom_levels: u32,
+    bloom_smooth: f32,
+    correction: Mat4,
 }
 
 impl PostSettings {
@@ -180,10 +183,22 @@ impl PostSettings {
             mode,
             light_adapt: get("Tone Map", "LightAdapt", 1.).max(0.),
             dark_adapt: get("Tone Map", "DarkAdapt", 0.5).max(0.),
-            filmic: get("Tone Map", "FilmicContrast", 0.5),
+            filmic: get(
+                "Tone Map",
+                "ToneMap-Contrast",
+                get("Tone Map", "FilmicContrast", 0.5),
+            ),
             reinhard: get("Tone Map", "ReinhardContrast", 1.6),
             white_balance: get("Tone Map", "ReinhardWhiteBalance", 1.7),
-            bloom_normalizer: (0..(get("Bloom", "GlareNumLevels", 7.) as i32).clamp(1, 16))
+            bloom_levels: (get("Bloom", "GlareNumLevels", 7.) as u32).clamp(1, 8),
+            bloom_smooth: get("Bloom", "GlareBloom Smooth", 0.8),
+            correction: tone_correction(
+                get("Tone Map", "ColorH", 0.),
+                get("Tone Map", "ColorS", 1.),
+                get("Tone Map", "ColorV", 1.),
+                get("Tone Map", "GS Presents - Contrast", 1.),
+            ),
+            bloom_normalizer: (0..(get("Bloom", "GlareNumLevels", 7.) as i32).clamp(1, 8))
                 .map(|i| get("Bloom", "GlareBloom Smooth", 0.8).powi(i))
                 .sum(),
         }
@@ -220,7 +235,13 @@ impl PostSettings {
                 self.filmic,
                 self.reinhard,
             ),
-            reinhard: Vec4::new(self.white_balance, 0., 0., 0.),
+            reinhard: Vec4::new(
+                self.white_balance,
+                self.bloom_levels as f32,
+                self.bloom_smooth,
+                0.,
+            ),
+            colour: self.correction,
             controls: Vec4::new(
                 self.saturation,
                 f32::from(self.freeze),
@@ -232,6 +253,33 @@ impl PostSettings {
             ),
         }
     }
+}
+
+/// Native 24dca0: hue in a luminance-preserving basis, then saturation,
+/// value and contrast about 0.5, all before the ordinary output exponent.
+fn tone_correction(hue: f32, saturation: f32, value: f32, contrast: f32) -> Mat4 {
+    let weights = Vec3::new(0.29891, 0.58661, 0.11448);
+    let complement = Vec3::ONE - weights;
+    let basis = Mat3::from_cols(
+        Vec3::X - complement * weights.x,
+        Vec3::Y - complement * weights.y,
+        Vec3::Z - complement * weights.z,
+    );
+    let hue_matrix = if hue == 0. {
+        Mat3::IDENTITY
+    } else {
+        basis.inverse()
+            * Mat3::from_quat(Quat::from_axis_angle(weights.normalize(), hue.to_radians()))
+            * basis
+    };
+    let saturation_matrix = Mat3::from_cols(
+        Vec3::splat((1. - saturation) * weights.x) + Vec3::X * saturation,
+        Vec3::splat((1. - saturation) * weights.y) + Vec3::Y * saturation,
+        Vec3::splat((1. - saturation) * weights.z) + Vec3::Z * saturation,
+    );
+    let mut matrix = Mat4::from_mat3(saturation_matrix * hue_matrix * (value * contrast));
+    matrix.w_axis = Vec3::splat((1. - contrast) * 0.5).extend(1.);
+    matrix
 }
 
 #[derive(Component)]
@@ -1583,6 +1631,9 @@ mod probe_tests {
             reinhard: 1.6,
             white_balance: 1.7,
             bloom_normalizer: 3.951424,
+            bloom_levels: 7,
+            bloom_smooth: 0.8,
+            correction: Mat4::IDENTITY,
         };
         let upload = set.upload(&MapPostEffects::default());
         assert_eq!(upload.adaptation.y, 8.);
@@ -1596,6 +1647,47 @@ mod probe_tests {
         });
         assert_eq!(disabled.exposure.w, 0.);
         assert_eq!(disabled.bloom.y, 0.);
+    }
+    #[test]
+    fn authored_colour_controls_reach_the_pre_gamma_matrix() {
+        use sekiro_formats::gparam::{Entry, Group, Param, Value};
+        let gparam = Gparam {
+            groups: vec![Group {
+                name: "Tone Map[Yebis]".into(),
+                display_name: String::new(),
+                params: [
+                    ("GS Presents - ToneMap-Contrast", 0.2),
+                    ("GS Presents - ColorH", 30.),
+                    ("GS Presents - ColorS", 0.),
+                    ("GS Presents - ColorV", 0.8),
+                    ("GS Presents - Contrast", 0.7),
+                ]
+                .into_iter()
+                .map(|(name, value)| Param {
+                    name: name.into(),
+                    display_name: String::new(),
+                    entries: vec![Entry {
+                        id: 0,
+                        time: 22.,
+                        value: Value::Float(value),
+                    }],
+                })
+                .collect(),
+            }],
+        };
+        let post = PostSettings::from_gparam(&gparam, 0, 22.).upload(&MapPostEffects::default());
+        assert_eq!(post.curve.z, 0.2);
+        // Native saturation zero preserves weighted luminance, even after hue.
+        let red = post.colour * Vec4::new(1., 0., 0., 1.);
+        assert!(
+            (red.truncate() - Vec3::splat(0.3173896))
+                .abs()
+                .max_element()
+                < 0.000002
+        );
+        // Hue rotates around the luminance axis after its basis change, preserving grey.
+        let grey = tone_correction(67., 0.6, 0.8, 0.7) * Vec4::new(0.5, 0.5, 0.5, 1.);
+        assert!((grey.truncate() - Vec3::splat(0.43)).abs().max_element() < 0.000002);
     }
     #[test]
     fn native_constructor_defaults_and_bloom_normalization() {

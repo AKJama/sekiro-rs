@@ -2,6 +2,7 @@
 struct Settings {
     exposure: vec4<f32>, adaptation: vec4<f32>, bloom: vec4<f32>,
     transfer: vec4<f32>, controls: vec4<f32>, curve: vec4<f32>, reinhard: vec4<f32>,
+    colour: mat4x4<f32>,
 }
 @group(0) @binding(0) var scene: texture_2d<f32>;
 @group(0) @binding(1) var level0: texture_2d<f32>;
@@ -47,16 +48,21 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let gray = dot(bright, vec3(0.29891, 0.58661, 0.11448));
     return vec4(mix(bright, vec3(gray), settings.controls.x), 1.0);
 #else
+#ifdef COPY
+    return vec4(sample_scene(in.uv), 1.0);
+#else
+#ifdef UPSAMPLE
+    return vec4(sample_scene(in.uv)
+        + settings.reinhard.z * textureSampleLevel(level0, linear_sampler, in.uv, 0.0).rgb, 1.0);
+#else
 #ifdef TONE
     var x = max(sample_scene(in.uv) * settings.exposure.x * adapted.y, vec3(0.0));
     if settings.bloom.y > 0.0 {
-        let glare = textureSampleLevel(level0, linear_sampler, in.uv, 0.0).rgb
-            + 0.5 * textureSampleLevel(level1, linear_sampler, in.uv, 0.0).rgb
-            + 0.25 * textureSampleLevel(level2, linear_sampler, in.uv, 0.0).rgb;
+        let glare = textureSampleLevel(level0, linear_sampler, in.uv, 0.0).rgb;
         x += glare * settings.bloom.y * settings.bloom.w;
     }
-    // Identity colour matrix/vignette until their CPU uploads are resolved.
-    var display = pow(max(tone(x), vec3(0.0)), vec3(settings.transfer.y));
+    let corrected = (settings.colour * vec4(tone(x), 1.0)).rgb;
+    var display = pow(max(corrected, vec3(0.0)), vec3(settings.transfer.y));
     if settings.controls.z < 0.5 {
         let noise = fract(52.9829189 * fract(dot(in.position.xy, vec2(0.06711056, 0.00583715)))) - 0.5;
         display = max(display + noise / 255.0, vec3(0.0));
@@ -65,7 +71,7 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // undone by grading before lookup, preserving the native output-power domain.
     return vec4(display_to_linear(display), 1.0);
 #else
-    // Seven-tap normalized Gaussian; CPU kernel generation remains calibrated.
+    // 2556e0 normalizes exp(-offset^2/(2*sigma^2)), sigma=1.5.
     let weights = array<f32, 7>(0.036633, 0.111281, 0.216745, 0.270682, 0.216745, 0.111281, 0.036633);
     let size = vec2<f32>(textureDimensions(scene));
 #ifdef BLUR_H
@@ -78,6 +84,8 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         result += sample_scene(in.uv + axis * f32(i - 3) * settings.bloom.z / size) * weights[i];
     }
     return vec4(result, 1.0);
+#endif
+#endif
 #endif
 #endif
 }

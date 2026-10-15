@@ -1,5 +1,19 @@
 # Status
 
+## Post-chain colour audit (2026-10-15)
+
+Implemented the native pre-gamma hue/saturation/value/contrast matrix, accepted the authored ToneMap-Contrast name and restored the full authored spatial bloom pyramid.
+Exact-night colour correction defaults remain neutral, LUT 20 sampling and output gamma agree with the ordinary native path, and no warmer tint or exposure offset was invented.
+Saturation moves closer to retail in five of six matched views; luminance moves closer in 009, 025 and 091 and farther away in 002, 003 and 092.
+Blue snow and the remaining brightness mismatch stay open; docs/COLOUR.md records the full numbers, native evidence and unresolved LUT blending, display/quality settings, temporal bloom and exposure limits.
+All six sorted visibility records agree, and all 17,217 map/draw-param asset fingerprints are unchanged.
+The audited release workspace run passes 816 tests with 25 existing ignores, including the installed-data gate, and release workspace all-target Clippy with warnings denied and formatting pass.
+The final Outskirts and Castle gates pass in 54.114 and 58.818 seconds, with unchanged geometry triples totalling 0/493/0 and 1933/4885/0 respectively.
+Only reviewed colour fixture cells change, with every view documented in docs/MAP-COMPLETENESS-SWEEP.md and the 120-second limit and tolerances unchanged.
+Requested panels, masks, manifests and measurements are in the external progress collection's 2026-10-15/colour directory.
+The protected sky/fog files and a late concurrent FXR diagnostic edit are outside this task; that late FXR edit is excluded from this build's validation.
+No staging, commit, publication, worktree, retail-game session or game-install write was performed by this task.
+
 ## Painted backdrop and fog follow-up (2026-10-15)
 
 Restored the separate m89 FarMountain companion selected with each dome, including night m900130 and its layered panorama, native colour/haze shader, alpha threshold and depth-write flag.
