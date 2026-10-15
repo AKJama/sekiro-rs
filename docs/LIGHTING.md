@@ -5,6 +5,15 @@ The shared implementation is `crates/game/src/lighting_selection.rs`.
 Each map's original flags and event references live in one module under `crates/game/src/lighting/maps/`.
 No game asset or decoded event body is copied into those modules.
 
+## Sensitometric exposure audit, 2026-10-15
+
+The shared mode-7 tone curve used natural exponentials where the native shader's `exp` instructions require base-two powers.
+The corrected `tonemap.wgsl` uses `exp2` with the original coefficients and authored contrast, without changing exposure, light colours, snow textures or the inferred scene-unit bridge.
+The controlled spot-002 mean linear luminance falls from 19.70435 to 13.63111 percent white, compared with retail 7.02082.
+The blue cast and excess saturation remain, and colour ratios worsen as the corrected shoulder compresses highlights less aggressively; this is a native-formula correction rather than complete L1/M1 parity.
+The pinned RustSekiro inspection found the same exponential-base error and retained by-eye exposure offsets, so no exposure implementation was copied.
+See [EXPOSURE.md](EXPOSURE.md) for native evidence, all six luminance/saturation/hue comparisons, remaining unknowns, source isolation and validation.
+
 ## Extra LightSet slots and sun shadows, 2026-10-15
 
 The native deferred directional accumulator leaves slots 1, 2 and 3 unattenuated by the sun's shadow map.
@@ -339,6 +348,10 @@ The pale retail sky and readable distant snowy range in the external reference p
 Genuine environment changes still require coefficient-atlas synchronization in the GI/material owner's code.
 
 ### Shared native fog correction (2026-10-15)
+
+The subsequent [painted-backdrop follow-up](BACKDROP.md) restores each sky group's separate FarMountain companion and its native haze-colour shader.
+It also corrects omitted fog sampling defaults from the executable constructor, SAT sky/fog-card RGB conversion, and the fog cards' independent sun specular input.
+Exposure, tone mapping and the shared LightSet implementation are outside that follow-up's changes.
 
 The exact global `Enable` lookup no longer matches `EnableAnalyticalFog`, restoring Hirata and Depths without changing authored density.
 Fog light references stay as integers and resolve the native map bank plus independent LightSet row, with bank 1 / light 0 and the decoded dummy light as native fallbacks.

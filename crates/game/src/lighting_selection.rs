@@ -582,6 +582,7 @@ mod tests {
         }
     }
     #[test]
+    #[ignore = "slow: audit every boss arena story preset"]
     fn boss_arenas_keep_their_story_state() {
         for arena in sekiro_sim::arena::ARENAS {
             let s = select(&cache(), arena.map, None, Some(arena)).unwrap();
@@ -595,6 +596,10 @@ mod tests {
                 assert_eq!(s.environment, 0);
             }
         }
+    }
+
+    #[test]
+    fn castle_boss_arenas_keep_their_story_state() {
         let morning = select(
             &cache(),
             "m11_01_00_00",

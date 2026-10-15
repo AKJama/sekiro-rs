@@ -433,6 +433,33 @@ fn has(bit: u32, map_game: MapGame) -> bool {
 fn game_layers(in: VertexOutput, b: vec4<f32>, b2: vec4<f32>, uv_scale: f32, pbr_in: PbrInput, map_game: MapGame, slot: u32) -> PbrInput {
     var pbr_input = pbr_in;
     let p = map_game.p;
+    if map_game.flags.y == 3u {
+        // Native LandScape Mountain: normal-map B plus three authored mask projections.
+        // UV tiling is FLVER texture scale, independent of the placed mesh's world scale.
+        let mask_uv = layer_uv(in,p[13].z)*p[13].xy;
+        let mask_a = sample_height_mask(mask_uv*p[4].xy,slot).rgb;
+        let mask_b = sample_height_mask(mask_uv*p[3].xy,slot).rgb;
+        let mask_c = sample_height_mask(mask_uv*p[5].xy,slot).rgb;
+        let height = (dot(mask_a,p[6].xyz)+dot(mask_b,p[7].xyz)+0.01)*p[2].y;
+        let normal_sample = sample_base_normal(layer_uv(in,p[9].z)*p[9].xy,slot);
+        let coverage = 1.0-dot(mask_c,p[8].xyz)-normal_sample.b;
+        let rock_weight = saturate((coverage-height*(1.0-coverage))*(1.0+p[2].z));
+        let snow_color = sample_snow(layer_uv(in,p[10].z)*p[10].xy,slot).rgb*p[1].rgb;
+        let rock_color = sample_base_albedo(layer_uv(in,p[11].z)*p[11].xy,slot).rgb*p[0].rgb;
+        pbr_input.material.base_color = vec4(saturate(mix(snow_color,rock_color,rock_weight)),1.0);
+        // COLOR1.x is the native baked ambient occlusion, separate from the snow mask.
+        pbr_input.diffuse_occlusion *= b.x;
+        pbr_input.specular_occlusion *= b.x;
+        var nt = mix(vec3(0.0,0.0,1.0),flv(normal_sample),p[2].x);
+        nt = vec3(nt.xy+flv(sample_detail(layer_uv(in,p[12].z)*p[12].xy,slot)).xy*p[2].w,nt.z);
+#ifdef VERTEX_TANGENTS
+        let n = normalize(in.world_normal);
+        let t = normalize(in.world_tangent.xyz);
+        let bitangent = in.world_tangent.w*cross(n,t);
+        pbr_input.N = normalize(nt.x*t+nt.y*bitangent+nt.z*n);
+#endif
+        return pbr_input;
+    }
     let ground = map_game.flags.y == 2u;
     let uv0 = in.uv;
     var uv1 = in.uv;

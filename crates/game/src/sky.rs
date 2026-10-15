@@ -40,6 +40,7 @@ struct SkyInputs {
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+#[bind_group_data(SkyKey)]
 struct SkyMaterial {
     #[uniform(0)]
     inputs: SkyInputs,
@@ -49,6 +50,20 @@ struct SkyMaterial {
     #[texture(3)]
     #[sampler(4)]
     low: Handle<Image>,
+    write_depth: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct SkyKey {
+    write_depth: bool,
+}
+
+impl From<&SkyMaterial> for SkyKey {
+    fn from(material: &SkyMaterial) -> Self {
+        Self {
+            write_depth: material.write_depth,
+        }
+    }
 }
 
 impl Material for SkyMaterial {
@@ -59,7 +74,9 @@ impl Material for SkyMaterial {
         false
     }
     fn alpha_mode(&self) -> AlphaMode {
-        if self.inputs.control.x > 1.5 {
+        if self.inputs.control.x > 2.5 {
+            AlphaMode::Mask(self.inputs.control.w)
+        } else if self.inputs.control.x > 1.5 {
             AlphaMode::Blend
         } else {
             AlphaMode::Opaque
@@ -77,11 +94,13 @@ impl Material for SkyMaterial {
         _: &MaterialPipeline,
         d: &mut RenderPipelineDescriptor,
         _: &MeshVertexBufferLayoutRef,
-        _: MaterialPipelineKey<Self>,
+        key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         d.primitive.cull_mode = None;
         if let Some(depth) = &mut d.depth_stencil {
-            depth.depth_write_enabled = Some(false);
+            // FarMountain's authored alpha-tested finite cylinder also occludes
+            // landscape cloud cards beyond it. The dome itself remains at infinity.
+            depth.depth_write_enabled = Some(key.bind_group_data.write_depth);
             depth.depth_compare = Some(CompareFunction::GreaterEqual);
         }
         Ok(())
@@ -96,6 +115,7 @@ struct Library {
     current: String,
     groups: BTreeMap<i32, String>,
     clouds: BTreeMap<String, CloudLayer>,
+    horizons: BTreeMap<String, CloudLayer>,
     missing: Option<String>,
     legacy: bool,
     clock_override: bool,
@@ -119,7 +139,7 @@ fn group_models(msb: &sekiro_formats::msb::Msb, legacy: bool) -> BTreeMap<i32, S
             for &group in &part.entity_group_ids {
                 if group > 0 {
                     // The native selector takes the first part: the dome precedes
-                    // its separate cloud model in each installed m89 group.
+                    // its separate FarMountain companion in each installed m89 group.
                     if legacy {
                         groups.insert(group, model.name.clone());
                     } else {
@@ -136,6 +156,8 @@ fn group_models(msb: &sekiro_formats::msb::Msb, legacy: bool) -> BTreeMap<i32, S
 struct Dome;
 #[derive(Component)]
 struct CloudDome;
+#[derive(Component)]
+struct Horizon;
 
 // common.emevd event 100 activates these m89 groups with 2012[1].
 // Story time flags 9800..9803 map to the matching authored light/probe hour keys.
@@ -171,6 +193,8 @@ fn inputs(row: &Value) -> SkyInputs {
     let shader = row["shader"].as_str().unwrap_or_default();
     let prefix = if shader.contains("Ver2") {
         "M_Sky__SkyDome_Ver2_snp_0_"
+    } else if shader.contains("FarMountain") {
+        "M_LandScape__FarMountain_snp_0_"
     } else if shader.contains("M[Sky]_Cloud.") {
         "M_Sky__Cloud_snp_0_"
     } else {
@@ -195,21 +219,29 @@ fn inputs(row: &Value) -> SkyInputs {
     };
     SkyInputs {
         colors: std::array::from_fn(|i| {
-            let name = format!("{prefix}color_{i}");
+            let slot = if prefix.contains("FarMountain") {
+                [10, 11, 12, 13, 8][i.min(4)]
+            } else {
+                i
+            };
+            let name = format!("{prefix}color_{slot}");
             let c = vector(&name);
-            // Colour packing is calibrated as gamma 2, following native LightSet uploads.
+            // SAT colour descriptors request gamma conversion: 1403dc4b0 applies
+            // RGB^2.2 before the independent intensity, preserving alpha.
             let intensity = values(&format!("{name}-Intensity"))
                 .first()
                 .copied()
                 .unwrap_or(1.);
-            (c.xyz() * c.xyz() * intensity).extend(1.)
+            (c.xyz().powf(2.2) * intensity).extend(c.w)
         }),
         floats: std::array::from_fn(|i| vector(&format!("{prefix}float_{i}"))),
         vectors: std::array::from_fn(|i| vector(&format!("{prefix}float3_{i}"))),
         uv: std::array::from_fn(|i| vector(&format!("{prefix}float2_{i}"))),
         sun: Vec4::Y,
         control: Vec4::new(
-            if prefix.contains("Ver2") {
+            if prefix.contains("FarMountain") {
+                3.
+            } else if prefix.contains("Ver2") {
                 1.
             } else if prefix.contains("Cloud_snp") {
                 2.
@@ -218,10 +250,14 @@ fn inputs(row: &Value) -> SkyInputs {
             },
             SKY_RADIANCE_SCALE,
             0.,
-            values("GXFT_SATStaticSwitch")
-                .first()
-                .copied()
-                .unwrap_or(0.),
+            if prefix.contains("FarMountain") {
+                values("g_AlphaRef").first().copied().unwrap_or(0.) / 255.
+            } else {
+                values("GXFT_SATStaticSwitch")
+                    .first()
+                    .copied()
+                    .unwrap_or(0.)
+            },
         ),
     }
 }
@@ -329,14 +365,18 @@ fn texture_slots(
         .values()
     {
         let path = path.as_str().context("sky texture path")?;
-        let image = if let Some(image) = images.get(path) {
+        let srgb = row["shader"]
+            .as_str()
+            .is_some_and(|s| s.contains("FarMountain"));
+        let key = format!("{srgb}:{path}");
+        let image = if let Some(image) = images.get(&key) {
             image.clone()
         } else {
             let mut image = Image::from_buffer(
                 &std::fs::read(dir.join(path))?,
                 bevy::image::ImageType::Extension("dds"),
                 bevy::image::CompressedImageFormats::all(),
-                false,
+                srgb,
                 ImageSampler::default(),
                 RenderAssetUsages::default(),
             )?;
@@ -346,7 +386,7 @@ fn texture_slots(
                 ..default()
             });
             let image = app.world_mut().resource_mut::<Assets<Image>>().add(image);
-            images.insert(path.into(), image.clone());
+            images.insert(key, image.clone());
             image
         };
         slots.push(image);
@@ -374,6 +414,7 @@ pub(super) fn install(app: &mut App, cache: &Path, id: &str, hour: f32) -> Resul
         current: selection(id, hour).into(),
         groups: BTreeMap::new(),
         clouds: BTreeMap::new(),
+        horizons: BTreeMap::new(),
         missing: None,
         legacy: legacy_selection(),
         clock_override: std::env::args().any(|a| a == "--hour"),
@@ -408,6 +449,7 @@ pub(super) fn install(app: &mut App, cache: &Path, id: &str, hour: f32) -> Resul
                 inputs: value.clone(),
                 high: slots[0].clone(),
                 low: slots.last().unwrap().clone(),
+                write_depth: false,
             });
         library.materials.insert(name.into(), material);
         library.meshes.insert(
@@ -429,6 +471,7 @@ pub(super) fn install(app: &mut App, cache: &Path, id: &str, hour: f32) -> Resul
                     inputs: cloud_inputs,
                     high: slots[0].clone(),
                     low: slots.last().unwrap().clone(),
+                    write_depth: false,
                 });
             let mesh = app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh(
                 &dir.join(format!("models/{name}.glb")),
@@ -438,6 +481,29 @@ pub(super) fn install(app: &mut App, cache: &Path, id: &str, hour: f32) -> Resul
             )?);
             library
                 .clouds
+                .insert(name.into(), CloudLayer { mesh, material });
+        }
+        let horizon = &row["horizon"];
+        if !horizon.is_null() {
+            let slots = texture_slots(app, &dir, horizon, &mut images)?;
+            let material = app
+                .world_mut()
+                .resource_mut::<Assets<SkyMaterial>>()
+                .add(SkyMaterial {
+                    inputs: inputs(horizon),
+                    high: slots[0].clone(),
+                    low: slots[0].clone(),
+                    write_depth: horizon["depth_write"].as_bool().unwrap_or(false),
+                });
+            let model = horizon["model"].as_str().context("horizon model")?;
+            let mesh = app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh(
+                &dir.join(format!("models/{model}.glb")),
+                horizon["material_index"]
+                    .as_u64()
+                    .context("horizon material")? as usize,
+            )?);
+            library
+                .horizons
                 .insert(name.into(), CloudLayer { mesh, material });
         }
     }
@@ -486,6 +552,29 @@ pub(super) fn install(app: &mut App, cache: &Path, id: &str, hour: f32) -> Resul
             NotShadowReceiver,
         ));
     }
+    let horizon = library.horizons.get(&library.current).cloned();
+    let visibility = if horizon.is_some() {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    if horizon.is_none() {
+        warn!(
+            "sky {} has no exported FarMountain companion; refresh the m89 sky export",
+            library.current
+        );
+    }
+    let horizon = horizon.unwrap_or_default();
+    app.world_mut().spawn((
+        Horizon,
+        Mesh3d(horizon.mesh),
+        MeshMaterial3d(horizon.material),
+        Transform::default(),
+        visibility,
+        NoFrustumCulling,
+        NotShadowCaster,
+        NotShadowReceiver,
+    ));
     info!("authored sky {} for {id} at {hour}h", library.current);
     app.insert_resource(library)
         .init_resource::<SkyOverride>()
@@ -502,7 +591,18 @@ type Clouds<'w, 's> = Query<
         &'static mut MeshMaterial3d<SkyMaterial>,
         &'static mut Visibility,
     ),
-    (With<CloudDome>, Without<Dome>),
+    (With<CloudDome>, Without<Dome>, Without<Horizon>),
+>;
+
+type Horizons<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut Mesh3d,
+        &'static mut MeshMaterial3d<SkyMaterial>,
+        &'static mut Visibility,
+    ),
+    (With<Horizon>, Without<Dome>, Without<CloudDome>),
 >;
 
 #[allow(clippy::too_many_arguments)]
@@ -514,6 +614,7 @@ fn update(
     mut materials: ResMut<Assets<SkyMaterial>>,
     mut domes: Query<(&mut Mesh3d, &mut MeshMaterial3d<SkyMaterial>), With<Dome>>,
     mut clouds: Clouds<'_, '_>,
+    mut horizons: Horizons<'_, '_>,
     scene: Option<Res<crate::arena_b::Scene>>,
     story: Res<crate::lighting_selection::LightingSelection>,
     map_scene: Res<crate::lighting_selection::MapEventScene>,
@@ -589,6 +690,18 @@ fn update(
             material.inputs.control.z = time.elapsed_secs();
         }
     }
+    for (mut mesh, mut handle, mut visibility) in &mut horizons {
+        if let Some(layer) = library.horizons.get(&selected) {
+            mesh.0 = layer.mesh.clone();
+            handle.0 = layer.material.clone();
+            *visibility = Visibility::Inherited;
+            if let Some(mut material) = materials.get_mut(&handle.0) {
+                material.inputs.sun = set.sun_toward.extend(0.);
+            }
+        } else {
+            *visibility = Visibility::Hidden;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -610,6 +723,7 @@ mod tests {
             current: story.initial.sky.clone().unwrap(),
             groups: BTreeMap::new(),
             clouds: BTreeMap::new(),
+            horizons: BTreeMap::new(),
             missing: None,
             legacy: false,
             clock_override: false,
@@ -631,6 +745,7 @@ mod tests {
                 inputs: inputs(row),
                 high: default(),
                 low: default(),
+                write_depth: row["depth_write"].as_bool().unwrap_or(false),
             };
             let geometry = || {
                 Mesh::new(
@@ -651,6 +766,15 @@ mod tests {
                     },
                 );
             }
+            if !row["horizon"].is_null() {
+                library.horizons.insert(
+                    name.clone(),
+                    CloudLayer {
+                        mesh: meshes.add(geometry()),
+                        material: materials.add(material(&row["horizon"])),
+                    },
+                );
+            }
         }
         let mut app = App::new();
         app.world_mut().spawn((
@@ -660,6 +784,12 @@ mod tests {
         ));
         app.world_mut().spawn((
             CloudDome,
+            Mesh3d::default(),
+            MeshMaterial3d::<SkyMaterial>::default(),
+            Visibility::Hidden,
+        ));
+        app.world_mut().spawn((
+            Horizon,
             Mesh3d::default(),
             MeshMaterial3d::<SkyMaterial>::default(),
             Visibility::Hidden,
@@ -679,6 +809,57 @@ mod tests {
         .init_resource::<crate::lighting_selection::MapEventScene>()
         .add_systems(Update, update);
         app
+    }
+
+    #[test]
+    fn event_sky_keeps_its_native_painted_horizon_companion() {
+        let mut app = sky_app();
+        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let json: Value = serde_json::from_slice(
+            &std::fs::read(cache.join("maps/m89_00_00_99/sky.json")).unwrap(),
+        )
+        .unwrap();
+        let msb = sekiro_formats::msb::parse(
+            &std::fs::read(cache.join("raw/map/mapstudio/m89_00_00_99.msb")).unwrap(),
+        )
+        .unwrap();
+        for (dome, group) in [
+            ("m900000", 8907000),
+            ("m900030", 8907030),
+            ("m900080", 8907080),
+            ("m900095", 8907100),
+        ] {
+            let row = &json["models"][dome]["horizon"];
+            let companion = row["model"].as_str().expect("refresh m89 sky export");
+            assert!(msb.parts.iter().any(|p| p.entity_group_ids.contains(&group)
+                && msb.model(p).is_some_and(|m| m.name == companion)));
+            assert!(row["shader"].as_str().unwrap().contains("FarMountain"));
+            let geometry = mesh(
+                &cache.join(format!("maps/m89_00_00_99/models/{companion}.glb")),
+                row["material_index"].as_u64().unwrap() as usize,
+            )
+            .unwrap();
+            assert!(geometry.count_vertices() > 0);
+            app.world_mut().resource_mut::<SkyOverride>().0 = Some(dome);
+            app.update();
+            let world = app.world_mut();
+            let mut query = world.query_filtered::<(&Mesh3d, &MeshMaterial3d<SkyMaterial>, &Visibility),With<Horizon>>();
+            let (mesh, material, visibility) = query.single(world).unwrap();
+            let expected = &world.resource::<Library>().horizons[dome];
+            assert_eq!(mesh.0, expected.mesh);
+            assert_eq!(material.0, expected.material);
+            assert_eq!(*visibility, Visibility::Inherited);
+            assert_eq!(
+                world
+                    .resource::<Assets<SkyMaterial>>()
+                    .get(&material.0)
+                    .unwrap()
+                    .inputs
+                    .control
+                    .x,
+                3.
+            );
+        }
     }
 
     #[test]

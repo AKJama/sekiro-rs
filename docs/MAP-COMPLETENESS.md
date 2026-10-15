@@ -890,6 +890,19 @@ An earlier formatting check observed in-progress formatting differences in the c
 
 ## Rules from the exe
 
+The D1 follow-up additionally traces the missing `EnableAnalyticalFog` default to false in constructor `0x1402a0740` and its registration at `0x14029c180`.
+This is independent of draw-group preprocessing and LOD selection.
+See the D1 diagnosis in `VISUAL-PARITY.md` and the forward fog packet in `SHADER-INPUTS.md`.
+
+The horizon material is the native Mountain family on Outskirts `m925000`, with related landscape facets on `m902000`, `m902010` and Castle `m911061`.
+The `m6*` names alone do not identify that horizon.
+The targeted export option refreshes the selected placed models and required textures, preserving layout, collision, grass, environment and lighting sidecars:
+
+```powershell
+sekiro-extract map m11_00_00_00 --models m902000 m902010 m925000
+sekiro-extract map m11_01_00_00 --models m911061
+```
+
 Research date: 14 October 2026.
 This section supersedes the earlier unresolved statements about mask preprocessing, connection Condition and map-piece LOD ID 255.
 It describes static observations from the existing Ghidra program, not a retail screenshot comparison or a live-memory experiment.

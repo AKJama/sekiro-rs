@@ -9,7 +9,7 @@
 struct Inputs {
     colors: array<vec4<f32>,4>, floats: array<vec4<f32>,14>, vectors: array<vec4<f32>,18>,
     uv: array<vec4<f32>,4>, control: vec4<f32>, sun: vec4<f32>, direct: vec4<f32>,
-    ambient: vec4<f32>, hemi_axis: vec4<f32>, hemi_delta: vec4<f32>,
+    specular: vec4<f32>, ambient: vec4<f32>, hemi_axis: vec4<f32>, hemi_delta: vec4<f32>,
 }
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> fog: Inputs;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var mask: texture_2d<f32>;
@@ -156,7 +156,7 @@ fn fragment(v: VertexOutput) -> @location(0) vec4<f32> {
     fallback+=environment_map_light(&li,&ranges,false).diffuse;
 #endif
     let ambient=ambient_light(v.world_position.xyz,n,fallback)*occlusion;
-    let radiance=albedo*(ambient+fog.direct.rgb*nl)+fog.direct.rgb*specular;
+    let radiance=albedo*(ambient+fog.direct.rgb*nl)+fog.specular.rgb*specular;
 #ifdef DEPTH_PREPASS
     let scene_depth=prepass_depth(v.position,0u);
     let scene_z=-position_ndc_to_view(vec3(0.0,0.0,scene_depth)).z;

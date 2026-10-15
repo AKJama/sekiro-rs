@@ -1,5 +1,39 @@
 # Status
 
+## Painted backdrop and fog follow-up (2026-10-15)
+
+Restored the separate m89 FarMountain companion selected with each dome, including night m900130 and its layered panorama, native colour/haze shader, alpha threshold and depth-write flag.
+Corrected omitted fog sampling controls to executable defaults of near offset 1, 32 slices and sample offset 0, plus SAT sky/fog-card gamma 2.2 and independent alpha.
+Traced spot-011's blue arc to m925009_9000 CloudFog material 7 and corrected the fog cards' substitution of diffuse RGB/intensity for the native independent SpecColor0 input.
+The final arc remains conspicuous and the night painted range insufficiently readable, so D1/F1 visual parity remains open; no arbitrary density, colour, height or exposure adjustment was introduced.
+Both canonical render gates pass after reviewed colour-only fixture changes, in 45.910 and 59.719 seconds, with identical geometry metrics, selected collisions and visible-part sets across all twelve views.
+All 24 before/final diagnostic depth and collision images are pixel-identical.
+The independent final repeat differs at one Castle view-4 depth pixel by one channel code, with unchanged geometry categories.
+Release workspace tests pass 815 tests with 25 existing ignores; the final touched-crate rerun passes 163 tests with three existing ignores, including the installed-data and sky-companion regressions.
+Workspace all-target release Clippy with warnings denied, formatting and diff checks pass using target/alt-backdrop.
+Six real/before/after comparisons for spots 011, 022, 091, 009, 045 and 089 are in the external progress collection's 2026-10-15/backdrop directory, with results.json and gate/pixel proofs.
+Native research stays in re/research/backdrop-2026-10-15; details and remaining limitations are in docs/BACKDROP.md.
+No shared lighting or post source was edited, and the before/final executables embed identical current tone and exposure shaders.
+No staging, commit, worktree, publication or retail-game session was performed.
+
+## Exposure and tone curve (2026-10-15)
+
+Corrected mode-7 sensitometric mapping from natural exponentials to the native shader's base-two powers, with an actual GPU regression that fails on the previous production function and passes after the correction.
+The RustSekiro inspection at `0c9e5915b3d98d8a1e00319a64513100ff322e5e` found the same curve error, retained by-eye exposure offsets and documented bloom approximations; no implementation was copied.
+Authored exposure, metering/adaptation settings, light colours and snow inputs remain unchanged.
+The final controlled spot-002 mean linear luminance decreases from 19.70435 to 13.63111 percent white, versus retail 7.02082, a 30.82% decrease with a remaining 1.94x retail ratio.
+Luminance is closer in four of six views and farther away in two; saturation and B/R worsen in all six, so L1/M1 brightness and snow-colour parity remain open.
+The full luminance/saturation/hue table, native evidence, unknowns and image provenance are in docs/EXPOSURE.md.
+All six complete visibility records agree, and SHA-256/size/timestamp fingerprints remain equal across 17,214 map/draw-param files.
+An external capture-script stale-marker mistake was corrected with unique batch IDs, and all reported comparisons were repeated; provisional images remain separately archived.
+Only colour fixture fields were re-baselined, with every per-view change explained in docs/MAP-COMPLETENESS-SWEEP.md.
+All twelve before/final geometry triples agree: Outskirts totals void/depth-gap/untextured 0/493/0 and Castle 1933/4885/0.
+The final gates pass in 49.948 and 58.686 seconds with unchanged tolerances and the 120-second limit.
+Release workspace tests pass 814 tests with 25 existing ignores, including the installed-data gate, 127 game unit tests and seven game integration tests.
+Release workspace all-target Clippy with warnings denied and workspace formatting pass.
+All Cargo work uses target/alt-exposure; captures and validation artifacts are in the external progress collection's 2026-10-15/exposure directory.
+No staging, commit, remote update, retail game session or game-install write was performed by this task.
+
 ## Extra LightSet sun-shadow audit (2026-10-15)
 
 Native deferred shader disassembly applies the sun-shadow colour factor only to slot 0 diffuse/specular; the other three slots receive separate SSAO visibility weights and have no independent shadow sample in this path.
@@ -1608,3 +1642,4 @@ One formatting check caught a concurrent map_sweep.rs log-statement edit; the ow
 No renderer/map fixes, game window, re-match, real-game/save/install access, commits or publication were performed for this completion.
 2026-10-15: Corrected all 13 m89 dome-group overwrites, synchronized exported cloud layers and separated event sky/environment selection from clock-only changes in sky.rs and arena_b.rs; eight sky regressions, the environment/restart regression, before/after data gates, 118 game unit tests plus six integration tests, workspace Clippy and fmt pass using target/alt-sky and six jobs; matched spot-011/091 captures and gate numbers are under target/alt-sky/progress, with no per-view metric regression beyond tolerance and identical collision/visible-part manifests, but both canonical render gates remain blocked by shared grey/pop-in fixture failures already present with the correction off, and F1/D1 plus missing m900085 remain open.
 2026-10-15: Shared sweep texture/pipeline readiness with ordinary, play, viewer and arena captures; fixed --uncapped being ignored outside maps and logged concrete supported presentation modes; historical/current ordinary and play proofs plus before/after six-view gates live under target/alt-capture/progress; 120 game unit and six integration tests pass with two ignored, workspace Clippy and fmt are clean, and both gates preserve per-view geometry exactly, with Castle's three pre-existing grey failures and sustained uncapped throughput still open (Vulkan Immediate/Mailbox medians 16.682/16.693 ms).
+2026-10-15: Restored D1 snowy horizon terrain behind Outskirts village and Castle keep by using the native false default for omitted analytical-fog continuation and retaining Mountain snow/rock, mask, raw-normal/detail and baked-occlusion data; refreshed four placed model exports without layout or ancillary changes; all twelve geometry diagnostics and visibility selections stay identical, with four reviewed colour fixture fields documented in MAP-COMPLETENESS-SWEEP.md; frozen render gates pass in 68.552/85.507 seconds, the final shared-tree workspace run passes 814 tests with 25 ignored, and release all-target Clippy plus fmt pass using target/alt-mountains; four real/before/after panels and manifests are under the external 2026-10-15/mountains progress directory; the full-roster story audit moves to the slow tier, and no exposure/tone code, staging, commits or publication belong to this job.

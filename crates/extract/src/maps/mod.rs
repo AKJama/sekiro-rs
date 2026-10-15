@@ -205,7 +205,7 @@ fn physics_only_members<'a>(names: impl IntoIterator<Item = &'a str>) -> bool {
     physics
 }
 
-pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
+pub fn export(game: &Path, cache: &Path, id: &str, selected_models: &[String]) -> Result<()> {
     let raw = cache.join("raw");
     let out = cache.join("maps").join(id);
     std::fs::create_dir_all(out.join("models"))?;
@@ -222,21 +222,23 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
     if std::env::var_os("SEKIRO_MAP_GRASS_ONLY").is_some() {
         return grass::export(cache, id, &msb, oodle);
     }
-    lights::export(&raw, &out, id)?;
-    if std::env::var_os("SEKIRO_MAP_LIGHTS_ONLY").is_some() {
-        return Ok(());
-    }
-    env::export(&raw, &out, id, &msb)?;
-    if std::env::var_os("SEKIRO_MAP_ENV_ONLY").is_some() {
-        return Ok(());
-    }
-    let edge_header = raw.join(format!("map/{id}/{id}.edgebhd"));
-    if edge_header.is_file() || msb.parts.iter().any(|p| p.kind == msb::PartKind::Collision) {
-        if edges::export(cache, id, &msb, oodle)? {
+    if selected_models.is_empty() {
+        lights::export(&raw, &out, id)?;
+        if std::env::var_os("SEKIRO_MAP_LIGHTS_ONLY").is_some() {
             return Ok(());
         }
-    } else {
-        eprintln!("{id}: collisionless layout has no authored edge archive");
+        env::export(&raw, &out, id, &msb)?;
+        if std::env::var_os("SEKIRO_MAP_ENV_ONLY").is_some() {
+            return Ok(());
+        }
+        let edge_header = raw.join(format!("map/{id}/{id}.edgebhd"));
+        if edge_header.is_file() || msb.parts.iter().any(|p| p.kind == msb::PartKind::Collision) {
+            if edges::export(cache, id, &msb, oodle)? {
+                return Ok(());
+            }
+        } else {
+            eprintln!("{id}: collisionless layout has no authored edge archive");
+        }
     }
     let mtds = load_mtds(&raw)?;
 
@@ -245,6 +247,9 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
     let mut instances = [0usize; 2];
     for p in &msb.parts {
         let Some(m) = msb.model(p) else { continue };
+        if !selected_models.is_empty() && !selected_models.contains(&m.name) {
+            continue;
+        }
         let path = match p.kind {
             msb::PartKind::MapPiece => {
                 instances[0] += 1;
@@ -264,6 +269,12 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
         instances[1],
         used.len()
     );
+    for name in selected_models {
+        anyhow::ensure!(
+            used.contains_key(name),
+            "model {name} is not placed in {id}"
+        );
+    }
 
     // Pass 1: which textures do the pieces want?
     let wanted: BTreeSet<(String, bool)> = used
@@ -415,6 +426,14 @@ pub fn export(game: &Path, cache: &Path, id: &str) -> Result<()> {
         failed.load(Ordering::Relaxed),
         used.len() - models.len() - failed.load(Ordering::Relaxed)
     );
+
+    if !selected_models.is_empty() {
+        anyhow::ensure!(
+            failed.load(Ordering::Relaxed) == 0,
+            "selected model export failed"
+        );
+        return Ok(());
+    }
 
     // Layout.
     let model_name = |p: &msb::Part| msb.model(p).map(|m| m.name.clone()).unwrap_or_default();

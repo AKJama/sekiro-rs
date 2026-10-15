@@ -7,6 +7,52 @@ fn document(bytes: &[u8]) -> Value {
 }
 
 #[test]
+fn mountain_retains_native_snow_mask_and_baked_occlusion() {
+    let raw = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/raw");
+    let source =
+        raw.join("map/m11_00_00_00/m11_00_00_00_925000.mapbnd.d/m11_00_00_00_925000.flver");
+    if !source.is_file() {
+        return;
+    }
+    let f = flver::parse(&std::fs::read(source).unwrap()).unwrap();
+    let mut mtds = Mtds(HashMap::new());
+    for mat in &f.materials {
+        let name = format!("{}.mtd", texture_stem(&mat.mtd));
+        let m = mtd::parse(
+            &std::fs::read(raw.join("mtd/allmaterialbnd.mtdbnd.d").join(&name)).unwrap(),
+        )
+        .unwrap();
+        mtds.0.insert(name.to_ascii_lowercase(), m);
+    }
+    let choice = choose_material(&f.materials[0], mtds.get(&f.materials[0].mtd));
+    let layers = choice
+        .layers
+        .as_ref()
+        .expect("native Mountain must retain both albedos");
+    assert_eq!(layers.kind, 3);
+    assert!(layers.snow.is_some() && layers.mask.is_some() && layers.detail.is_some());
+    let wanted = wanted_textures(&f, &mtds);
+    assert!(wanted.iter().any(|(name, _)| name == "m99_snow_00_a"));
+    let built = build(&f, &mtds, &|name| Some(format!("tex/{name}.dds"))).unwrap();
+    let d = document(&built.glb);
+    assert!(d["materials"][0]["extras"]["sekiro_layers"]["snow"]["uri"].is_string());
+    let primitive = &d["meshes"][0]["primitives"][0];
+    let accessor = &d["accessors"][primitive["attributes"]["COLOR_0"].as_u64().unwrap() as usize];
+    let view = &d["bufferViews"][accessor["bufferView"].as_u64().unwrap() as usize];
+    let offset = 28
+        + u32::from_le_bytes(built.glb[12..16].try_into().unwrap()) as usize
+        + view["byteOffset"].as_u64().unwrap_or(0) as usize
+        + accessor["byteOffset"].as_u64().unwrap_or(0) as usize;
+    for (i, color) in f.meshes[0].vertices.colors[0].iter().enumerate() {
+        let start = offset + i * 16;
+        assert_eq!(
+            f32::from_le_bytes(built.glb[start..start + 4].try_into().unwrap()),
+            color[0]
+        );
+    }
+}
+
+#[test]
 fn detail_scenes_do_not_draw_other_levels_or_motion_blur_together() {
     use flver::face_set_flags::*;
     let mesh = flver::Mesh {

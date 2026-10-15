@@ -97,6 +97,12 @@ P3 = (kH, sH, FixedDensity', 0)
 `P1.w` equals the capped volume depth only when EnableAnalyticalFog is on, which is what gates the far continuation in the FLVER shader.
 Confidence: verified.
 
+The missing-field default for `EnableAnalyticalFog` is false.
+Constructor `2a0740` zeroes blended-record byte `+0x20`; registration `29c180` binds the same byte through the editor record and also supplies false as its default.
+The base `m11_00_0000` and `m11_01_0000` files omit this parameter, so their distant geometry retains the terminal integrated volume instead of integrating fixed density for kilometres beyond `FarDepth`.
+Explicit GPARAM entries still replace that default.
+This correction changes neither authored density nor the finite volume's scattering arithmetic.
+
 ### HeightFogOffset and the height vector (`39fa70`)
 
 `g_HeightFactor.xyz` is the world-Y component of the camera's three view axes, from the camera-to-world matrix at context `+0xd0`.
@@ -196,13 +202,16 @@ g_ReinhardParam = (ReinhardContrast, ReinhardWhiteBalance, 0, 0)
 g_ToneMapParam  = (FilmicContrast, AfterGamma ? 1 : Gamma, AfterGamma ? 1/Gamma : 1, ...)
 ```
 
-The Sensitometric table writer (disassembly `ToneMap_WriteSensitometricToneMappingTablePS`) is, with `x = 0.2u/(1-u)`, `A = 1 - e^(-1.442695x)`, `B = 1 - e^(-4.456669x)` and `c = FilmicContrast`:
+The Sensitometric table writer (disassembly `ToneMap_WriteSensitometricToneMappingTablePS`) is, with `x = 0.2u/(1-u)`, `A = 1 - 2^(-1.442695x)`, `B = 1 - 2^(-4.456669x)` and `c = FilmicContrast`:
 
 ```text
 out = (A + c*(B^3 - A))^(1/g_ToneMapParam.y)
 ```
 
 With the default `AfterGamma`, `y = 1` and the 1/2.2 power is applied at the end (`z`), which matches the ordinary branch in `docs/SHADERS.md`.
+The shader-model-5 assembly instruction `exp` computes a base-two power, as specified by [Microsoft](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/exp--sm4---asm-).
+The earlier natural-exponential transcription was incorrect and made the reconstructed mode-7 curve too bright.
+This correction does not change `24d920`'s CPU natural-exponential soft exposure limits or the GPU's base-ten adaptation rate.
 `HDR paper white` feeds `g_vHDRDisplayParam = (nits/10000, nits/200)`.
 Confidence: verified.
 

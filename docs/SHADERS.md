@@ -167,6 +167,13 @@ The forward FLVER shader does prove direct application, with channel transmittan
 
 ### FLVER forward and far geometry
 
+The `M[LandScape]_Mountain` Gbuf/Fwd permutations retain the authored normal, detail-normal, rock, snow and mask slots 0/7/3/2/8.
+Their vertex shader forwards native `COLOR1.x` as baked ambient occlusion.
+The base normal texture's blue channel contributes to snow coverage independently of that occlusion.
+Three independently scaled mask samples and the material's channel-selector vectors determine the rock/snow blend; model placement scale does not multiply those UVs.
+The exporter retains these inputs as map-layer family 3, consumed by the existing shared map lighting and fog passes.
+This is material support for the installed mountain geometry, independent of the local `m6*` scenery names.
+
 The representative file is `gxflvershader.shaderbnd.d/GXFlver_ColDifSpcBumpBlendIbl_Bloody_Cloth_Fwd.ppo`.
 It binds `g_VolumeFog0` at t47 and `FC_VolumeFogParam[4]` at byte 1072 of `cbScene`.
 With `P=FC_VolumeFogParam`, its lookup depth is `P[0].y*log2(min(depth,P[0].w)+P[0].x)+P[0].z`.
@@ -438,7 +445,8 @@ The unconverted native-tone candidate clipped about 1.03 percent of the noon wor
 
 Modes 0, 3, 7 and 8 evaluate the native filmic, Reinhard, sensitometric and extended-Reinhard table writers analytically.
 The native `x/(x+0.2)` address and writer reconstruction cancel, so this avoids lookup-table quantization while preserving the transfer function.
-Sensitometric uses `A=1-exp(-1.442695*x)`, `B=1-exp(-4.456669*x)` and `A+FilmicContrast*(B^3-A)`.
+Sensitometric uses `A=1-exp2(-1.442695*x)`, `B=1-exp2(-4.456669*x)` and `A+FilmicContrast*(B^3-A)`.
+The 2026-10-15 exposure audit corrected the earlier confusion between DXBC `exp` (base two) and WGSL `exp` (base e).
 AfterGamma uses table power one and final output power `1/2.2`, before the LUT.
 Missing authored controls use traced constructor defaults: mode 7, FilmicContrast 0.5, ReinhardContrast 1.6, ReinhardWhiteBalance 1.7, MiddleGray -2, LightAdapt 1, DarkAdapt 0.5, CenterWeight 4 and EV bounds -8/+8.
 `--native-tone-reinhard` and `--native-tone-filmic` provide diagnostic overrides.

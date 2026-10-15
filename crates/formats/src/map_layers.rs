@@ -11,6 +11,7 @@ pub fn family(shader: &str) -> u8 {
     {
         "m[multiple].spx" => 1,
         "m[multipleground].spx" => 2,
+        "m[landscape]_mountain.spx" => 3,
         _ => 0,
     }
 }
@@ -113,7 +114,9 @@ const GROUND_SLOTS: [&[u8]; 34] = [
 ];
 
 pub fn game_params(d: &mtd::Mtd, kind: u8) -> [[f32; 4]; 16] {
-    let prefix = if kind == 2 {
+    let prefix = if kind == 3 {
+        "M_LandScape__Mountain_snp_0_"
+    } else if kind == 2 {
         "M_MultipleGround__snp_0_"
     } else {
         "M_Multiple__snp_0_"
@@ -144,7 +147,21 @@ pub fn game_params(d: &mtd::Mtd, kind: u8) -> [[f32; 4]; 16] {
     };
     let w = |a: [f32; 3], x: f32| [a[0], a[1], a[2], x];
     let one = [1.0, 1.0, 1.0, 0.0];
-    let p: [[f32; 4]; 16] = if kind == 2 {
+    let p: [[f32; 4]; 16] = if kind == 3 {
+        // Native Mountain Gbuf/Fwd: two albedos and three mask lookups.
+        let mut p = [[0.; 4]; 16];
+        p[0] = col("color_0");
+        p[1] = col("color_1");
+        p[2] = [f("float_0"), f("float_2"), f("float_3"), f("float_6")];
+        for (i, name) in ["float2_0", "float2_1", "float2_2"].iter().enumerate() {
+            let v = v2(name);
+            p[3 + i] = [v[0], v[1], 0., 0.];
+        }
+        for (i, name) in ["float3_1", "float3_2", "float3_3"].iter().enumerate() {
+            p[6 + i] = w(v3(name), 0.);
+        }
+        p
+    } else if kind == 2 {
         let snow = mirror(v3("float3_5"));
         let wet = v2("float2_1");
         [

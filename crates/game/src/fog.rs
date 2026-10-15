@@ -99,6 +99,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn omitted_analytical_switch_preserves_the_native_finite_volume() {
+        let g = fixture(vec![(
+            "VolumetricFog Global FixedDensity",
+            0,
+            0.,
+            Value::Float(0.003),
+        )]);
+        let fog = GameFog::from_gparam(&g, 0, 22., Vec3::Y).unwrap();
+        assert_eq!(fog.slices.w, 0.);
+        assert_eq!(fog.density.x, 0.003);
+        assert_eq!(fog.slices, Vec4::new(1., 32., 0., 0.));
+        for map in ["m11_00", "m11_01"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("../../cache/raw/param/drawparam/{map}_0000.gparam"));
+            if !path.is_file() {
+                continue;
+            }
+            let g = sekiro_formats::gparam::parse(&std::fs::read(path).unwrap()).unwrap();
+            assert!(fog_param_exact(&g, "EnableAnalyticalFog").is_none());
+            let fog = GameFog::from_gparam(&g, 0, 22., Vec3::Y).unwrap();
+            assert_eq!(fog.slices.w, 0.);
+        }
+    }
+
     fn light_fixture(angles: &[(i32, [f32; 2])]) -> Gparam {
         Gparam {
             groups: vec![Group {
@@ -634,13 +659,16 @@ impl GameFog {
                     .map_or(Vec3::ZERO, |v| Vec3::new(v[0], v[1], v[2])))
             .extend(sign),
             slices: Vec4::new(
-                gs * get("NearOffset", 0.),
-                get("VolumeDepth", 48.).clamp(4., 128.),
-                get("VolumeSliceSampleOffset", 0.5),
+                // Constructor 1402a0740: +0x14 = 1, +0x08 = 32, +0x24 = 0.
+                // The base Ashina GPARAMs omit these sampling controls.
+                gs * get("NearOffset", 1.),
+                get("VolumeDepth", 32.).clamp(4., 128.),
+                get("VolumeSliceSampleOffset", 0.),
                 fog_param_exact(g, "EnableAnalyticalFog")
                     .and_then(|p| p.nearest(id, hour))
                     .and_then(|v| v.first().copied())
-                    .unwrap_or(1.),
+                    // 1402a0740 initializes blended-record byte +0x20 to false.
+                    .unwrap_or(0.),
             ),
             background_control: Vec4::ZERO,
             background: [Vec4::ZERO; 16],

@@ -25,6 +25,7 @@ struct Inputs {
     control: Vec4,
     sun: Vec4,
     direct: Vec4,
+    specular: Vec4,
     ambient: Vec4,
     hemi_axis: Vec4,
     hemi_delta: Vec4,
@@ -203,8 +204,9 @@ fn inputs(data: &Value) -> Inputs {
             let intensity = params[format!("{name}-Intensity")][0]
                 .as_f64()
                 .unwrap_or(1.) as f32;
-            // Same CPU colour convention as the authored sky and LightSet.
-            Vec4::new(c.x * c.x, c.y * c.y, c.z * c.z, c.w) * intensity
+            // SAT colour upload 1403dc4b0 converts RGB with gamma 2.2, then
+            // applies intensity to RGB only; alpha is independent.
+            (c.xyz().powf(2.2) * intensity).extend(c.w)
         }),
         floats: std::array::from_fn(|i| read(&format!("{prefix}float_{i}"))),
         vectors: [Vec4::ZERO; 18],
@@ -217,6 +219,7 @@ fn inputs(data: &Value) -> Inputs {
         ),
         sun: Vec4::Y,
         direct: Vec4::ZERO,
+        specular: Vec4::ZERO,
         ambient: Vec4::ZERO,
         hemi_axis: Vec4::ZERO,
         hemi_delta: Vec4::ZERO,
@@ -371,6 +374,9 @@ fn update_lighting(
         material.inputs.sun = set.sun_toward.extend(0.);
         material.inputs.control.w = crate::lighting::ENV_PER_UNIT;
         material.inputs.direct = direct.extend(0.);
+        // CloudFog/GroundFog Fwd read FC_DirLightSpc_0 independently of
+        // FC_DirLightCol_0. Diffuse W is not a substitute for SpecColor0 W.
+        material.inputs.specular = set.direct[2] / std::f32::consts::PI;
         material.inputs.ambient = ambient.extend(0.);
         material.inputs.hemi_axis = set.hemi_axis.extend(0.);
         material.inputs.hemi_delta = (set.hemi_delta * ambient_light.brightness).extend(0.);

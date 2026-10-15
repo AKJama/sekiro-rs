@@ -255,24 +255,56 @@ pub fn choose_material(material: &flver::Material, mtd: Option<&mtd::Mtd>) -> Ma
                     })
             };
             let ground = kind == 2;
-            choice.albedo = slot(8, "AlbedoMap");
-            choice.normal = slot(3, "NormalMap");
+            let mountain = kind == 3;
+            choice.albedo = slot(if mountain { 3 } else { 8 }, "AlbedoMap");
+            choice.normal = slot(if mountain { 0 } else { 3 }, "NormalMap");
             choice.layers = Some(Layers {
                 kind,
                 variant,
                 params: sekiro_formats::map_layers::game_params(m, kind),
-                base_normal: slot(3, "NormalMap"),
-                detail: slot(if ground { 12 } else { 0 }, "NormalMap"),
+                base_normal: slot(if mountain { 0 } else { 3 }, "NormalMap"),
+                detail: slot(
+                    if mountain {
+                        7
+                    } else if ground {
+                        12
+                    } else {
+                        0
+                    },
+                    "NormalMap",
+                ),
                 mask_l: if ground { None } else { slot(6, "Mask") },
                 wet: slot(if ground { 0 } else { 16 }, "NormalMap"),
                 overlay: slot(5, "AlbedoMap"),
                 overlay_normal: slot(4, "NormalMap"),
-                snow: slot(if ground { 11 } else { 12 }, "AlbedoMap"),
+                snow: slot(
+                    if mountain {
+                        2
+                    } else if ground {
+                        11
+                    } else {
+                        12
+                    },
+                    "Albedo",
+                ),
                 snow_normal: slot(if ground { 7 } else { 10 }, "NormalMap"),
                 c: slot(if ground { 1 } else { 7 }, "AlbedoMap"),
                 c_normal: if ground { slot(6, "NormalMap") } else { None },
-                mask: slot(9, "Mask"),
+                mask: slot(if mountain { 8 } else { 9 }, "Mask"),
             });
+            if mountain && let Some(layers) = &mut choice.layers {
+                for (i, r) in [
+                    (9, &layers.base_normal),
+                    (10, &layers.snow),
+                    (11, &choice.albedo),
+                    (12, &layers.detail),
+                    (13, &layers.mask),
+                ] {
+                    if let Some(r) = r {
+                        layers.params[i] = [r.scale[0], r.scale[1], r.uv as f32, 0.];
+                    }
+                }
+            }
         }
     }
     choice
@@ -354,8 +386,18 @@ pub fn build(
         }
         let mut attributes = json!({ "POSITION": g.vec3(&positions, true) });
         if choice.layers.is_some() {
+            let mountain = choice.layers.as_ref().is_some_and(|l| l.kind == 3);
             let weights: Vec<[f32; 4]> = (0..count)
                 .map(|i| {
+                    if mountain {
+                        // Mountain's native vertex shader forwards COLOR1.x, not blend bytes.
+                        return [
+                            v.colors.first().and_then(|c| c.get(i)).map_or(0., |c| c[0]),
+                            0.,
+                            0.,
+                            0.,
+                        ];
+                    }
                     let byte = |stream: usize, channel: usize| {
                         v.blends
                             .get(stream)

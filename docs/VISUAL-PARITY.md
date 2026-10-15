@@ -73,6 +73,9 @@ Likely cause: the night light bank selection, sun or moon intensity and colour, 
 
 Examples: `pairs/spot-002-shot-004.png`, `pairs/spot-003-shot-012.png`, `pairs/spot-025-shot-085.png`, `pairs/spot-092-shot-293.png`.
 
+The 2026-10-15 [exposure follow-up](EXPOSURE.md) corrects a proven mode-7 exponential-base error and measures six controlled retail/before/after views.
+Luminance moves closer in four views and farther away in two, while saturation and B/R worsen in all six; L1 and M1 remain open.
+
 ### F1 Fog, haze and sky
 
 Kind: fog, sky and fog surfaces.
@@ -122,6 +125,9 @@ Separate L1's exposure/lighting contribution before changing authored material c
 Examples: `pairs/spot-003-shot-012.png`, `pairs/spot-013-shot-044.png`, `pairs/spot-050-shot-174.png`, `pairs/spot-073-shot-251.png`.
 
 #### M1 data audit - 2026-10-15
+
+The subsequent [exposure correction](EXPOSURE.md) changes the shared tone curve from a mistranscribed natural exponential to the native base-two powers, without changing the authored snow or lighting inputs audited below.
+It does not resolve the requested browner snow colour, and its measured colour limitations remain explicit.
 
 Decision: retain the authored snow albedo, material tints, night lights and post settings.
 The data establishes a slightly blue snow texture and strongly blue incident light, but does not supply a replacement contrast, scene-radiance scale or global saturation value that would establish retail parity.
@@ -288,6 +294,28 @@ Visibility means submitted scene roots, not proof of in-frustum or unobscured mo
 The what-is-there owner should establish submission/coverage before handing any residual brightness mismatch to how-it-looks.
 
 Examples: `pairs/spot-011-shot-037.png`, `pairs/spot-009-shot-034.png`, `pairs/spot-091-shot-290.png`, `pairs/spot-022-shot-074.png`.
+
+#### D1 data diagnosis - 2026-10-15
+
+The subsequent [painted-backdrop follow-up](BACKDROP.md) identifies a separate missing m89 FarMountain companion, including night `m900130`, which carries the layered panorama.
+The terrain restored below is therefore only one component of D1.
+That follow-up also traces the blue arc to `m925009_9000` CloudFog and corrects its use of diffuse light in place of the independently authored specular light.
+
+The `m6*` prefix is not a reliable identification of the snowy horizon.
+The inspected `m600000` and `m601000` exports contain local stone, buildings and scenery stand-ins, while Outskirts `m925000_9000` supplies the broad horizon through the native `M[LandScape]_Mountain` family.
+Its authored MSB transform and kilometre-scale FLVER bounds are retained.
+The supplied spot-011 visibility dump already marks that mountain part ready, resident and visible.
+
+The base Ashina GPARAM files omit `EnableAnalyticalFog`.
+Executable constructor `0x1402a0740` initializes the blended fog record's byte `+0x20` to zero, and registration `0x14029c180` associates that field with `EnableAnalyticalFog`.
+The forward packet producer `0x14039f000` uses a large continuation threshold when that byte is false.
+Our former missing-field fallback enabled continuation and integrated kilometres of extra fixed-density fog over the horizon.
+The correction preserves the authored finite volume and any explicit continuation switch, including explicit true values in other GPARAM families.
+
+The Mountain Gbuf and Fwd shaders also use five texture slots, two albedos, three mask samples, normal-map blue for snow coverage and native `COLOR1.x` for baked occlusion.
+The former generic export retained the rock albedo and base normal but discarded the snow albedo, detail normal, mask and baked occlusion.
+The exporter and renderer now retain those inputs, with no replacement texture or scene-exposure change.
+Matched before/after controls expose snowy horizon terrain behind the village and keep; the reviewed gate measurements and remaining sky/lighting limitations are recorded in `MAP-COMPLETENESS-SWEEP.md`.
 
 ### M2 Foliage and tree snow
 

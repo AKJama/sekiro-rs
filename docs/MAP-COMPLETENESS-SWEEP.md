@@ -493,3 +493,155 @@ The CPU fallback and shared FXR tree/property/batch work add substantial frame c
 The live effect/particle/light pools and range sleeping bound this work; a native GPU particle implementation remains a performance and fidelity follow-up.
 These camera-specific results do not establish a global frame-time limit or a GPU speedup.
 Complete capture metadata, timing windows, sample counts/ranges and logs are under target/alt-fx/performance/ and comparison.json.
+
+## D1 mountain and finite-fog review, 2026-10-15
+
+The horizon was submitted but obscured by an incorrect missing-field default for analytical fog continuation.
+The native constructor and editor registration both default that switch to false; the base Ashina files omit it.
+The corrected renderer retains the authored finite fog volume, densities, colours and explicit switches.
+The Mountain material additionally retains its native snow/rock albedos, raw normal and detail normal, three mask projections and baked vertex occlusion.
+Targeted extraction refreshes Outskirts m902000/m902010/m925000 and Castle m911061 without rewriting either layout or ancillary sidecars.
+Both layout hashes remain identical, and all selected samplers resolve with zero missing textures.
+Exposure, tone mapping, sky geometry/order, camera planes, draw groups and LOD rules are unchanged.
+
+The no-fog control already exposes the mountains with the original camera and sky, ruling out clipping or sky occlusion for the inspected views.
+The fog-only control restores their contrast but retains the former green single-albedo appearance.
+The complete correction exposes snowy terrain behind the village and keep.
+The matched spot-009, spot-011, spot-022 and spot-091 cameras, selected collisions and complete sorted visibility records agree before/after.
+Spot-022 remains chiefly a foreground gate/fire view with limited far coverage; it is not an independent proof that every retail mountain pixel is matched.
+The sky, blue/bright snow and shared material-lighting differences remain separate fidelity limits, without a replacement exposure or tint.
+
+Both same-session baseline gates pass with the original fixtures.
+Every one of the twelve reviewed views retains its exact void, depth-gap and untextured counts, selected collision and sorted visible-part identities after the correction.
+Totals in that order remain `(0,493,0)` for Outskirts and `(1933,4885,0)` for Castle.
+The following are the first complete after measurements used for fixture review, compared with the same-session before executable and original cache.
+Grey and pop-in are colour classifications, so restoring finite-volume transmission can change their thresholds on distant geometry and the normal/all-visible comparison without changing a submitted part.
+
+| Area / view | Grey before -> after | Pop-in before -> after | Fixture decision and per-view review |
+| --- | ---: | ---: | --- |
+| Outskirts 0 | 276 -> 222 | 8651 -> 8560 | Retain both fixtures; both counts decrease with finite-volume colour. |
+| Outskirts 1 | 188 -> 189 | 294 -> 295 | Retain both fixtures; one-pixel colour crossings remain within tolerance. |
+| Outskirts 2 | 380 -> 379 | 2489 -> 2489 | Retain both fixtures; grey decreases by one and pop-in is identical. |
+| Outskirts 3 | 717 -> 752 | 5413 -> 5412 | Grey fixture 725 -> 752; inspected normal/all-visible pairs retain silhouettes and coverage while distant fog/background contrast changes colour classification. |
+| Outskirts 4 | 641 -> 641 | 6756 -> 6757 | Retain both fixtures; grey is identical and pop-in changes by one. |
+| Outskirts 5 | 149 -> 149 | 5241 -> 5240 | Retain both fixtures; grey is identical and pop-in decreases by one. |
+| Castle 0 | 203 -> 199 | 5088 -> 5099 | Retain both fixtures; grey decreases and the colour-comparison change remains within tolerance. |
+| Castle 1 | 288 -> 262 | 7488 -> 7518 | Retain both fixtures; grey decreases and pop-in remains within the original 1% allowance. |
+| Castle 2 | 588 -> 625 | 5879 -> 5840 | Grey fixture 588 -> 625; the formerly washed-out far landscape becomes readable behind the roofs, with identical geometry diagnostics. |
+| Castle 3 | 51 -> 246 | 3782 -> 4278 | Grey fixture 49 -> 246 and pop-in 3782 -> 4278; inspected under-keep pairs expose distant landscape/sky contrast in the normal/all-visible comparison, while the existing void/depth-gap mask stays identical. |
+| Castle 4 | 480 -> 480 | 2418 -> 2362 | Retain both fixtures; grey is identical and pop-in decreases. |
+| Castle 5 | 91 -> 103 | 6944 -> 6988 | Retain both fixtures; both colour-category changes remain within the original tolerance. |
+
+Only those four grey/pop-in fixture fields change.
+No camera, geometry fixture, tolerance or 120-second budget changes.
+Both final six-view gates pass in 68.552 seconds for Outskirts and 85.507 seconds for Castle.
+These runs use the frozen mountain executable and identical post settings; the separately owned tone-curve correction that appeared later in the shared tree is excluded from this before/after attribution.
+Both saved executable images contain the complete unchanged original tone shader; its hash and byte-presence checks are retained in `protected-tone-proof.json`.
+The data gate passes after the selected exports, and release all-target workspace Clippy with warnings denied and workspace formatting pass using `target/alt-mountains` and six Cargo jobs.
+The measured multi-minute full-roster boss-story audit is moved to the prescribed ignored slow tier, with its focused Genichiro/Owl story check retained in the normal suite.
+The initial new fog regression incorrectly assumed terminal fixed-density transmission always exceeded 50%; that unsupported assertion was removed, retaining the missing-switch and explicit-switch regressions.
+The final `cargo test --release --workspace` run passes 814 tests with 25 ignored and zero failures, including the installed-data gate, mountain export regression, missing-switch regression and the shared tree's separately corrected native tone regression.
+Final workspace release/all-target Clippy with `-D warnings` and `cargo fmt --all --check` both pass.
+
+The source changes for this job are `crates/game/src/fog.rs`, `crates/game/src/map_material.wgsl`, `crates/formats/src/map_layers.rs`, `crates/extract/src/main.rs`, `crates/extract/src/maps/mod.rs`, `crates/extract/src/maps/pieces.rs` and `crates/extract/src/maps/pieces_lod_tests.rs`.
+The slow-tier split is confined to tests in `crates/game/src/lighting_selection.rs`.
+The four reviewed fixture fields are in `crates/game/tests/data/m11_00_00_00.render.json` and `m11_01_00_00.render.json`.
+Documentation records are this page, `MAP-COMPLETENESS.md`, `VISUAL-PARITY.md`, `FIDELITY.md`, the mountain/fog additions in `SHADERS.md` and `SHADER-INPUTS.md`, and `STATUS.md`.
+Concurrent tone/exposure source, tests and documentation belong to their separate owner and are not mountain changes.
+
+Runtime reports, diagnostic controls, native-input research and executable hashes are retained under `target/alt-mountains/progress/`.
+The external `2026-10-15/mountains/` progress directory contains four `spot-*-real-before-after.png` panels, their individual images and camera/visibility manifests.
+
+## Exposure tone fixture review (2026-10-15)
+
+The sensitometric mode-7 curve now uses the native base-two exponentials rather than the earlier natural-exponential transcription.
+Only grey and pop-in fixture fields are re-baselined; camera poses, geometry fields, 128x72 resolution, 16-pixel-or-1% tolerances and the 120-second limit are retained.
+This review starts from the concurrent mountain job's completed fixtures rather than reverting its colour updates.
+The before/after controls retain identical void, depth-gap and untextured counts at all twelve views: totals are 0/493/0 for Outskirts and 1933/4885/0 for Castle.
+The complete six retail-camera visibility manifests also agree, and all 17,214 fingerprinted map/draw-param assets remain unchanged across the repeated captures.
+No geometry metric is relaxed or made worse.
+
+Grey requires neutral RGB spread at most 8 and all channels in 70..210.
+The corrected curve moves pixels into or out of that range, including previously brighter neutral surfaces, without creating or removing geometry.
+Pop-in measures an existing normal/all-visible difference above 12 display values; changing the nonlinear output curve changes how many existing differences cross that threshold.
+The per-view explanation reports the net criterion change, without assigning it to an unverified individual light or material.
+Original fixture values below include ordinary prior capture variance; the external before reports retain the fresh control counts independently.
+
+| Map / view | Grey fixture -> new | Pop-in fixture -> new | Per-view interpretation |
+| --- | ---: | ---: | --- |
+| Outskirts 0 | 274 -> 233 | 8711 -> 8360 | 41 fewer neutral-range pixels; 351 fewer above-threshold differences. |
+| Outskirts 1 | 183 -> 48 | 294 -> 219 | 135 fewer neutral-range pixels; 75 fewer above-threshold differences. |
+| Outskirts 2 | 383 -> 333 | 2484 -> 2581 | 50 fewer neutral-range pixels; 97 more differences exceed 12 after the curve's slope changes. |
+| Outskirts 3 | 752 -> 1418 | 5503 -> 4894 | 666 more pixels meet the neutral-range criterion after darkening; 609 fewer above-threshold differences. |
+| Outskirts 4 | 648 -> 505 | 6831 -> 5321 | 143 fewer neutral-range pixels; 1510 fewer above-threshold differences. |
+| Outskirts 5 | 147 -> 259 | 5245 -> 4804 | 112 more pixels meet the neutral-range criterion after darkening; 441 fewer above-threshold differences. |
+| Castle 0 | 196 -> 152 | 5083 -> 4932 | 44 fewer neutral-range pixels; 151 fewer above-threshold differences. |
+| Castle 1 | 288 -> 35 | 7488 -> 7359 | 253 fewer neutral-range pixels; 129 fewer above-threshold differences. |
+| Castle 2 | 625 -> 528 | 5879 -> 5746 | 97 fewer neutral-range pixels; 133 fewer above-threshold differences. |
+| Castle 3 | 246 -> 159 | 4278 -> 4172 | 87 fewer neutral-range pixels; 106 fewer above-threshold differences. |
+| Castle 4 | 482 -> 228 | 2400 -> 2167 | 254 fewer neutral-range pixels; 233 fewer above-threshold differences. |
+| Castle 5 | 92 -> 67 | 6958 -> 6779 | 25 fewer neutral-range pixels; 179 fewer above-threshold differences. |
+
+The fresh pre-baseline after runs take 78.825 seconds and 93.754 seconds, retaining every geometry count from the before controls.
+The Outskirts rejection contains only the expected colour-fixture differences; Castle's existing tolerances already admit the new counts.
+An earlier run during compilation also exceeded the unchanged time limit and is not used as the final gate result.
+The reviewed numbers, full before/after reports and verification JSON are under `target/alt-exposure/gates-before/`, `gates-after/` and the external `2026-10-15/exposure/` collection.
+See [EXPOSURE.md](EXPOSURE.md) for the native rule, RustSekiro inspection and six-view luminance/saturation/hue results, including the unresolved snow-colour gap.
+
+Both independent final repeats in `target/alt-exposure/gates-final/` pass: Outskirts 49.948 seconds and Castle 58.686 seconds.
+Their geometry triples exactly equal the fresh before controls at every view, and the saved pre-change fixture comparison confirms that only the two colour fields changed.
+Final grey/pop-in totals are 2796/26172 and 1169/31146 respectively, with ordinary capture variation inside the unchanged per-view tolerances.
+Release workspace tests, the installed-data gate, native post composition and GPU numeric regression, workspace all-target release Clippy with warnings denied, and formatting pass.
+
+## Painted backdrop and fog-card follow-up, 2026-10-15
+
+This follows the terrain-mountain and exposure work above, preserving both sets of changes.
+The missing painted range belongs to each m89 sky group's separate FarMountain companion, not the dome's cloud textures or the `m6*` naming family.
+The exporter and runtime now retain that companion, its native colour/haze shader, alpha threshold and depth-write control.
+The executable also establishes omitted fog sampling defaults of near offset 1, 32 slices and sample offset 0, plus SAT RGB conversion with exponent 2.2 and independent alpha.
+Fog-card highlights now use the independent native sun specular record rather than diffuse RGB/intensity.
+The full data trace, blue-arc isolation and remaining retail haze discrepancy are in [BACKDROP.md](BACKDROP.md).
+No density multiplier, panorama height adjustment, replacement tint or exposure/post change is part of this task.
+
+The frozen before executable is the exposure job's final control, retaining the preceding mountain fixes and native base-two tone curve.
+Both captures use unchanged canonical first-visit gate settings and the same extracted map geometry.
+Every selected collision and sorted visible-part manifest agrees across all twelve views.
+All twelve void/depth-gap/untextured triples agree exactly, and every diagnostic depth and collision image is pixel-identical.
+Geometry totals remain Outskirts `0/493/0` and Castle `1933/4885/0` in void/depth-gap/untextured order.
+
+The following are fresh before/final measurements, not substitutions for the preceding job's controls.
+Small count changes can include ordinary capture variance; the larger vista changes are reviewed as the combined horizon/fog/material correction, without claiming a separate numeric attribution to each input.
+Only Outskirts view 3 grey and Castle views 2 and 3 grey/pop-in fixture fields are updated.
+All geometry fields, cameras, tolerances and the 120-second gate limit remain unchanged.
+
+| Area/view | Grey before -> final | Pop-in before -> final | Review and fixture decision |
+| --- | ---: | ---: | --- |
+| Outskirts 0 | 238 -> 233 | 8360 -> 8360 | Temple/idol clearing retains coverage; small neutral classification variance, no fixture edit. |
+| Outskirts 1 | 48 -> 48 | 220 -> 220 | Dark hut retains the same surfaces and colour counts, no fixture edit. |
+| Outskirts 2 | 338 -> 332 | 2583 -> 2579 | Snow path and rock edge remain aligned; small colour changes stay within tolerance, no fixture edit. |
+| Outskirts 3 | 1416 -> 1434 | 4896 -> 4887 | Open cliff view retains silhouettes while fog/card/background colour shifts neutral classification; grey fixture 1418 -> 1434. |
+| Outskirts 4 | 505 -> 505 | 5321 -> 5324 | Door/wall view retains its illumination boundaries; three comparison pixels vary, no fixture edit. |
+| Outskirts 5 | 260 -> 258 | 4804 -> 4798 | Sheltered passage retains detail and depth; small colour changes stay within tolerance, no fixture edit. |
+| Castle 0 | 152 -> 151 | 4932 -> 4927 | Doorway and outside snow stay aligned; small threshold changes, no fixture edit. |
+| Castle 1 | 35 -> 36 | 7359 -> 7359 | Rock/roof passage retains its normal/all-visible difference; no fixture edit. |
+| Castle 2 | 528 -> 558 | 5746 -> 5628 | Panoramic outlook has the reviewed atmospheric/background colour change with identical diagnostic geometry; grey fixture 528 -> 558 and pop-in 5746 -> 5628. |
+| Castle 3 | 159 -> 155 | 4172 -> 4100 | Under-keep outlook retains the roof framing and void mask; altered far fog/background colour lowers the comparison count; fixtures 159 -> 155 and 4172 -> 4100. |
+| Castle 4 | 228 -> 230 | 2167 -> 2168 | Snow courtyard/tree view retains coverage; small colour variance, no fixture edit. |
+| Castle 5 | 67 -> 68 | 6778 -> 6779 | Gate passage retains framing and light boundary; no fixture edit. |
+
+The first frozen final runs measure 89.5 seconds for Outskirts and 99.6 seconds for Castle inside the gate.
+Outskirts passes before any fixture edit; Castle rejects only view-2 grey, 528 -> 558.
+The manually reviewed colour baselines above address that rejection without weakening a geometry check.
+Review contact sheets and all 24 diagnostic image equality results are retained under `target/alt-backdrop/`.
+The final image set uses spots 011/037, 022/074, 091/290, 009/034, 045/160 and 089/282.
+Two unsuitable extra matches, 048/167 and 093/296, are archived as rejected diagnostics rather than counted as backdrop evidence.
+
+Both independent final gate repeats pass after the reviewed colour fixture edits: Outskirts in 45.910 seconds and Castle in 59.719 seconds.
+Their geometry triples remain identical to every preceding control view.
+The independent repeat retains all diagnostic pixels except one Castle view-4 depth pixel changing by one channel code; its measured geometry categories remain identical.
+Release workspace tests pass 815 tests with 25 existing ignores, including the installed-data gate.
+The final touched-crate rerun passes 163 game/extractor tests with three existing ignores, including the sky-companion regression and the installed-data gate again.
+Workspace all-target release Clippy with warnings denied, formatting and `git diff --check` pass.
+The frozen before and final executables both embed the exact current tone and exposure shader source, confirming that their correction is retained and unchanged by this task.
+All Cargo work uses `CARGO_TARGET_DIR=target/alt-backdrop`.
+No staging, commit, worktree, remote publication or retail-game session was performed.

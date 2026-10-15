@@ -76,6 +76,9 @@ enum Command {
         /// Refresh complete placement metadata using existing geometry and material audit.
         #[arg(long, conflicts_with = "summary")]
         layout_only: bool,
+        /// Refresh only these placed models and their textures, preserving layout and ancillary data.
+        #[arg(long, num_args = 1.., conflicts_with_all = ["summary", "layout_only"])]
+        models: Vec<String>,
     },
     /// Decode FSB5 sound banks in cache/raw/sound to WAV in cache/sound/<bank>/ with an
     /// events.json per bank. Needs the Vorbis headers from tools/sound/vorbis_setups.py.
@@ -100,13 +103,14 @@ fn main() -> Result<()> {
             id,
             summary,
             layout_only,
+            models,
         } => {
             return if *summary {
                 maps::summary(&cli.cache, id)
             } else if *layout_only {
                 maps::refresh_layout(&cli.cache, id)
             } else {
-                maps::export(&cli.game, &cli.cache, id)
+                maps::export(&cli.game, &cli.cache, id, models)
             };
         }
         _ => {}

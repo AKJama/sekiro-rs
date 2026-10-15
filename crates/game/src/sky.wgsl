@@ -17,7 +17,7 @@ fn vertex(v: Vertex) -> VertexOutput {
     o.world_position=vec4(v.position,0.0);
     o.world_normal=normalize(v.position);
     o.position=view.clip_from_world*vec4(v.position+view.world_position,1.0);
-    o.position.z=0.0;
+    if sky.control.x<2.5 { o.position.z=0.0; }
     o.uv=v.uv;
     o.uv_b=v.uv_b;
     return o;
@@ -32,6 +32,17 @@ fn fragment(v: VertexOutput) -> @location(0) vec4<f32> {
     let height=max(ray.y,0.0);
     let sun=max(dot(ray,sky.sun.xyz),0.0);
     var color: vec3<f32>;
+    if sky.control.x>2.5 {
+        // Native FarMountain is a painted RGBA range with its own height-colour blend.
+        // Its night material deliberately fades the upper, more distant painted layers.
+        let mountain=textureSample(high,high_sampler,v.uv);
+        if mountain.a<sky.control.w { discard; }
+        let lobe=min(power(sun*(1.0+f(23u)),f(24u)),1.0);
+        let lit=mountain.rgb*c(0u)*mix(c(3u),c(2u),lobe);
+        let haze=1.0-min(power(v.uv.y,1.5),1.0);
+        let colour=mix(lit,mix(c(1u),c(4u),haze),mix(f(21u),f(22u),haze));
+        return vec4(max(colour,vec3(0.0))*sky.control.y*view.exposure,1.0);
+    }
     if sky.control.x>1.5 {
         // Native Cloud geometry and masks; normal perturbation is approximated by a mask slope.
         let drift=sky.control.z*0.0002;

@@ -1,5 +1,21 @@
 # Known fidelity approximations
 
+## Exposure and tone
+
+Mode 7 now uses the native base-two sensitometric exponentials; the earlier natural-exponential transcription is corrected.
+The weighted log meter, base-ten adaptation response, authored exposure and CPU natural-exponential soft limits retain the recovered rules.
+Tone tables are evaluated analytically, while exact table precision, reduction layout, reset timing, renderer delta units, bloom scheduling/feedback, colour matrix/vignette producers and HDR output remain incomplete.
+The scene-to-Bevy unit bridge remains inferred.
+Matched captures still show excess brightness and blue saturation, so this correction does not close L1 or M1 and supplies no replacement tint or multiplier.
+See [EXPOSURE.md](EXPOSURE.md) for the native evidence and measured limits.
+
+## Distant mountain materials
+
+The native Mountain family retains authored rock/snow textures, mask projections, normal strengths and baked vertex occlusion.
+It shares the map renderer's existing BRDF, roughness representation, shadow filtering and GI composition; native deferred G-buffer material encoding remains a separate limitation.
+The finite fog volume follows the native missing-field default for analytical continuation, while local fog sources and independent transparent-surface fog remain incomplete.
+Horizon visibility does not establish exact retail sky, colour or illumination parity.
+
 ## Authored map grass
 
 Ashina grass reads the six native surface-density channels, type rows, FLVERs and textures.
@@ -145,3 +161,12 @@ The two six-view gates retain every runtime-off geometry metric and visible-part
 The GPU emission scheduler/shape details, native bonfire idle selection, particle lighting, four-sample soft-depth limitation and unsupported model/wind/spot-light appearances remain explicit approximations in MAP-FX.md.
 Ongoing quest and arena-phase effect control beyond the first-visit snapshot remains open.
 The data-fed presentation closes the complete absence of map snow, fire/smoke and idol effects in exploration, but does not establish full E1/E2 retail pixel parity or repair emissive-material fidelity.
+
+## Painted horizon follow-up, 2026-10-15
+
+The sky runtime now submits the native m89 FarMountain companion, including night `m900130`, independently of the nearer placed terrain.
+Its recovered colour/haze shader, finite depth and alpha threshold are retained, alongside corrected fog sampling defaults and the fog cards' independent specular colour.
+These data-backed changes do not establish D1/F1 visual parity: the final night range remains too faint, distant terrain too clear and the spot-011 CloudFog arc conspicuous.
+The arc is traced to `m925009_9000`, not a moon or sky-dome texture; no authored card, density or scene exposure is removed or retuned to hide it.
+Native per-instance fog-card ambient/SH and atmosphere composition remain investigation candidates rather than established causes of the residual.
+See [BACKDROP.md](BACKDROP.md) for the recovered inputs, limitations and six reference comparisons.

@@ -25,8 +25,9 @@ fn tone(x: vec3<f32>) -> vec3<f32> {
         return pow(v * (6.2*v + 0.5) / (v*(6.2*v + 1.7) + 0.06), vec3(2.2 / settings.transfer.x));
     }
     if settings.transfer.z == 7.0 {
-        let a = 1.0 - exp(-1.442695 * x);
-        let b = 1.0 - exp(-4.456669 * x);
+        // DXBC `exp` is base two, unlike WGSL `exp` and the CPU soft EV limit.
+        let a = 1.0 - exp2(-1.442695 * x);
+        let b = 1.0 - exp2(-4.456669 * x);
         return pow(max(a + settings.curve.z * (b*b*b - a), vec3(0.0)), vec3(1.0 / settings.transfer.x));
     }
     if settings.transfer.z == 8.0 {
