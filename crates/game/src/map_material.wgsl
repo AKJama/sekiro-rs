@@ -14,7 +14,10 @@
 #ifdef ENVIRONMENT_MAP
 #import bevy_pbr::environment_map::environment_map_light
 #endif
-#import bevy_pbr::clustered_forward::{view_fragment_cluster_index, unpack_clusterable_object_index_ranges}
+#import bevy_pbr::clustered_forward::{view_fragment_cluster_index, unpack_clusterable_object_index_ranges, get_clusterable_object_id}
+#import bevy_pbr::mesh_view_bindings::clustered_lights
+#import bevy_pbr::mesh_view_types::{POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT, POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE}
+#import bevy_pbr::shadows::{fetch_point_shadow, fetch_spot_shadow}
 #import bevy_pbr::lighting::{derive_lighting_input, Fd_Burley, directional_light}
 #import bevy_pbr::lighting as native_lighting
 #import bevy_pbr::shadows::fetch_directional_shadow
@@ -153,8 +156,7 @@ fn hemisphere_response(pbr: PbrInput) -> vec3<f32> {
 }
 
 #ifdef NATIVE_DIRECT
-// Native four-slot colour routing with the recovered directional accumulation.
-fn native_direct(pbr: PbrInput, layers: Layers) -> vec3<f32> {
+fn base_lighting_input(pbr: PbrInput) -> LightingInput {
     var li: LightingInput;
     let nv = max(dot(pbr.N,pbr.V),0.0001);
     li.layers[LAYER_BASE].N = pbr.N;
@@ -169,6 +171,91 @@ fn native_direct(pbr: PbrInput, layers: Layers) -> vec3<f32> {
     li.F0_dielectric = calculate_F0_dielectric(pbr.material.reflectance);
     li.F0_metallic = pbr.material.base_color.rgb;
     li.F_ab = F_AB(pbr.material.perceptual_roughness,nv);
+    return li;
+}
+
+// Native deferred point/spot light (GXLightAcc_DPointLight1 / DSpotLight1 pixel shaders).
+// With b = DiffColor.w = 1/range (builder 3892e0 offset 0x4c) and x = d^2/R^2 = (d*b)^2:
+//   diffuse = Diff * saturate(1-x) * max(t^2+(1-t^2)*N.L,0) / (1+0.7x), t = 1.4/(1.4+d*b)
+//   specular = Spec * F0 * 2.5/(1+x) * D * N.L / (max(N.V,N.L)*(1-a/2)+a/2) * saturate(1-x)
+// Spot lights also multiply by max(1-(tan/tan_outer)^2,0). Bevy's premultiplied colour is
+// Diff * SCENE_TO_BEVY, so the result matches the directional path in native_direct.
+// Not traced: TransLightParam (cb1[3], backlight) and the G-buffer translucency term, both 0 here.
+fn native_clustered_light(light_id: u32, pbr: PbrInput, li: LightingInput, spot: bool) -> vec3<f32> {
+    let light = &clustered_lights.data[light_id];
+    let to_light = (*light).position_radius.xyz - pbr.world_position.xyz;
+    let d2 = dot(to_light,to_light);
+    let x = d2*(*light).color_inverse_square_range.w;
+    var fall = saturate(1.0-x);
+    if fall<=0.0 { return vec3(0.0); }
+    let l = to_light*inverseSqrt(max(d2,1e-8));
+    if spot {
+        var axis = vec3<f32>((*light).light_custom_data.x,0.0,(*light).light_custom_data.y);
+        axis.y = sqrt(max(0.0,1.0-axis.x*axis.x-axis.z*axis.z));
+        if ((*light).flags & POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE)!=0u { axis.y = -axis.y; }
+        let cd = dot(-axis,l);
+        if cd<=0.0 { return vec3(0.0); }
+        let ratio = sqrt(max(1.0-cd*cd,0.0))/cd/max((*light).spot_light_tan_angle,1e-4);
+        fall *= max(1.0-ratio*ratio,0.0);
+        if fall<=0.0 { return vec3(0.0); }
+    }
+    let n = pbr.N;
+    let nl_raw = dot(n,l);
+    let t = 1.4/(1.4+sqrt(x));
+    let t2 = t*t;
+    let wrap = max(t2+(1.0-t2)*nl_raw,0.0);
+    let diffuse = li.diffuse_color*(wrap*fall/(1.0+0.7*x)/3.14159265);
+    let nv = max(dot(n,pbr.V),0.0001);
+    let nl = saturate(nl_raw);
+    let h = normalize(l+pbr.V);
+    let nh = saturate(dot(n,h));
+    let gloss = clamp(1.0-pbr.material.perceptual_roughness,0.0,1.0);
+    let w = 10.0*(1.0+x);
+    let e = exp2(13.0*gloss);
+    let p = max(w*e/(w+e),1.0);
+    let a = pow(1.0-0.95*sqrt(min(log2(p)/13.0,1.0)),2.0);
+    let aa = a*a;
+    let den = 1.0+nh*nh*(aa-1.0);
+    let d = aa/(3.14159265*den*den);
+    let vis = 1.0/(max(max(nv,nl),0.0001)*(1.0-a*0.5)+a*0.5);
+    let f0 = calculate_F0(pbr.material.base_color.rgb,pbr.material.metallic,pbr.material.reflectance);
+    let specular = f0*(2.5/(1.0+x)*d*nl*vis*fall);
+    return (diffuse+specular)*(*light).color_inverse_square_range.rgb;
+}
+
+fn point_light_shadow(light_id: u32, pbr: PbrInput, spot: bool) -> f32 {
+    let flags = clustered_lights.data[light_id].flags;
+    if (pbr.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT)==0u || (flags & POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT)==0u { return 1.0; }
+    if spot {
+        return fetch_spot_shadow(light_id,pbr.world_position,pbr.world_normal,clustered_lights.data[light_id].shadow_map_near_z,pbr.frag_coord.xy);
+    }
+    return fetch_point_shadow(light_id,pbr.world_position,pbr.world_normal,pbr.frag_coord.xy);
+}
+
+// Replaces Bevy's inverse-square point/spot response with the native one: Bevy's own
+// contribution (same inputs as apply_pbr_lighting's loops) is subtracted, the native one added.
+fn native_point_lights(pbr: PbrInput, scale: f32) -> vec3<f32> {
+    var li = base_lighting_input(pbr);
+    let view_z = (view.view_from_world*pbr.world_position).z;
+    var ranges = unpack_clusterable_object_index_ranges(view_fragment_cluster_index(pbr.frag_coord.xy,view_z,pbr.is_orthographic));
+    var correction = vec3(0.0);
+    for (var i=ranges.first_point_light_index_offset; i<ranges.first_reflection_probe_index_offset; i+=1u) {
+        let spot = i>=ranges.first_spot_light_index_offset;
+        let light_id = get_clusterable_object_id(i);
+        var bevy = vec3(0.0);
+        if spot { bevy = native_lighting::spot_light(light_id,&li,true); }
+        else { bevy = native_lighting::point_light(light_id,&li,true,true); }
+        correction += (native_clustered_light(light_id,pbr,li,spot)*scale-bevy)*point_light_shadow(light_id,pbr,spot);
+    }
+    return correction*view.exposure;
+}
+#endif
+
+#ifdef NATIVE_DIRECT
+// Native four-slot colour routing with the recovered directional accumulation.
+fn native_direct(pbr: PbrInput, layers: Layers) -> vec3<f32> {
+    var li = base_lighting_input(pbr);
+    let nv = max(dot(pbr.N,pbr.V),0.0001);
     var correction = vec3(0.0);
     var sun_shadow = 1.0;
     let view_z = (view.view_from_world*pbr.world_position).z;
@@ -672,6 +759,9 @@ vertex: VertexOutput,
 #ifdef NATIVE_DIRECT
     if !unlit && layers.direct[12].x>0.0 {
         out.color = vec4(out.color.rgb+native_direct(pbr,layers),out.color.a);
+        if layers.direct[12].y>0.0 {
+            out.color = vec4(out.color.rgb+native_point_lights(pbr,layers.direct[12].z),out.color.a);
+        }
     }
 #endif
     if layers.hemi_axis.w > 0.0 && !unlit {

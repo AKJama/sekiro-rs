@@ -212,8 +212,7 @@ diffuse = Diff.rgb * fall * wrap / (1 + 0.7 * (d * b)^2)
 There is no inverse-square term and the light is finite at its centre.
 Bevy's stock point light is `I / d^2` with a range window, which is brighter than the native curve inside about 1 m and dimmer outside it (at 2 m with R 5 native is 0.84, Bevy 0.25).
 So our lights are, if anything, under-lit at wall distance and over-lit only when a surface is within a metre of the flame.
-The native `b` (DiffColor.w) and the CPU light path for FXR 609 are not traced (the recovered `3892e0` builds map spot lights only), so no change was made.
-Reproducing the curve needs a custom term in `map_material.wgsl`, which is outside this job.
+`b` is now traced (b = 1/R) and the curve is implemented; see "Native point-light falloff and flame colour" below.
 
 ### Remaining differences at spot-022
 
@@ -227,3 +226,64 @@ Bloom was not edited; with the wash removed the bloom around the remaining flame
 The two changes add one branch and three multiplies per sprite fragment, and the prepass read replaces a load of an unwritten texture, so the depth-load count is unchanged.
 No frame-time measurement was taken.
 The gate times stayed within 56 to 61 seconds for Outskirts.
+
+## Native point-light falloff and flame colour, 2026-10-15
+
+### Native point and spot light curve (implemented)
+
+`GXLightAcc_DPointLight1.ppo` and `GXLightAcc_DSpotLight1.ppo` were disassembled with d3dcompiler and re-read in full.
+For a view-space light at squared distance `d2`, with `x = d2 * cb1[0].w`, the point shader gives:
+
+```text
+fall = saturate(1 - x)                           (cb1[0].w = 1/R^2)
+t = 1.4 / (1.4 + d * b)                          (b = DiffColor.w)
+wrap = max(t^2 + (1 - t^2) * N.L, 0)             (N.L unclamped)
+diffuse = Diff.rgb * fall * wrap / (1 + 0.7 * (d*b)^2)
+spec = Spec.rgb * GBuffer3.rgb^2 * fall * 2.5/(1 + (d*b)^2) * D * sat(N.L) / (max(N.V, N.L)*(1 - a/2) + a/2)
+```
+
+`D` is the GGX term `aa / (pi * (1 + nh^2 * (aa - 1))^2)`.
+The roughness `a = (1 - 0.95 * sqrt(min(log2(P) / 13, 1)))^2`, with `P = 10(1+(d*b)^2) * 2^(13*gloss) / (10(1+(d*b)^2) + 2^(13*gloss))` and `gloss` the G-buffer 1 x channel.
+The spot shader is identical and multiplies both terms by `max(1 - |uv|^2, 0)`, where `uv` is the projective spot-space xy divided by w (one at the cone edge), and skips fragments behind the light.
+The diffuse buffer has no albedo and no 1/pi, so the compositor applies `albedo / pi * Diff` exactly as the directional path does.
+
+Where `b` comes from: the recovered builder `3892e0` (reached from `210e00` with the effect's property block) stores the diffuse vec4 at object offset 0x40 as `(c^2 * a * power, ..., 1/range)`.
+`fVar47 / fVar45` at offset 0x4c is `DAT_14328919c / range` and that constant is 1.0, so `b = 1/R` and `d*b = d/R`.
+The spot shader's cbuffer matches (`PositionAndRange.w = R`, DiffColor.w = b), which confirms it.
+So `x = d2 * (1/R^2)` is what Bevy already stores as `color_inverse_square_range.w`, and no extra per-light value is needed.
+The same builder squares the diffuse and specular RGB, so FXR 609 colour is now squared too (`fxr.rs`); the previous note that 609 colour is not squared was wrong.
+The builder's remaining inputs (object offsets 0x258, 0xf8, 0xfc and the `param_5` flag, which look like a time-of-day or story intensity modulation, and the random/flicker term at 0x108) are not traced and are left out.
+`TransLightParam` (the backlight term) and the G-buffer translucency channel are treated as zero.
+
+Implementation: `map_material.wgsl` `native_point_lights` loops the clustered point and spot lights of the fragment, subtracts Bevy's own `point_light`/`spot_light` result (same inputs as `apply_pbr_lighting`, same shadow) and adds the native one.
+It runs for the native direct path only (`direct[12].x`, the existing `SEKIRO_GI_NATIVE_LIGHTS` switch) and is controlled by `direct[12].y`, set in `map_material.rs`.
+`SEKIRO_MAP_POINT_LIGHTS_BEVY=1` restores Bevy's inverse-square response for A/B captures.
+Light range, position and colour still come from the BTL and FXR code unchanged.
+
+Open: the unit.
+The inferred 4500 lux per unit bridge was fitted under Bevy's curve, which equals the native curve at 1 m but is 3.4 times dimmer at 2 m and 5 times dimmer at 3 m (R 5).
+At those units the native curve over-lit walls several times against the references (spot-056 wall washed to white).
+`NATIVE_POINT_LIGHT_SCALE = 0.25` in `map_material.rs` (override `SEKIRO_MAP_POINT_LIGHT_SCALE`) is an untraced calibration chosen by eye against the spot-056 reference.
+It scales the native term only.
+The real value probably lives in the untraced 0x258 / 0xf8 / 0xfc modulation above, so tracing those would replace the constant.
+
+### Brazier flames: white-hot and small (fixed, size open)
+
+Cause of white-hot: FXR sprite textures were decoded as sRGB.
+The installed particle DDS files are plain UNORM (BC1 for 3000, 11622, BC7 UNORM for 11627, 11633, 31411), and the effect pixel shader squares the texture colour itself, so decoding as sRGB applied the gamma twice.
+Mid-tone flame body was crushed to near black while the peak texels stayed at one, so only the hot core (rgbMultiplier 5 to 15) survived and clipped to white, which also made the flame look small.
+`fxr.rs` now loads sprite textures as UNORM.
+Brazier flames at spot-056 are now orange with the soft body back; the colour curve, `hue_squared` and the blend state were checked against the disassembly and are correct.
+Remaining difference: the flame is still shorter and lower than the real tongue above the coals, and there are no rising sparks.
+This was not resolved here; the sprite widths (0.375 to 1.25 m) agree with the data, so the missing height needs the node motion and emitter data checked next.
+
+### Spot-022 fire gating
+
+The fire next to the camera is not gated.
+Object `o116060_2000` carries FXR 800140 (a complete fire: flame 31421 and 31211, smoke 11633 and 21091, a 609 light) and is enabled by default; it spawns in the first-visit state and is rendered as the ground glow and small flames at a roped-off pile 6 m from the camera.
+The effects previously called "burning story state" are different placements: the `燃焼` (burning) SFX entities 1104630 to 1104666 (810101, 810115, 811300 smoke) are created and deleted by event 11105109 on flag 8302: with 8302 off the event deletes them, with 8302 on it spawns them.
+The group-off effects on `o115840` (811320, 800150) are toggled by event 20004112 for group 1106610.
+So the gating we read is a real flag test.
+If the user's reference was taken with 8302 set, the reference shows those effects and our first-visit state correctly omits them.
+Whether 8302 should be on for the afternoon story state is a decision in `map_story.rs`, which the story-state agent owns; no edit was made there.
+The flame sprites of 800140 render far smaller than the real fire, the same unresolved size difference as the brazier.

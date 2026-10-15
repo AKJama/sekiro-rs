@@ -914,7 +914,13 @@ fn collect_node(n: &NodeInst, c: &Value, f: &mut Frame) {
                 if radius > 0. && intensity > 0. {
                     f.lights.push((
                         world,
-                        Color::linear_rgb(color[0], color[1], color[2]),
+                        // 3892e0 (reached from 210e00 with the 609 property block) squares the
+                        // diffuse RGB before the colour alpha and multiplier scale it.
+                        Color::linear_rgb(
+                            color[0] * color[0],
+                            color[1] * color[1],
+                            color[2] * color[2],
+                        ),
                         intensity * fade,
                         radius,
                     ));
@@ -1364,7 +1370,10 @@ fn texture_handle(
     if let Some(h) = player.textures.get(&id) {
         return h.clone();
     }
-    let handle = match load_texture(&player.lib, id, true) {
+    // The effect shaders sample the DDS as plain UNORM (BC1 and BC7 UNORM, never *_SRGB) and
+    // square the texture colour themselves, so decoding it as sRGB first applied the gamma twice
+    // and starved the soft body of every flame sprite, leaving only the over-bright core.
+    let handle = match load_texture(&player.lib, id, false) {
         Some(image) => images.add(image),
         None => {
             warn!("FXR texture {id} is not installed or cannot be decoded");

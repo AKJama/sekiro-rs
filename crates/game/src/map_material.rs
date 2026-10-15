@@ -262,10 +262,38 @@ struct MapLayersUniform {
     game: MapGame,
 }
 
+/// Native deferred point/spot falloff for clustered map lights (`direct[12].y`).
+/// `SEKIRO_MAP_POINT_LIGHTS_BEVY=1` restores Bevy's inverse-square response for A/B captures.
+fn native_point_lights() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("SEKIRO_MAP_POINT_LIGHTS_BEVY").is_none_or(|v| v != "1"))
+}
+
+/// Untraced unit calibration for the native point/spot curve (`direct[12].z`).
+/// The 4500 lux-per-unit bridge was inferred under Bevy's inverse-square curve, which
+/// matches the native curve at 1 m but is 3 to 5 times dimmer at 2 to 3 m, so the native
+/// curve at the same units over-lights walls several times relative to the references.
+/// `SEKIRO_MAP_POINT_LIGHT_SCALE` overrides it for ablations.
+const NATIVE_POINT_LIGHT_SCALE: f32 = 0.25;
+
+fn native_point_light_scale() -> f32 {
+    static SCALE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *SCALE.get_or_init(|| {
+        std::env::var("SEKIRO_MAP_POINT_LIGHT_SCALE")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.)
+            .unwrap_or(NATIVE_POINT_LIGHT_SCALE)
+    })
+}
+
 impl From<&MapLayers> for MapLayersUniform {
     fn from(layers: &MapLayers) -> Self {
+        let mut direct = layers.direct;
+        direct[12].y = f32::from(native_point_lights() && direct[12].x > 0.);
+        direct[12].z = native_point_light_scale();
         Self {
-            direct: layers.direct,
+            direct,
             enabled: layers.enabled,
             albedo_enabled: layers.albedo_enabled,
             albedo_uv: layers.albedo_uv,
