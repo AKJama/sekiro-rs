@@ -10,9 +10,9 @@ Work starts from an issue, and every change goes through its own branch and pull
 
 0. Start from a filed issue.
 1. Write the PR.
-2. Run the `code-review` skill.
-3. Run the `simplify` skill.
-4. Run the checks.
+2. Run the `code-review` skill at medium effort and collect its findings.
+3. Run the `simplify` review and collect its findings, then apply both sets in one fix pass.
+4. Run the full checks, once.
 5. The user plays the game and confirms (for PRs that change game code).
 6. Merge.
 
@@ -40,6 +40,8 @@ If a job turns up a second problem, file it as a new issue instead of widening t
 - High-priority issues go to the most capable model available (Opus 5.5 or newer).
 - Only one agent runs the game at a time, and at most two game windows are open in total (the user may have one).
 - Agents share one Cargo build folder (`CARGO_TARGET_DIR`) instead of one each; every full build is several GB.
+- Builds and tests are most of a PR's time, so while working or fixing, agents build and test only the crates they touched (for example `cargo test --release -p sekiro-formats`).
+The full workspace suite, render gates and live test run once, at step 4, on the final state.
 - Agents do not commit; the main session reviews and commits their work.
 - A command an agent is denied permission for is reported back, never worked around.
 
@@ -76,12 +78,14 @@ When the PR merges, move that row to Done with the PR link.
 
 ## 2. Code review
 
-Run the `code-review` skill on the PR's diff (for example `/code-review medium`) to find correctness bugs.
-Fix the findings that hold up and push them to the same branch.
+Run the `code-review` skill on the PR's diff at medium effort (`/code-review medium`), never higher, to find correctness bugs.
+Collect the findings that hold up; do not fix them yet.
 
-## 3. Simplify
+## 3. Simplify, then one fix pass
 
-Run the `simplify` skill on the diff for reuse, simplification and efficiency cleanups, and push the result.
+Run the `simplify` review on the same diff for reuse, simplification, efficiency and altitude cleanups, and collect its findings too.
+Then apply the code-review and simplify findings together in one pass (one agent, or the main session), checking only the touched crates as it goes, and push the result.
+Keep simplify to cleanups of the diff: a deeper refactor it suggests becomes its own issue instead of growing the PR.
 
 `code-review` and `simplify` are built into Claude Code.
 Other agents (Codex and others) do the same two passes by hand: a correctness review of every hunk, its enclosing function and its callers, then a cleanup pass for reuse, redundant state and wasted work.
@@ -89,7 +93,8 @@ If neither is possible, say so in the PR body rather than skipping it silently.
 
 ## 4. Checks
 
-Run these last, on the final state of the branch, from the repo root.
+Run these once, last, on the final state of the branch, from the repo root.
+Agents that worked on the branch do not run them as well.
 They need the installed game and `cache/`, so they run locally, not in GitHub Actions.
 
 ```bash
