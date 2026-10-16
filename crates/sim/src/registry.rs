@@ -1,7 +1,8 @@
 //! Placed enemies and their resource donors, read from extractor output.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
@@ -43,7 +44,24 @@ fn rows(cache: &Path, table: &str) -> Result<BTreeMap<i32, Value>, String> {
 }
 
 impl Registry {
-    pub fn load(cache: &Path) -> Result<Self, String> {
+    /// The registry of the extracted data at `cache`, read once per process and shared after
+    /// that: reading it parses every map's `layout.json` (several hundred MB of JSON, about 3 s),
+    /// and duels, arenas and encounters each ask for it. A failed read is not kept, so a later
+    /// call tries again.
+    pub fn load(cache: &Path) -> Result<Arc<Self>, String> {
+        static LOADED: Mutex<BTreeMap<PathBuf, Arc<Registry>>> = Mutex::new(BTreeMap::new());
+        let key = std::fs::canonicalize(cache).unwrap_or_else(|_| cache.to_path_buf());
+        // Held while reading, so callers racing on a cold cache wait for one read.
+        let mut loaded = LOADED.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(registry) = loaded.get(&key) {
+            return Ok(registry.clone());
+        }
+        let registry = Arc::new(Self::read(cache)?);
+        loaded.insert(key, registry.clone());
+        Ok(registry)
+    }
+
+    fn read(cache: &Path) -> Result<Self, String> {
         let mut placed: BTreeMap<String, Vec<Placement>> = BTreeMap::new();
         let dirs = std::fs::read_dir(cache.join("maps")).map_err(|e| e.to_string())?;
         for dir in dirs {
