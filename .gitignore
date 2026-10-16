@@ -15,6 +15,10 @@
 !/rustfmt.toml
 !/config/
 !/config/*.toml
+!/.claude/
+!/.claude/skills/
+!/.claude/skills/**/
+!/.claude/skills/**/SKILL.md
 !/docs/
 !/docs/**/
 !/docs/**/*.md
