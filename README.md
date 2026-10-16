@@ -25,7 +25,7 @@ To build anything you need your own copy of Sekiro (Steam, v1.6.0.0), from which
 - [Setup, controls, architecture and AI workflow](docs/GETTING-STARTED.md)
 - [Boss AI and coach](docs/BRAIN.md), [combat](docs/COMBAT-RULES.md) and [movement](docs/MOBILITY.md)
 - [Maps](docs/MAP-COMPLETENESS.md), [lighting](docs/LIGHTING.md) and [shaders](docs/SHADERS.md)
-- [Formats](docs/FORMATS.md), [progress](docs/PROGRESS.md), [status](STATUS.md) and [contributing](AGENTS.md)
+- [Formats](docs/FORMATS.md), [progress](docs/PROGRESS.md), [status](STATUS.md) and [contributing](CONTRIBUTING.md)
 
 ## Working together
 

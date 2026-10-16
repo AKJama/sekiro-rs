@@ -28,6 +28,14 @@ When a lower PR changes or merges, rebase the stacked branches onto it and force
 - Agents do not commit, push or open PRs; the main session does after reviewing their work.
 - No git worktrees.
 
+## Outside contributors
+
+- Contributors commit under their own name; the AKJama identity rule is for the maintainer.
+- Skip the collab-board steps and coordinate on the assigned issue instead.
+- Run step 4 and play the game yourself; step 5 becomes the maintainer's review and playtest.
+- Only the maintainer merges (step 6).
+- See [CONTRIBUTING.md](../../../CONTRIBUTING.md) for the contribution rules.
+
 ## 0. Start from an issue
 
 Every PR works on an existing issue; file or pick one with the [`issues`](../issues/SKILL.md) skill first.

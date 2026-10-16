@@ -1,0 +1,48 @@
+name: Issue link
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+    branches: [main]
+
+permissions: { issues: read, pull-requests: read, contents: read }
+
+jobs:
+  issue-link:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check linked issues
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          fail() {
+            echo "Error: $* See CONTRIBUTING.md."
+            exit 1
+          }
+
+          references=$(printf '%s\n' "$PR_BODY" | grep -Eio '\b(Fixes|Closes|Resolves)[[:blank:]]+#[0-9]+\b' || true)
+          [[ -n "$references" ]] || fail "Include a closing issue reference such as Fixes #123 in the PR body."
+          numbers=$(printf '%s\n' "$references" | grep -Eo '[0-9]+' | sort -u)
+
+          eligible=false
+          while IFS= read -r number; do
+            issue=$(gh api "repos/$REPO/issues/$number") || fail "Could not read issue #$number."
+            jq -e 'has("pull_request") | not' <<< "$issue" > /dev/null || fail "#$number is a PR, not an issue."
+            jq -e '.state == "open"' <<< "$issue" > /dev/null || fail "Issue #$number must be open."
+            if jq -e --arg author "$PR_AUTHOR" '
+              any(.labels[]; .name == "help wanted") and
+              any(.assignees[]; .login == $author)
+            ' <<< "$issue" > /dev/null; then
+              eligible=true
+            fi
+          done <<< "$numbers"
+
+          if [[ "$PR_AUTHOR" != "AKJama" && "$eligible" != true ]]; then
+            fail "At least one linked issue must have the help wanted label and be assigned to the PR author ($PR_AUTHOR)."
+          fi
+          echo "Linked issues meet the contribution rules."
