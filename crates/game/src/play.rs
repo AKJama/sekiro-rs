@@ -392,6 +392,7 @@ pub fn run(options: Options) -> Result<()> {
         }
     }
     let mut on_map = None;
+    let mut stories = map::story::MapStory::default();
     let mut start_yaw = 0.0;
     let mut within = None;
     let mut fog_walls = Vec::new();
@@ -444,7 +445,12 @@ pub fn run(options: Options) -> Result<()> {
         map::raise_io_stack();
     } else if let Some(id) = &options.map {
         let dir = map::map_dir(&cache, id)?;
-        let world = Arc::new(map::world::collision_world(&cache, id)?);
+        let blocks = map::world::play_blocks(&cache, id)?;
+        // A connected world's stories, loaded once for its objects' collision and the map.
+        if map::world::connects(id) {
+            stories = map::story::load_blocks(&cache, &blocks)?;
+        }
+        let world = Arc::new(map::world::collision_world(&cache, &blocks, &stories)?);
         stage("collision world");
         let (start, yaw_degrees) = match options.spawn {
             Some([x, y, z, yaw]) => {
@@ -778,6 +784,7 @@ pub fn run(options: Options) -> Result<()> {
                 within,
                 focus: Some(start_position),
             },
+            stories,
         )?;
         app.insert_resource(MapCollision(world));
         if options.arena.is_some() && options.enemy_present {

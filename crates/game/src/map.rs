@@ -597,8 +597,15 @@ pub fn player_start(dir: &Path, index: usize) -> Result<(Vec3, f32)> {
 /// Adds a map to an app built with `DefaultPlugins`: its pieces, draw-group culling around the
 /// [`MapFocus`] entity, a sun, ambient light, sky colour, fog and far plane on every 3D camera,
 /// and the collision view. The viewer's keys (C collision, G group modes, M markers) are
-/// [`run`]'s own: in play C crouches.
-pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
+/// [`run`]'s own: in play C crouches. A connected world uses the block `stories` already loaded
+/// (the play world's collision, [`world::collision_world`]) and loads the rest; a map shown
+/// alone uses none.
+pub fn add_map(
+    app: &mut App,
+    dir: &Path,
+    scene: MapScene,
+    mut stories: story::MapStory,
+) -> Result<()> {
     let stage = |name: &str| info!("map setup: {name} at {:.1} s", crate::since_start());
     let json: Value = serde_json::from_slice(
         &std::fs::read(dir.join("layout.json")).context("reading layout.json")?,
@@ -650,24 +657,30 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
         .parent()
         .and_then(Path::parent)
         .context("map folder has no cache above it")?;
-    let connected = world::enabled(&id)
+    let connected = world::connects(&id)
         && scene.within.is_none()
         && !app.world().contains_resource::<world::ArenaMap>()
-        && !std::env::args().any(|a| a == "--arena" || a == "--no-connected-blocks");
+        && !std::env::args().any(|a| a == "--arena");
     if connected {
         let world = world::MapWorld::load(cache, &id, &scene.prefix)?;
-        let mut story_maps = story::MapStory::default();
+        stories
+            .maps
+            .retain(|block, _| world.blocks.contains_key(block));
         for (block, layout) in &world.blocks {
-            if let Some(state) = story::load(cache, block, &layout.json)? {
+            if !stories.maps.contains_key(block)
+                && let Some(state) = story::load(cache, block, &layout.json)?
+            {
+                stories.maps.insert(block.clone(), state);
+            }
+            if let Some(state) = stories.maps.get(block) {
                 info!(
                     "{block}: offline story, {} parts, {} unsupported predicates",
                     state.parts.len(),
                     state.state.unsupported.len()
                 );
-                story_maps.maps.insert(block.clone(), state);
             }
         }
-        app.insert_resource(story_maps);
+        app.insert_resource(stories);
         stage("connected world and story");
         app.add_plugins(visibility::MapVisibilityPlugin)
             .insert_resource(world)
@@ -1001,6 +1014,7 @@ pub fn run(options: Options) -> Result<()> {
             within: None,
             focus: Some(start),
         },
+        Default::default(),
     )?;
     if options.camera.is_none()
         && let Ok((pos, _)) = player_start(&dir, options.start)

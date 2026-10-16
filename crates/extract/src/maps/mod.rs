@@ -6,7 +6,9 @@
 //!   (next to the GLBs so viewers that forbid `..` in asset paths load them),
 //! - `layout.json`: map piece instances, objects, enemies, player starts, in Bevy space,
 //! - `collision.bin`: the hit collision (`h*` binder) as one triangle mesh in Bevy space
-//!   (`sekiro_formats::hknp::CollisionMesh` in postcard).
+//!   (`sekiro_formats::hknp::CollisionMesh` in postcard),
+//! - `object_collision.bin`: the static collision placed objects carry in their objbnds
+//!   (`sekiro_formats::hknp::ObjectCollision` in postcard, `docs/OBJECT-COLLISION.md`).
 //!
 //! Every position and transform is mirrored across X like the model export (docs/FORMATS.md).
 
@@ -17,6 +19,7 @@ mod grass;
 mod layout;
 mod lights;
 mod material_audit;
+mod object_collision;
 mod pieces;
 mod sky;
 mod textures;
@@ -38,6 +41,20 @@ use textures::MapTextures;
 fn mirror(m: Mat4) -> Mat4 {
     let s = Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0));
     s * m * s
+}
+
+/// Appends `mesh`, in FromSoftware space, to `out` placed at `part` in Bevy space: mirrored
+/// first, then the mirrored part matrix.
+fn extend_placed(out: &mut hknp::CollisionMesh, mesh: &hknp::CollisionMesh, part: &msb::Part) {
+    let world = mirror(part.matrix());
+    let base = out.vertices.len() as u32;
+    out.vertices.extend(mesh.vertices.iter().map(|v| {
+        world
+            .transform_point3(Vec3::new(-v[0], v[1], v[2]))
+            .to_array()
+    }));
+    out.indices.extend(mesh.indices.iter().map(|i| i + base));
+    out.materials.extend_from_slice(&mesh.materials);
 }
 
 /// A part's transform in Bevy space as JSON (translation, rotation quaternion xyzw, scale).
@@ -97,6 +114,11 @@ fn read_msb(cache: &Path, id: &str) -> Result<msb::Msb> {
     let path = cache.join(format!("raw/map/mapstudio/{id}.msb"));
     let data = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
     msb::parse(&data).with_context(|| format!("parsing {}", path.display()))
+}
+
+/// Rewrite only `object_collision.bin` from the MSB and the unpacked object binders.
+pub fn export_object_collision(cache: &Path, id: &str) -> Result<()> {
+    object_collision::export(cache, id, &read_msb(cache, id)?)
 }
 
 /// Upgrade placement metadata without changing geometry, textures or collision.
@@ -509,6 +531,7 @@ pub fn export(game: &Path, cache: &Path, id: &str, selected_models: &[String]) -
         collision.triangle_count(),
         collision.vertices.len()
     );
+    object_collision::export(cache, id, &msb)?;
 
     let mut layout = json!({
         "id": id,
@@ -656,19 +679,11 @@ fn export_collision(
         let Some(model) = msb.model(p).and_then(|m| by_model.get(&m.name)) else {
             continue;
         };
-        let world = mirror(p.matrix());
-        let mut placed = model.clone();
-        for v in &mut placed.vertices {
-            // Mirror first (FromSoftware space -> Bevy space), then the mirrored part matrix.
-            *v = world
-                .transform_point3(Vec3::new(-v[0], v[1], v[2]))
-                .to_array();
-        }
         ranges.insert(
             p.name.clone(),
-            [mesh.triangle_count(), placed.triangle_count()],
+            [mesh.triangle_count(), model.triangle_count()],
         );
-        mesh.extend(&placed);
+        extend_placed(&mut mesh, model, p);
     }
 
     // Validation: every player start should stand on collision.

@@ -344,23 +344,39 @@ fn neighbourhood(cache: &Path) -> Result<BTreeMap<String, Value>> {
     Ok(layouts)
 }
 
-/// Physics bootstrap uses the same bounded block inventory as rendering.
+/// Whether `id` plays as the connected world of its neighbouring blocks rather than alone
+/// (`--no-connected-blocks`).
+pub(crate) fn connects(id: &str) -> bool {
+    enabled(id) && !std::env::args().any(|a| a == "--no-connected-blocks")
+}
+
+/// The blocks the play world's collision holds for `id`, with their layouts: the connected
+/// neighbourhood when `id` [`connects`], else `id` alone.
+pub(crate) fn play_blocks(cache: &Path, id: &str) -> Result<BTreeMap<String, Value>> {
+    if connects(id) {
+        neighbourhood(cache)
+    } else {
+        Ok(BTreeMap::from([(
+            id.to_string(),
+            read_layout(&cache.join("maps").join(id))?,
+        )]))
+    }
+}
+
+/// Physics bootstrap uses the same bounded block inventory as rendering ([`play_blocks`]).
 /// Collision/group records remain separate in MapWorld; only the broad-phase query
 /// mesh is concatenated, without adding MapOffset or translating any vertex.
 /// Each block's helper parts the player does not collide with (`sekiro_sim::hit_filter`)
 /// leave the walkable mesh first and join the world as camera-only triangles or event walls.
+/// Placed objects join last, without those the block's `story` switches off.
 pub(crate) fn collision_world(
     cache: &Path,
-    id: &str,
+    layouts: &BTreeMap<String, Value>,
+    story: &super::story::MapStory,
 ) -> Result<sekiro_sim::collision::CollisionWorld> {
-    let layouts = if !enabled(id) || std::env::args().any(|a| a == "--no-connected-blocks") {
-        BTreeMap::from([(id.to_string(), read_layout(&cache.join("maps").join(id))?)])
-    } else {
-        neighbourhood(cache)?
-    };
     let mut mesh = CollisionMesh::default();
     let mut helpers = sekiro_sim::hit_filter::HelperCollision::default();
-    for (block, layout) in &layouts {
+    for (block, layout) in layouts {
         let path = cache.join("maps").join(block).join("collision.bin");
         if path.is_file() {
             let mut part = CollisionMesh::from_bytes(&std::fs::read(path)?)?;
@@ -375,6 +391,26 @@ pub(crate) fn collision_world(
     );
     let mut world = sekiro_sim::collision::CollisionWorld::from_mesh(&mesh);
     world.add_helpers(&helpers);
+    for block in layouts.keys() {
+        // Objects the story has switched off (`DeactivateObject`) have no collision either.
+        let story = story.maps.get(block);
+        let mut switched_off = 0;
+        let (parts, triangles) = world
+            .add_block_objects(&cache.join("maps").join(block), block, |part| {
+                let on = story
+                    .and_then(|s| s.part(&part.name))
+                    .is_none_or(|p| p.enabled);
+                switched_off += usize::from(!on);
+                on
+            })
+            .map_err(anyhow::Error::msg)?;
+        if parts > 0 {
+            eprintln!(
+                "collision: {block}: {parts} placed objects with collision, {triangles} \
+                 triangles ({switched_off} switched off by the story)"
+            );
+        }
+    }
     Ok(world)
 }
 
@@ -1560,5 +1596,38 @@ mod tests {
         // spawn probe: the part below him takes over before he lands.
         assert!(world.stand(ledge + Vec3::Y * 5.0, false, None));
         assert_eq!(world.selected, ledge_part);
+    }
+
+    /// The play world's collision (`collision_world`, objects included and the story's switched
+    /// off ones left out) holds Wolf on the grapple pine over the Outskirts start ravine, at the
+    /// trunk's tip the sim data test (`crates/sim/tests/it/object_collision.rs`) starts from.
+    #[test]
+    fn play_collision_world_stands_on_the_grapple_pine() {
+        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        if !cache
+            .join("maps/m11_00_00_00/object_collision.bin")
+            .is_file()
+        {
+            return;
+        }
+        let t = std::time::Instant::now();
+        let blocks = play_blocks(&cache, ASHINA[0]).unwrap();
+        let stories = super::super::story::load_blocks(&cache, &blocks).unwrap();
+        let world = collision_world(&cache, &blocks, &stories).unwrap();
+        println!(
+            "collision world built in {:.0} ms",
+            t.elapsed().as_secs_f64() * 1e3
+        );
+        // Both blocks have a story to leave switched-off objects out with.
+        assert!(stories.maps.contains_key(ASHINA[0]) && stories.maps.contains_key(ASHINA[1]));
+        let (x, z) = (-140.9, -124.1);
+        let floor = world
+            .floor(x, z, -40.0)
+            .expect("a floor at the trunk's tip");
+        assert!((floor + 44.1).abs() < 0.3, "tip floor at {floor}");
+        assert_eq!(
+            world.floor_object(x, z, -40.0),
+            Some("m11_00_00_00/o002500_0005")
+        );
     }
 }

@@ -543,10 +543,10 @@ Attack and guard tests enable their actual unlocks 14 and 15; the controller doe
 Env 3003 remains cm/s, while env 248 can predict contact during the next downward tick independently of env 201's completed landing.
 The fast no-ride fixture reaches WireFallLandReady at -2078 cm/s, then LandWireMove on contact.
 
-A ridden landing supplies a virtual perch within 0.6 m horizontally of its landing spot, because the object is often absent from terrain collision.
+A ridden landing supplies a virtual perch within 0.6 m horizontally of its landing spot, because the grapple point often sits beside the object's walkable top rather than on it.
 When terrain is within 0.6 m vertically of the spot it supplies the perch height instead, so ordinary roof landings settle onto collision.
-Walking outside the perch footprint resumes falling.
-This is the documented object-collision approximation, not an extracted object collider.
+Walking outside the perch footprint resumes falling unless there is collision under Wolf.
+Since 2026-10-16 the play world also loads the placed objects' own collision (`docs/OBJECT-COLLISION.md`), so after landing on a rideable pine Wolf walks along its trunk.
 
 The model exporter now writes `cache/models/wp_a_9500.glb` and `cache/anim/wp_a_9500/` when exporting Wolf.
 It exports the original WP_A_9500 model, its 80-bone skeleton, 77 mesh joints and all 16 available anibnd clips, including 202000 through 202710 and a999.

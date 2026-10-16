@@ -66,6 +66,19 @@ const GRAPPLE: &str = "120 0 0 -
 /// The ledge's collision part, which must select the map from spawn to the end of the turn.
 const LEDGE_PART: &str = "m11_00_00_00/h023300";
 
+/// From the lower ground south of the ravine, grapple to the rideable pine `o002500_0005`
+/// (`docs/OBJECT-COLLISION.md`) and walk its trunk: down to the tip over the ravine, back, and
+/// up to the platform it leads to. The script idles 7 s first (the map and collision are loaded
+/// before play starts; Wolf stands grounded through the wait), then grapples and lets the
+/// landing finish; `--script-route` steers the walk along the trunk's top.
+const TRUNK_SPAWN: &str = "-140,-50,-132,180,0";
+const TRUNK_SCRIPT: &str = "420 0 0 -
+1 0 0 grapple
+420 0 0 -
+";
+const TRUNK_ROUTE: &str = "-136.2,-121.75;-136.4,-122.0;-136.6,-122.5;-136.9,-122.75;-137.1,-123.0;-137.4,-123.25;-137.75,-123.5;-138.0,-123.75;-138.6,-124.0;-139.4,-124.1;-140.4,-124.15;-139.4,-124.1;-138.6,-124.0;-138.0,-123.75;-137.75,-123.5;-137.4,-123.25;-137.1,-123.0;-136.9,-122.75;-136.6,-122.5;-136.4,-122.0;-136.2,-121.75;-136.1,-121.25;-136.05,-121.0;-136.15,-120.5;-136.25,-120.0;-136.35,-119.5;-136.15,-119.0;-136.0,-118.5;-135.9,-117.5";
+const TREE: &str = "m11_00_00_00/o002500_0005";
+
 fn run(root: &Path, out: &Path, name: &str, extra: &[&str]) -> Value {
     let summary = out.join(format!("{name}.json"));
     let status = Command::new(env!("CARGO_BIN_EXE_sekiro-rs"))
@@ -89,7 +102,7 @@ fn number(summary: &Value, key: &str) -> f64 {
 }
 
 #[test]
-#[ignore = "slow: opens a game window and loads Ashina Outskirts four times, about 5 minutes; needs a GPU and the extracted cache"]
+#[ignore = "slow: opens a game window and loads Ashina Outskirts five times, about 6 minutes; needs a GPU and the extracted cache"]
 fn outskirts_loads_then_plays_smoothly_on_drawn_ground() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     if !root.join("cache/maps/m11_00_00_00/layout.json").is_file() {
@@ -102,6 +115,8 @@ fn outskirts_loads_then_plays_smoothly_on_drawn_ground() {
     std::fs::write(&walk, WALK).unwrap();
     let grapple = out.join("grapple.txt");
     std::fs::write(&grapple, GRAPPLE).unwrap();
+    let trunk = out.join("trunk.txt");
+    std::fs::write(&trunk, TRUNK_SCRIPT).unwrap();
 
     // A scripted walk from the menu's start, timed from launch.
     let s = run(&root, &out, "walk", &["--script", walk.to_str().unwrap()]);
@@ -262,4 +277,60 @@ fn outskirts_loads_then_plays_smoothly_on_drawn_ground() {
         near.len(),
         near.iter().min().unwrap()
     );
+
+    // Grapple to the pine and walk its trunk: Wolf stands on the tree's own collision all the
+    // way to the tip and back up to the platform, never falling into the ravine.
+    let s = run(
+        &root,
+        &out,
+        "trunk",
+        &[
+            "--spawn",
+            TRUNK_SPAWN,
+            "--script",
+            trunk.to_str().unwrap(),
+            "--script-route",
+            TRUNK_ROUTE,
+        ],
+    );
+    assert!(
+        number(&s, "map_loaded_s") <= number(&s, "sim_started_s"),
+        "play started before the map loaded"
+    );
+    let samples = s["samples"].as_array().expect("samples");
+    let at = |v: &Value| -> [f64; 3] {
+        let p = v["position"].as_array().unwrap();
+        [0, 1, 2].map(|i| p[i].as_f64().unwrap())
+    };
+    let before: Vec<&Value> = samples
+        .iter()
+        .filter(|v| v["step"].as_u64().is_some_and(|n| n < 420))
+        .collect();
+    assert!(
+        before.len() >= 20 && before.iter().all(|v| v["grounded"] == true),
+        "Wolf was not standing through the wait before the grapple"
+    );
+    let mut on_tree = 0.0;
+    let mut last: Option<[f64; 3]> = None;
+    for v in samples {
+        let p = at(v);
+        let tree = v["grounded"] == true && v["floor_object"] == TREE;
+        if let Some(l) = last.filter(|_| tree) {
+            on_tree += ((p[0] - l[0]).powi(2) + (p[2] - l[2]).powi(2)).sqrt();
+        }
+        last = tree.then_some(p);
+        if v["step"].as_u64().is_some_and(|n| n > 560) {
+            assert!(p[1] > -45.0, "Wolf fell off the trunk: {v}");
+        }
+    }
+    let end: Vec<f64> = s["final_position"]
+        .as_array()
+        .expect("final position")
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let end_ok = (end[0] + 135.9).abs() < 0.6 && (end[2] + 117.5).abs() < 0.6;
+    assert!(end_ok, "Wolf did not reach the platform: {end:?}");
+    assert!(on_tree > 10.0, "only {on_tree:.1} m walked on the trunk");
+    println!("trunk: {on_tree:.1} m on {TREE}, ended at {end:?}");
 }

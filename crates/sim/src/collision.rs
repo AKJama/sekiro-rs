@@ -22,7 +22,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use glam::{Vec2, Vec3};
-use sekiro_formats::hknp::CollisionMesh;
+use sekiro_formats::hknp::{CollisionMesh, ObjectCollision, ObjectCollisionPart};
 
 use crate::body::{Ground, WaterSurface};
 use crate::hit_filter::{CAMERA, ENEMY, PLAYER};
@@ -285,6 +285,9 @@ pub struct CollisionWorld {
     masked: Vec<(std::ops::Range<u32>, u8)>,
     /// Map action event walls: untouchable triangles whose contact runs a reaction.
     triggers: Vec<TriggerPart>,
+    /// Placed objects' triangle ranges ([`CollisionWorld::add_objects`]) and `<block>/<part>`
+    /// names, in triangle order.
+    objects: Vec<(std::ops::Range<u32>, String)>,
 }
 
 /// One event wall part, kept out of the walkable grid.
@@ -303,6 +306,12 @@ pub struct TriggerContact {
     pub part: String,
     /// Where the body's path met the wall.
     pub point: Vec3,
+}
+
+/// A triangle's unit normal, `None` for one too thin to collide with (left out of the grid).
+fn face_normal(a: Vec3, b: Vec3, c: Vec3) -> Option<Vec3> {
+    let n = (b - a).cross(c - a);
+    (n.length_squared() >= 1e-12).then(|| n.normalize())
 }
 
 fn cell_of(x: f32, z: f32) -> (i32, i32) {
@@ -394,13 +403,12 @@ impl CollisionWorld {
                 gate_from = triangles.len() as u32;
             }
             let [a, b, c] = tri.map(|i| vertices[i as usize]);
-            let n = (b - a).cross(c - a);
-            if n.length_squared() < 1e-12 {
+            let Some(n) = face_normal(a, b, c) else {
                 continue;
-            }
+            };
             let t = triangles.len() as u32;
             triangles.push(*tri);
-            normals.push(n.normalize());
+            normals.push(n);
             materials.push(mesh.materials.get(source).copied().unwrap_or(u32::MAX));
             let (x0, z0) = cell_of(a.x.min(b.x).min(c.x), a.z.min(b.z).min(c.z));
             let (x1, z1) = cell_of(a.x.max(b.x).max(c.x), a.z.max(b.z).max(c.z));
@@ -422,6 +430,7 @@ impl CollisionWorld {
             event_parts: Vec::new(),
             masked: Vec::new(),
             triggers: Vec::new(),
+            objects: Vec::new(),
         }
     }
 
@@ -431,10 +440,7 @@ impl CollisionWorld {
     /// list.
     pub fn add_helpers(&mut self, helpers: &crate::hit_filter::HelperCollision) {
         for (&mask, mesh) in &helpers.parts {
-            let range = self.append(mesh);
-            if !range.is_empty() {
-                self.masked.push((range, mask));
-            }
+            self.add_masked(mask, mesh);
         }
         for trigger in &helpers.triggers {
             let mesh = &trigger.mesh;
@@ -459,6 +465,110 @@ impl CollisionWorld {
                 triangles,
             });
         }
+    }
+
+    /// Adds the collision of a block's placed objects (`object_collision.bin`) that `enabled`
+    /// keeps, for those [`crate::hit_filter::object_mask`] says collide with them: objects
+    /// everyone collides with as ordinary triangles, the rest as helpers of their mask. Each
+    /// mask's objects join the grid as one mesh, and each object is recorded by its triangles in
+    /// it as `<block>/<part>`, since part names repeat across blocks. Returns the parts and
+    /// triangles added.
+    pub fn add_objects(
+        &mut self,
+        block: &str,
+        objects: &ObjectCollision,
+        mut enabled: impl FnMut(&ObjectCollisionPart) -> bool,
+    ) -> (usize, usize) {
+        let mut by_mask: std::collections::BTreeMap<u8, Vec<&ObjectCollisionPart>> =
+            Default::default();
+        for part in &objects.parts {
+            let who = crate::hit_filter::object_mask(part.collision_type);
+            if who != 0 && enabled(part) {
+                by_mask.entry(who).or_default().push(part);
+            }
+        }
+        let source = &objects.mesh;
+        let (mut parts, first) = (0, self.triangles.len());
+        // Source vertex -> its index in the group's mesh.
+        let mut slot = vec![u32::MAX; source.vertices.len()];
+        for (who, group) in by_mask {
+            slot.fill(u32::MAX);
+            let mut mesh = CollisionMesh::default();
+            let mut ranges = Vec::with_capacity(group.len());
+            for part in group {
+                let start = mesh.triangle_count() as u32;
+                for t in part.first as usize..(part.first + part.count) as usize {
+                    let tri = &source.indices[t * 3..t * 3 + 3];
+                    let [a, b, c] = [0, 1, 2].map(|k| Vec3::from(source.vertices[tri[k] as usize]));
+                    // Left out here as the grid would, so the ranges count what it keeps.
+                    if face_normal(a, b, c).is_none() {
+                        continue;
+                    }
+                    for &i in tri {
+                        if slot[i as usize] == u32::MAX {
+                            slot[i as usize] = mesh.vertices.len() as u32;
+                            mesh.vertices.push(source.vertices[i as usize]);
+                        }
+                        mesh.indices.push(slot[i as usize]);
+                    }
+                    mesh.materials
+                        .push(source.materials.get(t).copied().unwrap_or(u32::MAX));
+                }
+                ranges.push((start..mesh.triangle_count() as u32, &part.name));
+            }
+            let range = self.add_masked(who, &mesh);
+            for (r, name) in ranges {
+                let r = range.start + r.start..range.start + r.end;
+                self.objects.push((r, format!("{block}/{name}")));
+                parts += 1;
+            }
+        }
+        (parts, self.triangles.len() - first)
+    }
+
+    /// [`CollisionWorld::add_objects`] with a block's `object_collision.bin` in its map folder
+    /// `dir`, if it has one (none adds nothing).
+    pub fn add_block_objects(
+        &mut self,
+        dir: &Path,
+        block: &str,
+        enabled: impl FnMut(&ObjectCollisionPart) -> bool,
+    ) -> Result<(usize, usize), String> {
+        let path = dir.join("object_collision.bin");
+        if !path.is_file() {
+            return Ok((0, 0));
+        }
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let objects = ObjectCollision::from_bytes(&bytes).map_err(|e| e.to_string())?;
+        Ok(self.add_objects(block, &objects, enabled))
+    }
+
+    /// Appends a mesh only those `mask` holds collide with ([`crate::hit_filter::PLAYER`],
+    /// `ENEMY`, `CAMERA` bits); with all three bits it is ordinary collision.
+    fn add_masked(&mut self, mask: u8, mesh: &CollisionMesh) -> std::ops::Range<u32> {
+        let range = self.append(mesh);
+        if mask != PLAYER | ENEMY | CAMERA && !range.is_empty() {
+            self.masked.push((range.clone(), mask));
+        }
+        range
+    }
+
+    /// The placed object (`<block>/<part>`, [`CollisionWorld::add_objects`]) a triangle belongs
+    /// to, if it is an object's.
+    pub fn object_at(&self, triangle: u32) -> Option<&str> {
+        let i = self
+            .objects
+            .partition_point(|(range, _)| range.end <= triangle);
+        self.objects
+            .get(i)
+            .filter(|(range, _)| range.contains(&triangle))
+            .map(|(_, name)| name.as_str())
+    }
+
+    /// The placed object whose collision is the floor [`CollisionWorld::floor`] finds, if the
+    /// floor there is an object's.
+    pub fn floor_object(&self, x: f32, z: f32, top: f32) -> Option<&str> {
+        self.object_at(self.floor_hit(x, z, top)?.1)
     }
 
     /// Appends a mesh's triangles to the grid; the caller records what they are.
@@ -580,7 +690,12 @@ impl CollisionWorld {
 
     /// The highest walkable surface under `(x, z)` whose height is at most `top`.
     pub fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
-        self.floor_triangle(x, z, top, PLAYER).map(|(h, _)| h)
+        self.floor_hit(x, z, top).map(|(h, _)| h)
+    }
+
+    /// [`CollisionWorld::floor`] with the floor's triangle, for [`CollisionWorld::object_at`].
+    pub fn floor_hit(&self, x: f32, z: f32, top: f32) -> Option<(f32, u32)> {
+        self.floor_triangle(x, z, top, PLAYER)
     }
 
     /// The hit material of the floor [`CollisionWorld::floor`] finds, when known.

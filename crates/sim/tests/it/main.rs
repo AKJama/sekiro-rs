@@ -47,6 +47,7 @@ mod map_collision;
 mod map_effects;
 mod mibu_bridge;
 mod mobility;
+mod object_collision;
 mod owl;
 mod owl_arena;
 mod owl_brain;

@@ -5,7 +5,7 @@
 //! Visibility combines this gate with masks/residency; this module never writes Visibility.
 //! Named reference progression adds known boss defeats to the first-visit fixture.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -67,6 +67,17 @@ pub(crate) fn initial_state(
     world_events::evaluate(cache, map, fixture)
         .map(Some)
         .map_err(anyhow::Error::msg)
+}
+
+/// [`load`] for each of a world's blocks, by block id.
+pub fn load_blocks(cache: &Path, layouts: &BTreeMap<String, Value>) -> Result<MapStory> {
+    let mut out = MapStory::default();
+    for (block, layout) in layouts {
+        if let Some(state) = load(cache, block, layout)? {
+            out.maps.insert(block.clone(), state);
+        }
+    }
+    Ok(out)
 }
 
 pub fn load(cache: &Path, map: &str, layout: &Value) -> Result<Option<StoryMap>> {

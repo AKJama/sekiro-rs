@@ -46,49 +46,56 @@ pub fn collision_group(hit_filter: u8, low: bool, middle: bool) -> u8 {
     }
 }
 
-/// Groups the player's capsule (group 1) collides with, among the groups map parts get, from
-/// the matrix `FUN_140933390` builds: low and middle map (39, 40), the capsule-only wall (43)
-/// and the swim hit (91). The high-resolution map (38) is not among them; the exe walks the
-/// player on the low-resolution binder, which this simulation approximates with the high one.
-const PLAYER_GROUPS: [u8; 4] = [39, 40, 43, 91];
+/// Groups the player's capsule (group 1) collides with, among the groups map parts and placed
+/// objects get, from the matrix `FUN_140933390` builds: the object groups 24 to 27, low and
+/// middle map (39, 40), the capsule-only wall (43) and the swim hit (91). The high-resolution map
+/// (38) is not among them; the exe walks the player on the low-resolution binder, which this
+/// simulation approximates with the high one.
+const PLAYER_GROUPS: [u8; 8] = [24, 25, 26, 27, 39, 40, 43, 91];
 /// Groups an enemy's or a boss's capsule (groups 2 and 5, and their map-only variants 7 and
 /// 10) collides with: the player's plus the enemy-only wall (42) and the water surface (46).
-const ENEMY_GROUPS: [u8; 6] = [39, 40, 42, 43, 46, 91];
-/// Groups the camera's ray (group 48) collides with: low and middle map, the map camera hit
-/// (41) and the water surface (46).
-const CAMERA_GROUPS: [u8; 4] = [39, 40, 41, 46];
+const ENEMY_GROUPS: [u8; 10] = [24, 25, 26, 27, 39, 40, 42, 43, 46, 91];
+/// Groups the camera's ray (group 48) collides with: the object group 24 (オブジェ), low and
+/// middle map, the map camera hit (41), the water surface (46) and the object group 108
+/// (キャラとロックが当たらないオブジェ).
+const CAMERA_GROUPS: [u8; 6] = [24, 39, 40, 41, 46, 108];
 
 /// Who collides with a part: bits of [`mask`].
 pub const PLAYER: u8 = 1;
 pub const ENEMY: u8 = 2;
 pub const CAMERA: u8 = 4;
 
+/// [`PLAYER`], [`ENEMY`] and [`CAMERA`] bits for a Havok collision group.
+pub fn group_mask(group: u8) -> u8 {
+    [
+        (&PLAYER_GROUPS[..], PLAYER),
+        (&ENEMY_GROUPS[..], ENEMY),
+        (&CAMERA_GROUPS[..], CAMERA),
+    ]
+    .into_iter()
+    .filter(|(groups, _)| groups.contains(&group))
+    .fold(0, |m, (_, bit)| m | bit)
+}
+
 /// Whether the player stands on and bumps into parts with this hit filter.
 pub fn player_collides(hit_filter: u8) -> bool {
-    // Ordinary parts stand in for their low-resolution twins (group 39).
-    PLAYER_GROUPS.contains(&collision_group(hit_filter, true, false))
+    mask(hit_filter) & PLAYER != 0
 }
 
 /// Whether enemies and bosses stand on and bump into parts with this hit filter.
 pub fn enemy_collides(hit_filter: u8) -> bool {
-    ENEMY_GROUPS.contains(&collision_group(hit_filter, true, false))
+    mask(hit_filter) & ENEMY != 0
 }
 
 /// Whether the camera ray stops at parts with this hit filter.
 pub fn camera_collides(hit_filter: u8) -> bool {
-    CAMERA_GROUPS.contains(&collision_group(hit_filter, true, false))
+    mask(hit_filter) & CAMERA != 0
 }
 
 /// [`PLAYER`], [`ENEMY`] and [`CAMERA`] bits for the parts with this hit filter.
 pub fn mask(hit_filter: u8) -> u8 {
-    [
-        (player_collides(hit_filter), PLAYER),
-        (enemy_collides(hit_filter), ENEMY),
-        (camera_collides(hit_filter), CAMERA),
-    ]
-    .into_iter()
-    .filter(|(on, _)| *on)
-    .fold(0, |m, (_, bit)| m | bit)
+    // Ordinary parts stand in for their low-resolution twins (group 39).
+    group_mask(collision_group(hit_filter, true, false))
 }
 
 /// Hit filters whose parts are map action event walls (group 44): untouchable, but a
@@ -104,6 +111,27 @@ pub fn is_event_wall(hit_filter: u8) -> bool {
 pub const FALL_RETURN_FILTER: u8 = 15;
 /// Seconds of the fall return's model fade: 1.0 at -2.0 per second.
 pub const FALL_RETURN_FADE: f32 = 0.5;
+
+/// Havok group of a placed object's static and keyframed bodies, by its model's
+/// `ObjectParam.collisionType` (`FUN_140872b40` reads it through `FUN_1408705d0`, row `+0x57`,
+/// and indexes the table at `0x1429e73b8`; out-of-range types use entry 0). Dynamic bodies take
+/// the parallel table at `0x1429e73e8` instead (28, 29, 31, ...), which nobody stands on.
+pub fn object_group(collision_type: u8) -> u8 {
+    const GROUPS: [u8; 12] = [24, 25, 27, 41, 47, 67, 92, 108, 47, 51, 32, 93];
+    GROUPS
+        .get(collision_type as usize)
+        .copied()
+        .unwrap_or(GROUPS[0])
+}
+
+/// [`PLAYER`], [`ENEMY`] and [`CAMERA`] bits for an object's static bodies ([`group_mask`] of
+/// its [`object_group`]): the player (`FUN_1409325c0` for group 1) and enemies
+/// (`FUN_140932480` for group 2) collide with the object groups 24 to 27, the camera ray
+/// (group 48) with 24, the camera-only map hit 41 and 108. Groups 32, 47, 51, 67, 92 and 93
+/// hold none of them.
+pub fn object_mask(collision_type: u8) -> u8 {
+    group_mask(object_group(collision_type))
+}
 
 /// The helper triangles taken out of the player's collision.
 #[derive(Debug, Default, Clone)]
@@ -236,6 +264,21 @@ mod tests {
         assert_eq!(mask(8), PLAYER | ENEMY | CAMERA);
         assert_eq!(mask(16), ENEMY | CAMERA);
         assert_eq!(mask(15), 0);
+    }
+
+    #[test]
+    fn object_groups_follow_the_exe_table() {
+        assert_eq!(object_group(0), 24);
+        assert_eq!(object_group(6), 92);
+        assert_eq!(object_group(200), 24);
+        assert_eq!(object_mask(0), PLAYER | ENEMY | CAMERA);
+        assert_eq!(object_mask(1), PLAYER | ENEMY);
+        assert_eq!(object_mask(2), PLAYER | ENEMY);
+        assert_eq!(object_mask(3), CAMERA);
+        assert_eq!(object_mask(7), CAMERA);
+        for t in [4, 5, 6, 8, 9, 10, 11] {
+            assert_eq!(object_mask(t), 0, "{t}");
+        }
     }
 
     #[test]
