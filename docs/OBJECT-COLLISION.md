@@ -19,6 +19,8 @@ Addresses are RVAs in the 1.06 exe (`re/dump/manifest.json`), read with the head
   Checked on `o002500`: decoded with that transform, the median distance from a collision vertex to the nearest FLVER vertex is 0.000 m (90th percentile 0.018 m); without the rotation, or with it inverted, it is 0.17 to 0.33 m.
 - Convex polytope vertices are the hull shrunk by the shape's `convexRadius`.
   The Outskirts chest `o114740` has its box top at 1.006 m with radius 0.05 m, and its FLVER top at 1.056 m.
+- A capsule (`hknpCapsuleShape`) is a polytope too, but its vertices are only a thin box around the segment from `a` to `b`, and its `convexRadius` is the capsule's radius.
+  Over every object file there are 93 capsule bodies, 85 of them dynamic, and no placed object in m11_00_00_00 or m11_01_00_00 has a static or keyframed one.
 - Of 1509 placed objects in m11_00_00_00, 1119 have an intact physics file; in m11_01_00_00, 1388 of 1674.
 
 ## How the exe builds it
@@ -39,10 +41,10 @@ Type 6 is the "fall prevention" variant of a rideable pine (`o002501`, 落下防
 
 | collisionType | Group | Player and enemies | Camera | Outskirts objects (triangles) | Castle objects (triangles) |
 |---|---|---|---|---|---|
-| 0 | 24 | yes | yes | 351 (60404) | 616 (41023) |
-| 1 | 25 | yes | no | 545 (28325) | 541 (44121) |
-| 2 | 27 | yes | no | 5 (154) | 2 (60) |
-| 4 | 47 | no | no | 149 (5089) | 176 (2556) |
+| 0 | 24 | yes | yes | 351 (70128) | 616 (61699) |
+| 1 | 25 | yes | no | 545 (35393) | 541 (52625) |
+| 2 | 27 | yes | no | 5 (412) | 2 (160) |
+| 4 | 47 | no | no | 149 (5465) | 176 (4496) |
 | 6 | 92 | no | no | 29 (1382) | 24 (562) |
 | 10 | 32 | no | no | 29 (4060) | 24 (4420) |
 | 11 | 93 | no | no | 11 (156) | 3 (42) |
@@ -50,16 +52,23 @@ Type 6 is the "fall prevention" variant of a rideable pine (`o002501`, 落下防
 ## What the simulation does
 
 - `sekiro-extract map <id> --object-collision` (also part of the full map export) writes `cache/maps/<id>/object_collision.bin`: for every placed `Object` with an intact physics file, the static and keyframed bodies (dynamic ones are left out), placed with the part's MSB transform and mirrored into Bevy space like `collision.bin`, with the part name, entity id and `collisionType`.
-  It is about 2.2 MB for m11_00_00_00 (99570 triangles) and 2.4 MB for m11_01_00_00 (92784).
+  It is about 2.7 MB for m11_00_00_00 (116996 triangles) and 3.3 MB for m11_01_00_00 (124004).
+- A convex polytope's faces move out along their planes by the convex radius and are rebuilt from the moved planes, each clipped by all the others, so the shape is closed at its edges and corners (`hknp::expanded_hull`).
+  An edge whose faces are more than 90 degrees apart, and a corner with such a pair, also get a bevel plane at the radius, so thin wedges do not reach far past the rounded hull.
+  Over the 1431 polytopes in the intact object files (static, keyframed and dynamic), no corner is more than 1.5 radii outside the rounded hull (0.73 at box corners, the 99.9th percentile).
+  A capsule is tessellated from its segment and radius instead (`hknp::capsule`).
 - `CollisionWorld::add_objects` adds the parts the story keeps enabled: types 0 as ordinary collision, 1 and 2 as collision for the player and enemies only, 3 and 7 for the camera only, and leaves the rest out (`hit_filter::object_group`, `hit_filter::object_mask`).
-- The play world (`map_world::collision_world`) adds every block's objects, skipping those the first-visit story has switched off (`DeactivateObject`, `docs/MAP-COMPLETENESS.md`): on the reference story 168 Outskirts and 64 Castle objects with collision are off.
-- `CollisionWorld::floor_object` names the object under a point, and the live check records it per sample as `floor_object`.
+- The play world (`map_world::collision_world`) adds every block's objects (`CollisionWorld::add_block_objects`), skipping those the first-visit story has switched off (`DeactivateObject`, `docs/MAP-COMPLETENESS.md`): on the reference story 168 Outskirts and 64 Castle objects with collision are off.
+- `CollisionWorld::floor_object` names the object under a point as `<block>/<part>` (`m11_00_00_00/o002500_0005`), since 200 object part names repeat between the Outskirts and Castle blocks, and the live check records it per sample as `floor_object`.
+- The play setup loads a connected world's stories once (`story::load_blocks`) for both the objects' collision and the map (`add_map`), which would otherwise evaluate each block's story a second time (about 0.9 s per block).
+  A map played alone (`--no-connected-blocks`) has no story for its drawn parts, so its objects' collision does not use one either.
 - Standing on an object leaves the map selection on the last map part Wolf stood on (`MapWorld::stand` only scores map collision parts, and objects have no display groups).
   In the live trunk walk below the map stayed on `h023300` from the spawn to the platform, with no block request change.
 
 ## Measured
 
 On the pine `o002500_0005` (collisionType 0), the data test (`crates/sim/tests/it/object_collision.rs`) walks a body from the tip over the ravine along the curving trunk to the platform: 9.3 m on the tree, grounded throughout; without object collision there is no floor under the tip above the event walls.
+The play world itself (`map_world::collision_world`, connected blocks and story included) has the floor at the tip on `m11_00_00_00/o002500_0005` too (`play_collision_world_stands_on_the_grapple_pine` in `crates/game/src/map_world.rs`).
 Walking off the tip, it leaves the floor at x = -141.5, the trunk's end.
 
 In the live game, spawned on the lower ground south of the ravine at (-140, -50, -132), idle 7 s, grapple, then walk the trunk with `--script-route`:
@@ -73,5 +82,5 @@ In the live game, spawned on the lower ground south of the ravine at (-140, -50,
 - Keyframed bodies stay in the bind pose of the hkx; the exe moves them with the object's animation (swaying trees, doors opened by their authored initial animation).
 - Broken states (`_1.hkx`), destruction at runtime and `RequestObjectDestruction` are not applied; every object is intact.
 - Convex polytope triangles have no hit material.
-- The arena worlds (`Arena::load`) and the wire's own collision (`CollisionWorld::load_map`, used for line of sight) do not load objects.
+- The arena worlds (`Arena::load`) and the wire's own collision (`CollisionWorld::load_map`, used for line of sight) do not load objects yet; `CollisionWorld::add_block_objects` is the call they would share.
 - The body's floor is a point under the feet, so on a round trunk only the top band within the 50 degree slope limit holds Wolf (about 0.6 m wide on the pine), where the exe's 0.4 m capsule rests on the curved sides too.

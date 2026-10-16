@@ -43,6 +43,20 @@ fn mirror(m: Mat4) -> Mat4 {
     s * m * s
 }
 
+/// Appends `mesh`, in FromSoftware space, to `out` placed at `part` in Bevy space: mirrored
+/// first, then the mirrored part matrix.
+fn extend_placed(out: &mut hknp::CollisionMesh, mesh: &hknp::CollisionMesh, part: &msb::Part) {
+    let world = mirror(part.matrix());
+    let base = out.vertices.len() as u32;
+    out.vertices.extend(mesh.vertices.iter().map(|v| {
+        world
+            .transform_point3(Vec3::new(-v[0], v[1], v[2]))
+            .to_array()
+    }));
+    out.indices.extend(mesh.indices.iter().map(|i| i + base));
+    out.materials.extend_from_slice(&mesh.materials);
+}
+
 /// A part's transform in Bevy space as JSON (translation, rotation quaternion xyzw, scale).
 fn transform_json(part: &msb::Part) -> Value {
     layout::transform_json(part)
@@ -104,7 +118,7 @@ fn read_msb(cache: &Path, id: &str) -> Result<msb::Msb> {
 
 /// Rewrite only `object_collision.bin` from the MSB and the unpacked object binders.
 pub fn export_object_collision(cache: &Path, id: &str) -> Result<()> {
-    object_collision::export(cache, id, &read_msb(cache, id)?).map(|_| ())
+    object_collision::export(cache, id, &read_msb(cache, id)?)
 }
 
 /// Upgrade placement metadata without changing geometry, textures or collision.
@@ -665,19 +679,11 @@ fn export_collision(
         let Some(model) = msb.model(p).and_then(|m| by_model.get(&m.name)) else {
             continue;
         };
-        let world = mirror(p.matrix());
-        let mut placed = model.clone();
-        for v in &mut placed.vertices {
-            // Mirror first (FromSoftware space -> Bevy space), then the mirrored part matrix.
-            *v = world
-                .transform_point3(Vec3::new(-v[0], v[1], v[2]))
-                .to_array();
-        }
         ranges.insert(
             p.name.clone(),
-            [mesh.triangle_count(), placed.triangle_count()],
+            [mesh.triangle_count(), model.triangle_count()],
         );
-        mesh.extend(&placed);
+        extend_placed(&mut mesh, model, p);
     }
 
     // Validation: every player start should stand on collision.

@@ -321,7 +321,8 @@ fn sample_ground(
     meshes: &Assets<Mesh>,
     p: Vec3,
 ) -> serde_json::Value {
-    let floor = collision.0.floor(p.x, p.z, p.y + 1.0);
+    let hit = collision.0.floor_hit(p.x, p.z, p.y + 1.0);
+    let floor = hit.map(|(y, _)| y);
     let under = floor.map(|y| Vec3::new(p.x, y, p.z));
     let precise = under.and_then(|u| ground_triangle(drawn, meshes, u));
     let in_bounds = under.is_some_and(|u| covered(drawn, u));
@@ -346,7 +347,7 @@ fn sample_ground(
     serde_json::json!({
         "position": p.to_array(),
         "floor": floor,
-        "floor_object": collision.0.floor_object(p.x, p.z, p.y + 1.0),
+        "floor_object": hit.and_then(|(_, t)| collision.0.object_at(t)),
         // A drawn triangle on the floor; falls back to drawn bounds when no mesh keeps
         // CPU vertex data.
         "ground_drawn": precise.unwrap_or(in_bounds),

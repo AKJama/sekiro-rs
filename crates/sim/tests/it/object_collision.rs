@@ -29,10 +29,14 @@ fn load(id: &str) -> Option<(PathBuf, ObjectCollision)> {
     Some((dir, objects))
 }
 
-/// The map's player collision plus every placed object's, as the play world builds it.
-fn world(dir: &std::path::Path, objects: &ObjectCollision) -> CollisionWorld {
+/// The block's own map collision plus every placed object's. The play world
+/// (`map_world::collision_world` in the game crate, tested there on the same pine) adds the
+/// connected blocks too and leaves out the objects the story switches off.
+fn world(dir: &std::path::Path) -> CollisionWorld {
     let mut world = CollisionWorld::load_map(dir).unwrap();
-    world.add_objects(objects, |_| true);
+    world
+        .add_block_objects(dir, "m11_00_00_00", |_| true)
+        .unwrap();
     world
 }
 
@@ -51,8 +55,8 @@ fn census(objects: &ObjectCollision) -> BTreeMap<u8, (usize, usize)> {
 fn object_collision_per_map() {
     // (map, placed objects with static collision, their triangles, those the player stands on).
     for (id, parts, triangles, player) in [
-        ("m11_00_00_00", 1119, 99_570, 901),
-        ("m11_01_00_00", 1386, 92_784, 1159),
+        ("m11_00_00_00", 1119, 116_996, 901),
+        ("m11_01_00_00", 1386, 124_004, 1159),
     ] {
         let Some((_, objects)) = load(id) else {
             continue;
@@ -84,6 +88,8 @@ const TRUNK: [[f32; 2]; 8] = [
     [-135.5, -117.0],
 ];
 const TREE: &str = "o002500_0005";
+/// [`TREE`] as [`CollisionWorld::floor_object`] names it.
+const TREE_PART: &str = "m11_00_00_00/o002500_0005";
 
 /// Walks a body through `waypoints` at run speed (forward root motion), returning every tick's
 /// feet and whether it was grounded.
@@ -122,18 +128,17 @@ fn the_grapple_pine_has_a_floor_from_tip_to_platform() {
     };
     let tree = objects.parts.iter().find(|p| p.name == TREE).expect(TREE);
     assert_eq!(
-        (tree.model.as_str(), tree.collision_type),
-        ("o002500", 0),
+        tree.collision_type, 0,
         "the pine is an ordinary object (group 24)"
     );
     let bare = CollisionWorld::load_map(&dir).unwrap();
-    let world = world(&dir, &objects);
+    let world = world(&dir);
     let tip = TRUNK[0];
     let start_y = world
         .floor(tip[0], tip[1], -40.0)
         .expect("a floor at the trunk's tip");
     assert!((start_y + 44.1).abs() < 0.3, "tip floor at {start_y}");
-    assert_eq!(world.floor_object(tip[0], tip[1], -40.0), Some(TREE));
+    assert_eq!(world.floor_object(tip[0], tip[1], -40.0), Some(TREE_PART));
     // Without the object collision nothing holds Wolf over the ravine but the event walls.
     assert!(bare.floor(tip[0], tip[1], -40.0).is_none_or(|y| y < -70.0));
 
@@ -143,7 +148,7 @@ fn the_grapple_pine_has_a_floor_from_tip_to_platform() {
     for pair in path.windows(2) {
         let ((a, _), (b, grounded)) = (pair[0], pair[1]);
         assert!(grounded, "fell off the trunk at {b:?}");
-        if world.floor_object(b[0], b[2], b[1] + 0.5) == Some(TREE) {
+        if world.floor_object(b[0], b[2], b[1] + 0.5) == Some(TREE_PART) {
             on_tree += (b[0] - a[0]).hypot(b[2] - a[2]);
         }
     }

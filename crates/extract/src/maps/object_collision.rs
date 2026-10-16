@@ -13,12 +13,11 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use glam::Vec3;
-use sekiro_formats::hknp::{self, MotionType, ObjectCollision, ObjectCollisionPart};
+use sekiro_formats::hknp::{self, ObjectCollision, ObjectCollisionPart};
 use sekiro_formats::msb;
 
 /// Writes `cache/maps/<id>/object_collision.bin` from the MSB and `cache/raw/obj`.
-pub(super) fn export(cache: &Path, id: &str, msb: &msb::Msb) -> Result<ObjectCollision> {
+pub(super) fn export(cache: &Path, id: &str, msb: &msb::Msb) -> Result<()> {
     let params: serde_json::Value = serde_json::from_slice(
         &std::fs::read(cache.join("params/ObjectParam.json"))
             .context("cache/params/ObjectParam.json (run `sekiro-extract params`)")?,
@@ -39,19 +38,12 @@ pub(super) fn export(cache: &Path, id: &str, msb: &msb::Msb) -> Result<ObjectCol
         placed += 1;
         let name = &model.name;
         if !decoded.contains_key(name) {
-            let path = cache.join(format!("raw/obj/{name}.objbnd.d/{name}.hkx"));
+            let path = super::object_flver(&cache.join("raw"), name).with_extension("hkx");
             let mesh = if path.is_file() {
-                let (bodies, stats) = hknp::decode_bodies(&std::fs::read(&path)?, None, true)
+                let (mesh, stats) = hknp::decode_bodies(&std::fs::read(&path)?, None)
                     .with_context(|| path.display().to_string())?;
                 other_shapes += stats.other_shapes;
-                let mut mesh = hknp::CollisionMesh::default();
-                for body in &bodies {
-                    if body.motion == MotionType::Dynamic {
-                        skipped_dynamic += 1;
-                    } else {
-                        mesh.extend(&body.mesh);
-                    }
-                }
+                skipped_dynamic += stats.dynamic;
                 Some(mesh)
             } else {
                 None
@@ -65,23 +57,15 @@ pub(super) fn export(cache: &Path, id: &str, msb: &msb::Msb) -> Result<ObjectCol
         if mesh.indices.is_empty() {
             continue;
         }
-        let world = super::mirror(part.matrix());
-        let mut placed_mesh = mesh.clone();
-        for v in &mut placed_mesh.vertices {
-            *v = world
-                .transform_point3(Vec3::new(-v[0], v[1], v[2]))
-                .to_array();
-        }
         let number: i64 = name.trim_start_matches('o').parse().unwrap_or(-1);
         out.parts.push(ObjectCollisionPart {
             name: part.name.clone(),
-            model: name.clone(),
             entity_id: part.entity_id,
             collision_type: collision_type.get(&number).copied().unwrap_or(0),
             first: out.mesh.triangle_count() as u32,
-            count: placed_mesh.triangle_count() as u32,
+            count: mesh.triangle_count() as u32,
         });
-        out.mesh.extend(&placed_mesh);
+        super::extend_placed(&mut out.mesh, mesh, part);
     }
     std::fs::write(
         cache.join("maps").join(id).join("object_collision.bin"),
@@ -95,5 +79,5 @@ pub(super) fn export(cache: &Path, id: &str, msb: &msb::Msb) -> Result<ObjectCol
         out.parts.len(),
         out.mesh.triangle_count(),
     );
-    Ok(out)
+    Ok(())
 }

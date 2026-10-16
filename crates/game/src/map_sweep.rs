@@ -425,6 +425,7 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
             within: None,
             focus: None,
         },
+        Default::default(),
     )?;
     if (options.gate.is_some() || crate::arg_value(args, "--sweep-views").is_some())
         && !args.iter().any(|a| a == "--sweep-all-assets")
