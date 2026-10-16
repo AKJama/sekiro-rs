@@ -83,6 +83,50 @@ Use the same map data, story selection, sampling options and image resolution wh
 The existing `--cache` and story/lighting/rendering diagnostic flags are accepted by the shared map loader.
 Runs overwrite `report.json`, and `partial.json` checkpoints preserve measurements if a run is interrupted.
 
+## Live play check
+
+The sweep and render gates never run the real play path, so they missed a live regression (2026-10-16): Explore in Ashina Outskirts took about 125 s to become playable, ran at 10 to 20 fps, and froze the closed window for about 27 s.
+The live check runs the play binary exactly as the Explore menu launches it, in a window, and measures what a player sees.
+It is an ignored (slow-tier) test because it needs a GPU, a desktop session and the extracted cache, and it opens one game window at a time.
+
+```powershell
+$env:CARGO_TARGET_DIR = 'target/alt-live'
+cargo test --release --offline -p sekiro-game live_play -- --include-ignored --nocapture
+```
+
+The test runs two sessions of `--play --map m11_00_00_00 --start 0 ... --no-enemy` with `--live-check <summary.json>`.
+The first walks a short input script out of the start hall; the second uses `--live-tour starts` to move Wolf to every authored player start.
+It asserts the time from launch until the loading screen lifts (at most 90 s), the longest frame while loading (at most 8 s, so the old 9 to 10 s stalls cannot return), the median and 95th-percentile frame times from the first playable frame (at most 20 ms and 40 ms), that Wolf walked, that every grounded sample and every tour stop has a drawn map triangle on the collision floor under Wolf, and that at least 90% of the collision floor within 20 m lies inside drawn map meshes.
+
+The same flags work by hand on any play command:
+
+```powershell
+& target/alt-live/release/sekiro-rs.exe --play --enemy soldier --map m11_00_00_00 --start 0 --brain lua --progression castle-roof --player default --objects --simple-ai --no-enemy --live-check live.json --live-shots shots --script walk.txt
+```
+
+`--live-check <file>` writes the summary and exits after the script (plus two seconds), after `--live-tour` (`x,y,z;x,y,z` or `starts`), or after `--live-seconds` (default 20) of unscripted play.
+`--live-shots <dir>` saves `play-start.png`, the first frame without the loading screen, and one `tour-NN.png` per tour stop.
+Every measurement is also logged as a `live check:` line, and the loading stages are logged as `startup:`, `map setup:`, `loading:` and `play ready:` lines.
+Building with `--features profile-spans` times every Bevy system through its tracing span and logs `span profile` (mean ms per frame) and `span stall` (longest single run) lines every five seconds.
+
+Play starts only when loading has finished (`crates/game/src/play_gate.rs`): Wolf's model is bound, every map GLB and texture has loaded and spawned, no pipeline is compiling, the collision floor under Wolf exists, every image and mesh has been prepared by the render world and the drawn map meshes within 60 m have their textures on the GPU, and then 60 consecutive frames stay within 1/30 s.
+Until then an opaque loading screen with a progress bar covers the view and the simulation does not step.
+
+Reference numbers (Ryzen 7 5700X3D, RTX 5070 Ti, warm file cache, 2026-10-16):
+
+| Measure | HEAD e7bebb6 | After |
+| --- | ---: | ---: |
+| Launch to playable | about 125 s (map loaded 111 s after it was added) | 51 to 58 s (map loaded 24 to 29 s after it was added) |
+| Frame time once playable at start 0 | 52 ms median (19 fps) | 16.6 to 17.0 ms median, 20 to 22 ms p95 (vsync 60 Hz) |
+| Longest frame while loading (after the first) | 8.7 s | 2.2 to 7.3 s, usually 2 to 4 s |
+| Map scene instances, entities | 31,968, 244,000 | 24,624, 198,000 |
+| Exit after closing the window | about 27 s | about 1.5 s |
+
+Open: frames of 2 to 7 s remain while loading, where Bevy prepares and allocates thousands of streamed GPU meshes in one render frame (`prepare_assets<RenderMesh>` up to 3.7 s and `allocate_and_free_meshes` up to 2.1 s in `span stall` lines).
+The 96 MB per-frame upload budget and eight GLBs in flight shortened them; a 24 MB budget did not help, so the cost is per mesh rather than per byte.
+The first window frame, which runs the startup systems, takes about 7 s.
+Launch to first window frame is about 26 s of synchronous setup (character and animation libraries 9.7 s, simulation 3.3 s, the 13.3 million triangle connected collision world 3.3 s, layouts and story 6 s).
+
 ## Sampling and measurements
 
 Upward or downward wound collision triangles with slope at most 50 degrees populate horizontal grid cell centres.

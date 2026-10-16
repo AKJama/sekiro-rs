@@ -15,6 +15,7 @@ use sekiro_formats::hknp::CollisionMesh;
 use serde_json::{Value, json};
 
 use super::{GroupMode, MapFocus, Pending, groups8, vertical_hit, visibility};
+use bevy::world_serialization::{WorldAssetRoot, WorldInstance, WorldInstanceSpawner};
 
 pub(crate) type Mask = [u32; 8];
 const ASHINA: [&str; 2] = ["m11_00_00_00", "m11_01_00_00"];
@@ -125,6 +126,8 @@ pub(crate) struct Block {
     pub(crate) state: RequestState,
     pub(crate) handles: Vec<Handle<Gltf>>,
     assets_ready: bool,
+    /// Distinct GLBs this block streams; it is ready once all of them have loaded.
+    glb_total: usize,
     warm_mask: Mask,
     collisions: Vec<Surface>,
     retire_frames: u8,
@@ -191,6 +194,12 @@ pub(crate) struct DetailPart {
     max: Vec3,
     available: [bool; 3],
     slots: [Option<Entity>; 3],
+    /// The model's GLB, the level drawn now, and which levels have a scene instance.
+    glb: String,
+    shown: Option<usize>,
+    spawned: [bool; 3],
+    /// Offscreen captures spawn every level up front, without scene instances.
+    capture: bool,
 }
 
 /// Submission weight retained for the eventual retail coverage shader.
@@ -420,6 +429,7 @@ impl MapWorld {
                     state: RequestState::Dormant,
                     handles: Vec::new(),
                     assets_ready: false,
+                    glb_total: 0,
                     warm_mask: [0; 8],
                     retire_frames: 0,
                     detail,
@@ -590,7 +600,6 @@ pub(crate) fn update(
     focus: Query<&Transform, With<MapFocus>>,
     cameras: Query<&Transform, With<Camera3d>>,
     mut last: Local<Option<Vec<Vec3>>>,
-    pending: Res<Pending>,
     story: Res<super::story::MapStory>,
 ) {
     let positions: Vec<_> = focus
@@ -603,11 +612,13 @@ pub(crate) fn update(
         *last = Some(positions);
     }
     for block in world.blocks.values_mut() {
-        block.assets_ready = pending.loaded()
-            && block
-                .handles
-                .iter()
-                .all(|h| assets.is_loaded_with_dependencies(h.id()));
+        // Streaming requests a block's GLBs over time; it is ready once every one has loaded.
+        block.assets_ready = block.assets_ready
+            || (block.handles.len() >= block.glb_total
+                && block
+                    .handles
+                    .iter()
+                    .all(|h| assets.is_loaded_with_dependencies(h.id())));
         let demanded = block.normal != [0; 8] || block.additional != [0; 8];
         let next = if demanded {
             block.retire_frames = 0;
@@ -675,8 +686,11 @@ pub(crate) fn publish(
             visibility::BlockVisibility {
                 request,
                 draw: block.normal,
-                resident: block.state == RequestState::Ready || groups.mode == GroupMode::Off,
-                ready: block.assets_ready,
+                // A demanded block draws while it streams: each part appears once its own
+                // scene has spawned, so the area around the player never waits for the rest.
+                resident: matches!(block.state, RequestState::Ready | RequestState::Requested)
+                    || groups.mode == GroupMode::Off,
+                ready: true,
                 groups_off: groups.mode == GroupMode::Off,
             },
         );
@@ -685,6 +699,11 @@ pub(crate) fn publish(
 
 /// Instantiate eligible canonical rows once; geometry stays warm while its request
 /// state changes. Jobs C/E/F attach state through BlockPart without duplicate roots.
+///
+/// Interactive worlds queue each row's GLB nearest-first from `scene.focus` and stream them
+/// ([`super::stream_assets`]); a MapPiece instantiates only the level of detail it shows at
+/// the start, and [`update_detail`] adds another level the first time it is selected.
+/// Fixed captures (`capture_views`) keep loading every level at once.
 pub(crate) fn spawn(
     commands: &mut Commands,
     assets: &AssetServer,
@@ -699,225 +718,280 @@ pub(crate) fn spawn(
     let mut capture_roots = BTreeMap::new();
     let args: Vec<_> = std::env::args().collect();
     let only_part = crate::arg_value(&args, "--world-part");
-    for block in world.blocks.values_mut() {
-        let mut seen = BTreeSet::new();
-        let mut skipped = BTreeMap::<String, usize>::new();
-        for row in block.json["parts"].as_array().into_iter().flatten() {
-            if only_part
-                .as_ref()
-                .is_some_and(|name| row["name"].as_str() != Some(name))
-            {
-                continue;
-            }
-            if row["kind"] != "MapPiece" && row["kind"] != "Object" {
-                continue;
-            }
-            let Some(model) = row["model"].as_str() else {
-                continue;
+    let row_transform = |row: &Value| {
+        super::pose(row).map(|pose| Transform {
+            translation: pose.translation,
+            rotation: pose.rotation,
+            scale: pose.scale,
+        })
+    };
+    // Nearest first across every block, so the stream loads outwards from the start.
+    let mut order = Vec::new();
+    for (id, block) in &world.blocks {
+        for (index, row) in block.json["parts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            let distance = match (scene.focus, row_transform(row), row["model"].as_str()) {
+                (Some(focus), Some(transform), Some(model)) => {
+                    super::placed_distance(&block.json["models"][model], focus, &transform)
+                }
+                _ => 0.0,
             };
-            let reason = row["render_status"]["reason"].as_str().unwrap_or("legacy");
-            if !matches!(reason, "exported" | "legacy_zero_draw_groups" | "legacy") {
-                *skipped.entry(reason.to_string()).or_default() += 1;
+            order.push((distance, id.clone(), index));
+        }
+    }
+    order.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut seen = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut skipped = BTreeMap::<String, BTreeMap<String, usize>>::new();
+    for (distance, id, index) in order {
+        let near = distance <= super::NEAR_RADIUS;
+        let block = world.blocks.get_mut(&id).expect("listed block");
+        let row = &block.json["parts"][index];
+        if only_part
+            .as_ref()
+            .is_some_and(|name| row["name"].as_str() != Some(name))
+        {
+            continue;
+        }
+        if row["kind"] != "MapPiece" && row["kind"] != "Object" {
+            continue;
+        }
+        let Some(model) = row["model"].as_str() else {
+            continue;
+        };
+        let reason = row["render_status"]["reason"].as_str().unwrap_or("legacy");
+        if !matches!(reason, "exported" | "legacy_zero_draw_groups" | "legacy") {
+            *skipped
+                .entry(block.id.clone())
+                .or_default()
+                .entry(reason.to_string())
+                .or_default() += 1;
+            continue;
+        }
+        if scene
+            .hide
+            .iter()
+            .any(|h| model.starts_with(h) || row["name"].as_str() == Some(h))
+        {
+            continue;
+        }
+        let Some(glb) = block.json["models"][model]["glb"].as_str() else {
+            continue;
+        };
+        let Some(transform) = row_transform(row) else {
+            continue;
+        };
+        if let (Some(coverage), Some(min), Some(max)) = (
+            world.capture_views.as_ref(),
+            super::vec3(&block.json["models"][model]["min"]),
+            super::vec3(&block.json["models"][model]["max"]),
+        ) && !coverage.includes(min, max, &transform)
+        {
+            continue;
+        }
+        let (draw, backread) = effective_masks(row);
+        if !enabled(&block.id)
+            && !draw
+                .into_iter()
+                .zip(block.warm_mask)
+                .any(|(a, b)| a & b != 0)
+            && !backread
+                .into_iter()
+                .zip(block.warm_mask)
+                .any(|(a, b)| a & b != 0)
+        {
+            continue;
+        }
+        let glb = format!("{}{glb}", block.prefix);
+        let capture_handle: Option<Handle<Gltf>> = world.capture_views.as_ref().map(|_| {
+            assets
+                .load_builder()
+                .override_unapproved()
+                .load(glb.clone())
+        });
+        if capture_handle.is_some() && !capture_roots.contains_key(&glb) {
+            match super::capture::scene_roots(&sekiro_sim::cache::root().join(&glb)) {
+                Ok(roots) => {
+                    capture_roots.insert(glb.clone(), roots);
+                }
+                Err(error) => {
+                    error!("capture {glb}: {error:#}");
+                    continue;
+                }
+            }
+        }
+        let first_sight = seen
+            .entry(block.id.clone())
+            .or_default()
+            .insert(glb.clone());
+        if let Some(handle) = &capture_handle
+            && first_sight
+        {
+            // A sweep's legacy asset root is the primary map folder. Its bounded,
+            // inventory-validated sibling paths are explicitly allowed to load.
+            pending.handles.push(handle.clone().untyped());
+            block.handles.push(handle.clone());
+        }
+        let source = match visibility::SourceMasks::from_row(row) {
+            Ok(source) => source,
+            Err(error) => {
+                error!("{} {}: {error:#}", block.id, row["name"]);
                 continue;
             }
-            if scene
-                .hide
-                .iter()
-                .any(|h| model.starts_with(h) || row["name"].as_str() == Some(h))
-            {
-                continue;
-            }
-            let Some(glb) = block.json["models"][model]["glb"].as_str() else {
-                continue;
-            };
-            let Some(pose) = super::pose(row) else {
-                continue;
-            };
-            if let (Some(coverage), Some(min), Some(max)) = (
-                world.capture_views.as_ref(),
+        };
+        let part_visibility = visibility::VisibilityPart::from_row(&block.id, row)
+            .expect("validated canonical row")
+            .unwrap_or_else(|| visibility::VisibilityPart {
+                map: block.id.clone(),
+                name: row["name"].as_str().unwrap_or_default().to_string(),
+                entity_id: row["entity_id"].as_i64().unwrap_or(0) as i32,
+                entity_groups: groups8(&row["entity_group_ids"]).map(|v| v as i32),
+                effective: source.effective(row["kind"].as_str().unwrap_or_default()),
+                source,
+            });
+        let root = commands
+            .spawn((
+                part_visibility,
+                BlockPart {
+                    block: block.id.clone(),
+                    part_index: row["part_index"].as_u64().unwrap_or(0) as usize,
+                },
+                super::DrawGroups(draw),
+                transform,
+                Visibility::Hidden,
+            ))
+            .id();
+        if enabled(&block.id)
+            && row["kind"] == "MapPiece"
+            && let (Some(min), Some(max), Some(&available)) = (
                 super::vec3(&block.json["models"][model]["min"]),
                 super::vec3(&block.json["models"][model]["max"]),
-            ) {
-                let transform = Transform {
-                    translation: pose.translation,
-                    rotation: pose.rotation,
-                    scale: pose.scale,
-                };
-                if !coverage.includes(min, max, &transform) {
+                block.detail.get(model),
+            )
+        {
+            let rule = world
+                .lod
+                .map_piece(row["lod_param_id"].as_u64().unwrap_or(255) as u8)
+                .expect("validated LOD row");
+            let scales = super::lod::LodScales {
+                platform: world.lod.platform_scale,
+                ..default()
+            };
+            // The level the first update selects; capture views and the file-order fallback
+            // keep the first available level.
+            let initial = match scene.focus {
+                Some(focus) if capture_handle.is_none() => {
+                    let distance = super::lod::bounds_distance(focus, &transform, min, max);
+                    let weights = super::lod::LodState::default()
+                        .update(rule, scales, distance, 0.0, available);
+                    dominant(weights)
+                }
+                _ => available.iter().position(|&v| v).unwrap_or(0),
+            };
+            let mut slots = [None; 3];
+            for (level, &exists) in available.iter().enumerate() {
+                if !exists {
                     continue;
                 }
-            }
-            let (draw, backread) = effective_masks(row);
-            if !enabled(&block.id)
-                && !draw
-                    .into_iter()
-                    .zip(block.warm_mask)
-                    .any(|(a, b)| a & b != 0)
-                && !backread
-                    .into_iter()
-                    .zip(block.warm_mask)
-                    .any(|(a, b)| a & b != 0)
-            {
-                continue;
-            }
-            let glb = format!("{}{glb}", block.prefix);
-            let capture_handle: Option<Handle<Gltf>> = world.capture_views.as_ref().map(|_| {
-                assets
-                    .load_builder()
-                    .override_unapproved()
-                    .load(glb.clone())
-            });
-            if capture_handle.is_some() && !capture_roots.contains_key(&glb) {
-                match super::capture::scene_roots(&sekiro_sim::cache::root().join(&glb)) {
-                    Ok(roots) => {
-                        capture_roots.insert(glb.clone(), roots);
-                    }
-                    Err(error) => {
-                        error!("capture {glb}: {error:#}");
-                        continue;
-                    }
-                }
-            }
-            if seen.insert(glb.clone()) {
-                // A sweep's legacy asset root is the primary map folder. Its bounded,
-                // inventory-validated sibling paths are explicitly allowed to load.
-                let handle: Handle<Gltf> = assets
-                    .load_builder()
-                    .override_unapproved()
-                    .load(glb.clone());
-                pending.handles.push(handle.clone().untyped());
-                block.handles.push(handle);
-            }
-            let source = match visibility::SourceMasks::from_row(row) {
-                Ok(source) => source,
-                Err(error) => {
-                    error!("{} {}: {error:#}", block.id, row["name"]);
-                    continue;
-                }
-            };
-            let part_visibility = visibility::VisibilityPart::from_row(&block.id, row)
-                .expect("validated canonical row")
-                .unwrap_or_else(|| visibility::VisibilityPart {
-                    map: block.id.clone(),
-                    name: row["name"].as_str().unwrap_or_default().to_string(),
-                    entity_id: row["entity_id"].as_i64().unwrap_or(0) as i32,
-                    entity_groups: groups8(&row["entity_group_ids"]).map(|v| v as i32),
-                    effective: source.effective(row["kind"].as_str().unwrap_or_default()),
-                    source,
-                });
-            let transform = Transform {
-                translation: pose.translation,
-                rotation: pose.rotation,
-                scale: pose.scale,
-            };
-            let root = commands
-                .spawn((
-                    part_visibility,
-                    BlockPart {
-                        block: block.id.clone(),
-                        part_index: row["part_index"].as_u64().unwrap_or(0) as usize,
-                    },
-                    super::DrawGroups(draw),
-                    transform,
-                    Visibility::Hidden,
-                ))
-                .id();
-            if enabled(&block.id)
-                && row["kind"] == "MapPiece"
-                && let (Some(min), Some(max), Some(&available)) = (
-                    super::vec3(&block.json["models"][model]["min"]),
-                    super::vec3(&block.json["models"][model]["max"]),
-                    block.detail.get(model),
-                )
-            {
-                let rule = world
-                    .lod
-                    .map_piece(row["lod_param_id"].as_u64().unwrap_or(255) as u8)
-                    .expect("validated LOD row");
-                let mut slots = [None; 3];
-                let first = available.iter().position(|&v| v).unwrap_or(0);
-                for (level, &exists) in available.iter().enumerate() {
-                    if !exists {
-                        continue;
-                    }
-                    let mut child = commands.spawn((
-                        Transform::IDENTITY,
-                        if level == first {
-                            Visibility::Inherited
-                        } else {
-                            Visibility::Hidden
-                        },
-                        DetailWeight(f32::from(level == first)),
-                        ChildOf(root),
-                    ));
-                    if let Some(handle) = &capture_handle {
-                        child.insert(super::capture::CaptureScene {
-                            gltf: handle.clone(),
-                            level,
-                            roots: capture_roots[&glb][level].clone(),
-                        });
+                let mut child = commands.spawn((
+                    Transform::IDENTITY,
+                    if level == initial {
+                        Visibility::Inherited
                     } else {
-                        child.insert(WorldAssetRoot(
-                            assets
-                                .load_builder()
-                                .override_unapproved()
-                                .load(GltfAssetLabel::Scene(level).from_asset(glb.clone())),
-                        ));
-                    }
-                    slots[level] = Some(child.id());
-                    pending.instances += 1;
-                }
-                commands.entity(root).insert(DetailPart {
-                    state: super::lod::LodState::default(),
-                    rule,
-                    scales: super::lod::LodScales {
-                        platform: world.lod.platform_scale,
-                        ..default()
+                        Visibility::Hidden
                     },
-                    min,
-                    max,
-                    available,
-                    slots,
-                });
-            } else {
+                    DetailWeight(f32::from(level == initial)),
+                    ChildOf(root),
+                ));
                 if let Some(handle) = &capture_handle {
-                    commands.entity(root).insert(super::capture::CaptureScene {
+                    child.insert(super::capture::CaptureScene {
                         gltf: handle.clone(),
-                        level: 0,
-                        roots: capture_roots[&glb][0].clone(),
+                        level,
+                        roots: capture_roots[&glb][level].clone(),
                     });
-                } else {
-                    commands.entity(root).insert(WorldAssetRoot(
-                        assets
-                            .load_builder()
-                            .override_unapproved()
-                            .load(GltfAssetLabel::Scene(0).from_asset(glb)),
-                    ));
+                    pending.add_instance();
+                } else if level == initial {
+                    pending.queue(&glb, Some(&block.id), true, (child.id(), level), near);
                 }
-                pending.instances += 1;
+                slots[level] = Some(child.id());
             }
-            spawned += 1;
+            commands.entity(root).insert(DetailPart {
+                state: super::lod::LodState::default(),
+                rule,
+                scales,
+                min,
+                max,
+                available,
+                slots,
+                glb: glb.clone(),
+                capture: capture_handle.is_some(),
+                shown: Some(initial),
+                spawned: std::array::from_fn(|level| {
+                    capture_handle.is_some() && available[level] || level == initial
+                }),
+            });
+        } else if let Some(handle) = &capture_handle {
+            commands.entity(root).insert(super::capture::CaptureScene {
+                gltf: handle.clone(),
+                level: 0,
+                roots: capture_roots[&glb][0].clone(),
+            });
+            pending.add_instance();
+        } else {
+            pending.queue(&glb, Some(&block.id), true, (root, 0), near);
         }
+        spawned += 1;
+    }
+    for block in world.blocks.values_mut() {
+        block.glb_total = seen.get(&block.id).map_or(0, BTreeSet::len);
         info!(
             "{} warm models {}, skipped render reasons {:?}",
             block.id,
-            block.handles.len(),
-            skipped
+            block.glb_total,
+            skipped.get(&block.id).cloned().unwrap_or_default()
         );
     }
-    info!("spawned {spawned} connected map piece and ordinary Object instances");
+    info!(
+        "spawned {spawned} connected map piece and ordinary Object instances, {} GLBs queued nearest-first",
+        pending.streaming()
+    );
 }
 
+/// The level with the largest weight, as [`update_detail`] draws it.
+fn dominant(weights: [f32; 3]) -> usize {
+    weights
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn update_detail(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    mut pending: ResMut<Pending>,
+    instances: Res<WorldInstanceSpawner>,
     time: Res<Time>,
     groups: Res<super::Groups>,
     cameras: Query<&Transform, With<Camera3d>>,
     mut parts: Query<(&Transform, &BlockPart, &mut DetailPart), Without<Camera3d>>,
-    mut slots: Query<(&mut Visibility, &mut DetailWeight)>,
+    mut slots: Query<(
+        &mut Visibility,
+        &mut DetailWeight,
+        Option<&WorldAssetRoot>,
+        Option<&WorldInstance>,
+    )>,
 ) {
+    let _timer = crate::perf_log::SystemTimer::start("update_detail");
     let Some(camera) = cameras.iter().next() else {
         return;
     };
+    let debug = std::env::args().any(|a| a == "--lod-debug");
     for (transform, identity, mut part) in &mut parts {
         let distance =
             super::lod::bounds_distance(camera.translation, transform, part.min, part.max);
@@ -936,27 +1010,48 @@ pub(crate) fn update_detail(
         };
         // The retail coverage shader is not traced. Until that renderer interface
         // exists, keep the dominant representation, preserving exact weights as data.
-        let selected = weights
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.total_cmp(b.1))
-            .map(|(i, _)| i)
-            .unwrap_or(0);
+        let selected = dominant(weights);
+        // A level selected for the first time gets its scene now; its GLB is already loaded
+        // or streaming, since every level lives in the same file.
+        if !part.spawned[selected]
+            && let Some(entity) = part.slots[selected]
+        {
+            commands
+                .entity(entity)
+                .insert(WorldAssetRoot(super::scene_handle(
+                    &assets, &part.glb, selected, true,
+                )));
+            part.spawned[selected] = true;
+            pending.add_instance();
+        }
+        // Keep drawing the current level until the selected one has spawned its meshes, so a
+        // switch never leaves a gap. Capture scenes are spawned synchronously.
+        let selected_ready = part.capture
+            || part.slots[selected]
+                .and_then(|entity| slots.get(entity).ok())
+                .is_some_and(|(_, _, root, instance)| {
+                    root.is_some() && instance.is_some_and(|i| instances.instance_is_ready(**i))
+                });
+        let shown = match part.shown {
+            Some(current) if !selected_ready => current,
+            _ => selected,
+        };
+        part.shown = Some(shown);
         for (level, entity) in part.slots.iter().enumerate() {
             if let Some(entity) = entity
-                && let Ok((mut visibility, mut weight)) = slots.get_mut(*entity)
+                && let Ok((mut visibility, mut weight, _, _)) = slots.get_mut(*entity)
             {
-                let desired = if level == selected {
+                let desired = if level == shown {
                     Visibility::Inherited
                 } else {
                     Visibility::Hidden
                 };
                 if *visibility != desired {
                     *visibility = desired;
-                    if std::env::args().any(|a| a == "--lod-debug") {
+                    if debug {
                         info!(
                             "{} part {} detail {}, weights {:?}",
-                            identity.block, identity.part_index, selected, weights
+                            identity.block, identity.part_index, shown, weights
                         );
                     }
                 }

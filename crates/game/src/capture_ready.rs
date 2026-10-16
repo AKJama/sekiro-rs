@@ -31,6 +31,14 @@ impl Pipelines {
     }
 }
 
+/// Mesh assets the render world has prepared, collected only while `wanted` is set (the
+/// loading screen asks before it lifts; the full set is large).
+#[derive(Clone, Default, Resource)]
+pub(crate) struct UploadedMeshes {
+    pub wanted: Arc<std::sync::atomic::AtomicBool>,
+    pub ids: Arc<Mutex<std::collections::HashSet<AssetId<Mesh>>>>,
+}
+
 #[derive(Default, Resource)]
 pub(crate) struct CaptureWait {
     requested: bool,
@@ -108,20 +116,50 @@ pub(crate) fn textures_pending(world: &World, entities: &[Entity]) -> bool {
     })
 }
 
+/// Images and meshes loaded in the main world that the render world has not prepared yet:
+/// GPU uploads still queued behind the per-frame upload budget. Mesh ids are only collected
+/// while [`UploadedMeshes::wanted`] is set, so ask a frame ahead.
+pub(crate) fn pending_uploads(world: &World) -> (usize, usize) {
+    let images = {
+        let uploaded = world
+            .resource::<super::map_material::SweepImages>()
+            .0
+            .lock()
+            .unwrap();
+        world
+            .resource::<Assets<Image>>()
+            .ids()
+            .filter(|id| !uploaded.contains(id))
+            .count()
+    };
+    let meshes = {
+        let uploaded = world.resource::<UploadedMeshes>().ids.lock().unwrap();
+        world
+            .resource::<Assets<Mesh>>()
+            .ids()
+            .filter(|id| !uploaded.contains(id))
+            .count()
+    };
+    (images, meshes)
+}
+
 pub(crate) fn install(app: &mut App) {
     if app.world().contains_resource::<Pipelines>() {
         return;
     }
     let pipelines = Pipelines::default();
     let images = super::map_material::SweepImages::default();
+    let meshes = UploadedMeshes::default();
     app.insert_resource(pipelines.clone())
         .insert_resource(images.clone())
+        .insert_resource(meshes.clone())
         .init_resource::<CaptureWait>()
         .add_systems(PostUpdate, prepare);
     if let Some(render) = app.get_sub_app_mut(RenderApp) {
         render
             .insert_resource(pipelines)
             .insert_resource(images)
+            .insert_resource(meshes)
             .add_systems(Render, record.in_set(RenderSystems::PostCleanup));
     }
 }
@@ -131,8 +169,16 @@ fn record(
     cache: Res<PipelineCache>,
     uploaded: Res<super::map_material::SweepImages>,
     images: Res<bevy::render::render_asset::RenderAssets<bevy::render::texture::GpuImage>>,
+    uploaded_meshes: Res<UploadedMeshes>,
+    meshes: Res<bevy::render::render_asset::RenderAssets<bevy::render::mesh::RenderMesh>>,
 ) {
     *uploaded.0.lock().unwrap() = images.iter().map(|(id, _)| id).collect();
+    if uploaded_meshes
+        .wanted
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        *uploaded_meshes.ids.lock().unwrap() = meshes.iter().map(|(id, _)| id).collect();
+    }
     let mut next = PipelineStatus {
         pending: cache.waiting_pipelines().count(),
         ..default()

@@ -1,5 +1,17 @@
 # Status
 
+## Live play load, frame rate and exit (2026-10-16)
+
+Explore in Ashina Outskirts became playable about 125 s after launch, ran at 10 to 20 fps and hung about 27 s on close; the render gates never ran the live path.
+Measured cause: since d76523f the connected world instantiated every level of detail of 16,899 parts across six blocks (31,968 scene instances, 244,000 entities) and play waited for all of it; 24bc46d loaded in 7 s at 60 fps.
+Map GLBs now stream nearest-first, eight at a time, and a part instantiates only the level of detail it shows; launch to playable is 51 to 58 s and play runs at the 60 Hz cap (16.6 ms median, 20 to 23 ms p95).
+A loading screen holds play until every asset, pipeline and GPU upload is ready and frames are stable, so no part of the world is undrawn when it lifts; mesh entities are re-extracted once uploads finish because Bevy skipped ones first extracted behind the upload budget.
+Closing the window exits in about 1.5 s instead of 27 s.
+The missing-ground report did not reproduce on the new build: a scripted walk and every Outskirts player start have drawn ground under Wolf.
+`cargo test --release -p sekiro-game live_play -- --include-ignored` is the new live regression; details, numbers and open items are in docs/MAP-COMPLETENESS-SWEEP.md, "Live play check".
+Open: 2 to 7 s render frames while loading (Bevy mesh preparation), about 26 s of synchronous setup before the first window frame, and the void after the user's grapple, which was not reproduced.
+No staging, commit or worktree was performed.
+
 ## Snow layer coverage audit (2026-10-15)
 
 Traced Multiple/MultipleGround snow weights against native Gbuf vertex/pixel shaders and installed MTD/FLVER inputs.

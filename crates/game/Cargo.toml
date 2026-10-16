@@ -19,3 +19,9 @@ sekiro-brain-net.workspace = true
 sekiro-fmod.workspace = true
 serde_json.workspace = true
 wgpu = { version = "29", default-features = false }
+tracing = { version = "0.1", optional = true }
+bevy-ecs-trace = { package = "bevy_ecs", version = "=0.19.1", optional = true, default-features = false, features = ["trace", "debug"] }
+
+[features]
+# Times every Bevy system through its tracing span; see src/span_profile.rs.
+profile-spans = ["dep:tracing", "dep:bevy-ecs-trace"]
