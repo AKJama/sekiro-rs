@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use bevy::camera::primitives::{Aabb, Frustum};
 use bevy::prelude::*;
 use sekiro_formats::hknp::CollisionMesh;
+use sekiro_sim::collision::ObjectSwitch;
 use serde_json::{Value, json};
 
 use super::{GroupMode, MapFocus, Pending, PlayerFocus, groups8, vertical_hit, visibility};
@@ -392,16 +393,26 @@ pub(crate) fn collision_world(
     let mut world = sekiro_sim::collision::CollisionWorld::from_mesh(&mesh);
     world.add_helpers(&helpers);
     for block in layouts.keys() {
-        // Objects the story has switched off (`DeactivateObject`) have no collision either.
+        // Objects the story has switched off (`DeactivateObject`) have no collision either,
+        // except those its scripts switch on by one of Wolf's SpEffects.
         let story = story.maps.get(block);
         let mut switched_off = 0;
         let (parts, triangles) = world
             .add_block_objects(&cache.join("maps").join(block), block, |part| {
-                let on = story
-                    .and_then(|s| s.part(&part.name))
-                    .is_none_or(|p| p.enabled);
-                switched_off += usize::from(!on);
-                on
+                let state = story.and_then(|s| s.part(&part.name));
+                match state {
+                    None => ObjectSwitch::On,
+                    Some(p) if p.enabled => ObjectSwitch::On,
+                    // Switched on at runtime while Wolf has the SpEffect (common event
+                    // 20005560 and the pine's fall-prevention walls).
+                    Some(p) if let Some(effect) = p.while_player_has => {
+                        ObjectSwitch::WhilePlayerHas(effect)
+                    }
+                    Some(_) => {
+                        switched_off += 1;
+                        ObjectSwitch::Off
+                    }
+                }
             })
             .map_err(anyhow::Error::msg)?;
         if parts > 0 {
@@ -1628,6 +1639,66 @@ mod tests {
         assert_eq!(
             world.floor_object(x, z, -40.0),
             Some("m11_00_00_00/o002500_0005")
+        );
+    }
+
+    /// The grapple pine's fall-prevention walls (`o002501_0005`, collisionType 6, in entity
+    /// group 1106200) are off in the story's first visit, and common event 20005560 switches the
+    /// group on while Wolf has SpEffect 4100 (riding an object), which the pine's hit material
+    /// (808: special setting 8) gives him while he stands on it (`Duel::apply_floor_effect`).
+    /// In the play world, driven by the player script, he walks from the trunk's middle into
+    /// the walls on both sides and up toward the platform, and stays on it. Walking with the
+    /// camera at yaw 0 (straight toward the tip) he reaches the trunk's right flank, where the
+    /// walls stand beyond the band a point foot can stand on and he still drops
+    /// (`docs/OBJECT-COLLISION.md`, Unresolved), so that direction is not asserted.
+    #[test]
+    fn play_world_holds_wolf_on_the_grapple_pine() {
+        use sekiro_sim::duel::Duel;
+        use sekiro_sim::{Buttons, InputFrame};
+        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        if !cache
+            .join("maps/m11_00_00_00/object_collision.bin")
+            .is_file()
+            || !cache.join("raw/chr/c1010.behbnd.d/c9997.hkx").exists()
+        {
+            return;
+        }
+        let blocks = play_blocks(&cache, ASHINA[0]).unwrap();
+        let stories = super::super::story::load_blocks(&cache, &blocks).unwrap();
+        let walls = stories.maps[ASHINA[0]].part("o002501_0005").unwrap();
+        assert!(!walls.enabled, "the story leaves the walls off");
+        assert_eq!(walls.while_player_has, Some(4100));
+        let world = std::sync::Arc::new(collision_world(&cache, &blocks, &stories).unwrap());
+        let start = [-136.0, world.floor(-136.0, -120.0, -40.0).unwrap(), -120.0];
+        let mut duel = Duel::load(&cache, 4.0).unwrap();
+        duel.enemy_active = false;
+        duel.player.ground = Box::new(world.clone());
+        let mut fell = Vec::new();
+        for yaw in [90.0f32, 180.0, 270.0] {
+            duel.player.body = sekiro_sim::body::Body {
+                position: start,
+                ..Default::default()
+            };
+            let mut lowest = start[1];
+            for f in 0..180 {
+                let frame = InputFrame {
+                    move_stick: if f >= 20 { [0.0, 1.0] } else { [0.0; 2] },
+                    camera_yaw: yaw.to_radians(),
+                    buttons: Buttons::default(),
+                };
+                duel.step(&frame, 1.0 / 60.0);
+                lowest = lowest.min(duel.player.body.position[1]);
+            }
+            let end = duel.player.body.position;
+            println!("camera yaw {yaw}: ended at {end:?}, lowest {lowest}");
+            // The trunk's top is no lower than -44.3 (its tip); below that he fell off.
+            if lowest < -45.0 {
+                fell.push(yaw);
+            }
+        }
+        assert!(
+            fell.is_empty(),
+            "walked off the trunk with the camera at {fell:?}"
         );
     }
 }

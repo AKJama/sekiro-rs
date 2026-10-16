@@ -88,6 +88,25 @@ pub struct PartState {
     pub enabled: bool,
     /// Last applicable entity/group command, or None for authored startup default (enabled).
     pub source: Option<VisibilityWrite>,
+    /// The SpEffect on Wolf that switches this part on while he has it, when the story leaves
+    /// it off ([`PlayerEffectSwitch`]).
+    pub while_player_has: Option<i32>,
+}
+
+/// A part or group a script switches by Wolf's SpEffects: a startup wait on
+/// `IfCharacterHasSpeffect(10000, effect, has)` that the first visit never meets, followed by
+/// the visibility writes it would make. Common event 20005560 is the one the Outskirts uses:
+/// it disables its group, waits for SpEffect 4100 (riding an object), enables the group, waits
+/// for the effect to end, and restarts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlayerEffectSwitch {
+    pub effect: i32,
+    /// Whether the wait is for Wolf to have the effect (or to lose it).
+    pub has: bool,
+    pub kind: PartKind,
+    pub target: i32,
+    /// What the write after the wait sets.
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -116,6 +135,8 @@ pub struct WorldState {
     pub effects: Vec<EffectWrite>,
     pub effect_controls: Vec<EffectWrite>,
     pub bonfires: BTreeMap<i32, Bonfire>,
+    /// Parts switched at runtime by Wolf's SpEffects.
+    pub player_effect_switches: Vec<PlayerEffectSwitch>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -167,13 +188,26 @@ impl WorldState {
                             && (v.target == entity_id || groups.contains(&v.target))
                     })
                     .cloned();
+                let enabled = source.as_ref().is_none_or(|v| v.enabled);
+                let while_player_has = self
+                    .player_effect_switches
+                    .iter()
+                    .find(|w| {
+                        !enabled
+                            && w.has
+                            && w.enabled
+                            && w.kind == kind
+                            && (w.target == entity_id || groups.contains(&w.target))
+                    })
+                    .map(|w| w.effect);
                 Some(PartState {
                     entity_id,
                     name: part["name"].as_str()?.to_owned(),
                     part_index: part["part_index"].as_u64()? as usize,
                     kind,
-                    enabled: source.as_ref().is_none_or(|v| v.enabled),
+                    enabled,
                     source,
+                    while_player_has,
                 })
             })
             .collect()
@@ -412,6 +446,36 @@ impl Interpreter {
         }
     }
 
+    /// Records the object and collision writes that follow a blocked wait on one of Wolf's
+    /// SpEffects ([`PlayerEffectSwitch`]), up to the next condition or control instruction.
+    fn note_player_effect_wait(&mut self, r: &Instance, ins: &Instruction) {
+        let a = decoded(ins);
+        let i = |n: usize| a.get(n).map_or(0, |v| v.as_i64());
+        if ins.code() != (4, 5) || i(1) != 10000 {
+            return;
+        }
+        for next in r.code.iter().skip(r.pc + 1) {
+            if (0..=5).contains(&next.bank) || next.bank == 1000 {
+                break;
+            }
+            let kind = match next.code() {
+                (2005, 3) => PartKind::Object,
+                (2011, 1) => PartKind::Collision,
+                _ => continue,
+            };
+            let switch = PlayerEffectSwitch {
+                effect: i(2) as i32,
+                has: i(3) != 0,
+                kind,
+                target: next.i32_at(0).unwrap_or(-1),
+                enabled: next.u8_at(4).unwrap_or(0) != 0,
+            };
+            if !self.state.player_effect_switches.contains(&switch) {
+                self.state.player_effect_switches.push(switch);
+            }
+        }
+    }
+
     fn set_flag(&mut self, _r: &mut Instance, id: i32, state: u8) {
         let on = if state == 2 {
             !self.state.flags.contains(&id)
@@ -485,6 +549,7 @@ impl Interpreter {
                 }
                 if group == 0 {
                     if self.condition(r, &ins, 0) != Some(true) {
+                        self.note_player_effect_wait(r, &ins);
                         return Ok(());
                     }
                     r.finished = r.groups.keys().map(|&g| (g, self.group(r, g, 0))).collect();
@@ -731,6 +796,7 @@ pub fn evaluate_files(
         effects: Vec::new(),
         effect_controls: Vec::new(),
         bonfires: BTreeMap::new(),
+        player_effect_switches: Vec::new(),
     };
     let mut vm = Interpreter {
         files,

@@ -263,6 +263,11 @@ pub const MAX_SLOPE_DEGREES: f32 = 50.0;
 const SPHERES: [f32; 3] = [STEP_HEIGHT + RADIUS, 1.2, 1.55];
 /// The player's physics capsule height (see [`RADIUS`]).
 const CAPSULE_HEIGHT: f32 = 1.5;
+/// How close the fall-prevention assist lets a body come to its walls: `FallAssistMinRadius`,
+/// physics module `+0xaec`, 0.16 m from the constructor `FUN_140bbb010` (`+0xae8`,
+/// `FallAssistMaxRadius`, is 0.4). `FUN_140bc68d0` slides the body's move along the walls its
+/// sphere cast meets and cuts it where the body would come nearer than this to one.
+pub const FALL_ASSIST_RADIUS: f32 = 0.16;
 const CELL: f32 = 4.0;
 
 pub struct CollisionWorld {
@@ -280,6 +285,10 @@ pub struct CollisionWorld {
     /// Map event collision switched by entity: triangle range, who collides with it (as in
     /// `masked`) and whether it is on.
     event_parts: Vec<(i32, std::ops::Range<u32>, u8, AtomicBool)>,
+    /// Placed objects a script switches on only while Wolf has a SpEffect
+    /// ([`ObjectSwitch::WhilePlayerHas`]): the effect, triangle range, who collides with them
+    /// (as in `masked`) and whether he has it.
+    effect_parts: Vec<(i32, std::ops::Range<u32>, u8, AtomicBool)>,
     /// Helper parts (see [`crate::hit_filter`]): triangle ranges and who collides with them
     /// ([`crate::hit_filter::PLAYER`], `ENEMY`, `CAMERA` bits). Every other triangle is for all.
     masked: Vec<(std::ops::Range<u32>, u8)>,
@@ -288,6 +297,22 @@ pub struct CollisionWorld {
     /// Placed objects' triangle ranges ([`CollisionWorld::add_objects`]) and `<block>/<part>`
     /// names, in triangle order.
     objects: Vec<(std::ops::Range<u32>, String)>,
+}
+
+/// Whether a placed object's collision joins the world ([`CollisionWorld::add_objects`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectSwitch {
+    Off,
+    On,
+    /// Only while Wolf has this SpEffect, as the story's scripts switch it
+    /// (`sekiro_sim::world_events::PlayerEffectSwitch`).
+    WhilePlayerHas(i32),
+}
+
+impl From<bool> for ObjectSwitch {
+    fn from(on: bool) -> Self {
+        if on { Self::On } else { Self::Off }
+    }
 }
 
 /// One event wall part, kept out of the walkable grid.
@@ -375,8 +400,9 @@ impl CollisionWorld {
         self.gate_open.load(Ordering::Relaxed)
     }
 
-    /// Whether triangle `t` takes part in `who`'s queries: every ordinary one, a helper one
-    /// when it holds `who`, an event one while on and holding `who`, a gate one while on.
+    /// Whether triangle `t` takes part in `who`'s queries: every ordinary one (except for the
+    /// fall-prevention assist's), a helper one when it holds `who`, an event one while on and
+    /// holding `who`, a gate one while on.
     fn live(&self, t: u32, who: u8) -> bool {
         if let Some((_, mask)) = self.masked.iter().find(|(range, _)| range.contains(&t)) {
             return mask & who != 0;
@@ -388,7 +414,15 @@ impl CollisionWorld {
         {
             return mask & who != 0 && on.load(Ordering::Relaxed);
         }
-        t < self.gate_from || self.gate_open.load(Ordering::Relaxed)
+        if let Some((_, _, mask, on)) = self
+            .effect_parts
+            .iter()
+            .find(|(_, range, _, _)| range.contains(&t))
+        {
+            return mask & who != 0 && on.load(Ordering::Relaxed);
+        }
+        who & (PLAYER | ENEMY | CAMERA) != 0
+            && (t < self.gate_from || self.gate_open.load(Ordering::Relaxed))
     }
 
     fn build(mesh: &CollisionMesh, gate_start: Option<usize>) -> Self {
@@ -428,6 +462,7 @@ impl CollisionWorld {
             gate_from,
             gate_open: AtomicBool::new(false),
             event_parts: Vec::new(),
+            effect_parts: Vec::new(),
             masked: Vec::new(),
             triggers: Vec::new(),
             objects: Vec::new(),
@@ -467,31 +502,40 @@ impl CollisionWorld {
         }
     }
 
-    /// Adds the collision of a block's placed objects (`object_collision.bin`) that `enabled`
+    /// Adds the collision of a block's placed objects (`object_collision.bin`) that `switch`
     /// keeps, for those [`crate::hit_filter::object_mask`] says collide with them: objects
-    /// everyone collides with as ordinary triangles, the rest as helpers of their mask. Each
-    /// mask's objects join the grid as one mesh, and each object is recorded by its triangles in
-    /// it as `<block>/<part>`, since part names repeat across blocks. Returns the parts and
-    /// triangles added.
+    /// everyone collides with as ordinary triangles, the rest as helpers of their mask, and
+    /// those switched by one of Wolf's SpEffects off until [`CollisionWorld::set_player_effect`]
+    /// turns them on. Each mask's objects join the grid as one mesh, and each object is recorded
+    /// by its triangles in it as `<block>/<part>`, since part names repeat across blocks. Returns
+    /// the parts and triangles added.
     pub fn add_objects(
         &mut self,
         block: &str,
         objects: &ObjectCollision,
-        mut enabled: impl FnMut(&ObjectCollisionPart) -> bool,
+        mut switch: impl FnMut(&ObjectCollisionPart) -> ObjectSwitch,
     ) -> (usize, usize) {
-        let mut by_mask: std::collections::BTreeMap<u8, Vec<&ObjectCollisionPart>> =
+        type Key = (u8, Option<i32>);
+        let mut by_mask: std::collections::BTreeMap<Key, Vec<&ObjectCollisionPart>> =
             Default::default();
         for part in &objects.parts {
             let who = crate::hit_filter::object_mask(part.collision_type);
-            if who != 0 && enabled(part) {
-                by_mask.entry(who).or_default().push(part);
+            if who == 0 {
+                continue;
+            }
+            match switch(part) {
+                ObjectSwitch::Off => {}
+                ObjectSwitch::On => by_mask.entry((who, None)).or_default().push(part),
+                ObjectSwitch::WhilePlayerHas(effect) => {
+                    by_mask.entry((who, Some(effect))).or_default().push(part)
+                }
             }
         }
         let source = &objects.mesh;
         let (mut parts, first) = (0, self.triangles.len());
         // Source vertex -> its index in the group's mesh.
         let mut slot = vec![u32::MAX; source.vertices.len()];
-        for (who, group) in by_mask {
+        for ((who, effect), group) in by_mask {
             slot.fill(u32::MAX);
             let mut mesh = CollisionMesh::default();
             let mut ranges = Vec::with_capacity(group.len());
@@ -516,7 +560,15 @@ impl CollisionWorld {
                 }
                 ranges.push((start..mesh.triangle_count() as u32, &part.name));
             }
-            let range = self.add_masked(who, &mesh);
+            let range = match effect {
+                None => self.add_masked(who, &mesh),
+                Some(effect) => {
+                    let range = self.append(&mesh);
+                    self.effect_parts
+                        .push((effect, range.clone(), who, AtomicBool::new(false)));
+                    range
+                }
+            };
             for (r, name) in ranges {
                 let r = range.start + r.start..range.start + r.end;
                 self.objects.push((r, format!("{block}/{name}")));
@@ -532,7 +584,7 @@ impl CollisionWorld {
         &mut self,
         dir: &Path,
         block: &str,
-        enabled: impl FnMut(&ObjectCollisionPart) -> bool,
+        switch: impl FnMut(&ObjectCollisionPart) -> ObjectSwitch,
     ) -> Result<(usize, usize), String> {
         let path = dir.join("object_collision.bin");
         if !path.is_file() {
@@ -540,7 +592,17 @@ impl CollisionWorld {
         }
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let objects = ObjectCollision::from_bytes(&bytes).map_err(|e| e.to_string())?;
-        Ok(self.add_objects(block, &objects, enabled))
+        Ok(self.add_objects(block, &objects, switch))
+    }
+
+    /// Switches the objects held by `effect` ([`ObjectSwitch::WhilePlayerHas`]) on or off, as
+    /// Wolf gains or loses it. Shared by every holder of the world.
+    pub fn set_player_effect(&self, effect: i32, on: bool) {
+        for (id, _, _, state) in &self.effect_parts {
+            if *id == effect {
+                state.store(on, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Appends a mesh only those `mask` holds collide with ([`crate::hit_filter::PLAYER`],
@@ -783,14 +845,23 @@ impl CollisionWorld {
     /// Moves a body standing at `feet` by the horizontal `delta`, stopping at walls and
     /// sliding along them. Returns the horizontal displacement actually made.
     pub fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
-        self.slide_for(feet, delta, PLAYER)
+        self.slide_for(feet, delta, PLAYER, 0)
     }
 
-    fn slide_for(&self, feet: [f32; 3], delta: [f32; 2], who: u8) -> [f32; 2] {
+    /// [`CollisionWorld::slide`] for `who` that also keeps the body [`FALL_ASSIST_RADIUS`]
+    /// from the fall-prevention walls in `assist` ([`crate::hit_filter::FALL_ASSIST_MOVE`],
+    /// `FALL_ASSIST_ACTION` bits), which nothing else collides with.
+    fn slide_for(&self, feet: [f32; 3], delta: [f32; 2], who: u8, assist: u8) -> [f32; 2] {
         let start = Vec3::from(feet);
         let d = Vec2::from(delta);
         let len = d.length();
-        let steps = ((len / (RADIUS * 0.5)).ceil() as usize).clamp(1, 32);
+        // Sub-steps of half the smallest clearance, so no wall is stepped across.
+        let clearance = if assist != 0 {
+            FALL_ASSIST_RADIUS
+        } else {
+            RADIUS
+        };
+        let steps = ((len / (clearance * 0.5)).ceil() as usize).clamp(1, 64);
         let mut p = start;
         let mut tris = Vec::new();
         let reach = RADIUS + len / steps as f32 + 0.05;
@@ -803,7 +874,12 @@ impl CollisionWorld {
             p.x += d.x / steps as f32;
             p.z += d.y / steps as f32;
             for _ in 0..4 {
-                let push = self.push_out(p, &tris, who);
+                let mut push = self.push_out(p, &tris, who);
+                // The assist's walls last, so they hold where both push.
+                if assist != 0 {
+                    let hold = self.hold_inside(p + Vec3::new(push.x, 0.0, push.y), &tris, assist);
+                    push += hold;
+                }
                 if push == Vec2::ZERO {
                     break;
                 }
@@ -812,6 +888,40 @@ impl CollisionWorld {
             }
         }
         [p.x - start.x, p.z - start.z]
+    }
+
+    /// Horizontal correction that keeps the feet [`FALL_ASSIST_RADIUS`] on the inner side of
+    /// the fall-prevention walls in `walls` they are near. The feet are the character's
+    /// position, and where the pine's walls cross the trunk's top they meet its edges, so it is
+    /// there the walls are tested (the height the exe tests at is not traced). They are one-sided:
+    /// `FUN_140bc68d0` cuts a move only along a hit triangle's face normal and only while the
+    /// body is behind that face, so they keep a body in and let one outside walk in. The
+    /// export's mirror into Bevy space reverses the winding, so the inner side is the one the
+    /// Bevy-space normal points to.
+    fn hold_inside(&self, feet: Vec3, tris: &[u32], walls: u8) -> Vec2 {
+        let mut push = Vec2::ZERO;
+        for &t in tris {
+            if !self.live(t, walls) {
+                continue;
+            }
+            let [a, b, c] = self.corners(t);
+            if feet.distance(closest_on_triangle(feet, a, b, c)) >= FALL_ASSIST_RADIUS {
+                continue;
+            }
+            let n = self.normals[t as usize];
+            let flat = Vec2::new(n.x, n.z);
+            let inside = n.dot(feet - a);
+            // Outside the wall, or a face too flat to push sideways from.
+            if inside < 0.0 || flat.length_squared() < 0.09 {
+                continue;
+            }
+            let dir = flat.normalize();
+            let depth = (FALL_ASSIST_RADIUS - inside) / flat.length();
+            if depth > push.dot(dir) {
+                push += dir * (depth - push.dot(dir));
+            }
+        }
+        push
     }
 
     /// Horizontal correction that takes the body's spheres out of the given triangles.
@@ -914,7 +1024,15 @@ impl Ground for View<'_> {
     }
 
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
-        self.world.slide_for(feet, delta, self.who)
+        self.world.slide_for(feet, delta, self.who, 0)
+    }
+
+    fn slide_assisted(&self, feet: [f32; 3], delta: [f32; 2], walls: u8) -> [f32; 2] {
+        self.world.slide_for(feet, delta, self.who, walls)
+    }
+
+    fn set_player_effect(&self, effect: i32, on: bool) {
+        self.world.set_player_effect(effect, on);
     }
 
     fn max_step(&self) -> f32 {
@@ -964,6 +1082,14 @@ macro_rules! ground_via_view {
 
             fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
                 self.$view().slide(feet, delta)
+            }
+
+            fn slide_assisted(&self, feet: [f32; 3], delta: [f32; 2], walls: u8) -> [f32; 2] {
+                self.$view().slide_assisted(feet, delta, walls)
+            }
+
+            fn set_player_effect(&self, effect: i32, on: bool) {
+                self.$view().set_player_effect(effect, on)
             }
 
             fn max_step(&self) -> f32 {
@@ -1031,6 +1157,14 @@ impl<T: Ground + ?Sized> Ground for std::sync::Arc<T> {
 
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
         (**self).slide(feet, delta)
+    }
+
+    fn slide_assisted(&self, feet: [f32; 3], delta: [f32; 2], walls: u8) -> [f32; 2] {
+        (**self).slide_assisted(feet, delta, walls)
+    }
+
+    fn set_player_effect(&self, effect: i32, on: bool) {
+        (**self).set_player_effect(effect, on)
     }
 
     fn max_step(&self) -> f32 {

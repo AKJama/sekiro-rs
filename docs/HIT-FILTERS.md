@@ -43,6 +43,7 @@ Replaying its arguments from the disassembly gives:
 - The player's capsule, group 1 (プレイヤー), collides with map groups 39, 40, 43 and 91, and not with 38, 41, 42, 44, 46, 51, 68, 79, 85, 88, 92 or 109.
 - Enemies and bosses, groups 2 (敵) and 5 (ボス) and their map-only variants 7 and 10, collide with 39, 40, 42, 43, 46 and 91: they also stand on water surfaces and stop at enemy-only walls.
 - The camera ray, group 48 (カメラ), collides with 39, 40, 41 and 46.
+- The fall-prevention assist hits, groups 92 and 93, meet only the assist's sphere casts (94 and 96 for 92, 95 and 96 for 93) and the throw-follow proxies 113 and 114 (`docs/OBJECT-COLLISION.md`).
 - Group 44 collides only with group 45 (マップアクション壁収集用, the map action wall collector) and group 82 (a map event detection ray), so nothing solid stands on or bumps into an event wall.
 
 So the player walks on the low-resolution binder in the exe; the simulation keeps using the exported high-resolution one as its stand-in.
@@ -68,6 +69,7 @@ Filter 15 under a pit is the fall return's trigger: Wolf falls through it, fades
 - The switched event collision `h900900` (entity 1124860, `arena_c::take_event_collision`) has hit filter 9, so while on it holds only the camera.
 - The removed parts that enemies or the camera collide with stay in the world, tagged with who: enemies and bosses query it through `collision::EnemyGround` (filters 11, 16 and 19), and `CollisionWorld::camera_raycast` (the play camera) stops at filters 9 and 16.
   The player's queries skip them all.
+- Fall-prevention parts (hit filter 28, group 92) stay as walls only the fall-prevention assist sees: they hold Wolf while his script asks for it (`docs/OBJECT-COLLISION.md`).
 - Event walls (group 44) become contact triggers (`CollisionWorld::trigger_contact`, tested along the capsule's path at its bottom, middle and top).
   Contact with filter 15 starts the fall return: after the 0.5 s fade Wolf is returned to where he last stood, the existing return path.
   Every contact is logged (`helper collision: ...`) and kept in `Duel::helper_events`; reactions other than 15's are only recorded.

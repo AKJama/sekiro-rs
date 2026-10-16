@@ -906,6 +906,7 @@ impl Character {
         let body_input = BodyInput {
             ignore_walls: self.throw_ignore_walls,
             water_mode: self.behavior.env.water_mode.get(),
+            fall_assist: self.behavior.env.fall_assist.get(),
             stick: if self.kind == ControlKind::Player {
                 self.input
                     .stick_world_yaw()
