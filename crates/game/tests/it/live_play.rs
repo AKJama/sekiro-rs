@@ -10,12 +10,9 @@ use std::process::Command;
 /// streamed, GPU-checked load takes 50 to 60 s on the reference machine (Ryzen 7 5700X3D,
 /// RTX 5070 Ti, warm file cache).
 const READY_SECONDS: f64 = 90.0;
-/// The longest frame while loading. HEAD e7bebb6 stalled 8.7 s (10.2 s for the first frame).
-/// Streaming now leaves 2 to 7 s frames where Bevy prepares and allocates thousands of GPU
-/// meshes at once (`prepare_assets<RenderMesh>`, `allocate_and_free_meshes`); Windows marks
-/// a window "Not Responding" after 5 s, so the target is 4 s and this bound only stops the
-/// old stalls returning (open item in docs/MAP-COMPLETENESS-SWEEP.md).
-const LOADING_FRAME_MS: f64 = 8000.0;
+/// The longest frame while loading, after the first. HEAD e7bebb6 stalled 8.7 s; streaming
+/// measures about 0.4 s. Windows marks a window "Not Responding" after 5 s.
+const LOADING_FRAME_MS: f64 = 2000.0;
 const FRAME_MEDIAN_MS: f64 = 20.0;
 const FRAME_P95_MS: f64 = 40.0;
 
@@ -38,6 +35,9 @@ const EXPLORE: [&str; 16] = [
     "--simple-ai",
     "--no-enemy",
 ];
+
+/// Ashina Castle player starts 1, 2, 3, 5, 6 and 7, reached from the Outskirts load.
+const CASTLE: &str = "202.6,-26.4,176.7;82.9,29.8,254.3;120.3,54.1,234.2;-60.4,-31.2,360.4;336.9,-32.1,252.7;47.1,-2.6,188.6";
 
 /// Run out of the start hall in four directions, then sprint.
 const WALK: &str = "\
@@ -73,7 +73,7 @@ fn number(summary: &Value, key: &str) -> f64 {
 }
 
 #[test]
-#[ignore = "slow: opens a game window and loads Ashina Outskirts twice, about 3 minutes; needs a GPU and the extracted cache"]
+#[ignore = "slow: opens a game window and loads Ashina Outskirts three times, about 4 minutes; needs a GPU and the extracted cache"]
 fn outskirts_loads_then_plays_smoothly_on_drawn_ground() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     if !root.join("cache/maps/m11_00_00_00/layout.json").is_file() {
@@ -129,6 +129,17 @@ fn outskirts_loads_then_plays_smoothly_on_drawn_ground() {
     assert!(stops.len() >= 9, "player starts missing from the tour");
     for stop in stops {
         assert!(stop["floor"].is_number(), "no collision floor at {stop}");
+        assert_eq!(
+            stop["ground_drawn"].as_bool(),
+            Some(true),
+            "undrawn ground at {stop}"
+        );
+    }
+
+    // Far into Ashina Castle (block m11_01), 300 to 600 m from the start: the connected blocks
+    // draw where Wolf stands after loading from the Outskirts.
+    let s = run(&root, &out, "castle", &["--live-tour", CASTLE]);
+    for stop in s["stops"].as_array().expect("tour stops") {
         assert_eq!(
             stop["ground_drawn"].as_bool(),
             Some(true),

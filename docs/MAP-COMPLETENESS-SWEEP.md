@@ -94,9 +94,9 @@ $env:CARGO_TARGET_DIR = 'target/alt-live'
 cargo test --release --offline -p sekiro-game live_play -- --include-ignored --nocapture
 ```
 
-The test runs two sessions of `--play --map m11_00_00_00 --start 0 ... --no-enemy` with `--live-check <summary.json>`.
-The first walks a short input script out of the start hall; the second uses `--live-tour starts` to move Wolf to every authored player start.
-It asserts the time from launch until the loading screen lifts (at most 90 s), the longest frame while loading (at most 8 s, so the old 9 to 10 s stalls cannot return), the median and 95th-percentile frame times from the first playable frame (at most 20 ms and 40 ms), that Wolf walked, that every grounded sample and every tour stop has a drawn map triangle on the collision floor under Wolf, and that at least 90% of the collision floor within 20 m lies inside drawn map meshes.
+The test runs three sessions of `--play --map m11_00_00_00 --start 0 ... --no-enemy` with `--live-check <summary.json>`.
+The first walks a short input script out of the start hall; the second uses `--live-tour starts` to move Wolf to every authored player start; the third tours Castle starts 300 to 600 m away.
+It asserts the time from launch until the loading screen lifts (at most 90 s), the longest frame while loading after the first (at most 2 s, below Windows' 5 s "Not Responding" limit), the median and 95th-percentile frame times from the first playable frame (at most 20 ms and 40 ms), that Wolf walked, that every grounded sample and every tour stop (every Outskirts player start, then six Ashina Castle starts reached from the Outskirts load) has a drawn map triangle on the collision floor under Wolf, and that at least 90% of the collision floor within 20 m lies inside drawn map meshes.
 
 The same flags work by hand on any play command:
 
@@ -109,23 +109,27 @@ The same flags work by hand on any play command:
 Every measurement is also logged as a `live check:` line, and the loading stages are logged as `startup:`, `map setup:`, `loading:` and `play ready:` lines.
 Building with `--features profile-spans` times every Bevy system through its tracing span and logs `span profile` (mean ms per frame) and `span stall` (longest single run) lines every five seconds.
 
-Play starts only when loading has finished (`crates/game/src/play_gate.rs`): Wolf's model is bound, every map GLB and texture has loaded and spawned, no pipeline is compiling, the collision floor under Wolf exists, every image and mesh has been prepared by the render world and the drawn map meshes within 60 m have their textures on the GPU, and then 60 consecutive frames stay within 1/30 s.
+Play starts only when loading has finished (`crates/game/src/play_gate.rs`): Wolf's model is bound, every map GLB and texture has loaded and spawned, no pipeline is compiling, the collision floor under Wolf exists, every image has been uploaded, every spawned mesh entity's mesh has been prepared by the render world, and the drawn meshes within 60 m have their textures, and then 60 consecutive frames stay within 1/30 s.
 Until then an opaque loading screen with a progress bar covers the view and the simulation does not step.
 
 Reference numbers (Ryzen 7 5700X3D, RTX 5070 Ti, warm file cache, 2026-10-16):
 
 | Measure | HEAD e7bebb6 | After |
 | --- | ---: | ---: |
-| Launch to playable | about 125 s (map loaded 111 s after it was added) | 51 to 58 s (map loaded 24 to 29 s after it was added) |
-| Frame time once playable at start 0 | 52 ms median (19 fps) | 16.6 to 17.0 ms median, 20 to 22 ms p95 (vsync 60 Hz) |
-| Longest frame while loading (after the first) | 8.7 s | 2.2 to 7.3 s, usually 2 to 4 s |
+| Launch to playable | about 125 s (map loaded 111 s after it was added) | 43 to 47 s (map loaded about 17 to 24 s after it was added) |
+| Frame time once playable at start 0 | 52 ms median (19 fps) | 16.5 to 16.6 ms median, 20 to 21 ms p95 (vsync 60 Hz) |
+| Longest frame while loading (after the first) | 8.7 s | about 0.4 s |
 | Map scene instances, entities | 31,968, 244,000 | 24,624, 198,000 |
 | Exit after closing the window | about 27 s | about 1.5 s |
 
-Open: frames of 2 to 7 s remain while loading, where Bevy prepares and allocates thousands of streamed GPU meshes in one render frame (`prepare_assets<RenderMesh>` up to 3.7 s and `allocate_and_free_meshes` up to 2.1 s in `span stall` lines).
-The 96 MB per-frame upload budget and eight GLBs in flight shortened them; a 24 MB budget did not help, so the cost is per mesh rather than per byte.
+Bevy 0.19's material specialization skips a mesh entity whose mesh is not yet prepared and never retries it, so with the per-frame upload budget an entity extracted before its mesh stays undrawn.
+`LateMeshes` in `crates/game/src/capture_ready.rs` tracks meshes that were not prepared when their entity appeared and marks those entities changed once the mesh is prepared, for the whole session.
+An earlier one-off re-extraction of every mesh entity before play caused most of the 2 to 7 s loading frames; the incremental tracking removed them.
 The first window frame, which runs the startup systems, takes about 7 s.
 Launch to first window frame is about 26 s of synchronous setup (character and animation libraries 9.7 s, simulation 3.3 s, the 13.3 million triangle connected collision world 3.3 s, layouts and story 6 s).
+Open: the void after a fall or grapple in the ravine north of start 0 reproduces with `--live-tour -137.6,-44.3,-124.5`.
+Wolf lands on the helper collision `h900000` (hit filter 15) at y = -74.2, whose display and draw demand masks are zero, so the confirmed visibility rule draws no scenery and the screen shows only sky and fog; the map viewer at the same camera shows the same void with draw groups on and the ravine with `--groups off`.
+The simulation treats every collision as walkable floor; in the game the special hit filters (11, 13, 15, 19, 22, 25 and 28 in the Outskirts, all on `h9` helper parts) presumably do not hold the player, but their meaning is not yet traced in the executable, so this is not changed.
 
 ## Sampling and measurements
 

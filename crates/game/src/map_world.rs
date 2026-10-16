@@ -1011,9 +1011,11 @@ pub(crate) fn update_detail(
         // The retail coverage shader is not traced. Until that renderer interface
         // exists, keep the dominant representation, preserving exact weights as data.
         let selected = dominant(weights);
-        // A level selected for the first time gets its scene now; its GLB is already loaded
-        // or streaming, since every level lives in the same file.
+        // A level selected for the first time gets its scene now. Every level lives in the same
+        // GLB, so once the stream has requested it the scene comes from that load; before
+        // then the current level stays, keeping the stream's order and in-flight limit.
         if !part.spawned[selected]
+            && pending.requested(&part.glb)
             && let Some(entity) = part.slots[selected]
         {
             commands

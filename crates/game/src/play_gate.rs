@@ -4,11 +4,12 @@
 //! the simulation does not step (so the player cannot move) until loading has finished: Wolf's
 //! model is bound, every map GLB and texture has loaded and every scene has spawned
 //! ([`crate::map::Pending::loaded`]), no render pipeline is still compiling, the collision
-//! floor under Wolf exists, the drawn map meshes within 60 m have their mesh buffers and
-//! textures prepared on the GPU ([`check_render`]), and then 60 consecutive frames stay
-//! within 1/30 s, so uploads and first-use work that follow loading also finish behind the
-//! screen. The time to that point is logged as `play ready`; a machine that never settles starts after 60 s with
-//! a warning instead of waiting forever.
+//! floor under Wolf exists, every image and spawned mesh is prepared on the GPU and the
+//! drawn meshes within 60 m have their textures ([`check_render`]), and then 60 consecutive
+//! frames stay within 1/30 s, so uploads and first-use work that follow loading also finish
+//! behind the screen. Scripted, replayed and interactive runs all wait for the whole map. The
+//! time to that point is logged as `play ready`; a machine that never settles starts after
+//! 60 s with a warning instead of waiting forever.
 use super::{Actor, MapCollision, Sim};
 use crate::character::Rig;
 use bevy::prelude::*;
@@ -24,10 +25,9 @@ pub(super) struct PlayGate {
     progress: f32,
     /// Every drawn map mesh near Wolf has its mesh and material textures prepared on the GPU.
     render_ready: bool,
-    render_missing: (usize, bool, usize, usize),
+    /// Nearby textures pending, images and meshes waiting for the GPU.
+    render_missing: (bool, usize, usize),
     last_log: Option<Instant>,
-    /// Mesh entities were marked changed once every upload had finished.
-    refreshed: bool,
 }
 
 /// Drawn map meshes within this distance of Wolf must be renderable before play starts.
@@ -149,7 +149,7 @@ pub(super) fn update(
                     );
                 } else {
                     warn!(
-                        "play ready: not settled within {STABLE_TIMEOUT_SECONDS} s of loading (near meshes not on the GPU, near textures pending, images and meshes not uploaded: {:?}), starting anyway {launch:.1} s after launch",
+                        "play ready: not settled within {STABLE_TIMEOUT_SECONDS} s of loading (nearby textures pending, images and meshes waiting for the GPU: {:?}), starting anyway {launch:.1} s after launch",
                         gate.render_missing
                     );
                 }
@@ -173,90 +173,73 @@ pub(super) fn update(
     }
 }
 
-/// Once everything has loaded, checks that the drawn map meshes near Wolf are renderable: the
-/// render world has prepared their mesh buffers ([`crate::map::ready::UploadedMeshes`]) and
-/// their materials' textures are on the GPU (the capture readiness check). GPU uploads are
-/// spread over frames (`crate::map::upload_budget`), so this trails the CPU-side load.
+/// Once everything has loaded, checks that the world is renderable: no image upload is still
+/// queued behind the upload budget, every spawned mesh entity's mesh is prepared on the GPU
+/// ([`crate::map::ready::LateMeshes`], which also gets late entities drawn), and the
+/// materials of the drawn map meshes within [`RENDER_RADIUS`] of Wolf have their textures (the
+/// capture readiness check). The nearby scan runs only once the upload counts are zero.
 pub(super) fn check_render(world: &mut World) {
-    let Some(uploads) = world
-        .get_resource::<crate::map::ready::UploadedMeshes>()
-        .cloned()
-    else {
+    if !world.contains_resource::<crate::map::ready::LateMeshes>() {
         world.resource_mut::<PlayGate>().render_ready = true;
         return;
-    };
+    }
     let gate = world.resource::<PlayGate>();
-    let waiting = gate.ready_at.is_none() && gate.loaded_at.is_some();
-    uploads
-        .wanted
-        .store(waiting, std::sync::atomic::Ordering::Relaxed);
-    if !waiting {
+    if gate.ready_at.is_some() || gate.loaded_at.is_none() {
         return;
     }
+    let (images, meshes) = crate::map::ready::pending_uploads(world);
+    let textures = images == 0 && meshes == 0 && near_textures_pending(world);
+    let log = {
+        let mut gate = world.resource_mut::<PlayGate>();
+        gate.render_ready = images == 0 && meshes == 0 && !textures;
+        gate.render_missing = (textures, images, meshes);
+        let due = gate
+            .last_log
+            .is_none_or(|t| t.elapsed().as_secs_f32() >= 1.0);
+        if due {
+            gate.last_log = Some(Instant::now());
+        }
+        due
+    };
+    if log {
+        let sample: Vec<String> = world
+            .resource::<crate::map::ready::LateMeshes>()
+            .sample()
+            .into_iter()
+            .map(|id| {
+                let assets = world.resource::<AssetServer>();
+                format!(
+                    "{id:?} main {} state {:?} path {:?}",
+                    world.resource::<Assets<Mesh>>().get(id).is_some(),
+                    assets.get_load_state(id),
+                    assets.get_path(id)
+                )
+            })
+            .collect();
+        info!(
+            "loading: {images} images and {meshes} meshes waiting for the GPU, nearby textures pending {textures} {sample:?}"
+        );
+    }
+}
+
+/// Whether a drawn map mesh near Wolf still waits for its material textures.
+fn near_textures_pending(world: &mut World) -> bool {
     let wolf = Vec3::from_array(world.non_send::<Sim>().duel.player.body.position);
-    let mut query = world.query::<(
+    let mut query = world.query_filtered::<(
         Entity,
-        &Mesh3d,
         &GlobalTransform,
         &InheritedVisibility,
         &bevy::camera::primitives::Aabb,
-    )>();
-    let mut near = Vec::new();
-    for (entity, mesh, transform, visible, aabb) in query.iter(world) {
-        if !visible.get() {
-            continue;
-        }
-        let centre = transform.transform_point(Vec3::from(aabb.center));
-        let extent = Vec3::from(transform.affine().matrix3.abs() * aabb.half_extents);
-        if wolf.distance(wolf.clamp(centre - extent, centre + extent)) > RENDER_RADIUS {
-            continue;
-        }
-        near.push((entity, mesh.id()));
-    }
-    // Map pieces only: Wolf and effects have their own readiness.
-    near.retain(|&(entity, _)| {
-        let mut ancestor = entity;
-        for _ in 0..64 {
-            if world.get::<crate::map::DrawGroups>(ancestor).is_some() {
-                return true;
-            }
-            match world.get::<ChildOf>(ancestor) {
-                Some(parent) => ancestor = parent.parent(),
-                None => return false,
-            }
-        }
-        false
-    });
-    let missing = {
-        let ids = uploads.ids.lock().unwrap();
-        near.iter().filter(|(_, id)| !ids.contains(id)).count()
-    };
-    let entities: Vec<Entity> = near.iter().map(|(e, _)| *e).collect();
-    let textures = crate::map::ready::textures_pending(world, &entities);
-    let (images, meshes) = crate::map::ready::pending_uploads(world);
-    let near_count = near.len();
-    let uploaded = missing == 0 && !textures && images == 0 && meshes == 0;
-    // Bevy extracts a mesh entity when its components change. One first extracted while its
-    // mesh was still queued behind the upload budget stays undrawn until something changes,
-    // so once every upload has finished, every mesh entity is extracted again.
-    if uploaded && !world.resource::<PlayGate>().refreshed {
-        let mut query = world.query::<&mut Mesh3d>();
-        for mut mesh in query.iter_mut(world) {
-            mesh.set_changed();
-        }
-        world.resource_mut::<PlayGate>().refreshed = true;
-        return;
-    }
-    let mut gate = world.resource_mut::<PlayGate>();
-    gate.render_ready = uploaded;
-    gate.render_missing = (missing, textures, images, meshes);
-    if gate
-        .last_log
-        .is_none_or(|t| t.elapsed().as_secs_f32() >= 1.0)
-    {
-        gate.last_log = Some(Instant::now());
-        info!(
-            "loading: {near_count} map meshes near Wolf, {missing} not on the GPU, textures pending {textures}; {images} images and {meshes} meshes waiting for upload"
-        );
-    }
+    ), With<Mesh3d>>();
+    let near: Vec<Entity> = query
+        .iter(world)
+        .filter(|(_, transform, visible, aabb)| {
+            let centre = transform.transform_point(Vec3::from(aabb.center));
+            let extent = Vec3::from(transform.affine().matrix3.abs() * aabb.half_extents);
+            visible.get()
+                && wolf.distance(wolf.clamp(centre - extent, centre + extent)) <= RENDER_RADIUS
+        })
+        .map(|(entity, ..)| entity)
+        .collect();
+    crate::map::ready::textures_pending(world, &near)
 }

@@ -31,12 +31,116 @@ impl Pipelines {
     }
 }
 
-/// Mesh assets the render world has prepared, collected only while `wanted` is set (the
-/// loading screen asks before it lifts; the full set is large).
+/// Mesh entities extracted before their mesh reached the GPU.
+///
+/// Bevy 0.19's material specialization (`specialize_material_meshes` in bevy_pbr) skips an
+/// entity whose mesh asset is not prepared yet without queueing a retry, unlike a missing
+/// material, and specializes it again only when the entity changes. With the per-frame upload
+/// budget (`crate::map::upload_budget`) a new entity can be extracted before its mesh is
+/// prepared and then stays undrawn. The render world reports meshes that were not prepared
+/// when first seen and later are, and [`watch_meshes`] marks their entities changed so Bevy
+/// specializes them again. This runs for the whole session, so meshes streamed or levels of
+/// detail spawned during play are covered too.
 #[derive(Clone, Default, Resource)]
-pub(crate) struct UploadedMeshes {
-    pub wanted: Arc<std::sync::atomic::AtomicBool>,
-    pub ids: Arc<Mutex<std::collections::HashSet<AssetId<Mesh>>>>,
+pub(crate) struct LateMeshes(Arc<Mutex<LateState>>);
+
+#[derive(Default)]
+struct LateState {
+    /// Main to render: meshes of entities that appeared since the last check.
+    new: Vec<AssetId<Mesh>>,
+    /// Render: meshes not prepared when first checked.
+    waiting: std::collections::HashSet<AssetId<Mesh>>,
+    /// Render to main: checked meshes that were prepared in time, and waiting ones now prepared.
+    on_time: Vec<AssetId<Mesh>>,
+    ready: Vec<AssetId<Mesh>>,
+}
+
+impl LateMeshes {
+    /// A few of the meshes still waiting, for the loading log.
+    pub fn sample(&self) -> Vec<AssetId<Mesh>> {
+        self.0
+            .lock()
+            .unwrap()
+            .waiting
+            .iter()
+            .take(4)
+            .copied()
+            .collect()
+    }
+
+    /// Meshes of spawned entities not yet known to be prepared on the GPU.
+    pub fn waiting(&self) -> usize {
+        let state = self.0.lock().unwrap();
+        state.new.len() + state.waiting.len()
+    }
+}
+
+/// Main world: report new mesh entities and mark entities changed once their late mesh is
+/// prepared. Entities are kept only until the render world has checked their mesh; a mesh
+/// handle swapped on an existing entity counts as new too.
+#[allow(clippy::type_complexity)]
+fn watch_meshes(
+    late: Res<LateMeshes>,
+    assets: Res<Assets<Mesh>>,
+    mut meshes: ParamSet<(
+        Query<(Entity, &Mesh3d), Changed<Mesh3d>>,
+        Query<&mut Mesh3d>,
+    )>,
+    mut unchecked: Local<std::collections::HashMap<AssetId<Mesh>, Vec<Entity>>>,
+) {
+    let (on_time, ready) = {
+        let mut state = late.0.lock().unwrap();
+        for (entity, mesh) in &meshes.p0() {
+            // Placeholder handles (`Mesh3d::default()`) never load; a mesh that is not in the
+            // main world has nothing to upload from it.
+            if !assets.contains(mesh.id()) {
+                continue;
+            }
+            state.new.push(mesh.id());
+            unchecked.entry(mesh.id()).or_default().push(entity);
+        }
+        (
+            std::mem::take(&mut state.on_time),
+            std::mem::take(&mut state.ready),
+        )
+    };
+    for id in on_time {
+        unchecked.remove(&id);
+    }
+    for id in ready {
+        for entity in unchecked.remove(&id).unwrap_or_default() {
+            if let Ok(mut mesh) = meshes.p1().get_mut(entity) {
+                mesh.set_changed();
+            }
+        }
+    }
+}
+
+/// Render world, after specialization: sort newly reported meshes into prepared and waiting,
+/// and report waiting meshes that have been prepared since.
+fn check_late_meshes(
+    late: Res<LateMeshes>,
+    meshes: Res<bevy::render::render_asset::RenderAssets<bevy::render::mesh::RenderMesh>>,
+) {
+    let mut state = late.0.lock().unwrap();
+    let state = &mut *state;
+    for id in std::mem::take(&mut state.new) {
+        if meshes.get(id).is_some() {
+            state.on_time.push(id);
+        } else {
+            state.waiting.insert(id);
+        }
+    }
+    let prepared: Vec<_> = state
+        .waiting
+        .iter()
+        .copied()
+        .filter(|id| meshes.get(*id).is_some())
+        .collect();
+    for id in prepared {
+        state.waiting.remove(&id);
+        state.ready.push(id);
+    }
 }
 
 #[derive(Default, Resource)]
@@ -116,9 +220,10 @@ pub(crate) fn textures_pending(world: &World, entities: &[Entity]) -> bool {
     })
 }
 
-/// Images and meshes loaded in the main world that the render world has not prepared yet:
-/// GPU uploads still queued behind the per-frame upload budget. Mesh ids are only collected
-/// while [`UploadedMeshes::wanted`] is set, so ask a frame ahead.
+/// Render uploads still outstanding: images loaded in the main world for the render world that
+/// it has not prepared yet (queued behind the per-frame upload budget), and meshes of spawned
+/// entities not yet known to be prepared ([`LateMeshes`]). Main-world-only images never
+/// upload, so they do not count.
 pub(crate) fn pending_uploads(world: &World) -> (usize, usize) {
     let images = {
         let uploaded = world
@@ -128,19 +233,16 @@ pub(crate) fn pending_uploads(world: &World) -> (usize, usize) {
             .unwrap();
         world
             .resource::<Assets<Image>>()
-            .ids()
-            .filter(|id| !uploaded.contains(id))
+            .iter()
+            .filter(|(id, image)| {
+                image
+                    .asset_usage
+                    .contains(bevy::asset::RenderAssetUsages::RENDER_WORLD)
+                    && !uploaded.contains(id)
+            })
             .count()
     };
-    let meshes = {
-        let uploaded = world.resource::<UploadedMeshes>().ids.lock().unwrap();
-        world
-            .resource::<Assets<Mesh>>()
-            .ids()
-            .filter(|id| !uploaded.contains(id))
-            .count()
-    };
-    (images, meshes)
+    (images, world.resource::<LateMeshes>().waiting())
 }
 
 pub(crate) fn install(app: &mut App) {
@@ -149,18 +251,21 @@ pub(crate) fn install(app: &mut App) {
     }
     let pipelines = Pipelines::default();
     let images = super::map_material::SweepImages::default();
-    let meshes = UploadedMeshes::default();
+    let late = LateMeshes::default();
     app.insert_resource(pipelines.clone())
         .insert_resource(images.clone())
-        .insert_resource(meshes.clone())
+        .insert_resource(late.clone())
         .init_resource::<CaptureWait>()
-        .add_systems(PostUpdate, prepare);
+        .add_systems(PostUpdate, (prepare, watch_meshes));
     if let Some(render) = app.get_sub_app_mut(RenderApp) {
         render
             .insert_resource(pipelines)
             .insert_resource(images)
-            .insert_resource(meshes)
-            .add_systems(Render, record.in_set(RenderSystems::PostCleanup));
+            .insert_resource(late)
+            .add_systems(
+                Render,
+                (record, check_late_meshes).in_set(RenderSystems::PostCleanup),
+            );
     }
 }
 
@@ -169,16 +274,8 @@ fn record(
     cache: Res<PipelineCache>,
     uploaded: Res<super::map_material::SweepImages>,
     images: Res<bevy::render::render_asset::RenderAssets<bevy::render::texture::GpuImage>>,
-    uploaded_meshes: Res<UploadedMeshes>,
-    meshes: Res<bevy::render::render_asset::RenderAssets<bevy::render::mesh::RenderMesh>>,
 ) {
     *uploaded.0.lock().unwrap() = images.iter().map(|(id, _)| id).collect();
-    if uploaded_meshes
-        .wanted
-        .load(std::sync::atomic::Ordering::Relaxed)
-    {
-        *uploaded_meshes.ids.lock().unwrap() = meshes.iter().map(|(id, _)| id).collect();
-    }
     let mut next = PipelineStatus {
         pending: cache.waiting_pipelines().count(),
         ..default()

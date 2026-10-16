@@ -328,6 +328,13 @@ impl Pending {
         (0.7 * glbs + 0.3 * spawned).min(0.99)
     }
 
+    /// Whether the stream has requested `glb` (always true for GLBs it never queued).
+    pub(crate) fn requested(&self, glb: &str) -> bool {
+        self.stream_index
+            .get(glb)
+            .is_none_or(|&index| index < self.next)
+    }
+
     /// Requested GLBs that have not finished, with their textures.
     pub fn streaming(&self) -> usize {
         self.stream.len() - self.next + self.in_flight.len()

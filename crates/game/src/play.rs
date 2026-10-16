@@ -796,8 +796,9 @@ pub fn run(options: Options) -> Result<()> {
 /// process exits without tearing down the rest of the app: Bevy dropped hundreds of thousands
 /// of entities and gigabytes of map assets one by one, which kept a closed window "Not
 /// Responding" for about 27 seconds; the operating system reclaims that memory at once.
-fn exit_fast(world: &mut World) {
-    let Some(exit) = world.get_resource::<Messages<AppExit>>().and_then(|m| {
+/// Screenshots still being captured get up to two seconds first.
+fn exit_fast(world: &mut World, mut deferred: Local<Option<(AppExit, std::time::Instant)>>) {
+    let requested = world.get_resource::<Messages<AppExit>>().and_then(|m| {
         let exits: Vec<_> = m.iter_current_update_messages().cloned().collect();
         (!exits.is_empty()).then(|| {
             exits
@@ -806,9 +807,27 @@ fn exit_fast(world: &mut World) {
                 .cloned()
                 .unwrap_or(AppExit::Success)
         })
-    }) else {
+    });
+    if let Some(exit) = requested {
+        deferred.get_or_insert((exit, std::time::Instant::now()));
+    }
+    let Some((exit, asked)) = deferred.clone() else {
         return;
     };
+    // Screenshots still being captured or written get up to two seconds; the exit request is
+    // held back meanwhile so Bevy's runner does not start its slow teardown.
+    let capturing = world
+        .query_filtered::<(), With<Screenshot>>()
+        .iter(world)
+        .next()
+        .is_some()
+        || world
+            .get_resource::<Captures>()
+            .is_some_and(|c| c.in_flight.iter().any(|p| !p.is_file()));
+    if capturing && asked.elapsed().as_secs_f32() < 2.0 {
+        world.resource_mut::<Messages<AppExit>>().clear();
+        return;
+    }
     let started = std::time::Instant::now();
     world.remove_non_send::<Sim>();
     world.remove_resource::<crate::perf_log::PerfLog>();
@@ -1238,9 +1257,10 @@ fn simulate(
     mut cues: MessageWriter<crate::audio::SoundCue>,
     replay: Option<ResMut<crate::input_replay::InputReplay>>,
 ) {
-    // Hold the simulation behind the loading screen until the area is ready (play_gate.rs),
-    // then MAP_SETTLE_SECS more, past the one-off presentation stall that follows the map's
-    // upload. Scripted runs wait for the whole map so they line up with frames.
+    // Hold the simulation behind the loading screen until the whole map has loaded and is
+    // drawable (play_gate.rs), then MAP_SETTLE_SECS more, past the one-off presentation stall
+    // that follows the map's upload. Scripted and replayed runs wait the same way, so their
+    // frames line up run to run.
     if !gate.open(sim.step == 0) {
         return;
     }
