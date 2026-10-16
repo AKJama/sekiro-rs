@@ -51,6 +51,8 @@ mod menu;
 mod perf_log;
 mod play;
 mod presentation;
+#[cfg(feature = "profile-spans")]
+mod span_profile;
 mod viewer;
 
 use std::path::PathBuf;
@@ -414,7 +416,19 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
     })
 }
 
+/// When this process started, for load timings measured from launch.
+fn process_start() -> std::time::Instant {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *START.get_or_init(std::time::Instant::now)
+}
+
+/// Seconds since this process started.
+fn since_start() -> f32 {
+    process_start().elapsed().as_secs_f32()
+}
+
 fn main() -> anyhow::Result<()> {
+    process_start();
     dispatch()?;
     menu::relaunch()?;
     Ok(())

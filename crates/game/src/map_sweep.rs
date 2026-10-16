@@ -423,6 +423,7 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
             hour: f32::NAN,
             gparam: None,
             within: None,
+            focus: None,
         },
     )?;
     if (options.gate.is_some() || crate::arg_value(args, "--sweep-views").is_some())

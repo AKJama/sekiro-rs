@@ -53,6 +53,10 @@ mod arena_c_scene;
 mod arena_d_scene;
 #[path = "cinematic_fade.rs"]
 mod cinematic_fade;
+#[path = "live_check.rs"]
+mod live_check;
+#[path = "play_gate.rs"]
+mod play_gate;
 #[path = "rope.rs"]
 mod rope;
 
@@ -234,13 +238,6 @@ struct EnemyScene {
 }
 
 const STEP_HZ: f64 = 60.0;
-/// Seconds the fight waits after the map has loaded. About 1.9 s after the map's textures and
-/// meshes are uploaded, presentation stalls once for 50 to 70 ms: the render world waits that
-/// long for the next swapchain image (measured on an RTX 5070 Ti with Vulkan, 2026-10-10, in
-/// every run with map pieces drawn, in none without, and at the same time when the start was
-/// held longer; no CPU work, pipeline compile, sound or clip load lines up with it; STATUS.md,
-/// "Frame pacing"). Starting after it keeps that stall out of the fight.
-const MAP_SETTLE_SECS: f32 = 2.5;
 /// Radians of camera turn per mouse count (0.0035 was reported as far too sensitive).
 const MOUSE_SENSITIVITY: f32 = 0.0012;
 const WOLF: usize = 0;
@@ -337,6 +334,8 @@ pub fn run(options: Options) -> Result<()> {
             missing.join(", ")
         );
     }
+    // Seconds since launch at each loading stage, for load-time reports.
+    let stage = |name: &str| eprintln!("startup: {name} at {:.1} s", crate::since_start());
     let roster = sekiro_sim::registry::Registry::load(&cache).map_err(anyhow::Error::msg)?;
     // Duel has two mandatory slots; exploration uses an unoccupied soldier slot, never a boss
     // encounter, and does not spawn its model or controller.
@@ -351,8 +350,10 @@ pub fn run(options: Options) -> Result<()> {
         AnimLibrary::load(&cache, "c0000")?,
         AnimLibrary::load(&cache, &anim_chr)?,
     ];
+    stage("roster and animations");
     let mut duel = Duel::load_with(&cache, 6.0, opponent)
         .map_err(|e| anyhow::anyhow!("loading the simulation: {e}"))?;
+    stage("simulation");
     duel.rules
         .set_attack_power(options.attack_power)
         .map_err(anyhow::Error::msg)?;
@@ -442,6 +443,7 @@ pub fn run(options: Options) -> Result<()> {
     } else if let Some(id) = &options.map {
         let dir = map::map_dir(&cache, id)?;
         let world = Arc::new(map::world::collision_world(&cache, id)?);
+        stage("collision world");
         let (start, yaw_degrees) = match options.spawn {
             Some([x, y, z, yaw]) => {
                 let y = world.floor(x, z, y + 1.0).unwrap_or(y);
@@ -511,9 +513,19 @@ pub fn run(options: Options) -> Result<()> {
         }
     }
 
+    stage("traversal data");
+    // Map GLBs stream outwards from here.
+    let start_position = Vec3::from_array(duel.player.body.position);
     let mut app = App::new();
+    #[cfg(feature = "profile-spans")]
+    let defaults = DefaultPlugins.set(bevy::log::LogPlugin {
+        custom_layer: crate::span_profile::layer,
+        ..default()
+    });
+    #[cfg(not(feature = "profile-spans"))]
+    let defaults = DefaultPlugins;
     app.add_plugins(
-        DefaultPlugins
+        defaults
             .set(crate::map::layered_gltf_plugin())
             .set(WindowPlugin {
                 primary_window: Some(Window {
@@ -556,6 +568,7 @@ pub fn run(options: Options) -> Result<()> {
         ..default()
     })
     .insert_resource(bevy::winit::WinitSettings::continuous())
+    .insert_resource(crate::map::upload_budget())
     .insert_resource(Time::<Fixed>::from_hz(STEP_HZ))
     .insert_resource(Libraries(libraries))
     .insert_resource(EnemyScene {
@@ -643,7 +656,16 @@ pub fn run(options: Options) -> Result<()> {
             .enemy_present
             .then(|| (options.opponent.chr.clone(), options.opponent.npc_param)),
     })
-    .add_systems(Startup, setup)
+    // Wolf's and the enemy's models load before the map's GLBs are queued.
+    .add_systems(Startup, setup.before(map::MapSpawn))
+    .init_resource::<play_gate::PlayGate>()
+    .add_systems(Startup, play_gate::spawn_screen)
+    .add_systems(
+        Update,
+        (play_gate::check_render, play_gate::update)
+            .chain()
+            .run_if(play_gate::loading),
+    )
     .insert_resource(rope::RopeCache(cache.clone()))
     .add_systems(
         Startup,
@@ -692,6 +714,15 @@ pub fn run(options: Options) -> Result<()> {
         arena_c_scene::install(&mut app, &cache, options.arena)?;
     }
     crate::perf_log::register!(app);
+    #[cfg(feature = "profile-spans")]
+    app.add_systems(Last, crate::span_profile::report);
+    if let Some(check) = live_check::LiveCheck::from_args(
+        &std::env::args().collect::<Vec<_>>(),
+        on_map.as_ref().map(|(dir, _, _)| dir.as_path()),
+    )? {
+        app.insert_resource(check)
+            .add_systems(Last, live_check::observe.before(exit_fast));
+    }
     if std::env::var_os("PF_RESPAWN_PROBE").is_some() {
         app.add_systems(Last, renderer_counts);
     }
@@ -737,6 +768,7 @@ pub fn run(options: Options) -> Result<()> {
                 hour: options.hour,
                 gparam: options.gparam.clone(),
                 within,
+                focus: Some(start_position),
             },
         )?;
         app.insert_resource(MapCollision(world));
@@ -746,9 +778,62 @@ pub fn run(options: Options) -> Result<()> {
     }
     map::ready::install(&mut app);
     app.add_plugins(crate::presentation::PresentationPlugin)
-        .add_systems(Last, capture);
+        .add_systems(Last, (capture, exit_fast).chain());
     app.run();
     Ok(())
+}
+
+/// Ends a play session as soon as anything asks the app to exit (closing the window, the pause
+/// menu, `--exit`, the live check). The simulation (brain memory and session reports) and the
+/// perf log are dropped so they save, a pause-menu relaunch starts its process, and the
+/// process exits without tearing down the rest of the app: Bevy dropped hundreds of thousands
+/// of entities and gigabytes of map assets one by one, which kept a closed window "Not
+/// Responding" for about 27 seconds; the operating system reclaims that memory at once.
+/// Screenshots still being captured get up to two seconds first.
+fn exit_fast(world: &mut World, mut deferred: Local<Option<(AppExit, std::time::Instant)>>) {
+    // Any error exit wins over success, in one pass.
+    let requested = world.get_resource::<Messages<AppExit>>().and_then(|m| {
+        m.iter_current_update_messages()
+            .fold(None, |chosen: Option<AppExit>, exit| match chosen {
+                Some(error) if error.is_error() => Some(error),
+                _ => Some(exit.clone()),
+            })
+    });
+    if let Some(exit) = requested {
+        deferred.get_or_insert((exit, std::time::Instant::now()));
+    }
+    let Some((exit, asked)) = deferred.clone() else {
+        return;
+    };
+    // Screenshots still being captured or written get up to two seconds; the exit request is
+    // held back meanwhile so Bevy's runner does not start its slow teardown.
+    let capturing = world
+        .query_filtered::<(), With<Screenshot>>()
+        .iter(world)
+        .next()
+        .is_some()
+        || world
+            .get_resource::<Captures>()
+            .is_some_and(|c| c.in_flight.iter().any(|p| !p.is_file()));
+    if capturing && asked.elapsed().as_secs_f32() < 2.0 {
+        world.resource_mut::<Messages<AppExit>>().clear();
+        return;
+    }
+    let started = std::time::Instant::now();
+    world.remove_non_send::<Sim>();
+    world.remove_resource::<crate::perf_log::PerfLog>();
+    eprintln!(
+        "shutdown: session saved in {:.2} s, exiting {:.2} s after launch",
+        started.elapsed().as_secs_f32(),
+        crate::since_start()
+    );
+    if let Err(error) = crate::menu::relaunch() {
+        eprintln!("relaunch: {error:#}");
+    }
+    std::process::exit(match exit {
+        AppExit::Success => 0,
+        AppExit::Error(code) => i32::from(code.get()),
+    })
 }
 
 /// Adapt the two-slot fight simulation to an absent opponent, without defeating a map boss.
@@ -1158,22 +1243,16 @@ fn simulate(
     mut fade: ResMut<cinematic_fade::Fade>,
     live: Res<LiveInput>,
     mut orbit: ResMut<Orbit>,
-    rigs: Query<&Rig, With<Actor>>,
-    map_pending: Option<Res<map::Pending>>,
+    gate: Res<play_gate::PlayGate>,
     mut sounds: ResMut<crate::audio::SoundLibrary>,
     mut cues: MessageWriter<crate::audio::SoundCue>,
     replay: Option<ResMut<crate::input_replay::InputReplay>>,
 ) {
-    // Hold the simulation until the models (and the map) are on screen, so scripted runs line
-    // up with frames.
-    // The start also waits until the map has been drawn for MAP_SETTLE_SECS, past the one-off
-    // presentation stall that follows the map's upload.
-    if rigs.is_empty()
-        || !rigs.iter().all(|r| r.bound)
-        || map_pending
-            .as_ref()
-            .is_some_and(|p| !p.loaded() || (sim.step == 0 && p.loaded_for() < MAP_SETTLE_SECS))
-    {
+    // Hold the simulation behind the loading screen until the whole map has loaded, is drawable
+    // and frames have settled (play_gate.rs; its stable-frame wait also covers the one-off
+    // presentation stall after the map's upload). Scripted and replayed runs wait the same
+    // way, so their frames line up run to run.
+    if !gate.open() {
         return;
     }
     if sim
@@ -1856,20 +1935,18 @@ fn capture(
     if cap.pending.iter().any(|(s, _)| *s <= step) && !readiness.allow() {
         return;
     }
-    let due: Vec<PathBuf> = cap
-        .pending
-        .iter()
-        .filter(|(s, _)| *s <= step)
-        .map(|(_, p)| p.clone())
-        .collect();
-    cap.pending.retain(|(s, _)| *s > step);
-    for path in due {
+    cap.in_flight.retain(|p| !p.is_file());
+    // The window takes one screenshot per frame (Bevy skips a duplicate render target), so
+    // shots that fall due together, such as after a readiness wait, go one after another.
+    if cap.in_flight.is_empty()
+        && let Some(index) = cap.pending.iter().position(|(s, _)| *s <= step)
+    {
+        let (_, path) = cap.pending.remove(index);
         commands
             .spawn(Screenshot::primary_window())
             .observe(save_to_disk(path.clone()));
         cap.in_flight.push(path);
     }
-    cap.in_flight.retain(|p| !p.is_file());
     let script_done =
         sim.script.as_ref().is_some_and(|s| step >= s.len()) || replay.is_some_and(|r| r.done());
     if cap.exit_after_script && script_done && cap.pending.is_empty() && cap.in_flight.is_empty() {

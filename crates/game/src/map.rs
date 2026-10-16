@@ -127,9 +127,34 @@ impl GroupMode {
     }
 }
 
+/// The map part root (a [`DrawGroups`] entity) at or above `entity`, if it belongs to the map.
+pub(crate) fn map_root(
+    entity: Entity,
+    parents: &Query<&ChildOf>,
+    roots: &Query<(), With<DrawGroups>>,
+) -> Option<Entity> {
+    let mut ancestor = entity;
+    while !roots.contains(ancestor) {
+        ancestor = parents.get(ancestor).ok()?.parent();
+    }
+    Some(ancestor)
+}
+
+/// The world-space axis-aligned bounds of a mesh's local bounds under `transform`.
+pub(crate) fn world_bounds(transform: &GlobalTransform, aabb: &Aabb) -> (Vec3, Vec3) {
+    let centre = transform.transform_point(Vec3::from(aabb.center));
+    let extent = Vec3::from(transform.affine().matrix3.abs() * aabb.half_extents);
+    (centre - extent, centre + extent)
+}
+
+/// The startup system that spawns map roots and queues their GLBs; models that must load
+/// before the map (the player's) are requested `.before` it.
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MapSpawn;
+
 /// A piece's draw groups.
 #[derive(Component)]
-struct DrawGroups([u32; 8]);
+pub(crate) struct DrawGroups([u32; 8]);
 
 /// Distant render-only scenery is independent of the local collision's draw groups.
 #[derive(Component)]
@@ -194,7 +219,26 @@ struct Marker;
 #[derive(Component)]
 struct Hud;
 
+/// Map GLBs requested at once while streaming. Each request counts until its textures have
+/// loaded too, so the nearest models and their textures finish before farther ones start.
+/// Eight keeps the loaders busy (the same total load time as 32 in the Outskirts) while
+/// fewer assets finish in one frame: the longest loading frame fell from 3.2-5.2 s to 2.2-2.4 s.
+const STREAM_IN_FLIGHT: usize = 8;
+
+/// One map GLB to load and the scene instances that wait for it.
+struct StreamRequest {
+    glb: String,
+    /// The connected-world block that owns the model, for its residency state.
+    block: Option<String>,
+    /// Bounded sibling paths of the connected world need the explicit override.
+    unapproved: bool,
+    /// Entities that get this GLB's scene (`level`) once it is requested.
+    targets: Vec<(Entity, usize)>,
+}
+
 /// Every GLB handle the map needs, to know when loading is done.
+/// Map GLBs are requested nearest-first from the start position, a few at a time
+/// ([`stream_assets`]), so the area around the player loads first.
 #[derive(Resource)]
 pub struct Pending {
     handles: Vec<UntypedHandle>,
@@ -205,6 +249,11 @@ pub struct Pending {
     /// When [`add_map`] was called, for the load time in the log.
     added_at: Instant,
     loaded_at: Option<Instant>,
+    /// GLBs in load order, the next one to request, and the GLBs requested but not finished.
+    stream: Vec<StreamRequest>,
+    stream_index: std::collections::HashMap<String, usize>,
+    next: usize,
+    in_flight: Vec<UntypedHandle>,
 }
 
 impl Default for Pending {
@@ -216,6 +265,10 @@ impl Default for Pending {
             ready_roots: std::collections::HashSet::new(),
             added_at: Instant::now(),
             loaded_at: None,
+            stream: Vec::new(),
+            stream_index: std::collections::HashMap::new(),
+            next: 0,
+            in_flight: Vec::new(),
         }
     }
 }
@@ -230,11 +283,159 @@ impl Pending {
     pub fn loaded_for(&self) -> f32 {
         self.loaded_at.map_or(0.0, |t| t.elapsed().as_secs_f32())
     }
+
+    /// Queue `entity` to receive scene `level` of `glb` once that GLB is requested, and return
+    /// the GLB's stream index. Requests keep the order of their first call, so callers queue
+    /// nearest-first.
+    pub(crate) fn queue(
+        &mut self,
+        glb: &str,
+        block: Option<&str>,
+        unapproved: bool,
+        target: (Entity, usize),
+    ) -> usize {
+        let index = match self.stream_index.get(glb) {
+            Some(&index) => index,
+            None => {
+                self.stream.push(StreamRequest {
+                    glb: glb.to_string(),
+                    block: block.map(str::to_string),
+                    unapproved,
+                    targets: Vec::new(),
+                });
+                self.stream_index
+                    .insert(glb.to_string(), self.stream.len() - 1);
+                self.stream.len() - 1
+            }
+        };
+        self.stream[index].targets.push(target);
+        self.instances += 1;
+        index
+    }
+
+    /// A scene instance attached outside the stream (a capture scene, or a level of detail
+    /// first selected during play).
+    pub(crate) fn add_instance(&mut self) {
+        if self.loaded_at.is_none() {
+            self.instances += 1;
+        }
+    }
+
+    /// Fraction of the map's GLBs (with textures) loaded and of its scene instances spawned.
+    pub fn progress(&self) -> f32 {
+        if self.loaded() {
+            return 1.0;
+        }
+        let glbs = (self.next - self.in_flight.len()) as f32 / self.stream.len().max(1) as f32;
+        let spawned = self.ready.min(self.instances) as f32 / self.instances.max(1) as f32;
+        (0.7 * glbs + 0.3 * spawned).min(0.99)
+    }
+
+    /// The GLB of stream request `index` once the stream has requested it, with its override.
+    pub(crate) fn requested(&self, index: usize) -> Option<(&str, bool)> {
+        (index < self.next).then(|| {
+            let request = &self.stream[index];
+            (request.glb.as_str(), request.unapproved)
+        })
+    }
+
+    /// Requested GLBs that have not finished, with their textures.
+    pub fn streaming(&self) -> usize {
+        self.stream.len() - self.next + self.in_flight.len()
+    }
 }
 
-/// The world-space horizontal bounding box of a model row placed at `p` (from the `min` and
+/// Whether an asset and its dependencies have loaded, or its load failed.
+fn asset_finished(assets: &AssetServer, id: impl Into<UntypedAssetId>) -> bool {
+    let id = id.into();
+    assets.is_loaded_with_dependencies(id)
+        || matches!(assets.get_load_state(id), Some(LoadState::Failed(_)))
+}
+
+/// Load a map asset, with the sibling-path override the connected world needs.
+pub(crate) fn load_map_asset<A: Asset>(
+    assets: &AssetServer,
+    path: impl Into<bevy::asset::AssetPath<'static>>,
+    unapproved: bool,
+) -> Handle<A> {
+    if unapproved {
+        assets.load_builder().override_unapproved().load(path)
+    } else {
+        assets.load(path)
+    }
+}
+
+/// Scene `level` of a map GLB.
+pub(crate) fn scene_handle(
+    assets: &AssetServer,
+    glb: &str,
+    level: usize,
+    unapproved: bool,
+) -> Handle<bevy::world_serialization::WorldAsset> {
+    load_map_asset(
+        assets,
+        GltfAssetLabel::Scene(level).from_asset(glb.to_string()),
+        unapproved,
+    )
+}
+
+/// Request queued map GLBs, nearest first, keeping [`STREAM_IN_FLIGHT`] loading at a time.
+fn stream_assets(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    mut pending: ResMut<Pending>,
+    mut world: Option<ResMut<world::MapWorld>>,
+) {
+    let _timer = crate::perf_log::SystemTimer::start("stream_assets");
+    if pending.next >= pending.stream.len() && pending.in_flight.is_empty() {
+        return;
+    }
+    pending
+        .in_flight
+        .retain(|h| !asset_finished(&assets, h.id()));
+    while pending.in_flight.len() < STREAM_IN_FLIGHT && pending.next < pending.stream.len() {
+        let index = pending.next;
+        pending.next += 1;
+        let request = &pending.stream[index];
+        let handle: Handle<Gltf> = load_map_asset(&assets, request.glb.clone(), request.unapproved);
+        for &(entity, level) in &request.targets {
+            commands.entity(entity).insert(WorldAssetRoot(scene_handle(
+                &assets,
+                &request.glb,
+                level,
+                request.unapproved,
+            )));
+        }
+        if let (Some(block), Some(world)) = (request.block.clone(), world.as_mut())
+            && let Some(block) = world.blocks.get_mut(&block)
+        {
+            block.handles.push(handle.clone());
+        }
+        pending.handles.push(handle.clone().untyped());
+        pending.in_flight.push(handle.untyped());
+    }
+}
+
+/// Distance from `focus` to a placed model's oriented bounds (its origin without bounds).
+pub(crate) fn placed_distance(model: &Value, focus: Vec3, transform: &Transform) -> f32 {
+    match (vec3(&model["min"]), vec3(&model["max"])) {
+        (Some(min), Some(max)) => lod::bounds_distance(focus, transform, min, max),
+        _ => focus.distance(transform.translation),
+    }
+}
+
+/// A part row's placement in Bevy space.
+pub(crate) fn row_transform(row: &Value) -> Option<Transform> {
+    pose(row).map(|p| Transform {
+        translation: p.translation,
+        rotation: p.rotation,
+        scale: p.scale,
+    })
+}
+
+/// The world-space horizontal bounding box of a model row placed at `transform` (from the `min` and
 /// `max` its `models` entry records).
-fn placed_box(model: &Value, p: &Pose) -> Option<(Vec2, Vec2)> {
+fn placed_box(model: &Value, transform: &Transform) -> Option<(Vec2, Vec2)> {
     let (min, max) = (vec3(&model["min"])?, vec3(&model["max"])?);
     let mut lo = Vec2::splat(f32::MAX);
     let mut hi = Vec2::splat(f32::MIN);
@@ -244,7 +445,7 @@ fn placed_box(model: &Value, p: &Pose) -> Option<(Vec2, Vec2)> {
             if i & 2 == 0 { min.y } else { max.y },
             if i & 4 == 0 { min.z } else { max.z },
         );
-        let w = p.translation + p.rotation * (p.scale * corner);
+        let w = transform.transform_point(corner);
         lo = lo.min(Vec2::new(w.x, w.z));
         hi = hi.max(Vec2::new(w.x, w.z));
     }
@@ -319,6 +520,9 @@ pub struct MapScene {
     /// Arena collision and object radius. Map pieces use ARENA_VISUAL_RADIUS unless
     /// --no-far-scenery is set; `None` loads the whole map.
     pub within: Option<(Vec3, f32)>,
+    /// Where the player or camera starts: map GLBs load nearest-first from here. `None` keeps
+    /// file order.
+    pub focus: Option<Vec3>,
 }
 
 /// Default draw param of a map: `m11_00_00_00` -> `m11_00_0000`.
@@ -383,6 +587,7 @@ pub fn player_start(dir: &Path, index: usize) -> Result<(Vec3, f32)> {
 /// [`MapFocus`] entity, a sun, ambient light, sky colour, fog and far plane on every 3D camera,
 /// and the collision view (C toggles it, G cycles group modes, M toggles markers).
 pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
+    let stage = |name: &str| info!("map setup: {name} at {:.1} s", crate::since_start());
     let json: Value = serde_json::from_slice(
         &std::fs::read(dir.join("layout.json")).context("reading layout.json")?,
     )?;
@@ -451,6 +656,7 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
             }
         }
         app.insert_resource(story_maps);
+        stage("connected world and story");
         app.add_plugins(visibility::MapVisibilityPlugin)
             .insert_resource(world)
             .add_systems(
@@ -612,7 +818,9 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
             }
         }
     }
+    stage("lighting selection, sky and probes");
     crate::lighting::install_irradiance(app, dir, &probes)?;
+    stage("irradiance volumes");
     app.insert_resource(probes);
     let args: Vec<_> = std::env::args().collect();
     if args
@@ -637,6 +845,7 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
     map_material::install(app, &scene.prefix, dir, &args);
     crate::map_fog_surface::install(app, &scene.prefix);
     crate::map_grass::install(app, dir, &scene.prefix)?;
+    stage("materials and grass");
     app.insert_resource(ShadowSettings::from_args(&gparam, hour, &args)?);
     LocalLights::install(app, dir, &args)?;
     app.add_plugins(WireframePlugin::default())
@@ -668,13 +877,13 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
         })
         .init_resource::<Pending>()
         .add_observer(map_scene_ready)
-        .add_systems(Startup, spawn_map)
+        .add_systems(Startup, spawn_map.in_set(MapSpawn))
         .add_systems(
             Update,
             (
                 camera_environment,
                 toggle_collision,
-                track_loading,
+                (stream_assets, track_loading).chain(),
                 budget_map_shadows,
                 update_local_lights.after(world::update),
                 (pick_groups, apply_groups, apply_lighting, apply_probes).chain(),
@@ -759,7 +968,8 @@ pub fn run(options: Options) -> Result<()> {
     ))
     // Keep rendering at full rate when the window is not focused, so screenshots and
     // `--uncapped` measurements from a terminal are not throttled to 60 Hz.
-    .insert_resource(bevy::winit::WinitSettings::continuous());
+    .insert_resource(bevy::winit::WinitSettings::continuous())
+    .insert_resource(upload_budget());
     add_map(
         &mut app,
         &dir,
@@ -778,6 +988,7 @@ pub fn run(options: Options) -> Result<()> {
             hour: options.hour,
             gparam: options.gparam,
             within: None,
+            focus: Some(start),
         },
     )?;
     if options.camera.is_none()
@@ -818,6 +1029,15 @@ pub fn run(options: Options) -> Result<()> {
 }
 
 const SKY: Color = Color::srgb(0.62, 0.68, 0.74);
+
+/// GPU upload budget per frame while a map streams in. Without it the render world uploads
+/// every mesh and texture that finished loading in one frame, stalling for seconds (Windows
+/// then reports the window as not responding).
+pub(crate) const UPLOAD_BYTES_PER_FRAME: usize = 96 << 20;
+
+pub(crate) fn upload_budget() -> bevy::render::render_asset::RenderAssetBytesPerFrame {
+    bevy::render::render_asset::RenderAssetBytesPerFrame::new(UPLOAD_BYTES_PER_FRAME)
+}
 
 pub(crate) fn layered_gltf_plugin() -> bevy::gltf::GltfPlugin {
     bevy::gltf::GltfPlugin::default()
@@ -879,16 +1099,28 @@ fn spawn_map(
     } else if !scene.no_pieces {
         let models = &layout.json["models"];
         let mut spawned = 0;
-        let mut seen = std::collections::HashSet::new();
         let kinds: &[&str] = if scene.objects {
             &["pieces", "objects"]
         } else {
             &["pieces"]
         };
-        let rows = kinds
+        // Nearest first, so the stream loads the area around the start before the rest.
+        let mut rows: Vec<(f32, &Value, Transform)> = kinds
             .iter()
-            .flat_map(|k| layout.json[*k].as_array().into_iter().flatten());
-        for row in rows {
+            .flat_map(|k| layout.json[*k].as_array().into_iter().flatten())
+            .filter_map(|row| {
+                let transform = row_transform(row)?;
+                let distance = match (scene.focus, row["model"].as_str()) {
+                    (Some(focus), Some(model)) => {
+                        placed_distance(&models[model], focus, &transform)
+                    }
+                    _ => 0.0,
+                };
+                Some((distance, row, transform))
+            })
+            .collect();
+        rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, row, transform) in rows {
             let Some(model) = row["model"].as_str() else {
                 continue;
             };
@@ -906,39 +1138,26 @@ fn spawn_map(
                 continue;
             };
             let glb = format!("{}{glb}", scene.prefix);
-            let Some(p) = pose(row) else { continue };
             if let Some((center, collision_radius)) = scene.within {
                 let radius = if model.starts_with('m') && far_enabled {
                     sekiro_sim::arena::ARENA_VISUAL_RADIUS
                 } else {
                     collision_radius
                 };
-                let inside = placed_box(&models[model], &p).is_some_and(|(lo, hi)| {
+                let inside = placed_box(&models[model], &transform).is_some_and(|(lo, hi)| {
                     sekiro_sim::arena::box_within(lo, hi, center.xz(), radius)
                 });
                 if !inside {
                     continue;
                 }
             }
-            if seen.insert(glb.clone()) {
-                pending
-                    .handles
-                    .push(assets.load::<Gltf>(glb.clone()).untyped());
-            }
             let far_scenery = scene.within.is_some_and(|(center, radius)| {
-                placed_box(&models[model], &p).is_some_and(|(lo, hi)| {
+                placed_box(&models[model], &transform).is_some_and(|(lo, hi)| {
                     !sekiro_sim::arena::box_within(lo, hi, center.xz(), radius)
                 })
             });
-            let mut entity = commands.spawn((
-                DrawGroups(groups8(&row["draw_groups"])),
-                WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(glb))),
-                Transform {
-                    translation: p.translation,
-                    rotation: p.rotation,
-                    scale: p.scale,
-                },
-            ));
+            let mut entity = commands.spawn((DrawGroups(groups8(&row["draw_groups"])), transform));
+            pending.queue(&glb, None, false, (entity.id(), 0));
             if far_scenery {
                 entity.insert(FarScenery);
             }
@@ -950,7 +1169,6 @@ fn spawn_map(
             }
             spawned += 1;
         }
-        pending.instances = spawned;
         info!("spawned {spawned} map piece and object instances");
     }
 
@@ -1359,29 +1577,10 @@ fn budget_map_shadows(
     let mut total = 0;
     let mut casting = 0;
     for (entity, transform, bounds, excluded) in &meshes {
-        let mut ancestor = entity;
-        while !roots.contains(ancestor) {
-            let Ok(parent) = parents.get(ancestor) else {
-                break;
-            };
-            ancestor = parent.parent();
-        }
-        if !roots.contains(ancestor) {
+        if map_root(entity, &parents, &roots).is_none() {
             continue;
         }
-        let mut lo = Vec3::splat(f32::INFINITY);
-        let mut hi = Vec3::splat(f32::NEG_INFINITY);
-        for x in [-1., 1.] {
-            for y in [-1., 1.] {
-                for z in [-1., 1.] {
-                    let corner = Vec3::from(bounds.center)
-                        + Vec3::from(bounds.half_extents) * Vec3::new(x, y, z);
-                    let corner = transform.transform_point(corner);
-                    lo = lo.min(corner);
-                    hi = hi.max(corner);
-                }
-            }
-        }
+        let (lo, hi) = world_bounds(transform, bounds);
         let cast = settings.enabled
             && position.distance_squared(position.clamp(lo, hi))
                 <= settings.caster_distance.powi(2);
@@ -1487,28 +1686,22 @@ fn track_loading(
     if pending.loaded_at.is_some() {
         return;
     }
-    if pending.ready < pending.instances {
+    if pending.next < pending.stream.len() || pending.ready < pending.instances {
         return;
     }
     // A GLTF scene contains nested node worlds. The outer scene's Ready event
     // does not mean those node instances have finished creating their meshes.
     for (entity, instance) in &worlds {
-        let mut ancestor = entity;
-        while !roots.contains(ancestor) {
-            let Ok(parent) = parents.get(ancestor) else {
-                break;
-            };
-            ancestor = parent.parent();
-        }
-        if roots.contains(ancestor) && instance.is_none_or(|i| !instances.instance_is_ready(**i)) {
+        if map_root(entity, &parents, &roots).is_some()
+            && instance.is_none_or(|i| !instances.instance_is_ready(**i))
+        {
             return;
         }
     }
-    let done = pending.handles.iter().all(|h| {
-        let id: UntypedAssetId = h.id();
-        assets.is_loaded_with_dependencies(id)
-            || matches!(assets.get_load_state(id), Some(LoadState::Failed(_)))
-    });
+    let done = pending
+        .handles
+        .iter()
+        .all(|h| asset_finished(&assets, h.id()));
     if done {
         info!(
             "all map assets loaded ({} instances) {:.1} s after the map was added",
@@ -1777,6 +1970,7 @@ mod tests {
                     hour: 6.,
                     gparam: None,
                     within: None,
+                    focus: None,
                 },
             })
             .insert_resource(Groups {
