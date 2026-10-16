@@ -20,7 +20,8 @@
 //! starting at that simulation step and taking that long (with `--live-shots`, a screenshot every
 //! 45 degrees); the run also waits for the turn. Every connected map block's request state
 //! change after play starts (`map_world`) is recorded with the collision part selecting the map,
-//! so a run can assert that a block never retires while the camera turns.
+//! so a run can assert that a block never retires while the camera turns; `selections` lists
+//! every collision part that selected the map after play started.
 //! Every line is also logged as `live check:` for manual runs.
 use super::{MapCollision, Sim, WOLF};
 use bevy::app::AppExit;
@@ -90,6 +91,8 @@ pub(super) struct LiveCheck {
     /// Request state per map block, and every change after play started.
     block_states: BTreeMap<String, String>,
     block_changes: Vec<serde_json::Value>,
+    /// Every collision part selecting the map after play started, in order, without repeats.
+    selections: Vec<Option<String>>,
     finished: bool,
 }
 
@@ -185,6 +188,7 @@ impl LiveCheck {
                 .transpose()?,
             block_states: BTreeMap::new(),
             block_changes: Vec::new(),
+            selections: Vec::new(),
             finished: false,
         }))
     }
@@ -371,6 +375,13 @@ pub(super) fn observe_world(
     if let Some(world) = world {
         let selected = world.selected.as_ref().map(|(b, c)| format!("{b}/{c}"));
         world_selected.clone_from(&selected);
+        if playing && check.selections.last() != Some(&selected) {
+            info!(
+                "live check: map selected by {selected:?} at step {}",
+                sim.step
+            );
+            check.selections.push(selected.clone());
+        }
         for (id, block) in &world.blocks {
             // A demanded block with no display groups draws none of its parts.
             let empty = if block.normal == [0; 8] {
@@ -647,6 +658,7 @@ pub(super) fn observe(
         "orbit_turned": check.orbit.as_ref().map(|t| t.done),
         "block_states": check.block_states,
         "block_changes": check.block_changes,
+        "selections": check.selections,
         "samples": check.samples,
     });
     info!(

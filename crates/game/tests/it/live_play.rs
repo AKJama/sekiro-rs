@@ -63,6 +63,8 @@ const GRAPPLE: &str = "120 0 0 -
 240 0 0 -
 720 0 0 -
 ";
+/// The ledge's collision part, which must select the map from spawn to the end of the turn.
+const LEDGE_PART: &str = "m11_00_00_00/h023300";
 
 fn run(root: &Path, out: &Path, name: &str, extra: &[&str]) -> Value {
     let summary = out.join(format!("{name}.json"));
@@ -231,7 +233,20 @@ fn outskirts_loads_then_plays_smoothly_on_drawn_ground() {
                 "the Outskirts block lost its groups: {change}"
             );
         }
+        assert_eq!(
+            change["selected"], LEDGE_PART,
+            "the map left the ledge's part: {change}"
+        );
     }
+    assert_eq!(
+        s["block_states"]["m11_00_00_00"], "Ready",
+        "the Outskirts block is not drawn at the end"
+    );
+    assert_eq!(
+        s["selections"],
+        serde_json::json!([LEDGE_PART]),
+        "the map left the ledge's part"
+    );
     let samples = s["samples"].as_array().expect("samples");
     let near: Vec<u64> = samples
         .iter()
@@ -239,7 +254,7 @@ fn outskirts_loads_then_plays_smoothly_on_drawn_ground() {
         .collect();
     assert!(near.len() >= 40, "too few samples: {near:?}");
     assert!(
-        near.iter().all(|&n| n > 0),
+        near.iter().all(|&n| n >= 100),
         "the map around Wolf vanished: drawn meshes near {near:?}"
     );
     println!(

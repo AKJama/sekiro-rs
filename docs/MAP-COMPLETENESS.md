@@ -1109,10 +1109,12 @@ When transient collisions are queued, every block except the reserved one is cle
 
 The implementation follows the high-confidence branches.
 In play, `map_world::MapWorld::stand` selects the player-collidable part under Wolf's feet, from 0.5 m above them to `STAND_REACH` (1 m) below, and keeps the last part when none is found.
+It takes a new part only while the simulation's body has ground contact (`sekiro_sim::body::Body::grounded`, published on `map::PlayerFocus`), so a jump's apex or a grapple flight past other parts keeps the last one.
 Before he has stood on anything, the nearest player-collidable part below him stands in for the exe's spawn cast.
+A jump of more than 10 m between frames (respawn, fall return, a tour stop) re-arms that spawn probe, as the exe re-runs its cast on map entry.
 That one part drives demand, participating parts and the lighting selection, and the orbit camera no longer contributes.
-The map viewer, render gates and captures keep the camera-driven probe with its 0.5 m tie band, because there the focus is a free camera rather than a character.
-The height band stands in for the physics ground contact; the exact contact (the low-resolution binder, capsule contact points, slopes and steps) is approximated.
+The map viewer, render gates and captures (including the pose server, whose requested player position is a free focus beside the sweep camera) keep the camera-driven probe with its 0.5 m tie band, because there the focus is a free camera rather than a character.
+The height band stands in for the physics ground contact's collision part; the simulation's ground query returns a height, not the triangle it hit, so the exact contact (the low-resolution binder, capsule contact points, slopes and steps) is approximated.
 
 The evidence comes from six read-only decompile exports made with the same `MapProbe.java` script against `re/ghidra`; they are local working files and are not checked in.
 

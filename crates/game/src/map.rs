@@ -555,7 +555,12 @@ pub struct MapFocus;
 /// and keeps it while he is off map collision, as the exe's hit collision does
 /// (`world::MapWorld::stand`). Without it the focus is a free camera.
 #[derive(Component)]
-pub struct PlayerFocus;
+pub struct PlayerFocus {
+    /// His physics body has ground contact (`sekiro_sim::body::Body::grounded`). The exe
+    /// takes a new hit collision only from a ground contact, so in the air (a jump's apex, a
+    /// grapple flight) the part stays.
+    pub grounded: bool,
+}
 
 /// `cache/maps/<id>`, or an error naming the export command.
 pub fn map_dir(cache: &Path, id: &str) -> Result<PathBuf> {

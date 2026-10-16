@@ -151,6 +151,11 @@ struct Surface {
 /// part he last stood on stays in force, as the exe keeps the character's last hit collision.
 const STAND_REACH: f32 = 1.0;
 
+/// How far the player's feet may move between two [`MapWorld::stand`] calls before it is a
+/// teleport (respawn, fall return, a tour stop) that re-arms the spawn probe. Drawn motion
+/// (sprints, grapple flights, falls) covers well under a metre a frame.
+const TELEPORT: f32 = 10.0;
+
 /// C/E consume the per-block demand here; F uses BlockPart and its authored row.
 /// Cached GLBs stay warm for the bounded neighbourhood after demand retires.
 #[derive(Resource)]
@@ -162,6 +167,8 @@ pub(crate) struct MapWorld {
     /// whether he really stood on it rather than it standing in before his first landing.
     standing: Option<(String, usize)>,
     stood: bool,
+    /// The player's feet at the last [`Self::stand`], to tell a teleport.
+    last_feet: Option<Vec3>,
     visibility_maps: BTreeMap<String, visibility::VisibilityMap>,
     requests: BTreeMap<String, visibility::BlockRequest>,
     lod: super::lod::LodTable,
@@ -517,6 +524,7 @@ impl MapWorld {
             selected: None,
             standing: None,
             stood: false,
+            last_feet: None,
             visibility_maps,
             requests: BTreeMap::new(),
             lod,
@@ -590,37 +598,42 @@ impl MapWorld {
         self.apply(&sources, story);
     }
 
-    /// The player-collidable part feet at `feet` stand on: the nearest surface below within
-    /// [`STAND_REACH`], or one at most 0.5 m above them.
-    fn stood_on(
-        &self,
-        feet: Vec3,
-        story: Option<&super::story::MapStory>,
-    ) -> Option<(String, usize)> {
-        self.hits(feet, story, true)
-            .into_iter()
-            .find(|h| (-0.5..=STAND_REACH).contains(&h.1))
-            .map(|(_, _, id, index)| (id, index))
-    }
-
     /// Play demand from the collision part the player stands on (`docs/MAP-COMPLETENESS.md`,
-    /// "The player's hit collision selects the map"). Off map collision (in the air, on the
-    /// wire perch, over a ravine) the last part stays. Until he first stands on one, the
-    /// nearest player-collidable part below him stands in, like the exe's spawn probe, and
-    /// is re-probed as he moves (the character is placed after the first frames). The camera
-    /// never takes part. Returns whether the selection changed.
-    pub(crate) fn stand(&mut self, feet: Vec3, story: Option<&super::story::MapStory>) -> bool {
-        let found = match self.stood_on(feet, story) {
-            Some(part) => {
-                self.stood = true;
-                Some(part)
-            }
-            None if !self.stood => self
-                .hits(feet, story, true)
-                .into_iter()
-                .find(|h| h.1 >= -0.5)
-                .map(|(_, _, id, index)| (id, index)),
-            None => None,
+    /// "The player's hit collision selects the map"): with ground contact (`grounded`), the
+    /// nearest player-collidable surface below his feet within [`STAND_REACH`], or one at most
+    /// 0.5 m above them. In the air, or grounded off map collision (the wire perch), the last
+    /// part stays. Until he first stands on one, the nearest player-collidable part below him
+    /// stands in, like the exe's spawn cast, and is re-probed as he moves (the character is
+    /// placed after the first frames). A jump of more than [`TELEPORT`] in one call (respawn,
+    /// fall return, a tour stop) re-arms that probe, as the exe re-runs its cast on map entry.
+    /// The camera never takes part. Returns whether the selection changed.
+    pub(crate) fn stand(
+        &mut self,
+        feet: Vec3,
+        grounded: bool,
+        story: Option<&super::story::MapStory>,
+    ) -> bool {
+        if self
+            .last_feet
+            .is_some_and(|last| last.distance(feet) > TELEPORT)
+        {
+            self.stood = false;
+        }
+        self.last_feet = Some(feet);
+        if self.stood && !grounded {
+            return false;
+        }
+        // Hits are sorted nearest below first, then above, so only the first can be in reach.
+        let Some((_, height, id, index)) = self.hits(feet, story, true).into_iter().next() else {
+            return false;
+        };
+        let found = if grounded && (-0.5..=STAND_REACH).contains(&height) {
+            self.stood = true;
+            Some((id, index))
+        } else if !self.stood && height >= -0.5 {
+            Some((id, index))
+        } else {
+            None
         };
         if found.is_none() || found == self.standing {
             return false;
@@ -696,17 +709,23 @@ impl MapWorld {
 pub(crate) fn update(
     mut world: ResMut<MapWorld>,
     assets: Res<AssetServer>,
-    focus: Query<(&Transform, Has<PlayerFocus>), With<MapFocus>>,
-    mut last: Local<Option<Vec<Vec3>>>,
+    focus: Query<(&Transform, Option<&PlayerFocus>), With<MapFocus>>,
+    mut last: Local<Option<Vec<(Vec3, bool)>>>,
     story: Res<super::story::MapStory>,
 ) {
-    let positions: Vec<_> = focus.iter().map(|(t, _)| t.translation).collect();
+    let positions: Vec<_> = focus
+        .iter()
+        .map(|(t, player)| (t.translation, player.is_some_and(|p| p.grounded)))
+        .collect();
     if last.as_ref() != Some(&positions) {
-        match focus.iter().find(|(_, player)| *player) {
-            Some((feet, _)) => {
-                world.stand(feet.translation, Some(&story));
+        match focus.iter().find_map(|(t, player)| Some((t, player?))) {
+            Some((feet, player)) => {
+                world.stand(feet.translation, player.grounded, Some(&story));
             }
-            None => world.demand(&positions, Some(&story)),
+            None => {
+                let cameras: Vec<_> = positions.iter().map(|&(p, _)| p).collect();
+                world.demand(&cameras, Some(&story));
+            }
         }
         *last = Some(positions);
     }
@@ -1421,21 +1440,47 @@ mod tests {
     }
 
     /// The grapple from the Outskirts ledge to the branch over the ravine: on the perch Wolf
-    /// stands on no map collision (only the event walls h900000 and h900001 lie below), so
-    /// the ledge's part stays and the camera orbiting out over the ravine changes nothing.
+    /// stands on no map collision (only the event walls h900000 and h900001, which he does not
+    /// collide with, lie below), so the ledge's part stays, whatever the camera does. A
+    /// teleport re-arms the spawn probe even in the air.
     #[test]
-    fn standing_part_survives_the_branch_while_the_camera_orbits() {
+    fn standing_part_survives_the_branch_and_follows_teleports() {
         let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
         if !cache.join("maps/m11_01_00_00/layout.json").is_file() {
             return;
         }
         let mut world = MapWorld::load(&cache, ASHINA[0], "maps/m11_00_00_00/").unwrap();
         let ledge = Vec3::new(-132.5, -44.6, -124.0);
-        let branch = Vec3::new(-137.6, -44.3, -124.5);
+        // Both ends of the branch: the user's perch and the one the live check's grapple
+        // reaches from the ledge.
+        let perches = [
+            Vec3::new(-137.6, -44.3, -124.5),
+            Vec3::new(-141.58, -44.26, -123.86),
+        ];
         let ledge_part = Some((ASHINA[0].to_string(), "h023300".to_string()));
 
+        // The event walls under the branch are not the player's collision.
+        for wall in ["h900000", "h900001"] {
+            let surface = world.blocks[ASHINA[0]]
+                .collisions
+                .iter()
+                .find(|s| s.name == wall)
+                .unwrap_or_else(|| panic!("{wall} missing"));
+            assert!(!surface.player, "{wall} is player collision");
+        }
+        // No player-collidable part is within reach of either perch.
+        for perch in perches {
+            let below = world.hits(perch, None, true).into_iter().next();
+            assert!(
+                below
+                    .as_ref()
+                    .is_none_or(|h| !(-0.5..=STAND_REACH).contains(&h.1)),
+                "{perch} stands on {below:?}"
+            );
+        }
+
         // The viewer's camera probe over the ravine finds only zero-demand helper walls.
-        world.demand(&[branch], None);
+        world.demand(&[perches[0]], None);
         assert_eq!(
             world.selected,
             Some((ASHINA[0].to_string(), "h900000".to_string()))
@@ -1443,14 +1488,15 @@ mod tests {
         assert_eq!(world.blocks[ASHINA[0]].normal, [0; 8]);
 
         // Normal ground: the ledge's own part, and a jump's apex keeps it.
-        assert!(world.stand(ledge, None));
+        assert!(world.stand(ledge, true, None));
         assert_eq!(world.selected, ledge_part);
         let ledge_mask = world.blocks[ASHINA[0]].normal;
         assert_ne!(ledge_mask, [0; 8]);
-        assert!(!world.stand(ledge + Vec3::Y * 1.5, None));
+        assert!(!world.stand(ledge + Vec3::Y * 1.5, false, None));
         assert_eq!(world.selected, ledge_part);
 
-        // The whole play path: Wolf perched, the orbit camera at every 15 degrees.
+        // The play path: Wolf on the ledge, then perched on each end of the branch. A camera
+        // over the ravine guards against cameras taking part again.
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, AssetPlugin::default()))
             .init_resource::<super::super::story::MapStory>()
@@ -1458,57 +1504,47 @@ mod tests {
             .add_systems(Update, update);
         let wolf = app
             .world_mut()
-            .spawn((MapFocus, PlayerFocus, Transform::from_translation(ledge)))
+            .spawn((
+                MapFocus,
+                PlayerFocus { grounded: true },
+                Transform::from_translation(ledge),
+            ))
             .id();
         let camera = app
             .world_mut()
             .spawn((Camera3d::default(), Transform::from_translation(ledge)))
             .id();
         app.update();
-        // Both ends of the branch: the user's perch and the one the live check's grapple
-        // reaches from the ledge.
-        for perch in [branch, Vec3::new(-141.58, -44.26, -123.86)] {
+        for perch in perches {
             app.world_mut()
                 .get_mut::<Transform>(wolf)
                 .unwrap()
                 .translation = perch;
-            let focus = perch + Vec3::Y * 1.5;
-            for pitch in [0.0f32, 0.35] {
-                for yaw in (0..360).step_by(15) {
-                    let yaw = (yaw as f32).to_radians();
-                    let back = Vec3::new(
-                        yaw.sin() * pitch.cos(),
-                        pitch.sin(),
-                        yaw.cos() * pitch.cos(),
-                    );
-                    app.world_mut()
-                        .get_mut::<Transform>(camera)
-                        .unwrap()
-                        .translation = focus + back * 4.5;
-                    app.update();
-                    let world = app.world().resource::<MapWorld>();
-                    assert_eq!(world.selected, ledge_part, "{perch} yaw {yaw}");
-                    assert_eq!(
-                        world.blocks[ASHINA[0]].normal, ledge_mask,
-                        "{perch} yaw {yaw}"
-                    );
-                    assert!(
-                        matches!(
-                            world.blocks[ASHINA[0]].state,
-                            RequestState::Requested | RequestState::Ready
-                        ),
-                        "m11_00 retired at {perch} yaw {yaw}: {:?}",
-                        world.blocks[ASHINA[0]].state
-                    );
-                }
-            }
+            app.update();
+            let world = app.world().resource::<MapWorld>();
+            assert_eq!(world.selected, ledge_part, "{perch}");
+            assert_eq!(world.blocks[ASHINA[0]].normal, ledge_mask, "{perch}");
+            assert!(
+                matches!(
+                    world.blocks[ASHINA[0]].state,
+                    RequestState::Requested | RequestState::Ready
+                ),
+                "m11_00 retired at {perch}: {:?}",
+                world.blocks[ASHINA[0]].state
+            );
         }
+        app.world_mut()
+            .get_mut::<Transform>(camera)
+            .unwrap()
+            .translation = perches[0] + Vec3::new(-4.5, 1.5, 0.0);
+        app.update();
+        assert_eq!(app.world().resource::<MapWorld>().selected, ledge_part);
 
-        // Back on ground elsewhere, the part under his feet takes over: Ashina Castle's
-        // first player start.
+        // A teleport to the ground elsewhere: the part under his feet takes over, Ashina
+        // Castle's first player start.
         let mut world = app.world_mut().remove_resource::<MapWorld>().unwrap();
         let castle = Vec3::new(202.6, -26.4, 176.7);
-        assert!(world.stand(castle, None));
+        assert!(world.stand(castle, true, None));
         let (block, part) = world.selected.clone().unwrap();
         assert_eq!(block, ASHINA[1]);
         let surface = world.blocks[&block]
@@ -1519,5 +1555,10 @@ mod tests {
         assert!(surface.player, "{part} is not player collision");
         assert_ne!(world.blocks[ASHINA[1]].normal, [0; 8]);
         println!("castle start stands on {block}/{part}");
+
+        // A teleport into the air (a tour stop or a fall return above the ground) re-arms the
+        // spawn probe: the part below him takes over before he lands.
+        assert!(world.stand(ledge + Vec3::Y * 5.0, false, None));
+        assert_eq!(world.selected, ledge_part);
     }
 }
