@@ -384,28 +384,6 @@ fn mirror_matrix(m: Mat4) -> Mat4 {
     s * m * s
 }
 
-/// Bind-pose world matrices of a FLVER node table, in FromSoftware space.
-fn world_matrices(nodes: &[flver::Node]) -> Vec<Mat4> {
-    let mut world: Vec<Option<Mat4>> = vec![None; nodes.len()];
-    fn resolve(i: usize, nodes: &[flver::Node], world: &mut [Option<Mat4>], depth: usize) -> Mat4 {
-        if let Some(m) = world[i] {
-            return m;
-        }
-        let local = nodes[i].local_matrix();
-        let p = nodes[i].parent;
-        let m = if p >= 0 && depth < nodes.len() {
-            resolve(p as usize, nodes, world, depth + 1) * local
-        } else {
-            local
-        };
-        world[i] = Some(m);
-        m
-    }
-    (0..nodes.len())
-        .map(|i| resolve(i, nodes, &mut world, 0))
-        .collect()
-}
-
 struct Node {
     name: String,
     local: Mat4,
@@ -628,7 +606,7 @@ fn build(raw: &Path, model: &Model, verbose: bool) -> Result<Vec<u8>> {
                 .iter()
                 .find(|d| d.reference_id == id)
                 .with_context(|| format!("skeleton has no dummy {id}"))?;
-            let skel_world = world_matrices(&model.skeleton.nodes);
+            let skel_world = flver::world_matrices(&model.skeleton.nodes);
             let bone = usize::try_from(d.attach_bone).context("dummy without attach bone")?;
             let parent_world = usize::try_from(d.parent_bone)
                 .ok()
@@ -644,7 +622,7 @@ fn build(raw: &Path, model: &Model, verbose: bool) -> Result<Vec<u8>> {
             let n = scene.add(&name, local, Some(bone));
             scene.by_name.insert(name, n);
         }
-        let world = world_matrices(&part.flver.nodes);
+        let world = flver::world_matrices(&part.flver.nodes);
         let mut nodes = PartNodes {
             part,
             map: HashMap::new(),
@@ -786,7 +764,7 @@ fn build(raw: &Path, model: &Model, verbose: bool) -> Result<Vec<u8>> {
         }
         if verbose {
             // How far each part's bind pose is from the skeleton's rest pose, per shared bone.
-            let skel_world = world_matrices(&model.skeleton.nodes);
+            let skel_world = flver::world_matrices(&model.skeleton.nodes);
             for (&src, &slot) in &joint_slots {
                 let name = &part.flver.nodes[src].name;
                 let Some(&s) = scene.by_name.get(name) else {

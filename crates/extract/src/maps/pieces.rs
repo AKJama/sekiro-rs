@@ -358,17 +358,24 @@ pub fn build(
         .collect();
     // Existing consumers use the legacy material prefix; append alternate variants after it.
     faces.sort_by_key(|(_, _, _, face)| face.flags != 0);
+    // Unweighted vertices live in their node's frame; place them as the game draws them.
+    let world = flver::world_matrices(&flver.nodes);
+    let model_space: Vec<_> = flver
+        .meshes
+        .iter()
+        .map(|mesh| mesh.model_space_vertices(&world))
+        .collect();
     for (mi, mesh, fi, face) in faces {
-        let mut indices = face.triangles(mesh.vertices.len());
+        let vertices: &flver::Vertices = &model_space[mi];
+        let mut indices = face.triangles(vertices.len());
         if indices.is_empty() {
             continue;
         }
-        if indices.iter().any(|&i| i as usize >= mesh.vertices.len()) {
+        if indices.iter().any(|&i| i as usize >= vertices.len()) {
             bail!("mesh {mi} index out of range");
         }
-        let compact =
-            (face.detail_level() > 0).then(|| compact_vertices(&mesh.vertices, &mut indices));
-        let v = compact.as_ref().unwrap_or(&mesh.vertices);
+        let compact = (face.detail_level() > 0).then(|| compact_vertices(vertices, &mut indices));
+        let v = compact.as_ref().unwrap_or(vertices);
         let count = v.len();
         if count == 0 {
             continue;
@@ -801,6 +808,10 @@ fn game_texture_name(r: &TexRef, normal: bool) -> String {
 #[cfg(test)]
 #[path = "pieces_lod_tests.rs"]
 mod lod_tests;
+
+#[cfg(test)]
+#[path = "pieces_node_tests.rs"]
+mod node_tests;
 
 #[cfg(test)]
 mod tests {

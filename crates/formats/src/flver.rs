@@ -312,6 +312,109 @@ impl Vertices {
     }
 }
 
+/// Bind-pose model-space matrices of a FLVER node table (`world = parent * local`), in the
+/// file's own coordinate system. A broken parent chain stops at the table length.
+pub fn world_matrices(nodes: &[Node]) -> Vec<glam::Mat4> {
+    fn resolve(
+        i: usize,
+        nodes: &[Node],
+        world: &mut [Option<glam::Mat4>],
+        depth: usize,
+    ) -> glam::Mat4 {
+        if let Some(m) = world[i] {
+            return m;
+        }
+        let local = nodes[i].local_matrix();
+        let p = nodes[i].parent;
+        let m = if p >= 0 && depth < nodes.len() {
+            resolve(p as usize, nodes, world, depth + 1) * local
+        } else {
+            local
+        };
+        world[i] = Some(m);
+        m
+    }
+    let mut world = vec![None; nodes.len()];
+    (0..nodes.len())
+        .map(|i| resolve(i, nodes, &mut world, 0))
+        .collect()
+}
+
+impl Mesh {
+    /// The mesh's vertices in model space, as the game draws them at rest.
+    ///
+    /// Unweighted (non-dynamic) vertices are stored relative to the node their normal W
+    /// names, so the renderer places each one with that node's matrix.
+    /// Map objects use this heavily: a bamboo clump keeps every leaf cluster in its own
+    /// node's frame, scaled and rotated into place by the node.
+    /// The FLVER header bounds only enclose the vertices after this transform.
+    /// Weighted meshes are already in model space (bind pose) and come back unchanged, as do
+    /// meshes whose vertices all name identity nodes.
+    /// `world` is [`world_matrices`] of the same FLVER's nodes.
+    pub fn model_space_vertices(&self, world: &[glam::Mat4]) -> std::borrow::Cow<'_, Vertices> {
+        use glam::{Mat3, Mat4, Vec3};
+        use std::borrow::Cow;
+        let v = &self.vertices;
+        if self.dynamic || v.normal_w.len() != v.len() {
+            return Cow::Borrowed(v);
+        }
+        let node = |i: usize| {
+            usize::try_from(v.normal_w[i])
+                .ok()
+                .and_then(|n| world.get(n))
+                .filter(|m| !m.abs_diff_eq(Mat4::IDENTITY, 1e-6))
+        };
+        if (0..v.len()).all(|i| node(i).is_none()) {
+            return Cow::Borrowed(v);
+        }
+        let mut out = v.clone();
+        let point = |m: &Mat4, p: [f32; 3]| m.transform_point3(Vec3::from(p)).to_array();
+        // Normals follow the inverse transpose (nodes can scale unevenly); tangent-frame
+        // vectors follow the linear part. A mirroring node flips the tangent handedness.
+        let direction = |m: &Mat3, d: [f32; 3]| {
+            let d = *m * Vec3::from(d);
+            d.try_normalize().unwrap_or(d).to_array()
+        };
+        for i in 0..v.len() {
+            let Some(m) = node(i) else { continue };
+            let linear = Mat3::from_mat4(*m);
+            let normal = linear.inverse().transpose();
+            let flip = if linear.determinant() < 0.0 {
+                -1.0
+            } else {
+                1.0
+            };
+            out.positions[i] = point(m, v.positions[i]);
+            for s in &mut out.extra_positions {
+                if let Some(p) = s.get_mut(i) {
+                    *p = point(m, *p);
+                }
+            }
+            if let Some(n) = out.normals.get_mut(i) {
+                *n = direction(&normal, *n);
+            }
+            for s in &mut out.extra_normals {
+                if let Some(n) = s.get_mut(i) {
+                    *n = direction(&normal, *n);
+                }
+            }
+            let frame = |t: &mut [f32; 4]| {
+                let [x, y, z] = direction(&linear, [t[0], t[1], t[2]]);
+                *t = [x, y, z, t[3] * flip];
+            };
+            for s in &mut out.tangents {
+                if let Some(t) = s.get_mut(i) {
+                    frame(t);
+                }
+            }
+            if let Some(t) = out.bitangents.get_mut(i) {
+                frame(t);
+            }
+        }
+        Cow::Owned(out)
+    }
+}
+
 pub fn is_flver(data: &[u8]) -> bool {
     data.starts_with(b"FLVER\0")
 }
@@ -924,5 +1027,88 @@ mod blend_tests {
         assert_eq!(vertices.blends[0], vec![[128, 0, 0, 0]]);
         assert_eq!(vertices.blends[4], vec![[0, 200, 0, 0]]);
         assert!(vertices.blends[1].is_empty());
+    }
+}
+
+#[cfg(test)]
+mod model_space_tests {
+    use super::*;
+    use glam::Vec3;
+
+    fn node(translation: [f32; 3], rotation: [f32; 3], scale: [f32; 3], parent: i16) -> Node {
+        Node {
+            name: String::new(),
+            translation,
+            rotation,
+            scale,
+            parent,
+            first_child: -1,
+            next_sibling: -1,
+            previous_sibling: -1,
+            bbox_min: [0.0; 3],
+            bbox_max: [0.0; 3],
+            flags: 0,
+        }
+    }
+
+    fn mesh(dynamic: bool, normal_w: Vec<i32>) -> Mesh {
+        let n = normal_w.len();
+        Mesh {
+            dynamic,
+            material: 0,
+            node: 0,
+            bone_indices: vec![],
+            face_sets: vec![],
+            buffers: vec![],
+            vertices: Vertices {
+                positions: vec![[1.0, 0.0, 0.0]; n],
+                normals: vec![[1.0, 0.0, 0.0]; n],
+                normal_w,
+                tangents: vec![vec![[0.0, 1.0, 0.0, -1.0]; n]],
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn unweighted_vertices_follow_the_node_their_normal_w_names() {
+        // Node 1: up 5 m, turned 90 degrees about Z, scaled 2x along its local X only,
+        // under a parent shifted 1 m along Z.
+        let nodes = [
+            node([0.0; 3], [0.0; 3], [1.0; 3], -1),
+            node(
+                [0.0, 5.0, 0.0],
+                [0.0, 0.0, std::f32::consts::FRAC_PI_2],
+                [2.0, 1.0, 1.0],
+                2,
+            ),
+            node([0.0, 0.0, 1.0], [0.0; 3], [1.0; 3], -1),
+        ];
+        let world = world_matrices(&nodes);
+        let m = mesh(false, vec![0, 1]);
+        let v = m.model_space_vertices(&world);
+        assert_eq!(v.positions[0], [1.0, 0.0, 0.0]);
+        let p = Vec3::from(v.positions[1]);
+        assert!(p.abs_diff_eq(Vec3::new(0.0, 7.0, 1.0), 1e-5), "{p}");
+        let n = Vec3::from(v.normals[1]);
+        assert!(n.abs_diff_eq(Vec3::Y, 1e-5), "{n}");
+        let t = v.tangents[0][1];
+        assert!(Vec3::new(t[0], t[1], t[2]).abs_diff_eq(-Vec3::X, 1e-5));
+        assert_eq!(t[3], -1.0);
+    }
+
+    #[test]
+    fn weighted_and_identity_bound_meshes_stay_borrowed() {
+        let nodes = [
+            node([0.0; 3], [0.0; 3], [1.0; 3], -1),
+            node([0.0, 5.0, 0.0], [0.0; 3], [1.0; 3], -1),
+        ];
+        let world = world_matrices(&nodes);
+        for m in [mesh(true, vec![1, 1]), mesh(false, vec![0, 0])] {
+            assert!(matches!(
+                m.model_space_vertices(&world),
+                std::borrow::Cow::Borrowed(_)
+            ));
+        }
     }
 }
