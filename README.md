@@ -158,6 +158,13 @@ Engine-side rules are documented in our own words in `docs/`, with confidence la
 
 This is an AI-assisted project, developed with Anthropic Claude Code and OpenAI Codex, and reviewed and playtested by the author.
 
+### Working on it with AI agents
+
+- We recommend Claude Opus 5.5 at medium effort, for the main session and for sub-agents; it is the only model that has worked reliably for us.
+- If you must, Claude Sonnet 5.5 can run sub-agents.
+- For completely trivial, mechanical jobs, a Claude session can direct Codex, but Codex made enough mistakes here that redoing its work often cost more than it saved.
+- Problems found while playing become prioritised GitHub issues ([`.claude/skills/issues/SKILL.md`](.claude/skills/issues/SKILL.md)), and each issue is fixed in its own reviewed, playtested PR ([`.claude/skills/pr-flow/SKILL.md`](.claude/skills/pr-flow/SKILL.md)); [`AGENTS.md`](AGENTS.md) points every agent to both.
+
 ## Disclaimer
 
 sekiro-rs is an unofficial, non-commercial fan project made for education and research into game engine design and interoperability.
