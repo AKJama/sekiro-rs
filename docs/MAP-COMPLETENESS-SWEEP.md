@@ -94,8 +94,9 @@ $env:CARGO_TARGET_DIR = 'target/alt-live'
 cargo test --release --offline -p sekiro-game live_play -- --include-ignored --nocapture
 ```
 
-The test runs three sessions of `--play --map m11_00_00_00 --start 0 ... --no-enemy` with `--live-check <summary.json>`.
+The test runs four sessions of `--play --map m11_00_00_00 --start 0 ... --no-enemy` with `--live-check <summary.json>`.
 The first walks a short input script out of the start hall; the second uses `--live-tour starts` to move Wolf to every authored player start; the third tours Castle starts 300 to 600 m away.
+The fourth spawns on the ledge east of the ravine north of start 0, grapples to the branch over it and turns the camera a full circle there with `--live-orbit 400,8`, and asserts that the Outskirts block keeps its display groups and that drawn map meshes stay near Wolf in every sample.
 It asserts the time from launch until the loading screen lifts (at most 90 s), the longest frame while loading after the first (at most 2 s, below Windows' 5 s "Not Responding" limit), the median and 95th-percentile frame times from the first playable frame (at most 20 ms and 40 ms), that Wolf walked, that every grounded sample and every tour stop (every Outskirts player start, then six Ashina Castle starts reached from the Outskirts load) has a drawn map triangle on the collision floor under Wolf, and that at least 90% of the collision floor within 20 m lies inside drawn map meshes.
 
 The same flags work by hand on any play command:
@@ -105,7 +106,8 @@ The same flags work by hand on any play command:
 ```
 
 `--live-check <file>` writes the summary and exits after the script (plus two seconds), after `--live-tour` (`x,y,z;x,y,z` or `starts`), or after `--live-seconds` (default 20) of unscripted play.
-`--live-shots <dir>` saves `play-start.png`, the first frame without the loading screen, and one `tour-NN.png` per tour stop.
+`--live-shots <dir>` saves `play-start.png`, the first frame without the loading screen, one `tour-NN.png` per tour stop and, with `--live-orbit <step>,<seconds>`, one `orbit-DDD.png` every 45 degrees of the camera turn.
+The summary also lists every connected block's request state change after play starts (`block_changes`), with the collision part selecting the map; a state marked `(no groups)` draws none of its parts.
 Every measurement is also logged as a `live check:` line, and the loading stages are logged as `startup:`, `map setup:`, `loading:` and `play ready:` lines.
 Building with `--features profile-spans` times every Bevy system through its tracing span and logs `span profile` (mean ms per frame) and `span stall` (longest single run) lines every five seconds.
 
@@ -133,6 +135,8 @@ Fixed: the void after a fall or grapple in the ravine north of start 0 reproduce
 Wolf landed on the helper collision `h900000` (hit filter 15) at y = -74.2, whose display and draw demand masks are zero, so the confirmed visibility rule drew no scenery and the screen showed only sky and fog; the map viewer at the same camera shows the same void with draw groups on and the ravine with `--groups off`.
 Since 2026-10-16 Wolf falls through `h900000`: filter 15 is an event wall the player never stands on, and its contact starts the fall return (`docs/HIT-FILTERS.md`).
 The special hit filters are now traced in the executable; only filters 8, 22 and 27 (and unlisted values) hold the player.
+Fixed: after grappling to that branch the whole Outskirts block disappeared at most camera yaws, because the orbit camera's position over the ravine also chose the map's collision part.
+In play the map now follows the part Wolf last stood on, as the executable follows the character's hit collision (`docs/MAP-COMPLETENESS.md`, section 5).
 
 ## Sampling and measurements
 

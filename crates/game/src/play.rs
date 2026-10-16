@@ -44,7 +44,7 @@ use sekiro_sim::{Buttons, InputFrame, StepReport, demo};
 use crate::character::{AnimLibrary, Animator, Rig, animate, bind_rigs};
 use crate::combat_hud;
 use crate::draw_mask::{DrawMask, MaskSource, apply_draw_masks};
-use crate::map::{self, MapFocus, MapScene};
+use crate::map::{self, MapFocus, MapScene, PlayerFocus};
 use sekiro_sim::arena::{Arena, ArenaSpec};
 use sekiro_sim::collision::CollisionWorld;
 #[path = "arena_c_scene.rs"]
@@ -720,8 +720,12 @@ pub fn run(options: Options) -> Result<()> {
         &std::env::args().collect::<Vec<_>>(),
         on_map.as_ref().map(|(dir, _, _)| dir.as_path()),
     )? {
-        app.insert_resource(check)
-            .add_systems(Last, live_check::observe.before(exit_fast));
+        app.insert_resource(check).add_systems(
+            Last,
+            (live_check::observe_world, live_check::observe)
+                .chain()
+                .before(exit_fast),
+        );
     }
     if std::env::var_os("PF_RESPAWN_PROBE").is_some() {
         app.add_systems(Last, renderer_counts);
@@ -1003,8 +1007,8 @@ fn setup(
             );
         }
         if actor == WOLF && on_map {
-            // Draw groups follow Wolf.
-            e.insert(MapFocus);
+            // The map follows the collision part Wolf stands on, never the camera.
+            e.insert((MapFocus, PlayerFocus));
         }
     }
     commands.spawn((

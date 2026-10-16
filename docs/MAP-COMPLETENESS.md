@@ -1082,6 +1082,44 @@ The full meaning of the additional non-core-map gate was not resolved here.
 **Medium confidence for the complete occupancy story:** the attached-source-collision and per-target-mask path is established, but selecting all participating player/camera/support collisions is a separate upstream operation.
 This audit does not settle stacked-floor, airborne or grappling selection merely by identifying ConnectCollision.
 Implement the confirmed target-mask union while preserving those upstream selection questions as explicit fidelity work.
+Section 5 settles the airborne and grappling cases: the player's last hit collision stays in force.
+
+### 5. The player's hit collision selects the map
+
+**High confidence:** in play the per-block display masks follow one collision part, the player character's current hit collision, and the camera takes no part.
+The per-frame map step `0x140a75920` reads the player (`WorldChrMan+0x88`), passes his position to the map manager (`0x14080ec20`) and then calls `0x140810310` with the character's hit collision at `ChrIns+0x1ad8`.
+That wrapper reaches `0x140b028a0`, which stores the collision in the mask object's single sticky slot `+0x20` only when the pointer is non-null.
+The same step then calls `0x14080ea80`, the wrapper of the per-block mask install `0x140affb20`.
+The install unions, through `0x140b029b0`, the sticky slot's collision and up to eight transient collisions from slots `+0x28` to `+0x60`, then clears the transient slots.
+The transient slots are filled by `0x140affaa0` (via `0x14080e880`) only from `0x140ecef80`, which walks a list of map ID and part index pairs held by its caller rather than any camera or ray state.
+The one-collision path `0x140810320` starts from empty masks, forces the reserved block `0x59000063` to all groups, and unions a single collision's mask and connections; its only caller `0x140810bb0` is reached from `0x140a6c960`, `0x140a6cac0`, `0x140a6cf00`, `0x140a6d0f0` and `0x140a6d490`, which also call the install wrapper and were not traced further.
+No camera object, camera position or camera ray appears in any of these functions.
+
+**High confidence:** the character's hit collision is set by `ChrIns::SetHitCollision` `0x1409f5820`, which also copies that collision's draw-parameter block (`ChrIns+0x1a68` onwards) and map block index, so lighting and fog follow the same part.
+Its per-frame caller `0x140a01d70` asks the character physics module for the ground contact's collision (`0x140bbf160`, an ID looked up through `0x14080cff0`) and sets it only when one exists.
+`0x1409f7760` does the same from `0x140bbf860` and also skips a null result.
+So while the character has no ground contact (in the air, grappling, perched on the wire), the hit collision stays the last one, and in any case `0x140b028a0` never installs a null.
+By inference from the collision matrix (`docs/HIT-FILTERS.md`), parts the player capsule does not collide with cannot become his ground contact, so only player-collidable hit filters (`sekiro_sim::hit_filter::player_collides`) drive the masks.
+
+**High confidence for spawn:** when the character has no hit collision yet, `0x140b024e0` (called from `0x140810180` on map entry and from `0x140811e10`) casts from the player's position plus a fixed offset, takes the first hit whose part type byte is 8 (map collision) and installs it with `0x1409f5820`, falling back to `0x140a24d70`.
+
+**Medium confidence:** when no transient collision is queued, `0x140affb20` starts from a per-block array copied from the map manager (`+0x78` and `+0x4a0` of the object at `+0x18`) rather than from zero; whether that array is the previous frame's result or a fixed base was not resolved.
+When transient collisions are queued, every block except the reserved one is cleared before the union.
+`WorldChrMan+0x98` gates the player-driven update in `0x140a75920`; its meaning (possibly a free or debug camera) was not resolved.
+
+The implementation follows the high-confidence branches.
+In play, `map_world::MapWorld::stand` selects the player-collidable part under Wolf's feet, from 0.5 m above them to `STAND_REACH` (1 m) below, and keeps the last part when none is found.
+Before he has stood on anything, the nearest player-collidable part below him stands in for the exe's spawn cast.
+That one part drives demand, participating parts and the lighting selection, and the orbit camera no longer contributes.
+The map viewer, render gates and captures keep the camera-driven probe with its 0.5 m tie band, because there the focus is a free camera rather than a character.
+The height band stands in for the physics ground contact; the exact contact (the low-resolution binder, capsule contact points, slopes and steps) is approximated.
+
+The evidence comes from six read-only decompile exports made with the same `MapProbe.java` script against `re/ghidra`; they are local working files and are not checked in.
+
+**Reproduction:** grappling from the ledge at (-132.3, -42.2, -123.9) to the branch and turning the camera a full circle (`--live-orbit 400,8`), the old camera-and-focus probe selected `h900000` with empty display groups, and 62 of 76 live samples had no drawn map mesh within 20 m of Wolf.
+With the standing part the branch keeps `h023300` at every camera yaw, the Outskirts block keeps its display groups, and all 79 samples had at least 533 drawn meshes near Wolf.
+The lighting region now also stays on the ledge's part on the branch instead of switching to the helper wall's.
+`map_world::tests::standing_part_survives_the_branch_while_the_camera_orbits` checks this on the cached data at both ends of the branch, and the live play test repeats the grapple and the turn in the game.
 
 ### Verification and remaining work
 
@@ -1097,7 +1135,7 @@ No Rust crate was touched, so crate Clippy and test runs were not applicable to 
 The collaboration-board API read failed through the configured proxy; this report's existing claim record was retained, with no remote mutation.
 No game session, save access, live-memory read, commit or publication occurred.
 
-Still open: the object model default's source, extra LOD scale-table provenance, exact FLVER render-group binding and crossfade pixel shader, navigation-distance/gate traversal and fallback rules, every block-request override and final resource-release barrier, and complete upstream collision selection at seams and in the air.
+Still open: the object model default's source, extra LOD scale-table provenance, exact FLVER render-group binding and crossfade pixel shader, navigation-distance/gate traversal and fallback rules, every block-request override and final resource-release barrier, and the exact physics ground contact at seams and stacked floors (section 5 approximates it with a height band).
 These limits do not invalidate the specific confirmed branches above, but they prevent claiming a complete retail streaming or visibility implementation.
 
 ## Gates and Outskirts regression
