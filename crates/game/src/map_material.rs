@@ -366,6 +366,36 @@ mod tests {
     }
 
     #[test]
+    fn layered_families_use_native_f0_and_mountain_is_fully_rough() {
+        let base = StandardMaterial::default();
+        let surface = |kind: u64, variant: u64| {
+            native_surface(
+                &base,
+                &serde_json::json!({"version": 2, "kind": kind, "variant": variant}),
+            )
+        };
+        for kind in 1..=3 {
+            let f0 = 0.16 * surface(kind, 0).reflectance.powi(2);
+            assert!(
+                (f0 - 0.173_205_f32.powi(2)).abs() < 1e-5,
+                "kind {kind}: F0 {f0}"
+            );
+        }
+        assert_eq!(surface(3, 0).perceptual_roughness, 1.);
+        assert_eq!(
+            surface(1, 0).perceptual_roughness,
+            base.perceptual_roughness
+        );
+        assert_eq!(surface(1, 18).reflectance, base.reflectance);
+        assert_eq!(surface(2, 18).reflectance, NATIVE_LAYERED_REFLECTANCE);
+        assert_eq!(surface(0, 0).reflectance, base.reflectance);
+        assert_eq!(
+            native_surface(&base, &Value::Null).reflectance,
+            base.reflectance
+        );
+    }
+
+    #[test]
     fn map_extension_preserves_standard_material_bindless_batching() {
         use bevy::render::render_resource::AsBindGroup;
         assert!(<LayeredMaterial as AsBindGroup>::bindless_slot_count().is_some());
@@ -703,6 +733,32 @@ fn update_hemisphere(
     }
 }
 
+/// Bevy reflectance giving the native layered-map F0: every M[Multiple], M[MultipleGround] and
+/// M[LandScape]_Mountain Gbuf shader writes the constant 0.173205, and F0 = 0.173205^2 = 0.03,
+/// so 0.16 * r^2 = 0.03 (#7).
+const NATIVE_LAYERED_REFLECTANCE: f32 = 0.433_012_7;
+
+/// The base material for a layered map family, with the native specular constants applied.
+fn native_surface(base: &StandardMaterial, data: &Value) -> StandardMaterial {
+    let mut base = base.clone();
+    if data["version"].as_u64() != Some(2) {
+        return base;
+    }
+    let kind = data["kind"].as_u64().unwrap_or(0);
+    // Slot 17 (only Multiple variant 18) writes a textured F0 instead of the constant; the slot
+    // is not sampled yet, so it keeps Bevy's default for now (#43).
+    let variant = data["variant"].as_u64().unwrap_or(0) as usize;
+    let textured_f0 = sekiro_formats::map_layers::slots(kind as u8, variant).contains(&17);
+    if (1..=3).contains(&kind) && !textured_f0 {
+        base.reflectance = NATIVE_LAYERED_REFLECTANCE;
+    }
+    // Mountain writes gloss 0 and the shader's Mountain path leaves roughness to the base.
+    if kind == 3 {
+        base.perceptual_roughness = 1.;
+    }
+    base
+}
+
 #[allow(clippy::type_complexity)]
 fn replace_materials(
     mut commands: Commands,
@@ -912,7 +968,7 @@ fn replace_materials(
                 voxels: irradiance.as_ref().map(|i| i.voxels.clone()),
             };
             let handle = layered.add(ExtendedMaterial {
-                base: base.clone(),
+                base: native_surface(base, data),
                 extension,
             });
             settings.materials.insert(original.0.id(), handle.clone());

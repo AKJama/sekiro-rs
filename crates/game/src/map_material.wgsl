@@ -219,7 +219,9 @@ fn native_clustered_light(light_id: u32, pbr: PbrInput, li: LightingInput, spot:
     let d = aa/(3.14159265*den*den);
     let vis = 1.0/(max(max(nv,nl),0.0001)*(1.0-a*0.5)+a*0.5);
     let f0 = calculate_F0(pbr.material.base_color.rgb,pbr.material.metallic,pbr.material.reflectance);
-    let specular = f0*(2.5/(1.0+x)*d*nl*vis*fall);
+    // Native D already carries 1/pi (as in GXLightAcc_DDirLight1); the light colour is packed
+    // with SCENE_TO_BEVY = pi / exposure, so specular takes the same 1/pi as diffuse (#7).
+    let specular = f0*(2.5/(1.0+x)*d*nl*vis*fall/3.14159265);
     return (diffuse+specular)*(*light).color_inverse_square_range.rgb;
 }
 
@@ -294,7 +296,9 @@ fn native_direct(pbr: PbrInput, layers: Layers) -> vec3<f32> {
         let vis = 1.0/(max(nl,nv)*(1.0-a*0.5)+a*0.5);
         var diffuse_angle = nl;
         if i>=2u { diffuse_angle = min(pow(0.5*dot(pbr.N,normalize(direction))+0.5,2.0),1.0); }
-        correction += (li.diffuse_color*diffuse*diffuse_angle/3.14159265+f*d*nl*vis*specular_rgb)*select(1.0,sun_shadow,i==0u);
+        // The packed colours carry SCENE_TO_BEVY = pi / exposure, so both terms take 1/pi;
+        // native D (GXLightAcc_DDirLight1) already contains its own 1/pi, kept in d above (#7).
+        correction += (li.diffuse_color*diffuse*diffuse_angle+f*d*nl*vis*specular_rgb)/3.14159265*select(1.0,sun_shadow,i==0u);
     }
     return correction*view.exposure;
 }
@@ -588,7 +592,10 @@ fn game_layers(in: VertexOutput, b: vec4<f32>, b2: vec4<f32>, uv_scale: f32, is_
         if ground { wWet = b2.w * p[7].z; } else { wWet = hb(b2.w, H(m6, p[11].xyz, p[7].z, map_game), map_game); }
     }
     let lum = dot(1.0 - b2.rgb, vec3(0.29891, 0.58661, 0.11448));
-    let wTint = hb(lum, H(m6, p[12].xyz, p[8].x, map_game), map_game);
+    // The vertex-colour tint is gated by mask 6, so variants without slot 6 (5, 10, 20, 25) take
+    // no tint; their exported tint is often 0, which would turn the albedo black (#7).
+    var wTint = 0.0;
+    if has(512u, map_game) { wTint = hb(lum, H(m6, p[12].xyz, p[8].x, map_game), map_game); }
 
     // Normals: base / overlay (B gloss), the detail normal's xy added, layer L (ground).
     var nb = vec4(0.5, 0.5, 1.0, 0.15);

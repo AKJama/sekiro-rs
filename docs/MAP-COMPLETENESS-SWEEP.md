@@ -920,3 +920,24 @@ Outskirts 4 shows a faint, even change across the lit wall, consistent with the 
 Final totals (void, depth gap, untextured, grey, pop-in) are Outskirts 0 / 497 / 0 / 2595 / 21120 in 53.3 seconds and Castle 1933 / 4888 / 0 / 275 / 22736 in 47.7 seconds, both passing every per-view tolerance.
 The first new runs agree with the final runs within 9 pixels in every cell.
 Depth gap moves within tolerance at Outskirts 0 (75 -> 79) and Castle 1 (15 -> 17), and those geometry cells are retained.
+
+## Vertex tint gate and native specular (#7)
+
+Gating the Multiple vertex tint on mask 6 lifts rock, stone, wood and bark that the ungated tint had multiplied to black, and specular now takes the same 1/pi as diffuse with the native F0 0.03.
+Lighter neutral rock crosses the fixed grey criterion and the brighter albedo moves pop-in counts, so only those colour cells are re-baselined.
+
+| Map / view | Grey | Pop-in |
+|---|---|---|
+| Outskirts 0 | 93 -> 138 | |
+| Outskirts 2 | 14 -> 251 | |
+| Outskirts 4 | | 7435 -> 7909 |
+| Outskirts 5 | | 4501 -> 4597 |
+| Castle 0 | 198 -> 409 | |
+| Castle 1 | 56 -> 342 | |
+| Castle 2 | | 5426 -> 5508 |
+| Castle 3 | | 5468 -> 6181 |
+| Castle 4 | 13 -> 34 | |
+| Castle 5 | 32 -> 87 | |
+
+Void, depth-gap and untextured counts are unchanged within tolerance, and untextured stays 0 in every view.
+The user confirmed in live play that the black glossy patches are gone.
