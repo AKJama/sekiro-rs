@@ -160,10 +160,10 @@ This is an AI-assisted project, developed with Anthropic Claude Code and OpenAI 
 
 ### Working on it with AI agents
 
-- We recommend Claude Opus 5.5 at medium effort as the main worker; it is the one that worked best for us.
-- Sub-agents can run on Claude Sonnet 5.5.
-- For genuinely trivial, mechanical jobs, Opus or Sonnet can direct Codex, but Codex made enough mistakes here that redoing its work often cost more than it saved.
-- How work flows (issues, one PR per issue, review, checks and the playtest before merge) is in [`.claude/skills/pr-flow/SKILL.md`](.claude/skills/pr-flow/SKILL.md), and [`AGENTS.md`](AGENTS.md) points every agent to it.
+- We recommend Claude Opus 5.5 at medium effort, for the main session and for sub-agents; it is the only model that has worked reliably for us.
+- If you must, Claude Sonnet 5.5 can run sub-agents.
+- For completely trivial, mechanical jobs, a Claude session can direct Codex, but Codex made enough mistakes here that redoing its work often cost more than it saved.
+- Problems found while playing become prioritised GitHub issues ([`.claude/skills/issues/SKILL.md`](.claude/skills/issues/SKILL.md)), and each issue is fixed in its own reviewed, playtested PR ([`.claude/skills/pr-flow/SKILL.md`](.claude/skills/pr-flow/SKILL.md)); [`AGENTS.md`](AGENTS.md) points every agent to both.
 
 ## Disclaimer
 

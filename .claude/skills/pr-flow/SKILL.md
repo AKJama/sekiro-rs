@@ -1,6 +1,6 @@
 ---
 name: pr-flow
-description: How work flows in sekiro-rs - capture problems as prioritised GitHub issues, pick an issue, one branch and PR per issue, then code-review, simplify, local checks with a live-game run, the user's playtest, then merge. Use whenever filing a bug, starting a job, committing, pushing, opening a PR or finishing a job in this repo.
+description: How changes reach main in sekiro-rs - work only on a filed issue, one branch and PR per issue, then code-review, simplify, local checks with a live-game run, the user's playtest, then merge. Use whenever filing a bug, starting a job, committing, pushing, opening a PR or finishing a job in this repo.
 ---
 
 # PR flow
@@ -8,7 +8,7 @@ description: How work flows in sekiro-rs - capture problems as prioritised GitHu
 Nothing is committed straight to `main`.
 Work starts from an issue, and every change goes through its own branch and pull request, in this order:
 
-0. Capture or pick the issue.
+0. Start from a filed issue.
 1. Write the PR.
 2. Run the `code-review` skill.
 3. Run the `simplify` skill.
@@ -28,20 +28,16 @@ When a lower PR changes or merges, rebase the stacked branches onto it and force
 - Agents do not commit, push or open PRs; the main session does after reviewing their work.
 - No git worktrees.
 
-## 0. Issues
+## 0. Start from an issue
 
-The backlog lives in GitHub issues on `AKJama/sekiro-rs`, one issue per job.
-- When a playtest, review or investigation turns up a problem, open an issue for it rather than widening the current PR.
-- Each issue has: Problem (what the player sees, where), Likely cause (with evidence: file:line, data, exe addresses), To do, and Done when (how a fix is checked, including the live game).
-- Label it `bug` or `enhancement` and one of `priority: high`, `priority: medium`, `priority: low`.
-- No game assets, screenshots of game content or personal paths in issues; describe images in words and keep them off the repo.
-- Pick the highest-priority open issue that nobody has claimed, and claim it on the collab board (`sekiro-collab/WORK.md`) with a link to the issue.
-- The PR body says `Fixes #N`, so merging closes the issue.
-- `STATUS.md` stays a short snapshot of what works and what is in progress; it is not the to-do list.
+Every PR works on an existing issue; file or pick one with the [`issues`](../issues/SKILL.md) skill first.
+If a job turns up a second problem, file it as a new issue instead of widening the PR.
 
 ## Agents
 
-- Recommended main worker: Claude Opus 5.5 at medium effort.
+- Use Claude Opus 5.5 at medium effort for the main session and for sub-agents; it is the model that has worked reliably here.
+- Claude Sonnet 5.5 sub-agents only as a fallback, and Codex only for trivial, mechanical jobs directed by a Claude session.
+- High-priority issues go to the most capable model available (Opus 5.5 or newer).
 - Only one agent runs the game at a time, and at most two game windows are open in total (the user may have one).
 - Agents share one Cargo build folder (`CARGO_TARGET_DIR`) instead of one each; every full build is several GB.
 - Agents do not commit; the main session reviews and commits their work.
