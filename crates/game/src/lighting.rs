@@ -285,21 +285,21 @@ fn tone_correction(hue: f32, saturation: f32, value: f32, contrast: f32) -> Mat4
 #[derive(Component)]
 struct AppliedPost(i32, f32, String);
 
+#[allow(clippy::type_complexity)]
 fn apply_post_effects(
     mut commands: Commands,
     lighting: Res<MapLighting>,
     effects: Res<MapPostEffects>,
-    cameras: Query<(Entity, Option<&AppliedPost>), With<Camera3d>>,
+    cameras: Query<(Entity, Option<&AppliedPost>, Option<&grading::GradingLut>), With<Camera3d>>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("apply_post_effects");
     let pending: Vec<_> = cameras
         .iter()
-        .filter(|(_, p)| {
+        .filter(|(_, p, _)| {
             p.is_none_or(|p| {
                 p.0 != lighting.light_set || p.1 != lighting.hour || p.2 != lighting.source
             })
         })
-        .map(|(e, _)| e)
         .collect();
     if pending.is_empty() {
         return;
@@ -309,22 +309,30 @@ fn apply_post_effects(
         "map native post: {set:?}, upload={:?}; CPU mappings from SHADER-INPUTS.md",
         set.upload(&effects)
     );
-    for entity in pending {
+    for (entity, applied, current_lut) in pending {
         let mut camera = commands.entity(entity);
+        // The view setup is per camera, not per row: re-inserting Hdr and Tonemapping at every
+        // LightSet change (doorways, #15) made Bevy re-specialise the camera's view pipelines.
+        if applied.is_none() {
+            camera.insert((Hdr, Tonemapping::None, DebandDither::Disabled));
+            camera.remove::<(AutoExposure, Bloom)>();
+        }
         camera.insert((
-            Hdr,
-            Tonemapping::None,
-            DebandDither::Disabled,
             AppliedPost(lighting.light_set, lighting.hour, lighting.source.clone()),
+            ColorGrading::default(),
+            set.upload(&effects),
         ));
-        camera.insert((ColorGrading::default(), set.upload(&effects)));
-        camera.remove::<(AutoExposure, Bloom)>();
-        if !effects.no_grading
-            && let Some(lut) = set.lut.and_then(|id| effects.luts.get(&id))
-        {
-            camera.insert(grading::GradingLut(lut.clone()));
-        } else {
-            camera.remove::<grading::GradingLut>();
+        let lut = (!effects.no_grading)
+            .then(|| set.lut.and_then(|id| effects.luts.get(&id)))
+            .flatten();
+        match lut {
+            Some(lut) if current_lut.is_none_or(|c| c.0 != *lut) => {
+                camera.insert(grading::GradingLut(lut.clone()));
+            }
+            None if current_lut.is_some() => {
+                camera.remove::<grading::GradingLut>();
+            }
+            _ => {}
         }
     }
 }
@@ -598,6 +606,11 @@ struct GiOptions {
     hemisphere: bool,
     local_fallback: bool,
     native_lights: bool,
+}
+
+/// Whether map materials add the native four-slot direct lighting (`direct[12].x`).
+pub(crate) fn native_lights() -> bool {
+    gi_options().native_lights
 }
 
 fn gi_options() -> &'static GiOptions {

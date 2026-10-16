@@ -1012,11 +1012,15 @@ fn configure(
         .then(|| GameFog::from_gparam(&lighting.gparam, key.0, key.1, direction))
         .flatten();
     info!("shader fog: {value:?}");
+    let depth = TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING;
     for (entity, camera) in &cameras {
-        let mut camera = camera.clone();
-        camera.depth_texture_usages =
-            (TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING).into();
-        commands.entity(entity).insert(camera);
+        // Only new cameras need this; re-inserting Camera3d at every LightSet change (#15)
+        // marked the view changed and rebuilt its depth texture.
+        if TextureUsages::from(camera.depth_texture_usages) != depth {
+            let mut camera = camera.clone();
+            camera.depth_texture_usages = depth.into();
+            commands.entity(entity).insert(camera);
+        }
         if let Some(value) = &value {
             commands.entity(entity).insert(value.clone());
         } else {

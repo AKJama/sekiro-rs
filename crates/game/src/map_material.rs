@@ -153,20 +153,17 @@ fn release_materials(
     }
 }
 
-#[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
+#[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
 #[bind_group_data(MapPipelineKey)]
 #[data(50, MapLayersUniform, binding_array(101))]
-#[bindless(index_table(range(50..80), binding(100)))]
+#[bindless(index_table(range(50..81), binding(100)))]
 struct MapLayers {
-    direct: [Vec4; 13],
     // xyz: enabled albedo layers; w: mask present.
     enabled: Vec4,
     albedo_enabled: Vec4,
     albedo_uv: Vec4,
     normal_uv: Vec4,
     normal_enabled: Vec4,
-    hemi_axis: Vec4,
-    hemi_delta: Vec4,
     camera_fade: Vec4,
     game: MapGame,
     #[texture(51)]
@@ -213,6 +210,9 @@ struct MapLayers {
     #[texture(78)]
     #[sampler(79)]
     wet: Option<Handle<Image>>,
+    /// The shared [`MapLightBuffer`], so a LightSet change rewrites one buffer, not every material.
+    #[storage(80, read_only, binding_array(103))]
+    light: Handle<bevy::render::storage::ShaderBuffer>,
 }
 
 #[derive(ShaderType, Reflect, Debug, Clone, Default)]
@@ -241,7 +241,7 @@ impl From<&MapLayers> for MapPipelineKey {
         static LEGACY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         Self {
             game: layers.game.flags.y != 0,
-            native_direct: layers.direct[12].x > 0.,
+            native_direct: crate::lighting::native_lights(),
             camera_fade: layers.camera_fade.x > 0.
                 || *LEGACY.get_or_init(|| std::env::args().any(|a| a == "--legacy-camera-fade")),
         }
@@ -251,14 +251,11 @@ impl From<&MapLayers> for MapPipelineKey {
 // Packed once per material; bindless slabs preserve Bevy's multi-draw batching.
 #[derive(Clone, ShaderType)]
 struct MapLayersUniform {
-    direct: [Vec4; 13],
     enabled: Vec4,
     albedo_enabled: Vec4,
     albedo_uv: Vec4,
     normal_uv: Vec4,
     normal_enabled: Vec4,
-    hemi_axis: Vec4,
-    hemi_delta: Vec4,
     camera_fade: Vec4,
     game: MapGame,
 }
@@ -299,21 +296,69 @@ fn native_point_light_scale() -> f32 {
 
 impl From<&MapLayers> for MapLayersUniform {
     fn from(layers: &MapLayers) -> Self {
-        let mut direct = layers.direct;
-        direct[12].y = f32::from(native_point_lights() && direct[12].x > 0.);
-        direct[12].z = native_point_light_scale();
         Self {
-            direct,
             enabled: layers.enabled,
             albedo_enabled: layers.albedo_enabled,
             albedo_uv: layers.albedo_uv,
             normal_uv: layers.normal_uv,
             normal_enabled: layers.normal_enabled,
-            hemi_axis: layers.hemi_axis,
-            hemi_delta: layers.hemi_delta,
             camera_fade: layers.camera_fade,
             game: layers.game.clone(),
         }
+    }
+}
+
+/// The LightSet values every map material reads. They live in one shared storage buffer: the
+/// collision LightSet row changes at doorways (the Outskirts shack, #15), and writing them into
+/// each material re-prepared every map material's bind group in one frame.
+#[derive(Clone, Debug, Default, PartialEq, ShaderType)]
+struct MapLight {
+    direct: [Vec4; 13],
+    hemi_axis: Vec4,
+    hemi_delta: Vec4,
+}
+
+impl MapLight {
+    fn new(
+        lighting: &crate::lighting::MapLighting,
+        ambient: &bevy::light::GlobalAmbientLight,
+    ) -> Self {
+        let set = crate::lighting::LightSet::from_gparam(
+            &lighting.gparam,
+            lighting.light_set,
+            lighting.hour,
+        );
+        let mut direct = set.direct;
+        direct[12].y = f32::from(native_point_lights() && direct[12].x > 0.);
+        direct[12].z = native_point_light_scale();
+        let mut hemi_delta =
+            (set.hemi_delta * crate::lighting::ENV_PER_UNIT).extend(crate::lighting::ENV_PER_UNIT);
+        hemi_delta *= crate::lighting::scale("AMBIENT");
+        if crate::lighting::ablate("noamb") {
+            hemi_delta = Vec4::ZERO;
+        } else if crate::lighting::ablate("nogi") {
+            hemi_delta.w = 0.;
+        }
+        Self {
+            direct,
+            hemi_axis: set.hemi_axis.extend(f32::from(ambient.brightness > 0.)),
+            hemi_delta,
+        }
+    }
+}
+
+#[derive(Resource)]
+struct MapLightBuffer(Handle<bevy::render::storage::ShaderBuffer>);
+
+impl FromWorld for MapLightBuffer {
+    fn from_world(world: &mut World) -> Self {
+        Self(
+            world
+                .resource_mut::<Assets<bevy::render::storage::ShaderBuffer>>()
+                .add(bevy::render::storage::ShaderBuffer::from(
+                    MapLight::default(),
+                )),
+        )
     }
 }
 
@@ -478,7 +523,6 @@ mod tests {
         assert!(material.base.unlit);
         assert_eq!(material.base.base_color, original.base_color);
         assert_eq!(material.extension.albedo_enabled, Vec4::ZERO);
-        assert_eq!(material.extension.hemi_axis.xyz(), Vec3::Y);
         assert!(!MapPipelineKey::from(&material.extension).camera_fade);
         let mut blind = material.extension.clone();
         blind.camera_fade = Vec4::new(1., 1., 1. / 0.3, 0.);
@@ -541,6 +585,67 @@ mod tests {
                 "fight {fight}: wrapper survived source teardown"
             );
         }
+    }
+
+    #[test]
+    fn light_set_change_writes_the_shared_buffer_not_the_materials() {
+        use bevy::render::storage::ShaderBuffer;
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<LayeredMaterial>()
+            .init_asset::<ShaderBuffer>()
+            .init_resource::<MapLightBuffer>()
+            .insert_resource(crate::lighting::MapLighting {
+                gparam: Default::default(),
+                hour: 12.,
+                light_set: 110,
+                applied: None,
+                source: String::new(),
+            })
+            .insert_resource(bevy::light::GlobalAmbientLight::default())
+            .add_systems(Update, update_hemisphere);
+        let buffer = app.world().resource::<MapLightBuffer>().0.clone();
+        app.world_mut()
+            .resource_mut::<Assets<LayeredMaterial>>()
+            .add(ExtendedMaterial {
+                base: StandardMaterial::default(),
+                extension: MapLayers::default(),
+            });
+        app.update();
+        let expected = |app: &App| {
+            let lighting = app.world().resource::<crate::lighting::MapLighting>();
+            let ambient = app.world().resource::<bevy::light::GlobalAmbientLight>();
+            ShaderBuffer::from(MapLight::new(lighting, ambient)).data
+        };
+        let written = |app: &App| {
+            app.world()
+                .resource::<Assets<ShaderBuffer>>()
+                .get(&buffer)
+                .unwrap()
+                .data
+                .clone()
+        };
+        assert_eq!(written(&app), expected(&app));
+        let modified = |app: &mut App| {
+            let mut count = 0;
+            app.world_mut()
+                .resource_mut::<Messages<AssetEvent<LayeredMaterial>>>()
+                .drain()
+                .for_each(|e| count += usize::from(matches!(e, AssetEvent::Modified { .. })));
+            count
+        };
+        modified(&mut app);
+        // The shack doorway: the collision row flips from 110 inside to 100 outside.
+        app.world_mut()
+            .resource_mut::<crate::lighting::MapLighting>()
+            .light_set = 100;
+        app.update();
+        assert_eq!(written(&app), expected(&app));
+        assert_eq!(
+            modified(&mut app),
+            0,
+            "a LightSet change touched map materials"
+        );
     }
 }
 
@@ -638,12 +743,11 @@ struct LayerSettings {
 
 #[derive(bevy::ecs::system::SystemParam)]
 struct MapEnvironment<'w, 's> {
-    lighting: Res<'w, crate::lighting::MapLighting>,
-    ambient: Res<'w, bevy::light::GlobalAmbientLight>,
     parents: Query<'w, 's, &'static ChildOf>,
     roots: Query<'w, 's, (), With<super::DrawGroups>>,
     actors: Query<'w, 's, (), With<crate::character::Rig>>,
     irradiance: Option<Res<'w, crate::lighting::MapIrradiance>>,
+    light: Option<Res<'w, MapLightBuffer>>,
 }
 
 /// Retain actor material sources for gameplay tint, while drawing the native ambient wrapper.
@@ -675,6 +779,7 @@ pub(super) fn install(app: &mut App, prefix: &str, dir: &std::path::Path, args: 
     bevy::shader::load_shader_library!(app, "map_bindings.wgsl");
     bevy::shader::load_shader_library!(app, "map_coverage.wgsl");
     app.add_plugins(MaterialPlugin::<LayeredMaterial>::default())
+        .init_resource::<MapLightBuffer>()
         .insert_resource(LayerSettings {
             prefix: prefix.to_owned(),
             primary_texture_prefix: args.iter().any(|s| s == "--test-primary-material-prefix"),
@@ -699,7 +804,8 @@ pub(super) fn install(app: &mut App, prefix: &str, dir: &std::path::Path, args: 
 fn update_hemisphere(
     lighting: Res<crate::lighting::MapLighting>,
     ambient: Res<bevy::light::GlobalAmbientLight>,
-    mut materials: ResMut<Assets<LayeredMaterial>>,
+    light: Res<MapLightBuffer>,
+    mut buffers: ResMut<Assets<bevy::render::storage::ShaderBuffer>>,
     mut last: Local<Option<(i32, f32, bool, String)>>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("update_hemisphere");
@@ -713,23 +819,9 @@ fn update_hemisphere(
         return;
     }
     *last = Some(key);
-    let set =
-        crate::lighting::LightSet::from_gparam(&lighting.gparam, lighting.light_set, lighting.hour);
-    let axis = set.hemi_axis.extend(f32::from(ambient.brightness > 0.));
-    let mut delta =
-        (set.hemi_delta * crate::lighting::ENV_PER_UNIT).extend(crate::lighting::ENV_PER_UNIT);
-    delta *= crate::lighting::scale("AMBIENT");
-    if crate::lighting::ablate("noamb") {
-        delta = Vec4::ZERO;
-    } else if crate::lighting::ablate("nogi") {
-        delta.w = 0.;
-    }
-    for (_, material) in materials.iter_mut() {
-        material.extension.direct = set.direct;
-        if material.extension.hemi_axis != axis || material.extension.hemi_delta != delta {
-            material.extension.hemi_axis = axis;
-            material.extension.hemi_delta = delta;
-        }
+    // Same size every write, so Bevy rewrites the GPU buffer in place and no bind group changes.
+    if let Some(mut buffer) = buffers.get_mut(&light.0) {
+        buffer.set_data(MapLight::new(&lighting, &ambient));
     }
 }
 
@@ -779,15 +871,12 @@ fn replace_materials(
 ) {
     let _timer = crate::perf_log::SystemTimer::start("replace_materials");
     let MapEnvironment {
-        lighting,
-        ambient,
         parents,
         roots,
         actors,
         irradiance,
+        light,
     } = environment;
-    let set =
-        crate::lighting::LightSet::from_gparam(&lighting.gparam, lighting.light_set, lighting.hour);
     for (entity, original, extras, name) in &meshes {
         // Map and rig descendants share spatial lighting. Actor tint proxies retain
         // the StandardMaterial handles used by gameplay; unrelated FX stay untouched.
@@ -934,19 +1023,6 @@ fn replace_materials(
                     present("c_normal"),
                     f32::from(settings.debug),
                 ),
-                direct: set.direct,
-                hemi_axis: set.hemi_axis.extend(f32::from(ambient.brightness > 0.)),
-                hemi_delta: {
-                    let mut d = (set.hemi_delta * crate::lighting::ENV_PER_UNIT)
-                        .extend(crate::lighting::ENV_PER_UNIT);
-                    d *= crate::lighting::scale("AMBIENT");
-                    if crate::lighting::ablate("noamb") {
-                        d = Vec4::ZERO;
-                    } else if crate::lighting::ablate("nogi") {
-                        d.w = 0.;
-                    }
-                    d
-                },
                 camera_fade,
                 overlay: load("overlay", true),
                 snow: load("snow", true),
@@ -966,6 +1042,7 @@ fn replace_materials(
                 specular: irradiance.as_ref().map(|i| i.specular.clone()),
                 diffuse: irradiance.as_ref().map(|i| i.diffuse.clone()),
                 voxels: irradiance.as_ref().map(|i| i.voxels.clone()),
+                light: light.as_ref().map(|l| l.0.clone()).unwrap_or_default(),
             };
             let handle = layered.add(ExtendedMaterial {
                 base: native_surface(base, data),
