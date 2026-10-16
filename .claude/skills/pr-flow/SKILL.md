@@ -106,16 +106,15 @@ target/release/sekiro-rs.exe --render-gate --map m11_00_00_00 --sweep-out target
 target/release/sekiro-rs.exe --render-gate --map m11_01_00_00 --sweep-out target/render-gate
 ```
 
-Then run the live game the way the user plays it: launch from the menu or with `--map m11_00_00_00 --story genichiro-defeated`, wait for the loading screen to end, walk and grapple.
+Then test the change in the live game with the [`live-test`](../live-test/SKILL.md) skill: ask the user to playtest first, and if an agent runs it, wait for the full load, steer with a route and prove the target was hit.
 Record time to ready, settled fps, and that the ground and nearby pieces are textured from the first frame.
-Use the live-game test from `docs/MAP-COMPLETENESS-SWEEP.md` once it exists.
 A PR whose live run is worse than `main` is not ready, whatever the still-image gates say.
 If a check fails, fix it on the branch and run the checks again.
 
 ## 5. The user plays it
 
 For any PR that changes game code, the user's playtest is the final gate.
-Point them at the "What to look out for" section and the build to run (copy the branch's release binary to `target/play/sekiro-rs.exe`).
+Point them at the "What to look out for" section and the build to run, as the [`live-test`](../live-test/SKILL.md) skill describes.
 If they ask for changes, make them on the same branch (or rebase the stack), rerun steps 2 to 4, and ask again.
 
 ## 6. Merge

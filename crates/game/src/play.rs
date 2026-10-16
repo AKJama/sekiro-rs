@@ -269,6 +269,8 @@ struct Sim {
     /// The last hits, for the HUD.
     hit_log: Vec<String>,
     script: Option<Vec<InputFrame>>,
+    /// `--script-route`: waypoints Wolf walks to once the script ends, and the next one.
+    route: ScriptRoute,
     step: usize,
     lock_requested: bool,
     break_posture: bool,
@@ -597,6 +599,7 @@ pub fn run(options: Options) -> Result<()> {
         started: [None, None],
         hit_log: Vec::new(),
         script,
+        route: ScriptRoute::parse(&std::env::args().collect::<Vec<_>>())?,
         step: 0,
         lock_requested: options.lock_on && options.enemy_present,
         break_posture: options.break_posture,
@@ -1299,15 +1302,22 @@ fn simulate(
             sim.duel.reset().expect("probe restart");
         }
     }
-    let mut frame = match &sim.script {
-        Some(frames) => {
+    let script_ended = sim.script.as_ref().is_some_and(|s| sim.step >= s.len());
+    let feet = sim.duel.player.body.position;
+    let route = script_ended
+        .then(|| sim.route.steer(Vec2::new(feet[0], feet[2])))
+        .flatten();
+    let mut frame = match (&sim.script, route) {
+        // The route's stick direction is already in world space.
+        (_, Some(f)) => f,
+        (Some(frames), None) => {
             // Scripted sticks are camera-relative to the current orbit, like a player's.
             let mut f = frames.get(sim.step).copied().unwrap_or_default();
             f.camera_yaw += orbit.yaw;
             f
         }
         // The stick is relative to the camera on screen now (the orbit of the last frame).
-        None => InputFrame {
+        (None, None) => InputFrame {
             camera_yaw: orbit.yaw,
             ..live.frame
         },
@@ -1981,6 +1991,80 @@ fn capture(
     }
 }
 
+/// `--script-route x,z;x,z;...`: once the `--script` input runs out, Wolf walks (0.3 stick)
+/// to each point in turn, steered toward it every step with the stick's world direction
+/// (not relative to the orbit camera), so a live run can follow a narrow path such as a tree
+/// trunk; it needs a `--script` (whose idle lines wait for the load). A point counts as reached
+/// within 0.25 m; after [`ScriptRoute::LIMIT`] steps without
+/// finishing, the route is abandoned. The live check waits for it.
+#[derive(Default)]
+pub(crate) struct ScriptRoute {
+    points: Vec<Vec2>,
+    next: usize,
+    steps: usize,
+}
+
+impl ScriptRoute {
+    const LIMIT: usize = 3600;
+
+    fn parse(args: &[String]) -> Result<Self> {
+        let Some(value) = crate::arg_value(args, "--script-route") else {
+            return Ok(Self::default());
+        };
+        // The route starts when the script ends, and the script's idle lines are what wait for
+        // the load, so a route alone would never run.
+        anyhow::ensure!(
+            crate::arg_value(args, "--script").is_some(),
+            "--script-route needs a --script to run after"
+        );
+        let points = value
+            .split(';')
+            .map(|p| {
+                let (x, z) = p.split_once(',').context("--script-route points are x,z")?;
+                Ok(Vec2::new(x.trim().parse()?, z.trim().parse()?))
+            })
+            .collect::<Result<_>>()?;
+        Ok(Self {
+            points,
+            ..Self::default()
+        })
+    }
+
+    /// Whether every point is reached (or the route was abandoned).
+    pub(crate) fn done(&self) -> bool {
+        self.next >= self.points.len()
+    }
+
+    fn steer(&mut self, feet: Vec2) -> Option<InputFrame> {
+        while let Some(&target) = self.points.get(self.next) {
+            self.steps += 1;
+            if self.steps > Self::LIMIT {
+                warn!(
+                    "script route abandoned before point {} at {feet}",
+                    self.next
+                );
+                self.next = self.points.len();
+                return None;
+            }
+            let d = target - feet;
+            if d.length() < 0.25 {
+                info!(
+                    "script route: reached point {} {target} at {feet}",
+                    self.next
+                );
+                self.next += 1;
+                continue;
+            }
+            return Some(InputFrame {
+                move_stick: [0.0, 0.3],
+                camera_yaw: (-d.x).atan2(-d.y),
+                ..InputFrame::default()
+            });
+        }
+        None
+    }
+}
+
 /// Per-frame camera and per-step movement logs, on for `--input` replays or with
 /// `PLAY_LOG_CAMERA` set.
 fn log_enabled() -> bool {
@@ -2287,6 +2371,7 @@ mod tests {
             started: [None, None],
             hit_log: Vec::new(),
             script: None,
+            route: ScriptRoute::default(),
             step: 0,
             lock_requested: false,
             break_posture: false,
@@ -2450,5 +2535,38 @@ mod tests {
             held_frames[0] >= 3 && held_frames[1] >= 3,
             "{held_frames:?}"
         );
+    }
+
+    #[test]
+    fn script_route_steers_to_each_point_in_world_space_then_finishes() {
+        let args = ["--script", "idle.txt", "--script-route", "0,-5; 3,-5"].map(String::from);
+        let mut route = ScriptRoute::parse(&args).unwrap();
+        assert!(!route.done());
+        let walk = |f: InputFrame| Vec2::new(-f.camera_yaw.sin(), -f.camera_yaw.cos());
+        // From the origin the stick walks straight toward the first point.
+        let f = route.steer(Vec2::ZERO).unwrap();
+        assert_eq!(f.move_stick, [0.0, 0.3]);
+        assert!(walk(f).distance(Vec2::new(0.0, -1.0)) < 1e-5);
+        // Within 0.25 m the point counts as reached and the next one is steered for.
+        let f = route.steer(Vec2::new(0.1, -4.9)).unwrap();
+        assert!(walk(f).distance(Vec2::new(2.9, -0.1).normalize()) < 1e-5);
+        assert!(route.steer(Vec2::new(3.0, -5.0)).is_none());
+        assert!(route.done());
+    }
+
+    #[test]
+    fn script_route_is_empty_without_the_flag_needs_a_script_and_gives_up_after_its_limit() {
+        assert!(ScriptRoute::parse(&[]).unwrap().done());
+        let bad = ["--script", "idle.txt", "--script-route", "1;2"].map(String::from);
+        assert!(ScriptRoute::parse(&bad).is_err());
+        let alone = ["--script-route", "1,2"].map(String::from);
+        assert!(ScriptRoute::parse(&alone).is_err());
+        let args = ["--script", "idle.txt", "--script-route", "100,0"].map(String::from);
+        let mut route = ScriptRoute::parse(&args).unwrap();
+        for _ in 0..ScriptRoute::LIMIT {
+            assert!(route.steer(Vec2::ZERO).is_some());
+        }
+        assert!(route.steer(Vec2::ZERO).is_none());
+        assert!(route.done());
     }
 }
