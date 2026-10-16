@@ -551,6 +551,17 @@ fn cinematic_gparam(id: &str) -> Option<String> {
 #[derive(Component)]
 pub struct MapFocus;
 
+/// Marks a [`MapFocus`] that is the player: the map follows the collision part he stands on
+/// and keeps it while he is off map collision, as the exe's hit collision does
+/// (`world::MapWorld::stand`). Without it the focus is a free camera.
+#[derive(Component)]
+pub struct PlayerFocus {
+    /// His physics body has ground contact (`sekiro_sim::body::Body::grounded`). The exe
+    /// takes a new hit collision only from a ground contact, so in the air (a jump's apex, a
+    /// grapple flight) the part stays.
+    pub grounded: bool,
+}
+
 /// `cache/maps/<id>`, or an error naming the export command.
 pub fn map_dir(cache: &Path, id: &str) -> Result<PathBuf> {
     cache
@@ -585,7 +596,8 @@ pub fn player_start(dir: &Path, index: usize) -> Result<(Vec3, f32)> {
 
 /// Adds a map to an app built with `DefaultPlugins`: its pieces, draw-group culling around the
 /// [`MapFocus`] entity, a sun, ambient light, sky colour, fog and far plane on every 3D camera,
-/// and the collision view (C toggles it, G cycles group modes, M toggles markers).
+/// and the collision view. The viewer's keys (C collision, G group modes, M markers) are
+/// [`run`]'s own: in play C crouches.
 pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
     let stage = |name: &str| info!("map setup: {name} at {:.1} s", crate::since_start());
     let json: Value = serde_json::from_slice(
@@ -882,7 +894,6 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene) -> Result<()> {
             Update,
             (
                 camera_environment,
-                toggle_collision,
                 (stream_assets, track_loading).chain(),
                 budget_map_shadows,
                 update_local_lights.after(world::update),
@@ -1005,7 +1016,8 @@ pub fn run(options: Options) -> Result<()> {
     .add_systems(Startup, move |commands: Commands| {
         setup_view(commands, start)
     })
-    .add_systems(Update, (fly, apply_fly, hud).chain());
+    .add_systems(Update, (fly, apply_fly, hud).chain())
+    .add_systems(Update, (toggle_collision, cycle_groups.before(pick_groups)));
     if let Some(path) = options.screenshot {
         if path.exists() {
             std::fs::remove_file(&path)?;
@@ -1409,11 +1421,19 @@ fn scene_layers(scene_gparam: &Value) -> [i8; 4] {
     })
 }
 
+/// Viewer key G: the next group mode.
+fn cycle_groups(keys: Res<ButtonInput<KeyCode>>, mut groups: ResMut<Groups>) {
+    if keys.just_pressed(KeyCode::KeyG) {
+        groups.mode = groups.mode.next();
+        groups.dirty = true;
+        groups.checked_at = None;
+    }
+}
+
 /// Finds the collision part under the camera (the nearest surface below, else the nearest
 /// above) and takes its groups and lighting configuration whenever the focus moves.
 #[allow(clippy::too_many_arguments)]
 fn pick_groups(
-    keys: Res<ButtonInput<KeyCode>>,
     layout: Res<Layout>,
     mut groups: ResMut<Groups>,
     mut lighting: ResMut<MapLighting>,
@@ -1424,11 +1444,6 @@ fn pick_groups(
     connected: Option<Res<world::MapWorld>>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("pick_groups");
-    if keys.just_pressed(KeyCode::KeyG) {
-        groups.mode = groups.mode.next();
-        groups.dirty = true;
-        groups.checked_at = None;
-    }
     if let Some(world) = connected {
         if let Some((block, collision)) = &world.selected
             && let Some(row) = world.blocks[block].json["parts"]

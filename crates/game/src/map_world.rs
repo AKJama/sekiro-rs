@@ -14,7 +14,7 @@ use bevy::prelude::*;
 use sekiro_formats::hknp::CollisionMesh;
 use serde_json::{Value, json};
 
-use super::{GroupMode, MapFocus, Pending, groups8, vertical_hit, visibility};
+use super::{GroupMode, MapFocus, Pending, PlayerFocus, groups8, vertical_hit, visibility};
 use bevy::world_serialization::{WorldAssetRoot, WorldInstance, WorldInstanceSpawner};
 
 pub(crate) type Mask = [u32; 8];
@@ -142,7 +142,19 @@ struct Surface {
     max: Vec2,
     demand: Mask,
     backread: Mask,
+    /// The player stands on this part (`sekiro_sim::hit_filter::player_collides`).
+    player: bool,
 }
+
+/// How far above a player-collidable part Wolf's feet may be and still stand on it. A
+/// jump's apex, a fall or the wire perch over a ravine is off the map collision, and the
+/// part he last stood on stays in force, as the exe keeps the character's last hit collision.
+const STAND_REACH: f32 = 1.0;
+
+/// How far the player's feet may move between two [`MapWorld::stand`] calls before it is a
+/// teleport (respawn, fall return, a tour stop) that re-arms the spawn probe. Drawn motion
+/// (sprints, grapple flights, falls) covers well under a metre a frame.
+const TELEPORT: f32 = 10.0;
 
 /// C/E consume the per-block demand here; F uses BlockPart and its authored row.
 /// Cached GLBs stay warm for the bounded neighbourhood after demand retires.
@@ -151,6 +163,12 @@ pub(crate) struct MapWorld {
     pub(crate) blocks: BTreeMap<String, Block>,
     pub(crate) primary: String,
     pub(crate) selected: Option<(String, String)>,
+    /// The collision part (block, index into its surfaces) the player last stood on, and
+    /// whether he really stood on it rather than it standing in before his first landing.
+    standing: Option<(String, usize)>,
+    stood: bool,
+    /// The player's feet at the last [`Self::stand`], to tell a teleport.
+    last_feet: Option<Vec3>,
     visibility_maps: BTreeMap<String, visibility::VisibilityMap>,
     requests: BTreeMap<String, visibility::BlockRequest>,
     lod: super::lod::LodTable,
@@ -407,6 +425,9 @@ impl MapWorld {
                     max,
                     demand: display_mask(row),
                     backread,
+                    // Rows without a hit filter are ordinary map collision.
+                    player: sekiro_sim::hit_filter::row_filter(row)
+                        .is_none_or(sekiro_sim::hit_filter::player_collides),
                 });
             }
             let block_prefix = if id == primary {
@@ -501,6 +522,9 @@ impl MapWorld {
             blocks,
             primary: primary.to_string(),
             selected: None,
+            standing: None,
+            stood: false,
+            last_feet: None,
             visibility_maps,
             requests: BTreeMap::new(),
             lod,
@@ -508,8 +532,122 @@ impl MapWorld {
         })
     }
 
-    /// Recalculate all masks, so stale connection demand cannot leak across blocks.
+    /// Whether `surface` of block `id` is switched off by the story.
+    fn disabled(story: Option<&super::story::MapStory>, id: &str, surface: &Surface) -> bool {
+        story
+            .and_then(|s| s.maps.get(id))
+            .and_then(|s| s.part(&surface.name))
+            .is_some_and(|p| !p.enabled)
+    }
+
+    /// Every collision part crossing the vertical line through `pos`, scored by the nearest
+    /// surface below (or, failing that, above), with the height of `pos` over that surface.
+    /// `player` keeps only the parts the player collides with.
+    fn hits(
+        &self,
+        pos: Vec3,
+        story: Option<&super::story::MapStory>,
+        player: bool,
+    ) -> Vec<(f32, f32, String, usize)> {
+        let mut hits = Vec::new();
+        for (id, block) in &self.blocks {
+            for (index, surface) in block.collisions.iter().enumerate() {
+                if (player && !surface.player) || Self::disabled(story, id, surface) {
+                    continue;
+                }
+                if pos.xz().cmplt(surface.min).any() || pos.xz().cmpgt(surface.max).any() {
+                    continue;
+                }
+                let best = block.collision.indices
+                    [surface.first * 3..(surface.first + surface.count) * 3]
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .filter_map(|tri| {
+                        let [a, b, c] =
+                            tri.map(|i| Vec3::from(block.collision.vertices[i as usize]));
+                        vertical_hit(pos, a, b, c)
+                    })
+                    .map(|h| (if h >= -0.5 { h } else { 1000.0 - h }, h))
+                    .min_by(|a, b| a.0.total_cmp(&b.0));
+                if let Some((score, height)) = best {
+                    hits.push((score, height, id.clone(), index));
+                }
+            }
+        }
+        hits.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.2.cmp(&b.2)));
+        hits
+    }
+
+    /// Camera-driven demand for the map viewer and fixed captures, where the focus is a free
+    /// camera rather than a character: every part under each position, with a 0.5 m tie band
+    /// so a camera over a seam takes both sides.
     pub(crate) fn demand(&mut self, positions: &[Vec3], story: Option<&super::story::MapStory>) {
+        let mut sources = Vec::new();
+        for &pos in positions {
+            let hits = self.hits(pos, story, false);
+            let Some(&(best, ..)) = hits.first() else {
+                continue;
+            };
+            sources.extend(
+                hits.into_iter()
+                    .take_while(|h| h.0 <= best + 0.5)
+                    .map(|(_, _, id, index)| (id, index)),
+            );
+        }
+        self.apply(&sources, story);
+    }
+
+    /// Play demand from the collision part the player stands on (`docs/MAP-COMPLETENESS.md`,
+    /// "The player's hit collision selects the map"): with ground contact (`grounded`), the
+    /// nearest player-collidable surface below his feet within [`STAND_REACH`], or one at most
+    /// 0.5 m above them. In the air, or grounded off map collision (the wire perch), the last
+    /// part stays. Until he first stands on one, the nearest player-collidable part below him
+    /// stands in, like the exe's spawn cast, and is re-probed as he moves (the character is
+    /// placed after the first frames). A jump of more than [`TELEPORT`] in one call (respawn,
+    /// fall return, a tour stop) re-arms that probe, as the exe re-runs its cast on map entry.
+    /// The camera never takes part. Returns whether the selection changed.
+    pub(crate) fn stand(
+        &mut self,
+        feet: Vec3,
+        grounded: bool,
+        story: Option<&super::story::MapStory>,
+    ) -> bool {
+        if self
+            .last_feet
+            .is_some_and(|last| last.distance(feet) > TELEPORT)
+        {
+            self.stood = false;
+        }
+        self.last_feet = Some(feet);
+        if self.stood && !grounded {
+            return false;
+        }
+        // Hits are sorted nearest below first, then above, so only the first can be in reach.
+        let Some((_, height, id, index)) = self.hits(feet, story, true).into_iter().next() else {
+            return false;
+        };
+        let found = if grounded && (-0.5..=STAND_REACH).contains(&height) {
+            self.stood = true;
+            Some((id, index))
+        } else if !self.stood && height >= -0.5 {
+            Some((id, index))
+        } else {
+            None
+        };
+        if found.is_none() || found == self.standing {
+            return false;
+        }
+        self.standing = found;
+        let sources: Vec<_> = self.standing.iter().cloned().collect();
+        self.apply(&sources, story);
+        true
+    }
+
+    /// Recalculate all masks from the participating collision parts (block, surface index),
+    /// so stale connection demand cannot leak across blocks. The first part selects the
+    /// lighting region.
+    fn apply(&mut self, sources: &[(String, usize)], story: Option<&super::story::MapStory>) {
         for block in self.blocks.values_mut() {
             block.normal = [0; 8];
             block.additional = [0; 8];
@@ -518,63 +656,24 @@ impl MapWorld {
         let mut contributions = Vec::new();
         let mut participating = BTreeMap::<String, BTreeSet<String>>::new();
         self.selected = None;
-        for &pos in positions {
-            let mut hits = Vec::new();
-            for (id, block) in &self.blocks {
-                for (index, surface) in block.collisions.iter().enumerate() {
-                    if story
-                        .and_then(|s| s.maps.get(id))
-                        .and_then(|s| s.part(&surface.name))
-                        .is_some_and(|p| !p.enabled)
-                    {
-                        continue;
-                    }
-                    if pos.xz().cmplt(surface.min).any() || pos.xz().cmpgt(surface.max).any() {
-                        continue;
-                    }
-                    let score = block.collision.indices
-                        [surface.first * 3..(surface.first + surface.count) * 3]
-                        .as_chunks::<3>()
-                        .0
-                        .iter()
-                        .filter_map(|tri| {
-                            let [a, b, c] =
-                                tri.map(|i| Vec3::from(block.collision.vertices[i as usize]));
-                            vertical_hit(pos, a, b, c)
-                        })
-                        .map(|h| if h >= -0.5 { h } else { 1000.0 - h })
-                        .min_by(f32::total_cmp);
-                    if let Some(score) = score {
-                        hits.push((score, id.clone(), index));
-                    }
-                }
+        for (id, index) in sources {
+            let block = &self.blocks[id];
+            let surface = &block.collisions[*index];
+            participating
+                .entry(id.clone())
+                .or_default()
+                .insert(surface.name.clone());
+            if self.selected.is_none() {
+                self.selected = Some((id.clone(), surface.name.clone()));
             }
-            hits.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-            let Some((best, _, _)) = hits.first() else {
-                continue;
-            };
-            // Supporting/player/camera collisions can coexist at a seam. The 0.5 m
-            // tie band is an explicit occupancy approximation pending job E's policy.
-            for (_, id, index) in hits.iter().take_while(|h| h.0 <= best + 0.5) {
-                let block = &self.blocks[id];
-                let surface = &block.collisions[*index];
-                participating
-                    .entry(id.clone())
-                    .or_default()
-                    .insert(surface.name.clone());
-                if self.selected.is_none() {
-                    self.selected = Some((id.clone(), surface.name.clone()));
+            contributions.push((id.clone(), surface.demand, surface.backread));
+            for row in block.json["connections"].as_array().into_iter().flatten() {
+                if row["connection"]["source_collision"]["name"].as_str() != Some(&surface.name) {
+                    continue;
                 }
-                contributions.push((id.clone(), surface.demand, surface.backread));
-                for row in block.json["connections"].as_array().into_iter().flatten() {
-                    if row["connection"]["source_collision"]["name"].as_str() != Some(&surface.name)
-                    {
-                        continue;
-                    }
-                    if let Some(p) = pattern(row) {
-                        for target in targets(p, &inventory) {
-                            contributions.push((target, display_mask(row), [0; 8]));
-                        }
+                if let Some(p) = pattern(row) {
+                    for target in targets(p, &inventory) {
+                        contributions.push((target, display_mask(row), [0; 8]));
                     }
                 }
             }
@@ -604,21 +703,30 @@ impl MapWorld {
     }
 }
 
+/// Map demand from the [`MapFocus`]: the collision part a [`PlayerFocus`] stands on (kept
+/// while he is off map collision), else the parts under the free camera. Other cameras never
+/// take part: in play the orbit camera swinging out over a ravine must not retire the map.
 pub(crate) fn update(
     mut world: ResMut<MapWorld>,
     assets: Res<AssetServer>,
-    focus: Query<&Transform, With<MapFocus>>,
-    cameras: Query<&Transform, With<Camera3d>>,
-    mut last: Local<Option<Vec<Vec3>>>,
+    focus: Query<(&Transform, Option<&PlayerFocus>), With<MapFocus>>,
+    mut last: Local<Option<Vec<(Vec3, bool)>>>,
     story: Res<super::story::MapStory>,
 ) {
     let positions: Vec<_> = focus
         .iter()
-        .chain(cameras.iter())
-        .map(|t| t.translation)
+        .map(|(t, player)| (t.translation, player.is_some_and(|p| p.grounded)))
         .collect();
     if last.as_ref() != Some(&positions) {
-        world.demand(&positions, Some(&story));
+        match focus.iter().find_map(|(t, player)| Some((t, player?))) {
+            Some((feet, player)) => {
+                world.stand(feet.translation, player.grounded, Some(&story));
+            }
+            None => {
+                let cameras: Vec<_> = positions.iter().map(|&(p, _)| p).collect();
+                world.demand(&cameras, Some(&story));
+            }
+        }
         *last = Some(positions);
     }
     for block in world.blocks.values_mut() {
@@ -1304,6 +1412,7 @@ mod tests {
                 max: Vec2::new(hi, 10.),
                 demand: [bit, 0, 0, 0, 0, 0, 0, 0],
                 backread: [32, 0, 0, 0, 0, 0, 0, 0],
+                player: true,
             }];
             block.json = json!({"connections":[]});
         }
@@ -1328,5 +1437,128 @@ mod tests {
         world.demand(&[Vec3::new(1., 1., 0.)], None);
         assert_eq!(world.blocks[ASHINA[1]].normal, [2, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(world.blocks[ASHINA[0]].normal, [0; 8]);
+    }
+
+    /// The grapple from the Outskirts ledge to the branch over the ravine: on the perch Wolf
+    /// stands on no map collision (only the event walls h900000 and h900001, which he does not
+    /// collide with, lie below), so the ledge's part stays, whatever the camera does. A
+    /// teleport re-arms the spawn probe even in the air.
+    #[test]
+    fn standing_part_survives_the_branch_and_follows_teleports() {
+        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        if !cache.join("maps/m11_01_00_00/layout.json").is_file() {
+            return;
+        }
+        let mut world = MapWorld::load(&cache, ASHINA[0], "maps/m11_00_00_00/").unwrap();
+        let ledge = Vec3::new(-132.5, -44.6, -124.0);
+        // Both ends of the branch: the user's perch and the one the live check's grapple
+        // reaches from the ledge.
+        let perches = [
+            Vec3::new(-137.6, -44.3, -124.5),
+            Vec3::new(-141.58, -44.26, -123.86),
+        ];
+        let ledge_part = Some((ASHINA[0].to_string(), "h023300".to_string()));
+
+        // The event walls under the branch are not the player's collision.
+        for wall in ["h900000", "h900001"] {
+            let surface = world.blocks[ASHINA[0]]
+                .collisions
+                .iter()
+                .find(|s| s.name == wall)
+                .unwrap_or_else(|| panic!("{wall} missing"));
+            assert!(!surface.player, "{wall} is player collision");
+        }
+        // No player-collidable part is within reach of either perch.
+        for perch in perches {
+            let below = world.hits(perch, None, true).into_iter().next();
+            assert!(
+                below
+                    .as_ref()
+                    .is_none_or(|h| !(-0.5..=STAND_REACH).contains(&h.1)),
+                "{perch} stands on {below:?}"
+            );
+        }
+
+        // The viewer's camera probe over the ravine finds only zero-demand helper walls.
+        world.demand(&[perches[0]], None);
+        assert_eq!(
+            world.selected,
+            Some((ASHINA[0].to_string(), "h900000".to_string()))
+        );
+        assert_eq!(world.blocks[ASHINA[0]].normal, [0; 8]);
+
+        // Normal ground: the ledge's own part, and a jump's apex keeps it.
+        assert!(world.stand(ledge, true, None));
+        assert_eq!(world.selected, ledge_part);
+        let ledge_mask = world.blocks[ASHINA[0]].normal;
+        assert_ne!(ledge_mask, [0; 8]);
+        assert!(!world.stand(ledge + Vec3::Y * 1.5, false, None));
+        assert_eq!(world.selected, ledge_part);
+
+        // The play path: Wolf on the ledge, then perched on each end of the branch. A camera
+        // over the ravine guards against cameras taking part again.
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_resource::<super::super::story::MapStory>()
+            .insert_resource(world)
+            .add_systems(Update, update);
+        let wolf = app
+            .world_mut()
+            .spawn((
+                MapFocus,
+                PlayerFocus { grounded: true },
+                Transform::from_translation(ledge),
+            ))
+            .id();
+        let camera = app
+            .world_mut()
+            .spawn((Camera3d::default(), Transform::from_translation(ledge)))
+            .id();
+        app.update();
+        for perch in perches {
+            app.world_mut()
+                .get_mut::<Transform>(wolf)
+                .unwrap()
+                .translation = perch;
+            app.update();
+            let world = app.world().resource::<MapWorld>();
+            assert_eq!(world.selected, ledge_part, "{perch}");
+            assert_eq!(world.blocks[ASHINA[0]].normal, ledge_mask, "{perch}");
+            assert!(
+                matches!(
+                    world.blocks[ASHINA[0]].state,
+                    RequestState::Requested | RequestState::Ready
+                ),
+                "m11_00 retired at {perch}: {:?}",
+                world.blocks[ASHINA[0]].state
+            );
+        }
+        app.world_mut()
+            .get_mut::<Transform>(camera)
+            .unwrap()
+            .translation = perches[0] + Vec3::new(-4.5, 1.5, 0.0);
+        app.update();
+        assert_eq!(app.world().resource::<MapWorld>().selected, ledge_part);
+
+        // A teleport to the ground elsewhere: the part under his feet takes over, Ashina
+        // Castle's first player start.
+        let mut world = app.world_mut().remove_resource::<MapWorld>().unwrap();
+        let castle = Vec3::new(202.6, -26.4, 176.7);
+        assert!(world.stand(castle, true, None));
+        let (block, part) = world.selected.clone().unwrap();
+        assert_eq!(block, ASHINA[1]);
+        let surface = world.blocks[&block]
+            .collisions
+            .iter()
+            .find(|s| s.name == part)
+            .unwrap();
+        assert!(surface.player, "{part} is not player collision");
+        assert_ne!(world.blocks[ASHINA[1]].normal, [0; 8]);
+        println!("castle start stands on {block}/{part}");
+
+        // A teleport into the air (a tour stop or a fall return above the ground) re-arms the
+        // spawn probe: the part below him takes over before he lands.
+        assert!(world.stand(ledge + Vec3::Y * 5.0, false, None));
+        assert_eq!(world.selected, ledge_part);
     }
 }

@@ -6,8 +6,11 @@ use std::collections::VecDeque;
 #[derive(Resource)]
 struct ShaderClock(Time);
 
+/// The requested player position: a plain [`MapFocus`] beside the sweep camera's, so a
+/// capture keeps the free-camera probe under both (never `map::PlayerFocus`, which would
+/// switch it to the play-time standing part).
 #[derive(Component)]
-struct PlayerFocus;
+struct PoseFocus;
 
 #[derive(Resource)]
 pub(super) struct Server {
@@ -35,14 +38,14 @@ pub(super) fn install(app: &mut App, directory: PathBuf) -> Result<()> {
     let (width, height) = (options.width, options.height);
     let focuses: Vec<_> = app
         .world_mut()
-        .query_filtered::<Entity, With<MapFocus>>()
+        .query_filtered::<Entity, (With<MapFocus>, Without<SweepCamera>)>()
         .iter(app.world())
         .collect();
     for entity in focuses {
         app.world_mut().entity_mut(entity).remove::<MapFocus>();
     }
     app.world_mut().spawn((
-        PlayerFocus,
+        PoseFocus,
         MapFocus,
         Transform::default(),
         GlobalTransform::default(),
@@ -156,7 +159,7 @@ fn step(world: &mut World, server: &mut Server, sweep: &mut Sweep) -> Result<()>
                 "invalid player position"
             );
             for (mut transform, mut global) in world
-                .query_filtered::<(&mut Transform, &mut GlobalTransform), With<PlayerFocus>>()
+                .query_filtered::<(&mut Transform, &mut GlobalTransform), With<PoseFocus>>()
                 .iter_mut(world)
             {
                 transform.translation = Vec3::from_array(player);

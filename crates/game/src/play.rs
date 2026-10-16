@@ -44,7 +44,7 @@ use sekiro_sim::{Buttons, InputFrame, StepReport, demo};
 use crate::character::{AnimLibrary, Animator, Rig, animate, bind_rigs};
 use crate::combat_hud;
 use crate::draw_mask::{DrawMask, MaskSource, apply_draw_masks};
-use crate::map::{self, MapFocus, MapScene};
+use crate::map::{self, MapFocus, MapScene, PlayerFocus};
 use sekiro_sim::arena::{Arena, ArenaSpec};
 use sekiro_sim::collision::CollisionWorld;
 #[path = "arena_c_scene.rs"]
@@ -692,7 +692,8 @@ pub fn run(options: Options) -> Result<()> {
             reload_enemy,
             bind_rigs,
             apply_draw_masks,
-            sync_actors,
+            // The map's standing probe reads Wolf's drawn feet of this frame.
+            sync_actors.before(map::world::update),
             sync_arena_scene,
             sync_bullets,
             sync_lightning_tint,
@@ -720,8 +721,12 @@ pub fn run(options: Options) -> Result<()> {
         &std::env::args().collect::<Vec<_>>(),
         on_map.as_ref().map(|(dir, _, _)| dir.as_path()),
     )? {
-        app.insert_resource(check)
-            .add_systems(Last, live_check::observe.before(exit_fast));
+        app.insert_resource(check).add_systems(
+            Last,
+            (live_check::observe_world, live_check::observe)
+                .chain()
+                .before(exit_fast),
+        );
     }
     if std::env::var_os("PF_RESPAWN_PROBE").is_some() {
         app.add_systems(Last, renderer_counts);
@@ -988,10 +993,13 @@ fn setup(
         );
         idle.apply_root_motion = false;
         idle.speed = 0.0;
+        // Placed where the simulation has him from the first frame, so nothing (the map's
+        // standing probe) ever sees him at the origin.
+        let (position, yaw) = shown(&sim, actor, 0.0);
         let mut e = commands.spawn((
             Actor(actor),
             WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(models[actor].clone()))),
-            Transform::IDENTITY,
+            Transform::from_translation(position).with_rotation(Quat::from_rotation_y(yaw)),
             Visibility::Inherited,
             Rig::new(Arc::new(lib.skeleton.clone())),
             idle,
@@ -1003,8 +1011,13 @@ fn setup(
             );
         }
         if actor == WOLF && on_map {
-            // Draw groups follow Wolf.
-            e.insert(MapFocus);
+            // The map follows the collision part Wolf stands on, never the camera.
+            e.insert((
+                MapFocus,
+                PlayerFocus {
+                    grounded: sim.duel.player.body.grounded,
+                },
+            ));
         }
     }
     commands.spawn((
@@ -1491,9 +1504,15 @@ fn sync_actors(
     mut libraries: ResMut<Libraries>,
     mut fx: ResMut<crate::bullet_fx::BulletFx>,
     mut fxr: ResMut<crate::fxr::FxrPlayer>,
-    mut q: Query<(&Actor, &mut Animator, &mut Transform, &mut Visibility)>,
+    mut q: Query<(
+        &Actor,
+        &mut Animator,
+        &mut Transform,
+        &mut Visibility,
+        Option<&mut PlayerFocus>,
+    )>,
 ) {
-    for (actor, mut anim, mut tf, mut vis) in &mut q {
+    for (actor, mut anim, mut tf, mut vis, focus) in &mut q {
         let i = actor.0;
         if i == ENEMY && sim.duel.screen_monkeys.is_some() {
             *vis = Visibility::Hidden;
@@ -1502,6 +1521,13 @@ fn sync_actors(
         let (position, yaw) = shown(&sim, i, fixed.overstep_fraction());
         tf.translation = position;
         tf.rotation = Quat::from_rotation_y(yaw);
+        if let Some(mut focus) = focus {
+            // Only a ground contact can change the map's standing part.
+            let grounded = sim.duel.player.body.grounded;
+            if focus.grounded != grounded {
+                focus.grounded = grounded;
+            }
+        }
         // TAE 193 fades the model (and the weapon in it) out and back in; drawn hidden past
         // half, with a puff where it goes and where it comes back (stand-ins for the game's
         // warp effects, FFX 650680 / 650682).

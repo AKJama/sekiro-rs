@@ -16,6 +16,12 @@
 //! fell to and his contacts with map action event walls (`sekiro_sim::hit_filter`). The run
 //! ends after the tour, the input script (plus two seconds) or `--live-seconds` of play, writes
 //! the summary and exits.
+//! `--live-orbit <step>,<seconds>` turns the play camera through a full circle around Wolf,
+//! starting at that simulation step and taking that long (with `--live-shots`, a screenshot every
+//! 45 degrees); the run also waits for the turn. Every connected map block's request state
+//! change after play starts (`map_world`) is recorded with the collision part selecting the map,
+//! so a run can assert that a block never retires while the camera turns; `selections` lists
+//! every collision part that selected the map after play started.
 //! Every line is also logged as `live check:` for manual runs.
 use super::{MapCollision, Sim, WOLF};
 use bevy::app::AppExit;
@@ -23,6 +29,7 @@ use bevy::camera::primitives::Aabb;
 use bevy::mesh::{Indices, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -36,6 +43,18 @@ const GROUND_TOLERANCE: f32 = 1.0;
 const TOUR_WAIT: f32 = 3.0;
 /// Seconds at a `drop:x,y,z` tour stop: a 30 m fall, the fall return's fade and the return.
 const DROP_WAIT: f32 = 8.0;
+/// Degrees between `--live-orbit` screenshots.
+const ORBIT_SHOT_DEGREES: f32 = 45.0;
+
+/// The `--live-orbit` camera turn: when it starts, how long it takes, and its progress.
+struct OrbitTurn {
+    step: usize,
+    seconds: f32,
+    /// When the turn began and the camera yaw it began from.
+    began: Option<(Instant, f32)>,
+    shots: usize,
+    done: bool,
+}
 
 #[derive(Resource)]
 pub(super) struct LiveCheck {
@@ -68,7 +87,28 @@ pub(super) struct LiveCheck {
     grounded_samples: usize,
     last_sample: Option<Instant>,
     coverage: Vec<f32>,
+    orbit: Option<OrbitTurn>,
+    /// Request state per map block, and every change after play started.
+    block_states: BTreeMap<String, String>,
+    block_changes: Vec<serde_json::Value>,
+    /// Every collision part selecting the map after play started, in order, without repeats.
+    selections: Vec<Option<String>>,
     finished: bool,
+}
+
+fn parse_orbit(value: &str) -> anyhow::Result<OrbitTurn> {
+    let (step, seconds) = value
+        .split_once(',')
+        .ok_or_else(|| anyhow::anyhow!("--live-orbit is <step>,<seconds>"))?;
+    let seconds: f32 = seconds.trim().parse()?;
+    anyhow::ensure!(seconds > 0.0, "--live-orbit needs a positive duration");
+    Ok(OrbitTurn {
+        step: step.trim().parse()?,
+        seconds,
+        began: None,
+        shots: 0,
+        done: false,
+    })
 }
 
 fn parse_tour(value: &str, map_dir: Option<&Path>) -> anyhow::Result<Vec<(Vec3, bool)>> {
@@ -143,6 +183,12 @@ impl LiveCheck {
             grounded_samples: 0,
             last_sample: None,
             coverage: Vec::new(),
+            orbit: crate::arg_value(args, "--live-orbit")
+                .map(|v| parse_orbit(&v))
+                .transpose()?,
+            block_states: BTreeMap::new(),
+            block_changes: Vec::new(),
+            selections: Vec::new(),
             finished: false,
         }))
     }
@@ -310,6 +356,102 @@ fn sample_ground(
     })
 }
 
+/// Turns the camera for `--live-orbit` and records map block request states, before
+/// [`observe`] decides whether the run is done.
+pub(super) fn observe_world(
+    mut commands: Commands,
+    mut check: ResMut<LiveCheck>,
+    sim: NonSend<Sim>,
+    mut orbit: ResMut<super::Orbit>,
+    world: Option<Res<crate::map::world::MapWorld>>,
+    camera: Query<&GlobalTransform, With<super::FollowCamera>>,
+) {
+    if check.finished {
+        return;
+    }
+    let now = crate::since_start();
+    let playing = check.sim_started.is_some();
+    let mut world_selected = None;
+    if let Some(world) = world {
+        let selected = world.selected.as_ref().map(|(b, c)| format!("{b}/{c}"));
+        world_selected.clone_from(&selected);
+        if playing && check.selections.last() != Some(&selected) {
+            info!(
+                "live check: map selected by {selected:?} at step {}",
+                sim.step
+            );
+            check.selections.push(selected.clone());
+        }
+        for (id, block) in &world.blocks {
+            // A demanded block with no display groups draws none of its parts.
+            let empty = if block.normal == [0; 8] {
+                " (no groups)"
+            } else {
+                ""
+            };
+            let state = format!("{:?}{empty}", block.state);
+            if check.block_states.get(id) == Some(&state) {
+                continue;
+            }
+            check.block_states.insert(id.clone(), state.clone());
+            if playing {
+                let change = serde_json::json!({
+                    "t": now,
+                    "step": sim.step,
+                    "block": id,
+                    "state": state,
+                    "selected": selected,
+                    "position": sim.duel.player.body.position,
+                    "camera_yaw_degrees": orbit.yaw.to_degrees(),
+                });
+                info!("live check: block {change}");
+                check.block_changes.push(change);
+            }
+        }
+    }
+    let shots = check.shots.clone();
+    let Some(turn) = check.orbit.as_mut().filter(|t| !t.done && playing) else {
+        return;
+    };
+    if turn.began.is_none() && sim.step >= turn.step {
+        turn.began = Some((Instant::now(), orbit.yaw));
+        info!(
+            "live check: orbit starts at step {} from yaw {:.1}",
+            sim.step,
+            orbit.yaw.to_degrees()
+        );
+    }
+    let Some((began, base)) = turn.began else {
+        return;
+    };
+    let fraction = (began.elapsed().as_secs_f32() / turn.seconds).min(1.0);
+    let turned = 360.0 * fraction;
+    orbit.yaw = base + turned.to_radians();
+    if turned >= turn.shots as f32 * ORBIT_SHOT_DEGREES {
+        if let Some(dir) = &shots {
+            let path = dir.join(format!(
+                "orbit-{:03}.png",
+                turn.shots as f32 * ORBIT_SHOT_DEGREES
+            ));
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(path));
+        }
+        info!(
+            "live check: orbit {:.0} degrees, camera yaw {:.1} at {:?}, Wolf at {:?}, selected {:?}",
+            turned,
+            orbit.yaw.to_degrees(),
+            camera.iter().next().map(|t| t.translation()),
+            sim.duel.player.body.position,
+            world_selected,
+        );
+        turn.shots += 1;
+    }
+    if fraction >= 1.0 {
+        turn.done = true;
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(super) fn observe(
     mut commands: Commands,
@@ -471,11 +613,13 @@ pub(super) fn observe(
     let timed_out = check
         .sim_started
         .is_some_and(|(_, t)| t.elapsed().as_secs_f32() >= check.play_seconds);
-    let done = if !check.tour.is_empty() {
-        tour_done
-    } else {
-        script_done || (sim.script.is_none() && timed_out)
-    };
+    let orbit_done = check.orbit.as_ref().is_none_or(|t| t.done);
+    let done = orbit_done
+        && if !check.tour.is_empty() {
+            tour_done
+        } else {
+            script_done || (sim.script.is_none() && timed_out)
+        };
     if !done {
         return;
     }
@@ -511,6 +655,10 @@ pub(super) fn observe(
         "mesh_entities": meshes.iter().count(),
         "entities": entities.iter().count(),
         "final_position": sim.duel.player.body.position,
+        "orbit_turned": check.orbit.as_ref().map(|t| t.done),
+        "block_states": check.block_states,
+        "block_changes": check.block_changes,
+        "selections": check.selections,
         "samples": check.samples,
     });
     info!(

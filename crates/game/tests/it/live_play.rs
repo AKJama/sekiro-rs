@@ -53,6 +53,19 @@ const WALK: &str = "\
 60 0 0 -
 ";
 
+/// Grapple from the Outskirts ledge east of the ravine to the branch over it, then, perched,
+/// turn the camera a full circle from step 400 (`--live-orbit`). The branch stands on no map
+/// collision (only the event walls h900000 and h900001 are below), so the map must stay on
+/// the ledge's collision part, whichever way the camera looks.
+const GRAPPLE_SPAWN: &str = "-132.3,-42.0,-123.9,90,0";
+const GRAPPLE: &str = "120 0 0 -
+1 0 0 grapple
+240 0 0 -
+720 0 0 -
+";
+/// The ledge's collision part, which must select the map from spawn to the end of the turn.
+const LEDGE_PART: &str = "m11_00_00_00/h023300";
+
 fn run(root: &Path, out: &Path, name: &str, extra: &[&str]) -> Value {
     let summary = out.join(format!("{name}.json"));
     let status = Command::new(env!("CARGO_BIN_EXE_sekiro-rs"))
@@ -76,7 +89,7 @@ fn number(summary: &Value, key: &str) -> f64 {
 }
 
 #[test]
-#[ignore = "slow: opens a game window and loads Ashina Outskirts three times, about 4 minutes; needs a GPU and the extracted cache"]
+#[ignore = "slow: opens a game window and loads Ashina Outskirts four times, about 5 minutes; needs a GPU and the extracted cache"]
 fn outskirts_loads_then_plays_smoothly_on_drawn_ground() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     if !root.join("cache/maps/m11_00_00_00/layout.json").is_file() {
@@ -87,6 +100,8 @@ fn outskirts_loads_then_plays_smoothly_on_drawn_ground() {
     std::fs::create_dir_all(&out).unwrap();
     let walk = out.join("walk.txt");
     std::fs::write(&walk, WALK).unwrap();
+    let grapple = out.join("grapple.txt");
+    std::fs::write(&grapple, GRAPPLE).unwrap();
 
     // A scripted walk from the menu's start, timed from launch.
     let s = run(&root, &out, "walk", &["--script", walk.to_str().unwrap()]);
@@ -183,5 +198,68 @@ fn outskirts_loads_then_plays_smoothly_on_drawn_ground() {
         "ravine drop: fell to {:.1}, contacts {}, back at {back:.2?}",
         number(drop, "lowest_y"),
         events.len()
+    );
+
+    // The grapple to the branch and a camera turn there: the Outskirts block keeps its display
+    // groups and the map around Wolf stays drawn at every camera yaw.
+    let s = run(
+        &root,
+        &out,
+        "grapple",
+        &[
+            "--spawn",
+            GRAPPLE_SPAWN,
+            "--script",
+            grapple.to_str().unwrap(),
+            "--live-orbit",
+            "400,8",
+        ],
+    );
+    assert_eq!(
+        s["orbit_turned"].as_bool(),
+        Some(true),
+        "the camera never turned"
+    );
+    let end = &s["final_position"];
+    let perched = [[-137.58, -44.30, -124.49], [-141.58, -44.26, -123.86]]
+        .iter()
+        .any(|p| (0..3).all(|i| (end[i].as_f64().unwrap() - p[i]).abs() < 0.5));
+    assert!(perched, "Wolf did not reach the branch: {end}");
+    let changes = s["block_changes"].as_array().expect("block changes");
+    for change in changes {
+        if change["block"] == "m11_00_00_00" {
+            assert_eq!(
+                change["state"], "Ready",
+                "the Outskirts block lost its groups: {change}"
+            );
+        }
+        assert_eq!(
+            change["selected"], LEDGE_PART,
+            "the map left the ledge's part: {change}"
+        );
+    }
+    assert_eq!(
+        s["block_states"]["m11_00_00_00"], "Ready",
+        "the Outskirts block is not drawn at the end"
+    );
+    assert_eq!(
+        s["selections"],
+        serde_json::json!([LEDGE_PART]),
+        "the map left the ledge's part"
+    );
+    let samples = s["samples"].as_array().expect("samples");
+    let near: Vec<u64> = samples
+        .iter()
+        .map(|v| v["drawn_meshes_near"].as_u64().unwrap())
+        .collect();
+    assert!(near.len() >= 40, "too few samples: {near:?}");
+    assert!(
+        near.iter().all(|&n| n >= 100),
+        "the map around Wolf vanished: drawn meshes near {near:?}"
+    );
+    println!(
+        "grapple: perched at {end}, {} samples, fewest drawn meshes near {}",
+        near.len(),
+        near.iter().min().unwrap()
     );
 }
