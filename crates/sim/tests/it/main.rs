@@ -40,6 +40,7 @@ mod gyoubu_arena;
 mod headless_ape;
 mod hirata_father_arena;
 mod hirata_hall_arena;
+mod hit_filters;
 mod isshin_ashina;
 mod lightning;
 mod map_collision;

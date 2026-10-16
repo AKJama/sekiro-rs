@@ -36,7 +36,7 @@ impl Encounter {
     }
 
     pub fn place(&mut self, world: &Arc<crate::collision::CollisionWorld>) {
-        self.duel.enemy.ground = Box::new(world.clone());
+        self.duel.enemy.ground = Box::new(crate::collision::EnemyGround(world.clone()));
     }
 
     pub fn command(&mut self, command: &EventCommand, dt: f32) {

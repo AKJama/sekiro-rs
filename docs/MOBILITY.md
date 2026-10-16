@@ -398,7 +398,9 @@ Final captures add `--simple-ai` to bypass the default Lua driver's automatic se
 One concurrent map replay hit Vulkan DeviceLost; its steering capture was rerun alone and passed.
 The existing camera chase still lags during very fast descents; respawn now snaps the camera and starts a fresh pose at spawn.
 `fallDeathDist` in metres remains an assumption from the research, the air-stick combination remains modelled, and authored void kill/return volumes remain undecoded.
+Update 2026-10-16: the authored return trigger is decoded for one case: map collision parts with hit filter 15 are event walls whose contact fades Wolf out and starts the fall return (`docs/HIT-FILTERS.md`); the placeholder depth stays for pits without one.
 The Owl arena fall test now expects the landing death on the ground 62 m below the roof and the respawn at the start.
+Since 2026-10-16 that "ground" is known to be the filter-13 event wall `h900011`, which the player never stands on; the test now expects the filter-15 fall return to the start instead (`docs/HIT-FILTERS.md`).
 
 ### Step 2. Ledge hang
 

@@ -71,12 +71,14 @@ pub fn missing_models(cache: &Path, spec: &ArenaSpec) -> Vec<String> {
         .collect()
 }
 
-/// h900900 (1124860) is switched by Wolf's messages 90/100 in event 11125877.
+/// h900900 (1124860) is switched by Wolf's messages 90/100 in event 11125877. Returns its
+/// triangles and who collides with them ([`crate::hit_filter::mask`]: its hit filter 9 holds
+/// only the camera).
 pub fn take_event_collision(
     spec: &ArenaSpec,
     layout: &Value,
     mesh: &mut CollisionMesh,
-) -> Option<CollisionMesh> {
+) -> Option<(CollisionMesh, u8)> {
     if spec.map != "m11_02_00_00" {
         return None;
     }
@@ -98,7 +100,11 @@ pub fn take_event_collision(
         tri[1] = tri[0];
         tri[2] = tri[0];
     }
-    Some(part)
+    let who = crate::hit_filter::row_filter(row).map_or(
+        crate::hit_filter::PLAYER | crate::hit_filter::ENEMY | crate::hit_filter::CAMERA,
+        crate::hit_filter::mask,
+    );
+    Some((part, who))
 }
 
 /// Common event 100 and final intro 11125840 hide alternative sky groups.

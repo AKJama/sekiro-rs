@@ -105,7 +105,9 @@ impl Wire {
             search: Some(serde_json::from_value(search).map_err(|e| e.to_string())?),
             variations: variations.into_iter().map(|v| (v.id, v)).collect(),
             offsets,
-            collision: Some(CollisionWorld::load(&map.join("collision.bin"))?),
+            // The player's collision: helper parts the player passes through do not stop the
+            // line of sight or the flight (`crate::hit_filter`).
+            collision: Some(CollisionWorld::load_map(map)?),
             ..Self::default()
         })
     }

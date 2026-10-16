@@ -110,6 +110,16 @@ pub struct GrabReport {
     pub hits: Vec<(i32, i32, i32)>,
 }
 
+/// Wolf's contact with a map action event wall ([`crate::hit_filter`]).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct HelperEvent {
+    pub hit_filter: u8,
+    pub part: String,
+    pub point: [f32; 3],
+    /// Where the fall return put him, for a filter-15 wall.
+    pub returned_to: Option<[f32; 3]>,
+}
+
 /// One step of the duel.
 #[derive(Debug, Clone, Default)]
 pub struct DuelReport {
@@ -224,6 +234,12 @@ pub struct Duel {
     fall_materials: std::collections::HashMap<u32, FallMaterial>,
     /// Where Wolf last stood on collision, for the return after a fall into the void.
     last_safe: Option<([f32; 3], f32)>,
+    /// Seconds into the fall return's model fade, after Wolf touched a filter-15 event wall.
+    fall_return_fade: Option<f32>,
+    /// Event wall parts Wolf is in contact with, so one contact is recorded once.
+    touching: Vec<String>,
+    /// Wolf's contacts with map action event walls (see [`crate::hit_filter`]), oldest first.
+    pub helper_events: Vec<HelperEvent>,
     /// The boss brain choosing the enemy's acts with its Lua AI (see [`crate::brain`]);
     /// `None` leaves the Lua AI alone.
     pub boss_brain: Option<crate::brain::BrainDriver>,
@@ -760,6 +776,9 @@ impl Duel {
             fog_gate: None,
             fall_materials: load_fall_materials(cache),
             last_safe: None,
+            fall_return_fade: None,
+            touching: Vec::new(),
+            helper_events: Vec::new(),
             boss_brain: None,
             god: false,
             immortal: false,
@@ -1065,6 +1084,9 @@ impl Duel {
         self.enemy_throw = None;
         self.mikiri = None;
         self.respawn_in = None;
+        // A fall return cut short by death must not move the respawned Wolf.
+        self.fall_return_fade = None;
+        self.touching.clear();
         self.defender_dying = 0;
         self.last_throw_def_clip = None;
         self.paired_floor = None;
@@ -2768,9 +2790,17 @@ impl Duel {
         }
     }
 
+    /// Wolf's model opacity from the fall return's fade: 1 to 0 over
+    /// [`crate::hit_filter::FALL_RETURN_FADE`] after a filter-15 event wall, else 1.
+    pub fn fall_return_opacity(&self) -> f32 {
+        self.fall_return_fade.map_or(1.0, |t| {
+            (1.0 - t / crate::hit_filter::FALL_RETURN_FADE).clamp(0.0, 1.0)
+        })
+    }
+
     /// Routes lethal landings through DEATH_FALLING and returns Wolf to where he last stood
     /// after a fall into the void.
-    fn kill_fallen(&mut self, was_grounded: bool) {
+    fn kill_fallen(&mut self, was_grounded: bool, before: [f32; 3], dt: f32) {
         // Keep the arena's existing NPC boundary reset; material fall death is PC-only.
         if let Some((depth, spawn)) = self.fall_respawn_depth.zip(self.spawn) {
             let start = spawn[1];
@@ -2797,9 +2827,46 @@ impl Duel {
         if was_grounded && b.grounded && on_floor {
             self.last_safe = Some((b.position, b.yaw));
         }
-        // Placeholder void boundary until authored kill/return volumes are decoded.
+        // A map action event wall in the path: filter 15 starts the fall return (its model
+        // fade, then the return below); other filters' reactions are only recorded.
+        let ground = &self.player.ground;
+        let contact = ground
+            .trigger_contact(before, b.position)
+            .filter(|c| !self.touching.contains(&c.part));
+        self.touching
+            .retain(|part| ground.near_trigger(part, b.position));
+        if let Some(contact) = contact {
+            let fall_return = contact.hit_filter == crate::hit_filter::FALL_RETURN_FILTER
+                && self.fall_return_fade.is_none();
+            eprintln!(
+                "helper collision: Wolf touched {} (hit filter {}) at {:.2?}{}",
+                contact.part,
+                contact.hit_filter,
+                contact.point.to_array(),
+                if fall_return { ", fall return" } else { "" }
+            );
+            if fall_return {
+                self.fall_return_fade = Some(0.0);
+            }
+            self.touching.push(contact.part.clone());
+            self.helper_events.push(HelperEvent {
+                hit_filter: contact.hit_filter,
+                part: contact.part,
+                point: contact.point.to_array(),
+                returned_to: None,
+            });
+        }
+        let b = &self.player.body;
+        if let Some(t) = &mut self.fall_return_fade {
+            *t += dt;
+        }
+        let fading = self.fall_return_fade;
+        let faded = fading.is_some_and(|t| t >= crate::hit_filter::FALL_RETURN_FADE);
+        // Placeholder void boundary where no authored return wall (filter 15) lies below.
         // The lowest supporting collision takes precedence over spawn to allow deep paths.
-        let void_fall = !b.grounded
+        let void_fall = fading.is_none()
+            && !b.grounded
+            && !self.player.ground.fall_return_below(x, y, z)
             && self
                 .fall_respawn_depth
                 .zip(self.spawn)
@@ -2811,7 +2878,7 @@ impl Duel {
                         .unwrap_or(spawn[0].position[1]);
                     y < lowest - depth
                 });
-        if void_fall {
+        if void_fall || faded {
             // Sekiro returns Wolf to safe ground after a fall into the void instead of killing
             // him (the script's FALL_DEAD_RETURN route). The HP cost is in the exe and not
             // traced yet, so none is taken here.
@@ -2819,6 +2886,21 @@ impl Duel {
                 .last_safe
                 .or_else(|| self.spawn.map(|s| (s[0].position, s[0].yaw)))
                 .unwrap_or((b.position, b.yaw));
+            if self.fall_return_fade.take().is_some()
+                && let Some(event) = self.helper_events.iter_mut().rev().find(|e| {
+                    e.hit_filter == crate::hit_filter::FALL_RETURN_FILTER && e.returned_to.is_none()
+                })
+            {
+                event.returned_to = Some(position);
+            }
+            eprintln!(
+                "fall return: Wolf back at {position:.2?} ({})",
+                if faded {
+                    "filter-15 event wall"
+                } else {
+                    "placeholder void depth"
+                }
+            );
             let body = &mut self.player.body;
             body.position = position;
             body.yaw = yaw;
@@ -3035,6 +3117,7 @@ impl Duel {
         ];
         let was_grounded = self.player.body.grounded;
         let pair_before = [self.player.body.clone(), self.enemy.body.clone()];
+        let player_before = pair_before[0].position;
         let paired_active = self.deathblow.is_some() || self.throw_held();
         let recovering = [
             self.player.state().starts_with("Throw"),
@@ -3092,7 +3175,7 @@ impl Duel {
             self.separate();
         }
         if !self.shared_player_frame {
-            self.kill_fallen(was_grounded);
+            self.kill_fallen(was_grounded, player_before, dt);
         }
 
         if self.god {

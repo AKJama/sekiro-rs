@@ -31,6 +31,7 @@ pub mod events;
 pub mod fight;
 pub mod fogwall;
 pub mod grab;
+pub mod hit_filter;
 pub mod hit_fx;
 pub mod hits;
 pub mod homing;

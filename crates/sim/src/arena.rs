@@ -423,10 +423,19 @@ impl Arena {
         let path = dir.join("collision.bin");
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut mesh = CollisionMesh::from_bytes(&bytes).map_err(|e| e.to_string())?;
+        // These steps collapse triangles in place, so every triangle range in the layout stays
+        // valid until the fog walls' split below. The helpers go last: disabled, event and
+        // hidden parts are already gone and do not come back as helpers.
         crate::arena_c::filter_collision(spec, &json, &mut mesh);
         let event_collision = crate::arena_c::take_event_collision(spec, &json, &mut mesh);
         let hidden = crate::arenas_a::hidden_parts(cache, spec)?;
         crate::arenas_a::remove_hidden_collision(&mut mesh, &json, &hidden);
+        let mut helpers = crate::hit_filter::strip_helpers(&mut mesh, &json);
+        if !full_map {
+            for helper in helpers.meshes_mut() {
+                *helper = crop(helper, layout.center(), spec.radius);
+            }
+        }
         let mut gate = CollisionMesh::default();
         for place in &fog_walls {
             if let Some(range) = place
@@ -454,13 +463,14 @@ impl Arena {
                 &crop(&gate, layout.center(), spec.radius),
             )
         };
-        if let Some(part) = event_collision {
+        world.add_helpers(&helpers);
+        if let Some((part, who)) = event_collision {
             let part = if full_map {
                 part
             } else {
                 crop(&part, layout.center(), spec.radius)
             };
-            world.append_event_part(1_124_860, &part, true);
+            world.append_event_part(1_124_860, &part, who, true);
         }
         Ok(Self {
             spec,
@@ -477,15 +487,23 @@ impl Arena {
     }
 
     /// Puts Wolf and the boss on their spots, on the arena's collision, with the fall respawn.
+    /// The boss stands on what enemies collide with ([`crate::collision::EnemyGround`]).
     pub fn place(&self, duel: &mut Duel) {
-        for (c, spot) in [
-            (&mut duel.player, self.layout.wolf),
-            (&mut duel.enemy, self.layout.boss),
+        let enemy = crate::collision::EnemyGround(self.world.clone());
+        for (c, spot, ground) in [
+            (
+                &mut duel.player,
+                self.layout.wolf,
+                Box::new(self.world.clone()) as Box<dyn Ground>,
+            ),
+            (&mut duel.enemy, self.layout.boss, Box::new(enemy)),
         ] {
-            c.body.position = self.floor_at(spot.position).to_array();
+            let p = spot.position;
+            let y = ground.floor(p.x, p.z, p.y + 1.0).unwrap_or(p.y);
+            c.body.position = p.with_y(y).to_array();
             c.body.yaw = spot.yaw;
             c.body.fall_top = c.body.position[1];
-            c.ground = Box::new(self.world.clone());
+            c.ground = ground;
         }
         duel.fall_respawn_depth = Some(FALL_RESPAWN_DEPTH);
         crate::demon::on_place(duel);
