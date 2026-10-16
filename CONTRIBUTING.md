@@ -44,7 +44,8 @@ Use the PR template and include `Fixes #N` in the PR body.
 
 ## Review and merge
 
-Only the maintainer, AKJama, merges into `main`.
+You do not need to be a collaborator: push the branch to your fork and open the PR against `AKJama/sekiro-rs` `main`.
+Only the maintainer, AKJama, merges into `main`; branch rules enforce this, and every PR needs the maintainer's approval.
 The maintainer reviews the code and plays the game to compare before and after.
 Expect change requests.
 PRs are squash-merged.
