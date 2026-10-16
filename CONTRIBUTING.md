@@ -10,6 +10,7 @@ Read the [README disclaimer](README.md#disclaimer) before starting.
 
 Any open issue without a linked PR is free to take; `help wanted` marks ones that suit newcomers.
 Claim it by opening a draft PR with `Fixes #N` in its body before you write any code, so everyone can see it's taken; you don't need to wait for anyone.
+The [project board](https://github.com/users/AKJama/projects/2) shows what is free (Todo), claimed (In Progress) and waiting for review.
 One person works on each issue, so skip issues that already show a linked PR, and check the [collaboration board](https://github.com/AKJama/sekiro-collab/blob/main/WORK.md) for work the maintainers have claimed.
 A draft PR with no new commits for 7 days frees the issue again.
 For something with no issue yet, have your agent file one first (the repo's `issues` skill), then open the draft PR.
