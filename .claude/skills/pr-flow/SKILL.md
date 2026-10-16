@@ -12,13 +12,16 @@ Every change goes through its own branch and pull request, in this order:
 2. Run the `code-review` skill.
 3. Run the `simplify` skill.
 4. Run the checks.
-5. Merge.
+5. The user plays the game and confirms (for PRs that change game code).
+6. Merge.
 
 ## Rules
 
 - One feature or fix per PR.
 If a job turns up a second problem, note it and open a separate PR for it.
 - One branch per PR, named `<area>/<short-kebab-name>`, for example `map/ground-visibility` or `perf/load-time`.
+- PRs may be stacked: branch from an open PR's branch and set that branch as the base.
+When a lower PR changes or merges, rebase the stacked branches onto it and force-push with `--force-with-lease`.
 - Commit as AKJama <92124781+AKJama@users.noreply.github.com>, with no co-author lines.
 - Stage explicit file paths only, never `git add -A` or `git add .`, because agent work may be sitting in the tree.
 - Agents do not commit, push or open PRs; the main session does after reviewing their work.
@@ -29,8 +32,11 @@ If a job turns up a second problem, note it and open a separate PR for it.
 Create the branch, commit the change, push, and open the PR with a short body:
 
 ```markdown
-## What
-One or two sentences on the change and why.
+## What and why
+In plain words: what this tries to implement and why.
+
+## What to look out for when playing
+Where to go and what to check, for example "load into the Outskirts: the loading bar should finish with the ground already textured".
 
 ## Checks
 - code-review: N findings, M fixed
@@ -86,7 +92,13 @@ Use the live-game test from `docs/MAP-COMPLETENESS-SWEEP.md` once it exists.
 A PR whose live run is worse than `main` is not ready, whatever the still-image gates say.
 If a check fails, fix it on the branch and run the checks again.
 
-## 5. Merge
+## 5. The user plays it
 
-Merge only when the checks pass and the user says to merge.
+For any PR that changes game code, the user's playtest is the final gate.
+Point them at the "What to look out for" section and the build to run (copy the branch's release binary to `target/play/sekiro-rs.exe`).
+If they ask for changes, make them on the same branch (or rebase the stack), rerun steps 2 to 4, and ask again.
+
+## 6. Merge
+
+Merge only when the checks pass and the user confirms.
 Use squash merge, then delete the branch and pull `main`.
