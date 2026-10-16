@@ -319,7 +319,10 @@ struct MapLight {
 }
 
 impl MapLight {
-    fn new(lighting: &crate::lighting::MapLighting, ambient: &bevy::light::GlobalAmbientLight) -> Self {
+    fn new(
+        lighting: &crate::lighting::MapLighting,
+        ambient: &bevy::light::GlobalAmbientLight,
+    ) -> Self {
         let set = crate::lighting::LightSet::from_gparam(
             &lighting.gparam,
             lighting.light_set,
@@ -352,7 +355,9 @@ impl FromWorld for MapLightBuffer {
         Self(
             world
                 .resource_mut::<Assets<bevy::render::storage::ShaderBuffer>>()
-                .add(bevy::render::storage::ShaderBuffer::from(MapLight::default())),
+                .add(bevy::render::storage::ShaderBuffer::from(
+                    MapLight::default(),
+                )),
         )
     }
 }
@@ -636,7 +641,11 @@ mod tests {
             .light_set = 100;
         app.update();
         assert_eq!(written(&app), expected(&app));
-        assert_eq!(modified(&mut app), 0, "a LightSet change touched map materials");
+        assert_eq!(
+            modified(&mut app),
+            0,
+            "a LightSet change touched map materials"
+        );
     }
 }
 

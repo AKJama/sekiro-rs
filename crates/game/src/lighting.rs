@@ -285,18 +285,12 @@ fn tone_correction(hue: f32, saturation: f32, value: f32, contrast: f32) -> Mat4
 #[derive(Component)]
 struct AppliedPost(i32, f32, String);
 
+#[allow(clippy::type_complexity)]
 fn apply_post_effects(
     mut commands: Commands,
     lighting: Res<MapLighting>,
     effects: Res<MapPostEffects>,
-    cameras: Query<
-        (
-            Entity,
-            Option<&AppliedPost>,
-            Option<&grading::GradingLut>,
-        ),
-        With<Camera3d>,
-    >,
+    cameras: Query<(Entity, Option<&AppliedPost>, Option<&grading::GradingLut>), With<Camera3d>>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("apply_post_effects");
     let pending: Vec<_> = cameras
