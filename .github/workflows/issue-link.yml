@@ -27,6 +27,7 @@ jobs:
           references=$(printf '%s\n' "$PR_BODY" | grep -Eio '\b(Fixes|Closes|Resolves)[[:blank:]]+#[0-9]+\b' || true)
           [[ -n "$references" ]] || fail "Include a closing issue reference such as Fixes #123 in the PR body."
           numbers=$(printf '%s\n' "$references" | grep -Eo '[0-9]+' | sort -u)
+          [[ $(wc -l <<< "$numbers") -eq 1 ]] || fail "One issue per PR: this PR closes $(echo $numbers | sed 's/ /, #/g; s/^/#/'). Split it into one PR per issue."
 
           while IFS= read -r number; do
             issue=$(gh api "repos/$REPO/issues/$number") || fail "Could not read issue #$number."

@@ -32,7 +32,10 @@ Then fix it following the pr-flow skill, run its checks, and tell me what to tes
 
 ## The flow
 
-Use one issue per PR and one branch per PR, named `<area>/<short-kebab-name>`.
+One PR fixes exactly one issue, and the `issue-link` check fails a PR that closes more than one.
+Keep each PR to one feature or fix that can be played and judged on its own.
+A big area (a whole menu system, all of parkour) becomes several issues first, for example "equip menu for prosthetic tools" and "ledge grab", and then one PR each.
+Use one branch per PR, named `<area>/<short-kebab-name>`, made from the latest `main`.
 Follow the [pr-flow skill](.claude/skills/pr-flow/SKILL.md), including code review, simplify, and the full step 4 checks:
 
 ```powershell
@@ -45,6 +48,18 @@ cargo test --release --workspace
 For rendering changes, also build the release binary and run both render gates listed in step 4.
 Play the game yourself following the live-test skill and describe what you saw.
 Use the PR template and include `Fixes #N` in the PR body.
+
+Before marking the PR ready for review, bring it up to date with `main` and rerun the checks:
+
+```powershell
+git remote add upstream https://github.com/AKJama/sekiro-rs.git  # once
+git fetch upstream
+git rebase upstream/main
+git push --force-with-lease
+```
+
+Resolve any conflicts on your side; `main` only accepts branches that are up to date with it.
+Small PRs rarely conflict, which is another reason to keep them to one issue.
 
 ## Review and merge
 
