@@ -745,9 +745,10 @@ fn native_surface(base: &StandardMaterial, data: &Value) -> StandardMaterial {
         return base;
     }
     let kind = data["kind"].as_u64().unwrap_or(0);
-    // Multiple variant 18 is the only one with slot 17, which writes a textured F0 instead of
-    // the constant; the slot is not sampled yet, so it keeps Bevy's default for now.
-    let textured_f0 = kind == 1 && data["variant"].as_u64() == Some(18);
+    // Slot 17 (only Multiple variant 18) writes a textured F0 instead of the constant; the slot
+    // is not sampled yet, so it keeps Bevy's default for now (#43).
+    let variant = data["variant"].as_u64().unwrap_or(0) as usize;
+    let textured_f0 = sekiro_formats::map_layers::slots(kind as u8, variant).contains(&17);
     if (1..=3).contains(&kind) && !textured_f0 {
         base.reflectance = NATIVE_LAYERED_REFLECTANCE;
     }
