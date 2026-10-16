@@ -1,13 +1,14 @@
 ---
 name: pr-flow
-description: How changes reach main in sekiro-rs - one feature per branch and PR, then code-review, simplify, local checks with a live-game run, then merge. Use whenever committing, pushing, opening a PR or finishing a job in this repo.
+description: How work flows in sekiro-rs - capture problems as prioritised GitHub issues, pick an issue, one branch and PR per issue, then code-review, simplify, local checks with a live-game run, the user's playtest, then merge. Use whenever filing a bug, starting a job, committing, pushing, opening a PR or finishing a job in this repo.
 ---
 
 # PR flow
 
 Nothing is committed straight to `main`.
-Every change goes through its own branch and pull request, in this order:
+Work starts from an issue, and every change goes through its own branch and pull request, in this order:
 
+0. Capture or pick the issue.
 1. Write the PR.
 2. Run the `code-review` skill.
 3. Run the `simplify` skill.
@@ -27,12 +28,32 @@ When a lower PR changes or merges, rebase the stacked branches onto it and force
 - Agents do not commit, push or open PRs; the main session does after reviewing their work.
 - No git worktrees.
 
+## 0. Issues
+
+The backlog lives in GitHub issues on `AKJama/sekiro-rs`, one issue per job.
+- When a playtest, review or investigation turns up a problem, open an issue for it rather than widening the current PR.
+- Each issue has: Problem (what the player sees, where), Likely cause (with evidence: file:line, data, exe addresses), To do, and Done when (how a fix is checked, including the live game).
+- Label it `bug` or `enhancement` and one of `priority: high`, `priority: medium`, `priority: low`.
+- No game assets, screenshots of game content or personal paths in issues; describe images in words and keep them off the repo.
+- Pick the highest-priority open issue that nobody has claimed, and claim it on the collab board (`sekiro-collab/WORK.md`) with a link to the issue.
+- The PR body says `Fixes #N`, so merging closes the issue.
+- `STATUS.md` stays a short snapshot of what works and what is in progress; it is not the to-do list.
+
+## Agents
+
+- Recommended main worker: Claude Opus 5.5 at medium effort.
+- Only one agent runs the game at a time, and at most two game windows are open in total (the user may have one).
+- Agents share one Cargo build folder (`CARGO_TARGET_DIR`) instead of one each; every full build is several GB.
+- Agents do not commit; the main session reviews and commits their work.
+- A command an agent is denied permission for is reported back, never worked around.
+
 ## 1. Write the PR
 
 Create the branch, commit the change, push, and open the PR with a short body:
 
 ```markdown
 ## What and why
+Fixes #N.
 In plain words: what this tries to implement and why.
 
 ## What to look out for when playing
@@ -55,6 +76,7 @@ Anything left undone, or "None".
 Fill in the Checks lines as steps 2 to 4 finish, and edit the PR body to match.
 Do not paste game assets or personal paths beyond the media folder reference.
 Add the PR link to the matching row on the collab board (`sekiro-collab/WORK.md`).
+When the PR merges, move that row to Done with the PR link.
 
 ## 2. Code review
 
@@ -65,7 +87,9 @@ Fix the findings that hold up and push them to the same branch.
 
 Run the `simplify` skill on the diff for reuse, simplification and efficiency cleanups, and push the result.
 
-If either skill is not installed on this machine, say so in the PR body rather than skipping it silently.
+`code-review` and `simplify` are built into Claude Code.
+Other agents (Codex and others) do the same two passes by hand: a correctness review of every hunk, its enclosing function and its callers, then a cleanup pass for reuse, redundant state and wasted work.
+If neither is possible, say so in the PR body rather than skipping it silently.
 
 ## 4. Checks
 

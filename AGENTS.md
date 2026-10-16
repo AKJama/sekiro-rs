@@ -28,14 +28,15 @@ A Rust/Bevy reimplementation of Sekiro: Shadows Die Twice (Steam, v1.6.0.0, buil
 - Back up saves before any session that runs the game.
 - Game files, extracted data and research artefacts stay in the local gitignored `cache/` and `re/` folders; only original source and docs are tracked (whitelist `.gitignore`).
 - No online play, anti-cheat or DRM work.
-- Local commits are fine; never add a remote, push or publish without asking.
+- Every change goes through an issue, a branch and a pull request; follow [`.claude/skills/pr-flow/SKILL.md`](.claude/skills/pr-flow/SKILL.md) whichever agent you are.
+- Never publish anything outside the repo, its issues and PRs, and the collab board without asking.
 
 ## Conventions
 
 - Windows, PowerShell. Python via `uv` only.
 - Cargo: `cargo`. Keep `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --check` clean.
 - No em dashes. One sentence per line in long Markdown.
-- Update `STATUS.md` at the end of each working session.
+- Update `STATUS.md` at the end of each working session; the to-do list lives in GitHub issues.
 
 ## Tests
 
