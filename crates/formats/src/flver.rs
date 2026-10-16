@@ -312,6 +312,149 @@ impl Vertices {
     }
 }
 
+/// Bind-pose model-space matrices of a FLVER node table (`world = parent * local`), in the
+/// file's own coordinate system. A broken parent chain stops at the table length.
+pub fn world_matrices(nodes: &[Node]) -> Vec<glam::Mat4> {
+    fn resolve(
+        i: usize,
+        nodes: &[Node],
+        world: &mut [Option<glam::Mat4>],
+        depth: usize,
+    ) -> glam::Mat4 {
+        if let Some(m) = world[i] {
+            return m;
+        }
+        let local = nodes[i].local_matrix();
+        let p = nodes[i].parent;
+        let m = if p >= 0 && depth < nodes.len() {
+            resolve(p as usize, nodes, world, depth + 1) * local
+        } else {
+            local
+        };
+        world[i] = Some(m);
+        m
+    }
+    let mut world = vec![None; nodes.len()];
+    (0..nodes.len())
+        .map(|i| resolve(i, nodes, &mut world, 0))
+        .collect()
+}
+
+/// A node's bind-pose transform, split once into what each vertex attribute needs.
+struct NodeFrame {
+    matrix: glam::Mat4,
+    /// Rotation and scale, for tangents and bitangents.
+    linear: glam::Mat3,
+    /// Inverse transpose of `linear`, for normals (nodes can scale unevenly).
+    normal: glam::Mat3,
+    /// -1 when the node mirrors, which flips the tangent handedness.
+    handedness: f32,
+}
+
+impl NodeFrame {
+    /// `None` for identity nodes, whose vertices stay as stored.
+    fn new(matrix: glam::Mat4) -> Option<Self> {
+        if matrix.abs_diff_eq(glam::Mat4::IDENTITY, 1e-6) {
+            return None;
+        }
+        let linear = glam::Mat3::from_mat4(matrix);
+        Some(Self {
+            matrix,
+            linear,
+            normal: linear.inverse().transpose(),
+            handedness: if linear.determinant() < 0.0 {
+                -1.0
+            } else {
+                1.0
+            },
+        })
+    }
+}
+
+impl Mesh {
+    /// Node table index for a vertex bone index: through the mesh bone palette when it has
+    /// one (out-of-range entries fall back to node 0), otherwise the index itself.
+    pub fn palette_node(&self, index: usize) -> usize {
+        if self.bone_indices.is_empty() {
+            index
+        } else {
+            self.bone_indices.get(index).copied().unwrap_or(0).max(0) as usize
+        }
+    }
+
+    /// The mesh's vertices in model space, as the game draws them at rest.
+    ///
+    /// Unweighted (non-dynamic) vertices are stored relative to the node their normal W
+    /// names (through the bone palette, see [`Mesh::palette_node`]), so the renderer places
+    /// each one with that node's matrix.
+    /// Map objects use this heavily: a bamboo clump keeps every leaf cluster in its own
+    /// node's frame, scaled and rotated into place by the node.
+    /// The FLVER header bounds only enclose the vertices after this transform.
+    /// Weighted meshes are already in model space (bind pose) and come back unchanged, as do
+    /// meshes whose vertices all name identity nodes.
+    /// `world` is [`world_matrices`] of the same FLVER's nodes.
+    ///
+    /// A Float3 normal has no W and decodes it as 0, which reads as node 0.
+    /// No placed piece or object in m11_00_00_00 (733 models) or m11_01_00_00 (790 models)
+    /// has an unweighted Float3 normal, and none has a bone palette, so neither case is
+    /// special-cased here.
+    pub fn model_space_vertices(&self, world: &[glam::Mat4]) -> std::borrow::Cow<'_, Vertices> {
+        use glam::{Mat3, Vec3};
+        use std::borrow::Cow;
+        let v = &self.vertices;
+        if self.dynamic || v.normal_w.len() != v.len() {
+            return Cow::Borrowed(v);
+        }
+        let frames: Vec<Option<NodeFrame>> = world.iter().map(|&m| NodeFrame::new(m)).collect();
+        let frame_of = |i: usize| {
+            usize::try_from(v.normal_w[i])
+                .ok()
+                .and_then(|b| frames.get(self.palette_node(b)))
+                .and_then(Option::as_ref)
+        };
+        if (0..v.len()).all(|i| frame_of(i).is_none()) {
+            return Cow::Borrowed(v);
+        }
+        let mut out = v.clone();
+        let point =
+            |m: &NodeFrame, p: [f32; 3]| m.matrix.transform_point3(Vec3::from(p)).to_array();
+        let direction = |m: &Mat3, d: [f32; 3]| {
+            let d = *m * Vec3::from(d);
+            d.try_normalize().unwrap_or(d).to_array()
+        };
+        for i in 0..v.len() {
+            let Some(f) = frame_of(i) else { continue };
+            out.positions[i] = point(f, v.positions[i]);
+            for s in &mut out.extra_positions {
+                if let Some(p) = s.get_mut(i) {
+                    *p = point(f, *p);
+                }
+            }
+            if let Some(n) = out.normals.get_mut(i) {
+                *n = direction(&f.normal, *n);
+            }
+            for s in &mut out.extra_normals {
+                if let Some(n) = s.get_mut(i) {
+                    *n = direction(&f.normal, *n);
+                }
+            }
+            for s in &mut out.tangents {
+                if let Some(t) = s.get_mut(i) {
+                    let [x, y, z] = direction(&f.linear, [t[0], t[1], t[2]]);
+                    *t = [x, y, z, t[3] * f.handedness];
+                }
+            }
+            // Bitangents are not exported and what their W means under a mirroring node is
+            // unverified, so only the direction is transformed and W is kept as stored.
+            if let Some(t) = out.bitangents.get_mut(i) {
+                let [x, y, z] = direction(&f.linear, [t[0], t[1], t[2]]);
+                *t = [x, y, z, t[3]];
+            }
+        }
+        Cow::Owned(out)
+    }
+}
+
 pub fn is_flver(data: &[u8]) -> bool {
     data.starts_with(b"FLVER\0")
 }
@@ -785,6 +928,8 @@ fn read_buffer(
                 }
                 S::Normal => {
                     let (n, w) = match m.kind {
+                        // No W stored; 0 is indistinguishable from node 0 (see
+                        // `Mesh::model_space_vertices` for why that is safe today).
                         T::Float3 => ([f32_at(c, 0), f32_at(c, 1), f32_at(c, 2)], 0),
                         T::Float4 => (
                             [f32_at(c, 0), f32_at(c, 1), f32_at(c, 2)],
@@ -924,5 +1069,127 @@ mod blend_tests {
         assert_eq!(vertices.blends[0], vec![[128, 0, 0, 0]]);
         assert_eq!(vertices.blends[4], vec![[0, 200, 0, 0]]);
         assert!(vertices.blends[1].is_empty());
+    }
+}
+
+#[cfg(test)]
+mod model_space_tests {
+    use super::*;
+    use glam::Vec3;
+
+    fn node(translation: [f32; 3], rotation: [f32; 3], scale: [f32; 3], parent: i16) -> Node {
+        Node {
+            name: String::new(),
+            translation,
+            rotation,
+            scale,
+            parent,
+            first_child: -1,
+            next_sibling: -1,
+            previous_sibling: -1,
+            bbox_min: [0.0; 3],
+            bbox_max: [0.0; 3],
+            flags: 0,
+        }
+    }
+
+    fn mesh(dynamic: bool, normal_w: Vec<i32>) -> Mesh {
+        let n = normal_w.len();
+        Mesh {
+            dynamic,
+            material: 0,
+            node: 0,
+            bone_indices: vec![],
+            face_sets: vec![],
+            buffers: vec![],
+            vertices: Vertices {
+                positions: vec![[1.0, 0.0, 0.0]; n],
+                normals: vec![[1.0, 0.0, 0.0]; n],
+                normal_w,
+                tangents: vec![vec![[0.0, 1.0, 0.0, -1.0]; n]],
+                bitangents: vec![[0.0, 0.0, 1.0, -1.0]; n],
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn unweighted_vertices_follow_the_node_their_normal_w_names() {
+        // Node 1: up 5 m, turned 90 degrees about Z, scaled 2x along its local X only,
+        // under a parent shifted 1 m along Z.
+        let nodes = [
+            node([0.0; 3], [0.0; 3], [1.0; 3], -1),
+            node(
+                [0.0, 5.0, 0.0],
+                [0.0, 0.0, std::f32::consts::FRAC_PI_2],
+                [2.0, 1.0, 1.0],
+                2,
+            ),
+            node([0.0, 0.0, 1.0], [0.0; 3], [1.0; 3], -1),
+        ];
+        let world = world_matrices(&nodes);
+        let mut m = mesh(false, vec![0, 1]);
+        // A diagonal normal separates the inverse transpose from the plain linear part.
+        let diagonal = Vec3::new(1.0, 1.0, 0.0).normalize();
+        m.vertices.normals = vec![diagonal.to_array(); 2];
+        let v = m.model_space_vertices(&world);
+        assert_eq!(v.positions[0], [1.0, 0.0, 0.0]);
+        assert_eq!(v.normals[0], diagonal.to_array());
+        let p = Vec3::from(v.positions[1]);
+        assert!(p.abs_diff_eq(Vec3::new(0.0, 7.0, 1.0), 1e-5), "{p}");
+        // (R S)^-T = R S^-1 for a rotation R and scale S; the parent only translates.
+        let rotation = nodes[1].local_rotation();
+        let scale = Vec3::from(nodes[1].scale);
+        let expected = (rotation * (diagonal / scale)).normalize();
+        let linear_only = (rotation * (diagonal * scale)).normalize();
+        assert!(!expected.abs_diff_eq(linear_only, 0.1));
+        let n = Vec3::from(v.normals[1]);
+        assert!(n.abs_diff_eq(expected, 1e-5), "{n}, expected {expected}");
+        let t = v.tangents[0][1];
+        assert!(Vec3::new(t[0], t[1], t[2]).abs_diff_eq(-Vec3::X, 1e-5));
+        assert_eq!(t[3], -1.0);
+    }
+
+    #[test]
+    fn a_mirroring_node_negates_x_and_flips_the_tangent_handedness() {
+        let nodes = [node([0.0; 3], [0.0; 3], [-1.0, 1.0, 1.0], -1)];
+        let world = world_matrices(&nodes);
+        let v = mesh(false, vec![0])
+            .model_space_vertices(&world)
+            .into_owned();
+        assert_eq!(v.positions[0], [-1.0, 0.0, 0.0]);
+        assert_eq!(v.normals[0], [-1.0, 0.0, 0.0]);
+        assert_eq!(v.tangents[0][0], [0.0, 1.0, 0.0, 1.0]);
+        // Bitangent W is unverified under mirroring and kept as stored.
+        assert_eq!(v.bitangents[0], [0.0, 0.0, 1.0, -1.0]);
+    }
+
+    #[test]
+    fn normal_w_goes_through_the_bone_palette() {
+        let nodes = [
+            node([0.0; 3], [0.0; 3], [1.0; 3], -1),
+            node([0.0, 5.0, 0.0], [0.0; 3], [1.0; 3], -1),
+        ];
+        let world = world_matrices(&nodes);
+        let mut m = mesh(false, vec![0]);
+        m.bone_indices = vec![1];
+        assert_eq!(m.palette_node(0), 1);
+        let v = m.model_space_vertices(&world);
+        assert_eq!(v.positions[0], [1.0, 5.0, 0.0]);
+    }
+
+    #[test]
+    fn weighted_and_identity_bound_meshes_stay_borrowed() {
+        let nodes = [
+            node([0.0; 3], [0.0; 3], [1.0; 3], -1),
+            node([0.0, 5.0, 0.0], [0.0; 3], [1.0; 3], -1),
+        ];
+        let world = world_matrices(&nodes);
+        for m in [mesh(true, vec![1, 1]), mesh(false, vec![0, 0])] {
+            assert!(matches!(
+                m.model_space_vertices(&world),
+                std::borrow::Cow::Borrowed(_)
+            ));
+        }
     }
 }

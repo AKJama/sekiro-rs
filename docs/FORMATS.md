@@ -100,6 +100,12 @@ This was checked on single-sided meshes (the Wolf's head renders inside-out if t
   The GLB export copies the skeleton's dummies, mirrored, into the scene `extras.dummies`.
 - Meshes: every Sekiro character mesh has an empty local bone palette, and vertex bone indices index the node table directly.
   Verified on c1010: indices reach 109, the last bone-flagged node is 109, and skinning with that reading reproduces the authored shapes.
+- Map pieces and objects: unweighted (non-dynamic) vertices are stored in the frame of the node their normal W names (through the mesh bone palette when there is one), and the game draws them through that node's bind-pose matrix (`Mesh::model_space_vertices`).
+  Map objects rely on it: an Outskirts bamboo clump (`o112400`-`o112440`) keeps each leaf cluster at its own node's origin, scaled and turned into the crown by the node.
+  Evidence: in 2,122 of the 2,170 object FLVERs with such vertices only the transformed vertices reproduce the header bounds (none match better untransformed); the rest are unchanged either way.
+  Map pieces only name identity nodes, so they are unaffected.
+  No placed piece or object in m11_00_00_00 or m11_01_00_00 has a bone palette or a Float3 normal (which has no W).
+  Character meshes are unverified: the map exporter applies this rule, the character exporter does not yet.
 - Face sets: keep flags `0` (LOD0); `0x01000000`/`0x02000000` are LOD1/2 and `0x80000000` marks motion-blur copies.
   All observed sets are 16-bit triangle lists; strips with 0xFFFF restarts are unrolled anyway.
   The face set's cull flag becomes glTF `doubleSided`.
