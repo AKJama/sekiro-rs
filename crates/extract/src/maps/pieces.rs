@@ -360,30 +360,29 @@ pub fn build(
     faces.sort_by_key(|(_, _, _, face)| face.flags != 0);
     // Unweighted vertices live in their node's frame; place them as the game draws them.
     let world = flver::world_matrices(&flver.nodes);
-    let model_space: Vec<_> = flver
-        .meshes
-        .iter()
-        .map(|mesh| mesh.model_space_vertices(&world))
-        .collect();
+    let mut model_space: Vec<Option<std::borrow::Cow<'_, flver::Vertices>>> =
+        vec![None; flver.meshes.len()];
     for (mi, mesh, fi, face) in faces {
-        let vertices: &flver::Vertices = &model_space[mi];
-        let mut indices = face.triangles(vertices.len());
+        let mut indices = face.triangles(mesh.vertices.len());
         if indices.is_empty() {
             continue;
         }
-        if indices.iter().any(|&i| i as usize >= vertices.len()) {
+        if indices.iter().any(|&i| i as usize >= mesh.vertices.len()) {
             bail!("mesh {mi} index out of range");
-        }
-        let compact = (face.detail_level() > 0).then(|| compact_vertices(vertices, &mut indices));
-        let v = compact.as_ref().unwrap_or(vertices);
-        let count = v.len();
-        if count == 0 {
-            continue;
         }
         let material = &flver.materials[mesh.material];
         let mtd = mtds.get(&material.mtd);
         let choice = choose_material(material, mtd);
         if skip_material(&choice.mtd) {
+            continue;
+        }
+        // Same vertex count as `mesh.vertices`, transformed once per mesh on first use.
+        let vertices: &flver::Vertices =
+            model_space[mi].get_or_insert_with(|| mesh.model_space_vertices(&world));
+        let compact = (face.detail_level() > 0).then(|| compact_vertices(vertices, &mut indices));
+        let v = compact.as_ref().unwrap_or(vertices);
+        let count = v.len();
+        if count == 0 {
             continue;
         }
         let positions: Vec<[f32; 3]> = v.positions.iter().map(|p| [-p[0], p[1], p[2]]).collect();

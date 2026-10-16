@@ -134,15 +134,12 @@ fn outskirts_bamboo_exports_leaves_on_the_stalks() {
             .fold(0f32, |m, c| m.max(c.abs()));
         assert!(lo.y > -0.1 && reach < 5.0, "{model}: LOD0 spans {lo}..{hi}");
         // Leaf clusters hang in the crown, not at the root.
+        let world = flver::world_matrices(&f.nodes);
         let leaves = f
             .meshes
             .iter()
             .filter(|m| f.materials[m.material].mtd.contains("Pivot_Parent_Child"))
-            .flat_map(|m| {
-                m.model_space_vertices(&flver::world_matrices(&f.nodes))
-                    .positions
-                    .clone()
-            })
+            .flat_map(|m| m.model_space_vertices(&world).positions.clone())
             .collect::<Vec<_>>();
         assert!(!leaves.is_empty(), "{model}: no leaf clusters");
         let mean_height = leaves.iter().map(|p| p[1]).sum::<f32>() / leaves.len() as f32;

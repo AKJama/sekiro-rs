@@ -654,17 +654,7 @@ fn build(raw: &Path, model: &Model, verbose: bool) -> Result<Vec<u8>> {
                 joint_slots.insert(src, s);
                 s
             };
-            let to_node = |b: u16| -> usize {
-                if mesh.bone_indices.is_empty() {
-                    b as usize
-                } else {
-                    mesh.bone_indices
-                        .get(b as usize)
-                        .copied()
-                        .unwrap_or(0)
-                        .max(0) as usize
-                }
-            };
+            let to_node = |b: u16| mesh.palette_node(b as usize);
             let default_bone = if mesh.node >= 0 {
                 mesh.node as usize
             } else {

@@ -891,3 +891,28 @@ Raw reports are under `target/alt-bright/gate-nolayers/` (control), `gate-layers
 Final totals (void, depth gap, untextured, grey, pop-in) are Outskirts 0 / 493 / 0 / 2508 / 24043 in 55.5 seconds and Castle 1933 / 4885 / 0 / 325 / 23017 in 56.8 seconds, both under the 120-second limit and both passing every per-view tolerance.
 The geometry columns of the layered runs equal the control runs and the fixtures in every view.
 The first layered Outskirts run gave the same totals as the final one (deterministic); the Castle pop-in total moved 23023 -> 23017.
+
+## Node-bound object fixture review, 2026-10-16
+
+Unweighted map-object vertices are now exported through the node their normal W names, see [FORMATS.md](FORMATS.md#flver2-version-0x2001a).
+The cache was re-exported for the affected object models only (bamboo, trees, shrubs and similar), so the leaf clusters that sat at each model's root now stand in the crown.
+Colour fields (grey, pop-in) that moved past the tolerance in either direction are re-baselined; geometry fields, cameras, resolution, story, tolerances and the 120-second budget are unchanged.
+The control is the unchanged executable on the old cache (`target/alt-void-head/gate/`); the new runs are under `target/alt-trees/gate/` and `target/alt-trees/gate-final/`.
+Every view selects the same collision and the same visible parts in the control and the new run, so the pixel differences come from the re-exported models.
+Image differences sit on the bamboo canopy (Outskirts 0), dry shrubs (Castle 0, 1 and 5) and the all-visible comparison images (Outskirts 3 and 5, Castle 3).
+Outskirts 4 shows a faint, even change across the lit wall, consistent with the moved models changing the shadow casters; it was not attributed further.
+
+| Map / view | Grey fixture -> control -> new | Pop-in fixture -> control -> new | Note |
+| --- | ---: | ---: | --- |
+| Outskirts 0 | 68 -> 68 -> 93 | 2491 -> 2491 -> 2648 | Bamboo canopy now in the crown |
+| Outskirts 3 | 49 -> 49 -> 49 | 6240 -> 6240 -> 3984 | All-visible image only; the normal image is unchanged |
+| Outskirts 4 | 754 -> 758 -> 816 | 7435 -> 7433 -> 7489 | Grey fixture only; pop-in stays within tolerance |
+| Outskirts 5 | 0 -> 0 -> 0 | 5377 -> 5377 -> 4501 | All-visible image only |
+| Castle 0 | 198 -> 205 -> 185 | 5040 -> 5029 -> 5103 | Pop-in fixture only; shrubs move |
+| Castle 1 | 56 -> 56 -> 42 | 4892 -> 4892 -> 4840 | Pop-in fixture only |
+| Castle 3 | 0 -> 0 -> 0 | 5787 -> 5787 -> 5468 | All-visible image only |
+| Castle 5 | 55 -> 55 -> 32 | 1878 -> 1882 -> 1898 | Shrub at the lower right |
+
+Final totals (void, depth gap, untextured, grey, pop-in) are Outskirts 0 / 497 / 0 / 2595 / 21120 in 53.3 seconds and Castle 1933 / 4888 / 0 / 275 / 22736 in 47.7 seconds, both passing every per-view tolerance.
+The first new runs agree with the final runs within 9 pixels in every cell.
+Depth gap moves within tolerance at Outskirts 0 (75 -> 79) and Castle 1 (15 -> 17), and those geometry cells are retained.
