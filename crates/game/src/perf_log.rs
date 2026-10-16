@@ -12,7 +12,9 @@ use bevy::prelude::*;
 use std::io::{BufWriter, Write};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-type SystemSamples = std::collections::BTreeMap<&'static str, (usize, f64, f64)>;
+/// Per timed name: runs, total milliseconds and the longest run.
+pub type SystemSamples =
+    std::collections::BTreeMap<std::borrow::Cow<'static, str>, (usize, f64, f64)>;
 static SYSTEM_SAMPLES: std::sync::Mutex<SystemSamples> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
 
@@ -31,27 +33,42 @@ impl SystemTimer {
 
 impl Drop for SystemTimer {
     fn drop(&mut self) {
-        if let Some((name, start)) = self.0
-            && let Ok(mut samples) = SYSTEM_SAMPLES.lock()
-        {
-            let ms = start.elapsed().as_secs_f64() * 1000.;
-            let sample = samples.entry(name).or_default();
-            sample.0 += 1;
-            sample.1 += ms;
-            sample.2 = sample.2.max(ms);
+        if let Some((name, start)) = self.0 {
+            record(name, start.elapsed().as_secs_f64() * 1000.);
         }
     }
 }
 
-pub fn report_systems() {
+/// Add one timed run of `name` to the shared store (system timers and, with the
+/// `profile-spans` feature, tracing spans).
+pub fn record(name: impl Into<std::borrow::Cow<'static, str>>, ms: f64) {
     if let Ok(mut samples) = SYSTEM_SAMPLES.lock() {
-        for (name, (count, sum, max)) in samples.iter() {
-            info!(
-                "profile system {name}: mean {:.3} ms, max {max:.3} ms",
-                sum / *count as f64
-            );
-        }
-        samples.clear();
+        let sample = samples.entry(name.into()).or_default();
+        sample.0 += 1;
+        sample.1 += ms;
+        sample.2 = sample.2.max(ms);
+    }
+}
+
+/// Remove and return the stored samples whose names do or do not (`matching`) start with
+/// `prefix`.
+pub fn take_samples(prefix: &str, matching: bool) -> SystemSamples {
+    let Ok(mut samples) = SYSTEM_SAMPLES.lock() else {
+        return SystemSamples::new();
+    };
+    samples
+        .extract_if(.., |name, _| name.starts_with(prefix) == matching)
+        .collect()
+}
+
+/// Log and clear the system timers. Span samples (named `span ...`, with the `profile-spans`
+/// feature) stay for `span_profile`'s report.
+pub fn report_systems() {
+    for (name, (count, sum, max)) in take_samples("span ", false) {
+        info!(
+            "profile system {name}: mean {:.3} ms, max {max:.3} ms",
+            sum / count as f64
+        );
     }
 }
 

@@ -56,18 +56,6 @@ struct LateState {
 }
 
 impl LateMeshes {
-    /// A few of the meshes still waiting, for the loading log.
-    pub fn sample(&self) -> Vec<AssetId<Mesh>> {
-        self.0
-            .lock()
-            .unwrap()
-            .waiting
-            .iter()
-            .take(4)
-            .copied()
-            .collect()
-    }
-
     /// Meshes of spawned entities not yet known to be prepared on the GPU.
     pub fn waiting(&self) -> usize {
         let state = self.0.lock().unwrap();
@@ -88,6 +76,9 @@ fn watch_meshes(
     )>,
     mut unchecked: Local<std::collections::HashMap<AssetId<Mesh>, Vec<Entity>>>,
 ) {
+    if unchecked.is_empty() && meshes.p0().is_empty() {
+        return;
+    }
     let (on_time, ready) = {
         let mut state = late.0.lock().unwrap();
         for (entity, mesh) in &meshes.p0() {
@@ -114,6 +105,8 @@ fn watch_meshes(
             }
         }
     }
+    // A mesh asset removed before the render world prepared it never reports back.
+    unchecked.retain(|id, _| assets.contains(*id));
 }
 
 /// Render world, after specialization: sort newly reported meshes into prepared and waiting,
@@ -124,6 +117,9 @@ fn check_late_meshes(
 ) {
     let mut state = late.0.lock().unwrap();
     let state = &mut *state;
+    if state.new.is_empty() && state.waiting.is_empty() {
+        return;
+    }
     for id in std::mem::take(&mut state.new) {
         if meshes.get(id).is_some() {
             state.on_time.push(id);
@@ -131,16 +127,14 @@ fn check_late_meshes(
             state.waiting.insert(id);
         }
     }
-    let prepared: Vec<_> = state
-        .waiting
-        .iter()
-        .copied()
-        .filter(|id| meshes.get(*id).is_some())
-        .collect();
-    for id in prepared {
-        state.waiting.remove(&id);
-        state.ready.push(id);
-    }
+    let LateState { waiting, ready, .. } = state;
+    waiting.retain(|id| {
+        let prepared = meshes.get(*id).is_some();
+        if prepared {
+            ready.push(*id);
+        }
+        !prepared
+    });
 }
 
 #[derive(Default, Resource)]
@@ -225,22 +219,23 @@ pub(crate) fn textures_pending(world: &World, entities: &[Entity]) -> bool {
 /// entities not yet known to be prepared ([`LateMeshes`]). Main-world-only images never
 /// upload, so they do not count.
 pub(crate) fn pending_uploads(world: &World) -> (usize, usize) {
+    let images: Vec<AssetId<Image>> = world
+        .resource::<Assets<Image>>()
+        .iter()
+        .filter(|(_, image)| {
+            image
+                .asset_usage
+                .contains(bevy::asset::RenderAssetUsages::RENDER_WORLD)
+        })
+        .map(|(id, _)| id)
+        .collect();
     let images = {
         let uploaded = world
             .resource::<super::map_material::SweepImages>()
             .0
             .lock()
             .unwrap();
-        world
-            .resource::<Assets<Image>>()
-            .iter()
-            .filter(|(id, image)| {
-                image
-                    .asset_usage
-                    .contains(bevy::asset::RenderAssetUsages::RENDER_WORLD)
-                    && !uploaded.contains(id)
-            })
-            .count()
+        images.iter().filter(|id| !uploaded.contains(id)).count()
     };
     (images, world.resource::<LateMeshes>().waiting())
 }

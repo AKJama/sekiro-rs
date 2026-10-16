@@ -23,9 +23,6 @@ use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-/// Seconds after the first step not counted in the frame-time statistics (none: the first
-/// playable frames must already be within budget).
-const SETTLE_SECONDS: f32 = 0.0;
 /// Radius of the floor-coverage survey around Wolf.
 const SURVEY_RADIUS: f32 = 20.0;
 const SURVEY_SPACING: f32 = 2.0;
@@ -51,8 +48,12 @@ pub(super) struct LiveCheck {
     sim_started: Option<(f32, Instant)>,
     map_loaded: Option<f32>,
     frames_ms: Vec<f32>,
-    /// Longest frame before play started (a main-thread stall while loading).
+    /// Longest frame before play started (a main-thread stall while loading), and the longest
+    /// in the first three seconds of play (a hitch as the loading screen lifts).
     longest_loading_ms: f32,
+    longest_start_ms: f32,
+    /// This frame ran a 4 Hz ground sample, whose cost lands in the next frame's time.
+    sampled: bool,
     samples: Vec<serde_json::Value>,
     stops: Vec<serde_json::Value>,
     holes: usize,
@@ -120,6 +121,8 @@ impl LiveCheck {
             map_loaded: None,
             frames_ms: Vec::new(),
             longest_loading_ms: 0.0,
+            longest_start_ms: 0.0,
+            sampled: false,
             samples: Vec::new(),
             stops: Vec::new(),
             holes: 0,
@@ -129,10 +132,6 @@ impl LiveCheck {
             finished: false,
         }))
     }
-}
-
-fn since_start() -> f32 {
-    crate::process_start().elapsed().as_secs_f32()
 }
 
 /// A drawn map mesh near `centre`: its entity, world bounds and transform. Map descendants
@@ -168,28 +167,16 @@ fn drawn_map_meshes(
         if !visible.get() {
             continue;
         }
-        let world_centre = transform.transform_point(Vec3::from(aabb.center));
-        let extent = Vec3::from(transform.affine().matrix3.abs() * aabb.half_extents);
-        if world_centre.xz().distance(centre.xz()) > radius + extent.xz().length() {
+        let (lo, hi) = crate::map::world_bounds(transform, aabb);
+        let reach = ((hi - lo) * 0.5).xz().length();
+        if ((lo + hi) * 0.5).xz().distance(centre.xz()) > radius + reach {
             continue;
         }
-        let mut ancestor = entity;
-        let mut map = false;
-        for _ in 0..64 {
-            if roots.contains(ancestor) {
-                map = true;
-                break;
-            }
-            let Ok(parent) = parents.get(ancestor) else {
-                break;
-            };
-            ancestor = parent.parent();
-        }
-        if map {
+        if crate::map::map_root(entity, parents, roots).is_some() {
             out.push(Drawn {
                 mesh: mesh.id(),
-                lo: world_centre - extent,
-                hi: world_centre + extent,
+                lo,
+                hi,
                 transform: *transform,
             });
         }
@@ -237,25 +224,15 @@ fn ground_triangle(drawn: &[Drawn], meshes: &Assets<Mesh>, p: Vec3) -> Option<bo
             else {
                 return false;
             };
-            let (a, b, c) = (Vec3::from(*a), Vec3::from(*b), Vec3::from(*c));
-            // Moller-Trumbore, segment parameter in 0..1 spans the tolerance band.
-            let (e1, e2) = (b - a, c - a);
-            let h = direction.cross(e2);
-            let det = e1.dot(h);
-            if det.abs() < 1e-12 {
-                return false;
-            }
-            let s = origin - a;
-            let u = s.dot(h) / det;
-            if !(0.0..=1.0).contains(&u) {
-                return false;
-            }
-            let q = s.cross(e1);
-            let v = direction.dot(q) / det;
-            if v < 0.0 || u + v > 1.0 {
-                return false;
-            }
-            (0.0..=1.0).contains(&(e2.dot(q) / det))
+            // The segment parameter 0..1 spans the tolerance band.
+            sekiro_sim::collision::ray_triangle(
+                origin,
+                direction,
+                Vec3::from(*a),
+                Vec3::from(*b),
+                Vec3::from(*c),
+            )
+            .is_some_and(|t| t <= 1.0)
         };
         let found = match mesh.indices() {
             Some(Indices::U16(i)) => i
@@ -339,7 +316,7 @@ pub(super) fn observe(
     if check.finished {
         return;
     }
-    let now = since_start();
+    let now = crate::since_start();
     if check.first_frame.is_none() {
         check.first_frame = Some(now);
         info!("live check: first frame {now:.1} s");
@@ -369,11 +346,17 @@ pub(super) fn observe(
                 .observe(save_to_disk(dir.join("play-start.png")));
         }
     }
+    // Play frames, without the ones paying for this check's own ground samples.
+    let sampled_before = std::mem::take(&mut check.sampled);
     if let Some((_, started)) = check.sim_started
-        && started.elapsed().as_secs_f32() > SETTLE_SECONDS
         && check.tour.is_empty()
+        && !sampled_before
     {
-        check.frames_ms.push(time.delta_secs() * 1000.0);
+        let ms = time.delta_secs() * 1000.0;
+        check.frames_ms.push(ms);
+        if started.elapsed().as_secs_f32() <= 3.0 {
+            check.longest_start_ms = check.longest_start_ms.max(ms);
+        }
     }
     let Some(collision) = collision else { return };
     let p = Vec3::from_array(sim.duel.player.body.position);
@@ -423,6 +406,7 @@ pub(super) fn observe(
         return;
     }
     check.last_sample = Some(Instant::now());
+    check.sampled = true;
     let drawn = drawn_map_meshes(p, SURVEY_RADIUS, &meshes, &parents, &roots);
     let mut sample = sample_ground(&collision, &drawn, &mesh_assets, p);
     let drawn_ground = sample["ground_drawn"].as_bool() == Some(true);
@@ -469,13 +453,10 @@ pub(super) fn observe(
         return;
     }
     check.finished = true;
-    let mut frames = check.frames_ms.clone();
-    frames.sort_by(f32::total_cmp);
-    let pick = |q: f32| {
-        frames
-            .get(((frames.len() as f32 * q) as usize).min(frames.len().saturating_sub(1)))
-            .copied()
-    };
+    let frames = &check.frames_ms;
+    let pick =
+        |q: f32| (!frames.is_empty()).then(|| sekiro_sim::brain::metrics::percentile(frames, q));
+    let longest = frames.iter().copied().reduce(f32::max);
     let min_coverage = check.coverage.iter().copied().fold(1.0f32, f32::min);
     let stop_holes = check
         .stops
@@ -492,8 +473,9 @@ pub(super) fn observe(
         "frames": frames.len(),
         "frame_ms_median": pick(0.5),
         "frame_ms_p95": pick(0.95),
-        "frame_ms_max": frames.last(),
+        "frame_ms_max": longest,
         "longest_loading_frame_ms": check.longest_loading_ms,
+        "longest_start_frame_ms": check.longest_start_ms,
         "grounded_samples": check.grounded_samples,
         "ground_holes": check.holes,
         "floor_coverage_min": min_coverage,
@@ -514,7 +496,7 @@ pub(super) fn observe(
         check.map_loaded,
         pick(0.5),
         pick(0.95),
-        frames.last(),
+        longest,
         check.longest_loading_ms,
         check.holes,
         check.grounded_samples,
@@ -532,7 +514,7 @@ pub(super) fn observe(
     }
     info!(
         "live check: exit requested {:.2} s after launch",
-        since_start()
+        crate::since_start()
     );
     exit.write(AppExit::Success);
 }

@@ -644,7 +644,8 @@ fn height_on(x: f32, z: f32, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
 }
 
 /// Möller-Trumbore, both faces.
-fn ray_triangle(o: Vec3, d: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
+/// Returns the ray parameter `t >= 0` where `o + t * d` meets triangle `abc`.
+pub fn ray_triangle(o: Vec3, d: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
     let e1 = b - a;
     let e2 = c - a;
     let p = d.cross(e2);

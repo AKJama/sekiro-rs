@@ -132,12 +132,13 @@ fn plan(world: &World, scene: &CaptureScene) -> Result<Vec<Node>> {
                     primitive.material.as_ref(),
                     world_from_scene.determinant() < 0.,
                 )?;
-                let material: Handle<StandardMaterial> =
-                    assets.load_builder().override_unapproved().load(
-                        path.without_label()
-                            .clone_owned()
-                            .with_label(format!("{label}/std")),
-                    );
+                let material: Handle<StandardMaterial> = super::load_map_asset(
+                    assets,
+                    path.without_label()
+                        .clone_owned()
+                        .with_label(format!("{label}/std")),
+                    true,
+                );
                 anyhow::ensure!(
                     world
                         .resource::<Assets<StandardMaterial>>()

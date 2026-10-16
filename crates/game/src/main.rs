@@ -422,6 +422,11 @@ fn process_start() -> std::time::Instant {
     *START.get_or_init(std::time::Instant::now)
 }
 
+/// Seconds since this process started.
+fn since_start() -> f32 {
+    process_start().elapsed().as_secs_f32()
+}
+
 fn main() -> anyhow::Result<()> {
     process_start();
     dispatch()?;

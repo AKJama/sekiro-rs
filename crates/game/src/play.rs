@@ -238,13 +238,6 @@ struct EnemyScene {
 }
 
 const STEP_HZ: f64 = 60.0;
-/// Seconds the fight waits after the map has loaded. About 1.9 s after the map's textures and
-/// meshes are uploaded, presentation stalls once for 50 to 70 ms: the render world waits that
-/// long for the next swapchain image (measured on an RTX 5070 Ti with Vulkan, 2026-10-10, in
-/// every run with map pieces drawn, in none without, and at the same time when the start was
-/// held longer; no CPU work, pipeline compile, sound or clip load lines up with it; STATUS.md,
-/// "Frame pacing"). Starting after it keeps that stall out of the fight.
-const MAP_SETTLE_SECS: f32 = 2.5;
 /// Radians of camera turn per mouse count (0.0035 was reported as far too sensitive).
 const MOUSE_SENSITIVITY: f32 = 0.0012;
 const WOLF: usize = 0;
@@ -342,12 +335,7 @@ pub fn run(options: Options) -> Result<()> {
         );
     }
     // Seconds since launch at each loading stage, for load-time reports.
-    let stage = |name: &str| {
-        eprintln!(
-            "startup: {name} at {:.1} s",
-            crate::process_start().elapsed().as_secs_f32()
-        )
-    };
+    let stage = |name: &str| eprintln!("startup: {name} at {:.1} s", crate::since_start());
     let roster = sekiro_sim::registry::Registry::load(&cache).map_err(anyhow::Error::msg)?;
     // Duel has two mandatory slots; exploration uses an unoccupied soldier slot, never a boss
     // encounter, and does not spawn its model or controller.
@@ -672,7 +660,12 @@ pub fn run(options: Options) -> Result<()> {
     .add_systems(Startup, setup.before(map::MapSpawn))
     .init_resource::<play_gate::PlayGate>()
     .add_systems(Startup, play_gate::spawn_screen)
-    .add_systems(Update, (play_gate::check_render, play_gate::update).chain())
+    .add_systems(
+        Update,
+        (play_gate::check_render, play_gate::update)
+            .chain()
+            .run_if(play_gate::loading),
+    )
     .insert_resource(rope::RopeCache(cache.clone()))
     .add_systems(
         Startup,
@@ -798,15 +791,13 @@ pub fn run(options: Options) -> Result<()> {
 /// Responding" for about 27 seconds; the operating system reclaims that memory at once.
 /// Screenshots still being captured get up to two seconds first.
 fn exit_fast(world: &mut World, mut deferred: Local<Option<(AppExit, std::time::Instant)>>) {
+    // Any error exit wins over success, in one pass.
     let requested = world.get_resource::<Messages<AppExit>>().and_then(|m| {
-        let exits: Vec<_> = m.iter_current_update_messages().cloned().collect();
-        (!exits.is_empty()).then(|| {
-            exits
-                .iter()
-                .find(|e| e.is_error())
-                .cloned()
-                .unwrap_or(AppExit::Success)
-        })
+        m.iter_current_update_messages()
+            .fold(None, |chosen: Option<AppExit>, exit| match chosen {
+                Some(error) if error.is_error() => Some(error),
+                _ => Some(exit.clone()),
+            })
     });
     if let Some(exit) = requested {
         deferred.get_or_insert((exit, std::time::Instant::now()));
@@ -834,7 +825,7 @@ fn exit_fast(world: &mut World, mut deferred: Local<Option<(AppExit, std::time::
     eprintln!(
         "shutdown: session saved in {:.2} s, exiting {:.2} s after launch",
         started.elapsed().as_secs_f32(),
-        crate::process_start().elapsed().as_secs_f32()
+        crate::since_start()
     );
     if let Err(error) = crate::menu::relaunch() {
         eprintln!("relaunch: {error:#}");
@@ -1257,11 +1248,11 @@ fn simulate(
     mut cues: MessageWriter<crate::audio::SoundCue>,
     replay: Option<ResMut<crate::input_replay::InputReplay>>,
 ) {
-    // Hold the simulation behind the loading screen until the whole map has loaded and is
-    // drawable (play_gate.rs), then MAP_SETTLE_SECS more, past the one-off presentation stall
-    // that follows the map's upload. Scripted and replayed runs wait the same way, so their
-    // frames line up run to run.
-    if !gate.open(sim.step == 0) {
+    // Hold the simulation behind the loading screen until the whole map has loaded, is drawable
+    // and frames have settled (play_gate.rs; its stable-frame wait also covers the one-off
+    // presentation stall after the map's upload). Scripted and replayed runs wait the same
+    // way, so their frames line up run to run.
+    if !gate.open() {
         return;
     }
     if sim

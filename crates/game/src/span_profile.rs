@@ -1,19 +1,13 @@
 //! Opt-in system profiler: build with `--features profile-spans` and every Bevy system and
-//! schedule run is timed through its tracing span. Every five seconds the slowest spans are
+//! schedule run is timed through its tracing span, in perf_log's shared timing store. Every five seconds the slowest spans are
 //! logged as `span profile` lines (mean milliseconds per rendered frame), main and render world
 //! together. Uses only crates the app already depends on, so it builds offline.
 use bevy::log::BoxedLayer;
 use bevy::log::tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
 use bevy::prelude::*;
-use std::collections::HashMap;
-use std::sync::Mutex;
 use std::time::Instant;
 use tracing::span::{Attributes, Id};
 use tracing::{Subscriber, field::Field, field::Visit};
-
-/// Per span name: runs, total milliseconds and the longest run.
-type Totals = HashMap<String, (u64, f64, f64)>;
-static TOTALS: Mutex<Option<Totals>> = Mutex::new(None);
 
 struct Label {
     name: String,
@@ -43,8 +37,8 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for SpanTimes {
         attrs.record(&mut visitor);
         let base = attrs.metadata().name();
         let name = match visitor.0 {
-            Some(field) => format!("{base} {field}"),
-            None => base.to_owned(),
+            Some(field) => format!("span {base} {field}"),
+            None => format!("span {base}"),
         };
         if let Some(span) = ctx.span(id) {
             span.extensions_mut().insert(Label {
@@ -69,16 +63,7 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for SpanTimes {
         let Some(start) = label.entered.take() else {
             return;
         };
-        let ms = start.elapsed().as_secs_f64() * 1000.0;
-        if let Ok(mut totals) = TOTALS.lock() {
-            let entry = totals
-                .get_or_insert_with(HashMap::new)
-                .entry(label.name.clone())
-                .or_default();
-            entry.0 += 1;
-            entry.1 += ms;
-            entry.2 = entry.2.max(ms);
-        }
+        crate::perf_log::record(label.name.clone(), start.elapsed().as_secs_f64() * 1000.0);
     }
 }
 
@@ -95,11 +80,9 @@ pub fn report(time: Res<Time<Real>>, mut frames: Local<u64>, mut last: Local<f32
         return;
     }
     *last = now;
-    let Ok(mut totals) = TOTALS.lock() else {
-        return;
-    };
-    let Some(map) = totals.take() else { return };
-    let mut rows: Vec<_> = map.into_iter().collect();
+    let mut rows: Vec<_> = crate::perf_log::take_samples("span ", true)
+        .into_iter()
+        .collect();
     rows.sort_by(|a, b| b.1.1.total_cmp(&a.1.1));
     let n = (*frames).max(1) as f64;
     for (name, (count, ms, _)) in rows.iter().take(40) {

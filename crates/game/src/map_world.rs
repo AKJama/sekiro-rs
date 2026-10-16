@@ -194,12 +194,11 @@ pub(crate) struct DetailPart {
     max: Vec3,
     available: [bool; 3],
     slots: [Option<Entity>; 3],
-    /// The model's GLB, the level drawn now, and which levels have a scene instance.
-    glb: String,
-    shown: Option<usize>,
+    /// The model's GLB stream request (`None` for offscreen captures, which spawn every level
+    /// up front), the level drawn now, and which levels have a scene instance.
+    stream: Option<usize>,
+    shown: usize,
     spawned: [bool; 3],
-    /// Offscreen captures spawn every level up front, without scene instances.
-    capture: bool,
 }
 
 /// Submission weight retained for the eventual retail coverage shader.
@@ -718,13 +717,6 @@ pub(crate) fn spawn(
     let mut capture_roots = BTreeMap::new();
     let args: Vec<_> = std::env::args().collect();
     let only_part = crate::arg_value(&args, "--world-part");
-    let row_transform = |row: &Value| {
-        super::pose(row).map(|pose| Transform {
-            translation: pose.translation,
-            rotation: pose.rotation,
-            scale: pose.scale,
-        })
-    };
     // Nearest first across every block, so the stream loads outwards from the start.
     let mut order = Vec::new();
     for (id, block) in &world.blocks {
@@ -734,20 +726,22 @@ pub(crate) fn spawn(
             .flatten()
             .enumerate()
         {
-            let distance = match (scene.focus, row_transform(row), row["model"].as_str()) {
-                (Some(focus), Some(transform), Some(model)) => {
+            let Some(transform) = super::row_transform(row) else {
+                continue;
+            };
+            let distance = match (scene.focus, row["model"].as_str()) {
+                (Some(focus), Some(model)) => {
                     super::placed_distance(&block.json["models"][model], focus, &transform)
                 }
                 _ => 0.0,
             };
-            order.push((distance, id.clone(), index));
+            order.push((distance, id.clone(), index, transform));
         }
     }
     order.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut seen = BTreeMap::<String, BTreeSet<String>>::new();
     let mut skipped = BTreeMap::<String, BTreeMap<String, usize>>::new();
-    for (distance, id, index) in order {
-        let near = distance <= super::NEAR_RADIUS;
+    for (_, id, index, transform) in order {
         let block = world.blocks.get_mut(&id).expect("listed block");
         let row = &block.json["parts"][index];
         if only_part
@@ -781,9 +775,6 @@ pub(crate) fn spawn(
         let Some(glb) = block.json["models"][model]["glb"].as_str() else {
             continue;
         };
-        let Some(transform) = row_transform(row) else {
-            continue;
-        };
         if let (Some(coverage), Some(min), Some(max)) = (
             world.capture_views.as_ref(),
             super::vec3(&block.json["models"][model]["min"]),
@@ -806,12 +797,10 @@ pub(crate) fn spawn(
             continue;
         }
         let glb = format!("{}{glb}", block.prefix);
-        let capture_handle: Option<Handle<Gltf>> = world.capture_views.as_ref().map(|_| {
-            assets
-                .load_builder()
-                .override_unapproved()
-                .load(glb.clone())
-        });
+        let capture_handle: Option<Handle<Gltf>> = world
+            .capture_views
+            .as_ref()
+            .map(|_| super::load_map_asset(assets, glb.clone(), true));
         if capture_handle.is_some() && !capture_roots.contains_key(&glb) {
             match super::capture::scene_roots(&sekiro_sim::cache::root().join(&glb)) {
                 Ok(roots) => {
@@ -892,6 +881,7 @@ pub(crate) fn spawn(
                 _ => available.iter().position(|&v| v).unwrap_or(0),
             };
             let mut slots = [None; 3];
+            let mut stream = None;
             for (level, &exists) in available.iter().enumerate() {
                 if !exists {
                     continue;
@@ -914,7 +904,7 @@ pub(crate) fn spawn(
                     });
                     pending.add_instance();
                 } else if level == initial {
-                    pending.queue(&glb, Some(&block.id), true, (child.id(), level), near);
+                    stream = Some(pending.queue(&glb, Some(&block.id), true, (child.id(), level)));
                 }
                 slots[level] = Some(child.id());
             }
@@ -926,9 +916,8 @@ pub(crate) fn spawn(
                 max,
                 available,
                 slots,
-                glb: glb.clone(),
-                capture: capture_handle.is_some(),
-                shown: Some(initial),
+                stream,
+                shown: initial,
                 spawned: std::array::from_fn(|level| {
                     capture_handle.is_some() && available[level] || level == initial
                 }),
@@ -941,7 +930,7 @@ pub(crate) fn spawn(
             });
             pending.add_instance();
         } else {
-            pending.queue(&glb, Some(&block.id), true, (root, 0), near);
+            pending.queue(&glb, Some(&block.id), true, (root, 0));
         }
         spawned += 1;
     }
@@ -986,12 +975,13 @@ pub(crate) fn update_detail(
         Option<&WorldAssetRoot>,
         Option<&WorldInstance>,
     )>,
+    mut debug: Local<Option<bool>>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("update_detail");
     let Some(camera) = cameras.iter().next() else {
         return;
     };
-    let debug = std::env::args().any(|a| a == "--lod-debug");
+    let debug = *debug.get_or_insert_with(|| std::env::args().any(|a| a == "--lod-debug"));
     for (transform, identity, mut part) in &mut parts {
         let distance =
             super::lod::bounds_distance(camera.translation, transform, part.min, part.max);
@@ -1015,30 +1005,29 @@ pub(crate) fn update_detail(
         // GLB, so once the stream has requested it the scene comes from that load; before
         // then the current level stays, keeping the stream's order and in-flight limit.
         if !part.spawned[selected]
-            && pending.requested(&part.glb)
             && let Some(entity) = part.slots[selected]
+            && let Some(scene) = part
+                .stream
+                .and_then(|index| pending.requested(index))
+                .map(|(glb, unapproved)| super::scene_handle(&assets, glb, selected, unapproved))
         {
-            commands
-                .entity(entity)
-                .insert(WorldAssetRoot(super::scene_handle(
-                    &assets, &part.glb, selected, true,
-                )));
+            commands.entity(entity).insert(WorldAssetRoot(scene));
             part.spawned[selected] = true;
             pending.add_instance();
         }
         // Keep drawing the current level until the selected one has spawned its meshes, so a
         // switch never leaves a gap. Capture scenes are spawned synchronously.
-        let selected_ready = part.capture
-            || part.slots[selected]
-                .and_then(|entity| slots.get(entity).ok())
-                .is_some_and(|(_, _, root, instance)| {
-                    root.is_some() && instance.is_some_and(|i| instances.instance_is_ready(**i))
-                });
-        let shown = match part.shown {
-            Some(current) if !selected_ready => current,
-            _ => selected,
-        };
-        part.shown = Some(shown);
+        if part.shown != selected
+            && (part.stream.is_none()
+                || part.slots[selected]
+                    .and_then(|entity| slots.get(entity).ok())
+                    .is_some_and(|(_, _, root, instance)| {
+                        root.is_some() && instance.is_some_and(|i| instances.instance_is_ready(**i))
+                    }))
+        {
+            part.shown = selected;
+        }
+        let shown = part.shown;
         for (level, entity) in part.slots.iter().enumerate() {
             if let Some(entity) = entity
                 && let Ok((mut visibility, mut weight, _, _)) = slots.get_mut(*entity)

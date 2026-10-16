@@ -17,20 +17,37 @@ use std::time::Instant;
 
 #[derive(Resource, Default)]
 pub(super) struct PlayGate {
-    /// When the area became ready; play starts [`super::MAP_SETTLE_SECS`] later.
+    /// When loading finished and play may start.
     pub(super) ready_at: Option<Instant>,
     /// When everything had loaded, and the consecutive frames within budget since.
     loaded_at: Option<Instant>,
     stable_frames: u32,
-    progress: f32,
-    /// Every drawn map mesh near Wolf has its mesh and material textures prepared on the GPU.
-    render_ready: bool,
-    /// Nearby textures pending, images and meshes waiting for the GPU.
-    render_missing: (bool, usize, usize),
+    /// The last GPU readiness check ([`check_render`]); `None` before the first.
+    render: Option<RenderWait>,
+    /// Drawn meshes near Wolf, listed once when the upload counts first reach zero (Wolf does
+    /// not move before play).
+    near: Option<Vec<Entity>>,
     last_log: Option<Instant>,
 }
 
-/// Drawn map meshes within this distance of Wolf must be renderable before play starts.
+/// What the GPU still waits for before the world is drawable.
+#[derive(Clone, Copy, Debug, Default)]
+struct RenderWait {
+    /// A drawn mesh near Wolf still waits for its material textures.
+    textures: bool,
+    /// Images queued behind the upload budget.
+    images: usize,
+    /// Spawned mesh entities whose mesh is not yet prepared.
+    meshes: usize,
+}
+
+impl RenderWait {
+    fn ready(&self) -> bool {
+        !self.textures && self.images == 0 && self.meshes == 0
+    }
+}
+
+/// Drawn meshes within this distance of Wolf must have their textures before play starts.
 const RENDER_RADIUS: f32 = 60.0;
 
 /// A frame within budget: 30 Hz, so a vsync-limited 60 Hz frame always counts.
@@ -41,10 +58,15 @@ const STABLE_FRAMES: u32 = 60;
 const STABLE_TIMEOUT_SECONDS: f32 = 60.0;
 
 impl PlayGate {
-    /// Whether the simulation may step now.
-    pub(super) fn open(&self, first_step: bool) -> bool {
-        self.ready_at
-            .is_some_and(|t| !first_step || t.elapsed().as_secs_f32() >= super::MAP_SETTLE_SECS)
+    /// Whether the simulation may step now. The 60 stable frames before readiness also cover
+    /// the presentation stall that once followed the map upload; a further 2.5 s settle made
+    /// no difference to the first frames of play (about 80 ms either way, measured 2026-10-16).
+    pub(super) fn open(&self) -> bool {
+        self.ready_at.is_some()
+    }
+
+    fn render_ready(&self) -> bool {
+        self.render.is_some_and(|r| r.ready())
     }
 }
 
@@ -53,6 +75,12 @@ pub(super) struct LoadingScreen;
 
 #[derive(Component)]
 pub(super) struct LoadingBar;
+
+/// Run condition: the loading screen is still up. Once play starts it is despawned and the
+/// gate's systems stop running.
+pub(super) fn loading(screens: Query<(), With<LoadingScreen>>) -> bool {
+    !screens.is_empty()
+}
 
 pub(super) fn spawn_screen(mut commands: Commands) {
     commands
@@ -115,7 +143,13 @@ pub(super) fn update(
     screens: Query<Entity, With<LoadingScreen>>,
     mut bars: Query<&mut Node, With<LoadingBar>>,
 ) {
-    if gate.ready_at.is_none() {
+    if sim.step > 0 {
+        for screen in &screens {
+            commands.entity(screen).despawn();
+        }
+        return;
+    }
+    let progress = if gate.ready_at.is_none() {
         let rigs_bound = !rigs.is_empty() && rigs.iter().all(|r| r.bound);
         let map = pending.as_ref().is_none_or(|p| p.loaded());
         let compiled = pipelines.as_ref().is_none_or(|p| {
@@ -126,22 +160,20 @@ pub(super) fn update(
         let floor = collision
             .as_ref()
             .is_none_or(|c| c.0.floor(p[0], p[2], p[1] + 1.0).is_some());
-        let loaded = rigs_bound && map && compiled && floor;
         // GPU uploads trail the CPU load; then uploads, scene spawning and shader compiles show
-        // up as slow frames, so the area is ready once nearby pieces are renderable and frames
-        // stay within budget.
-        if loaded {
+        // up as slow frames, so the area is ready once the world is drawable and frames stay
+        // within budget.
+        if rigs_bound && map && compiled && floor {
             let since = *gate.loaded_at.get_or_insert_with(Instant::now);
-            if gate.render_ready && time.delta_secs() <= STABLE_FRAME_SECONDS {
+            if gate.render_ready() && time.delta_secs() <= STABLE_FRAME_SECONDS {
                 gate.stable_frames += 1;
             } else {
                 gate.stable_frames = 0;
             }
             let settled = gate.stable_frames >= STABLE_FRAMES;
-            let timed_out = since.elapsed().as_secs_f32() >= STABLE_TIMEOUT_SECONDS;
-            if settled || timed_out {
+            if settled || since.elapsed().as_secs_f32() >= STABLE_TIMEOUT_SECONDS {
                 gate.ready_at = Some(Instant::now());
-                let launch = crate::process_start().elapsed().as_secs_f32();
+                let launch = crate::since_start();
                 if settled {
                     info!(
                         "play ready: map loaded and {STABLE_FRAMES} frames within budget, {launch:.1} s after launch ({:.1} s settling)",
@@ -149,38 +181,36 @@ pub(super) fn update(
                     );
                 } else {
                     warn!(
-                        "play ready: not settled within {STABLE_TIMEOUT_SECONDS} s of loading (nearby textures pending, images and meshes waiting for the GPU: {:?}), starting anyway {launch:.1} s after launch",
-                        gate.render_missing
+                        "play ready: not settled within {STABLE_TIMEOUT_SECONDS} s of loading ({:?}), starting anyway {launch:.1} s after launch",
+                        gate.render
                     );
                 }
             }
         }
-        let map_progress = pending.as_ref().map_or(1.0, |p| p.progress());
-        gate.progress = map_progress * 0.9
+        pending.as_ref().map_or(1.0, |p| p.progress()) * 0.9
             + 0.04 * f32::from(u8::from(rigs_bound))
             + 0.03 * f32::from(u8::from(compiled))
-            + 0.03 * (gate.stable_frames as f32 / STABLE_FRAMES as f32).min(1.0);
+            + 0.03 * (gate.stable_frames as f32 / STABLE_FRAMES as f32).min(1.0)
     } else {
-        gate.progress = 1.0;
-    }
+        1.0
+    };
+    let width = percent(progress * 100.0);
     for mut bar in &mut bars {
-        bar.width = percent(gate.progress * 100.0);
-    }
-    if sim.step > 0 {
-        for screen in &screens {
-            commands.entity(screen).despawn();
+        if bar.width != width {
+            bar.width = width;
         }
     }
 }
 
-/// Once everything has loaded, checks that the world is renderable: no image upload is still
+/// Once everything has loaded, checks that the world is drawable: no image upload is still
 /// queued behind the upload budget, every spawned mesh entity's mesh is prepared on the GPU
 /// ([`crate::map::ready::LateMeshes`], which also gets late entities drawn), and the
-/// materials of the drawn map meshes within [`RENDER_RADIUS`] of Wolf have their textures (the
-/// capture readiness check). The nearby scan runs only once the upload counts are zero.
+/// materials of the drawn meshes within [`RENDER_RADIUS`] of Wolf have their textures (the
+/// capture readiness check). The nearby list is made once, when the upload counts first reach
+/// zero.
 pub(super) fn check_render(world: &mut World) {
     if !world.contains_resource::<crate::map::ready::LateMeshes>() {
-        world.resource_mut::<PlayGate>().render_ready = true;
+        world.resource_mut::<PlayGate>().render = Some(RenderWait::default());
         return;
     }
     let gate = world.resource::<PlayGate>();
@@ -188,42 +218,33 @@ pub(super) fn check_render(world: &mut World) {
         return;
     }
     let (images, meshes) = crate::map::ready::pending_uploads(world);
-    let textures = images == 0 && meshes == 0 && near_textures_pending(world);
-    let log = {
-        let mut gate = world.resource_mut::<PlayGate>();
-        gate.render_ready = images == 0 && meshes == 0 && !textures;
-        gate.render_missing = (textures, images, meshes);
-        let due = gate
-            .last_log
-            .is_none_or(|t| t.elapsed().as_secs_f32() >= 1.0);
-        if due {
-            gate.last_log = Some(Instant::now());
-        }
-        due
+    let textures = images == 0 && meshes == 0 && {
+        let near = match world.resource_mut::<PlayGate>().near.take() {
+            Some(near) => near,
+            None => near_meshes(world),
+        };
+        let pending = crate::map::ready::textures_pending(world, &near);
+        world.resource_mut::<PlayGate>().near = Some(near);
+        pending
     };
-    if log {
-        let sample: Vec<String> = world
-            .resource::<crate::map::ready::LateMeshes>()
-            .sample()
-            .into_iter()
-            .map(|id| {
-                let assets = world.resource::<AssetServer>();
-                format!(
-                    "{id:?} main {} state {:?} path {:?}",
-                    world.resource::<Assets<Mesh>>().get(id).is_some(),
-                    assets.get_load_state(id),
-                    assets.get_path(id)
-                )
-            })
-            .collect();
-        info!(
-            "loading: {images} images and {meshes} meshes waiting for the GPU, nearby textures pending {textures} {sample:?}"
-        );
+    let wait = RenderWait {
+        textures,
+        images,
+        meshes,
+    };
+    let mut gate = world.resource_mut::<PlayGate>();
+    gate.render = Some(wait);
+    if gate
+        .last_log
+        .is_none_or(|t| t.elapsed().as_secs_f32() >= 1.0)
+    {
+        gate.last_log = Some(Instant::now());
+        info!("loading: waiting for the GPU: {wait:?}");
     }
 }
 
-/// Whether a drawn map mesh near Wolf still waits for its material textures.
-fn near_textures_pending(world: &mut World) -> bool {
+/// The drawn meshes whose bounds come within [`RENDER_RADIUS`] of Wolf.
+fn near_meshes(world: &mut World) -> Vec<Entity> {
     let wolf = Vec3::from_array(world.non_send::<Sim>().duel.player.body.position);
     let mut query = world.query_filtered::<(
         Entity,
@@ -231,15 +252,12 @@ fn near_textures_pending(world: &mut World) -> bool {
         &InheritedVisibility,
         &bevy::camera::primitives::Aabb,
     ), With<Mesh3d>>();
-    let near: Vec<Entity> = query
+    query
         .iter(world)
         .filter(|(_, transform, visible, aabb)| {
-            let centre = transform.transform_point(Vec3::from(aabb.center));
-            let extent = Vec3::from(transform.affine().matrix3.abs() * aabb.half_extents);
-            visible.get()
-                && wolf.distance(wolf.clamp(centre - extent, centre + extent)) <= RENDER_RADIUS
+            let (lo, hi) = crate::map::world_bounds(transform, aabb);
+            visible.get() && wolf.distance(wolf.clamp(lo, hi)) <= RENDER_RADIUS
         })
         .map(|(entity, ..)| entity)
-        .collect();
-    crate::map::ready::textures_pending(world, &near)
+        .collect()
 }
