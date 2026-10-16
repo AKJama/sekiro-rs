@@ -9,8 +9,9 @@ Read the [README disclaimer](README.md#disclaimer) before starting.
 ## Pick an issue
 
 Only work on an open issue labelled `help wanted`.
-Comment to ask for it, then wait until the maintainer assigns it to you.
-One person works on each issue.
+Comment to ask for it, then wait until the maintainer assigns it to you; the assignee is who has claimed the issue.
+One person works on each issue, so skip issues that already have an assignee or a linked PR.
+As soon as you start, open a draft PR with `Fixes #N` in its body, so everyone can see the work in progress; mark it ready for review when it's done.
 To propose something new, open an issue first and wait for the maintainer to label it `help wanted` and assign it to you.
 PRs not linked to a `help wanted` issue assigned to you are closed.
 
