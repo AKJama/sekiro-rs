@@ -32,6 +32,8 @@ When a lower PR changes or merges, rebase the stacked branches onto it and force
 
 - Work from your fork and open the PR against `AKJama/sekiro-rs` `main`.
 - Claim the issue by opening a draft PR with `Fixes #N` before writing code, instead of a board row; mark it ready for review when steps 1 to 4 are done.
+- One issue per PR, never several: if the work covers more (a whole menu system, all of parkour), file one issue per playable piece with the `issues` skill and make one PR each.
+- Branch from the latest upstream `main`, and before marking the PR ready rebase on it (`git fetch upstream`, `git rebase upstream/main`), resolve conflicts, rerun step 4 and push with `--force-with-lease`.
 - Commit under your own name; the AKJama identity rule is for the maintainer.
 - Skip the collab-board steps.
 - Run step 4 and play the game yourself, and describe what you saw in the PR; step 5 becomes the maintainer's review and playtest.
