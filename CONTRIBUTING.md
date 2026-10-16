@@ -8,23 +8,25 @@ Read the [README disclaimer](README.md#disclaimer) before starting.
 
 ## Pick an issue
 
-Only work on an open issue labelled `help wanted`.
-Comment to ask for it, then wait until the maintainer assigns it to you; the assignee is who has claimed the issue.
-One person works on each issue, so skip issues that already have an assignee or a linked PR.
-As soon as you start, open a draft PR with `Fixes #N` in its body, so everyone can see the work in progress; mark it ready for review when it's done.
-To propose something new, open an issue first and wait for the maintainer to label it `help wanted` and assign it to you.
-PRs not linked to a `help wanted` issue assigned to you are closed.
+Any open issue without a linked PR is free to take; `help wanted` marks ones that suit newcomers.
+Claim it by opening a draft PR with `Fixes #N` in its body before you write any code, so everyone can see it's taken; you don't need to wait for anyone.
+One person works on each issue, so skip issues that already show a linked PR, and check the [collaboration board](https://github.com/AKJama/sekiro-collab/blob/main/WORK.md) for work the maintainers have claimed.
+A draft PR with no new commits for 7 days frees the issue again.
+For something with no issue yet, have your agent file one first (the repo's `issues` skill), then open the draft PR.
+Mark the PR ready for review when it's done.
+PRs that don't link an open issue are closed.
 
 ## Set up with your agent
 
 Fork `AKJama/sekiro-rs`, clone your fork, and open the folder in Claude Code desktop or CLI, Codex, or your agent.
 The repo carries its own agent rules and skills in [AGENTS.md](AGENTS.md), [pr-flow](.claude/skills/pr-flow/SKILL.md), [issues](.claude/skills/issues/SKILL.md), and [live-test](.claude/skills/live-test/SKILL.md) for your agent to read and follow.
-Paste this prompt, replacing `N` with your assigned issue number:
+Paste this prompt, replacing `N` with the issue number:
 
 ```text
-Read AGENTS.md and .claude/skills/pr-flow/SKILL.md.
-I've been assigned issue #N in AKJama/sekiro-rs.
-Make a branch, fix it following the pr-flow skill, run its checks, then tell me what to test in the game.
+Read AGENTS.md, CONTRIBUTING.md and .claude/skills/pr-flow/SKILL.md.
+I want to work on issue #N in AKJama/sekiro-rs.
+Check it has no linked PR, make a branch and open a draft PR against AKJama/sekiro-rs main with "Fixes #N" to claim it.
+Then fix it following the pr-flow skill, run its checks, and tell me what to test in the game.
 ```
 
 ## The flow
