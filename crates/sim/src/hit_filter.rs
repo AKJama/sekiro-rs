@@ -124,6 +124,13 @@ pub struct Trigger {
 }
 
 impl HelperCollision {
+    /// Every helper mesh, for cropping them with the rest of an arena's collision.
+    pub fn meshes_mut(&mut self) -> impl Iterator<Item = &mut CollisionMesh> {
+        self.parts
+            .values_mut()
+            .chain(self.triggers.iter_mut().map(|t| &mut t.mesh))
+    }
+
     /// Appends another block's helpers.
     pub fn extend(&mut self, other: HelperCollision) {
         for (mask, mesh) in other.parts {
@@ -136,19 +143,24 @@ impl HelperCollision {
     }
 }
 
+/// The hit filter of one of a layout's `collisions` rows.
+pub fn row_filter(row: &Value) -> Option<u8> {
+    row["collision"]["hit_filter_id"]
+        .as_u64()
+        .or_else(|| row["hit_filter_id"].as_u64())
+        .and_then(|f| u8::try_from(f).ok())
+}
+
 /// Takes the triangles of every collision part the player does not collide with out of
 /// `mesh`, a map's exported `collision.bin` read with its `layout`. Removed triangles collapse
 /// to a point, which [`crate::collision::CollisionWorld`] skips, so every triangle index in the
-/// layout still addresses the same triangle. Triangles outside every part stay.
+/// layout still addresses the same triangle. Triangles outside every part stay, and ones an
+/// earlier step already collapsed (hidden or disabled parts) are not taken.
 pub fn strip_helpers(mesh: &mut CollisionMesh, layout: &Value) -> HelperCollision {
     let mut out = HelperCollision::default();
     let triangles = mesh.triangle_count();
     for row in layout["collisions"].as_array().into_iter().flatten() {
-        let Some(filter) = row["collision"]["hit_filter_id"]
-            .as_u64()
-            .or_else(|| row["hit_filter_id"].as_u64())
-            .and_then(|f| u8::try_from(f).ok())
-        else {
+        let Some(filter) = row_filter(row) else {
             continue;
         };
         if player_collides(filter) {
@@ -162,8 +174,11 @@ pub fn strip_helpers(mesh: &mut CollisionMesh, layout: &Value) -> HelperCollisio
         };
         let range = first.min(triangles)..(first + count).min(triangles);
         let mut part = CollisionMesh::default();
-        for t in range.clone() {
+        for t in range {
             let tri = &mut mesh.indices[t * 3..t * 3 + 3];
+            if tri[0] == tri[1] && tri[1] == tri[2] {
+                continue;
+            }
             let base = part.vertices.len() as u32;
             part.vertices
                 .extend(tri.iter().map(|&i| mesh.vertices[i as usize]));
@@ -173,7 +188,10 @@ pub fn strip_helpers(mesh: &mut CollisionMesh, layout: &Value) -> HelperCollisio
             let keep = tri[0];
             tri.fill(keep);
         }
-        *out.removed.entry(filter).or_default() += range.len();
+        *out.removed.entry(filter).or_default() += part.triangle_count();
+        if part.indices.is_empty() {
+            continue;
+        }
         let who = mask(filter);
         if who != 0 {
             out.parts.entry(who).or_default().extend(&part);

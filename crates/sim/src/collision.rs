@@ -277,7 +277,9 @@ pub struct CollisionWorld {
     /// has it enabled (a boss fog wall and its invisible boundary). `u32::MAX` when there is none.
     gate_from: u32,
     gate_open: AtomicBool,
-    event_parts: Vec<(i32, std::ops::Range<u32>, AtomicBool)>,
+    /// Map event collision switched by entity: triangle range, who collides with it (as in
+    /// `masked`) and whether it is on.
+    event_parts: Vec<(i32, std::ops::Range<u32>, u8, AtomicBool)>,
     /// Helper parts (see [`crate::hit_filter`]): triangle ranges and who collides with them
     /// ([`crate::hit_filter::PLAYER`], `ENEMY`, `CAMERA` bits). Every other triangle is for all.
     masked: Vec<(std::ops::Range<u32>, u8)>,
@@ -322,6 +324,26 @@ impl CollisionWorld {
         Ok(Self::from_mesh(&crate::arena::crop(&mesh, center, radius)))
     }
 
+    /// A map's `collision.bin` as the player collides with it: the helper parts its
+    /// `layout.json` names leave the walkable mesh and join as helpers
+    /// ([`crate::hit_filter::strip_helpers`], [`CollisionWorld::add_helpers`]). Without a
+    /// layout it is [`CollisionWorld::load`].
+    pub fn load_map(dir: &Path) -> Result<Self, String> {
+        let path = dir.join("collision.bin");
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut mesh = CollisionMesh::from_bytes(&bytes).map_err(|e| e.to_string())?;
+        let helpers = match std::fs::read(dir.join("layout.json")) {
+            Ok(layout) => crate::hit_filter::strip_helpers(
+                &mut mesh,
+                &serde_json::from_slice(&layout).map_err(|e| e.to_string())?,
+            ),
+            Err(_) => Default::default(),
+        };
+        let mut world = Self::from_mesh(&mesh);
+        world.add_helpers(&helpers);
+        Ok(world)
+    }
+
     pub fn from_mesh(mesh: &CollisionMesh) -> Self {
         Self::build(mesh, None)
     }
@@ -344,17 +366,18 @@ impl CollisionWorld {
         self.gate_open.load(Ordering::Relaxed)
     }
 
-    /// Whether triangle `t` takes part in queries: every ordinary one, a gate one while on.
+    /// Whether triangle `t` takes part in `who`'s queries: every ordinary one, a helper one
+    /// when it holds `who`, an event one while on and holding `who`, a gate one while on.
     fn live(&self, t: u32, who: u8) -> bool {
         if let Some((_, mask)) = self.masked.iter().find(|(range, _)| range.contains(&t)) {
             return mask & who != 0;
         }
-        if let Some((_, _, on)) = self
+        if let Some((_, _, mask, on)) = self
             .event_parts
             .iter()
-            .find(|(_, range, _)| range.contains(&t))
+            .find(|(_, range, _, _)| range.contains(&t))
         {
-            return on.load(Ordering::Relaxed);
+            return mask & who != 0 && on.load(Ordering::Relaxed);
         }
         t < self.gate_from || self.gate_open.load(Ordering::Relaxed)
     }
@@ -409,7 +432,9 @@ impl CollisionWorld {
     pub fn add_helpers(&mut self, helpers: &crate::hit_filter::HelperCollision) {
         for (&mask, mesh) in &helpers.parts {
             let range = self.append(mesh);
-            self.masked.push((range, mask));
+            if !range.is_empty() {
+                self.masked.push((range, mask));
+            }
         }
         for trigger in &helpers.triggers {
             let mesh = &trigger.mesh;
@@ -827,7 +852,7 @@ macro_rules! ground_via_view {
             }
 
             fn max_step(&self) -> f32 {
-                STEP_HEIGHT
+                self.$view().max_step()
             }
 
             fn material(&self, x: f32, z: f32, top: f32) -> Option<u32> {

@@ -423,12 +423,19 @@ impl Arena {
         let path = dir.join("collision.bin");
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut mesh = CollisionMesh::from_bytes(&bytes).map_err(|e| e.to_string())?;
-        // In place, so every triangle range in the layout stays valid for the steps below.
-        let helpers = crate::hit_filter::strip_helpers(&mut mesh, &json);
+        // These steps collapse triangles in place, so every triangle range in the layout stays
+        // valid until the fog walls' split below. The helpers go last: disabled, event and
+        // hidden parts are already gone and do not come back as helpers.
         crate::arena_c::filter_collision(spec, &json, &mut mesh);
         let event_collision = crate::arena_c::take_event_collision(spec, &json, &mut mesh);
         let hidden = crate::arenas_a::hidden_parts(cache, spec)?;
         crate::arenas_a::remove_hidden_collision(&mut mesh, &json, &hidden);
+        let mut helpers = crate::hit_filter::strip_helpers(&mut mesh, &json);
+        if !full_map {
+            for helper in helpers.meshes_mut() {
+                *helper = crop(helper, layout.center(), spec.radius);
+            }
+        }
         let mut gate = CollisionMesh::default();
         for place in &fog_walls {
             if let Some(range) = place
@@ -457,13 +464,13 @@ impl Arena {
             )
         };
         world.add_helpers(&helpers);
-        if let Some(part) = event_collision {
+        if let Some((part, who)) = event_collision {
             let part = if full_map {
                 part
             } else {
                 crop(&part, layout.center(), spec.radius)
             };
-            world.append_event_part(1_124_860, &part, true);
+            world.append_event_part(1_124_860, &part, who, true);
         }
         Ok(Self {
             spec,

@@ -88,7 +88,7 @@ fn group_c_finishing_boundary_switches_independently_of_fog() {
         materials: vec![0],
     };
     let mut world = CollisionWorld::from_mesh_with_gate(&CollisionMesh::default(), &wall(2.0));
-    world.append_event_part(1_124_860, &wall(1.0), true);
+    world.append_event_part(1_124_860, &wall(1.0), sekiro_sim::hit_filter::PLAYER, true);
     let cast = || world.raycast(Vec3::new(0.5, 0.5, 0.0), Vec3::Z, 3.0);
     world.set_gate(true);
     assert_eq!(cast(), Some(1.0));

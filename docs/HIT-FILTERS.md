@@ -62,8 +62,10 @@ Filter 15 under a pit is the fall return's trigger: Wolf falls through it, fades
 
 ## What the simulation applies
 
-- `hit_filter::strip_helpers` takes every part the player does not collide with out of the walkable collision when a map or arena loads (`map_world::collision_world`, `Arena::load`).
+- `hit_filter::strip_helpers` takes every part the player does not collide with out of the walkable collision when a map, an arena or the wire's collision loads (`map_world::collision_world`, `Arena::load`, `CollisionWorld::load_map`).
   Removed triangles collapse to a point, so the triangle ranges in `layout.json` stay valid.
+  An arena strips them after its disabled, event and hidden parts are taken out, so those do not return as helpers, and crops them to its radius like the rest.
+- The switched event collision `h900900` (entity 1124860, `arena_c::take_event_collision`) has hit filter 9, so while on it holds only the camera.
 - The removed parts that enemies or the camera collide with stay in the world, tagged with who: enemies and bosses query it through `collision::EnemyGround` (filters 11, 16 and 19), and `CollisionWorld::camera_raycast` (the play camera) stops at filters 9 and 16.
   The player's queries skip them all.
 - Event walls (group 44) become contact triggers (`CollisionWorld::trigger_contact`, tested along the capsule's path at its bottom, middle and top).

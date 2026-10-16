@@ -333,6 +333,9 @@ impl Duel {
         std::mem::swap(&mut self.swing_hit, &mut other.swing_hit);
         std::mem::swap(&mut self.camera_director, &mut other.camera_director);
         std::mem::swap(&mut self.last_safe, &mut other.last_safe);
+        std::mem::swap(&mut self.fall_return_fade, &mut other.fall_return_fade);
+        std::mem::swap(&mut self.touching, &mut other.touching);
+        std::mem::swap(&mut self.helper_events, &mut other.helper_events);
         std::mem::swap(&mut self.attack_button, &mut other.attack_button);
         std::mem::swap(&mut self.lock_button, &mut other.lock_button);
     }

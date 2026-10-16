@@ -13,8 +13,9 @@
 //! each point in turn once play has started, waits three seconds and records a stop sample;
 //! `--live-shots <dir>` also saves a screenshot per stop. At a point written `drop:x,y,z` Wolf is
 //! let go in the air instead, and the stop, eight seconds later, records the lowest height he
-//! fell to and his contacts with map action event walls (`sekiro_sim::hit_filter`). The run ends after the tour, the input
-//! script (plus two seconds) or `--live-seconds` of play, writes the summary and exits.
+//! fell to and his contacts with map action event walls (`sekiro_sim::hit_filter`). The run
+//! ends after the tour, the input script (plus two seconds) or `--live-seconds` of play, writes
+//! the summary and exits.
 //! Every line is also logged as `live check:` for manual runs.
 use super::{MapCollision, Sim, WOLF};
 use bevy::app::AppExit;
@@ -33,7 +34,7 @@ const GROUND_TOLERANCE: f32 = 1.0;
 /// Seconds at each tour stop before it is sampled: visibility, detail levels and streaming
 /// react to the move first.
 const TOUR_WAIT: f32 = 3.0;
-/// Seconds at a `--live-drop` stop: a 30 m fall, the fall return's fade and the return.
+/// Seconds at a `drop:x,y,z` tour stop: a 30 m fall, the fall return's fade and the return.
 const DROP_WAIT: f32 = 8.0;
 
 #[derive(Resource)]
@@ -375,9 +376,10 @@ pub(super) fn observe(
     let p = Vec3::from_array(sim.duel.player.body.position);
     // Tour: move Wolf to the next point, wait, then sample it.
     if check.sim_started.is_some() && check.tour_index < check.tour.len() {
+        let (target, drop) = check.tour[check.tour_index];
+        let wait = if drop { DROP_WAIT } else { TOUR_WAIT };
         match check.tour_arrived {
             None => {
-                let (target, drop) = check.tour[check.tour_index];
                 let y = if drop {
                     target.y
                 } else {
@@ -397,20 +399,13 @@ pub(super) fn observe(
                 check.lowest_y = y;
                 sim.duel.helper_events.clear();
             }
-            Some(arrived)
-                if arrived.elapsed().as_secs_f32()
-                    >= if check.tour[check.tour_index].1 {
-                        DROP_WAIT
-                    } else {
-                        TOUR_WAIT
-                    } =>
-            {
+            Some(arrived) if arrived.elapsed().as_secs_f32() >= wait => {
                 let drawn = drawn_map_meshes(p, SURVEY_RADIUS, &meshes, &parents, &roots);
                 let mut stop = sample_ground(&collision, &drawn, &mesh_assets, p);
                 stop["stop"] = serde_json::json!(check.tour_index);
                 stop["t"] = serde_json::json!(now);
                 stop["grounded"] = serde_json::json!(sim.duel.player.body.grounded);
-                if check.tour[check.tour_index].1 {
+                if drop {
                     stop["lowest_y"] = serde_json::json!(check.lowest_y);
                     stop["helper_events"] = serde_json::json!(sim.duel.helper_events);
                 }

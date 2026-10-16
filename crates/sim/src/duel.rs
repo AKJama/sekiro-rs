@@ -234,9 +234,8 @@ pub struct Duel {
     fall_materials: std::collections::HashMap<u32, FallMaterial>,
     /// Where Wolf last stood on collision, for the return after a fall into the void.
     last_safe: Option<([f32; 3], f32)>,
-    /// Seconds into the fall return's model fade, after Wolf touched a filter-15 event wall,
-    /// and the index of that contact in `helper_events`.
-    fall_return_fade: Option<(f32, usize)>,
+    /// Seconds into the fall return's model fade, after Wolf touched a filter-15 event wall.
+    fall_return_fade: Option<f32>,
     /// Event wall parts Wolf is in contact with, so one contact is recorded once.
     touching: Vec<String>,
     /// Wolf's contacts with map action event walls (see [`crate::hit_filter`]), oldest first.
@@ -1085,6 +1084,9 @@ impl Duel {
         self.enemy_throw = None;
         self.mikiri = None;
         self.respawn_in = None;
+        // A fall return cut short by death must not move the respawned Wolf.
+        self.fall_return_fade = None;
+        self.touching.clear();
         self.defender_dying = 0;
         self.last_throw_def_clip = None;
         self.paired_floor = None;
@@ -2788,16 +2790,16 @@ impl Duel {
         }
     }
 
-    /// Routes lethal landings through DEATH_FALLING and returns Wolf to where he last stood
-    /// after a fall into the void.
     /// Wolf's model opacity from the fall return's fade: 1 to 0 over
     /// [`crate::hit_filter::FALL_RETURN_FADE`] after a filter-15 event wall, else 1.
     pub fn fall_return_opacity(&self) -> f32 {
-        self.fall_return_fade.map_or(1.0, |(t, _)| {
+        self.fall_return_fade.map_or(1.0, |t| {
             (1.0 - t / crate::hit_filter::FALL_RETURN_FADE).clamp(0.0, 1.0)
         })
     }
 
+    /// Routes lethal landings through DEATH_FALLING and returns Wolf to where he last stood
+    /// after a fall into the void.
     fn kill_fallen(&mut self, was_grounded: bool, before: [f32; 3], dt: f32) {
         // Keep the arena's existing NPC boundary reset; material fall death is PC-only.
         if let Some((depth, spawn)) = self.fall_respawn_depth.zip(self.spawn) {
@@ -2844,7 +2846,7 @@ impl Duel {
                 if fall_return { ", fall return" } else { "" }
             );
             if fall_return {
-                self.fall_return_fade = Some((0.0, self.helper_events.len()));
+                self.fall_return_fade = Some(0.0);
             }
             self.touching.push(contact.part.clone());
             self.helper_events.push(HelperEvent {
@@ -2855,11 +2857,11 @@ impl Duel {
             });
         }
         let b = &self.player.body;
-        if let Some((t, _)) = &mut self.fall_return_fade {
+        if let Some(t) = &mut self.fall_return_fade {
             *t += dt;
         }
         let fading = self.fall_return_fade;
-        let faded = fading.is_some_and(|(t, _)| t >= crate::hit_filter::FALL_RETURN_FADE);
+        let faded = fading.is_some_and(|t| t >= crate::hit_filter::FALL_RETURN_FADE);
         // Placeholder void boundary where no authored return wall (filter 15) lies below.
         // The lowest supporting collision takes precedence over spawn to allow deep paths.
         let void_fall = fading.is_none()
@@ -2884,8 +2886,10 @@ impl Duel {
                 .last_safe
                 .or_else(|| self.spawn.map(|s| (s[0].position, s[0].yaw)))
                 .unwrap_or((b.position, b.yaw));
-            if let Some((_, index)) = self.fall_return_fade.take()
-                && let Some(event) = self.helper_events.get_mut(index)
+            if self.fall_return_fade.take().is_some()
+                && let Some(event) = self.helper_events.iter_mut().rev().find(|e| {
+                    e.hit_filter == crate::hit_filter::FALL_RETURN_FILTER && e.returned_to.is_none()
+                })
             {
                 event.returned_to = Some(position);
             }
