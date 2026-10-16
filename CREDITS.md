@@ -23,12 +23,9 @@ No code from these projects is vendored; their documentation and source were rea
 ## Engine research
 
 - [borgCode/SekiroTool](https://github.com/borgCode/SekiroTool), [Xu060113/SekiroCraft-Passthrough](https://github.com/Xu060113/SekiroCraft-Passthrough), [thisguymartin/sekiro-deflect-observer](https://github.com/thisguymartin/sekiro-deflect-observer), [ElaDiDu/Sekiro-Practice-CT](https://github.com/ElaDiDu/Sekiro-Practice-CT): memory layout and posture research used to cross-check our own findings.
-- [FFwLo/RustSekiro](https://github.com/FFwLo/RustSekiro) (MIT): its knowledge base (`docs/kb`) supplied traced engine values we use: gravity, fall-control table values, turn speed, body radius, the input accept/execute flags, camera and lock-on rules, the locked-on walk twist (WalkTwist cones, its rate and the graph's Master and spine twist), lunge, auto-aim, knockback timing and invulnerability events (whose action-module bit also identifies the Owl's warp flag, ChrActionFlag 94, as invulnerability), the AtkParam hit stop fields, and which NPC TAE flags accept a queued AI request, and the sound runtime: playing events through the install's own FMOD Ex DLLs, the init flag, the master volume of 0.7, event naming, and the floor, armour and hit-sound material rules, the deathblow absorb (the defender placed once at the throw clip's frame 0, then both clips' own root motion), and the enemy grab pattern (a `throwFlag` 1 contact starts the throw, the `ThrowAttackBehavior` events carry its damage, Wolf's thrown clips live in `chr/c0000_cXXXX.anibnd`, step i-frame type 7 is the grab type, no grab on an airborne Wolf), and bullet flight past `dist` (`accelOutRange` and `gravityOutRange`) with the `lockShootLimitAng` aim, and GI probe time-of-day variant mapping and probe intensity scale, the display-space LUT strip layout, and the Tone Map compensation approach, and the distance-based shadow caster and cascade budget, and wire event semantics, solved arrival arcs, homing offsets, docking offsets and WP_A_9500 rope identification, and the cover button, variation restrictions and CustomDockingGenerator offset facts in its MIT docking notes, and enemy animation donors, animation-set SpEffects and the castle Genichiro-to-Tomoe hand-over, and layered map sampler families, packed vertex blend stream interpretation and repeat-sampler requirements, and the rank-3 lightning reaction and Divine Dragon reversal availability recorded in its MIT hand-off notes.
-Its MIT visuals notes also informed the zero-duration behaviour-effect and TAE Blend interpretation, independently checked against our extracted graphs and timelines.
-FwLo's MIT FXR notes and player informed the action inventory, billboard orientation, native Hermite angle interpretation and depth-copy/batching requirements.
-Its MIT hand-off notes corroborated frame-zero throw absorption followed by independent authored root motion.
-Each use is credited where it appears.
-  Its MIT map notes informed the sky/cloud far-piece and cloud-sea horizon investigation.
+- [FFwLo/RustSekiro](https://github.com/FFwLo/RustSekiro) (MIT): traced engine values and rules for movement, combat, camera, sound, animation, grappling and docking.
+- Its MIT research notes also informed lighting, colour grading, shadows, map materials, sky and clouds, effects, and lightning reactions.
+- These notes were read as references and cross-checked against our own data; adapted code is listed separately below.
 
 ## Code adapted from RustSekiro
 
@@ -36,15 +33,11 @@ From [FFwLo/RustSekiro](https://github.com/FFwLo/RustSekiro), under the MIT lice
 
 - RustSekiro commit 265e142bf3b36a5190d8ae4885acad7a4890cd16: layered map shader families, variant sampler tables, material constants and vertex blend routing.
 
-- The deathblow camera (TAE 151 / 153 / 155 rules) in `crates/sim/src/camera.rs` and `crates/game/src/play.rs`, from his `src/camera.rs`.
-- The perilous kanji HUD stand-in in `crates/game/src/combat_hud.rs`, from his `src/hud.rs`.
-- The sweep i-frame and kick-off (env 2004) rules in `crates/sim/src/hits.rs` and `crates/sim/src/duel.rs`, from his `src/combat.rs` and `src/player.rs`.
-- Effects, blood and decals: the node-tree FXR runtime in `crates/game/src/fxr_tree.rs`, the sprite, tracer and soft-particle batching in `crates/game/src/fxr.rs` and `fxr_multi.wgsl`, the hit-effect and hit-blood lookup in `crates/sim/src/hit_fx.rs` and the stain placement in `crates/game/src/decals.rs`, from his `src/fxr.rs`, `src/vfx.rs`, `src/gore.rs`, `src/fx_multi.wgsl` and `docs/kb/visuals.md` (MIT, Copyright (c) 2026 FFwLo; EvenTorset's FXR library, Unlicense, supplies the action layouts in `crates/formats/src/fxr_schema.rs`).
-- Additional FXR distortion (607) field evaluation and point-light (609) collection in `crates/game/src/fxr.rs` and `fxr_distort.wgsl` adapted from `FFwLo/RustSekiro`, `src/fxr.rs` and `src/fx_distort.wgsl`, commit `265e142bf3b36a5190d8ae4885acad7a4890cd16`, under MIT, Copyright (c) 2026 FFwLo.
-The local implementation retains batches and light entities and uses the existing scene-light conversion.
-- The Mikiri contact/flag rule, parry posture field and counter/break ThrowParam selection in `crates/sim/src/perilous.rs` and `crates/sim/src/duel.rs`, from his `src/combat.rs` and knowledge base, checked against our soldier and Owl data.
-- Cloth: the solver in `crates/game/src/cloth.rs` (Verlet in Havok world space, standard, stretch, bend, bend-stiffness and local-range sets in the file's `constraintExecution` order, capsule collisions, fixed particles lerped over the substeps, the empty-execution default, blow-up restart and rigid fallback, the 15 m range cull, parallel per-character solve and chunked CPU skinning) and the deformer flattening in `crates/formats/src/hkx/cloth.rs` (object- and bone-space skin, mesh-mesh and mesh-bone deform, the sim-mesh-as-display case), from his `src/cloth.rs`, `tools/sekiro-extract/src/cloth.rs`, `cloth_export.rs` and the cloth notes in `docs/kb/visuals.md` (MIT, Copyright (c) 2026 FFwLo); the bend-stiffness formula is his exe-traced one.
-- The character material interpretation (shininess in the blue channel of `_n` as gloss, roughness 1 - gloss with a 0.089 floor, the `_m` metallic mask, material cutouts) in `crates/extract/src/models/textures.rs` and `mod.rs`, from his `src/sekiro_material.wgsl` and `docs/kb/visuals.md`; we bake it into the exported glTF metallic-roughness texture instead of using his shader.
+- Map shaders and materials: layered shader families, samplers, material constants and vertex blending.
+- Combat and camera: deathblow camera, perilous HUD, sweep and kick-off rules, Mikiri, parry posture and throw selection.
+- Effects: FXR runtime, particle batching, blood, decals, distortion and point lights.
+- Cloth: simulation solver, collisions, deformation and the traced bend-stiffness formula.
+- Character materials: texture interpretation and cutouts, adapted into exported glTF metallic-roughness textures.
 
 ```
 MIT License
