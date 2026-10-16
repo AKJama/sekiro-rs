@@ -66,7 +66,7 @@ impl EnemySpec {
 
     /// The enemy's name for the HUD.
     pub fn display_name(&self) -> &'static str {
-        static ROSTER: std::sync::OnceLock<Option<crate::registry::Registry>> =
+        static ROSTER: std::sync::OnceLock<Option<std::sync::Arc<crate::registry::Registry>>> =
             std::sync::OnceLock::new();
         if let Some(name) = ROSTER
             .get_or_init(|| crate::registry::Registry::load(&Self::default_cache()).ok())

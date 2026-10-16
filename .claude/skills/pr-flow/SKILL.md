@@ -39,11 +39,44 @@ If a job turns up a second problem, file it as a new issue instead of widening t
 - Claude Sonnet 5.5 sub-agents only as a fallback, and Codex only for trivial, mechanical jobs directed by a Claude session.
 - High-priority issues go to the most capable model available (Opus 5.5 or newer).
 - Only one agent runs the game at a time, and at most two game windows are open in total (the user may have one).
-- Agents share one Cargo build folder (`CARGO_TARGET_DIR`) instead of one each; every full build is several GB.
-- Builds and tests are most of a PR's time, so while working or fixing, agents build and test only the crates they touched (for example `cargo test --release -p sekiro-formats`).
-The full workspace suite, render gates and live test run once, at step 4, on the final state.
+- Agents share one Cargo build folder (`CARGO_TARGET_DIR=target/agent`) instead of one each; every full build is several GB.
 - Agents do not commit; the main session reviews and commits their work.
 - A command an agent is denied permission for is reported back, never worked around.
+- Each agent brief sets a time budget (about 30 minutes) and puts cheap, likely wins first; the agent stops and reports when it hits the budget.
+- Changing Cargo profiles, debug info or the linker recompiles all of Bevy, so an agent tries at most one such setting unless the user approves more.
+
+## Testing while working
+
+Builds and tests are most of a PR's time, so the implementing agent tests as little as it can and the full checks run once, at step 4.
+
+- The implementing agent writes the code and its tests, and checks that it compiles.
+- It runs only the new tests and the tests in the files it touched, once, by name filter.
+It does not run the full suite, and does not rerun tests while iterating.
+- When it only needs to know whether something works in the game, it builds the release binary once and stops.
+It reports 1 to 3 specific things for the user to try, and the user playtests; the user is quicker than an agent game run.
+- The main session runs the full checks (step 4) once at the end: fmt, clippy, the workspace tests, both render gates and the live test.
+
+The fast commands, from PowerShell in the repo root:
+
+```powershell
+$env:CARGO_TARGET_DIR = "target/agent"
+# Does it compile (no codegen, fastest):
+cargo check -p sekiro-sim --all-targets --release
+# One sim integration test file, or one test, by name filter:
+cargo test --release -p sekiro-sim --test it object_collision::
+cargo test --release -p sekiro-sim --test it -- --exact duel::deflect_chain_depths_send_back_posture
+# One game unit test module:
+cargo test --release -p sekiro-game --bin sekiro-rs map::world::tests::
+# The release binary for a playtest:
+cargo build --release -p sekiro-game --bin sekiro-rs
+```
+
+Use the release profile for tests: the sim tests step real fights and are slow unoptimised, and sharing the release build with the playtest binary avoids a second full build of Bevy.
+Measured on 2026-10-16 (16 threads), after touching one sim file: release binary about 95 s, `cargo test --release --workspace --no-run` about 2 minutes.
+The whole workspace test run takes about 2.5 minutes; most of it is the sim `it` binary (about 90 s).
+So build the test binaries once and filter, instead of rebuilding for each run.
+Data loaded from `cache/` that never changes, such as the enemy registry, is read once per process and shared, so tests that load a duel or an arena stay cheap.
+Keep new shared data read-only; a test that changes state loads or clones its own.
 
 ## 1. Write the PR
 
@@ -84,7 +117,7 @@ Collect the findings that hold up; do not fix them yet.
 ## 3. Simplify, then one fix pass
 
 Run the `simplify` review on the same diff for reuse, simplification, efficiency and altitude cleanups, and collect its findings too.
-Then apply the code-review and simplify findings together in one pass (one agent, or the main session), checking only the touched crates as it goes, and push the result.
+Then apply the code-review and simplify findings together in one pass (one agent, or the main session), checking that it compiles and running only the tests in the files it touched, and push the result.
 Keep simplify to cleanups of the diff: a deeper refactor it suggests becomes its own issue instead of growing the PR.
 
 `code-review` and `simplify` are built into Claude Code.
@@ -97,7 +130,8 @@ Run these once, last, on the final state of the branch, from the repo root.
 Agents that worked on the branch do not run them as well.
 They need the installed game and `cache/`, so they run locally, not in GitHub Actions.
 
-```bash
+```powershell
+$env:CARGO_TARGET_DIR = "target/agent"
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --release -- -D warnings
 cargo test --release --workspace
