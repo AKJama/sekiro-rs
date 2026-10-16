@@ -78,6 +78,8 @@ Filter 15 under a pit is the fall return's trigger: Wolf falls through it, fades
 - `crates/sim/tests/it/hit_filters.rs` counts the parts by hit filter over the whole of m11_00_00_00 and m11_01_00_00, asserts which the player collides with, and checks the ravine.
   The live test (`crates/game/tests/it/live_play.rs`) drops Wolf into the ravine with `--live-tour drop:x,y,z`.
 
+- Placed objects get their groups from `ObjectParam.collisionType` instead of a hit filter; `docs/OBJECT-COLLISION.md` has that table and what the player collides with.
+
 ## Measured
 
 Dropping from (-137.6, -44.3, -124.5) in the live game with Outskirts start 0:

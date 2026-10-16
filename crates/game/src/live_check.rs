@@ -346,6 +346,7 @@ fn sample_ground(
     serde_json::json!({
         "position": p.to_array(),
         "floor": floor,
+        "floor_object": collision.0.floor_object(p.x, p.z, p.y + 1.0),
         // A drawn triangle on the floor; falls back to drawn bounds when no mesh keeps
         // CPU vertex data.
         "ground_drawn": precise.unwrap_or(in_bounds),

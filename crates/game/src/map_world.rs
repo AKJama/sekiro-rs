@@ -375,6 +375,28 @@ pub(crate) fn collision_world(
     );
     let mut world = sekiro_sim::collision::CollisionWorld::from_mesh(&mesh);
     world.add_helpers(&helpers);
+    for (block, layout) in &layouts {
+        let path = cache.join("maps").join(block).join("object_collision.bin");
+        if !path.is_file() {
+            continue;
+        }
+        let placed = sekiro_formats::hknp::ObjectCollision::from_bytes(&std::fs::read(path)?)?;
+        // Objects the story has switched off (`DeactivateObject`) have no collision either.
+        let story = super::story::load(cache, block, layout)?;
+        let mut switched_off = 0;
+        let (parts, triangles) = world.add_objects(&placed, |part| {
+            let on = story
+                .as_ref()
+                .and_then(|s| s.part(&part.name))
+                .is_none_or(|p| p.enabled);
+            switched_off += usize::from(!on);
+            on
+        });
+        eprintln!(
+            "collision: {block}: {parts} placed objects with collision, {triangles} triangles \
+             ({switched_off} switched off by the story)"
+        );
+    }
     Ok(world)
 }
 

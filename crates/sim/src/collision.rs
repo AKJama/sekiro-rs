@@ -22,7 +22,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use glam::{Vec2, Vec3};
-use sekiro_formats::hknp::CollisionMesh;
+use sekiro_formats::hknp::{CollisionMesh, ObjectCollision, ObjectCollisionPart};
 
 use crate::body::{Ground, WaterSurface};
 use crate::hit_filter::{CAMERA, ENEMY, PLAYER};
@@ -285,6 +285,9 @@ pub struct CollisionWorld {
     masked: Vec<(std::ops::Range<u32>, u8)>,
     /// Map action event walls: untouchable triangles whose contact runs a reaction.
     triggers: Vec<TriggerPart>,
+    /// Placed objects' triangle ranges ([`CollisionWorld::add_objects`]) and part names, in
+    /// triangle order.
+    objects: Vec<(std::ops::Range<u32>, String)>,
 }
 
 /// One event wall part, kept out of the walkable grid.
@@ -422,6 +425,7 @@ impl CollisionWorld {
             event_parts: Vec::new(),
             masked: Vec::new(),
             triggers: Vec::new(),
+            objects: Vec::new(),
         }
     }
 
@@ -459,6 +463,50 @@ impl CollisionWorld {
                 triangles,
             });
         }
+    }
+
+    /// Adds the collision of placed objects (`object_collision.bin`) that `enabled` keeps, for
+    /// those [`crate::hit_filter::object_mask`] says collide with them: objects everyone
+    /// collides with as ordinary triangles, the rest as helpers of their mask. Returns the
+    /// parts and triangles added.
+    pub fn add_objects(
+        &mut self,
+        objects: &ObjectCollision,
+        mut enabled: impl FnMut(&ObjectCollisionPart) -> bool,
+    ) -> (usize, usize) {
+        let mut by_mask: std::collections::BTreeMap<u8, Vec<&ObjectCollisionPart>> =
+            Default::default();
+        for part in &objects.parts {
+            let who = crate::hit_filter::object_mask(part.collision_type);
+            if who != 0 && enabled(part) {
+                by_mask.entry(who).or_default().push(part);
+            }
+        }
+        let (mut parts, first) = (0, self.triangles.len());
+        for (who, group) in by_mask {
+            let start = self.triangles.len() as u32;
+            for part in group {
+                let range = self.append(&objects.part_mesh(part));
+                parts += 1;
+                self.objects.push((range, part.name.clone()));
+            }
+            let range = start..self.triangles.len() as u32;
+            if who != PLAYER | ENEMY | CAMERA && !range.is_empty() {
+                self.masked.push((range, who));
+            }
+        }
+        (parts, self.triangles.len() - first)
+    }
+
+    /// The placed object whose collision is the floor [`CollisionWorld::floor`] finds, if the
+    /// floor there is an object's.
+    pub fn floor_object(&self, x: f32, z: f32, top: f32) -> Option<&str> {
+        let (_, t) = self.floor_triangle(x, z, top, PLAYER)?;
+        let i = self.objects.partition_point(|(range, _)| range.end <= t);
+        self.objects
+            .get(i)
+            .filter(|(range, _)| range.contains(&t))
+            .map(|(_, name)| name.as_str())
     }
 
     /// Appends a mesh's triangles to the grid; the caller records what they are.

@@ -6,7 +6,9 @@
 //!   (next to the GLBs so viewers that forbid `..` in asset paths load them),
 //! - `layout.json`: map piece instances, objects, enemies, player starts, in Bevy space,
 //! - `collision.bin`: the hit collision (`h*` binder) as one triangle mesh in Bevy space
-//!   (`sekiro_formats::hknp::CollisionMesh` in postcard).
+//!   (`sekiro_formats::hknp::CollisionMesh` in postcard),
+//! - `object_collision.bin`: the static collision placed objects carry in their objbnds
+//!   (`sekiro_formats::hknp::ObjectCollision` in postcard, `docs/OBJECT-COLLISION.md`).
 //!
 //! Every position and transform is mirrored across X like the model export (docs/FORMATS.md).
 
@@ -17,6 +19,7 @@ mod grass;
 mod layout;
 mod lights;
 mod material_audit;
+mod object_collision;
 mod pieces;
 mod sky;
 mod textures;
@@ -97,6 +100,11 @@ fn read_msb(cache: &Path, id: &str) -> Result<msb::Msb> {
     let path = cache.join(format!("raw/map/mapstudio/{id}.msb"));
     let data = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
     msb::parse(&data).with_context(|| format!("parsing {}", path.display()))
+}
+
+/// Rewrite only `object_collision.bin` from the MSB and the unpacked object binders.
+pub fn export_object_collision(cache: &Path, id: &str) -> Result<()> {
+    object_collision::export(cache, id, &read_msb(cache, id)?).map(|_| ())
 }
 
 /// Upgrade placement metadata without changing geometry, textures or collision.
@@ -509,6 +517,7 @@ pub fn export(game: &Path, cache: &Path, id: &str, selected_models: &[String]) -
         collision.triangle_count(),
         collision.vertices.len()
     );
+    object_collision::export(cache, id, &msb)?;
 
     let mut layout = json!({
         "id": id,

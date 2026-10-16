@@ -105,6 +105,35 @@ pub const FALL_RETURN_FILTER: u8 = 15;
 /// Seconds of the fall return's model fade: 1.0 at -2.0 per second.
 pub const FALL_RETURN_FADE: f32 = 0.5;
 
+/// Havok group of a placed object's static and keyframed bodies, by its model's
+/// `ObjectParam.collisionType` (`FUN_140872b40` reads it through `FUN_1408705d0`, row `+0x57`,
+/// and indexes the table at `0x1429e73b8`; out-of-range types use entry 0). Dynamic bodies take
+/// the parallel table at `0x1429e73e8` instead (28, 29, 31, ...), which nobody stands on.
+pub fn object_group(collision_type: u8) -> u8 {
+    const GROUPS: [u8; 12] = [24, 25, 27, 41, 47, 67, 92, 108, 47, 51, 32, 93];
+    GROUPS
+        .get(collision_type as usize)
+        .copied()
+        .unwrap_or(GROUPS[0])
+}
+
+/// [`PLAYER`], [`ENEMY`] and [`CAMERA`] bits for an object's static bodies, from the matrix
+/// `FUN_140933390` builds: the player (`FUN_1409325c0` for group 1) and enemies
+/// (`FUN_140932480` for group 2) collide with the object groups 24 to 27, the camera ray
+/// (group 48) with 24 (オブジェ), the camera-only map hit 41 and 108
+/// (キャラとロックが当たらないオブジェ). Groups 32, 47, 51, 67, 92 and 93 hold none of them.
+pub fn object_mask(collision_type: u8) -> u8 {
+    let group = object_group(collision_type);
+    let mut mask = 0;
+    if (24..=27).contains(&group) {
+        mask |= PLAYER | ENEMY;
+    }
+    if matches!(group, 24 | 41 | 108) {
+        mask |= CAMERA;
+    }
+    mask
+}
+
 /// The helper triangles taken out of the player's collision.
 #[derive(Debug, Default, Clone)]
 pub struct HelperCollision {
@@ -236,6 +265,21 @@ mod tests {
         assert_eq!(mask(8), PLAYER | ENEMY | CAMERA);
         assert_eq!(mask(16), ENEMY | CAMERA);
         assert_eq!(mask(15), 0);
+    }
+
+    #[test]
+    fn object_groups_follow_the_exe_table() {
+        assert_eq!(object_group(0), 24);
+        assert_eq!(object_group(6), 92);
+        assert_eq!(object_group(200), 24);
+        assert_eq!(object_mask(0), PLAYER | ENEMY | CAMERA);
+        assert_eq!(object_mask(1), PLAYER | ENEMY);
+        assert_eq!(object_mask(2), PLAYER | ENEMY);
+        assert_eq!(object_mask(3), CAMERA);
+        assert_eq!(object_mask(7), CAMERA);
+        for t in [4, 5, 6, 8, 9, 10, 11] {
+            assert_eq!(object_mask(t), 0, "{t}");
+        }
     }
 
     #[test]
