@@ -329,24 +329,35 @@ fn neighbourhood(cache: &Path) -> Result<BTreeMap<String, Value>> {
 /// Physics bootstrap uses the same bounded block inventory as rendering.
 /// Collision/group records remain separate in MapWorld; only the broad-phase query
 /// mesh is concatenated, without adding MapOffset or translating any vertex.
+/// Each block's helper parts the player does not collide with (`sekiro_sim::hit_filter`)
+/// leave the walkable mesh first and join the world as camera-only triangles or event walls.
 pub(crate) fn collision_world(
     cache: &Path,
     id: &str,
 ) -> Result<sekiro_sim::collision::CollisionWorld> {
-    if !enabled(id) || std::env::args().any(|a| a == "--no-connected-blocks") {
-        return sekiro_sim::collision::CollisionWorld::load(
-            &cache.join("maps").join(id).join("collision.bin"),
-        )
-        .map_err(anyhow::Error::msg);
-    }
+    let layouts = if !enabled(id) || std::env::args().any(|a| a == "--no-connected-blocks") {
+        BTreeMap::from([(id.to_string(), read_layout(&cache.join("maps").join(id))?)])
+    } else {
+        neighbourhood(cache)?
+    };
     let mut mesh = CollisionMesh::default();
-    for block in neighbourhood(cache)?.keys() {
+    let mut helpers = sekiro_sim::hit_filter::HelperCollision::default();
+    for (block, layout) in &layouts {
         let path = cache.join("maps").join(block).join("collision.bin");
         if path.is_file() {
-            mesh.extend(&CollisionMesh::from_bytes(&std::fs::read(path)?)?);
+            let mut part = CollisionMesh::from_bytes(&std::fs::read(path)?)?;
+            helpers.extend(sekiro_sim::hit_filter::strip_helpers(&mut part, layout));
+            mesh.extend(&part);
         }
     }
-    Ok(sekiro_sim::collision::CollisionWorld::from_mesh(&mesh))
+    eprintln!(
+        "collision: helper triangles kept off the player by hit filter {:?}, {} event walls",
+        helpers.removed,
+        helpers.triggers.len()
+    );
+    let mut world = sekiro_sim::collision::CollisionWorld::from_mesh(&mesh);
+    world.add_helpers(&helpers);
+    Ok(world)
 }
 
 impl MapWorld {

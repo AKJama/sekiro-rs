@@ -25,6 +25,7 @@ use glam::{Vec2, Vec3};
 use sekiro_formats::hknp::CollisionMesh;
 
 use crate::body::{Ground, WaterSurface};
+use crate::hit_filter::{CAMERA, ENEMY, PLAYER};
 
 /// Body radius in metres: the player's physics capsule is 1.5 m tall with a 0.4 m radius, read
 /// from the running game by FwLo's RustSekiro (`docs/kb/movement.md`).
@@ -260,6 +261,8 @@ pub const MAX_SLOPE_DEGREES: f32 = 50.0;
 /// Heights of the collision spheres' centres above the feet. The lowest sphere's bottom sits
 /// at the step height, so stairs reach the floor query rather than the wall push.
 const SPHERES: [f32; 3] = [STEP_HEIGHT + RADIUS, 1.2, 1.55];
+/// The player's physics capsule height (see [`RADIUS`]).
+const CAPSULE_HEIGHT: f32 = 1.5;
 const CELL: f32 = 4.0;
 
 pub struct CollisionWorld {
@@ -275,6 +278,29 @@ pub struct CollisionWorld {
     gate_from: u32,
     gate_open: AtomicBool,
     event_parts: Vec<(i32, std::ops::Range<u32>, AtomicBool)>,
+    /// Helper parts (see [`crate::hit_filter`]): triangle ranges and who collides with them
+    /// ([`crate::hit_filter::PLAYER`], `ENEMY`, `CAMERA` bits). Every other triangle is for all.
+    masked: Vec<(std::ops::Range<u32>, u8)>,
+    /// Map action event walls: untouchable triangles whose contact runs a reaction.
+    triggers: Vec<TriggerPart>,
+}
+
+/// One event wall part, kept out of the walkable grid.
+struct TriggerPart {
+    hit_filter: u8,
+    part: String,
+    min: Vec3,
+    max: Vec3,
+    triangles: Vec<[Vec3; 3]>,
+}
+
+/// A body's contact with an event wall ([`CollisionWorld::trigger_contact`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TriggerContact {
+    pub hit_filter: u8,
+    pub part: String,
+    /// Where the body's path met the wall.
+    pub point: Vec3,
 }
 
 fn cell_of(x: f32, z: f32) -> (i32, i32) {
@@ -319,7 +345,10 @@ impl CollisionWorld {
     }
 
     /// Whether triangle `t` takes part in queries: every ordinary one, a gate one while on.
-    fn live(&self, t: u32) -> bool {
+    fn live(&self, t: u32, who: u8) -> bool {
+        if let Some((_, mask)) = self.masked.iter().find(|(range, _)| range.contains(&t)) {
+            return mask & who != 0;
+        }
         if let Some((_, _, on)) = self
             .event_parts
             .iter()
@@ -368,7 +397,134 @@ impl CollisionWorld {
             gate_from,
             gate_open: AtomicBool::new(false),
             event_parts: Vec::new(),
+            masked: Vec::new(),
+            triggers: Vec::new(),
         }
+    }
+
+    /// Adds the helper collision [`crate::hit_filter::strip_helpers`] took out of the
+    /// player's: enemy and camera parts to the grid, queried only by those they hold
+    /// ([`EnemyGround`], [`CollisionWorld::camera_raycast`]), and the event walls to the contact
+    /// list.
+    pub fn add_helpers(&mut self, helpers: &crate::hit_filter::HelperCollision) {
+        for (&mask, mesh) in &helpers.parts {
+            let range = self.append(mesh);
+            self.masked.push((range, mask));
+        }
+        for trigger in &helpers.triggers {
+            let mesh = &trigger.mesh;
+            let triangles: Vec<[Vec3; 3]> = mesh
+                .indices
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|t| t.map(|i| Vec3::from(mesh.vertices[i as usize])))
+                .collect();
+            if triangles.is_empty() {
+                continue;
+            }
+            let all = triangles.iter().flatten();
+            let min = all.clone().copied().reduce(Vec3::min).unwrap();
+            let max = all.copied().reduce(Vec3::max).unwrap();
+            self.triggers.push(TriggerPart {
+                hit_filter: trigger.hit_filter,
+                part: trigger.part.clone(),
+                min,
+                max,
+                triangles,
+            });
+        }
+    }
+
+    /// Appends a mesh's triangles to the grid; the caller records what they are.
+    pub(crate) fn append(&mut self, mesh: &CollisionMesh) -> std::ops::Range<u32> {
+        let part = Self::from_mesh(mesh);
+        let vertex_offset = self.vertices.len() as u32;
+        let first = self.triangles.len() as u32;
+        let last = first + part.triangles.len() as u32;
+        self.vertices.extend(part.vertices);
+        self.triangles.extend(
+            part.triangles
+                .into_iter()
+                .map(|tri| tri.map(|i| i + vertex_offset)),
+        );
+        self.normals.extend(part.normals);
+        self.materials.extend(part.materials);
+        for (cell, triangles) in part.cells {
+            self.cells
+                .entry(cell)
+                .or_default()
+                .extend(triangles.into_iter().map(|t| t + first));
+        }
+        first..last
+    }
+
+    /// The first event wall a body's capsule meets moving from feet `from` to feet `to`:
+    /// the path is tested at the capsule's bottom, middle and top.
+    pub fn trigger_contact(&self, from: Vec3, to: Vec3) -> Option<TriggerContact> {
+        let travel = to - from;
+        let length = travel.length();
+        if length < 1e-4 {
+            return None;
+        }
+        let dir = travel / length;
+        let lo = from.min(to);
+        let hi = from.max(to) + Vec3::Y * CAPSULE_HEIGHT;
+        let mut best: Option<(f32, TriggerContact)> = None;
+        for part in &self.triggers {
+            if (hi.cmplt(part.min - RADIUS)).any() || (lo.cmpgt(part.max + RADIUS)).any() {
+                continue;
+            }
+            for h in [0.05, CAPSULE_HEIGHT * 0.5, CAPSULE_HEIGHT - 0.05] {
+                let origin = from + Vec3::Y * h;
+                for &[a, b, c] in &part.triangles {
+                    if let Some(d) = ray_triangle(origin, dir, a, b, c)
+                        && d <= length
+                        && best.as_ref().is_none_or(|(b, _)| d < *b)
+                    {
+                        best = Some((
+                            d,
+                            TriggerContact {
+                                hit_filter: part.hit_filter,
+                                part: part.part.clone(),
+                                point: origin + dir * d,
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+        best.map(|(_, c)| c)
+    }
+
+    /// Whether an event wall with the fall return's hit filter lies below `(x, y, z)`.
+    pub fn fall_return_below(&self, x: f32, y: f32, z: f32) -> bool {
+        self.triggers
+            .iter()
+            .filter(|p| p.hit_filter == crate::hit_filter::FALL_RETURN_FILTER)
+            .filter(|p| p.min.y < y && (p.min.x..=p.max.x).contains(&x))
+            .filter(|p| (p.min.z..=p.max.z).contains(&z))
+            .any(|p| {
+                p.triangles
+                    .iter()
+                    .any(|&[a, b, c]| height_on(x, z, a, b, c).is_some_and(|h| h < y))
+            })
+    }
+
+    /// Whether a body's capsule standing at `feet` is still within reach of an event wall part
+    /// (its bounds widened by the capsule radius): one contact lasts until it leaves.
+    pub fn near_trigger(&self, part: &str, feet: Vec3) -> bool {
+        let lo = feet;
+        let hi = feet + Vec3::Y * CAPSULE_HEIGHT;
+        self.triggers.iter().any(|p| {
+            p.part == part && !(hi.cmplt(p.min - RADIUS)).any() && !(lo.cmpgt(p.max + RADIUS)).any()
+        })
+    }
+
+    /// Distance along `dir` (unit length) to the first triangle the camera ray stops at within
+    /// `max`: [`CollisionWorld::raycast`] with the camera's helper parts instead of the player's.
+    pub fn camera_raycast(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<f32> {
+        self.ray(origin, dir, max, CAMERA)
     }
 
     pub fn triangle_count(&self) -> usize {
@@ -399,12 +555,16 @@ impl CollisionWorld {
 
     /// The highest walkable surface under `(x, z)` whose height is at most `top`.
     pub fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
-        self.floor_triangle(x, z, top).map(|(h, _)| h)
+        self.floor_triangle(x, z, top, PLAYER).map(|(h, _)| h)
     }
 
     /// The hit material of the floor [`CollisionWorld::floor`] finds, when known.
     pub fn floor_material(&self, x: f32, z: f32, top: f32) -> Option<u32> {
-        let (_, t) = self.floor_triangle(x, z, top)?;
+        self.floor_material_for(x, z, top, PLAYER)
+    }
+
+    fn floor_material_for(&self, x: f32, z: f32, top: f32, who: u8) -> Option<u32> {
+        let (_, t) = self.floor_triangle(x, z, top, who)?;
         self.materials
             .get(t as usize)
             .copied()
@@ -412,13 +572,13 @@ impl CollisionWorld {
     }
 
     /// The highest walkable surface under `(x, z)` no higher than `top`: height and triangle.
-    fn floor_triangle(&self, x: f32, z: f32, top: f32) -> Option<(f32, u32)> {
+    fn floor_triangle(&self, x: f32, z: f32, top: f32, who: u8) -> Option<(f32, u32)> {
         let cell = self.cells.get(&cell_of(x, z))?;
         let mut best: Option<(f32, u32)> = None;
         for &t in cell {
             if matches!(self.materials[t as usize], 22 | 36 | 38)
                 || self.normals[t as usize].y.abs() < self.min_walk_ny
-                || !self.live(t)
+                || !self.live(t, who)
             {
                 continue;
             }
@@ -441,7 +601,7 @@ impl CollisionWorld {
             .get(&cell_of(x, z))
             .into_iter()
             .flatten()
-            .filter(|&&t| self.live(t))
+            .filter(|&&t| self.live(t, PLAYER))
             .filter_map(|&t| {
                 let [a, b, c] = self.corners(t);
                 Some((height_on(x, z, a, b, c)?, self.normals[t as usize].y))
@@ -453,6 +613,10 @@ impl CollisionWorld {
 
     /// Distance along `dir` (unit length) to the first triangle within `max`.
     pub fn raycast(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<f32> {
+        self.ray(origin, dir, max, PLAYER)
+    }
+
+    fn ray(&self, origin: Vec3, dir: Vec3, max: f32, who: u8) -> Option<f32> {
         let end = origin + dir * max;
         let mut tris = Vec::new();
         self.gather(
@@ -462,7 +626,7 @@ impl CollisionWorld {
         );
         let mut best: Option<f32> = None;
         for t in tris {
-            if matches!(self.materials[t as usize], 22 | 36 | 38) || !self.live(t) {
+            if matches!(self.materials[t as usize], 22 | 36 | 38) || !self.live(t, who) {
                 continue;
             }
             let [a, b, c] = self.corners(t);
@@ -479,6 +643,10 @@ impl CollisionWorld {
     /// Moves a body standing at `feet` by the horizontal `delta`, stopping at walls and
     /// sliding along them. Returns the horizontal displacement actually made.
     pub fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
+        self.slide_for(feet, delta, PLAYER)
+    }
+
+    fn slide_for(&self, feet: [f32; 3], delta: [f32; 2], who: u8) -> [f32; 2] {
         let start = Vec3::from(feet);
         let d = Vec2::from(delta);
         let len = d.length();
@@ -495,7 +663,7 @@ impl CollisionWorld {
             p.x += d.x / steps as f32;
             p.z += d.y / steps as f32;
             for _ in 0..4 {
-                let push = self.push_out(p, &tris);
+                let push = self.push_out(p, &tris, who);
                 if push == Vec2::ZERO {
                     break;
                 }
@@ -507,13 +675,13 @@ impl CollisionWorld {
     }
 
     /// Horizontal correction that takes the body's spheres out of the given triangles.
-    fn push_out(&self, feet: Vec3, tris: &[u32]) -> Vec2 {
+    fn push_out(&self, feet: Vec3, tris: &[u32], who: u8) -> Vec2 {
         let mut total = Vec2::ZERO;
         for h in SPHERES {
             let centre = feet + Vec3::Y * h;
             let mut push = Vec2::ZERO;
             for &t in tris {
-                if matches!(self.materials[t as usize], 22 | 36 | 38) || !self.live(t) {
+                if matches!(self.materials[t as usize], 22 | 36 | 38) || !self.live(t, who) {
                     continue;
                 }
                 let [a, b, c] = self.corners(t);
@@ -551,24 +719,44 @@ impl CollisionWorld {
     }
 }
 
-impl Ground for CollisionWorld {
+/// The world as one kind of body sees it: which helper parts hold it.
+struct View<'a> {
+    world: &'a CollisionWorld,
+    who: u8,
+}
+
+impl Ground for View<'_> {
     fn water_surface(&self, x: f32, z: f32, top: f32) -> Option<WaterSurface> {
-        self.cells
+        let w = self.world;
+        w.cells
             .get(&cell_of(x, z))?
             .iter()
             .filter_map(|&t| {
-                let material = self.materials[t as usize];
-                if !matches!(material, 20..=24 | 35..=38) || !self.live(t) {
+                let material = w.materials[t as usize];
+                if !matches!(material, 20..=24 | 35..=38) || !w.live(t, self.who) {
                     return None;
                 }
-                let [a, b, c] = self.corners(t);
+                let [a, b, c] = w.corners(t);
                 let height = height_on(x, z, a, b, c)?;
                 (height <= top).then_some(WaterSurface { height, material })
             })
             .max_by(|a, b| a.height.total_cmp(&b.height))
     }
+
     fn height(&self, x: f32, z: f32) -> Option<f32> {
         self.floor(x, z, f32::INFINITY)
+    }
+
+    fn trigger_contact(&self, from: [f32; 3], to: [f32; 3]) -> Option<TriggerContact> {
+        self.world.trigger_contact(from.into(), to.into())
+    }
+
+    fn near_trigger(&self, part: &str, feet: [f32; 3]) -> bool {
+        self.world.near_trigger(part, feet.into())
+    }
+
+    fn fall_return_below(&self, x: f32, y: f32, z: f32) -> bool {
+        self.world.fall_return_below(x, y, z)
     }
 
     fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
@@ -577,12 +765,16 @@ impl Ground for CollisionWorld {
         const R: f32 = 0.08;
         [(0.0, 0.0), (R, 0.0), (-R, 0.0), (0.0, R), (0.0, -R)]
             .into_iter()
-            .filter_map(|(dx, dz)| CollisionWorld::floor(self, x + dx, z + dz, top))
+            .filter_map(|(dx, dz)| {
+                self.world
+                    .floor_triangle(x + dx, z + dz, top, self.who)
+                    .map(|(h, _)| h)
+            })
             .reduce(f32::max)
     }
 
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
-        CollisionWorld::slide(self, feet, delta)
+        self.world.slide_for(feet, delta, self.who)
     }
 
     fn max_step(&self) -> f32 {
@@ -598,9 +790,80 @@ impl Ground for CollisionWorld {
         {
             return Some(water.material);
         }
-        self.floor_material(x, z, top)
+        self.world.floor_material_for(x, z, top, self.who)
     }
 }
+
+/// Implements [`Ground`] for a type by forwarding every query to its [`View`].
+macro_rules! ground_via_view {
+    ($ty:ty, $view:ident) => {
+        impl Ground for $ty {
+            fn water_surface(&self, x: f32, z: f32, top: f32) -> Option<WaterSurface> {
+                self.$view().water_surface(x, z, top)
+            }
+
+            fn height(&self, x: f32, z: f32) -> Option<f32> {
+                self.$view().height(x, z)
+            }
+
+            fn trigger_contact(&self, from: [f32; 3], to: [f32; 3]) -> Option<TriggerContact> {
+                self.$view().trigger_contact(from, to)
+            }
+
+            fn near_trigger(&self, part: &str, feet: [f32; 3]) -> bool {
+                self.$view().near_trigger(part, feet)
+            }
+
+            fn fall_return_below(&self, x: f32, y: f32, z: f32) -> bool {
+                self.$view().fall_return_below(x, y, z)
+            }
+
+            fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
+                self.$view().floor(x, z, top)
+            }
+
+            fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
+                self.$view().slide(feet, delta)
+            }
+
+            fn max_step(&self) -> f32 {
+                STEP_HEIGHT
+            }
+
+            fn material(&self, x: f32, z: f32, top: f32) -> Option<u32> {
+                self.$view().material(x, z, top)
+            }
+        }
+    };
+}
+
+impl CollisionWorld {
+    /// The world itself is the player's view.
+    fn player_view(&self) -> View<'_> {
+        View {
+            world: self,
+            who: PLAYER,
+        }
+    }
+}
+
+ground_via_view!(CollisionWorld, player_view);
+
+/// A shared world as enemies and bosses see it: they also stand on water surfaces and stop at
+/// enemy-only walls (hit filters 11, 16 and 19, [`crate::hit_filter`]).
+#[derive(Clone)]
+pub struct EnemyGround(pub std::sync::Arc<CollisionWorld>);
+
+impl EnemyGround {
+    fn enemy_view(&self) -> View<'_> {
+        View {
+            world: &self.0,
+            who: ENEMY,
+        }
+    }
+}
+
+ground_via_view!(EnemyGround, enemy_view);
 
 impl<T: Ground + ?Sized> Ground for std::sync::Arc<T> {
     fn water_surface(&self, x: f32, z: f32, top: f32) -> Option<WaterSurface> {
@@ -608,6 +871,18 @@ impl<T: Ground + ?Sized> Ground for std::sync::Arc<T> {
     }
     fn height(&self, x: f32, z: f32) -> Option<f32> {
         (**self).height(x, z)
+    }
+
+    fn trigger_contact(&self, from: [f32; 3], to: [f32; 3]) -> Option<TriggerContact> {
+        (**self).trigger_contact(from, to)
+    }
+
+    fn near_trigger(&self, part: &str, feet: [f32; 3]) -> bool {
+        (**self).near_trigger(part, feet)
+    }
+
+    fn fall_return_below(&self, x: f32, y: f32, z: f32) -> bool {
+        (**self).fall_return_below(x, y, z)
     }
 
     fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {

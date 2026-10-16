@@ -107,10 +107,12 @@ fn owl_fights_on_the_castle_roof() {
     assert!(attacks >= 5, "{actions:?}");
 }
 
-/// Off the roof's edge Wolf falls about 62 m to the ground below, dies from the landing
-/// (`HitMtrlParam.fallDeathDist`) and respawns at his start.
+/// Off the roof's edge Wolf falls through the event walls under the castle (`h900011`, hit
+/// filter 13, at y = -8.6, where he used to land and die, then `h900010`, filter 15, at
+/// y = -23.6), and the filter-15 wall's fall return puts him back where he last stood, alive
+/// (`docs/HIT-FILTERS.md`).
 #[test]
-fn a_fall_off_the_roof_kills_wolf_and_he_respawns_at_the_start() {
+fn a_fall_off_the_roof_returns_wolf_to_his_start() {
     let Some((arena, mut duel)) = load() else {
         return;
     };
@@ -119,19 +121,27 @@ fn a_fall_off_the_roof_kills_wolf_and_he_respawns_at_the_start() {
     let start = duel.player.body.position;
     let away = arena.layout.center() + glam::Vec3::X * (arena.spec.radius + 20.0);
     duel.player.body.position = [away.x, start[1], away.z];
-    let mut died = false;
+    let mut lowest = start[1];
     let mut back = false;
-    for _ in 0..(60.0 * (sekiro_sim::duel::RESPAWN_DELAY + 6.0)) as usize {
+    for _ in 0..(60.0 * 8.0) as usize {
         duel.step(&InputFrame::default(), DT);
-        died |= duel.rules.fighters[0].dead();
-        if died && !duel.rules.fighters[0].dead() && duel.player.body.position == start {
+        assert!(!duel.rules.fighters[0].dead(), "the fall killed Wolf");
+        lowest = lowest.min(duel.player.body.position[1]);
+        if duel.player.body.position == start {
             back = true;
             break;
         }
     }
+    let parts: Vec<_> = duel
+        .helper_events
+        .iter()
+        .map(|e| (e.part.as_str(), e.hit_filter))
+        .collect();
     assert!(
-        died && back,
-        "died {died}, back {back}: {:?}",
+        back && parts.starts_with(&[("h900011", 13), ("h900010", 15)]),
+        "back {back}, contacts {parts:?}, lowest {lowest}: {:?}",
         duel.player.body.position
     );
+    assert!(lowest < -23.6, "{lowest}");
+    assert_eq!(duel.helper_events[1].returned_to, Some(start));
 }

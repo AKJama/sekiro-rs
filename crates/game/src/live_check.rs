@@ -11,7 +11,9 @@
 //!
 //! `--live-tour x,y,z;x,y,z;...` (or `starts` for every player start of the map) moves Wolf to
 //! each point in turn once play has started, waits three seconds and records a stop sample;
-//! `--live-shots <dir>` also saves a screenshot per stop. The run ends after the tour, the input
+//! `--live-shots <dir>` also saves a screenshot per stop. At a point written `drop:x,y,z` Wolf is
+//! let go in the air instead, and the stop, eight seconds later, records the lowest height he
+//! fell to and his contacts with map action event walls (`sekiro_sim::hit_filter`). The run ends after the tour, the input
 //! script (plus two seconds) or `--live-seconds` of play, writes the summary and exits.
 //! Every line is also logged as `live check:` for manual runs.
 use super::{MapCollision, Sim, WOLF};
@@ -31,14 +33,19 @@ const GROUND_TOLERANCE: f32 = 1.0;
 /// Seconds at each tour stop before it is sampled: visibility, detail levels and streaming
 /// react to the move first.
 const TOUR_WAIT: f32 = 3.0;
+/// Seconds at a `--live-drop` stop: a 30 m fall, the fall return's fade and the return.
+const DROP_WAIT: f32 = 8.0;
 
 #[derive(Resource)]
 pub(super) struct LiveCheck {
     output: PathBuf,
     play_seconds: f32,
-    tour: Vec<Vec3>,
+    /// Tour points, each with whether Wolf is dropped there (`drop:x,y,z`).
+    tour: Vec<(Vec3, bool)>,
     tour_index: usize,
     tour_arrived: Option<Instant>,
+    /// Lowest feet height since the current tour stop began.
+    lowest_y: f32,
     last_stop: Option<Instant>,
     shots: Option<PathBuf>,
     first_frame: Option<f32>,
@@ -63,12 +70,12 @@ pub(super) struct LiveCheck {
     finished: bool,
 }
 
-fn parse_tour(value: &str, map_dir: Option<&Path>) -> anyhow::Result<Vec<Vec3>> {
+fn parse_tour(value: &str, map_dir: Option<&Path>) -> anyhow::Result<Vec<(Vec3, bool)>> {
     if value == "starts" {
         let dir = map_dir.ok_or_else(|| anyhow::anyhow!("--live-tour starts needs --map"))?;
         let mut points = Vec::new();
         while let Ok((p, _)) = crate::map::player_start(dir, points.len()) {
-            points.push(p);
+            points.push((p, false));
         }
         return Ok(points);
     }
@@ -76,12 +83,17 @@ fn parse_tour(value: &str, map_dir: Option<&Path>) -> anyhow::Result<Vec<Vec3>> 
         .split(';')
         .filter(|s| !s.trim().is_empty())
         .map(|point| {
+            let point = point.trim();
+            let (point, drop) = match point.strip_prefix("drop:") {
+                Some(rest) => (rest, true),
+                None => (point, false),
+            };
             let v: Vec<f32> = point
                 .split(',')
                 .map(|c| c.trim().parse::<f32>())
                 .collect::<Result<_, _>>()?;
-            anyhow::ensure!(v.len() == 3, "--live-tour points are x,y,z");
-            Ok(Vec3::new(v[0], v[1], v[2]))
+            anyhow::ensure!(v.len() == 3, "--live-tour points are x,y,z or drop:x,y,z");
+            Ok((Vec3::new(v[0], v[1], v[2]), drop))
         })
         .collect()
 }
@@ -106,6 +118,7 @@ impl LiveCheck {
             tour,
             tour_index: 0,
             tour_arrived: None,
+            lowest_y: f32::INFINITY,
             last_stop: None,
             shots: crate::arg_value(args, "--live-shots")
                 .map(|dir| -> anyhow::Result<PathBuf> {
@@ -364,24 +377,43 @@ pub(super) fn observe(
     if check.sim_started.is_some() && check.tour_index < check.tour.len() {
         match check.tour_arrived {
             None => {
-                let target = check.tour[check.tour_index];
-                let y = collision
-                    .0
-                    .floor(target.x, target.z, target.y + 1.0)
-                    .unwrap_or(target.y);
+                let (target, drop) = check.tour[check.tour_index];
+                let y = if drop {
+                    target.y
+                } else {
+                    collision
+                        .0
+                        .floor(target.x, target.z, target.y + 1.0)
+                        .unwrap_or(target.y)
+                };
                 let body = &mut sim.duel.player.body;
                 body.position = [target.x, y, target.z];
                 body.velocity = [0.0; 3];
-                body.grounded = true;
+                body.grounded = !drop;
+                body.fall_top = y;
                 let yaw = sim.duel.player.visual_yaw();
                 sim.previous[WOLF] = ([target.x, y, target.z], yaw);
                 check.tour_arrived = Some(Instant::now());
+                check.lowest_y = y;
+                sim.duel.helper_events.clear();
             }
-            Some(arrived) if arrived.elapsed().as_secs_f32() >= TOUR_WAIT => {
+            Some(arrived)
+                if arrived.elapsed().as_secs_f32()
+                    >= if check.tour[check.tour_index].1 {
+                        DROP_WAIT
+                    } else {
+                        TOUR_WAIT
+                    } =>
+            {
                 let drawn = drawn_map_meshes(p, SURVEY_RADIUS, &meshes, &parents, &roots);
                 let mut stop = sample_ground(&collision, &drawn, &mesh_assets, p);
                 stop["stop"] = serde_json::json!(check.tour_index);
                 stop["t"] = serde_json::json!(now);
+                stop["grounded"] = serde_json::json!(sim.duel.player.body.grounded);
+                if check.tour[check.tour_index].1 {
+                    stop["lowest_y"] = serde_json::json!(check.lowest_y);
+                    stop["helper_events"] = serde_json::json!(sim.duel.helper_events);
+                }
                 if let Some(dir) = &check.shots {
                     let path = dir.join(format!("tour-{:02}.png", check.tour_index));
                     commands
@@ -395,7 +427,7 @@ pub(super) fn observe(
                 check.tour_arrived = None;
                 check.last_stop = Some(Instant::now());
             }
-            Some(_) => {}
+            Some(_) => check.lowest_y = check.lowest_y.min(p.y),
         }
     }
     // Sample at 4 Hz: the bounds scan walks every mesh.

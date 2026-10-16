@@ -36,8 +36,11 @@ const EXPLORE: [&str; 16] = [
     "--no-enemy",
 ];
 
-/// Ashina Castle player starts 1, 2, 3, 5, 6 and 7, reached from the Outskirts load.
-const CASTLE: &str = "202.6,-26.4,176.7;82.9,29.8,254.3;120.3,54.1,234.2;-60.4,-31.2,360.4;336.9,-32.1,252.7;47.1,-2.6,188.6";
+/// Ashina Castle player starts 1, 2, 3, 5, 6 and 7, reached from the Outskirts load, then a drop
+/// into the Outskirts ravine north of start 0, whose only collision is the filter-15 event wall
+/// `h900000` 30 m down (`sekiro_sim::hit_filter`): Wolf falls through it and the fall return
+/// puts him back on the last stop.
+const CASTLE: &str = "202.6,-26.4,176.7;82.9,29.8,254.3;120.3,54.1,234.2;-60.4,-31.2,360.4;336.9,-32.1,252.7;47.1,-2.6,188.6;drop:-137.6,-44.3,-124.5";
 
 /// Run out of the start hall in four directions, then sprint.
 const WALK: &str = "\
@@ -139,11 +142,46 @@ fn outskirts_loads_then_plays_smoothly_on_drawn_ground() {
     // Far into Ashina Castle (block m11_01), 300 to 600 m from the start: the connected blocks
     // draw where Wolf stands after loading from the Outskirts.
     let s = run(&root, &out, "castle", &["--live-tour", CASTLE]);
-    for stop in s["stops"].as_array().expect("tour stops") {
+    let stops = s["stops"].as_array().expect("tour stops");
+    assert_eq!(stops.len(), 7, "tour stops missing");
+    for stop in stops {
         assert_eq!(
             stop["ground_drawn"].as_bool(),
             Some(true),
             "undrawn ground at {stop}"
         );
     }
+    // The ravine drop: through h900000 (y -74.2), never standing on it, then back on the
+    // last stop's ground.
+    let drop = &stops[6];
+    let events = drop["helper_events"].as_array().expect("helper events");
+    let wall = events
+        .iter()
+        .find(|e| e["part"] == "h900000")
+        .unwrap_or_else(|| panic!("the drop never met h900000: {drop}"));
+    assert_eq!(wall["hit_filter"].as_u64(), Some(15), "{drop}");
+    let back: Vec<f64> = wall["returned_to"]
+        .as_array()
+        .expect("no fall return")
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let last = stops[5]["position"].as_array().unwrap();
+    for i in 0..3 {
+        let (a, b) = (back[i], last[i].as_f64().unwrap());
+        assert!(
+            (a - b).abs() < 0.5,
+            "returned to {back:?}, last stop {last:?}"
+        );
+    }
+    assert!(
+        number(drop, "lowest_y") < -75.0,
+        "Wolf stopped on the helper: {drop}"
+    );
+    assert_eq!(drop["grounded"].as_bool(), Some(true), "{drop}");
+    println!(
+        "ravine drop: fell to {:.1}, contacts {}, back at {back:.2?}",
+        number(drop, "lowest_y"),
+        events.len()
+    );
 }

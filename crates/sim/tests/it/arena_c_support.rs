@@ -25,9 +25,12 @@ pub fn staged(name: &str, fog: usize) -> Option<(Arena, Duel)> {
     }
     let arena = Arena::load(&cache, spec, false).unwrap();
     assert_eq!(arena.fog_walls.len(), fog);
-    for (who, spot) in [("Wolf", arena.layout.wolf), ("boss", arena.layout.boss)] {
-        let floor = arena
-            .world
+    let enemy = sekiro_sim::collision::EnemyGround(arena.world.clone());
+    for (who, spot, ground) in [
+        ("Wolf", arena.layout.wolf, &*arena.world as &dyn Ground),
+        ("boss", arena.layout.boss, &enemy),
+    ] {
+        let floor = ground
             .floor(spot.position.x, spot.position.z, spot.position.y + 1.0)
             .unwrap_or_else(|| panic!("{name}: no collision below {who} at {spot:?}"));
         assert!(

@@ -82,6 +82,18 @@ fn guardian_ape_lua_attacks_wolf() {
 fn guardian_ape_first_deathblow_reaches_headless_revival() {
     let Some(mut duel) = load() else { return };
     duel.enemy_active = false;
+    // The ape's start is in the pond, deep water (hit material 22) where Wolf swims: the
+    // water surface helper both used to stand on holds only enemies (hit filter 16,
+    // docs/HIT-FILTERS.md). Take the fight to the dry bank about 12 m away.
+    let bank = glam::Vec3::from(duel.enemy.body.position) + glam::Vec3::new(7.0, 0.0, -10.0);
+    for (c, dz) in [(&mut duel.enemy, 0.0), (&mut duel.player, 4.5)] {
+        let (x, z) = (bank.x, bank.z + dz);
+        let y = c.ground.floor(x, z, bank.y + 3.0).expect("dry bank");
+        c.body.position = [x, y, z];
+        c.body.fall_top = y;
+        c.body.velocity = [0.0; 3];
+        c.body.grounded = true;
+    }
     // Open the first mark, then press attack through the normal player input path.
     duel.rules.fighters[1].vitality.hp = 1;
     let mut started = false;

@@ -120,6 +120,26 @@ pub trait Ground {
     /// Height of the walkable surface below `(x, z)`, if any.
     fn height(&self, x: f32, z: f32) -> Option<f32>;
 
+    /// The first map action event wall a body's capsule meets moving from feet `from` to feet
+    /// `to` (see [`crate::hit_filter`]); such walls are never floors or walls.
+    fn trigger_contact(
+        &self,
+        _from: [f32; 3],
+        _to: [f32; 3],
+    ) -> Option<crate::collision::TriggerContact> {
+        None
+    }
+
+    /// Whether a capsule at `feet` is still within reach of the named event wall part.
+    fn near_trigger(&self, _part: &str, _feet: [f32; 3]) -> bool {
+        false
+    }
+
+    /// Whether an authored fall return wall (hit filter 15) lies below `(x, y, z)`.
+    fn fall_return_below(&self, _x: f32, _y: f32, _z: f32) -> bool {
+        false
+    }
+
     /// The walkable surface under `(x, z)` that is no higher than `top` (multi-level ground).
     fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
         let _ = top;

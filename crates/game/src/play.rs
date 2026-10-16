@@ -461,7 +461,7 @@ pub fn run(options: Options) -> Result<()> {
             |x, z, near| world.floor(x, z, near + 1.0).unwrap_or(near),
         );
         duel.player.ground = Box::new(world.clone());
-        duel.enemy.ground = Box::new(world.clone());
+        duel.enemy.ground = Box::new(sekiro_sim::collision::EnemyGround(world.clone()));
         // Placeholder until the map's authored void return volumes are decoded.
         duel.fall_respawn_depth = Some(40.0);
         eprintln!(
@@ -1766,7 +1766,7 @@ fn follow_camera(
     let mut distance = orbit.distance;
     // Pull the camera in front of walls between it and Wolf.
     if let Some(c) = collision
-        && let Some(hit) = c.0.raycast(target, back, orbit.distance + 0.3)
+        && let Some(hit) = c.0.camera_raycast(target, back, orbit.distance + 0.3)
     {
         distance = (hit - 0.3).clamp(0.4, orbit.distance);
     }

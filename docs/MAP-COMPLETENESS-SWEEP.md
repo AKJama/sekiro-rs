@@ -129,9 +129,10 @@ Bevy 0.19's material specialization skips a mesh entity whose mesh is not yet pr
 An earlier one-off re-extraction of every mesh entity before play caused most of the 2 to 7 s loading frames; the incremental tracking removed them.
 The first window frame, which runs the startup systems, takes about 7 s.
 Launch to first window frame is about 26 s of synchronous setup (character and animation libraries 9.7 s, simulation 3.3 s, the 13.3 million triangle connected collision world 3.3 s, layouts and story 6 s).
-Open: the void after a fall or grapple in the ravine north of start 0 reproduces with `--live-tour -137.6,-44.3,-124.5`.
-Wolf lands on the helper collision `h900000` (hit filter 15) at y = -74.2, whose display and draw demand masks are zero, so the confirmed visibility rule draws no scenery and the screen shows only sky and fog; the map viewer at the same camera shows the same void with draw groups on and the ravine with `--groups off`.
-The simulation treats every collision as walkable floor; in the game the special hit filters (11, 13, 15, 19, 22, 25 and 28 in the Outskirts, all on `h9` helper parts) presumably do not hold the player, but their meaning is not yet traced in the executable, so this is not changed.
+Fixed: the void after a fall or grapple in the ravine north of start 0 reproduced with `--live-tour drop:-137.6,-44.3,-124.5`.
+Wolf landed on the helper collision `h900000` (hit filter 15) at y = -74.2, whose display and draw demand masks are zero, so the confirmed visibility rule drew no scenery and the screen showed only sky and fog; the map viewer at the same camera shows the same void with draw groups on and the ravine with `--groups off`.
+Since 2026-10-16 Wolf falls through `h900000`: filter 15 is an event wall the player never stands on, and its contact starts the fall return (`docs/HIT-FILTERS.md`).
+The special hit filters are now traced in the executable; only filters 8, 22 and 27 (and unlisted values) hold the player.
 
 ## Sampling and measurements
 
