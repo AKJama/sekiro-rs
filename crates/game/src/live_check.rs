@@ -14,8 +14,8 @@
 //! `--live-shots <dir>` also saves a screenshot per stop. At a point written `drop:x,y,z` Wolf is
 //! let go in the air instead, and the stop, eight seconds later, records the lowest height he
 //! fell to and his contacts with map action event walls (`sekiro_sim::hit_filter`). The run
-//! ends after the tour, the input script (plus two seconds) or `--live-seconds` of play, writes
-//! the summary and exits.
+//! ends after the tour, the input script (plus two seconds, and its `--script-route`) or
+//! `--live-seconds` of play, writes the summary and exits.
 //! `--live-orbit <step>,<seconds>` turns the play camera through a full circle around Wolf,
 //! starting at that simulation step and taking that long (with `--live-shots`, a screenshot every
 //! 45 degrees); the run also waits for the turn. Every connected map block's request state
@@ -609,7 +609,7 @@ pub(super) fn observe(
     let script_done = sim
         .script
         .as_ref()
-        .is_some_and(|s| sim.step >= s.len() + 120);
+        .is_some_and(|s| sim.step >= s.len() + 120 && sim.route.done());
     let timed_out = check
         .sim_started
         .is_some_and(|(_, t)| t.elapsed().as_secs_f32() >= check.play_seconds);
