@@ -17,7 +17,7 @@ If a job turns up a second problem, note it and open a separate PR for it.
 - Stage explicit file paths only, never `git add -A` or `git add .`, because agent work may be sitting in the tree.
 - Agents do not commit, push or open PRs; the main session does after reviewing their work.
 - No git worktrees.
-- Merge only after the checks below pass and the user says to merge.
+- Merge only after the checks and both review passes below are done and the user says to merge.
 Use squash merge, then delete the branch and pull `main`.
 
 ## Checks before opening the PR
@@ -44,6 +44,19 @@ Record time to ready, settled fps, and that the ground and nearby pieces are tex
 Use the live-game test from `docs/MAP-COMPLETENESS-SWEEP.md` once it exists.
 A PR whose live run is worse than `main` is not ready, whatever the still-image gates say.
 
+## Review before merge
+
+When the checks pass and the PR is open, run two review passes on the branch diff, in this order:
+
+1. The `code-review` skill (for example `/code-review medium`), to find correctness bugs.
+Fix the findings that hold up and push them to the same branch.
+2. The `simplify` skill last, for reuse, simplification and efficiency cleanups.
+It only tidies, so it comes after the bugs are fixed.
+
+If either pass changes code, run the checks above again, including the live game, before asking the user to merge.
+If a skill is not installed on this machine, say so in the PR body rather than skipping silently.
+List both passes in the PR body under Checks.
+
 ## PR body
 
 Keep it short:
@@ -56,6 +69,7 @@ One or two sentences on the change and why.
 - fmt, clippy, tests: pass (N passed)
 - Render gates: pass / not affected
 - Live game: ready in Xs, Y fps settled, ground textured at spawn
+- code-review: N findings, M fixed; simplify: done
 
 ## Before / after
 Paths under D:\sekiro-rs-media\progress\<date>\ (images stay off the repo).
