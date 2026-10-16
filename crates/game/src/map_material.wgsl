@@ -32,14 +32,14 @@ fn gi_multiscatter(f0: vec3<f32>, f_ab: vec2<f32>, missing: f32, occlusion: f32)
     return GiScatter(single,multiple,1.0-single-multiple);
 }
 
-#import sekiro_map_bindings::{MapGame, Layers}
+#import sekiro_map_bindings::{MapGame, Layers, MapLight}
 #ifdef BINDLESS
 #import bevy_render::bindless::{bindless_textures_2d, bindless_textures_3d, bindless_textures_cube_array, bindless_samplers_filtering}
 #import bevy_pbr::mesh_bindings::mesh
 #import bevy_pbr::pbr_bindings::material_indices
-#import sekiro_map_bindings::{layer_array, layer_indices, giiv_buffers}
+#import sekiro_map_bindings::{layer_array, layer_indices, giiv_buffers, light_buffers}
 #else
-#import sekiro_map_bindings::{layers, overlay, overlay_sampler, snow, snow_sampler, layer_c, c_sampler, overlay_normal, overlay_normal_sampler, snow_normal, snow_normal_sampler, c_normal, c_normal_sampler, height_mask, height_sampler, giiv_buffer, gi_specular, gi_specular_sampler, gi_diffuse, gi_diffuse_sampler, gi_voxels, gi_voxels_sampler, base_normal, base_normal_sampler, detail, detail_sampler, mask_l, mask_l_sampler, wet, wet_sampler}
+#import sekiro_map_bindings::{layers, overlay, overlay_sampler, snow, snow_sampler, layer_c, c_sampler, overlay_normal, overlay_normal_sampler, snow_normal, snow_normal_sampler, c_normal, c_normal_sampler, height_mask, height_sampler, giiv_buffer, gi_specular, gi_specular_sampler, gi_diffuse, gi_diffuse_sampler, gi_voxels, gi_voxels_sampler, base_normal, base_normal_sampler, detail, detail_sampler, mask_l, mask_l_sampler, wet, wet_sampler, map_light}
 #endif
 
 fn gi_cube(slot: u32, index: u32, direction: vec3<f32>, mip: f32, diffuse: bool) -> vec3<f32> {
@@ -58,6 +58,14 @@ fn gi_word(slot: u32, index: u32) -> u32 {
     return giiv_buffers[layer_indices[slot].irradiance].words[index];
 #else
     return giiv_buffer.words[index];
+#endif
+}
+
+fn light_values(slot: u32) -> MapLight {
+#ifdef BINDLESS
+    return light_buffers[layer_indices[slot].light];
+#else
+    return map_light;
 #endif
 }
 
@@ -255,7 +263,7 @@ fn native_point_lights(pbr: PbrInput, scale: f32) -> vec3<f32> {
 
 #ifdef NATIVE_DIRECT
 // Native four-slot colour routing with the recovered directional accumulation.
-fn native_direct(pbr: PbrInput, layers: Layers) -> vec3<f32> {
+fn native_direct(pbr: PbrInput, light: MapLight) -> vec3<f32> {
     var li = base_lighting_input(pbr);
     let nv = max(dot(pbr.N,pbr.V),0.0001);
     var correction = vec3(0.0);
@@ -271,15 +279,15 @@ fn native_direct(pbr: PbrInput, layers: Layers) -> vec3<f32> {
         correction -= directional_light(i,&li,true)*shadow;
     }
     for (var i=0u; i<4u; i+=1u) {
-        if layers.direct[i*3u+2u].w<=0.0 { continue; }
-        let diffuse = layers.direct[i*3u+1u].rgb;
-        let specular_rgb = layers.direct[i*3u+2u].rgb;
+        if light.direct[i*3u+2u].w<=0.0 { continue; }
+        let diffuse = light.direct[i*3u+1u].rgb;
+        let specular_rgb = light.direct[i*3u+2u].rgb;
         if all(diffuse==vec3(0.0)) && all(specular_rgb==vec3(0.0)) { continue; }
-        var direction = layers.direct[i*3u].xyz;
+        var direction = light.direct[i*3u].xyz;
         // 310630 applies the same pi rotation then camera transform to a followed
         // fill and to both local slots. The world X mirror and camera -Z conversion
         // cancel that rotation into the packed direction used here.
-        if layers.direct[i*3u].w>0.0 { direction = (view.world_from_view*vec4(direction,0.0)).xyz; }
+        if light.direct[i*3u].w>0.0 { direction = (view.world_from_view*vec4(direction,0.0)).xyz; }
         var derived = derive_lighting_input(pbr.N,pbr.V,normalize(direction));
         let nl = max(dot(pbr.N,normalize(direction)),0.0);
         let h = normalize(pbr.V+normalize(direction));
@@ -287,7 +295,7 @@ fn native_direct(pbr: PbrInput, layers: Layers) -> vec3<f32> {
         let lh = max(dot(normalize(direction),h),0.0);
         // Native gloss is exported as 1 - perceptual roughness.
         let q = clamp(1.0-pbr.material.perceptual_roughness,0.0,1.0);
-        let sharpness = max(layers.direct[i*3u+1u].w,0.075);
+        let sharpness = max(light.direct[i*3u+1u].w,0.075);
         let a = pow(1.0-0.95*sqrt(q*(1.0-0.075/sharpness)),2.0);
         let aa = a*a;
         let d = aa/(3.14159265*pow(1.0+nh*nh*(aa-1.0),2.0));
@@ -739,6 +747,7 @@ vertex: VertexOutput,
 #endif
     let slot = 0u;
 #endif
+    let light = light_values(slot);
     var input = vertex;
 #ifdef CAMERA_FADE
     camera_coverage(input.position.xy, input.world_position.xyz, layers.camera_fade);
@@ -783,21 +792,21 @@ vertex: VertexOutput,
     out.color = pbr.material.base_color;
     if !unlit { out.color = apply_pbr_lighting(pbr); }
 #ifdef NATIVE_DIRECT
-    if !unlit && layers.direct[12].x>0.0 {
-        out.color = vec4(out.color.rgb+native_direct(pbr,layers),out.color.a);
-        if layers.direct[12].y>0.0 {
-            out.color = vec4(out.color.rgb+native_point_lights(pbr,layers.direct[12].z),out.color.a);
+    if !unlit && light.direct[12].x>0.0 {
+        out.color = vec4(out.color.rgb+native_direct(pbr,light),out.color.a);
+        if light.direct[12].y>0.0 {
+            out.color = vec4(out.color.rgb+native_point_lights(pbr,light.direct[12].z),out.color.a);
         }
     }
 #endif
-    if layers.hemi_axis.w > 0.0 && !unlit {
+    if light.hemi_axis.w > 0.0 && !unlit {
         // Verified 310630 hemisphere: mean + dot(axis,N)*(up-down)/2.
         // Inferred bridge retains Bevy's ambient BRDF and replaces its flat colour.
         let mean = lights.ambient_color.rgb;
-        let delta = layers.hemi_delta.xyz;
+        let delta = light.hemi_delta.xyz;
         let response = hemisphere_response(pbr);
         // Evaluate the colour difference directly, avoiding a division by a dark mean.
-        let irradiance = max(mean+dot(layers.hemi_axis.xyz,pbr.N)*delta,vec3(0.0));
+        let irradiance = max(mean+dot(light.hemi_axis.xyz,pbr.N)*delta,vec3(0.0));
         out.color = vec4(out.color.rgb + response*(irradiance-mean)*pbr.diffuse_occlusion*view.exposure,out.color.a);
     }
     if !unlit {
@@ -827,9 +836,9 @@ vertex: VertexOutput,
             fallback = environment.diffuse;
             fallback_specular = environment.specular;
 #endif
-            if layers.hemi_axis.w>0.0 {
+            if light.hemi_axis.w>0.0 {
                 // Remove the same response that the fallback adds, including its specular lobe.
-                fallback += hemisphere_response(pbr)*max(lights.ambient_color.rgb+dot(layers.hemi_axis.xyz,pbr.N)*layers.hemi_delta.xyz,vec3(0.0));
+                fallback += hemisphere_response(pbr)*max(lights.ambient_color.rgb+dot(light.hemi_axis.xyz,pbr.N)*light.hemi_delta.xyz,vec3(0.0));
             }
             let f_ab = F_AB(pbr.material.perceptual_roughness,nv);
             let f0 = calculate_F0(pbr.material.base_color.rgb,pbr.material.metallic,pbr.material.reflectance);
@@ -840,8 +849,8 @@ vertex: VertexOutput,
             let fms = mix(dielectric.FmsEms,metallic.FmsEms,pbr.material.metallic);
             var bounce = (fms+diffuse*dielectric.Edss)*gi.lambert;
             if gi_word(slot,1u)>0u { bounce = diffuse*gi.irradiance; }
-            let delta_diffuse = bounce*layers.hemi_delta.w-fallback*gi.coverage;
-            let delta_specular = fss*gi.specular*layers.hemi_delta.w-fallback_specular*gi.coverage;
+            let delta_diffuse = bounce*light.hemi_delta.w-fallback*gi.coverage;
+            let delta_specular = fss*gi.specular*light.hemi_delta.w-fallback_specular*gi.coverage;
             out.color = vec4(out.color.rgb+(delta_diffuse*pbr.diffuse_occlusion+delta_specular*pbr.specular_occlusion)*view.exposure,out.color.a);
         }
     }

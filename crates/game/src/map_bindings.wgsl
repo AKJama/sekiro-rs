@@ -1,16 +1,19 @@
 #define_import_path sekiro_map_bindings
 struct MapGame { flags: vec4<u32>, p: array<vec4<f32>, 16>, tiling: array<vec4<f32>, 12>, }
 struct Layers {
-    direct: array<vec4<f32>, 13>,
     enabled: vec4<f32>,
     albedo_enabled: vec4<f32>,
     albedo_uv: vec4<f32>,
     normal_uv: vec4<f32>,
     normal_enabled: vec4<f32>,
-    hemi_axis: vec4<f32>,
-    hemi_delta: vec4<f32>,
     camera_fade: vec4<f32>,
     game: MapGame,
+}
+// LightSet values shared by every map material (MapLightBuffer).
+struct MapLight {
+    direct: array<vec4<f32>, 13>,
+    hemi_axis: vec4<f32>,
+    hemi_delta: vec4<f32>,
 }
 #ifdef BINDLESS
 #import bevy_render::bindless::{bindless_textures_2d, bindless_textures_3d, bindless_textures_cube_array, bindless_samplers_filtering}
@@ -47,9 +50,11 @@ struct LayerIndices {
     mask_l_sampler: u32,
     wet: u32,
     wet_sampler: u32,
+    light: u32,
 }
 struct GiivBuffer { words: array<u32>, }
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var<storage, read> giiv_buffers: binding_array<GiivBuffer>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(103) var<storage, read> light_buffers: binding_array<MapLight>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<storage> layer_indices: array<LayerIndices>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var<storage> layer_array: array<Layers>;
 #else
@@ -84,5 +89,6 @@ struct GiivBuffer { words: array<u32>, }
 @group(#{MATERIAL_BIND_GROUP}) @binding(77) var mask_l_sampler: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(78) var wet: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(79) var wet_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(80) var<storage, read> map_light: MapLight;
 #endif
 
