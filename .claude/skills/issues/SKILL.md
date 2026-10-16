@@ -8,6 +8,18 @@ description: Capture problems in sekiro-rs as prioritised GitHub issues - from t
 The backlog lives in GitHub issues on `AKJama/sekiro-rs`, one issue per job.
 Work only starts from an issue; the [`pr-flow`](../pr-flow/SKILL.md) skill takes it from there.
 
+## Every issue, every time
+
+Every issue gets exactly two labels when it is filed: `bug` or `enhancement`, and one of `priority: high`, `priority: medium`, `priority: low`.
+This holds for side issues found during other work as well as for the user's reports.
+File with both labels in the same command, never as a later step:
+
+```powershell
+gh issue create --title "<what is wrong, in player terms>" --label bug --label "priority: medium" --body-file <body.md>
+```
+
+After filing, check that no open issue is missing a label: `gh issue list --limit 200 --json number,labels --jq '.[] | select((.labels | length) < 2) | .number'` must print nothing.
+
 ## When the user reports problems
 
 The user plays the game and describes what they saw, often several things at once.
@@ -19,7 +31,7 @@ The user plays the game and describes what they saw, often several things at onc
    - `priority: medium`: clearly wrong but play goes on (a wrong-looking material, a slow transition).
    - `priority: low`: noticeable on a close look, or likely to be hidden by unfinished work (distant pop-in, occasional frame drops).
    If the user calls something low priority or "later", follow them.
-5. File the issues and give the user the links.
+5. File the issues with both labels (see above) and give the user the links.
 
 ## What an issue holds
 
@@ -36,5 +48,7 @@ The user plays the game and describes what they saw, often several things at onc
 
 - Take the highest-priority open issue that nobody has claimed.
 - High-priority issues go to the most capable model available (Claude Opus 5.5 or newer); medium and low ones can go to any capable worker.
-- Claim it on the collab board (`sekiro-collab/WORK.md`) with a link to the issue before starting.
+- An issue is taken when it already has a linked PR (draft or not), or a row in Claimed on the collab board; skip those.
+- Maintainers claim it on the collab board (`sekiro-collab/WORK.md`) with a link to the issue before starting.
+- Outside contributors claim it by opening a draft PR with `Fixes #N` before writing code (see `CONTRIBUTING.md`); a draft with no new commits for 7 days frees the issue.
 - `STATUS.md` stays a short snapshot of what works and what is in progress; it is not the to-do list.

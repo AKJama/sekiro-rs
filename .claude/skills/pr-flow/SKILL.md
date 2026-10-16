@@ -30,11 +30,20 @@ When a lower PR changes or merges, rebase the stacked branches onto it and force
 
 ## Outside contributors
 
-- Contributors commit under their own name; the AKJama identity rule is for the maintainer.
-- Skip the collab-board steps and coordinate on the assigned issue instead.
-- Run step 4 and play the game yourself; step 5 becomes the maintainer's review and playtest.
-- Only the maintainer merges (step 6).
+- Work from your fork and open the PR against `AKJama/sekiro-rs` `main`.
+- Claim the issue by opening a draft PR with `Fixes #N` before writing code, instead of a board row; mark it ready for review when steps 1 to 4 are done.
+- Commit under your own name; the AKJama identity rule is for the maintainer.
+- Skip the collab-board steps.
+- Run step 4 and play the game yourself, and describe what you saw in the PR; step 5 becomes the maintainer's review and playtest.
+- Stop at step 5: only the maintainer merges, so step 6 is not yours.
 - See [CONTRIBUTING.md](../../../CONTRIBUTING.md) for the contribution rules.
+
+## Reviewing a contributor's PR (maintainer)
+
+1. Check it links an open issue and stays on that one issue.
+2. Run `code-review` at medium effort on it, and check out the branch (`gh pr checkout <N>`).
+3. Run the step 4 checks once, then build a playtest binary and play before and after.
+4. Request changes on the PR, or merge with step 6.
 
 ## 0. Start from an issue
 
@@ -164,12 +173,12 @@ For any PR that changes game code, the user's playtest is the final gate.
 Point them at the "What to look out for" section and the build to run, as the [`live-test`](../live-test/SKILL.md) skill describes.
 If they ask for changes, make them on the same branch (or rebase the stack), rerun steps 2 to 4, and ask again.
 
-## 6. Merge
+## 6. Merge (maintainer only)
 
 Merge only when the checks pass and the user confirms.
 Then, every time:
-1. Squash-merge the PR (`gh pr merge <N> --squash`); `Fixes #N` closes the issue.
-2. Delete the branch on GitHub and locally (`git push origin --delete <branch>`, `git branch -D <branch>`), and delete any stacked branch that merged with it.
+1. Squash-merge the PR; `Fixes #N` closes the issue and moves it to Done on the project board.
+2. GitHub deletes the merged branch; delete it locally too (`git branch -D <branch>`), and any stacked branch that merged with it.
 3. Pull `main`, and rebase any open stacked branches onto it.
 4. Update the shared board (`sekiro-collab/WORK.md`): move the claim row to Done with the PR link and today's date, bump the Done count, commit as AKJama and push.
 5. Clear the job's build folder if nothing else uses it, so old builds don't pile up on disk.
