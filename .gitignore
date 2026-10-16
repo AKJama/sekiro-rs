@@ -7,6 +7,14 @@
 !/README.md
 !/STATUS.md
 !/CREDITS.md
+!/CONTRIBUTING.md
+!/.github/
+!/.github/CODEOWNERS
+!/.github/*.md
+!/.github/ISSUE_TEMPLATE/
+!/.github/ISSUE_TEMPLATE/*
+!/.github/workflows/
+!/.github/workflows/*.yml
 !/LICENSE-MIT
 !/LICENSE-APACHE
 !/Cargo.toml
