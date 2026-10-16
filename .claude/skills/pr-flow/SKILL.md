@@ -121,4 +121,9 @@ If they ask for changes, make them on the same branch (or rebase the stack), rer
 ## 6. Merge
 
 Merge only when the checks pass and the user confirms.
-Use squash merge, then delete the branch and pull `main`.
+Then, every time:
+1. Squash-merge the PR (`gh pr merge <N> --squash`); `Fixes #N` closes the issue.
+2. Delete the branch on GitHub and locally (`git push origin --delete <branch>`, `git branch -D <branch>`), and delete any stacked branch that merged with it.
+3. Pull `main`, and rebase any open stacked branches onto it.
+4. Update the shared board (`sekiro-collab/WORK.md`): move the claim row to Done with the PR link and today's date, bump the Done count, commit as AKJama and push.
+5. Clear the job's build folder if nothing else uses it, so old builds don't pile up on disk.
