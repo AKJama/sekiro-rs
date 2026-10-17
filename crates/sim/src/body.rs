@@ -153,6 +153,20 @@ pub trait Ground {
         delta
     }
 
+    /// [`Ground::slide`] that also stops at the fall-prevention walls in `walls`
+    /// ([`crate::hit_filter::FALL_ASSIST_MOVE`], `FALL_ASSIST_ACTION` bits), for a body whose
+    /// script asks for the assist. Grounds without such walls just slide.
+    fn slide_assisted(&self, feet: [f32; 3], delta: [f32; 2], walls: u8) -> [f32; 2] {
+        let _ = walls;
+        self.slide(feet, delta)
+    }
+
+    /// Tells the ground whether Wolf has a SpEffect, for collision a script switches by it
+    /// ([`crate::collision::ObjectSwitch::WhilePlayerHas`]). Grounds without any ignore it.
+    fn set_player_effect(&self, effect: i32, on: bool) {
+        let _ = (effect, on);
+    }
+
     /// Highest ledge a grounded body steps onto, and the furthest it follows the floor down
     /// before it starts falling.
     fn max_step(&self) -> f32 {
@@ -218,6 +232,9 @@ pub struct BodyInput {
     pub ignore_walls: bool,
     /// HKS act 3037 = surface, act 3011 = dive. None uses ordinary physics.
     pub water_mode: Option<bool>,
+    /// The fall-prevention walls this tick's HKS `act(3016)` asked for
+    /// ([`crate::hit_filter::fall_assist_walls`]); 0 moves freely past them.
+    pub fall_assist: u8,
     /// World-space horizontal movement stick, with magnitude at most one.
     pub stick: Vec2,
     /// Root-motion delta in the character's local source space: `[x, y, z, yaw]`.
@@ -296,7 +313,7 @@ impl Body {
         let [mx, mz] = if input.ignore_walls {
             travel
         } else {
-            ground.slide(self.position, travel)
+            ground.slide_assisted(self.position, travel, input.fall_assist)
         };
         self.position[0] += mx;
         self.position[2] += mz;

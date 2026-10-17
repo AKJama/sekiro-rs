@@ -53,7 +53,7 @@ No env override is set anywhere outside tests [V: grep of `overrides` in `crates
 | env 3050 | can climb up from hang | `0.0` | top surface test |
 | env 3051, 3052 | obstacle at docking start, end | `0.0` | edge ends blocked |
 | env 3055, 3061 | init pose, safe-position return | `0.0` (which equals `STAND`, not `NONE` = -1) | see section 5 |
-| act 3016 | fall-prevention assist | recorded, no effect | ground edge stop |
+| act 3016 | fall-prevention assist | walls of groups 92 (arg 0) and 93 (arg 1) hold the move (`docs/OBJECT-COLLISION.md`) | ok |
 | act 3018 | set wire action in progress | recorded, no effect | wire state flag |
 | act 3023 | pre-computed movement (type, anim) | recorded, no effect | root-motion pre-evaluation |
 | act 3026, 3027, 3028 | run wall hug, ground hang, air hang start tests | recorded, no effect | trigger the env 3043 to 3045 searches |

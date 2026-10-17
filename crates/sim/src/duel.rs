@@ -66,6 +66,34 @@ fn load_fall_materials(cache: &Path) -> std::collections::HashMap<u32, FallMater
         .unwrap_or_default()
 }
 
+/// SpEffects a floor gives the character standing on it, by hit material special setting:
+/// `HitMaterialSpecialSettingParam.SpEffectId` (row 8, 乗れるオブジェ, gives 4100; rows without an
+/// effect are left out).
+fn load_floor_effects(cache: &Path) -> std::collections::HashMap<u32, i32> {
+    #[derive(serde::Deserialize)]
+    struct Row {
+        id: u32,
+        #[serde(rename = "SpEffectId")]
+        effect: i32,
+    }
+    #[derive(serde::Deserialize)]
+    struct Rows {
+        rows: Vec<Row>,
+    }
+    std::fs::read(cache.join("params/HitMaterialSpecialSettingParam.json"))
+        .ok()
+        .and_then(|data| serde_json::from_slice::<Rows>(&data).ok())
+        .map(|table| {
+            table
+                .rows
+                .into_iter()
+                .filter(|row| row.effect > 0)
+                .map(|row| (row.id, row.effect))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// TAE action flag on the player's attacks that tells the enemy AI to parry
 /// (`INTERUPT_ParryTiming`), traced by FwLo's RustSekiro (`docs/kb/guard-deflect.md`).
 pub const FLAG_PARRY_TIMING: i32 = 63;
@@ -236,6 +264,8 @@ pub struct Duel {
     /// which Wolf is returned to where he last stood; `None` disables the return.
     pub fall_respawn_depth: Option<f32>,
     fall_materials: std::collections::HashMap<u32, FallMaterial>,
+    /// [`load_floor_effects`].
+    floor_effects: std::collections::HashMap<u32, i32>,
     /// Where Wolf last stood on collision, for the return after a fall into the void.
     last_safe: Option<([f32; 3], f32)>,
     /// Seconds into the fall return's model fade, after Wolf touched a filter-15 event wall.
@@ -783,6 +813,7 @@ impl Duel {
             fall_respawn_depth: None,
             fog_gate: None,
             fall_materials: load_fall_materials(cache),
+            floor_effects: load_floor_effects(cache),
             last_safe: None,
             fall_return_fade: None,
             touching: Vec::new(),
@@ -2812,6 +2843,42 @@ impl Duel {
 
     /// Routes lethal landings through DEATH_FALLING and returns Wolf to where he last stood
     /// after a fall into the void.
+    /// Gives Wolf the SpEffect of the floor he stands on, refreshed every step he stands on it,
+    /// and tells his ground which floor effects he has, for collision the story's scripts
+    /// switch by them (common event 20005560 enables the pine's fall-prevention walls while he
+    /// has 4100). A hit material id is the special setting times 100 plus the HitMtrlParam row:
+    /// the rideable pines' 808 is row 8 under special setting 8 ([`load_floor_effects`]).
+    /// SpEffect 4100 lasts 0.06 s (`effectEndurance`), so it ends just after he leaves the tree.
+    fn apply_floor_effect(&mut self) {
+        if self.floor_effects.is_empty() {
+            return;
+        }
+        let b = &self.player.body;
+        let [x, y, z] = b.position;
+        if b.grounded
+            && let Some(&effect) = self
+                .player
+                .ground
+                .material(x, z, y + 0.01)
+                .and_then(|m| self.floor_effects.get(&(m / 100)))
+        {
+            let seconds = self
+                .player
+                .tae
+                .sp_effects
+                .get(&effect)
+                .map_or(0.0, |e| e.duration);
+            // An effect without a duration is applied once: it holds for this step.
+            self.player.tae_runtime.add_timed(effect, seconds.max(1e-3));
+        }
+        let has = self.player.tae_runtime.timed_ids();
+        for &effect in self.floor_effects.values() {
+            self.player
+                .ground
+                .set_player_effect(effect, has.contains(&effect));
+        }
+    }
+
     fn kill_fallen(&mut self, was_grounded: bool, before: [f32; 3], dt: f32) {
         // Keep the arena's existing NPC boundary reset; material fall death is PC-only.
         if let Some((depth, spawn)) = self.fall_respawn_depth.zip(self.spawn) {
@@ -3189,6 +3256,7 @@ impl Duel {
         if !self.shared_player_frame {
             self.kill_fallen(was_grounded, player_before, dt);
         }
+        self.apply_floor_effect();
 
         if self.god {
             let f = &mut self.rules.fighters[0];

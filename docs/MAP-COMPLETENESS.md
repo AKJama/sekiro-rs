@@ -427,7 +427,7 @@ They exclude unrelated instructions such as destruction, animation and treasure 
 | m11_00 group 1106610 | 215 Objects, 3 DummyObjects, 2 DummyEnemies | Disabled with 8302 off | Event 50 calls 20004112 with the disable-when-not-8302 condition |
 | m11_00 group 1106640 | 13 parts | Disabled after initialization settles | Event 0 passes both OFF and ON tests for 8310 to 20004112 |
 | m11_00 groups 1107600 / 1107610 | 115 / 36 parts | Enabled / disabled | Parallel common 20004110 map-part calls keyed to 8302 |
-| m11_00 group 1106200 | 28 Objects and 1 DummyObject | Disabled without Wolf SpEffect 4100 | Common 20005560 toggles on that SpEffect, not on draw groups |
+| m11_00 group 1106200 | 28 Objects and 1 DummyObject | Disabled without Wolf SpEffect 4100 | Common 20005560 toggles on that SpEffect, not on draw groups; the play world switches their collision at runtime (`docs/OBJECT-COLLISION.md`) |
 | m11_01 group 1116200 | 18 Objects and 7 DummyObjects | Enabled | Common 20004112 disables when one of 8306/8301/8302 is ON |
 | m11_01 group 1116201 | 64 Objects | Enabled | Common 20004112 disables when 8306 or 8302 is ON |
 | m11_01 group 1116203 | 56 Objects | Disabled | Common 20004112 matches 8301 OFF |

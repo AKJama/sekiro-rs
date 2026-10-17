@@ -38,6 +38,55 @@ Addresses are RVAs in the 1.06 exe (`re/dump/manifest.json`), read with the head
 
 So the player stands on the static and keyframed bodies of objects whose `collisionType` is 0, 1 or 2, and on nothing of the others.
 Type 6 is the "fall prevention" variant of a rideable pine (`o002501`, 落下防止), group 92, the fall-prevention assist hit, which the player's capsule does not collide with.
+Type 11 is group 93, its "ground actions only" twin.
+Another query tests them, below.
+
+## The fall-prevention assist
+
+Placed with the rideable pine over the start ravine is `o002501_0005` (collisionType 6): 52 triangles, all steep, standing along both sides of the trunk's top and across its tip, from about 0.5 m below the top to 2 m above it.
+They are not a floor; they are the walls that keep Wolf on the trunk.
+
+They are on only while Wolf rides the tree:
+
+- All eight `o002501_*` parts are in entity group 1106200, which `m11_00_00_00` event 0 hands to common event 20005560.
+- Event 20005560 (restart on end): `DeactivateObject(group, off)`, wait for `IfCharacterHasSpeffect(10000, 4100, has)`, `DeactivateObject(group, on)`, wait for the effect to end, restart.
+  So the story's first visit leaves the walls off, and they come on while Wolf has SpEffect 4100.
+- SpEffectParam 4100 is ヒットマテリアル判定_乗れるオブジェ (hit material judgment, rideable object), `effectEndurance` 0.06 s, spCategory 20.
+- `HitMaterialSpecialSettingParam` row 8, 乗れるオブジェ, has `SpEffectId` 4100 (rows 6 and 7 give 108010 steep slope roof and 108020 deep waterside).
+- The rideable pines' triangles all carry hit material 808, and other ids follow the same pattern: 201, 204, 208 (row 2, no camera), 501, 504, 508 (row 5), 616 (row 6).
+  So a material id is the special setting times 100 plus the HitMtrlParam row; the exe code that splits it and applies the effect is not traced.
+- Standing on the tree refreshes 4100 every step, so it ends 0.06 s after he leaves it.
+
+- Group names (`FUN_140932c00`): 92 落下防止アシストヒット(地上移動＆地上アクション) (fall-prevention assist hit, ground movement and ground actions), 93 the same for ground actions only, 94, 95 and 96 the sphere casts for 92, for 93, and for both, 113 and 114 the player's and enemies' fall-prevention throw-follow proxies.
+- In the collision matrix `FUN_140933390`, group 92 meets only 94, 96 and 113, and group 93 only 95, 96, 113 and 114: no capsule, ray or other body.
+- The player script asks for the assist every frame: `_UpdateFallProtection` (`c0000_transition.lua`, called from the `Update` in `c0000.lua`) sends `act(3016, 0)` in states whose `ENABLE_FALL_PROTECT_WALL_STRONG` flag is set and `act(3016, 1)` where `ENABLE_FALL_PROTECT_WALL_WEAK` is set (`g_paramHkbState` in `c0000_cmsg.lua`).
+  Of 1310 states, 770 set both, 90 only the strong one (walk and run loops, item and sub-weapon moves, crouch moves) and 450 neither: every jump, fall, wire, hang, cover, swim, dive, damage-flight and event state, and `SPRINT_LOOP`.
+  It skips the request in cover, hang, wire fall, cling, swim, dive and aged-fall styles, in the wire-ready states, and while SpEffect behaviour ref 6 (`TAE_DISABLE_FALL_PROTECT`) is on; refs 11 and 12 switch off the strong and weak request.
+- `FUN_140bc6800` reads the two request bits (character `+0x1ff8`, first module, `+0x20`): bit 0 alone casts with group 94, bit 1 alone with 95, both with 96, and none casts nothing.
+  So `act(3016, 0)` is taken as bit 0 (group 92) and `act(3016, 1)` as bit 1 (group 93); the act's own handler is not traced.
+- `FUN_140bc58b0` runs it on the body's move each physics step (callers `FUN_140bcc570` and `FUN_140bccd50`) and stores whether a wall was met at `+0xac0`.
+- `FUN_140bc68d0` casts the body along the move (`FUN_1418f73c0`) with that filter, collects the hit triangles' planes, slides the move along the nearest one, and then, for each plane the move heads into (the hit is ahead, and the move runs along the plane's face normal), cuts the move so the body stays `FallAssistMinRadius` from it, or stops it when it is already that close.
+  A plane the body is in front of is skipped, so the walls are one-sided: they keep a body in and let one outside walk in.
+- `FallAssistMaxRadius` and `FallAssistMinRadius` (physics module `+0xae8` and `+0xaec`, debug menu `FUN_140bc0280`) are 0.4 and 0.16 m (constructor `FUN_140bbb010`).
+  `FUN_140bca6d0` also corrects the final position against the stored walls when the body has stopped.
+
+What the simulation does:
+
+- The story interpreter (`world_events`) records a startup wait on one of Wolf's SpEffects that the first visit never meets, with the object and collision writes after it (`PlayerEffectSwitch`); a part those writes switch on while the story leaves it off gets `PartState::while_player_has` (4100 for the eight `o002501_*`).
+- The play world (`map_world::collision_world`) adds those objects as `ObjectSwitch::WhilePlayerHas(4100)`: in the grid, but off until `CollisionWorld::set_player_effect` turns them on.
+- `Duel::apply_floor_effect` gives Wolf the SpEffect of his floor's special setting (`material / 100`) each step he is grounded on it, with its `effectEndurance`, and tells his ground which floor effects he has.
+
+- `hit_filter::object_mask` gives type 6 the `FALL_ASSIST_MOVE` bit (group 92) and type 11 `FALL_ASSIST_ACTION` (group 93), and map parts with hit filter 28 (group 92, `h900400` and `h900410` in the Outskirts) get `FALL_ASSIST_MOVE` too; they join the world as helpers no capsule, ray or floor query sees.
+- The player adapter records `act(3016, arg)` per tick (`PlayerEnv::fall_assist`, cleared before each script update), and `BodyInput::fall_assist` hands the bits to `Body::step`, which moves through `Ground::slide_assisted`.
+- `CollisionWorld::slide_for` then also keeps the feet `FALL_ASSIST_RADIUS` (0.16 m) on the inner side of those walls (`hold_inside`), in sub-steps of 0.08 m so none is stepped across.
+- The walls are tested at the feet: where the pine's walls cross the trunk's top they meet its edges (at the start of its curve, 1.5 m apart, with the walkable top from x = -137.0 to -135.7).
+  The height the exe tests at is not traced; higher up the tip's walls lean over the trunk by up to 0.6 m, so a test along the whole capsule pinned Wolf in place there.
+- The export mirrors X without reversing the triangle order, so in Bevy space the pine's walls face the trunk (all 52 normals point at it); that side is the inner one.
+  In the game's space they face out, which is what the exe's test needs to keep a body in.
+
+Sprinting: `SPRINT_LOOP` sends no request, while the step and sprint-start states before it do, so a sprint into the wall is held only until the loop starts.
+The user saw this in the real game (held for one to two seconds, then off the trunk); issue #32 tracks it.
+The simulation's sprint at the wall stays in its start clips and is held, so it does not show the release yet.
 
 | collisionType | Group | Player and enemies | Camera | Outskirts objects (triangles) | Castle objects (triangles) |
 |---|---|---|---|---|---|
@@ -57,8 +106,8 @@ Type 6 is the "fall prevention" variant of a rideable pine (`o002501`, 落下防
   An edge whose faces are more than 90 degrees apart, and a corner with such a pair, also get a bevel plane at the radius, so thin wedges do not reach far past the rounded hull.
   Over the 1431 polytopes in the intact object files (static, keyframed and dynamic), no corner is more than 1.5 radii outside the rounded hull (0.73 at box corners, the 99.9th percentile).
   A capsule is tessellated from its segment and radius instead (`hknp::capsule`).
-- `CollisionWorld::add_objects` adds the parts the story keeps enabled: types 0 as ordinary collision, 1 and 2 as collision for the player and enemies only, 3 and 7 for the camera only, and leaves the rest out (`hit_filter::object_group`, `hit_filter::object_mask`).
-- The play world (`map_world::collision_world`) adds every block's objects (`CollisionWorld::add_block_objects`), skipping those the first-visit story has switched off (`DeactivateObject`, `docs/MAP-COMPLETENESS.md`): on the reference story 168 Outskirts and 64 Castle objects with collision are off.
+- `CollisionWorld::add_objects` adds the parts the story keeps enabled: types 0 as ordinary collision, 1 and 2 as collision for the player and enemies only, 3 and 7 for the camera only, 6 and 11 as fall-prevention walls (above), and leaves the rest out (`hit_filter::object_group`, `hit_filter::object_mask`).
+- The play world (`map_world::collision_world`) adds every block's objects (`CollisionWorld::add_block_objects`), skipping those the first-visit story has switched off (`DeactivateObject`, `docs/MAP-COMPLETENESS.md`), except those switched by one of Wolf's SpEffects (above).
 - `CollisionWorld::floor_object` names the object under a point as `<block>/<part>` (`m11_00_00_00/o002500_0005`), since 200 object part names repeat between the Outskirts and Castle blocks, and the live check records it per sample as `floor_object`.
 - The play setup loads a connected world's stories once (`story::load_blocks`) for both the objects' collision and the map (`add_map`), which would otherwise evaluate each block's story a second time (about 0.9 s per block).
   A map played alone (`--no-connected-blocks`) has no story for its drawn parts, so its objects' collision does not use one either.
@@ -76,6 +125,16 @@ In the live game, spawned on the lower ground south of the ravine at (-140, -50,
 - Before: Wolf landed on the perch at (-141.58, -44.26, -123.86) (spawned on the east ledge), and his first step west dropped him through `h900000` at y = -74.2 and the fall return.
 - After: he landed at (-137.09, -43.55, -121.83), stepped onto the trunk, walked down to its tip at x = -140.2 and back up to the platform at (-135.9, -42.6, -117.7), with every sample on `o002500_0005` until the platform's map collision and no fall.
 
+Fall prevention (`the_fall_prevention_walls_hold_wolf_on_the_trunk` and `wolf_stays_on_the_trunk_until_he_jumps_off` in the same file):
+
+- In the play world with the story applied (`play_world_holds_wolf_on_the_grapple_pine` in `crates/game/src/map_world.rs`), walking from the trunk's middle west, east and up the trunk holds him on it; without the floor effect the walls stay off and he falls west and east.
+  Toward the tip with the camera at yaw 0 he reaches the right flank and still drops (Unresolved).
+- With the player script driving Wolf from (-136.0, -43.06, -120.0), pushing the stick west for 2 s holds him at x = -136.99, grounded throughout, the script asking for the assist each frame; a jump from there carries him over the wall to x = -145.4 and down into the ravine.
+- A body walking square to the trunk at 1.5 and 4.8 m/s, from halfway along each stretch toward its left side (seen from the tip), and both ways near the tip, stays on the pine; without the walls it walks off every time.
+- Toward the tip's end it stops at x = -141.06, short of the end at -141.5.
+- From beside the trunk, where the grapple sets Wolf down (-137.09, -43.55, -121.83), he walks in onto it and along to the platform.
+- Toward the right side past the tip he still drops: there the walls stand where the trunk is steeper than 50 degrees (below).
+
 ## Unresolved
 
 - The MSB scale is applied to the collision like the drawn model; whether the exe scales object physics is not traced.
@@ -84,3 +143,5 @@ In the live game, spawned on the lower ground south of the ravine at (-140, -50,
 - Convex polytope triangles have no hit material.
 - The arena worlds (`Arena::load`) and the wire's own collision (`CollisionWorld::load_map`, used for line of sight) do not load objects yet; `CollisionWorld::add_block_objects` is the call they would share.
 - The body's floor is a point under the feet, so on a round trunk only the top band within the 50 degree slope limit holds Wolf (about 0.6 m wide on the pine), where the exe's 0.4 m capsule rests on the curved sides too.
+  On the pine's right flank past the tip (seen from the tip) the fall-prevention walls stand outside that band, so Wolf is held by the wall but has no floor and drops off (3 m in the data test); a capsule-shaped floor would close it.
+- The fall-prevention walls: the act 3016 handler itself, the height the exe's cast tests at, the plane slide's exact order, the `+0xa2` case that stops a body within `FallAssistMinRadius`, and `FUN_140bca6d0`'s end-of-step correction are not traced or applied; enemies' `FallPreventionAssist` (`c9997.lua`, `act(3016, 1)`) is not wired.
