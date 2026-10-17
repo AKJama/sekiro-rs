@@ -39,6 +39,10 @@ From [FFwLo/RustSekiro](https://github.com/FFwLo/RustSekiro), under the MIT lice
 - Cloth: simulation solver, collisions, deformation and the traced bend-stiffness formula.
 - Character materials: texture interpretation and cutouts, adapted into exported glTF metallic-roughness textures.
 
+From Fireguy32's fork [Fireguy32/RustSekiro](https://github.com/Fireguy32/RustSekiro) (MIT, the same licence below), commit d11ef65:
+
+- Combat HUD: the bar layout and colours measured from game captures, vitality length by maximum vitality, damage trails, posture states, arrows and display time, boss bars, over-head bars on the Head bone, and the item cluster's placement.
+
 ```
 MIT License
 

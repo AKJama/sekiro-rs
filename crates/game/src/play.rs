@@ -1841,6 +1841,23 @@ fn status_line(status: &sekiro_sim::status::Status, states: &[String]) -> String
     parts.join("   ")
 }
 
+/// The enemy's head for its floating bars: its skeleton's Head bone in this step's pose, held
+/// over its root so a swaying head does not shake the bars (Fireguy32's RustSekiro fork, MIT,
+/// commit d11ef65). Without the bone, just above the body capsule (NpcParam hitHeight: 1.8 m
+/// soldier, 2.5 m Owl).
+fn enemy_head(duel: &Duel) -> Vec3 {
+    let c = &duel.enemy;
+    let root = Vec3::from_array(c.body.position);
+    c.skeleton
+        .bone_index("Head")
+        .and_then(|i| c.bone_source_matrices().get(i).copied())
+        .map(|m| {
+            let p = c.source_to_world().transform_point3(m.w_axis.truncate());
+            Vec3::new(root.x, p.y, root.z)
+        })
+        .unwrap_or(root + Vec3::Y * duel.fighters[1].height)
+}
+
 fn hud(
     sim: NonSend<Sim>,
     recording: Res<crate::brain_overlay::RecordingBrain>,
@@ -1848,16 +1865,16 @@ fn hud(
     mut debug: ResMut<DebugHud>,
     mut text: Query<&mut Text, With<Hud>>,
     mut gauges: ResMut<combat_hud::Gauges>,
+    live: Option<Res<LiveInput>>,
 ) {
     let f = &sim.duel.rules.fighters;
+    let held = live.map_or([false; 2], |l| {
+        [l.frame.buttons.item, l.frame.buttons.prosthetic]
+    });
     *gauges = combat_hud::Gauges {
         hp: [0, 1].map(|i| (f[i].vitality.hp, f[i].vitality.max_hp)),
         posture: [0, 1].map(|i| (f[i].posture.remaining, f[i].posture.max)),
-        // Just above the enemy's body capsule (NpcParam hitHeight: 1.8 m soldier, 2.5 m Owl).
-        enemy_head: sim.enemy_present.then_some(
-            Vec3::from_array(sim.duel.enemy.body.position)
-                + Vec3::Y * (sim.duel.fighters[1].height + 0.2),
-        ),
+        enemy_head: sim.enemy_present.then(|| enemy_head(&sim.duel)),
         // Hidden with him while a warp fades him out.
         enemy_alive: sim.enemy_present
             && !f[1].dead()
@@ -1891,6 +1908,7 @@ fn hud(
             .dummy_position(WOLF, sekiro_sim::perilous::KANJI_DUMMY)
             .map(|p| Vec3::from_array(p) + Vec3::Y * 0.6),
         perilous_age: sim.perilous_age,
+        held,
     };
     let Ok(mut text) = text.single_mut() else {
         return;
