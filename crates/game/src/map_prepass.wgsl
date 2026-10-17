@@ -26,7 +26,7 @@
 #import sekiro_map_bindings::layers
 #endif
 
-#import sekiro_map_coverage::camera_coverage
+#import sekiro_map_coverage::{camera_coverage, lod_coverage}
 #ifdef PREPASS_FRAGMENT
 @fragment
 fn fragment(
@@ -70,6 +70,9 @@ fn fragment(
     let fade = layers.camera_fade;
 #endif
     camera_coverage(in.position.xy, in.world_position.xyz, fade);
+#endif
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    lod_coverage(in.position.xy, mesh[in.instance_index].tag);
 #endif
     pbr_prepass_functions::prepass_alpha_discard(input);
 #endif  // MESHLET_MESH_MATERIAL_PASS
@@ -180,6 +183,9 @@ fn fragment(in: prepass_io::VertexOutput) {
     let fade = layers.camera_fade;
 #endif
     camera_coverage(in.position.xy, in.world_position.xyz, fade);
+#endif
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    lod_coverage(in.position.xy, mesh[in.instance_index].tag);
 #endif
     pbr_prepass_functions::prepass_alpha_discard(input);
 }

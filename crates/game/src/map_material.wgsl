@@ -1,4 +1,4 @@
-#import sekiro_map_coverage::camera_coverage
+#import sekiro_map_coverage::{camera_coverage, lod_coverage}
 #import bevy_pbr::{
     forward_io::{VertexOutput, FragmentOutput},
     pbr_fragment::pbr_input_from_standard_material,
@@ -751,6 +751,9 @@ vertex: VertexOutput,
     var input = vertex;
 #ifdef CAMERA_FADE
     camera_coverage(input.position.xy, input.world_position.xyz, layers.camera_fade);
+#endif
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    lod_coverage(input.position.xy, mesh_functions::get_tag(input.instance_index));
 #endif
     var b = vec4(0.0);
 #ifdef VERTEX_COLORS

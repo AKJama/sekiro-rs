@@ -10,6 +10,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use bevy::camera::primitives::{Aabb, Frustum};
+use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 use sekiro_formats::hknp::CollisionMesh;
 use serde_json::{Value, json};
@@ -217,6 +218,10 @@ pub(crate) struct DetailPart {
     stream: Option<usize>,
     shown: usize,
     spawned: [bool; 3],
+    /// Whether the slots' meshes carry crossfade coverage tags that must be cleared.
+    fading: bool,
+    /// The part's MSB name, for `--lod-debug`.
+    name: String,
 }
 
 /// Submission weight retained for the eventual retail coverage shader.
@@ -1079,6 +1084,8 @@ pub(crate) fn spawn(
                 spawned: std::array::from_fn(|level| {
                     capture_handle.is_some() && available[level] || level == initial
                 }),
+                fading: false,
+                name: row["name"].as_str().unwrap_or_default().to_string(),
             });
         } else if let Some(handle) = &capture_handle {
             commands.entity(root).insert(super::capture::CaptureScene {
@@ -1107,6 +1114,10 @@ pub(crate) fn spawn(
     );
 }
 
+/// `--lod-debug` logs detail-level changes only for parts this close to Wolf (bounds distance),
+/// past the outermost installed MapPiece boundary plus its play distance (60 + 4 m).
+const LOD_DEBUG_RADIUS: f32 = 70.0;
+
 /// The level with the largest weight, as [`update_detail`] draws it.
 fn dominant(weights: [f32; 3]) -> usize {
     weights
@@ -1133,6 +1144,9 @@ pub(crate) fn update_detail(
         Option<&WorldAssetRoot>,
         Option<&WorldInstance>,
     )>,
+    children: Query<&Children>,
+    meshes: Query<(), With<Mesh3d>>,
+    wolf: Query<&Transform, (With<PlayerFocus>, Without<Camera3d>)>,
     mut debug: Local<Option<bool>>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("update_detail");
@@ -1140,6 +1154,7 @@ pub(crate) fn update_detail(
         return;
     };
     let debug = *debug.get_or_insert_with(|| std::env::args().any(|a| a == "--lod-debug"));
+    let wolf = wolf.iter().next().map(|t| t.translation);
     for (transform, identity, mut part) in &mut parts {
         let distance =
             super::lod::bounds_distance(camera.translation, transform, part.min, part.max);
@@ -1156,57 +1171,102 @@ pub(crate) fn update_detail(
             part.state
                 .update(rule, scales, distance, time.delta_secs(), available)
         };
-        // The retail coverage shader is not traced. Until that renderer interface
-        // exists, keep the dominant representation, preserving exact weights as data.
         let selected = dominant(weights);
-        // A level selected for the first time gets its scene now. Every level lives in the same
-        // GLB, so once the stream has requested it the scene comes from that load; before
-        // then the current level stays, keeping the stream's order and in-flight limit.
-        if !part.spawned[selected]
-            && let Some(entity) = part.slots[selected]
-            && let Some(scene) = part
-                .stream
-                .and_then(|index| pending.requested(index))
-                .map(|(glb, unapproved)| super::scene_handle(&assets, glb, selected, unapproved))
-        {
-            commands.entity(entity).insert(WorldAssetRoot(scene));
-            part.spawned[selected] = true;
-            pending.add_instance();
+        // Every level with weight gets its scene, so a crossfade's incoming level exists before
+        // it dominates. Every level lives in the same GLB, so once the stream has requested it
+        // the scene comes from that load; before then the current level stays, keeping the
+        // stream's order and in-flight limit.
+        for (level, &weight) in weights.iter().enumerate() {
+            if weight > 0.
+                && !part.spawned[level]
+                && let Some(entity) = part.slots[level]
+                && let Some(scene) = part
+                    .stream
+                    .and_then(|index| pending.requested(index))
+                    .map(|(glb, unapproved)| super::scene_handle(&assets, glb, level, unapproved))
+            {
+                commands.entity(entity).insert(WorldAssetRoot(scene));
+                part.spawned[level] = true;
+                pending.add_instance();
+            }
         }
-        // Keep drawing the current level until the selected one has spawned its meshes, so a
-        // switch never leaves a gap. Capture scenes are spawned synchronously.
-        if part.shown != selected
-            && (part.stream.is_none()
-                || part.slots[selected]
-                    .and_then(|entity| slots.get(entity).ok())
-                    .is_some_and(|(_, _, root, instance)| {
+        // A level is ready once its scene has spawned its meshes, so a switch never leaves a
+        // gap. Capture scenes are spawned synchronously.
+        let ready: [bool; 3] = std::array::from_fn(|level| {
+            part.slots[level].is_some_and(|entity| {
+                part.stream.is_none()
+                    || slots.get(entity).is_ok_and(|(_, _, root, instance)| {
                         root.is_some() && instance.is_some_and(|i| instances.instance_is_ready(**i))
-                    }))
-        {
+                    })
+            })
+        });
+        if part.shown != selected && ready[selected] {
             part.shown = selected;
         }
-        let shown = part.shown;
+        // During a transition the retail renderer submits both levels with complementary
+        // weights; draw them with complementary dither coverage instead of a one-frame swap.
+        // Offscreen captures are stills taken with held time, so they keep the dominant level.
+        let fade_ready = if part.stream.is_some() {
+            ready
+        } else {
+            [false; 3]
+        };
+        let tags = super::lod::crossfade_tags(weights, part.shown, fade_ready);
+        let fading = tags.iter().any(|tag| tag.is_some_and(|tag| tag != 0));
         for (level, entity) in part.slots.iter().enumerate() {
-            if let Some(entity) = entity
-                && let Ok((mut visibility, mut weight, _, _)) = slots.get_mut(*entity)
-            {
-                let desired = if level == shown {
+            let Some(entity) = *entity else {
+                continue;
+            };
+            if let Ok((mut visibility, mut weight, _, _)) = slots.get_mut(entity) {
+                let desired = if tags[level].is_some() {
                     Visibility::Inherited
                 } else {
                     Visibility::Hidden
                 };
                 if *visibility != desired {
                     *visibility = desired;
-                    if debug {
+                    // Only parts near Wolf, where a switch can be seen, keep the log short.
+                    let from_wolf =
+                        wolf.map(|p| super::lod::bounds_distance(p, transform, part.min, part.max));
+                    if debug && from_wolf.is_some_and(|d| d < LOD_DEBUG_RADIUS) {
                         info!(
-                            "{} part {} detail {}, weights {:?}",
-                            identity.block, identity.part_index, shown, weights
+                            "lod switch: {} part {} {} level {} {}, camera {:.2} m, Wolf {:.2} m (boundaries {:?}, play {:?}), weights {:?}, Wolf at {:.1?}",
+                            identity.block,
+                            identity.part_index,
+                            part.name,
+                            level,
+                            if desired == Visibility::Hidden {
+                                "hidden"
+                            } else {
+                                "drawn"
+                            },
+                            distance,
+                            from_wolf.unwrap_or_default(),
+                            rule.boundary,
+                            rule.play,
+                            weights,
+                            wolf.unwrap_or_default()
                         );
                     }
                 }
                 weight.0 = weights[level];
             }
+            if fading || part.fading {
+                for mesh in children.iter_descendants(entity) {
+                    if meshes.contains(mesh) {
+                        match tags[level] {
+                            Some(tag) if fading && tag != 0 => {
+                                commands.entity(mesh).insert(MeshTag(tag));
+                            }
+                            _ => {
+                                commands.entity(mesh).remove::<MeshTag>();
+                            }
+                        }
+                    }
+                }
+            }
         }
+        part.fading = fading;
     }
 }
 
