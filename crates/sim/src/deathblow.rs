@@ -453,6 +453,21 @@ pub fn deathblow_marks(ninsatu_num: i32) -> i32 {
     ninsatu_num.max(1)
 }
 
+/// The most deathblow marks a health bar shows: the largest NpcParam `ninsatuNum` (3); the
+/// Butterfly's encounter sums two 1-mark rows.
+pub const MAX_BAR_MARKS: i32 = 3;
+
+/// The deathblow marks a health bar draws: `left` of the `total` its encounter started with,
+/// none for an enemy taking a single deathblow (the game draws them only on enemies that take
+/// more than one).
+pub fn bar_marks(left: i32, total: i32) -> i32 {
+    if total > 1 {
+        left.clamp(0, MAX_BAR_MARKS)
+    } else {
+        0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     /// The attacker's lunge; the defender keeps playing its stagger.
@@ -745,6 +760,16 @@ impl Deathblow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_enemies_taking_more_than_one_deathblow_show_marks() {
+        // An ordinary soldier (ninsatuNum 0) takes one deathblow and shows no dots.
+        assert_eq!(bar_marks(deathblow_marks(0), deathblow_marks(0)), 0);
+        // A 2-mark enemy shows 2, then 1 after the first deathblow.
+        assert_eq!(bar_marks(deathblow_marks(2), 2), 2);
+        assert_eq!(bar_marks(deathblow_marks(1), 2), 1);
+        assert_eq!(bar_marks(7, 7), MAX_BAR_MARKS);
+    }
 
     fn row() -> ThrowRow {
         ThrowRow {

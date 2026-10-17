@@ -199,6 +199,10 @@ pub struct Duel {
     pub spec: EnemySpec,
     /// Marks on a later placed entity belonging to this encounter's visible boss bar.
     encounter_extra_marks: i32,
+    /// The deathblow marks this encounter's health bar started with (NpcParam `ninsatuNum`, 0
+    /// counting as one, plus `encounter_extra_marks`); kept across hand-overs, so a
+    /// later phase's last mark still shows.
+    encounter_marks: i32,
     initial_spec: EnemySpec,
     pending_handover: Option<(i32, Option<i32>)>,
     /// Map-event cinematic boundary, queued until any active deathblow releases.
@@ -723,6 +727,9 @@ impl Duel {
                 enemy_model: read_model(&spec.chr),
             })
         });
+        let encounter_extra_marks = crate::butterfly::additional_marks(cache, &spec);
+        let encounter_marks =
+            deathblow_marks(rules.fighters[1].vitality.deathblows_left) + encounter_extra_marks;
         Ok(Self {
             monk_stats: crate::true_monk::owns(&spec)
                 .then(|| crate::true_monk::PhaseStats::load(cache))
@@ -755,7 +762,8 @@ impl Duel {
             throws,
             cache: cache.to_path_buf(),
             initial_spec: spec.clone(),
-            encounter_extra_marks: crate::butterfly::additional_marks(cache, &spec),
+            encounter_extra_marks,
+            encounter_marks,
             pending_handover: None,
             cinematic: None,
             spec,
@@ -1174,6 +1182,7 @@ impl Duel {
         self.ai = if self.ai.is_some() { next.ai } else { None };
         self.spec = next.spec;
         self.encounter_extra_marks = next.encounter_extra_marks;
+        self.encounter_marks = self.encounter_marks.max(next.encounter_marks);
         self.events = next.events;
         self.butterfly_illusions = next.butterfly_illusions;
         if let (Some(encounter), Some(world)) = (&mut self.butterfly_illusions, &self.fog_gate) {
@@ -2347,7 +2356,9 @@ impl Duel {
             .is_none_or(|e| e.boss_bar.is_some() || e.hp_bar)
     }
 
-    /// Encounter marks for the HUD; combat still spends only the active entity's own marks.
+    /// Encounter marks the HUD draws over the enemy's health bar (see
+    /// [`crate::deathblow::bar_marks`]: none on an enemy taking a single deathblow); combat
+    /// still spends only the active entity's own marks.
     pub fn enemy_bar_marks(&self) -> i32 {
         if old_dragons::owns(&self.spec) {
             return 0;
@@ -2356,11 +2367,12 @@ impl Duel {
             return 0;
         }
         let remaining = self.rules.fighters[1].vitality.deathblows_left;
-        if self.spec.chr == "c5090" {
+        let left = if self.spec.chr == "c5090" {
             remaining.max(0) + self.encounter_extra_marks
         } else {
             deathblow_marks(remaining)
-        }
+        };
+        crate::deathblow::bar_marks(left, self.encounter_marks)
     }
 
     /// What the enemy's script reads from the engine about events, throws and endure requests,

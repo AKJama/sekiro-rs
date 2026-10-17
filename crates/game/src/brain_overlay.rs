@@ -11,6 +11,10 @@ pub struct RecordingBrain {
     pub unicode_font: bool,
 }
 
+/// The panel's distance from the window's top right corner, and its width (px).
+pub(crate) const PANEL_INSET: f32 = 24.0;
+pub(crate) const PANEL_WIDTH: f32 = 344.0;
+
 #[derive(Component)]
 pub struct Panel;
 #[derive(Component)]
@@ -31,9 +35,9 @@ pub fn spawn(
             Panel,
             Node {
                 position_type: PositionType::Absolute,
-                right: px(24),
-                top: px(24),
-                width: px(344),
+                right: px(PANEL_INSET),
+                top: px(PANEL_INSET),
+                width: px(PANEL_WIDTH),
                 padding: UiRect::all(px(16)),
                 border: UiRect::left(px(2)),
                 flex_direction: FlexDirection::Column,
