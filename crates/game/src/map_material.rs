@@ -961,7 +961,7 @@ fn replace_materials(
                             s.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
                                 address_mode_u: ImageAddressMode::Repeat,
                                 address_mode_v: ImageAddressMode::Repeat,
-                                anisotropy_clamp: 8,
+                                anisotropy_clamp: super::TEXTURE_ANISOTROPY,
                                 ..ImageSamplerDescriptor::linear()
                             });
                         })

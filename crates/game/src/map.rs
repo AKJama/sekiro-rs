@@ -1101,18 +1101,34 @@ pub(crate) fn upload_budget() -> bevy::render::render_asset::RenderAssetBytesPer
     bevy::render::render_asset::RenderAssetBytesPerFrame::new(UPLOAD_BYTES_PER_FRAME)
 }
 
+/// Anisotropic filtering for map and model textures, so surfaces seen at a grazing angle (cliff
+/// and rock faces) stay sharp instead of blurring to a low mip (#45).
+pub(crate) const TEXTURE_ANISOTROPY: u16 = 8;
+
+/// The sampler GLB textures get: trilinear with [`TEXTURE_ANISOTROPY`]; each texture's glTF
+/// wrap modes still apply.
+fn gltf_texture_sampler() -> bevy::image::ImageSamplerDescriptor {
+    bevy::image::ImageSamplerDescriptor {
+        anisotropy_clamp: TEXTURE_ANISOTROPY,
+        ..bevy::image::ImageSamplerDescriptor::linear()
+    }
+}
+
 pub(crate) fn layered_gltf_plugin() -> bevy::gltf::GltfPlugin {
-    bevy::gltf::GltfPlugin::default()
-        // gltf-json strips the leading underscore before Bevy looks up custom semantics.
-        .add_custom_vertex_attribute("MAP_BLEND2", ATTR_MAP_BLEND2)
-        .add_custom_vertex_attribute(
-            "MAP_COLOR1",
-            bevy::mesh::MeshVertexAttribute::new(
-                "MapColor1",
-                0x5ec1_0a03,
-                bevy::render::render_resource::VertexFormat::Float32x4,
-            ),
-        )
+    bevy::gltf::GltfPlugin {
+        default_sampler: gltf_texture_sampler(),
+        ..default()
+    }
+    // gltf-json strips the leading underscore before Bevy looks up custom semantics.
+    .add_custom_vertex_attribute("MAP_BLEND2", ATTR_MAP_BLEND2)
+    .add_custom_vertex_attribute(
+        "MAP_COLOR1",
+        bevy::mesh::MeshVertexAttribute::new(
+            "MapColor1",
+            0x5ec1_0a03,
+            bevy::render::render_resource::VertexFormat::Float32x4,
+        ),
+    )
 }
 
 fn setup_view(mut commands: Commands, start: Vec3) {
@@ -1877,6 +1893,17 @@ pub fn parse_camera(arg: Option<&str>) -> Result<Option<[f32; 5]>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #45: GLB textures (rock base colour and normals) must sample with anisotropic, trilinear
+    /// filtering, or faces seen at a grazing angle blur to a low mip.
+    #[test]
+    fn gltf_textures_sample_anisotropically() {
+        let sampler = layered_gltf_plugin().default_sampler;
+        assert_eq!(sampler.anisotropy_clamp, TEXTURE_ANISOTROPY);
+        assert!(TEXTURE_ANISOTROPY > 1);
+        assert_eq!(sampler.mipmap_filter, bevy::image::ImageFilterMode::Linear);
+        assert_eq!(sampler.min_filter, bevy::image::ImageFilterMode::Linear);
+    }
 
     #[test]
     fn readiness_ignores_nested_worlds_and_repeated_root_events() {
