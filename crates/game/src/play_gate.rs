@@ -6,22 +6,27 @@
 //! ([`crate::map::Pending::loaded`]), no render pipeline is still compiling, the collision
 //! floor under Wolf exists, every image and spawned mesh is prepared on the GPU and the
 //! drawn meshes within 60 m have their textures ([`check_render`]), and then 60 consecutive
-//! frames stay within 1/30 s, so uploads and first-use work that follow loading also finish
-//! behind the screen. Scripted, replayed and interactive runs all wait for the whole map. The
-//! time to that point is logged as `play ready`; a machine that never settles starts after
-//! 60 s with a warning instead of waiting forever.
+//! frames are steady ([`FrameSettle`]), so uploads and first-use work that follow loading also
+//! finish behind the screen. Steady means no loading hitch: a frame counts when it is within
+//! 1/30 s or within 1.5 times the median of the frames before it, so an area that is simply
+//! slow to draw (the Genichiro arena at about 47 ms, #75) starts once it is steady instead of
+//! at the timeout, while a fast area still waits out every spike above 1/30 s. Scripted,
+//! replayed and interactive runs all wait for the whole map. The time to that point is logged
+//! as `play ready`; a machine that never settles starts after 60 s with a warning instead of
+//! waiting forever.
 use super::{Actor, MapCollision, Sim};
 use crate::character::Rig;
 use bevy::prelude::*;
+use std::collections::VecDeque;
 use std::time::Instant;
 
 #[derive(Resource, Default)]
 pub(super) struct PlayGate {
     /// When loading finished and play may start.
     pub(super) ready_at: Option<Instant>,
-    /// When everything had loaded, and the consecutive frames within budget since.
+    /// When everything had loaded, and the frame times since.
     loaded_at: Option<Instant>,
-    stable_frames: u32,
+    settle: FrameSettle,
     /// The last GPU readiness check ([`check_render`]); `None` before the first.
     render: Option<RenderWait>,
     /// Drawn meshes near Wolf, listed once when the upload counts first reach zero (Wolf does
@@ -50,12 +55,64 @@ impl RenderWait {
 /// Drawn meshes within this distance of Wolf must have their textures before play starts.
 const RENDER_RADIUS: f32 = 60.0;
 
-/// A frame within budget: 30 Hz, so a vsync-limited 60 Hz frame always counts.
+/// A frame within this always counts as steady: 30 Hz, so a vsync-limited 60 Hz frame always
+/// counts and a fast area keeps the original budget.
 const STABLE_FRAME_SECONDS: f32 = 1.0 / 30.0;
-/// Consecutive frames within budget that mark the end of loading.
+/// A slower frame counts when it is within this many times the median of the recent frames:
+/// the arena's steady frames sit within 1.1 times their median, while loading hitches (uploads,
+/// scene spawning, shader compiles) are several times it.
+const SPIKE_RATIO: f32 = 1.5;
+/// Consecutive steady frames that mark the end of loading, and the frames the median is over.
 const STABLE_FRAMES: u32 = 60;
-/// A machine that never reaches the budget still starts, with a warning.
+/// A machine that never settles still starts, with a warning.
 const STABLE_TIMEOUT_SECONDS: f32 = 60.0;
+
+/// Whether frame times have settled after loading: [`STABLE_FRAMES`] consecutive frames each
+/// within [`STABLE_FRAME_SECONDS`] or within [`SPIKE_RATIO`] times the median of the frames
+/// before it. The rule is relative so an area that is steady but slower than 30 Hz still
+/// settles; a hitch above both limits starts the count again.
+#[derive(Default)]
+struct FrameSettle {
+    /// The last [`STABLE_FRAMES`] frame times, in seconds.
+    recent: VecDeque<f32>,
+    /// Consecutive steady frames.
+    stable: u32,
+}
+
+impl FrameSettle {
+    /// Records one frame; `drawable` is false while the GPU still waits for uploads, which
+    /// restarts the count.
+    fn push(&mut self, seconds: f32, drawable: bool) {
+        let steady = seconds <= STABLE_FRAME_SECONDS
+            || self
+                .median()
+                .is_some_and(|median| seconds <= median * SPIKE_RATIO);
+        self.stable = if drawable && steady {
+            self.stable + 1
+        } else {
+            0
+        };
+        if self.recent.len() == STABLE_FRAMES as usize {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(seconds);
+    }
+
+    fn median(&self) -> Option<f32> {
+        let mut sorted: Vec<f32> = self.recent.iter().copied().collect();
+        sorted.sort_by(f32::total_cmp);
+        sorted.get(sorted.len() / 2).copied()
+    }
+
+    fn settled(&self) -> bool {
+        self.stable >= STABLE_FRAMES
+    }
+
+    /// How far through the settling wait, from 0 to 1.
+    fn progress(&self) -> f32 {
+        (self.stable as f32 / STABLE_FRAMES as f32).min(1.0)
+    }
+}
 
 impl PlayGate {
     /// Whether the simulation may step now. The 60 stable frames before readiness also cover
@@ -161,22 +218,20 @@ pub(super) fn update(
             .as_ref()
             .is_none_or(|c| c.0.floor(p[0], p[2], p[1] + 1.0).is_some());
         // GPU uploads trail the CPU load; then uploads, scene spawning and shader compiles show
-        // up as slow frames, so the area is ready once the world is drawable and frames stay
-        // within budget.
+        // up as slow frames, so the area is ready once the world is drawable and frames are
+        // steady.
         if rigs_bound && map && compiled && floor {
             let since = *gate.loaded_at.get_or_insert_with(Instant::now);
-            if gate.render_ready() && time.delta_secs() <= STABLE_FRAME_SECONDS {
-                gate.stable_frames += 1;
-            } else {
-                gate.stable_frames = 0;
-            }
-            let settled = gate.stable_frames >= STABLE_FRAMES;
+            let drawable = gate.render_ready();
+            gate.settle.push(time.delta_secs(), drawable);
+            let settled = gate.settle.settled();
             if settled || since.elapsed().as_secs_f32() >= STABLE_TIMEOUT_SECONDS {
                 gate.ready_at = Some(Instant::now());
                 let launch = crate::since_start();
                 if settled {
                     info!(
-                        "play ready: map loaded and {STABLE_FRAMES} frames within budget, {launch:.1} s after launch ({:.1} s settling)",
+                        "play ready: map loaded and {STABLE_FRAMES} steady frames (median {:.1} ms), {launch:.1} s after launch ({:.1} s settling)",
+                        gate.settle.median().unwrap_or_default() * 1000.0,
                         since.elapsed().as_secs_f32()
                     );
                 } else {
@@ -190,7 +245,7 @@ pub(super) fn update(
         pending.as_ref().map_or(1.0, |p| p.progress()) * 0.9
             + 0.04 * f32::from(u8::from(rigs_bound))
             + 0.03 * f32::from(u8::from(compiled))
-            + 0.03 * (gate.stable_frames as f32 / STABLE_FRAMES as f32).min(1.0)
+            + 0.03 * gate.settle.progress()
     } else {
         1.0
     };
@@ -260,4 +315,62 @@ fn near_meshes(world: &mut World) -> Vec<Entity> {
         })
         .map(|(entity, ..)| entity)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(frames: impl IntoIterator<Item = f32>) -> FrameSettle {
+        let mut settle = FrameSettle::default();
+        for seconds in frames {
+            settle.push(seconds, true);
+            if settle.settled() {
+                break;
+            }
+        }
+        settle
+    }
+
+    #[test]
+    fn steady_slow_frames_settle() {
+        // The Genichiro arena: about 47 ms a frame with a little jitter, never within 1/30 s.
+        let settle = run((0..120).map(|i| 0.044 + 0.002 * (i % 4) as f32));
+        assert!(settle.settled());
+        assert_eq!(settle.recent.len(), STABLE_FRAMES as usize);
+    }
+
+    #[test]
+    fn steady_fast_frames_settle() {
+        assert!(run(std::iter::repeat_n(1.0 / 60.0, 60)).settled());
+    }
+
+    #[test]
+    fn spiky_frames_do_not_settle() {
+        // Loading hitches every 20 frames, both on a slow area and on a fast one.
+        for base in [0.047, 1.0 / 60.0] {
+            let frames = (0..600).map(|i| if i % 20 == 19 { 0.150 } else { base });
+            assert!(!run(frames).settled(), "base {base}");
+        }
+    }
+
+    #[test]
+    fn fast_area_keeps_the_absolute_budget() {
+        // On a 60 Hz area a 40 ms frame is still a hitch: over 1/30 s and over 1.5 times the median.
+        let frames = (0..600).map(|i| if i % 30 == 29 { 0.040 } else { 1.0 / 60.0 });
+        assert!(!run(frames).settled());
+    }
+
+    #[test]
+    fn frames_before_the_world_is_drawable_do_not_count() {
+        let mut settle = FrameSettle::default();
+        for _ in 0..100 {
+            settle.push(1.0 / 60.0, false);
+        }
+        assert!(!settle.settled());
+        for _ in 0..60 {
+            settle.push(1.0 / 60.0, true);
+        }
+        assert!(settle.settled());
+    }
 }
