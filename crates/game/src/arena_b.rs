@@ -75,13 +75,13 @@ fn visibility(
 ) {
     // Managed roots receive one combined decision in Job E's writer.
     // Replace the snapshot even when empty, so restarts release the previous override.
-    arena.maps.insert(
-        map.0.clone(),
-        EventState {
-            by_name: Default::default(),
-            by_entity: scene.0.enabled.iter().map(|(&id, &on)| (id, on)).collect(),
-        },
-    );
+    let next = EventState {
+        by_name: Default::default(),
+        by_entity: scene.0.enabled.iter().map(|(&id, &on)| (id, on)).collect(),
+    };
+    if arena.maps.get(&map.0) != Some(&next) {
+        arena.maps.insert(map.0.clone(), next);
+    }
     for (part, mut visibility) in &mut parts {
         let on = scene
             .0

@@ -180,7 +180,7 @@ impl VisibilityPart {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EventState {
     pub by_name: BTreeMap<String, bool>,
     /// Includes entity-group IDs when supplied by the event host.
@@ -226,7 +226,7 @@ pub struct MaskContribution {
     pub mask: Mask,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BlockRequest {
     pub normal: Mask,
     pub additional_backread: Mask,
@@ -243,7 +243,7 @@ impl BlockRequest {
 }
 
 /// D provides block residency and asset readiness, plus the accumulated request masks.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BlockVisibility {
     pub request: BlockRequest,
     pub draw: Mask,
@@ -454,8 +454,37 @@ impl Plugin for MapVisibilityPlugin {
                     .chain()
                     .before(VisibilitySystems::VisibilityPropagate),
             )
-            .add_systems(PostUpdate, write_visibility.in_set(VisibilityWrite));
+            .add_systems(
+                PostUpdate,
+                write_visibility
+                    .in_set(VisibilityWrite)
+                    .run_if(visibility_changed),
+            );
     }
+}
+
+type VisibilityChanges = Or<(
+    Changed<VisibilityPart>,
+    Changed<Visibility>,
+    Without<VisibilityDecision>,
+)>;
+
+fn visibility_changed(
+    blocks: Res<VisibilityBlocks>,
+    authored: Res<AuthoredVisibility>,
+    arena: Res<ArenaVisibility>,
+    story: Option<Res<super::story::MapStory>>,
+    mut had_story: Local<bool>,
+    parts: Query<(&VisibilityPart, &Visibility), VisibilityChanges>,
+) -> bool {
+    let story_changed =
+        story.as_ref().is_some_and(|s| s.is_changed()) || story.is_some() != *had_story;
+    *had_story = story.is_some();
+    blocks.is_changed()
+        || authored.is_changed()
+        || arena.is_changed()
+        || story_changed
+        || !parts.is_empty()
 }
 
 fn write_visibility(
@@ -588,6 +617,96 @@ mod tests {
             effective: source.effective(kind),
             source,
         }
+    }
+
+    #[test]
+    fn visibility_waits_for_input_changes_and_includes_new_parts() {
+        #[derive(Resource, Default)]
+        struct Runs(usize);
+        let mut app = App::new();
+        let row = part("MapPiece");
+        app.init_resource::<AuthoredVisibility>()
+            .init_resource::<ArenaVisibility>()
+            .init_resource::<Runs>()
+            .insert_resource(VisibilityBlocks(BTreeMap::from([(
+                row.map.clone(),
+                BlockVisibility {
+                    resident: true,
+                    ready: true,
+                    groups_off: true,
+                    ..default()
+                },
+            )])))
+            .add_systems(
+                Update,
+                (write_visibility, |mut runs: ResMut<Runs>| runs.0 += 1)
+                    .chain()
+                    .run_if(visibility_changed),
+            );
+        let first = app
+            .world_mut()
+            .spawn((row.clone(), Visibility::Hidden))
+            .id();
+        for _ in 0..3 {
+            app.update();
+        }
+        let runs = app.world().resource::<Runs>().0;
+        app.update();
+        assert_eq!(app.world().resource::<Runs>().0, runs);
+        app.world_mut()
+            .resource_mut::<ArenaVisibility>()
+            .maps
+            .insert(
+                row.map.clone(),
+                EventState {
+                    by_name: BTreeMap::from([(row.name.clone(), false)]),
+                    ..default()
+                },
+            );
+        app.update();
+        assert_eq!(
+            *app.world().get::<Visibility>(first).unwrap(),
+            Visibility::Hidden
+        );
+        let mut late = row.clone();
+        late.name = "late".into();
+        let second = app.world_mut().spawn((late, Visibility::Hidden)).id();
+        app.update();
+        assert_eq!(
+            *app.world().get::<Visibility>(second).unwrap(),
+            Visibility::Inherited
+        );
+        app.world_mut()
+            .get_mut::<VisibilityPart>(first)
+            .unwrap()
+            .name = "renamed".into();
+        app.update();
+        assert_eq!(
+            *app.world().get::<Visibility>(first).unwrap(),
+            Visibility::Inherited
+        );
+        app.world_mut()
+            .resource_mut::<VisibilityBlocks>()
+            .0
+            .get_mut(&row.map)
+            .unwrap()
+            .ready = false;
+        app.update();
+        for entity in [first, second] {
+            assert_eq!(
+                *app.world().get::<Visibility>(entity).unwrap(),
+                Visibility::Hidden
+            );
+        }
+        // Removing an optional story resource must also invalidate its former selection.
+        app.world_mut()
+            .init_resource::<super::super::story::MapStory>();
+        app.update();
+        let runs = app.world().resource::<Runs>().0;
+        app.world_mut()
+            .remove_resource::<super::super::story::MapStory>();
+        app.update();
+        assert_eq!(app.world().resource::<Runs>().0, runs + 1);
     }
 
     #[test]

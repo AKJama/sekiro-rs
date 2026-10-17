@@ -370,15 +370,124 @@ fn update_lighting(
     };
     let direct = rgb(set.sun_color) * set.sun_lux / std::f32::consts::PI;
     let ambient = rgb(set.ambient) * ambient_light.brightness;
-    for (_, material) in materials.iter_mut() {
-        material.inputs.sun = set.sun_toward.extend(0.);
+    // CloudFog/GroundFog Fwd read FC_DirLightSpc_0 independently of
+    // FC_DirLightCol_0. Diffuse W is not a substitute for SpecColor0 W.
+    let values = [
+        set.sun_toward.extend(0.),
+        direct.extend(0.),
+        set.direct[2] / std::f32::consts::PI,
+        ambient.extend(0.),
+        set.hemi_axis.extend(0.),
+        (set.hemi_delta * ambient_light.brightness).extend(0.),
+    ];
+    // iter_mut marks every visited asset modified, even when no field changes.
+    let changed: Vec<_> = materials
+        .iter()
+        .filter(|(_, material)| {
+            let inputs = &material.inputs;
+            inputs.control.w != crate::lighting::ENV_PER_UNIT
+                || [
+                    inputs.sun,
+                    inputs.direct,
+                    inputs.specular,
+                    inputs.ambient,
+                    inputs.hemi_axis,
+                    inputs.hemi_delta,
+                ] != values
+        })
+        .map(|(id, _)| id)
+        .collect();
+    for id in changed {
+        let Some(mut material) = materials.get_mut(id) else {
+            continue;
+        };
+        [
+            material.inputs.sun,
+            material.inputs.direct,
+            material.inputs.specular,
+            material.inputs.ambient,
+            material.inputs.hemi_axis,
+            material.inputs.hemi_delta,
+        ] = values;
         material.inputs.control.w = crate::lighting::ENV_PER_UNIT;
-        material.inputs.direct = direct.extend(0.);
-        // CloudFog/GroundFog Fwd read FC_DirLightSpc_0 independently of
-        // FC_DirLightCol_0. Diffuse W is not a substitute for SpecColor0 W.
-        material.inputs.specular = set.direct[2] / std::f32::consts::PI;
-        material.inputs.ambient = ambient.extend(0.);
-        material.inputs.hemi_axis = set.hemi_axis.extend(0.);
-        material.inputs.hemi_delta = (set.hemi_delta * ambient_light.brightness).extend(0.);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fog_materials_upload_only_for_new_materials_or_changed_lighting() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<FogMaterial>()
+            .insert_resource(crate::lighting::MapLighting {
+                gparam: Default::default(),
+                hour: 12.,
+                light_set: 0,
+                applied: None,
+                source: String::new(),
+            })
+            .init_resource::<bevy::light::GlobalAmbientLight>()
+            .add_systems(Update, update_lighting);
+        let material = || FogMaterial {
+            inputs: inputs(&serde_json::json!({})),
+            mask: default(),
+            flow: default(),
+            ground: default(),
+            height: default(),
+            irradiance: default(),
+            voxels: None,
+            diffuse: None,
+            double_sided: false,
+            diagnostic: false,
+        };
+        let modified = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<Messages<AssetEvent<FogMaterial>>>()
+                .drain()
+                .filter(|e| matches!(e, AssetEvent::Modified { .. }))
+                .count()
+        };
+        let first = app
+            .world_mut()
+            .resource_mut::<Assets<FogMaterial>>()
+            .add(material());
+        app.update();
+        assert_eq!(modified(&mut app), 1);
+        app.update();
+        assert_eq!(modified(&mut app), 0);
+        let second = app
+            .world_mut()
+            .resource_mut::<Assets<FogMaterial>>()
+            .add(material());
+        app.update();
+        assert_eq!(modified(&mut app), 1);
+        let before = app
+            .world()
+            .resource::<Assets<FogMaterial>>()
+            .get(&first)
+            .unwrap()
+            .inputs
+            .ambient;
+        app.world_mut()
+            .resource_mut::<bevy::light::GlobalAmbientLight>()
+            .brightness *= 2.;
+        app.update();
+        assert_eq!(modified(&mut app), 2);
+        for handle in [&first, &second] {
+            assert_eq!(
+                app.world()
+                    .resource::<Assets<FogMaterial>>()
+                    .get(handle)
+                    .unwrap()
+                    .inputs
+                    .ambient,
+                before * 2.,
+            );
+        }
+        app.update();
+        assert_eq!(modified(&mut app), 0);
     }
 }

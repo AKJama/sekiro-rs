@@ -1520,6 +1520,26 @@ fn cycle_groups(keys: Res<ButtonInput<KeyCode>>, mut groups: ResMut<Groups>) {
     }
 }
 
+/// Reuse the row index only while the current layout still names the selected collision there.
+fn selected_collision_row<'a>(
+    parts: &'a [Value],
+    collision: &str,
+    cached: &mut Option<usize>,
+) -> Option<&'a Value> {
+    *cached = cached
+        .filter(|&i| {
+            parts
+                .get(i)
+                .is_some_and(|p| p["name"].as_str() == Some(collision))
+        })
+        .or_else(|| {
+            parts
+                .iter()
+                .position(|p| p["name"].as_str() == Some(collision))
+        });
+    cached.and_then(|i| parts.get(i))
+}
+
 /// Finds the collision part under the camera (the nearest surface below, else the nearest
 /// above) and takes its groups and lighting configuration whenever the focus moves.
 #[allow(clippy::too_many_arguments)]
@@ -1532,13 +1552,14 @@ fn pick_groups(
     mut selection: Option<ResMut<crate::lighting_selection::LightingSelection>>,
     focus: Query<&Transform, With<MapFocus>>,
     connected: Option<Res<world::MapWorld>>,
+    mut selected_row: Local<Option<usize>>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("pick_groups");
     if let Some(world) = connected {
         if let Some((block, collision)) = &world.selected
             && let Some(row) = world.blocks[block].json["parts"]
                 .as_array()
-                .and_then(|parts| parts.iter().find(|p| p["name"].as_str() == Some(collision)))
+                .and_then(|parts| selected_collision_row(parts, collision, &mut selected_row))
             && row["gparam"].is_array()
         {
             let config = gparam_config(row);
@@ -1555,7 +1576,12 @@ fn pick_groups(
                 fog.0 = config[1];
             }
             groups.current = (block == &world.primary)
-                .then(|| groups.parts.iter().position(|p| &p.name == collision))
+                .then(|| {
+                    groups
+                        .current
+                        .filter(|&i| groups.parts.get(i).is_some_and(|p| &p.name == collision))
+                        .or_else(|| groups.parts.iter().position(|p| &p.name == collision))
+                })
                 .flatten();
         }
         return;
@@ -1911,6 +1937,34 @@ pub fn parse_camera(arg: Option<&str>) -> Result<Option<[f32; 5]>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_collision_selection_tracks_names_and_layout_changes() {
+        let mut parts = vec![
+            serde_json::json!({"name": "h0", "gparam": [0, 1, 2, 3]}),
+            serde_json::json!({"name": "h1", "gparam": [4, 5, 6, 7]}),
+        ];
+        let mut cached = None;
+        for name in ["h0", "h0", "h1", "missing", "h0"] {
+            assert_eq!(
+                selected_collision_row(&parts, name, &mut cached),
+                parts.iter().find(|p| p["name"] == name),
+            );
+        }
+        parts.swap(0, 1);
+        assert_eq!(
+            selected_collision_row(&parts, "h0", &mut cached),
+            Some(&parts[1])
+        );
+        // Another block or a replaced layout can reuse the name with different configuration.
+        parts[1]["gparam"] = serde_json::json!([8, 9, 10, 11]);
+        assert_eq!(
+            gparam_config(selected_collision_row(&parts, "h0", &mut cached).unwrap()),
+            [8, 9, 10, 11],
+        );
+        parts.clear();
+        assert!(selected_collision_row(&parts, "h0", &mut cached).is_none());
+    }
 
     /// #46: the map's far plane must not reset a camera's field of view (it forced 60 degrees on
     /// Wolf's 43-degree follow camera).
