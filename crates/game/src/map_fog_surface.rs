@@ -23,6 +23,12 @@ struct Inputs {
     vectors: [Vec4; 18],
     uv: [Vec4; 4],
     control: Vec4,
+    lighting: LightingInputs,
+}
+
+// Six contiguous vec4s retain the shader's existing uniform layout.
+#[derive(Clone, Copy, Debug, PartialEq, ShaderType)]
+struct LightingInputs {
     sun: Vec4,
     direct: Vec4,
     specular: Vec4,
@@ -217,12 +223,14 @@ fn inputs(data: &Value) -> Inputs {
             0.,
             0.,
         ),
-        sun: Vec4::Y,
-        direct: Vec4::ZERO,
-        specular: Vec4::ZERO,
-        ambient: Vec4::ZERO,
-        hemi_axis: Vec4::ZERO,
-        hemi_delta: Vec4::ZERO,
+        lighting: LightingInputs {
+            sun: Vec4::Y,
+            direct: Vec4::ZERO,
+            specular: Vec4::ZERO,
+            ambient: Vec4::ZERO,
+            hemi_axis: Vec4::ZERO,
+            hemi_delta: Vec4::ZERO,
+        },
     };
     // float2 and float3 slots overlap numerically, but are separate native registers.
     for i in 0..6 {
@@ -362,6 +370,11 @@ fn update_lighting(
     ambient_light: Res<bevy::light::GlobalAmbientLight>,
     mut materials: ResMut<Assets<FogMaterial>>,
 ) {
+    // Asset changes include same-frame additions, before AssetEvent::Added is published.
+    // Do not scan settled materials just because the schedule runs again.
+    if !lighting.is_changed() && !ambient_light.is_changed() && !materials.is_changed() {
+        return;
+    }
     let set =
         crate::lighting::LightSet::from_gparam(&lighting.gparam, lighting.light_set, lighting.hour);
     let rgb = |color: Color| {
@@ -372,28 +385,20 @@ fn update_lighting(
     let ambient = rgb(set.ambient) * ambient_light.brightness;
     // CloudFog/GroundFog Fwd read FC_DirLightSpc_0 independently of
     // FC_DirLightCol_0. Diffuse W is not a substitute for SpecColor0 W.
-    let values = [
-        set.sun_toward.extend(0.),
-        direct.extend(0.),
-        set.direct[2] / std::f32::consts::PI,
-        ambient.extend(0.),
-        set.hemi_axis.extend(0.),
-        (set.hemi_delta * ambient_light.brightness).extend(0.),
-    ];
+    let values = LightingInputs {
+        sun: set.sun_toward.extend(0.),
+        direct: direct.extend(0.),
+        specular: set.direct[2] / std::f32::consts::PI,
+        ambient: ambient.extend(0.),
+        hemi_axis: set.hemi_axis.extend(0.),
+        hemi_delta: (set.hemi_delta * ambient_light.brightness).extend(0.),
+    };
     // iter_mut marks every visited asset modified, even when no field changes.
     let changed: Vec<_> = materials
         .iter()
         .filter(|(_, material)| {
             let inputs = &material.inputs;
-            inputs.control.w != crate::lighting::ENV_PER_UNIT
-                || [
-                    inputs.sun,
-                    inputs.direct,
-                    inputs.specular,
-                    inputs.ambient,
-                    inputs.hemi_axis,
-                    inputs.hemi_delta,
-                ] != values
+            inputs.control.w != crate::lighting::ENV_PER_UNIT || inputs.lighting != values
         })
         .map(|(id, _)| id)
         .collect();
@@ -401,14 +406,7 @@ fn update_lighting(
         let Some(mut material) = materials.get_mut(id) else {
             continue;
         };
-        [
-            material.inputs.sun,
-            material.inputs.direct,
-            material.inputs.specular,
-            material.inputs.ambient,
-            material.inputs.hemi_axis,
-            material.inputs.hemi_delta,
-        ] = values;
+        material.inputs.lighting = values;
         material.inputs.control.w = crate::lighting::ENV_PER_UNIT;
     }
 }
@@ -470,6 +468,7 @@ mod tests {
             .get(&first)
             .unwrap()
             .inputs
+            .lighting
             .ambient;
         app.world_mut()
             .resource_mut::<bevy::light::GlobalAmbientLight>()
@@ -483,6 +482,7 @@ mod tests {
                     .get(handle)
                     .unwrap()
                     .inputs
+                    .lighting
                     .ambient,
                 before * 2.,
             );

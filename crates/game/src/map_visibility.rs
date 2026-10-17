@@ -458,7 +458,7 @@ impl Plugin for MapVisibilityPlugin {
                 PostUpdate,
                 write_visibility
                     .in_set(VisibilityWrite)
-                    .run_if(visibility_changed),
+                    .run_if(visibility_changed()),
             );
     }
 }
@@ -469,22 +469,17 @@ type VisibilityChanges = Or<(
     Without<VisibilityDecision>,
 )>;
 
-fn visibility_changed(
-    blocks: Res<VisibilityBlocks>,
-    authored: Res<AuthoredVisibility>,
-    arena: Res<ArenaVisibility>,
-    story: Option<Res<super::story::MapStory>>,
-    mut had_story: Local<bool>,
-    parts: Query<(&VisibilityPart, &Visibility), VisibilityChanges>,
-) -> bool {
-    let story_changed =
-        story.as_ref().is_some_and(|s| s.is_changed()) || story.is_some() != *had_story;
-    *had_story = story.is_some();
-    blocks.is_changed()
-        || authored.is_changed()
-        || arena.is_changed()
-        || story_changed
-        || !parts.is_empty()
+// Keep this input list in sync with write_visibility below.
+fn visibility_changed() -> impl SystemCondition<()> {
+    IntoSystem::into_system(
+        resource_changed::<VisibilityBlocks>
+            .or_eager(resource_changed::<AuthoredVisibility>)
+            .or_eager(resource_changed::<ArenaVisibility>)
+            .or_eager(resource_changed_or_removed::<super::story::MapStory>)
+            .or_eager(
+                |parts: Query<(&VisibilityPart, &Visibility), VisibilityChanges>| !parts.is_empty(),
+            ),
+    )
 }
 
 fn write_visibility(
@@ -501,9 +496,14 @@ fn write_visibility(
         Option<&VisibilityDecision>,
     )>,
 ) {
-    let debug = std::env::args().any(|a| a == "--visibility-debug");
-    let args: Vec<_> = std::env::args().collect();
-    let debug_part = crate::arg_value(&args, "--visibility-part");
+    static DEBUG: std::sync::OnceLock<(bool, Option<String>)> = std::sync::OnceLock::new();
+    let (debug, debug_part) = DEBUG.get_or_init(|| {
+        let args: Vec<_> = std::env::args().collect();
+        (
+            args.iter().any(|a| a == "--visibility-debug"),
+            crate::arg_value(&args, "--visibility-part"),
+        )
+    });
     for (entity, part, mut visibility, previous) in &mut parts {
         let default_block = BlockVisibility::default();
         let block = blocks.0.get(&part.map).unwrap_or(&default_block);
@@ -539,7 +539,7 @@ fn write_visibility(
             }
         }
         if previous != Some(&decision) {
-            if debug {
+            if *debug {
                 info!(map = part.map, part = part.name, ?decision, source = ?part.source,
                     effective = ?part.effective, collisions = ?block.request.sources,
                     normal = ?block.request.normal, additional = ?block.request.additional_backread,
@@ -641,7 +641,7 @@ mod tests {
                 Update,
                 (write_visibility, |mut runs: ResMut<Runs>| runs.0 += 1)
                     .chain()
-                    .run_if(visibility_changed),
+                    .run_if(visibility_changed()),
             );
         let first = app
             .world_mut()

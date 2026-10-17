@@ -75,12 +75,25 @@ fn visibility(
 ) {
     // Managed roots receive one combined decision in Job E's writer.
     // Replace the snapshot even when empty, so restarts release the previous override.
-    let next = EventState {
-        by_name: Default::default(),
-        by_entity: scene.0.enabled.iter().map(|(&id, &on)| (id, on)).collect(),
-    };
-    if arena.maps.get(&map.0) != Some(&next) {
-        arena.maps.insert(map.0.clone(), next);
+    let unchanged = arena.maps.get(&map.0).is_some_and(|state| {
+        state.by_name.is_empty()
+            && state.by_entity.len() == scene.0.enabled.len()
+            && scene
+                .0
+                .enabled
+                .iter()
+                .all(|(id, on)| state.by_entity.get(id) == Some(on))
+    });
+    if !unchanged {
+        let next = EventState {
+            by_name: Default::default(),
+            by_entity: scene.0.enabled.iter().map(|(&id, &on)| (id, on)).collect(),
+        };
+        crate::change::insert_if_neq(
+            arena.reborrow().map_unchanged(|a| &mut a.maps),
+            map.0.clone(),
+            next,
+        );
     }
     for (part, mut visibility) in &mut parts {
         let on = scene
@@ -89,11 +102,11 @@ fn visibility(
             .get(&part.entity)
             .or_else(|| part.groups.iter().find_map(|g| scene.0.enabled.get(g)));
         if let Some(&on) = on {
-            *visibility = if on {
+            visibility.set_if_neq(if on {
                 Visibility::Inherited
             } else {
                 Visibility::Hidden
-            };
+            });
         }
     }
 }

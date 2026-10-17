@@ -220,11 +220,19 @@ pub(crate) struct DetailPart {
     spawned: [bool; 3],
     /// Whether the slots' meshes carry crossfade coverage tags that must be cleared.
     fading: bool,
-    applied: Option<([f32; 3], [bool; 3])>,
+    applied: Option<DetailApplied>,
+}
+
+#[derive(PartialEq)]
+struct DetailApplied {
+    weights: [f32; 3],
+    ready: [bool; 3],
+    slots: [Option<Entity>; 3],
+    stream: Option<usize>,
 }
 
 /// Submission weight retained for the eventual retail coverage shader.
-#[derive(Component)]
+#[derive(Component, PartialEq)]
 pub(crate) struct DetailWeight(pub(crate) f32);
 
 fn detail_levels(path: &Path) -> Result<[bool; 3]> {
@@ -834,27 +842,52 @@ pub(crate) fn publish(
                 )
             })
             .collect();
-        if authored.maps != next {
-            authored.maps = next;
-        }
+        crate::change::set(&mut authored.reborrow(), |a| &mut a.maps, next);
+    }
+    if !world.is_changed() && !groups.is_changed() && !blocks.is_added() {
+        return;
     }
     for (id, block) in &world.blocks {
-        let mut request = world.requests.get(id).cloned().unwrap_or_default();
-        union(&mut request.normal, block.normal);
-        union(&mut request.additional_backread, block.additional);
+        let empty = visibility::BlockRequest::default();
+        let request = world.requests.get(id).unwrap_or(&empty);
+        let mut normal = request.normal;
+        let mut additional_backread = request.additional_backread;
+        union(&mut normal, block.normal);
+        union(&mut additional_backread, block.additional);
+        let groups_off = groups.mode == GroupMode::Off;
+        let resident =
+            matches!(block.state, RequestState::Ready | RequestState::Requested) || groups_off;
+        // Streaming can mark MapWorld changed without changing this block's visibility.
+        // Compare the source list by reference before allocating a new snapshot.
+        if blocks.0.get(id).is_some_and(|current| {
+            current.request.normal == normal
+                && current.request.additional_backread == additional_backread
+                && current.request.sources == request.sources
+                && current.draw == block.normal
+                && current.resident == resident
+                && current.ready
+                && current.groups_off == groups_off
+        }) {
+            continue;
+        }
         let next = visibility::BlockVisibility {
-            request,
+            request: visibility::BlockRequest {
+                normal,
+                additional_backread,
+                sources: request.sources.clone(),
+            },
             draw: block.normal,
             // A demanded block draws while it streams: each part appears once its own
             // scene has spawned, so the area around the player never waits for the rest.
-            resident: matches!(block.state, RequestState::Ready | RequestState::Requested)
-                || groups.mode == GroupMode::Off,
+            resident,
             ready: true,
-            groups_off: groups.mode == GroupMode::Off,
+            groups_off,
         };
-        if blocks.0.get(id) != Some(&next) {
-            blocks.0.insert(id.clone(), next);
-        }
+        crate::change::insert_if_neq(
+            blocks.reborrow().map_unchanged(|b| &mut b.0),
+            id.clone(),
+            next,
+        );
     }
 }
 
@@ -1182,9 +1215,7 @@ pub(crate) fn update_detail(
         } else {
             state.update(rule, scales, distance, time.delta_secs(), available)
         };
-        if part.state != state {
-            part.state = state;
-        }
+        crate::change::set(&mut part, |p| &mut p.state, state);
         let selected = dominant(weights);
         // Every level with weight gets its scene, so a crossfade's incoming level exists before
         // it dominates. Every level lives in the same GLB, so once the stream has requested it
@@ -1218,10 +1249,16 @@ pub(crate) fn update_detail(
         });
         // Settled levels still check distance and scene readiness, but need no slot writes.
         // Finish clearing a fade's mesh tags before taking this path.
-        if !part.fading && part.applied == Some((weights, ready)) {
+        let applied = DetailApplied {
+            weights,
+            ready,
+            slots: part.slots,
+            stream: part.stream,
+        };
+        if !part.fading && part.applied.as_ref() == Some(&applied) {
             continue;
         }
-        part.applied = Some((weights, ready));
+        part.applied = Some(applied);
         if part.shown != selected && ready[selected] {
             part.shown = selected;
         }
@@ -1245,8 +1282,7 @@ pub(crate) fn update_detail(
                 } else {
                     Visibility::Hidden
                 };
-                if *visibility != desired {
-                    *visibility = desired;
+                if visibility.set_if_neq(desired) {
                     // Only parts near Wolf, where a switch can be seen, keep the log short.
                     let from_wolf = wolf
                         .filter(|_| debug)
@@ -1272,9 +1308,7 @@ pub(crate) fn update_detail(
                         );
                     }
                 }
-                if weight.0 != weights[level] {
-                    weight.0 = weights[level];
-                }
+                weight.set_if_neq(DetailWeight(weights[level]));
             }
             if fading || part.fading {
                 // Write only changed tags, so a mesh is re-extracted only when its coverage moves.
@@ -1489,6 +1523,18 @@ mod tests {
             Visibility::Inherited
         );
         assert_eq!(app.world().get::<DetailWeight>(second).unwrap().0, 1.);
+        // Replacing a ready slot must initialize it even when weights/readiness stay equal.
+        let replacement = app
+            .world_mut()
+            .spawn((Visibility::Hidden, DetailWeight(0.)))
+            .id();
+        app.world_mut().get_mut::<DetailPart>(part).unwrap().slots[1] = Some(replacement);
+        app.update();
+        assert_eq!(
+            *app.world().get::<Visibility>(replacement).unwrap(),
+            Visibility::Inherited
+        );
+        assert_eq!(app.world().get::<DetailWeight>(replacement).unwrap().0, 1.);
         let tick = app
             .world()
             .entity(second)

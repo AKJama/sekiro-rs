@@ -383,7 +383,8 @@ pub fn scale(name: &str) -> f32 {
 
 /// Diagnostic `SEKIRO_LIGHT_SET=<id>` forces one LightSet row for every collision (unset: authored).
 pub fn forced_light_set() -> Option<i32> {
-    std::env::var("SEKIRO_LIGHT_SET").ok()?.parse().ok()
+    static FORCED: std::sync::OnceLock<Option<i32>> = std::sync::OnceLock::new();
+    *FORCED.get_or_init(|| std::env::var("SEKIRO_LIGHT_SET").ok()?.parse().ok())
 }
 
 /// Bevy lux per native scene unit, traced from the native accumulation arithmetic.

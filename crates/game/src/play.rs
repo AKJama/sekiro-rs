@@ -858,37 +858,12 @@ fn vacant_enemy_slot(duel: &mut Duel) {
     duel.enemy_active = false;
     duel.force_act = None;
     duel.events = None;
-    duel.rules.fighters[ENEMY].vitality.hp = 0;
-    duel.rules.fighters[ENEMY].vitality.deathblows_left = 0;
     duel.player.lock_target = None;
     duel.player.aim_candidates.clear();
     duel.enemy.tae_runtime.frame = Default::default();
     if !duel.rules.fighters[WOLF].dead() {
         duel.respawn_in = None;
     }
-}
-
-fn advance_duel(duel: &mut Duel, frame: &InputFrame, dt: f32, enemy_present: bool) -> DuelReport {
-    if enemy_present {
-        duel.enemy_present = true;
-        return duel.step(frame, dt);
-    }
-    // A player-death restart recreates both slots. Vacate the opponent before that tick's
-    // lock-on, collision and hit checks, and preserve the normal player restart report.
-    let respawned = duel.rules.fighters[WOLF].dead()
-        && duel.respawn_in.is_some_and(|remaining| remaining <= dt)
-        && duel.reset().is_ok();
-    vacant_enemy_slot(duel);
-    let mut report = duel.step(frame, dt);
-    vacant_enemy_slot(duel);
-    report.respawned |= respawned;
-    report.enemy = Default::default();
-    report.hits.clear();
-    report.perilous = None;
-    report.locked_on = false;
-    report.deathblow = Default::default();
-    report.jump_counter = false;
-    report
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1354,8 +1329,7 @@ fn simulate(
     }
     sim.duel.player.wire.view_pitch = orbit.pitch;
     let cinematic_applied = sim.duel.cinematic.as_ref().is_some_and(|c| c.applied);
-    let enemy_present = sim.enemy_present;
-    let mut report = advance_duel(&mut sim.duel, &frame, dt, enemy_present);
+    let mut report = sim.duel.step(&frame, dt);
     if std::env::var_os("PF_RESPAWN_PROBE").is_some() && sim.step % 60 == 30 {
         report.respawned = true;
     }
@@ -2457,6 +2431,7 @@ mod tests {
         // A hidden passive opponent here would push Wolf, be a target and receive attacks.
         duel.enemy.body.position = start;
         duel.force_act = Some(3000);
+        vacant_enemy_slot(&mut duel);
         let dt = 1. / STEP_HZ as f32;
         for step in 0..480 {
             let frame = InputFrame {
@@ -2468,7 +2443,7 @@ mod tests {
                 },
                 ..default()
             };
-            let report = advance_duel(&mut duel, &frame, dt, false);
+            let report = duel.step(&frame, dt);
             assert!(duel.player.lock_target.is_none());
             assert!(duel.player.aim_candidates.is_empty());
             assert!(!report.locked_on && !report.respawned);
@@ -2491,7 +2466,7 @@ mod tests {
         duel.rules.fighters[WOLF].vitality.hp = 0;
         let mut respawned = false;
         for _ in 0..(STEP_HZ as f32 * (sekiro_sim::duel::RESPAWN_DELAY + 1.)) as usize {
-            let report = advance_duel(&mut duel, &InputFrame::default(), dt, false);
+            let report = duel.step(&InputFrame::default(), dt);
             respawned |= report.respawned;
             assert!(duel.player.lock_target.is_none());
             assert!(duel.player.aim_candidates.is_empty());

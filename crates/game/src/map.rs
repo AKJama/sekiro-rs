@@ -1521,22 +1521,22 @@ fn cycle_groups(keys: Res<ButtonInput<KeyCode>>, mut groups: ResMut<Groups>) {
 }
 
 /// Reuse the row index only while the current layout still names the selected collision there.
+fn cached_index<T>(
+    parts: &[T],
+    cached: Option<usize>,
+    matches: impl Fn(&T) -> bool,
+) -> Option<usize> {
+    cached
+        .filter(|&i| parts.get(i).is_some_and(&matches))
+        .or_else(|| parts.iter().position(matches))
+}
+
 fn selected_collision_row<'a>(
     parts: &'a [Value],
     collision: &str,
     cached: &mut Option<usize>,
 ) -> Option<&'a Value> {
-    *cached = cached
-        .filter(|&i| {
-            parts
-                .get(i)
-                .is_some_and(|p| p["name"].as_str() == Some(collision))
-        })
-        .or_else(|| {
-            parts
-                .iter()
-                .position(|p| p["name"].as_str() == Some(collision))
-        });
+    *cached = cached_index(parts, *cached, |p| p["name"].as_str() == Some(collision));
     cached.and_then(|i| parts.get(i))
 }
 
@@ -1563,26 +1563,31 @@ fn pick_groups(
             && row["gparam"].is_array()
         {
             let config = gparam_config(row);
-            region.enter(config);
+            let mut next_region = *region;
+            next_region.enter(config);
+            region.set_if_neq(next_region);
             if block == &world.primary
                 && let Some(selection) = selection.as_mut()
             {
-                selection.set_overlays(scene_layers(&row["scene_gparam"]));
+                crate::lighting_selection::LightingSelection::set_overlays(
+                    &mut selection.reborrow(),
+                    scene_layers(&row["scene_gparam"]),
+                );
             }
             if config[0] >= 0 {
-                lighting.light_set = crate::lighting::forced_light_set().unwrap_or(config[0]);
+                crate::change::set(
+                    &mut lighting.reborrow(),
+                    |l| &mut l.light_set,
+                    crate::lighting::forced_light_set().unwrap_or(config[0]),
+                );
             }
             if config[1] >= 0 {
-                fog.0 = config[1];
+                crate::change::set(&mut fog.reborrow(), |f| &mut f.0, config[1]);
             }
-            groups.current = (block == &world.primary)
-                .then(|| {
-                    groups
-                        .current
-                        .filter(|&i| groups.parts.get(i).is_some_and(|p| &p.name == collision))
-                        .or_else(|| groups.parts.iter().position(|p| &p.name == collision))
-                })
+            let current = (block == &world.primary)
+                .then(|| cached_index(&groups.parts, groups.current, |p| &p.name == collision))
                 .flatten();
+            crate::change::set(&mut groups.reborrow(), |g| &mut g.current, current);
         }
         return;
     }
@@ -1620,15 +1625,24 @@ fn pick_groups(
     };
     let light_set = part.light_set;
     if let Some(selection) = selection.as_mut() {
-        selection.set_overlays(part.layers);
+        crate::lighting_selection::LightingSelection::set_overlays(
+            &mut selection.reborrow(),
+            part.layers,
+        );
     }
-    region.enter([light_set, part.fog_set, part.scattering_set, part.env_map]);
+    let mut next_region = *region;
+    next_region.enter([light_set, part.fog_set, part.scattering_set, part.env_map]);
+    region.set_if_neq(next_region);
     if part.fog_set >= 0 {
-        fog.0 = part.fog_set;
+        crate::change::set(&mut fog.reborrow(), |f| &mut f.0, part.fog_set);
     }
-    groups.current = Some(pi);
-    if light_set >= 0 && lighting.light_set != light_set {
-        lighting.light_set = crate::lighting::forced_light_set().unwrap_or(light_set);
+    crate::change::set(&mut groups.reborrow(), |g| &mut g.current, Some(pi));
+    if light_set >= 0 {
+        crate::change::set(
+            &mut lighting.reborrow(),
+            |l| &mut l.light_set,
+            crate::lighting::forced_light_set().unwrap_or(light_set),
+        );
     }
     // A collision with no groups leaves the previous selection in force.
     if g.iter().any(|&w| w != 0) && groups.active != Some(g) {
