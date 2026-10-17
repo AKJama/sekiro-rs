@@ -31,6 +31,7 @@ mod audio;
 mod brain_overlay;
 mod brain_stage;
 mod bullet_fx;
+mod change;
 mod character;
 mod cloth;
 mod combat_hud;

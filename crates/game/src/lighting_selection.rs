@@ -491,8 +491,8 @@ impl LightingSelection {
     }
 
     /// The overlay layers of the collision under the focus; applied on the next `sync_events`.
-    pub fn set_overlays(&mut self, overlays: [i8; 4]) {
-        self.overlays = overlays;
+    pub fn set_overlays(selection: &mut Mut<Self>, overlays: [i8; 4]) {
+        crate::change::set(selection, |s| &mut s.overlays, overlays);
     }
 
     pub fn environment_for_hour(&self, hour: f32) -> u32 {

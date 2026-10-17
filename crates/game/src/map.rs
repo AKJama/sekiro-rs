@@ -1520,6 +1520,26 @@ fn cycle_groups(keys: Res<ButtonInput<KeyCode>>, mut groups: ResMut<Groups>) {
     }
 }
 
+/// Reuse the row index only while the current layout still names the selected collision there.
+fn cached_index<T>(
+    parts: &[T],
+    cached: Option<usize>,
+    matches: impl Fn(&T) -> bool,
+) -> Option<usize> {
+    cached
+        .filter(|&i| parts.get(i).is_some_and(&matches))
+        .or_else(|| parts.iter().position(matches))
+}
+
+fn selected_collision_row<'a>(
+    parts: &'a [Value],
+    collision: &str,
+    cached: &mut Option<usize>,
+) -> Option<&'a Value> {
+    *cached = cached_index(parts, *cached, |p| p["name"].as_str() == Some(collision));
+    cached.and_then(|i| parts.get(i))
+}
+
 /// Finds the collision part under the camera (the nearest surface below, else the nearest
 /// above) and takes its groups and lighting configuration whenever the focus moves.
 #[allow(clippy::too_many_arguments)]
@@ -1532,31 +1552,42 @@ fn pick_groups(
     mut selection: Option<ResMut<crate::lighting_selection::LightingSelection>>,
     focus: Query<&Transform, With<MapFocus>>,
     connected: Option<Res<world::MapWorld>>,
+    mut selected_row: Local<Option<usize>>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("pick_groups");
     if let Some(world) = connected {
         if let Some((block, collision)) = &world.selected
             && let Some(row) = world.blocks[block].json["parts"]
                 .as_array()
-                .and_then(|parts| parts.iter().find(|p| p["name"].as_str() == Some(collision)))
+                .and_then(|parts| selected_collision_row(parts, collision, &mut selected_row))
             && row["gparam"].is_array()
         {
             let config = gparam_config(row);
-            region.enter(config);
+            let mut next_region = *region;
+            next_region.enter(config);
+            region.set_if_neq(next_region);
             if block == &world.primary
                 && let Some(selection) = selection.as_mut()
             {
-                selection.set_overlays(scene_layers(&row["scene_gparam"]));
+                crate::lighting_selection::LightingSelection::set_overlays(
+                    &mut selection.reborrow(),
+                    scene_layers(&row["scene_gparam"]),
+                );
             }
             if config[0] >= 0 {
-                lighting.light_set = crate::lighting::forced_light_set().unwrap_or(config[0]);
+                crate::change::set(
+                    &mut lighting.reborrow(),
+                    |l| &mut l.light_set,
+                    crate::lighting::forced_light_set().unwrap_or(config[0]),
+                );
             }
             if config[1] >= 0 {
-                fog.0 = config[1];
+                crate::change::set(&mut fog.reborrow(), |f| &mut f.0, config[1]);
             }
-            groups.current = (block == &world.primary)
-                .then(|| groups.parts.iter().position(|p| &p.name == collision))
+            let current = (block == &world.primary)
+                .then(|| cached_index(&groups.parts, groups.current, |p| &p.name == collision))
                 .flatten();
+            crate::change::set(&mut groups.reborrow(), |g| &mut g.current, current);
         }
         return;
     }
@@ -1594,15 +1625,24 @@ fn pick_groups(
     };
     let light_set = part.light_set;
     if let Some(selection) = selection.as_mut() {
-        selection.set_overlays(part.layers);
+        crate::lighting_selection::LightingSelection::set_overlays(
+            &mut selection.reborrow(),
+            part.layers,
+        );
     }
-    region.enter([light_set, part.fog_set, part.scattering_set, part.env_map]);
+    let mut next_region = *region;
+    next_region.enter([light_set, part.fog_set, part.scattering_set, part.env_map]);
+    region.set_if_neq(next_region);
     if part.fog_set >= 0 {
-        fog.0 = part.fog_set;
+        crate::change::set(&mut fog.reborrow(), |f| &mut f.0, part.fog_set);
     }
-    groups.current = Some(pi);
-    if light_set >= 0 && lighting.light_set != light_set {
-        lighting.light_set = crate::lighting::forced_light_set().unwrap_or(light_set);
+    crate::change::set(&mut groups.reborrow(), |g| &mut g.current, Some(pi));
+    if light_set >= 0 {
+        crate::change::set(
+            &mut lighting.reborrow(),
+            |l| &mut l.light_set,
+            crate::lighting::forced_light_set().unwrap_or(light_set),
+        );
     }
     // A collision with no groups leaves the previous selection in force.
     if g.iter().any(|&w| w != 0) && groups.active != Some(g) {
@@ -1911,6 +1951,34 @@ pub fn parse_camera(arg: Option<&str>) -> Result<Option<[f32; 5]>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_collision_selection_tracks_names_and_layout_changes() {
+        let mut parts = vec![
+            serde_json::json!({"name": "h0", "gparam": [0, 1, 2, 3]}),
+            serde_json::json!({"name": "h1", "gparam": [4, 5, 6, 7]}),
+        ];
+        let mut cached = None;
+        for name in ["h0", "h0", "h1", "missing", "h0"] {
+            assert_eq!(
+                selected_collision_row(&parts, name, &mut cached),
+                parts.iter().find(|p| p["name"] == name),
+            );
+        }
+        parts.swap(0, 1);
+        assert_eq!(
+            selected_collision_row(&parts, "h0", &mut cached),
+            Some(&parts[1])
+        );
+        // Another block or a replaced layout can reuse the name with different configuration.
+        parts[1]["gparam"] = serde_json::json!([8, 9, 10, 11]);
+        assert_eq!(
+            gparam_config(selected_collision_row(&parts, "h0", &mut cached).unwrap()),
+            [8, 9, 10, 11],
+        );
+        parts.clear();
+        assert!(selected_collision_row(&parts, "h0", &mut cached).is_none());
+    }
 
     /// #46: the map's far plane must not reset a camera's field of view (it forced 60 degrees on
     /// Wolf's 43-degree follow camera).

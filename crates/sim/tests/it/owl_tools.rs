@@ -236,6 +236,41 @@ fn poison_floor_poisons_a_wolf_standing_in_it() {
 }
 
 #[test]
+fn poison_floor_poisons_wolf_without_an_enemy() {
+    let Some(mut duel) = load(4.0, 3030) else {
+        return;
+    };
+    assert!(until_clip(&mut duel, "a000_003030"));
+    for _ in 0..180 {
+        duel.step(&idle(0), DT);
+        if duel
+            .bullets
+            .live
+            .iter()
+            .any(|b| b.def.look == BulletLook::Poison)
+        {
+            break;
+        }
+    }
+    assert!(
+        duel.bullets
+            .live
+            .iter()
+            .any(|b| b.def.look == BulletLook::Poison)
+    );
+    // Leave the authored floor in the world after its owner disappears.
+    duel.enemy_present = false;
+    duel.rules.fighters[1].vitality.hp = 0;
+    let w = watch(&mut duel, 180, idle);
+    assert!(w.effects.contains(&POISONED), "{w:#?}");
+    assert!(
+        w.hits.is_empty(),
+        "effect-only contacts must not cause damage reactions"
+    );
+    assert!(duel.respawn_in.is_none());
+}
+
+#[test]
 fn running_from_the_poison_balls_avoids_the_poison() {
     let Some(mut duel) = load(4.0, 3030) else {
         return;

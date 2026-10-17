@@ -989,11 +989,15 @@ fn configure(
     mut banks: Local<FogBanks>,
 ) {
     let key = (lighting.light_set, lighting.hour);
-    let cache_key = (key.0, key.1, selection.0, lighting.source.clone());
-    if last.as_ref() == Some(&cache_key) && added.is_empty() {
+    let unchanged = last.as_ref().is_some_and(|(set, hour, fog, source)| {
+        (*set, *hour, *fog) == (key.0, key.1, selection.0) && source == &lighting.source
+    });
+    if unchanged && added.is_empty() {
         return;
     }
-    *last = Some(cache_key);
+    if !unchanged {
+        *last = Some((key.0, key.1, selection.0, lighting.source.clone()));
+    }
     // Preserve the independent MSB FogParamID. No separate Fog formula was recovered.
     // Inspect selected authored rows rather than silently aliasing this ID to LightSetID.
     let legacy: Vec<_> = lighting

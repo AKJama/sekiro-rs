@@ -140,7 +140,7 @@ pub fn bounds_distance(view: Vec3, transform: &Transform, min: Vec3, max: Vec3) 
     (local - local.clamp(-half, half)).length()
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LodState {
     pub current: usize,
     target: Option<usize>,

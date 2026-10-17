@@ -18,6 +18,7 @@ use bevy::prelude::*;
 use sekiro_sim::deathblow::MAX_BAR_MARKS;
 
 use crate::brain_overlay::{PANEL_INSET, PANEL_WIDTH};
+use crate::change::set;
 
 /// What the bars show, filled by the simulation's owner every frame.
 #[derive(Resource, Default, Clone)]
@@ -529,12 +530,6 @@ pub fn spawn(commands: &mut Commands) {
                 b.spawn(text(key, 13.0));
             });
     }
-}
-
-/// Writes `value` into the field of `item` that `field` picks, marking the component changed
-/// only when the value differs.
-fn set<T, V: PartialEq>(item: &mut Mut<T>, field: impl FnOnce(&mut T) -> &mut V, value: V) {
-    item.reborrow().map_unchanged(field).set_if_neq(value);
 }
 
 /// Shows (`Inherited`) or hides a part with a visibility.

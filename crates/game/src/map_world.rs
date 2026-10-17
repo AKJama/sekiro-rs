@@ -220,10 +220,19 @@ pub(crate) struct DetailPart {
     spawned: [bool; 3],
     /// Whether the slots' meshes carry crossfade coverage tags that must be cleared.
     fading: bool,
+    applied: Option<DetailApplied>,
+}
+
+#[derive(PartialEq)]
+struct DetailApplied {
+    weights: [f32; 3],
+    ready: [bool; 3],
+    slots: [Option<Entity>; 3],
+    stream: Option<usize>,
 }
 
 /// Submission weight retained for the eventual retail coverage shader.
-#[derive(Component)]
+#[derive(Component, PartialEq)]
 pub(crate) struct DetailWeight(pub(crate) f32);
 
 fn detail_levels(path: &Path) -> Result<[bool; 3]> {
@@ -811,7 +820,7 @@ pub(crate) fn publish(
     mut authored: ResMut<visibility::AuthoredVisibility>,
 ) {
     if story.is_changed() {
-        authored.maps = story
+        let next = story
             .maps
             .iter()
             .map(|(id, map)| {
@@ -833,23 +842,51 @@ pub(crate) fn publish(
                 )
             })
             .collect();
+        crate::change::set(&mut authored.reborrow(), |a| &mut a.maps, next);
+    }
+    if !world.is_changed() && !groups.is_changed() && !blocks.is_added() {
+        return;
     }
     for (id, block) in &world.blocks {
-        let mut request = world.requests.get(id).cloned().unwrap_or_default();
-        union(&mut request.normal, block.normal);
-        union(&mut request.additional_backread, block.additional);
-        blocks.0.insert(
-            id.clone(),
-            visibility::BlockVisibility {
-                request,
-                draw: block.normal,
-                // A demanded block draws while it streams: each part appears once its own
-                // scene has spawned, so the area around the player never waits for the rest.
-                resident: matches!(block.state, RequestState::Ready | RequestState::Requested)
-                    || groups.mode == GroupMode::Off,
-                ready: true,
-                groups_off: groups.mode == GroupMode::Off,
+        let empty = visibility::BlockRequest::default();
+        let request = world.requests.get(id).unwrap_or(&empty);
+        let mut normal = request.normal;
+        let mut additional_backread = request.additional_backread;
+        union(&mut normal, block.normal);
+        union(&mut additional_backread, block.additional);
+        let groups_off = groups.mode == GroupMode::Off;
+        let resident =
+            matches!(block.state, RequestState::Ready | RequestState::Requested) || groups_off;
+        // Streaming can mark MapWorld changed without changing this block's visibility.
+        // Compare the source list by reference before allocating a new snapshot.
+        if blocks.0.get(id).is_some_and(|current| {
+            current.request.normal == normal
+                && current.request.additional_backread == additional_backread
+                && current.request.sources == request.sources
+                && current.draw == block.normal
+                && current.resident == resident
+                && current.ready
+                && current.groups_off == groups_off
+        }) {
+            continue;
+        }
+        let next = visibility::BlockVisibility {
+            request: visibility::BlockRequest {
+                normal,
+                additional_backread,
+                sources: request.sources.clone(),
             },
+            draw: block.normal,
+            // A demanded block draws while it streams: each part appears once its own
+            // scene has spawned, so the area around the player never waits for the rest.
+            resident,
+            ready: true,
+            groups_off,
+        };
+        crate::change::insert_if_neq(
+            blocks.reborrow().map_unchanged(|b| &mut b.0),
+            id.clone(),
+            next,
         );
     }
 }
@@ -1084,6 +1121,7 @@ pub(crate) fn spawn(
                     capture_handle.is_some() && available[level] || level == initial
                 }),
                 fading: false,
+                applied: None,
             });
         } else if let Some(handle) = &capture_handle {
             commands.entity(root).insert(super::capture::CaptureScene {
@@ -1167,6 +1205,7 @@ pub(crate) fn update_detail(
         let rule = part.rule;
         let scales = part.scales;
         let available = part.available;
+        let mut state = part.state;
         let weights = if groups.mode == GroupMode::Off {
             let mut weights = [0.; 3];
             if let Some(first) = available.iter().position(|&v| v) {
@@ -1174,9 +1213,9 @@ pub(crate) fn update_detail(
             }
             weights
         } else {
-            part.state
-                .update(rule, scales, distance, time.delta_secs(), available)
+            state.update(rule, scales, distance, time.delta_secs(), available)
         };
+        crate::change::set(&mut part, |p| &mut p.state, state);
         let selected = dominant(weights);
         // Every level with weight gets its scene, so a crossfade's incoming level exists before
         // it dominates. Every level lives in the same GLB, so once the stream has requested it
@@ -1208,6 +1247,18 @@ pub(crate) fn update_detail(
                         })
                 })
         });
+        // Settled levels still check distance and scene readiness, but need no slot writes.
+        // Finish clearing a fade's mesh tags before taking this path.
+        let applied = DetailApplied {
+            weights,
+            ready,
+            slots: part.slots,
+            stream: part.stream,
+        };
+        if !part.fading && part.applied.as_ref() == Some(&applied) {
+            continue;
+        }
+        part.applied = Some(applied);
         if part.shown != selected && ready[selected] {
             part.shown = selected;
         }
@@ -1231,8 +1282,7 @@ pub(crate) fn update_detail(
                 } else {
                     Visibility::Hidden
                 };
-                if *visibility != desired {
-                    *visibility = desired;
+                if visibility.set_if_neq(desired) {
                     // Only parts near Wolf, where a switch can be seen, keep the log short.
                     let from_wolf = wolf
                         .filter(|_| debug)
@@ -1258,7 +1308,7 @@ pub(crate) fn update_detail(
                         );
                     }
                 }
-                weight.0 = weights[level];
+                weight.set_if_neq(DetailWeight(weights[level]));
             }
             if fading || part.fading {
                 // Write only changed tags, so a mesh is re-extracted only when its coverage moves.
@@ -1346,6 +1396,162 @@ struct HierarchyReported;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn settled_detail_is_untouched_and_resumes_on_distance_or_readiness_change() {
+        let mut app = App::new();
+        app.add_plugins((bevy::app::TaskPoolPlugin::default(), AssetPlugin::default()))
+            .init_resource::<Pending>()
+            .init_resource::<WorldInstanceSpawner>()
+            .init_resource::<Time>()
+            .insert_resource(super::super::Groups {
+                mode: GroupMode::Display,
+                parts: Vec::new(),
+                current: None,
+                active: None,
+                checked_at: None,
+                dirty: false,
+            })
+            .add_systems(Update, update_detail);
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(0.1));
+        let camera = app
+            .world_mut()
+            .spawn((Camera3d::default(), Transform::IDENTITY))
+            .id();
+        let first = app
+            .world_mut()
+            .spawn((Visibility::Inherited, DetailWeight(1.)))
+            .id();
+        let second = app
+            .world_mut()
+            .spawn((Visibility::Hidden, DetailWeight(0.)))
+            .id();
+        let row = json!({
+            "kind": "MapPiece", "name": "test", "entity_id": -1,
+            "entity_group_ids": vec![0; 8], "display_data": {
+                "collision_mask": vec![0; 32], "display_groups": vec![0; 8],
+                "draw_groups": vec![0; 8], "condition1": 0, "condition2": 0
+            }
+        });
+        let part = app
+            .world_mut()
+            .spawn((
+                Transform::IDENTITY,
+                BlockPart {
+                    block: ASHINA[0].into(),
+                    part_index: 0,
+                },
+                visibility::VisibilityPart::from_row(ASHINA[0], &row)
+                    .unwrap()
+                    .unwrap(),
+                DetailPart {
+                    state: Default::default(),
+                    rule: super::super::lod::LodRule {
+                        boundary: [30., 60.],
+                        play: [2., 4.],
+                        crossfade: true,
+                        seconds: 0.2,
+                    },
+                    scales: super::super::lod::LodScales {
+                        crossfade_time: super::super::lod::CROSSFADE_STRETCH,
+                        ..default()
+                    },
+                    min: Vec3::ZERO,
+                    max: Vec3::ZERO,
+                    available: [true, true, false],
+                    slots: [Some(first), None, None],
+                    stream: None,
+                    shown: 0,
+                    spawned: [true, true, false],
+                    fading: false,
+                    applied: None,
+                },
+            ))
+            .id();
+        app.update();
+        let tick = app
+            .world()
+            .entity(first)
+            .get_ref::<DetailWeight>()
+            .unwrap()
+            .last_changed();
+        let part_tick = app
+            .world()
+            .entity(part)
+            .get_ref::<DetailPart>()
+            .unwrap()
+            .last_changed();
+        app.update();
+        assert_eq!(
+            app.world()
+                .entity(first)
+                .get_ref::<DetailWeight>()
+                .unwrap()
+                .last_changed(),
+            tick
+        );
+        assert_eq!(
+            app.world()
+                .entity(part)
+                .get_ref::<DetailPart>()
+                .unwrap()
+                .last_changed(),
+            part_tick
+        );
+        app.world_mut()
+            .get_mut::<Transform>(camera)
+            .unwrap()
+            .translation
+            .x = 40.;
+        for _ in 0..7 {
+            app.update();
+        }
+        assert_eq!(
+            *app.world().get::<Visibility>(first).unwrap(),
+            Visibility::Inherited
+        );
+        assert_eq!(app.world().get::<DetailWeight>(first).unwrap().0, 0.);
+        app.world_mut().get_mut::<DetailPart>(part).unwrap().slots[1] = Some(second);
+        app.update();
+        assert_eq!(
+            *app.world().get::<Visibility>(first).unwrap(),
+            Visibility::Hidden
+        );
+        assert_eq!(
+            *app.world().get::<Visibility>(second).unwrap(),
+            Visibility::Inherited
+        );
+        assert_eq!(app.world().get::<DetailWeight>(second).unwrap().0, 1.);
+        // Replacing a ready slot must initialize it even when weights/readiness stay equal.
+        let replacement = app
+            .world_mut()
+            .spawn((Visibility::Hidden, DetailWeight(0.)))
+            .id();
+        app.world_mut().get_mut::<DetailPart>(part).unwrap().slots[1] = Some(replacement);
+        app.update();
+        assert_eq!(
+            *app.world().get::<Visibility>(replacement).unwrap(),
+            Visibility::Inherited
+        );
+        assert_eq!(app.world().get::<DetailWeight>(replacement).unwrap().0, 1.);
+        let tick = app
+            .world()
+            .entity(second)
+            .get_ref::<DetailWeight>()
+            .unwrap()
+            .last_changed();
+        app.update();
+        assert_eq!(
+            app.world()
+                .entity(second)
+                .get_ref::<DetailWeight>()
+                .unwrap()
+                .last_changed(),
+            tick
+        );
+    }
+
     #[test]
     fn material_layers_resolve_from_the_owning_model_and_preserve_asset_source() {
         for owner in ["m11_00_00_00", "m11_01_00_00", "m13_00_00_00"] {

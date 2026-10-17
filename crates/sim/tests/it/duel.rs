@@ -9,6 +9,51 @@ use std::path::PathBuf;
 const DT: f32 = 1.0 / 60.0;
 
 #[test]
+fn absent_enemy_holds_state_while_passive_and_dead_enemies_advance() {
+    let Some(mut duel) = load_at(4.0) else { return };
+    duel.enemy_active = false;
+    duel.step(&InputFrame::default(), DT);
+    duel.enemy.body.position[1] += 4.;
+    duel.enemy.body.velocity = [1., 2., 3.];
+    duel.enemy.body.grounded = false;
+    let body = duel.enemy.body.clone();
+    let clip = |duel: &Duel| {
+        duel.enemy
+            .behavior
+            .runtime
+            .main_clip()
+            .map(|c| (c.animation.clone(), c.time))
+    };
+    let before = clip(&duel);
+    let state = duel.enemy.state().to_string();
+    duel.enemy_present = false;
+    for _ in 0..10 {
+        let report = duel.step(
+            &InputFrame {
+                buttons: Buttons {
+                    lock_on: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            DT,
+        );
+        assert_eq!(report.enemy.advanced, 0.);
+        assert_eq!(clip(&duel), before);
+        assert_eq!(duel.enemy.state(), state);
+        assert_eq!(duel.enemy.body.position, body.position);
+        assert_eq!(duel.enemy.body.velocity, body.velocity);
+        assert!(!report.locked_on && report.hits.is_empty());
+        assert!(duel.player.aim_candidates.is_empty());
+        assert!(duel.respawn_in.is_none());
+    }
+    duel.enemy_present = true;
+    assert!(duel.step(&InputFrame::default(), DT).enemy.advanced > 0.);
+    duel.rules.fighters[1].vitality.hp = 0;
+    assert!(duel.step(&InputFrame::default(), DT).enemy.advanced > 0.);
+}
+
+#[test]
 fn dead_target_releases_lock_and_camera_relative_movement() {
     let Some(mut duel) = load_at(4.0) else {
         return;

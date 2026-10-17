@@ -183,6 +183,8 @@ pub struct Duel {
     pub rules: CombatRules,
     /// Whether the enemy brain runs (off for scripted player-only tests).
     pub enemy_active: bool,
+    /// Whether the opponent slot participates at all, independently of death or passive AI.
+    pub enemy_present: bool,
     /// The deathblow in progress.
     pub deathblow: Option<Deathblow>,
     /// The enemy's throw on Wolf in progress.
@@ -754,6 +756,7 @@ impl Duel {
             detector: HitDetector::default(),
             rules,
             enemy_active: true,
+            enemy_present: true,
             deathblow: None,
             enemy_throw: None,
             mikiri: None,
@@ -1216,7 +1219,8 @@ impl Duel {
     fn update_lock(&mut self, input: &InputFrame) {
         let pressed = input.buttons.lock_on && !self.lock_button;
         self.lock_button = input.buttons.lock_on;
-        let enemy_alive = !self.rules.fighters[1].dead()
+        let enemy_alive = self.enemy_present
+            && !self.rules.fighters[1].dead()
             && !self.deathblow.as_ref().is_some_and(|d| d.lethal)
             && self.defender_dying == 0;
         // SpEffect stateInfo 350 "cannot be locked on" (the Owl's smoke screen adds 200602 for
@@ -2157,9 +2161,11 @@ impl Duel {
             t.phase == GrabPhase::Held
                 && (!t.branched || !self.player.state().starts_with("ThrowDefDeath"))
         });
+        let count = self.fighter_count();
         for (i, (c, f)) in [&mut self.player, &mut self.enemy]
             .into_iter()
             .zip(&self.rules.fighters)
+            .take(count)
             .enumerate()
         {
             let hp = f.vitality.hp as f32;
@@ -2301,7 +2307,7 @@ impl Duel {
     }
 
     fn step_lightning(&mut self) {
-        for i in 0..2 {
+        for i in 0..self.fighter_count() {
             let c = if i == 0 { &self.player } else { &self.enemy };
             let released = c
                 .tae_frame()
@@ -2391,6 +2397,9 @@ impl Duel {
                 Some(i32::from(slot)),
                 command as f32,
             ));
+        }
+        if !self.enemy_present {
+            return;
         }
         let in_throw = self.deathblow.is_some() || self.enemy_in_throw_clip();
         let command = self
@@ -2810,9 +2819,7 @@ impl Duel {
         })
     }
 
-    /// Routes lethal landings through DEATH_FALLING and returns Wolf to where he last stood
-    /// after a fall into the void.
-    fn kill_fallen(&mut self, was_grounded: bool, before: [f32; 3], dt: f32) {
+    fn return_fallen_enemy(&mut self) {
         // Keep the arena's existing NPC boundary reset; material fall death is PC-only.
         if let Some((depth, spawn)) = self.fall_respawn_depth.zip(self.spawn) {
             let start = spawn[1];
@@ -2825,6 +2832,11 @@ impl Duel {
                 self.enemy.body.fall_type = 0;
             }
         }
+    }
+
+    /// Routes lethal landings through DEATH_FALLING and returns Wolf to where he last stood
+    /// after a fall into the void.
+    fn kill_fallen(&mut self, was_grounded: bool, before: [f32; 3], dt: f32) {
         if self.rules.fighters[0].dead() {
             return;
         }
@@ -2940,7 +2952,184 @@ impl Duel {
         }
     }
 
+    /// An absent slot does not advance or participate in contacts, even if it still has HP.
+    fn step_solo(&mut self, input: &InputFrame, dt: f32) -> DuelReport {
+        let respawned = self.begin_player_step(input, dt);
+        self.attack_button = input.buttons.attack;
+        self.publish_player_frame(None);
+        self.player.aim_candidates.clear();
+        let player_dt = self.player_dt(dt);
+        let was_grounded = self.player.body.grounded;
+        let before = self.player.body.position;
+        self.player.throw_ignore_walls = false;
+        let player = self.advance_player(input, dt, player_dt);
+        self.push(0, player_dt);
+        self.finish_player_movement(was_grounded, before, dt);
+        let bullets = self.step_bullets(dt);
+        let perilous = self.apply_effect_hits(bullets.into_iter().filter(|b| b.effects_only));
+        self.step_lightning();
+        let jump_counter = self.note_player_hits(&[]);
+        self.tick_player_status(dt);
+        self.recover_player(player_dt);
+        self.schedule_respawn();
+        self.update_player_camera(dt);
+        DuelReport {
+            player,
+            respawned,
+            perilous,
+            jump_counter,
+            ..Default::default()
+        }
+    }
+
+    fn fighter_count(&self) -> usize {
+        1 + usize::from(self.enemy_present)
+    }
+
+    fn publish_player_frame(&mut self, endure_action: Option<i32>) {
+        self.publish_event_envs(endure_action);
+        self.publish_vitals();
+        self.publish_swing_hit();
+    }
+
+    fn player_dt(&mut self, dt: f32) -> f32 {
+        if self.shared_player_frame {
+            0.0
+        } else {
+            self.hit_stop[0].split(dt)
+        }
+    }
+
+    fn advance_player(&mut self, input: &InputFrame, dt: f32, player_dt: f32) -> StepReport {
+        // Auxiliary encounters reuse Wolf's frame, including if their slot is vacated.
+        if self.shared_player_frame {
+            self.last_steps[0].clone()
+        } else {
+            self.advance_character(0, input, dt, player_dt)
+        }
+    }
+
+    fn step_bullets(&mut self, dt: f32) -> Vec<crate::bullets::BulletHit> {
+        let count = self.fighter_count();
+        let chars = &([&self.player, &self.enemy])[..count];
+        let fighters = &([&self.fighters[0], &self.fighters[1]])[..count];
+        self.bullets.spawn(chars, fighters);
+        self.bullets
+            .advance(dt, chars, fighters, &*self.player.ground)
+    }
+
+    fn tick_player_status(&mut self, dt: f32) {
+        if !self.shared_player_frame {
+            self.rules.tick_status(0, dt);
+            self.rules.apply_effect_hp(0, self.player.tae_frame());
+        }
+    }
+
+    fn begin_player_step(&mut self, input: &InputFrame, dt: f32) -> bool {
+        if self.spawn.is_none() {
+            self.spawn = Some([placement(&self.player), placement(&self.enemy)]);
+        }
+        let mut respawned = false;
+        if let Some(t) = self.respawn_in.as_mut() {
+            *t -= dt;
+            if *t <= 0.0 && self.reset().is_ok() {
+                respawned = true;
+            }
+        }
+        if !self.shared_player_frame {
+            self.update_lock(input);
+        }
+        respawned
+    }
+
+    fn finish_player_movement(&mut self, was_grounded: bool, player_before: [f32; 3], dt: f32) {
+        if !self.shared_player_frame {
+            self.kill_fallen(was_grounded, player_before, dt);
+        }
+
+        if self.god {
+            let f = &mut self.rules.fighters[0];
+            f.vitality.cannot_die = true;
+            f.posture.no_consume = true;
+        }
+        if self.immortal {
+            self.rules.fighters[0].vitality.cannot_die = true;
+        }
+    }
+
+    fn apply_effect_hits(
+        &mut self,
+        effect_hits: impl IntoIterator<Item = crate::bullets::BulletHit>,
+    ) -> Option<crate::perilous::PerilousWarning> {
+        let mut perilous = None;
+        for b in effect_hits {
+            let kanji = b.sp_effects.iter().any(|id| {
+                self.player
+                    .tae
+                    .sp_effects
+                    .get(id)
+                    .is_some_and(|e| e.vfx == crate::perilous::KANJI_VFX)
+            });
+            if b.hit.defender == 0 && kanji && b.hit.attacker < self.fighter_count() {
+                let a = b.hit.attacker;
+                perilous = Some(crate::perilous::PerilousWarning {
+                    attacker: a,
+                    judge: b.hit.judge,
+                    kind: crate::perilous::upcoming_kind(self.chr(a), &self.fighters[a]),
+                });
+            }
+            if !self.rules.fighters[..self.fighter_count()]
+                .iter()
+                .any(|f| f.dead())
+            {
+                self.apply_status(b.hit.defender, &b.sp_effects);
+            }
+        }
+        perilous
+    }
+
+    fn recover_player(&mut self, dt: f32) {
+        if self.god {
+            let v = &mut self.rules.fighters[0].vitality;
+            v.hp = v.max_hp;
+        }
+        if !self.shared_player_frame {
+            self.rules.recover(0, &self.player, dt);
+        }
+    }
+
+    fn schedule_respawn(&mut self) {
+        if self.respawn_in.is_none()
+            && !self.shared_player_frame
+            && self.deathblow.is_none()
+            // Map defeat events can still be waiting before handing over to the next boss.
+            && (self.events.is_none() || self.rules.fighters[0].dead())
+            && self.rules.fighters[..self.fighter_count()].iter().any(|f| f.dead())
+        {
+            self.respawn_in = Some(RESPAWN_DELAY);
+        }
+    }
+
+    fn update_player_camera(&mut self, dt: f32) {
+        let clip = self
+            .player
+            .behavior
+            .runtime
+            .main_clip()
+            .map(|c| (c.animation.clone(), c.time));
+        if !self.shared_player_frame {
+            self.camera_director.update(
+                clip.as_ref().map(|(a, t)| (a.as_str(), *t)),
+                &self.player.tae,
+                dt,
+            );
+        }
+    }
+
     pub fn step(&mut self, input: &InputFrame, dt: f32) -> DuelReport {
+        if !self.enemy_present {
+            return self.step_solo(input, dt);
+        }
         if old_dragons::owns(&self.spec) && self.old_dragons.is_some() && !self.defer_map_events {
             return self.step_old_dragons(input, dt);
         }
@@ -3008,19 +3197,7 @@ impl Duel {
             };
         }
         let raw_input = *input;
-        if self.spawn.is_none() {
-            self.spawn = Some([placement(&self.player), placement(&self.enemy)]);
-        }
-        let mut respawned = false;
-        if let Some(t) = self.respawn_in.as_mut() {
-            *t -= dt;
-            if *t <= 0.0 && self.reset().is_ok() {
-                respawned = true;
-            }
-        }
-        if !self.shared_player_frame {
-            self.update_lock(input);
-        }
+        let respawned = self.begin_player_step(input, dt);
 
         // The engine checks for a deathblow before the attack reaches the script.
         let mut input = *input;
@@ -3093,9 +3270,7 @@ impl Duel {
             self.enemy.npc = Default::default();
         }
         self.force_enemy_act(enemy_alive);
-        self.publish_event_envs(endure_action);
-        self.publish_vitals();
-        self.publish_swing_hit();
+        self.publish_player_frame(endure_action);
         // Who each side aims at: auto-aim candidates for Wolf, Wolf for the soldier.
         self.player.aim_candidates = if enemy_alive {
             vec![self.enemy.body.position]
@@ -3116,11 +3291,7 @@ impl Duel {
                 }))
             || !self.auxiliary_animation_enabled;
         let dts = [
-            if self.shared_player_frame {
-                0.0
-            } else {
-                self.hit_stop[0].split(dt)
-            },
+            self.player_dt(dt),
             if monk_frozen {
                 0.0
             } else {
@@ -3142,11 +3313,7 @@ impl Duel {
             || self.throw_held();
         self.player.throw_ignore_walls = held;
         self.enemy.throw_ignore_walls = held;
-        let player = if self.shared_player_frame {
-            self.last_steps[0].clone()
-        } else {
-            self.advance_character(0, &input, dt, dts[0])
-        };
+        let player = self.advance_player(&input, dt, dts[0]);
         let enemy = if monk_frozen {
             // Animation disable holds the clip clock, while HKS still accepts AI/event requests.
             let report = self.enemy.tick(&InputFrame::default(), 0.0);
@@ -3187,17 +3354,9 @@ impl Duel {
             self.separate();
         }
         if !self.shared_player_frame {
-            self.kill_fallen(was_grounded, player_before, dt);
+            self.return_fallen_enemy();
         }
-
-        if self.god {
-            let f = &mut self.rules.fighters[0];
-            f.vitality.cannot_die = true;
-            f.posture.no_consume = true;
-        }
-        if self.immortal {
-            self.rules.fighters[0].vitality.cannot_die = true;
-        }
+        self.finish_player_movement(was_grounded, player_before, dt);
         let mut found = self.detector.detect(
             &[&self.player, &self.enemy],
             &[&self.fighters[0], &self.fighters[1]],
@@ -3244,12 +3403,7 @@ impl Duel {
                 }
             }
         }
-        let chars = [&self.player, &self.enemy];
-        let fighters = [&self.fighters[0], &self.fighters[1]];
-        self.bullets.spawn(&chars, &fighters);
-        let bullet_hits = self
-            .bullets
-            .advance(dt, &chars, &fighters, &*self.player.ground);
+        let bullet_hits = self.step_bullets(dt);
         let first_bullet_hit = found.len();
         // Contacts that only carry SpEffects (the poison floor) skip the hit rules (ours).
         let (effect_hits, bullet_hits): (Vec<_>, Vec<_>) =
@@ -3354,36 +3508,11 @@ impl Duel {
             }
             hits.push((hit, result));
         }
-        let mut perilous = None;
-        for b in effect_hits {
-            let kanji = b.sp_effects.iter().any(|id| {
-                self.player
-                    .tae
-                    .sp_effects
-                    .get(id)
-                    .is_some_and(|e| e.vfx == crate::perilous::KANJI_VFX)
-            });
-            if b.hit.defender == 0 && kanji {
-                let a = b.hit.attacker;
-                perilous = Some(crate::perilous::PerilousWarning {
-                    attacker: a,
-                    judge: b.hit.judge,
-                    kind: crate::perilous::upcoming_kind(self.chr(a), &self.fighters[a]),
-                });
-            }
-            if !self.rules.fighters.iter().any(|f| f.dead()) {
-                self.apply_status(b.hit.defender, &b.sp_effects);
-            }
-        }
+        let perilous = self.apply_effect_hits(effect_hits);
         self.step_lightning();
         let jump_counter = self.note_player_hits(&hits);
-        if !self.shared_player_frame {
-            self.rules.tick_status(0, dt);
-        }
+        self.tick_player_status(dt);
         self.rules.tick_status(1, dt);
-        if !self.shared_player_frame {
-            self.rules.apply_effect_hp(0, self.player.tae_frame());
-        }
         if crate::guardian_ape::headless(&self.spec)
             && self.spec.npc_param == 51000000
             && self.enemy.tae_frame().sp_effects.contains(&275100)
@@ -3399,23 +3528,9 @@ impl Duel {
         {
             self.defender_dying = 0;
         }
-        if self.god {
-            let v = &mut self.rules.fighters[0].vitality;
-            v.hp = v.max_hp;
-        }
-        if !self.shared_player_frame {
-            self.rules.recover(0, &self.player, dts[0]);
-        }
+        self.recover_player(dts[0]);
         self.rules.recover(1, &self.enemy, dts[1]);
-        if self.respawn_in.is_none()
-            && !self.shared_player_frame
-            && self.deathblow.is_none()
-            // Map defeat events can still be waiting before handing over to the next boss.
-            && (self.events.is_none() || self.rules.fighters[0].dead())
-            && self.rules.fighters.iter().any(|f| f.dead())
-        {
-            self.respawn_in = Some(RESPAWN_DELAY);
-        }
+        self.schedule_respawn();
         if crate::guardian_ape::headless(&self.spec)
             && self.enemy.tae_runtime.event_message == Some(30)
         {
@@ -3442,19 +3557,7 @@ impl Duel {
             other_counter,
             mikiri,
         };
-        let clip = self
-            .player
-            .behavior
-            .runtime
-            .main_clip()
-            .map(|c| (c.animation.clone(), c.time));
-        if !self.shared_player_frame {
-            self.camera_director.update(
-                clip.as_ref().map(|(a, t)| (a.as_str(), *t)),
-                &self.player.tae,
-                dt,
-            );
-        }
+        self.update_player_camera(dt);
         if let Some(mut d) = self.boss_brain.take() {
             d.after_step(self, &report, &raw_input);
             self.boss_brain = Some(d);

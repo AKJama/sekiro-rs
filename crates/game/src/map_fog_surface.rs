@@ -23,6 +23,12 @@ struct Inputs {
     vectors: [Vec4; 18],
     uv: [Vec4; 4],
     control: Vec4,
+    lighting: LightingInputs,
+}
+
+// Six contiguous vec4s retain the shader's existing uniform layout.
+#[derive(Clone, Copy, Debug, PartialEq, ShaderType)]
+struct LightingInputs {
     sun: Vec4,
     direct: Vec4,
     specular: Vec4,
@@ -217,12 +223,14 @@ fn inputs(data: &Value) -> Inputs {
             0.,
             0.,
         ),
-        sun: Vec4::Y,
-        direct: Vec4::ZERO,
-        specular: Vec4::ZERO,
-        ambient: Vec4::ZERO,
-        hemi_axis: Vec4::ZERO,
-        hemi_delta: Vec4::ZERO,
+        lighting: LightingInputs {
+            sun: Vec4::Y,
+            direct: Vec4::ZERO,
+            specular: Vec4::ZERO,
+            ambient: Vec4::ZERO,
+            hemi_axis: Vec4::ZERO,
+            hemi_delta: Vec4::ZERO,
+        },
     };
     // float2 and float3 slots overlap numerically, but are separate native registers.
     for i in 0..6 {
@@ -362,6 +370,11 @@ fn update_lighting(
     ambient_light: Res<bevy::light::GlobalAmbientLight>,
     mut materials: ResMut<Assets<FogMaterial>>,
 ) {
+    // Asset changes include same-frame additions, before AssetEvent::Added is published.
+    // Do not scan settled materials just because the schedule runs again.
+    if !lighting.is_changed() && !ambient_light.is_changed() && !materials.is_changed() {
+        return;
+    }
     let set =
         crate::lighting::LightSet::from_gparam(&lighting.gparam, lighting.light_set, lighting.hour);
     let rgb = |color: Color| {
@@ -370,15 +383,111 @@ fn update_lighting(
     };
     let direct = rgb(set.sun_color) * set.sun_lux / std::f32::consts::PI;
     let ambient = rgb(set.ambient) * ambient_light.brightness;
-    for (_, material) in materials.iter_mut() {
-        material.inputs.sun = set.sun_toward.extend(0.);
+    // CloudFog/GroundFog Fwd read FC_DirLightSpc_0 independently of
+    // FC_DirLightCol_0. Diffuse W is not a substitute for SpecColor0 W.
+    let values = LightingInputs {
+        sun: set.sun_toward.extend(0.),
+        direct: direct.extend(0.),
+        specular: set.direct[2] / std::f32::consts::PI,
+        ambient: ambient.extend(0.),
+        hemi_axis: set.hemi_axis.extend(0.),
+        hemi_delta: (set.hemi_delta * ambient_light.brightness).extend(0.),
+    };
+    // iter_mut marks every visited asset modified, even when no field changes.
+    let changed: Vec<_> = materials
+        .iter()
+        .filter(|(_, material)| {
+            let inputs = &material.inputs;
+            inputs.control.w != crate::lighting::ENV_PER_UNIT || inputs.lighting != values
+        })
+        .map(|(id, _)| id)
+        .collect();
+    for id in changed {
+        let Some(mut material) = materials.get_mut(id) else {
+            continue;
+        };
+        material.inputs.lighting = values;
         material.inputs.control.w = crate::lighting::ENV_PER_UNIT;
-        material.inputs.direct = direct.extend(0.);
-        // CloudFog/GroundFog Fwd read FC_DirLightSpc_0 independently of
-        // FC_DirLightCol_0. Diffuse W is not a substitute for SpecColor0 W.
-        material.inputs.specular = set.direct[2] / std::f32::consts::PI;
-        material.inputs.ambient = ambient.extend(0.);
-        material.inputs.hemi_axis = set.hemi_axis.extend(0.);
-        material.inputs.hemi_delta = (set.hemi_delta * ambient_light.brightness).extend(0.);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fog_materials_upload_only_for_new_materials_or_changed_lighting() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<FogMaterial>()
+            .insert_resource(crate::lighting::MapLighting {
+                gparam: Default::default(),
+                hour: 12.,
+                light_set: 0,
+                applied: None,
+                source: String::new(),
+            })
+            .init_resource::<bevy::light::GlobalAmbientLight>()
+            .add_systems(Update, update_lighting);
+        let material = || FogMaterial {
+            inputs: inputs(&serde_json::json!({})),
+            mask: default(),
+            flow: default(),
+            ground: default(),
+            height: default(),
+            irradiance: default(),
+            voxels: None,
+            diffuse: None,
+            double_sided: false,
+            diagnostic: false,
+        };
+        let modified = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<Messages<AssetEvent<FogMaterial>>>()
+                .drain()
+                .filter(|e| matches!(e, AssetEvent::Modified { .. }))
+                .count()
+        };
+        let first = app
+            .world_mut()
+            .resource_mut::<Assets<FogMaterial>>()
+            .add(material());
+        app.update();
+        assert_eq!(modified(&mut app), 1);
+        app.update();
+        assert_eq!(modified(&mut app), 0);
+        let second = app
+            .world_mut()
+            .resource_mut::<Assets<FogMaterial>>()
+            .add(material());
+        app.update();
+        assert_eq!(modified(&mut app), 1);
+        let before = app
+            .world()
+            .resource::<Assets<FogMaterial>>()
+            .get(&first)
+            .unwrap()
+            .inputs
+            .lighting
+            .ambient;
+        app.world_mut()
+            .resource_mut::<bevy::light::GlobalAmbientLight>()
+            .brightness *= 2.;
+        app.update();
+        assert_eq!(modified(&mut app), 2);
+        for handle in [&first, &second] {
+            assert_eq!(
+                app.world()
+                    .resource::<Assets<FogMaterial>>()
+                    .get(handle)
+                    .unwrap()
+                    .inputs
+                    .lighting
+                    .ambient,
+                before * 2.,
+            );
+        }
+        app.update();
+        assert_eq!(modified(&mut app), 0);
     }
 }
