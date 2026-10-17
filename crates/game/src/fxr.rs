@@ -15,7 +15,7 @@ use std::{collections::HashMap, path::PathBuf};
 
 use bevy::{
     asset::{RenderAssetUsages, embedded_asset, embedded_path},
-    mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology},
+    mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology, VertexAttributeValues},
     pbr::{MaterialPipeline, MaterialPipelineKey},
     prelude::*,
     render::render_resource::{
@@ -24,11 +24,10 @@ use bevy::{
     shader::ShaderRef,
 };
 use sekiro_sim::duel::{Duel, DuelReport};
-use serde_json::Value;
 
 use crate::fxr_tree::{
-    FxrLib, NodeInst, Rnd, frame_uvs, grow_trails, int, make_node, particle_color, prop, scalar,
-    step_node, subdivide, view_fade,
+    Action, Config, Field, FxrLib, NodeInst, Rnd, frame_uvs, grow_trails, int, make_node,
+    particle_color, prop, scalar, step_node, subdivide, view_fade,
 };
 
 /// Live effects and particles are bounded so a runaway effect cannot sink the frame.
@@ -116,9 +115,9 @@ pub struct FxrPlayer {
     enabled: bool,
     lib: FxrLib,
     effects: Vec<Effect>,
-    batches: HashMap<(i64, bool), (Handle<Mesh>, Entity)>,
-    multi_batches: HashMap<MultiKey, (Handle<Mesh>, Entity)>,
-    distort_batches: HashMap<i64, (Handle<Mesh>, Entity)>,
+    batches: HashMap<(i64, bool), Batch>,
+    multi_batches: HashMap<MultiKey, Batch>,
+    distort_batches: HashMap<i64, Batch>,
     textures: HashMap<i64, Handle<Image>>,
     bullets: HashMap<u64, i32>,
     bullet_sfx: HashMap<i32, i32>,
@@ -520,7 +519,7 @@ impl FxrPlayer {
                 continue;
             }
             if e.root.is_none() {
-                let Some(def) = lib.get(e.id) else {
+                let Some(def) = lib.compiled(e.id) else {
                     e.age = EFFECT_DROP + 1.0;
                     e.persistent = false;
                     continue;
@@ -529,7 +528,7 @@ impl FxrPlayer {
                     .wrapping_mul(97)
                     .wrapping_add(e.key.2 as u32)
                     .wrapping_add(self.steps as u32 * 31);
-                e.root = make_node(lib, &def["root"], seed, 0);
+                e.root = make_node(lib, &def, seed, 0);
                 if map
                     && dt == 0.
                     && let Some(root) = &mut e.root
@@ -685,18 +684,18 @@ fn additive(blend: i64) -> bool {
 /// cut a hard line through the floor, and fade it where it meets the scene (the shaders,
 /// `fxr.wgsl` / `fxr_multi.wgsl`). Where the appearance's `depthBlend` is set: (scale, offset) are
 /// `unkDepthBlend1/2`. Returns the corners and the soft distance (0 = hard).
-fn soften(a: &Value, size: f32, cam: &GlobalTransform, c: [Vec3; 4]) -> ([Vec3; 4], f32) {
-    if a["depthBlend"].as_bool() != Some(true) {
+fn soften(a: &Action, size: f32, cam: &GlobalTransform, c: [Vec3; 4]) -> ([Vec3; 4], f32) {
+    if a[Field::DepthBlend].as_bool() != Some(true) {
         return (c, 0.0);
     }
     const NEAR: f32 = 0.1;
     let scale = a
-        .get("unkDepthBlend1")
-        .and_then(Value::as_f64)
+        .get(Field::UnkDepthBlend1)
+        .and_then(|v| v.as_f64())
         .unwrap_or(1.0) as f32;
     let off = a
-        .get("unkDepthBlend2")
-        .and_then(Value::as_f64)
+        .get(Field::UnkDepthBlend2)
+        .and_then(|v| v.as_f64())
         .unwrap_or(0.0) as f32;
     let h = scale * size * 0.5;
     let (eye, fwd) = (cam.translation(), cam.forward().as_vec3());
@@ -714,25 +713,24 @@ fn soften(a: &Value, size: f32, cam: &GlobalTransform, c: [Vec3; 4]) -> ([Vec3; 
     (c.map(pull), 2.0 * off + h)
 }
 
-fn layer_uv(a: &Value, n: u32, age: f32, rnd: &mut Rnd) -> [[f32; 2]; 4] {
-    let su = scalar(a, &format!("layer{n}ScaleU"), age, rnd, 1.0);
-    let sv = scalar(a, &format!("layer{n}ScaleV"), age, rnd, 1.0);
-    let ou = scalar(a, &format!("layer{n}OffsetU"), 0.0, rnd, 0.0)
-        + scalar(a, &format!("layer{n}SpeedU"), age, rnd, 0.0) * age;
-    let ov = scalar(a, &format!("layer{n}OffsetV"), 0.0, rnd, 0.0)
-        + scalar(a, &format!("layer{n}SpeedV"), age, rnd, 0.0) * age;
+fn layer_uv(a: &Action, fields: [Field; 6], age: f32, rnd: &mut Rnd) -> [[f32; 2]; 4] {
+    let [scale_u, scale_v, offset_u, speed_u, offset_v, speed_v] = fields;
+    let su = scalar(a, scale_u, age, rnd, 1.0);
+    let sv = scalar(a, scale_v, age, rnd, 1.0);
+    let ou = scalar(a, offset_u, 0.0, rnd, 0.0) + scalar(a, speed_u, age, rnd, 0.0) * age;
+    let ov = scalar(a, offset_v, 0.0, rnd, 0.0) + scalar(a, speed_v, age, rnd, 0.0) * age;
     QUAD_UV.map(|[u, v]: [f32; 2]| [u * su + ou, v * sv + ov])
 }
 
 const QUAD_UV: [[f32; 2]; 4] = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
 
-fn layer_uv_distort(a: &Value, age: f32, rnd: &mut Rnd) -> [[f32; 2]; 4] {
-    let su = scalar(a, "normalMapScaleU", 0., rnd, 1.);
-    let sv = scalar(a, "normalMapScaleV", 0., rnd, 1.);
-    let ou = scalar(a, "normalMapOffsetU", 0., rnd, 0.)
-        + scalar(a, "normalMapSpeedU", age, rnd, 0.) * age;
-    let ov = scalar(a, "normalMapOffsetV", 0., rnd, 0.)
-        + scalar(a, "normalMapSpeedV", age, rnd, 0.) * age;
+fn layer_uv_distort(a: &Action, age: f32, rnd: &mut Rnd) -> [[f32; 2]; 4] {
+    let su = scalar(a, Field::NormalMapScaleU, 0., rnd, 1.);
+    let sv = scalar(a, Field::NormalMapScaleV, 0., rnd, 1.);
+    let ou = scalar(a, Field::NormalMapOffsetU, 0., rnd, 0.)
+        + scalar(a, Field::NormalMapSpeedU, age, rnd, 0.) * age;
+    let ov = scalar(a, Field::NormalMapOffsetV, 0., rnd, 0.)
+        + scalar(a, Field::NormalMapSpeedV, age, rnd, 0.) * age;
     QUAD_UV.map(|[u, v]| [u * su + ou, v * sv + ov])
 }
 
@@ -777,10 +775,20 @@ impl Material for DistortMaterial {
 
 struct Frame<'a> {
     cam: &'a GlobalTransform,
+    bufs: &'a mut HashMap<(i64, bool), Buf>,
+    multi: &'a mut HashMap<MultiKey, MultiBuf>,
+    lights: &'a mut Vec<(Vec3, Color, f32, f32)>,
+    distort: &'a mut HashMap<i64, Buf>,
+    trail: &'a mut Vec<(Vec3, Vec3, f32)>,
+}
+
+#[derive(Default)]
+struct FrameBuffers {
     bufs: HashMap<(i64, bool), Buf>,
     multi: HashMap<MultiKey, MultiBuf>,
     lights: Vec<(Vec3, Color, f32, f32)>,
     distort: HashMap<i64, Buf>,
+    trail: Vec<(Vec3, Vec3, f32)>,
 }
 
 fn collect(n: &NodeInst, f: &mut Frame) {
@@ -792,17 +800,17 @@ fn collect(n: &NodeInst, f: &mut Frame) {
     }
 }
 
-fn collect_node(n: &NodeInst, c: &Value, f: &mut Frame) {
-    let a = &c["appearance"];
-    let at = a["type"].as_i64().unwrap_or(0);
+fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
+    let a = &c.appearance;
+    let at = a[Field::Type].as_i64().unwrap_or(0);
     if !matches!(at, 600 | 602 | 603 | 604 | 606 | 607 | 609 | 10000 | 10012) {
         return;
     }
     let active_t = (n.time - n.delay).max(0.0);
-    let blend = int(a, "blendMode", 2);
+    let blend = int(a, Field::BlendMode, 2);
     let tex = match at {
-        604 => int(a, "layer1", 1),
-        _ => int(a, "texture", 1),
+        604 => int(a, Field::Layer1, 1),
+        _ => int(a, Field::Texture, 1),
     };
     let cam = f.cam;
     let (cam_r, cam_u, cam_f) = (
@@ -815,18 +823,18 @@ fn collect_node(n: &NodeInst, c: &Value, f: &mut Frame) {
         for p in &n.particles {
             let mut rnd = Rnd { seed: p.seed, k: 0 };
             let fade = view_fade(a, p.pos.distance(cam.translation()));
-            let size = scalar(a, "particleSizeX", p.age, &mut rnd, 0.025)
-                + scalar(a, "particleSizeXMin", 0., &mut rnd, 0.)
+            let size = scalar(a, Field::ParticleSizeX, p.age, &mut rnd, 0.025)
+                + scalar(a, Field::ParticleSizeXMin, 0., &mut rnd, 0.)
                 + rnd.next()
-                    * (scalar(a, "particleSizeXMax", 0., &mut rnd, 0.)
-                        - scalar(a, "particleSizeXMin", 0., &mut rnd, 0.));
-            let size = size * scalar(a, "particleSizeMultiplier", p.age, &mut rnd, 1.);
-            let mut col = prop(a.get("color"), p.age, &mut rnd, [1.; 4]);
-            let rgb = scalar(a, "rgbMultiplier", p.age, &mut rnd, 1.);
+                    * (scalar(a, Field::ParticleSizeXMax, 0., &mut rnd, 0.)
+                        - scalar(a, Field::ParticleSizeXMin, 0., &mut rnd, 0.));
+            let size = size * scalar(a, Field::ParticleSizeMultiplier, p.age, &mut rnd, 1.);
+            let mut col = prop(a.get(Field::Color), p.age, &mut rnd, [1.; 4]);
+            let rgb = scalar(a, Field::RgbMultiplier, p.age, &mut rnd, 1.);
             for v in &mut col[..3] {
                 *v *= env * rgb;
             }
-            col[3] *= fade * scalar(a, "alphaMultiplier", p.age, &mut rnd, 1.);
+            col[3] *= fade * scalar(a, Field::AlphaMultiplier, p.age, &mut rnd, 1.);
             let (r, u) = (cam_r * size * 0.5, cam_u * size * 0.5);
             f.bufs.entry((tex, additive(blend))).or_default().quad(
                 [p.pos - r - u, p.pos + r - u, p.pos + r + u, p.pos - r + u],
@@ -856,42 +864,42 @@ fn collect_node(n: &NodeInst, c: &Value, f: &mut Frame) {
         for v in &mut col[..3] {
             *v *= env;
         }
-        let pmod = &c["particleModifier"];
-        let sx = scalar(pmod, "scaleX", p.emit_t, &mut rnd, 1.0);
-        let sy = if pmod["uniformScale"].as_bool() == Some(true) {
+        let pmod = &c.particle_modifier;
+        let sx = scalar(pmod, Field::ScaleX, p.emit_t, &mut rnd, 1.0);
+        let sy = if pmod[Field::UniformScale].as_bool() == Some(true) {
             sx
         } else {
-            scalar(pmod, "scaleY", p.emit_t, &mut rnd, 1.0)
+            scalar(pmod, Field::ScaleY, p.emit_t, &mut rnd, 1.0)
         };
         match at {
             607 => {
-                let screen = prop(a.get("color"), p.age, &mut rnd, [1.; 4]);
+                let screen = prop(a.get(Field::Color), p.age, &mut rnd, [1.; 4]);
                 let modifier = prop(
-                    c["particleModifier"].get("color"),
+                    c.particle_modifier.get(Field::Color),
                     active_t,
                     &mut rnd,
                     [1.; 4],
                 );
                 col[3] = (screen[3]
                     * modifier[3]
-                    * scalar(a, "alphaMultiplier", active_t, &mut rnd, 1.)
+                    * scalar(a, Field::AlphaMultiplier, active_t, &mut rnd, 1.)
                     * fade)
                     .clamp(0., 1.);
-                let texture = int(a, "normalMap", 0);
+                let texture = int(a, Field::NormalMap, 0);
                 if texture <= 0 {
                     continue;
                 }
-                let w = scalar(a, "sizeX", p.age, &mut rnd, 1.) * sx;
-                let h = scalar(a, "sizeY", p.age, &mut rnd, 1.) * sy;
-                let (right, up) = match int(a, "orientation", 1) {
+                let w = scalar(a, Field::SizeX, p.age, &mut rnd, 1.) * sx;
+                let h = scalar(a, Field::SizeY, p.age, &mut rnd, 1.) * sy;
+                let (right, up) = match int(a, Field::Orientation, 1) {
                     0 | 3 => (Vec3::X, Vec3::Y),
                     2 => (n.world.rotation * Vec3::X, n.world.rotation * Vec3::Y),
                     _ => (cam_r, cam_u),
                 };
                 let (r, u) = (right * w * 0.5, up * h * 0.5);
                 let uv = layer_uv_distort(a, p.age, &mut rnd);
-                let intensity = scalar(a, "intensity", p.age, &mut rnd, 0.);
-                let radius = scalar(a, "radius", p.age, &mut rnd, 1.).max(0.001);
+                let intensity = scalar(a, Field::Intensity, p.age, &mut rnd, 0.);
+                let radius = scalar(a, Field::Radius, p.age, &mut rnd, 1.).max(0.001);
                 let buf = f.distort.entry(texture).or_default();
                 let corners = [world - r - u, world + r - u, world + r + u, world - r + u];
                 for i in [0, 1, 2, 0, 2, 3] {
@@ -903,14 +911,14 @@ fn collect_node(n: &NodeInst, c: &Value, f: &mut Frame) {
                 }
             }
             609 => {
-                let limit = scalar(a, "maxViewDistance", active_t, &mut rnd, -1.);
+                let limit = scalar(a, Field::MaxViewDistance, active_t, &mut rnd, -1.);
                 if limit > 0. && world.distance_squared(cam.translation()) > limit * limit {
                     continue;
                 }
-                let color = prop(a.get("diffuseColor"), p.age, &mut rnd, [1.; 4]);
+                let color = prop(a.get(Field::DiffuseColor), p.age, &mut rnd, [1.; 4]);
                 let intensity =
-                    scalar(a, "diffuseMultiplier", active_t, &mut rnd, 1.) * color[3].max(0.);
-                let radius = scalar(a, "radius", active_t, &mut rnd, 0.);
+                    scalar(a, Field::DiffuseMultiplier, active_t, &mut rnd, 1.) * color[3].max(0.);
+                let radius = scalar(a, Field::Radius, active_t, &mut rnd, 0.);
                 if radius > 0. && intensity > 0. {
                     f.lights.push((
                         world,
@@ -928,23 +936,23 @@ fn collect_node(n: &NodeInst, c: &Value, f: &mut Frame) {
             }
             600 | 603 | 604 => {
                 let w = if at == 600 {
-                    scalar(a, "size", p.age, &mut rnd, 1.0) * sx
+                    scalar(a, Field::Size, p.age, &mut rnd, 1.0) * sx
                 } else {
-                    scalar(a, "width", p.age, &mut rnd, 1.0) * sx
+                    scalar(a, Field::Width, p.age, &mut rnd, 1.0) * sx
                 };
-                let h = if at == 600 || a["uniformScale"].as_bool() == Some(true) {
+                let h = if at == 600 || a[Field::UniformScale].as_bool() == Some(true) {
                     w
                 } else {
-                    scalar(a, "height", p.age, &mut rnd, 1.0) * sy
+                    scalar(a, Field::Height, p.age, &mut rnd, 1.0) * sy
                 };
-                let rz = (scalar(a, "rotationZ", 0.0, &mut rnd, 0.0)
-                    + scalar(a, "angularSpeedZ", p.age, &mut rnd, 0.0)
-                        * scalar(a, "angularSpeedMultiplierZ", p.age, &mut rnd, 1.0)
+                let rz = (scalar(a, Field::RotationZ, 0.0, &mut rnd, 0.0)
+                    + scalar(a, Field::AngularSpeedZ, p.age, &mut rnd, 0.0)
+                        * scalar(a, Field::AngularSpeedMultiplierZ, p.age, &mut rnd, 1.0)
                         * p.age)
                     .to_radians();
                 // OrientationMode: 1 / 6 camera, 7 / 4 yaw toward the camera, 2 the node's
                 // frame, 0 / 3 global.
-                let (right, up) = match int(a, "orientation", 1) {
+                let (right, up) = match int(a, Field::Orientation, 1) {
                     0 | 3 => (Vec3::X, Vec3::Y),
                     2 => (n.world.rotation * Vec3::X, n.world.rotation * Vec3::Y),
                     o @ (4 | 7) => {
@@ -974,44 +982,68 @@ fn collect_node(n: &NodeInst, c: &Value, f: &mut Frame) {
                         world - hw + hh,
                     ],
                 );
-                let l2 = int(a, "layer2", 0);
+                let l2 = int(a, Field::Layer2, 0);
                 if at == 604 && l2 > 0 {
                     // The layers (fxr_multi.wgsl); unk_ds3_f2_10..13 are the shader's
                     // TexBlendType / 2 / 3 / ColorBlendType (FwLo's reading).
-                    let l3 = int(a, "layer3", 0).max(0);
-                    let m = |k: &str| int(a, k, 0) & 0xf;
-                    let modes = m("unk_ds3_f2_10")
-                        | m("unk_ds3_f2_11") << 4
-                        | m("unk_ds3_f2_12") << 8
-                        | m("unk_ds3_f2_13") << 12
-                        | ((a["premultiplyAlpha"].as_bool() == Some(true)) as i64) << 16;
+                    let l3 = int(a, Field::Layer3, 0).max(0);
+                    let m = |k: Field| int(a, k, 0) & 0xf;
+                    let modes = m(Field::UnkDs3F2_10)
+                        | m(Field::UnkDs3F2_11) << 4
+                        | m(Field::UnkDs3F2_12) << 8
+                        | m(Field::UnkDs3F2_13) << 12
+                        | ((a[Field::PremultiplyAlpha].as_bool() == Some(true)) as i64) << 16;
                     let scale1 = [
-                        scalar(a, "layer1ScaleU", p.age, &mut rnd, 1.0),
-                        scalar(a, "layer1ScaleV", p.age, &mut rnd, 1.0),
+                        scalar(a, Field::Layer1ScaleU, p.age, &mut rnd, 1.0),
+                        scalar(a, Field::Layer1ScaleV, p.age, &mut rnd, 1.0),
                     ];
                     let (f_uv, f_next, f_t) = frame_uvs(a, p.age, &mut rnd, scale1);
                     let o1 = [
-                        scalar(a, "layer1OffsetU", 0.0, &mut rnd, 0.0)
-                            + scalar(a, "layer1SpeedU", p.age, &mut rnd, 0.0) * p.age,
-                        scalar(a, "layer1OffsetV", 0.0, &mut rnd, 0.0)
-                            + scalar(a, "layer1SpeedV", p.age, &mut rnd, 0.0) * p.age,
+                        scalar(a, Field::Layer1OffsetU, 0.0, &mut rnd, 0.0)
+                            + scalar(a, Field::Layer1SpeedU, p.age, &mut rnd, 0.0) * p.age,
+                        scalar(a, Field::Layer1OffsetV, 0.0, &mut rnd, 0.0)
+                            + scalar(a, Field::Layer1SpeedV, p.age, &mut rnd, 0.0) * p.age,
                     ];
                     let shift = |uv: [[f32; 2]; 4]| uv.map(|[u, v]| [u + o1[0], v + o1[1]]);
-                    let lc = |k: &str, rnd: &mut Rnd| {
+                    let lc = |k: Field, rnd: &mut Rnd| {
                         prop(a.get(k), p.age, rnd, [1.0; 4]).map(|v| v.clamp(0.0, 1.0))
                     };
-                    let c1 = lc("layer1Color", &mut rnd);
-                    let interp = a["interpolateFrames"].as_bool() != Some(false);
+                    let c1 = lc(Field::Layer1Color, &mut rnd);
+                    let interp = a[Field::InterpolateFrames].as_bool() != Some(false);
                     let q = MultiQuad {
                         corners,
                         uv1: shift(f_uv),
                         uv1_next: shift(f_next),
-                        uv2: layer_uv(a, 2, p.age, &mut rnd),
-                        uv3: layer_uv(a, 3, p.age, &mut rnd),
+                        uv2: layer_uv(
+                            a,
+                            [
+                                Field::Layer2ScaleU,
+                                Field::Layer2ScaleV,
+                                Field::Layer2OffsetU,
+                                Field::Layer2SpeedU,
+                                Field::Layer2OffsetV,
+                                Field::Layer2SpeedV,
+                            ],
+                            p.age,
+                            &mut rnd,
+                        ),
+                        uv3: layer_uv(
+                            a,
+                            [
+                                Field::Layer3ScaleU,
+                                Field::Layer3ScaleV,
+                                Field::Layer3OffsetU,
+                                Field::Layer3SpeedU,
+                                Field::Layer3OffsetV,
+                                Field::Layer3SpeedV,
+                            ],
+                            p.age,
+                            &mut rnd,
+                        ),
                         col,
                         c1: [c1[0], c1[1], c1[2], if interp { f_t } else { 0.0 }],
-                        c2: lc("layer2Color", &mut rnd),
-                        c3: lc("layer3Color", &mut rnd),
+                        c2: lc(Field::Layer2Color, &mut rnd),
+                        c3: lc(Field::Layer3Color, &mut rnd),
                         soft,
                     };
                     f.multi
@@ -1022,12 +1054,12 @@ fn collect_node(n: &NodeInst, c: &Value, f: &mut Frame) {
                 }
                 let (uv, _, _) = frame_uvs(a, p.age, &mut rnd, [1.0, 1.0]);
                 let tan = [
-                    scalar(a, "alphaFadeThreshold", p.age, &mut rnd, 0.0) / 255.0,
-                    scalar(a, "alphaThreshold", active_t, &mut rnd, 0.0) / 255.0,
+                    scalar(a, Field::AlphaFadeThreshold, p.age, &mut rnd, 0.0) / 255.0,
+                    scalar(a, Field::AlphaThreshold, active_t, &mut rnd, 0.0) / 255.0,
                     soft,
                     // g_ps_bPreAlphaMult: the texture colour is multiplied by its alpha before
                     // the shader squares it.
-                    (a["premultiplyAlpha"].as_bool() == Some(true)) as u8 as f32,
+                    (a[Field::PremultiplyAlpha].as_bool() == Some(true)) as u8 as f32,
                 ];
                 f.bufs
                     .entry((tex, additive(blend)))
@@ -1035,11 +1067,11 @@ fn collect_node(n: &NodeInst, c: &Value, f: &mut Frame) {
                     .quad(corners, uv, col, tan);
             }
             602 => {
-                let wl = scalar(a, "width", p.emit_t, &mut rnd, 1.0)
-                    * scalar(a, "widthMultiplier", p.age, &mut rnd, 1.0)
+                let wl = scalar(a, Field::Width, p.emit_t, &mut rnd, 1.0)
+                    * scalar(a, Field::WidthMultiplier, p.age, &mut rnd, 1.0)
                     * sx;
-                let len = scalar(a, "length", p.emit_t, &mut rnd, 1.0)
-                    * scalar(a, "lengthMultiplier", p.age, &mut rnd, 1.0)
+                let len = scalar(a, Field::Length, p.emit_t, &mut rnd, 1.0)
+                    * scalar(a, Field::LengthMultiplier, p.age, &mut rnd, 1.0)
                     * sy;
                 let d = if p.attached {
                     n.world.rotation * p.dir
@@ -1056,20 +1088,21 @@ fn collect_node(n: &NodeInst, c: &Value, f: &mut Frame) {
                 );
             }
             606 | 10012 => {
-                let w = (scalar(a, "width", p.age, &mut rnd, 1.0)
-                    * scalar(a, "widthMultiplier", p.emit_t, &mut rnd, 1.0))
+                let w = (scalar(a, Field::Width, p.age, &mut rnd, 1.0)
+                    * scalar(a, Field::WidthMultiplier, p.emit_t, &mut rnd, 1.0))
                 .abs();
-                let cross = int(a, "orientation", 0) == 4;
+                let cross = int(a, Field::Orientation, 0) == 4;
                 // A trail with no colour (a distortion-only layer) draws nothing here.
-                if p.trail.len() < 2 || a["rgbMultiplier"].as_f64() == Some(0.0) {
+                if p.trail.len() < 2 || a[Field::RgbMultiplier].as_f64() == Some(0.0) {
                     continue;
                 }
-                let segs = subdivide(
+                subdivide(
                     &p.trail,
-                    int(a, "segmentSubdivision", 0).clamp(0, 16) as usize,
+                    int(a, Field::SegmentSubdivision, 0).clamp(0, 16) as usize,
+                    f.trail,
                 );
-                let sf = scalar(a, "startFadeEndpoint", p.age, &mut rnd, 0.0).max(0.0) / 100.0;
-                let ef = scalar(a, "endFadeEndpoint", p.age, &mut rnd, 0.0).max(0.0) / 100.0;
+                let sf = scalar(a, Field::StartFadeEndpoint, p.age, &mut rnd, 0.0).max(0.0) / 100.0;
+                let ef = scalar(a, Field::EndFadeEndpoint, p.age, &mut rnd, 0.0).max(0.0) / 100.0;
                 let fade_at = |u: f32| -> f32 {
                     let mut k = 1.0;
                     if sf > 0.0 {
@@ -1081,7 +1114,7 @@ fn collect_node(n: &NodeInst, c: &Value, f: &mut Frame) {
                     k
                 };
                 let buf = f.bufs.entry((tex, additive(blend))).or_default();
-                for w2 in segs.windows(2) {
+                for w2 in f.trail.windows(2) {
                     let ((a0, x0, u0), (a1, x1, u1)) = (w2[0], w2[1]);
                     let d = (a1 - a0).normalize_or(cam_r);
                     let travel = d.cross(cam_f).normalize_or(cam_u);
@@ -1388,18 +1421,126 @@ fn texture_handle(
 /// supported by the mesh allocator).
 const PAD: [f32; 3] = [0.0, -50.0, 0.0];
 
-fn new_batch(commands: &mut Commands, meshes: &mut Assets<Mesh>) -> (Handle<Mesh>, Entity) {
+trait BatchBuffer {
+    fn clear(&mut self);
+    fn is_empty(&self) -> bool;
+    fn update_mesh(&self, meshes: &mut Assets<Mesh>, handle: &Handle<Mesh>);
+}
+
+// Keep the padding triangle and attribute layout identical across reused buffers.
+macro_rules! batch_buffer {
+    ($buffer:ty, $normals:expr, $( $field:ident: $variant:ident, $attribute:expr, $pad:expr );+ $(;)?) => {
+        impl BatchBuffer for $buffer {
+            fn clear(&mut self) {
+                $(self.$field.clear();)+
+            }
+
+            fn is_empty(&self) -> bool {
+                self.pos.is_empty()
+            }
+
+            fn update_mesh(&self, meshes: &mut Assets<Mesh>, handle: &Handle<Mesh>) {
+                if self.is_empty() {
+                    return;
+                }
+                let Some(mesh) = meshes.get(handle) else { return };
+                if $(matches!(mesh.attribute($attribute),
+                    Some(VertexAttributeValues::$variant(values))
+                        if values.get(3..) == Some(self.$field.as_slice())) )&&+ {
+                    return;
+                }
+                let mut mesh = meshes.get_mut(handle).unwrap();
+                $(
+                    if let Some(VertexAttributeValues::$variant(values)) = mesh.attribute_mut($attribute) {
+                        values.truncate(3);
+                        values.extend_from_slice(&self.$field);
+                    } else {
+                        let mut values = Vec::with_capacity(self.$field.len() + 3);
+                        values.extend_from_slice(&[$pad; 3]);
+                        values.extend_from_slice(&self.$field);
+                        mesh.insert_attribute($attribute, values);
+                    }
+                )+
+                let n = self.pos.len() + 3;
+                if $normals {
+                    if let Some(VertexAttributeValues::Float32x3(values)) = mesh.attribute_mut(Mesh::ATTRIBUTE_NORMAL) {
+                        values.resize(n, [0.0, 0.0, 1.0]);
+                    } else {
+                        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 0.0, 1.0]; n]);
+                    }
+                }
+                if let Some(Indices::U32(indices)) = mesh.indices_mut() {
+                    indices.truncate(n);
+                    indices.extend(indices.len() as u32..n as u32);
+                } else {
+                    mesh.insert_indices(Indices::U32((0..n as u32).collect()));
+                }
+            }
+        }
+    };
+}
+
+batch_buffer!(Buf, true,
+    pos: Float32x3, Mesh::ATTRIBUTE_POSITION, PAD;
+    uv: Float32x2, Mesh::ATTRIBUTE_UV_0, [0.0; 2];
+    col: Float32x4, Mesh::ATTRIBUTE_COLOR, [0.0; 4];
+    tan: Float32x4, Mesh::ATTRIBUTE_TANGENT, [0.0; 4];
+);
+batch_buffer!(MultiBuf, false,
+    pos: Float32x3, Mesh::ATTRIBUTE_POSITION, PAD;
+    uv1: Float32x2, Mesh::ATTRIBUTE_UV_0, [0.0; 2];
+    uv2: Float32x2, Mesh::ATTRIBUTE_UV_1, [0.0; 2];
+    uv3n: Float32x4, ATTR_UV3N, [0.0; 4];
+    col: Float32x4, Mesh::ATTRIBUTE_COLOR, [0.0; 4];
+    c1: Float32x4, ATTR_C1, [0.0; 4];
+    c2: Float32x4, ATTR_C2, [0.0; 4];
+    c3: Float32x4, ATTR_C3, [0.0; 4];
+    soft: Float32, ATTR_SOFT, 0.0;
+);
+
+struct Batch {
+    mesh: Handle<Mesh>,
+    entity: Entity,
+    visible: bool,
+}
+
+impl Batch {
+    fn update(
+        &mut self,
+        buffer: &impl BatchBuffer,
+        commands: &mut Commands,
+        meshes: &mut Assets<Mesh>,
+    ) {
+        let visible = !buffer.is_empty();
+        if self.visible != visible {
+            commands.entity(self.entity).insert(if visible {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            });
+            self.visible = visible;
+        }
+        buffer.update_mesh(meshes, &self.mesh);
+    }
+}
+
+fn new_batch(commands: &mut Commands, meshes: &mut Assets<Mesh>) -> Batch {
     let mesh = meshes.add(Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
     ));
-    (mesh.clone(), mesh_entity(commands, mesh))
+    Batch {
+        entity: mesh_entity(commands, mesh.clone()),
+        mesh,
+        visible: false,
+    }
 }
 
 fn mesh_entity(commands: &mut Commands, mesh: Handle<Mesh>) -> Entity {
     commands
         .spawn((
             Mesh3d(mesh),
+            Visibility::Hidden,
             Transform::IDENTITY,
             bevy::camera::visibility::NoFrustumCulling,
             bevy::light::NotShadowCaster,
@@ -1424,6 +1565,7 @@ fn render(
     depth: Res<DepthCopy>,
     mut white: Local<Option<Handle<Image>>>,
     mut lights: Local<Vec<Entity>>,
+    mut buffers: Local<FrameBuffers>,
 ) {
     if !player.enabled {
         return;
@@ -1447,12 +1589,27 @@ fn render(
             ))
         })
         .clone();
+    let FrameBuffers {
+        bufs,
+        multi,
+        lights: frame_lights,
+        distort,
+        trail,
+    } = &mut *buffers;
+    for b in bufs.values_mut().chain(distort.values_mut()) {
+        b.clear();
+    }
+    for b in multi.values_mut() {
+        b.clear();
+    }
+    frame_lights.clear();
     let mut frame = Frame {
         cam,
-        bufs: HashMap::new(),
-        multi: HashMap::new(),
-        lights: Vec::new(),
-        distort: HashMap::new(),
+        bufs,
+        multi,
+        lights: frame_lights,
+        distort,
+        trail,
     };
     for e in player.effects.iter().filter(|e| !e.asleep) {
         if let Some(root) = &e.root {
@@ -1464,7 +1621,7 @@ fn render(
     while lights.len() > frame.lights.len() {
         commands.entity(lights.pop().unwrap()).despawn();
     }
-    for (i, (position, color, intensity, range)) in frame.lights.into_iter().enumerate() {
+    for (i, &(position, color, intensity, range)) in frame.lights.iter().enumerate() {
         let light = PointLight {
             color,
             intensity: intensity * crate::lighting::LOCAL_LUMENS_PER_UNIT,
@@ -1488,35 +1645,12 @@ fn render(
             .map(|image| images.add(image))
             .unwrap_or_else(|| white.clone());
         let material = distort_materials.add(DistortMaterial { texture });
-        let (mesh, entity) = new_batch(&mut commands, &mut meshes);
-        commands.entity(entity).insert(MeshMaterial3d(material));
-        player.distort_batches.insert(*key, (mesh, entity));
+        let batch = new_batch(&mut commands, &mut meshes);
+        commands.entity(batch.entity).insert(MeshMaterial3d(material));
+        player.distort_batches.insert(*key, batch);
     }
-    let empty_distort = Buf::default();
-    for (key, (mesh, _)) in &player.distort_batches {
-        let Some(mut m) = meshes.get_mut(mesh) else {
-            continue;
-        };
-        let b = frame.distort.get(key).unwrap_or(&empty_distort);
-        let n = b.pos.len() + 3;
-        m.insert_attribute(
-            Mesh::ATTRIBUTE_POSITION,
-            [vec![PAD; 3], b.pos.clone()].concat(),
-        );
-        m.insert_attribute(
-            Mesh::ATTRIBUTE_UV_0,
-            [vec![[0.; 2]; 3], b.uv.clone()].concat(),
-        );
-        m.insert_attribute(
-            Mesh::ATTRIBUTE_COLOR,
-            [vec![[0.; 4]; 3], b.col.clone()].concat(),
-        );
-        m.insert_attribute(
-            Mesh::ATTRIBUTE_TANGENT,
-            [vec![[0.; 4]; 3], b.tan.clone()].concat(),
-        );
-        m.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0., 0., 1.]; n]);
-        m.insert_indices(Indices::U32((0..n as u32).collect()));
+    for (key, batch) in &mut player.distort_batches {
+        batch.update(&frame.distort[key], &mut commands, &mut meshes);
     }
     // New batches for keys seen for the first time.
     for key in bufs.keys() {
@@ -1529,9 +1663,9 @@ fn render(
             depth: depth.image.clone(),
             additive: key.1,
         });
-        let (mesh, entity) = new_batch(&mut commands, &mut meshes);
-        commands.entity(entity).insert(MeshMaterial3d(material));
-        player.batches.insert(*key, (mesh, entity));
+        let batch = new_batch(&mut commands, &mut meshes);
+        commands.entity(batch.entity).insert(MeshMaterial3d(material));
+        player.batches.insert(*key, batch);
     }
     for key in multi.keys() {
         if player.multi_batches.contains_key(key) {
@@ -1564,75 +1698,28 @@ fn render(
             ),
             depth: depth.image.clone(),
         });
-        let (mesh, entity) = new_batch(&mut commands, &mut meshes);
-        commands.entity(entity).insert(MeshMaterial3d(material));
-        player.multi_batches.insert(*key, (mesh, entity));
+        let batch = new_batch(&mut commands, &mut meshes);
+        commands.entity(batch.entity).insert(MeshMaterial3d(material));
+        player.multi_batches.insert(*key, batch);
     }
-    // Fill every batch (empty ones get the padding triangle only).
-    let empty = Buf::default();
-    for (key, (mesh, _)) in &player.batches {
-        let Some(mut m) = meshes.get_mut(mesh) else {
-            continue;
-        };
-        let b = bufs.get(key).unwrap_or(&empty);
-        let n = b.pos.len() + 3;
-        m.insert_attribute(
-            Mesh::ATTRIBUTE_POSITION,
-            [vec![PAD; 3], b.pos.clone()].concat(),
-        );
-        m.insert_attribute(
-            Mesh::ATTRIBUTE_UV_0,
-            [vec![[0.0; 2]; 3], b.uv.clone()].concat(),
-        );
-        m.insert_attribute(
-            Mesh::ATTRIBUTE_COLOR,
-            [vec![[0.0; 4]; 3], b.col.clone()].concat(),
-        );
-        m.insert_attribute(
-            Mesh::ATTRIBUTE_TANGENT,
-            [vec![[0.0; 4]; 3], b.tan.clone()].concat(),
-        );
-        m.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 0.0, 1.0]; n]);
-        m.insert_indices(Indices::U32((0..n as u32).collect()));
+    for (key, batch) in &mut player.batches {
+        batch.update(&bufs[key], &mut commands, &mut meshes);
     }
-    let empty = MultiBuf::default();
-    for (key, (mesh, _)) in &player.multi_batches {
-        let Some(mut m) = meshes.get_mut(mesh) else {
-            continue;
-        };
-        let b = multi.get(key).unwrap_or(&empty);
-        let n = b.pos.len() + 3;
-        m.insert_attribute(
-            Mesh::ATTRIBUTE_POSITION,
-            [vec![PAD; 3], b.pos.clone()].concat(),
-        );
-        m.insert_attribute(
-            Mesh::ATTRIBUTE_UV_0,
-            [vec![[0.0; 2]; 3], b.uv1.clone()].concat(),
-        );
-        m.insert_attribute(
-            Mesh::ATTRIBUTE_UV_1,
-            [vec![[0.0; 2]; 3], b.uv2.clone()].concat(),
-        );
-        m.insert_attribute(ATTR_UV3N, [vec![[0.0; 4]; 3], b.uv3n.clone()].concat());
-        m.insert_attribute(
-            Mesh::ATTRIBUTE_COLOR,
-            [vec![[0.0; 4]; 3], b.col.clone()].concat(),
-        );
-        m.insert_attribute(ATTR_C1, [vec![[0.0; 4]; 3], b.c1.clone()].concat());
-        m.insert_attribute(ATTR_C2, [vec![[0.0; 4]; 3], b.c2.clone()].concat());
-        m.insert_attribute(ATTR_C3, [vec![[0.0; 4]; 3], b.c3.clone()].concat());
-        m.insert_attribute(ATTR_SOFT, [vec![0.0; 3], b.soft.clone()].concat());
-        m.insert_indices(Indices::U32((0..n as u32).collect()));
+    for (key, batch) in &mut player.multi_batches {
+        batch.update(&multi[key], &mut commands, &mut meshes);
     }
-    if std::env::var_os("SEKIRO_FXR_LOG").is_some() && !(bufs.is_empty() && multi.is_empty()) {
+    if std::env::var_os("SEKIRO_FXR_LOG").is_some()
+        && (bufs.values().any(|b| !b.is_empty()) || multi.values().any(|b| !b.is_empty()))
+    {
         let mut v: Vec<String> = bufs
             .iter()
+            .filter(|(_, b)| !b.is_empty())
             .map(|(k, b)| format!("{}/{}:{}", k.0, k.1 as u8, b.pos.len() / 6))
             .collect();
         v.extend(
             multi
                 .iter()
+                .filter(|(_, b)| !b.is_empty())
                 .map(|(k, b)| format!("multi {}:{}", k.0, b.pos.len() / 6)),
         );
         v.sort();
@@ -1648,6 +1735,99 @@ fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn batch_test_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_asset::<Image>()
+            .init_asset::<FxrMaterial>()
+            .init_asset::<MultiMaterial>()
+            .init_asset::<DistortMaterial>()
+            .init_resource::<DepthCopy>()
+            .add_systems(Update, render);
+        let mut player = FxrPlayer::new(PathBuf::from("missing-fxr-test-cache"));
+        player.enabled = true;
+        let nodes: Vec<_> = [600, 604, 607]
+            .into_iter()
+            .map(|kind| serde_json::json!({
+                "type": 2200, "configs": [{"type": 1004,
+                    "appearance": {"type": kind, "layer1": 1, "layer2": 2,
+                        "layer3": 3, "normalMap": 4}}]
+            }))
+            .collect();
+        player.lib.insert_for_test(
+            1,
+            serde_json::json!({"root": {"type": 2000, "nodes": nodes}}),
+        );
+        player.request(
+            1,
+            (0, 1, 0),
+            Transform::from_xyz(0.0, 0.0, -3.0),
+            true,
+            true,
+        );
+        player.advance(0.0);
+        app.insert_resource(player);
+        app.world_mut()
+            .spawn((Camera3d::default(), GlobalTransform::IDENTITY));
+        app
+    }
+
+    fn modified_meshes(app: &mut App) -> usize {
+        app.world_mut()
+            .resource_mut::<Messages<AssetEvent<Mesh>>>()
+            .drain()
+            .filter(|e| matches!(e, AssetEvent::Modified { .. }))
+            .count()
+    }
+
+    #[test]
+    fn unchanged_batches_do_not_modify_mesh_assets() {
+        let mut app = batch_test_app();
+        app.update();
+        assert_eq!(modified_meshes(&mut app), 3);
+        app.update();
+        assert_eq!(modified_meshes(&mut app), 0);
+        let mut player = app.world_mut().resource_mut::<FxrPlayer>();
+        player.effects[0].at.translation.x += 1.0;
+        player.advance(0.0);
+        app.update();
+        assert_eq!(modified_meshes(&mut app), 3, "changed positions still upload");
+        app.update();
+        assert_eq!(modified_meshes(&mut app), 0);
+    }
+
+    #[test]
+    fn empty_batches_hide_without_rewriting_and_reappear() {
+        let mut app = batch_test_app();
+        app.update();
+        assert_eq!(modified_meshes(&mut app), 3);
+        app.world_mut().resource_mut::<FxrPlayer>().effects[0].asleep = true;
+        for _ in 0..2 {
+            app.update();
+            assert_eq!(modified_meshes(&mut app), 0);
+            let world = app.world_mut();
+            let batches: Vec<_> = world
+                .query_filtered::<&Visibility, With<Mesh3d>>()
+                .iter(world)
+                .copied()
+                .collect();
+            assert_eq!(batches, vec![Visibility::Hidden; 3]);
+            for (_, mesh) in world.resource::<Assets<Mesh>>().iter() {
+                assert_eq!(mesh.count_vertices(), 9, "empty batches retain their data");
+            }
+        }
+        app.world_mut().resource_mut::<FxrPlayer>().effects[0].asleep = false;
+        app.update();
+        assert_eq!(modified_meshes(&mut app), 0);
+        let world = app.world_mut();
+        assert!(
+            world.query_filtered::<&Visibility, With<Mesh3d>>()
+                .iter(world)
+                .all(|v| *v == Visibility::Inherited)
+        );
+    }
 
     #[test]
     fn hit_contacts_are_held_on_the_body() {
@@ -1735,10 +1915,10 @@ mod tests {
         let cam = GlobalTransform::IDENTITY;
         let corners = [Vec3::new(0.0, 0.0, -5.0); 4];
         let off = serde_json::json!({});
-        assert_eq!(soften(&off, 1.0, &cam, corners).1, 0.0);
+        assert_eq!(soften(&Action::new(&off), 1.0, &cam, corners).1, 0.0);
         let on =
             serde_json::json!({"depthBlend": true, "unkDepthBlend1": 1.0, "unkDepthBlend2": 0.5});
-        let (c, soft) = soften(&on, 2.0, &cam, corners);
+        let (c, soft) = soften(&Action::new(&on), 2.0, &cam, corners);
         assert!(soft > 0.0);
         assert!(c[0].z > corners[0].z, "pulled toward the camera");
     }
