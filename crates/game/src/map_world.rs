@@ -173,7 +173,7 @@ pub(crate) struct MapWorld {
     requests: BTreeMap<String, visibility::BlockRequest>,
     lod: super::lod::LodTable,
     /// Fixed offscreen captures need only geometry intersecting their camera volumes
-    /// and the renderer's existing caster budget. Interactive worlds never set this.
+    /// and shadow casters within the sun's caster range. Interactive worlds never set this.
     pub(crate) capture_views: Option<CaptureViews>,
 }
 

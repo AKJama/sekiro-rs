@@ -432,7 +432,7 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
     {
         let shadow = app.world().resource::<ShadowSettings>();
         let caster_distance = if shadow.enabled {
-            shadow.caster_distance
+            shadow.caster_distance.unwrap_or(shadow.distance)
         } else {
             0.
         };
