@@ -175,6 +175,24 @@ pub(crate) fn follows_scene_light(row: &Value) -> bool {
 #[derive(Component)]
 struct FarScenery;
 
+/// The MSB part a legacy (disconnected or arena) scene root was placed from. Unlike
+/// [`world::BlockPart`] it opts into nothing but per-part data such as grass.
+#[derive(Component, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MsbPart {
+    pub(crate) block: String,
+    pub(crate) part_index: usize,
+}
+
+impl MsbPart {
+    /// The part a layout row of `block` names, when the row records its MSB index.
+    pub(crate) fn from_row(block: &str, row: &Value) -> Option<Self> {
+        Some(Self {
+            block: block.to_owned(),
+            part_index: usize::try_from(row["part_index"].as_u64()?).ok()?,
+        })
+    }
+}
+
 type LegacyPieceFilter = (Without<FarScenery>, Without<world::BlockPart>);
 
 struct CollisionPart {
@@ -506,6 +524,8 @@ fn pose(row: &Value) -> Option<Pose> {
 
 #[derive(Resource)]
 struct Layout {
+    /// The map ID (the map folder's name).
+    id: String,
     json: Value,
     collision: Option<sekiro_formats::hknp::CollisionMesh>,
     scene: MapScene,
@@ -896,6 +916,7 @@ pub fn add_map(
             ..default()
         })
         .insert_resource(Layout {
+            id: id.clone(),
             json,
             collision,
             scene,
@@ -1204,6 +1225,9 @@ fn spawn_map(
             }
             if follows_scene_light(row) {
                 entity.insert(FollowsSceneLight);
+            }
+            if let Some(part) = MsbPart::from_row(&layout.id, row) {
+                entity.insert(part);
             }
             if let Some(part) = arena_parts
                 .as_ref()
@@ -2002,6 +2026,7 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(ButtonInput::<KeyCode>::default())
             .insert_resource(Layout {
+                id: String::new(),
                 json: serde_json::json!({}),
                 collision: Some(collision),
                 scene: MapScene {
