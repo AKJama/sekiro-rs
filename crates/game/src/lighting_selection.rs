@@ -721,6 +721,19 @@ mod tests {
                 "{map}"
             );
             assert_eq!(selection.source, format!("{map}_0000"));
+            if map == "m11_00" {
+                // The fresh menu's start is the real game's opening (#47): before Gyoubu, no story-time flag.
+                assert_eq!(
+                    (selection.sub_id, selection.sky.as_deref()),
+                    (0, Some("m900000"))
+                );
+                assert!(
+                    !selection
+                        .flags
+                        .iter()
+                        .any(|f| *f == 9301 || (9800..=9803).contains(f))
+                );
+            }
         }
     }
     #[test]

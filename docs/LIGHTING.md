@@ -186,14 +186,9 @@ An explicit `--story NAME` selects the corresponding map profile, and an explici
 
 ### Matching real-game opening screenshots (#47)
 
-Paired screenshots from the real game's opening (Outskirts before Gyoubu, sunrise) match the plain Outskirts default: `sekiro-rs --play --map m11_00_00_00 --start 0 --no-enemy --objects --simple-ai`, with no `--story` or `--hour`.
-That state has no story-time flag 9800-9803 and no Gyoubu flag 9301, so common event 100 Label10 runs `SetAreaEnvmap(1)` and enables sky part 8907000 (`m900000`).
-`m11_00_00_00.emevd` has no `SetLighting`, `SetAreaEnvmap` or `SetAreaGparamSubID` of its own, so the file stays `m11_00_0000` with sub-ID 0.
-Common event 812 also sets envmap 3 or 4 in the Outskirts, but only with flags 11120100 and 6901 together; 6901 is off in the first-visit fixture.
-`--story morning` names the same state explicitly, and `--story gyoubu-defeated` is the same lighting with the boss gone.
-The fresh menu default is this start; the render and reference gates keep `genichiro-defeated` (12 h), so they are not like-for-like with opening screenshots.
-The engine's clock hour for variant 1 is not in the data: we use the 6 h key, but the outdoor row 0 also authors a 4 h key with a stronger orange sun (`1.0, 0.63, 0.25` times 3.0 against `1.0, 0.78, 0.71` times 1.5 at 6 h).
-`--hour 5` blends the draw params halfway toward that key; it is a diagnostic only, and like any `--hour` it can also change the probe and sky choice.
+The plain Outskirts start, with no `--story` or `--hour`, is the real game's opening: no Gyoubu flag 9301 and no story-time flag 9800-9803, so common event 100 selects morning variant 1 (the 6 h key), sub-ID 0 and sky `m900000`.
+The render and reference gates use `genichiro-defeated` (12 h), so they are not like-for-like with opening screenshots.
+The engine's clock hour for variant 1 is not in the data; the outdoor row also authors an unused, more orange 4 h key, but a playtest against the reference shot (2026-10-17) matched the sky best at 6 h.
 Unknown story names produce an error listing that map's available names.
 
 The clock names `morning`, `afternoon`, `evening`, `night` and `dawn` correspond respectively to no time flags, 9800, 9800-9801, 9800-9802 and 9800-9803.

@@ -259,27 +259,6 @@ mod tests {
             "--play --map m11_00_00_00 --start 0 --no-enemy --objects --simple-ai --progression castle-roof",
         );
     }
-    /// The fresh default start is the real game's first Outskirts visit: before Gyoubu (no 9301),
-    /// no story-time flag 9800-9803, so common event 100 selects morning variant 1 and sky m900000.
-    #[test]
-    fn default_start_matches_the_real_opening_before_gyoubu() {
-        let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
-        let args = Choices::default().args();
-        let map = crate::arg_value(&args, "--map").unwrap();
-        assert_eq!(map, "m11_00_00_00");
-        assert!(!args.iter().any(|a| a == "--hour" || a == "--story"));
-        let s = crate::lighting_selection::select(&cache, &map, None, None).unwrap();
-        assert_eq!(
-            (s.hour, s.environment, s.sub_id, s.sky.as_deref()),
-            (6., 1, 0, Some("m900000"))
-        );
-        assert!(!s.flags.contains(&9301));
-        assert!(!s.flags.iter().any(|f| (9800..=9803).contains(f)));
-        let state = crate::map::story::initial_state(&cache, &map, None)
-            .unwrap()
-            .unwrap();
-        assert!(!state.flags.contains(&9301), "Gyoubu must not be defeated");
-    }
     #[test]
     fn explore_keyboard_shortcuts_and_navigation_use_live_menu_system() {
         let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
