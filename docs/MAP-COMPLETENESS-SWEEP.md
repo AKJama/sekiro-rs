@@ -941,3 +941,18 @@ Lighter neutral rock crosses the fixed grey criterion and the brighter albedo mo
 
 Void, depth-gap and untextured counts are unchanged within tolerance, and untextured stays 0 in every view.
 The user confirmed in live play that the black glossy patches are gone.
+
+## Native sun shadow range (#9)
+
+The sun now uses the native `ShadowParam` cascades to 1000 m, and map shadow casters reach 300 m instead of 45 m, so distant pieces gain their shadows in both captures.
+The normal-distance and all-visible images then differ in more shadowed pixels, so only the pop-in cells that moved past tolerance are re-baselined.
+
+| Map / view | Pop-in |
+|---|---|
+| Outskirts 3 | 3984 -> 4062 |
+| Outskirts 4 | 7909 -> 8188 |
+| Outskirts 5 | 4597 -> 4704 |
+| Castle 2 | 5508 -> 5817 |
+| Castle 5 | 1898 -> 2639 |
+
+Void, depth-gap, untextured and grey cells pass unchanged; capture time grows to 60.7 and 68.8 seconds, inside the 120-second budget.

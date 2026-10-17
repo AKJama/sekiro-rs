@@ -385,26 +385,40 @@ pub struct ShadowSettings {
     pub cascades: usize,
     pub distance: f32,
     pub caster_distance: f32,
-    pub first_split: f32,
+    /// Native cascade cut points (`ShadowParam` `Cascade Dist 0->1/1->2/2->3`) in metres.
+    pub splits: [f32; 3],
     pub depth_bias: f32,
     pub normal_bias: f32,
 }
 
+/// `default.gparam` `ShadowParam`: cascade cut points 10/30/70 m and far fade start 1000 m.
+const NATIVE_SPLITS: [f32; 3] = [10., 30., 70.];
+const NATIVE_FAR_FADE_START: f32 = 1000.;
+
 impl ShadowSettings {
     pub fn from_args(g: &Gparam, hour: f32, args: &[String]) -> anyhow::Result<Self> {
-        let mut settings = Self {
-            enabled: !args.iter().any(|a| a == "--no-shadow"),
-            cascades: 2,
-            distance: 60.,
-            caster_distance: 45.,
-            depth_bias: 0.02,
-            normal_bias: 0.6,
-            first_split: g
-                .param("ShadowParam", "Cascade Dist 0->1")
+        let shadow_param = |name: &str, fallback: f32| {
+            g.param("ShadowParam", name)
                 .and_then(|p| p.at(0, hour))
                 .and_then(|v| v.first().copied())
                 .filter(|v| v.is_finite() && *v > 0.)
-                .unwrap_or(15.),
+                .unwrap_or(fallback)
+        };
+        // Receivers keep the sun shadow lookup to the native far fade; see LIGHTING.md (#9).
+        let mut settings = Self {
+            enabled: !args.iter().any(|a| a == "--no-shadow"),
+            cascades: 4,
+            distance: shadow_param("Far Fade Start", NATIVE_FAR_FADE_START),
+            // Renderer budget, not a native value: map casters within 300 m of the focus. At 45 m
+            // distant cliffs gained their shadows only on approach; 300 m held 60 fps (2026-10-17).
+            caster_distance: 300.,
+            depth_bias: 0.02,
+            normal_bias: 0.6,
+            splits: [
+                shadow_param("Cascade Dist 0->1", NATIVE_SPLITS[0]),
+                shadow_param("Cascade Dist 1->2", NATIVE_SPLITS[1]),
+                shadow_param("Cascade Dist 2->3", NATIVE_SPLITS[2]),
+            ],
         };
         for (i, arg) in args.iter().enumerate() {
             if arg == "--shadow" {
@@ -446,7 +460,6 @@ impl ShadowSettings {
             settings.caster_distance.is_finite() && settings.caster_distance > 0.,
             "caster distance must be finite and positive"
         );
-        settings.first_split = settings.first_split.min(settings.distance * 0.5);
         anyhow::ensure!(
             settings.depth_bias.is_finite()
                 && settings.depth_bias >= 0.
@@ -455,6 +468,22 @@ impl ShadowSettings {
             "shadow bias must be finite and nonnegative"
         );
         Ok(settings)
+    }
+
+    /// Cascade far bounds in view depth: the native cut points below the shadow distance,
+    /// at most `cascades - 1` of them, then the shadow distance itself.
+    pub fn cascade_bounds(&self) -> Vec<f32> {
+        let mut bounds: Vec<f32> = Vec::with_capacity(self.cascades);
+        for split in self.splits {
+            if bounds.len() + 1 >= self.cascades {
+                break;
+            }
+            if split < self.distance && bounds.last().is_none_or(|&last| split > last) {
+                bounds.push(split);
+            }
+        }
+        bounds.push(self.distance);
+        bounds
     }
 }
 /// Irradiance-to-radiance bridge shared by hemisphere and environment lighting.
@@ -1262,13 +1291,10 @@ pub fn spawn_lights(commands: &mut Commands, settings: &ShadowSettings) {
             shadow_normal_bias: settings.normal_bias,
             ..default()
         },
-        bevy::light::CascadeShadowConfigBuilder {
-            num_cascades: settings.cascades,
-            maximum_distance: settings.distance,
-            first_cascade_far_bound: settings.first_split,
+        bevy::light::CascadeShadowConfig {
+            bounds: settings.cascade_bounds(),
             ..default()
-        }
-        .build(),
+        },
         Transform::default(),
     ));
     commands.spawn((
@@ -1643,6 +1669,43 @@ mod probe_tests {
         let s = ShadowSettings::from_args(&g, 12., &args("4,250")).unwrap();
         assert_eq!(s.cascades, 4);
         assert_eq!(s.distance, 250.);
+        assert_eq!(s.cascade_bounds(), vec![10., 30., 70., 250.]);
+        let s = ShadowSettings::from_args(&g, 12., &args("2,60")).unwrap();
+        assert_eq!(s.cascade_bounds(), vec![10., 60.]);
+        let s = ShadowSettings::from_args(&g, 12., &args("1,5")).unwrap();
+        assert_eq!(s.cascade_bounds(), vec![5.]);
+    }
+    #[test]
+    fn shadow_cascades_follow_authored_shadow_param() {
+        use sekiro_formats::gparam::{Entry, Group, Param, Value};
+        let g = Gparam {
+            groups: vec![Group {
+                name: "ShadowParam ParamEditor".into(),
+                display_name: String::new(),
+                params: [
+                    ("ShadowParam - Shadow: Cascade Dist 0->1", 25.),
+                    ("ShadowParam - Shadow: Cascade Dist 1->2", 50.),
+                    ("ShadowParam - Shadow: Cascade Dist 2->3", 100.),
+                    ("ShadowParam - Shadow: Far Fade Start", 400.),
+                ]
+                .into_iter()
+                .map(|(name, value)| Param {
+                    name: name.into(),
+                    display_name: String::new(),
+                    entries: vec![Entry {
+                        id: 0,
+                        time: 0.,
+                        value: Value::Float(value),
+                    }],
+                })
+                .collect(),
+            }],
+        };
+        let s = ShadowSettings::from_args(&g, 6., &[]).unwrap();
+        assert_eq!(s.cascade_bounds(), vec![25., 50., 100., 400.]);
+        // Without authored values the native defaults reach 1000 m, past distant cliffs (#9).
+        let s = ShadowSettings::from_args(&Gparam { groups: vec![] }, 6., &[]).unwrap();
+        assert_eq!(s.cascade_bounds(), vec![10., 30., 70., 1000.]);
     }
     #[test]
     fn post_effects_only_mark_3d_cameras_and_disabled_lut_is_removed() {
