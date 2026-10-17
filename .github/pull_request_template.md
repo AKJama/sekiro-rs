@@ -30,6 +30,7 @@ What to check when playing: <!-- where to go and what to look for -->
 ## Checklist
 
 - [ ] Links exactly one open issue
+- [ ] Ran Claude Code's `/code-review` at medium, then `/simplify`, on the final diff (other agents' reviews are not accepted)
 - [ ] New tests only guard this change, and are listed above with their run time
 - [ ] Docs updated where needed
 - Agent and model used: <!-- for example Claude Code, Opus 5.5 -->

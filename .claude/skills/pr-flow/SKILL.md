@@ -130,8 +130,8 @@ Then apply the code-review and simplify findings together in one pass (one agent
 Keep simplify to cleanups of the diff: a deeper refactor it suggests becomes its own issue instead of growing the PR.
 
 `code-review` and `simplify` are built into Claude Code.
-Other agents (Codex and others) do the same two passes by hand: a correctness review of every hunk, its enclosing function and its callers, then a cleanup pass for reuse, redundant state and wasted work.
-If neither is possible, say so in the PR body rather than skipping it silently.
+Every PR must run both in Claude Code, `/code-review` at medium and then `/simplify`, on its final diff, whatever agent wrote the code.
+A review done by hand or by another agent (Codex and others) does not count, and a PR without both is sent back.
 
 ## 4. Checks
 

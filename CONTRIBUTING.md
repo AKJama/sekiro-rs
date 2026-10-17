@@ -19,7 +19,8 @@ PRs that don't link an open issue are closed.
 
 ## Set up with your agent
 
-Fork `AKJama/sekiro-rs`, clone your fork, and open the folder in Claude Code desktop or CLI, Codex, or your agent.
+Fork `AKJama/sekiro-rs`, clone your fork, and open the folder in Claude Code (desktop or CLI).
+You can write code with another agent, but the review steps must run in Claude Code: its built-in `/code-review` at medium, then `/simplify`; PRs reviewed any other way are sent back.
 The repo carries its own agent rules and skills in [AGENTS.md](AGENTS.md), [pr-flow](.claude/skills/pr-flow/SKILL.md), [issues](.claude/skills/issues/SKILL.md), and [live-test](.claude/skills/live-test/SKILL.md) for your agent to read and follow.
 Paste this prompt, replacing `N` with the issue number:
 
