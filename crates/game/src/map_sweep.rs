@@ -437,9 +437,8 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
             0.
         };
         let projection = PerspectiveProjection {
-            fov: super::VIEWER_FOV_DEG.to_radians(),
             aspect_ratio: options.width as f32 / options.height as f32,
-            ..default()
+            ..super::viewer_perspective()
         };
         let capture_views = super::world::CaptureViews {
             views: views

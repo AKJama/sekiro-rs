@@ -245,14 +245,9 @@ impl CameraBook {
             return book;
         };
         for i in 0..CAMERA_SLOTS {
-            // The row ids are u32 fields and the times f32; reading an id as f32 fails and would
-            // send every slot to row 0.
-            let id = |f: &str| {
-                row.u32(&format!("{f}{i}"))
-                    .ok()
-                    .and_then(|v| i32::try_from(v).ok())
-                    .unwrap_or(0)
-            };
+            // The row ids are integer fields and the times f32; reading an id as f32 fails and
+            // would send every slot to row 0.
+            let id = |f: &str| row.i32(&format!("{f}{i}")).unwrap_or(0);
             let time = |f: &str| row.f32(&format!("{f}{i}")).unwrap_or(0.0).max(0.0);
             let slot = CameraSlot {
                 lock_param: id("lockParamId"),

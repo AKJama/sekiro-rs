@@ -954,14 +954,19 @@ pub fn add_map(
 
 /// The map viewer's vertical field of view, degrees. Wolf's follow camera brings its own, the
 /// game's `camFovY` (#46).
-pub const VIEWER_FOV_DEG: f32 = 60.0;
+const VIEWER_FOV_DEG: f32 = 60.0;
 
-/// The free-fly map viewer's projection.
-pub fn viewer_projection() -> Projection {
-    Projection::Perspective(PerspectiveProjection {
+/// The free-fly map viewer's and sweep cameras' perspective.
+pub fn viewer_perspective() -> PerspectiveProjection {
+    PerspectiveProjection {
         fov: VIEWER_FOV_DEG.to_radians(),
         ..default()
-    })
+    }
+}
+
+/// [`viewer_perspective`] as a camera component.
+pub fn viewer_projection() -> Projection {
+    Projection::Perspective(viewer_perspective())
 }
 
 /// Near and far planes for every new 3D camera, keeping the field of view it was spawned with;
