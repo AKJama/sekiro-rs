@@ -2095,7 +2095,7 @@ mod tests {
             .world_mut()
             .spawn((
                 Mesh3d::default(),
-                GlobalTransform::from_translation(Vec3::X * 100.),
+                GlobalTransform::from_translation(Vec3::X * 400.),
                 bounds,
             ))
             .id();
@@ -2104,7 +2104,7 @@ mod tests {
             .spawn((
                 Mesh3d::default(),
                 ChildOf(root),
-                GlobalTransform::from_translation(Vec3::X * 100.),
+                GlobalTransform::from_translation(Vec3::X * 400.),
                 bounds,
             ))
             .id();
@@ -2113,10 +2113,10 @@ mod tests {
             .spawn((
                 Mesh3d::default(),
                 ChildOf(root),
-                GlobalTransform::from_translation(Vec3::X * 100.),
+                GlobalTransform::from_translation(Vec3::X * 400.),
                 Aabb {
                     center: Vec3::ZERO.into(),
-                    half_extents: Vec3::splat(80.).into(),
+                    half_extents: Vec3::splat(150.).into(),
                 },
             ))
             .id();
@@ -2128,7 +2128,7 @@ mod tests {
         assert!(app.world().get::<NotShadowCaster>(far).is_some());
         assert!(app.world().get::<NotShadowCaster>(wall).is_none());
         *app.world_mut().get_mut::<GlobalTransform>(focus).unwrap() =
-            GlobalTransform::from_translation(Vec3::X * 100.);
+            GlobalTransform::from_translation(Vec3::X * 400.);
         app.world_mut()
             .resource_mut::<Time>()
             .advance_by(Duration::from_secs(1));

@@ -1384,9 +1384,3 @@ A playtest on 2026-10-17 held 60 fps at 300 m; `--shadow-casters` overrides it.
 `--shadow cascades,distance` still overrides the count and range, using the native cut points below that range.
 The native far fade (10 m) and `Cascade Fade Range Scale` are not reproduced; Bevy keeps its own cascade overlap.
 
-The native local-light direction was also checked against the executable.
-`DAT_142dca95c` is pi, so `FUN_140152870` and the inline follow branch rotate by pi about Y before the camera matrix.
-`30e6c0` builds `(cos p sin y, -sin p, cos p cos y)` from (pitch, yaw), with an identity quaternion in `3119b0`, which matches our `Quat` construction exactly.
-The constructor default is therefore toward-light `(0.707, 0.707, 0)` before the camera transform: a side light with no forward component, not a headlamp.
-Which instances receive the second light set (`envData`, `FC_DirLight[1]`) remains open.
-

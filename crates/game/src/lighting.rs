@@ -404,9 +404,7 @@ impl ShadowSettings {
                 .filter(|v| v.is_finite() && *v > 0.)
                 .unwrap_or(fallback)
         };
-        // Native shadows reach the far fade (1000 m), so receivers keep the sun shadow lookup
-        // to that view depth. A short receiver range (the old 60 m) leaves everything beyond a
-        // camera-facing plane unshadowed, so rotating the camera relit distant cliffs.
+        // Receivers keep the sun shadow lookup to the native far fade; see LIGHTING.md (#9).
         let mut settings = Self {
             enabled: !args.iter().any(|a| a == "--no-shadow"),
             cascades: 4,
@@ -1293,13 +1291,9 @@ pub fn spawn_lights(commands: &mut Commands, settings: &ShadowSettings) {
             shadow_normal_bias: settings.normal_bias,
             ..default()
         },
-        {
-            let builder = bevy::light::CascadeShadowConfigBuilder::default();
-            bevy::light::CascadeShadowConfig {
-                bounds: settings.cascade_bounds(),
-                overlap_proportion: builder.overlap_proportion,
-                minimum_distance: builder.minimum_distance,
-            }
+        bevy::light::CascadeShadowConfig {
+            bounds: settings.cascade_bounds(),
+            ..default()
         },
         Transform::default(),
     ));
@@ -1682,20 +1676,6 @@ mod probe_tests {
         assert_eq!(s.cascade_bounds(), vec![5.]);
     }
     #[test]
-    fn default_shadows_cover_distant_cliffs_at_every_camera_yaw() {
-        // Bevy returns "unshadowed" past the last cascade's view depth, so a short range
-        // made a cliff 150 m away lit or shaded depending only on where the camera looked.
-        let s = ShadowSettings::from_args(&Gparam { groups: vec![] }, 6., &[]).unwrap();
-        assert_eq!(s.cascade_bounds(), vec![10., 30., 70., 1000.]);
-        let far = *s.cascade_bounds().last().unwrap();
-        for step in 0..36 {
-            let yaw = (step as f32 * 10.).to_radians();
-            let forward = Vec3::new(yaw.sin(), 0., -yaw.cos());
-            let view_depth = (Vec3::new(0., 20., -150.)).dot(forward);
-            assert!(view_depth < far, "yaw {step}0: depth {view_depth} beyond {far}");
-        }
-    }
-    #[test]
     fn shadow_cascades_follow_authored_shadow_param() {
         use sekiro_formats::gparam::{Entry, Group, Param, Value};
         let g = Gparam {
@@ -1723,6 +1703,9 @@ mod probe_tests {
         };
         let s = ShadowSettings::from_args(&g, 6., &[]).unwrap();
         assert_eq!(s.cascade_bounds(), vec![25., 50., 100., 400.]);
+        // Without authored values the native defaults reach 1000 m, past distant cliffs (#9).
+        let s = ShadowSettings::from_args(&Gparam { groups: vec![] }, 6., &[]).unwrap();
+        assert_eq!(s.cascade_bounds(), vec![10., 30., 70., 1000.]);
     }
     #[test]
     fn post_effects_only_mark_3d_cameras_and_disabled_lut_is_removed() {
