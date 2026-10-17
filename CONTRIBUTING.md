@@ -20,7 +20,7 @@ PRs that don't link an open issue are closed.
 ## Set up with your agent
 
 Fork `AKJama/sekiro-rs`, clone your fork, and open the folder in Claude Code (desktop or CLI).
-You can write code with another agent, but the review steps must run in Claude Code: its built-in `/code-review` at medium, then `/simplify`; PRs reviewed any other way are sent back.
+Code can come from another agent, but the reviews must be Claude Code's `/code-review` and `/simplify` ([pr-flow step 3](.claude/skills/pr-flow/SKILL.md#3-simplify-then-one-fix-pass)).
 The repo carries its own agent rules and skills in [AGENTS.md](AGENTS.md), [pr-flow](.claude/skills/pr-flow/SKILL.md), [issues](.claude/skills/issues/SKILL.md), and [live-test](.claude/skills/live-test/SKILL.md) for your agent to read and follow.
 Paste this prompt, replacing `N` with the issue number:
 
@@ -49,15 +49,10 @@ cargo test --release --workspace
 For rendering changes, also build the release binary and run both render gates listed in step 4.
 Play the game yourself following the live-test skill and describe what you saw.
 
-Keep new tests few, because the test run is most of every PR's time.
-Each new test guards one specific way your change could break and fails without it.
-Usually that is 1 to 3 tests; more needs a reason in the PR.
-Prefer fast data tests over tests that step fights or load the game, and list each new test with its run time in the PR.
+Keep new tests within the budget in [AGENTS.md](AGENTS.md#tests), because the test run is most of every PR's time.
+Fill in every section of the PR template; the `issue-link` check fails a ready PR that leaves one out, empty or unchanged.
 
-Fill in every section of the PR template, with `Fixes #N` in Motivation, real results in How it was tested, and Low, Medium or High in Risk.
-When a PR is ready for review, the `issue-link` check fails it if a section is missing, empty or still has the template text; drafts are not checked.
-
-Before marking the PR ready for review, bring it up to date with `main` and rerun the checks:
+Just before the step 4 checks, bring the branch up to date with `main`, so the slow checks run once:
 
 ```powershell
 git remote add upstream https://github.com/AKJama/sekiro-rs.git  # once
