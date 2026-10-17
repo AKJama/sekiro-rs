@@ -78,6 +78,7 @@ struct WarmCache {
     seen: HashSet<(bool, ErasedMaterialPipelineKey, MeshVertexBufferLayoutRef)>,
     work: VecDeque<Work>,
     queued: usize,
+    frames: u32,
 }
 
 impl WarmCache {
@@ -91,12 +92,16 @@ impl WarmCache {
     }
 }
 
+/// Frames after the map loads before warmup stops waiting for steady asset counts.
+const SETTLE_DEADLINE_FRAMES: u32 = 300;
+
 fn warm_pipelines<M: Material>(world: &mut World, mut state: Local<WarmCache>) {
     let warmup = world.resource::<PipelineWarmup>().clone();
     if warmup.ready() || !warmup.loaded.load(Ordering::Acquire) {
         return;
     }
     let _timer = crate::perf_log::SystemTimer::start("pipeline warmup");
+    state.frames += 1;
     let counts = (
         world.resource::<RenderAssets<RenderMesh>>().iter().count(),
         world
@@ -256,7 +261,9 @@ fn warm_pipelines<M: Material>(world: &mut World, mut state: Local<WarmCache>) {
             }
         }
     }
-    if state.stable >= 4
+    // Streaming, effects and batch merging can keep the asset counts moving in normal play,
+    // so stop waiting for them to settle after a deadline instead of holding the loading screen.
+    if (state.stable >= 4 || state.frames >= SETTLE_DEADLINE_FRAMES)
         && state.work.is_empty()
         && world
             .resource::<PipelineCache>()

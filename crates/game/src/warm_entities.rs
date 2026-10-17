@@ -56,6 +56,9 @@ fn extract<M: Material>(
         }));
 }
 
+/// Time spent warming placements per loading frame.
+const FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
+
 pub(super) fn warm<M: Material>(world: &mut World) -> bool {
     let _timer = crate::perf_log::SystemTimer::start("entity pipeline warmup");
     let mut queue = world.remove_resource::<Queue>().unwrap();
@@ -76,7 +79,9 @@ pub(super) fn warm<M: Material>(world: &mut World) -> bool {
         .resource::<RenderDevice>()
         .features()
         .contains(wgpu::Features::DEPTH_CLIP_CONTROL);
-    for _ in 0..128 {
+    // This runs behind the loading screen, so spend most of each frame on it.
+    let start = std::time::Instant::now();
+    while start.elapsed() < FRAME_BUDGET {
         let Some(resident) = queue.work.as_mut().unwrap().pop_front() else {
             break;
         };
