@@ -38,7 +38,7 @@ pub const AIR_HANG_TYPE_SHORT: u8 = 1;
 pub const AIR_HANG_TYPE_LONG: u8 = 2;
 /// The climb-up and drop clips: `HangToStand` / `HangFootHoldToStand` and `HangToFreeFall` /
 /// `HangFootHoldToFreeFall` (variation 0 / 1).
-const CLIMB_CLIPS: [&str; 2] = ["a000_217500", "a000_217600"];
+pub(crate) const CLIMB_CLIPS: [&str; 2] = ["a000_217500", "a000_217600"];
 const DROP_CLIPS: [&str; 2] = ["a000_217520", "a000_217620"];
 
 /// Hang edges: kind 2, variation 0 (`HANG_EDGE_TYPE_DISABLE_HOLD_FOOT`) or 1 (`ENABLE_HOLD_FOOT`).
@@ -96,6 +96,8 @@ pub struct Docking {
     pub active: Option<Target>,
     /// env 3045 for the airborne candidate: 0 none, [`AIR_HANG_TYPE_SHORT`] or [`AIR_HANG_TYPE_LONG`].
     pub air_hang_type: u8,
+    /// Skip the airborne edge scan: the script is not asking for an air hang (act 3028).
+    pub skip_air_search: bool,
     climb_start: Option<Vec3>,
 }
 
@@ -295,7 +297,9 @@ impl Docking {
             return;
         }
         if !body.grounded {
-            self.air_search(body, ground);
+            if !self.skip_air_search {
+                self.air_search(body, ground);
+            }
             return;
         }
         let p = Vec3::from(body.position);
@@ -359,35 +363,34 @@ impl Docking {
     /// wall jump and plain falls into the ground hang's own docking.
     fn air_search(&mut self, body: &Body, ground: &dyn Ground) {
         let p = Vec3::from(body.position);
-        let mut nearest = f32::INFINITY;
-        for i in 0..self.edges.len() {
-            let edge = &self.edges[i];
-            if !is_hang(edge) {
-                continue;
-            }
-            let (point, t) = edge.closest(p);
-            let up = point.y - p.y;
-            if !(AIR_HANG_BAND.0..=AIR_HANG_BAND.1).contains(&up)
-                || !(0.0..=1.0).contains(&t)
-                || Vec3::new(p.x - point.x, 0.0, p.z - point.z).length() > AIR_HANG_LONG + 0.5
-            {
-                continue;
-            }
-            let Some(mut target) = self.target(i, p, ground) else {
-                continue;
-            };
-            let off = (p - target.point).dot(target.outward);
-            // Beside the edge's span, not past its ends.
-            let a = Vec3::from(edge.start);
-            let d = Vec3::from(edge.end) - a;
-            let along = Vec3::new(d.x, 0.0, d.z);
-            let s = (p - a).dot(along) / along.length_squared().max(1e-8);
-            if !(-0.3..=AIR_HANG_LONG).contains(&off) || !(0.0..=1.0).contains(&s) || off >= nearest
-            {
-                continue;
-            }
+        let best = (0..self.edges.len())
+            .filter_map(|i| {
+                let edge = &self.edges[i];
+                if !is_hang(edge) {
+                    return None;
+                }
+                // Beside the edge's span, not past its ends (the unclamped projection).
+                let a = Vec3::from(edge.start);
+                let d = Vec3::from(edge.end) - a;
+                let along = Vec3::new(d.x, 0.0, d.z);
+                let s = (p - a).dot(along) / along.length_squared().max(1e-8);
+                let point = a + d * s.clamp(0.0, 1.0);
+                // Cheap rejections before `target`'s collision probes.
+                if !(0.0..=1.0).contains(&s)
+                    || !(AIR_HANG_BAND.0..=AIR_HANG_BAND.1).contains(&(point.y - p.y))
+                    || Vec3::new(p.x - point.x, 0.0, p.z - point.z).length() > AIR_HANG_LONG
+                {
+                    return None;
+                }
+                let target = self.target(i, p, ground)?;
+                let off = (p - target.point).dot(target.outward);
+                (-0.3..=AIR_HANG_LONG)
+                    .contains(&off)
+                    .then_some((target, off))
+            })
+            .min_by(|a, b| a.1.abs().total_cmp(&b.1.abs()));
+        if let Some((mut target, off)) = best {
             target.angle = angle_diff(target.yaw(), body.yaw).to_degrees();
-            nearest = off;
             self.air_hang_type = if off > AIR_HANG_SHORT {
                 AIR_HANG_TYPE_LONG
             } else {
@@ -478,14 +481,14 @@ pub fn wall_contact(feet: Vec3, yaw: f32, ground: &dyn Ground) -> Option<f32> {
     let chest = [feet.x, feet.y + WALL_PROBE_LIFT, feet.z];
     (0..8)
         .filter_map(|k| {
-            let ray_yaw = yaw - k as f32 * std::f32::consts::FRAC_PI_4;
-            // yaw is measured around +Y, forward is (-sin yaw, -cos yaw).
-            let dir = Vec3::new(-ray_yaw.sin(), 0.0, -ray_yaw.cos());
+            // Ray k is k * 45 degrees to the right of the facing.
+            let right = k as f32 * 45.0;
+            let dir = crate::arena::forward(yaw - right.to_radians());
             let delta = dir * WALL_REACH;
             let slid = ground.slide(chest, [delta.x, delta.z]);
             let shortfall = WALL_REACH - Vec3::new(slid[0], 0.0, slid[1]).dot(dir);
-            (shortfall > WALL_TOLERANCE)
-                .then(|| (-angle_diff(ray_yaw, yaw).to_degrees(), shortfall))
+            let angle = if right > 180.0 { right - 360.0 } else { right };
+            (shortfall > WALL_TOLERANCE).then_some((angle, shortfall))
         })
         .max_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(angle, _)| angle)

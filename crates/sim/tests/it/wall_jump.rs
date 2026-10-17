@@ -172,17 +172,6 @@ fn climb(duel: &mut Duel, hold_early: bool) {
         };
         let r = duel.step(&press(buttons), dt);
         peak = peak.max(duel.player.body.position[1] - start);
-        if !r.player.behavior.events.is_empty() {
-            eprintln!(
-                "pos={:?} vy={:.2} anim={:?} events={:?} wall={} air={}",
-                duel.player.body.position,
-                duel.player.body.velocity[1],
-                r.player.animation,
-                r.player.behavior.events,
-                duel.player.behavior.env.wall_contact,
-                duel.player.behavior.env.air_hang_type,
-            );
-        }
         wall_jumped |= r
             .player
             .behavior

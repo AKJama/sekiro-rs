@@ -647,24 +647,29 @@ impl Character {
                 .filter(|a| self.input.requested(*a, &TaeFrame::default()))
                 .collect();
         }
+        // The script asks for the air hang (act 3028) every update of a state that allows it,
+        // so last step's ask gates this step's edge scan.
+        self.docking.skip_air_search = self.behavior.env.docking_searches.get() & 4 == 0;
         self.docking.search(&self.body, self.ground.as_ref());
-        // env 3020 and ContactWallAngle: the airborne wall contact the wall jump reads. The
+        // env 3020 and ContactWallAngle: the airborne wall contact the wall jump reads, only in
+        // the TAE ref 104 (ENABLE_WALL_JUMP_CANCEL) window that `BEH_A_WALL_JUMP` requires. The
         // script itself allows one wall jump a flight (g_wallJumpCount, reset on landing).
-        let wall = (!self.body.grounded && self.docking.active.is_none())
-            .then(|| {
-                crate::docking::wall_contact(
-                    glam::Vec3::from(self.body.position),
-                    self.body.yaw,
-                    self.ground.as_ref(),
-                )
-            })
-            .flatten();
+        let wall = if !self.body.grounded
+            && self.docking.active.is_none()
+            && self.behavior.env.sp_effect_refs.contains(&104)
+        {
+            crate::docking::wall_contact(
+                glam::Vec3::from(self.body.position),
+                self.body.yaw,
+                self.ground.as_ref(),
+            )
+        } else {
+            None
+        };
         self.behavior.env.wall_contact = wall.is_some();
-        if let Some(angle) = wall {
-            self.behavior
-                .runtime
-                .set_variable("ContactWallAngle", angle);
-        }
+        self.behavior
+            .runtime
+            .set_variable("ContactWallAngle", wall.unwrap_or(0.0));
         self.wire.search(&self.body, frame.camera_yaw);
         self.behavior.env.wire_candidate = self.wire.candidate.is_some();
         let wire_target = if frame.buttons.grapple {
@@ -705,12 +710,15 @@ impl Character {
             .active
             .as_ref()
             .is_some_and(|t| self.docking.is_cover(t));
-        env.docking_blocked = dock.map_or([false; 2], |t| {
-            [
-                self.docking.cover_blocked(t, self.ground.as_ref(), true),
-                self.docking.cover_blocked(t, self.ground.as_ref(), false),
-            ]
-        });
+        // Only cover reads the blocked sides (env 3043's path).
+        env.docking_blocked = dock
+            .filter(|t| self.docking.is_cover(t))
+            .map_or([false; 2], |t| {
+                [
+                    self.docking.cover_blocked(t, self.ground.as_ref(), true),
+                    self.docking.cover_blocked(t, self.ground.as_ref(), false),
+                ]
+            });
         env.docking_active = self.docking.active.is_some();
         env.docking_variation = dock.map_or(0, |t| self.docking.edges[t.edge].variation);
         env.docking_end = dock.map_or(0, |t| t.end);
@@ -946,7 +954,7 @@ impl Character {
             .then(|| angle_diff(self.body.yaw + rx.atan2(-rz), 0.0));
         let root_progress = main
             .as_ref()
-            .filter(|c| c.animation == "a000_217500")
+            .filter(|c| crate::docking::CLIMB_CLIPS.contains(&c.animation.as_str()))
             .and_then(|c| {
                 let clip = self.clips.clip(&c.animation)?;
                 let rm = clip.root_motion.as_ref()?;
