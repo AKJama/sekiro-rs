@@ -1102,12 +1102,15 @@ pub(crate) fn upload_budget() -> bevy::render::render_asset::RenderAssetBytesPer
 }
 
 /// Anisotropic filtering for map and model textures, so surfaces seen at a grazing angle (cliff
-/// and rock faces) stay sharp instead of blurring to a low mip (#45).
-pub(crate) const TEXTURE_ANISOTROPY: u16 = 8;
+/// and rock faces) stay sharp instead of blurring to a low mip (#45). 8 is a stand-in that
+/// removed the blur in the 2026-10-17 playtest; the real game's own setting is untraced.
+const TEXTURE_ANISOTROPY: u16 = 8;
+const _: () = assert!(TEXTURE_ANISOTROPY > 1);
 
-/// The sampler GLB textures get: trilinear with [`TEXTURE_ANISOTROPY`]; each texture's glTF
-/// wrap modes still apply.
-fn gltf_texture_sampler() -> bevy::image::ImageSamplerDescriptor {
+/// The sampler for map and model textures: trilinear with [`TEXTURE_ANISOTROPY`] (wgpu needs
+/// every filter linear once anisotropy is on). GLB textures keep their glTF wrap modes, but
+/// Bevy then ignores their authored filters; the exporter writes only linear ones.
+pub(crate) fn texture_sampler() -> bevy::image::ImageSamplerDescriptor {
     bevy::image::ImageSamplerDescriptor {
         anisotropy_clamp: TEXTURE_ANISOTROPY,
         ..bevy::image::ImageSamplerDescriptor::linear()
@@ -1116,7 +1119,7 @@ fn gltf_texture_sampler() -> bevy::image::ImageSamplerDescriptor {
 
 pub(crate) fn layered_gltf_plugin() -> bevy::gltf::GltfPlugin {
     bevy::gltf::GltfPlugin {
-        default_sampler: gltf_texture_sampler(),
+        default_sampler: texture_sampler(),
         ..default()
     }
     // gltf-json strips the leading underscore before Bevy looks up custom semantics.
@@ -1898,11 +1901,17 @@ mod tests {
     /// filtering, or faces seen at a grazing angle blur to a low mip.
     #[test]
     fn gltf_textures_sample_anisotropically() {
+        use bevy::image::ImageFilterMode::Linear;
         let sampler = layered_gltf_plugin().default_sampler;
         assert_eq!(sampler.anisotropy_clamp, TEXTURE_ANISOTROPY);
-        assert!(TEXTURE_ANISOTROPY > 1);
-        assert_eq!(sampler.mipmap_filter, bevy::image::ImageFilterMode::Linear);
-        assert_eq!(sampler.min_filter, bevy::image::ImageFilterMode::Linear);
+        assert_eq!(
+            [
+                sampler.mag_filter,
+                sampler.min_filter,
+                sampler.mipmap_filter
+            ],
+            [Linear; 3]
+        );
     }
 
     #[test]
