@@ -141,7 +141,9 @@ fn release_materials(
 ) {
     for event in events.read() {
         if let AssetEvent::Removed { id } = event {
-            settings.materials.retain(|(source, _), _| source != id);
+            for follows_scene in [false, true] {
+                settings.materials.remove(&(*id, follows_scene));
+            }
         }
     }
     // Scene assets can retain their source materials after the rig is gone.
@@ -350,36 +352,26 @@ impl MapLight {
     }
 }
 
-/// The two shared light buffers: `part` for map pieces and objects on the ordinary MSB light
-/// set, `scene` for characters and parts that follow the collision-selected row.
+/// The two shared light buffers, indexed by whether the surface follows the collision row:
+/// map pieces and objects on the ordinary MSB light set, then characters and parts that
+/// follow the collision-selected row.
 #[derive(Resource)]
-struct MapLightBuffer {
-    part: Handle<bevy::render::storage::ShaderBuffer>,
-    scene: Handle<bevy::render::storage::ShaderBuffer>,
-}
+struct MapLightBuffer([Handle<bevy::render::storage::ShaderBuffer>; 2]);
 
 impl MapLightBuffer {
     fn get(&self, follows_scene: bool) -> Handle<bevy::render::storage::ShaderBuffer> {
-        if follows_scene {
-            self.scene.clone()
-        } else {
-            self.part.clone()
-        }
+        self.0[follows_scene as usize].clone()
     }
 }
 
 impl FromWorld for MapLightBuffer {
     fn from_world(world: &mut World) -> Self {
         let mut buffers = world.resource_mut::<Assets<bevy::render::storage::ShaderBuffer>>();
-        let mut add = || {
+        Self([(); 2].map(|()| {
             buffers.add(bevy::render::storage::ShaderBuffer::from(
                 MapLight::default(),
             ))
-        };
-        Self {
-            part: add(),
-            scene: add(),
-        }
+        }))
     }
 }
 
@@ -575,6 +567,9 @@ mod tests {
         assert_eq!(proxies.iter(app.world()).count(), 1);
         app.update();
         assert_eq!(proxies.iter(app.world()).count(), 1);
+        // The map and Wolf share one source but read different light buffers (#30).
+        let cached = app.world().resource::<LayerSettings>().materials.len();
+        assert_eq!(cached, 2);
         for fight in 0..20 {
             let source = app
                 .world_mut()
@@ -592,7 +587,10 @@ mod tests {
             app.world_mut()
                 .spawn((MeshMaterial3d(source.clone()), ChildOf(root)));
             app.update();
-            assert_eq!(app.world().resource::<LayerSettings>().materials.len(), 2);
+            assert_eq!(
+                app.world().resource::<LayerSettings>().materials.len(),
+                cached + 1
+            );
             app.world_mut().despawn(root);
             app.world_mut()
                 .resource_mut::<Assets<StandardMaterial>>()
@@ -602,7 +600,7 @@ mod tests {
             }
             assert_eq!(
                 app.world().resource::<LayerSettings>().materials.len(),
-                1,
+                cached,
                 "fight {fight}: wrapper survived source teardown"
             );
         }

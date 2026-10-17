@@ -161,11 +161,14 @@ pub(crate) struct DrawGroups([u32; 8]);
 #[derive(Component)]
 pub(crate) struct FollowsSceneLight;
 
+/// A layout part row's MSB GparamConfig ids (light, fog, scattering, env map), -1 when absent.
+fn gparam_config(row: &Value) -> [i32; 4] {
+    std::array::from_fn(|i| row["gparam"][i].as_i64().unwrap_or(-1) as i32)
+}
+
 /// Whether a layout part row authors its own light set (MSB GparamConfig light set id > 0).
 pub(crate) fn follows_scene_light(row: &Value) -> bool {
-    row["gparam"][0]
-        .as_i64()
-        .is_some_and(|id| crate::lighting::part_follows_scene(id as i32))
+    crate::lighting::part_follows_scene(gparam_config(row)[0])
 }
 
 /// Distant render-only scenery is independent of the local collision's draw groups.
@@ -1478,10 +1481,9 @@ fn pick_groups(
             && let Some(row) = world.blocks[block].json["parts"]
                 .as_array()
                 .and_then(|parts| parts.iter().find(|p| p["name"].as_str() == Some(collision)))
-            && let Some(config) = row["gparam"].as_array()
+            && row["gparam"].is_array()
         {
-            let config =
-                std::array::from_fn(|i| config.get(i).and_then(Value::as_i64).unwrap_or(-1) as i32);
+            let config = gparam_config(row);
             region.enter(config);
             if block == &world.primary
                 && let Some(selection) = selection.as_mut()

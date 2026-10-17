@@ -956,3 +956,13 @@ The normal-distance and all-visible images then differ in more shadowed pixels, 
 | Castle 5 | 1898 -> 2639 |
 
 Void, depth-gap, untextured and grey cells pass unchanged; capture time grows to 60.7 and 68.8 seconds, inside the 120-second budget.
+
+## Per-part light sets (#30)
+
+Map pieces and objects now use their own MSB light set row 0, which has no local light and a dimmer sun than the collision rows, so surfaces render darker and flatter-coloured.
+The Outskirts gate passes unchanged; two Castle cells moved past tolerance and are re-baselined.
+
+| Map / view | Cell |
+|---|---|
+| Castle 2 | pop-in 5817 -> 5938 |
+| Castle 5 | grey 87 -> 265 |
