@@ -1404,6 +1404,9 @@ fn mesh_entity(commands: &mut Commands, mesh: Handle<Mesh>) -> Entity {
             bevy::camera::visibility::NoFrustumCulling,
             bevy::light::NotShadowCaster,
             bevy::light::NotShadowReceiver,
+            // Batches appear whenever an effect first uses a texture; loading never
+            // waits for them.
+            crate::map::ready::RuntimeMesh,
         ))
         .id()
 }
