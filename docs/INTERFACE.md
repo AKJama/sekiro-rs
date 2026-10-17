@@ -3,6 +3,7 @@
 No arguments or `--menu` opens a Bevy UI panel with Segoe UI, keyboard, mouse and gamepad navigation.
 Existing flags still dispatch directly to their original modes.
 Explore map is the first and default mode, with only Map and Start number settings.
+A fresh menu starts on Ashina Outskirts (`m11_00_00_00`) start 0, the real game's first Ashina visit before Gyoubu; a saved menu keeps its own map.
 The Map row starts selected, so Enter/A immediately explores the selected start.
 Number keys 1-9 and 0 select the ten listed maps directly; Enter then starts exploration.
 Only extracted maps appear in the map cycle, and changing maps resets the start number to zero.
