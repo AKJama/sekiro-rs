@@ -44,5 +44,7 @@ A Rust/Bevy reimplementation of Sekiro: Shadows Die Twice (Steam, v1.6.0.0, buil
   Integration tests live in one binary per crate (`crates/<crate>/tests/it/main.rs`, one module per file), so a new test file is a `mod` line there, not a new binary.
 - The normal run holds tests that guard distinct behaviour and finish in a few seconds, including one end-to-end fight per boss (Owl, Genichiro).
   Anything slower, such as full-roster sweeps or long parameter sweeps, is marked `#[ignore = "slow: <reason>"]`; run that tier with `cargo test --release --workspace -- --include-ignored`.
+- A PR adds few tests, usually 1 to 3; more needs a reason in the PR.
+  Each guards one specific way that change could break and fails without it; prefer fast data tests over tests that step fights or load the game, and give the PR the run time of any new test over a second.
 - Prefer one focused test per behaviour, table-driven when only the inputs differ; don't add tests that restate the code (constants, defaults, getters, serde round-trips of a type already covered).
 - Tests that build many independent `Duel`s can spread the cases over cores with `rayon` (a dev-dependency of `sekiro-sim`).

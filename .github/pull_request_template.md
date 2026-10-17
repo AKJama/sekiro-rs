@@ -1,26 +1,42 @@
-## What and why
+## Motivation
 
 Fixes #N.
-<!-- In plain words: what this tries to implement and why. -->
+<!-- What the player saw and why it was wrong, in plain words. -->
 
-Agent and model used:
+## What changed
 
-## What to look out for when playing
+<!-- How it works now, what was kept, and its limits. -->
 
-<!-- Where to go and what to check. -->
+## How it was tested
 
-## Checks
-
-<!-- Fill these in after running the pr-flow checks and playing the change yourself. -->
+<!-- Real results, not "tests pass". Fill these in after the pr-flow checks and your own playtest. -->
 - code-review: N findings, M fixed
-- simplify: done
+- simplify: N findings, M fixed
 - fmt, clippy, tests: pass (N passed)
 - Render gates: pass / not affected
-- Live game: ready in Xs, Y fps settled, ground textured at spawn
+- New tests: <!-- each test's name, the breakage it catches and its run time, or "None" -->
+- Live game: <!-- what you played and what you saw -->
 
-## Before / after
+What to check when playing: <!-- where to go and what to look for -->
 
-<!-- Include screenshots or a short clip attached in the PR conversation. -->
+## Risk
+
+<!-- Start with Low, Medium or High, then say what else this could break: other maps, frame rate, loading, saves. -->
+
+## New dependencies
+
+<!-- "None", or each new crate and why. -->
+
+## Checklist
+
+- [ ] Ran Claude Code's `/code-review` at medium, then `/simplify`, on the final diff (other agents' reviews are not accepted)
+- [ ] New tests only guard this change, and are listed above with their run time
+- [ ] Docs updated where needed
+- Agent and model used: <!-- for example Claude Code, Opus 5.5 -->
+
+## Screenshots / video
+
+<!-- Attach them in the PR conversation, or write "Not applicable". -->
 
 ## Open
 

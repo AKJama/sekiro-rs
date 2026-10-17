@@ -19,7 +19,8 @@ PRs that don't link an open issue are closed.
 
 ## Set up with your agent
 
-Fork `AKJama/sekiro-rs`, clone your fork, and open the folder in Claude Code desktop or CLI, Codex, or your agent.
+Fork `AKJama/sekiro-rs`, clone your fork, and open the folder in Claude Code (desktop or CLI).
+Code can come from another agent, but the reviews must be Claude Code's `/code-review` and `/simplify` ([pr-flow step 3](.claude/skills/pr-flow/SKILL.md#3-simplify-then-one-fix-pass)).
 The repo carries its own agent rules and skills in [AGENTS.md](AGENTS.md), [pr-flow](.claude/skills/pr-flow/SKILL.md), [issues](.claude/skills/issues/SKILL.md), and [live-test](.claude/skills/live-test/SKILL.md) for your agent to read and follow.
 Paste this prompt, replacing `N` with the issue number:
 
@@ -47,9 +48,11 @@ cargo test --release --workspace
 
 For rendering changes, also build the release binary and run both render gates listed in step 4.
 Play the game yourself following the live-test skill and describe what you saw.
-Use the PR template and include `Fixes #N` in the PR body.
 
-Before marking the PR ready for review, bring it up to date with `main` and rerun the checks:
+Keep new tests within the budget in [AGENTS.md](AGENTS.md#tests), because the test run is most of every PR's time.
+Fill in every section of the PR template; the `issue-link` check fails a ready PR that leaves one out, empty or unchanged.
+
+Just before the step 4 checks, bring the branch up to date with `main`, so the slow checks run once:
 
 ```powershell
 git remote add upstream https://github.com/AKJama/sekiro-rs.git  # once

@@ -2,13 +2,19 @@ name: Issue link
 
 on:
   pull_request:
-    types: [opened, edited, reopened, synchronize]
+    types: [opened, edited, reopened, synchronize, ready_for_review]
     branches: [main]
 
 permissions: { issues: read, pull-requests: read, contents: read }
 
+concurrency:
+  group: issue-link-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   issue-link:
+    # Title or base edits can't change the result; body edits and pushes can.
+    if: github.event.action != 'edited' || github.event.changes.body != null
     runs-on: ubuntu-latest
     steps:
       - name: Check linked issues
@@ -35,3 +41,54 @@ jobs:
             jq -e '.state == "open"' <<< "$issue" > /dev/null || fail "Issue #$number must be open."
           done <<< "$numbers"
           echo "Linked issues are open: $(echo $numbers)."
+
+      # Drafts are claims and may be empty; the template is checked once the PR is ready.
+      - uses: actions/checkout@v4
+        if: ${{ !github.event.pull_request.draft }}
+        with:
+          sparse-checkout: .github/pull_request_template.md
+          sparse-checkout-cone-mode: false
+      - name: Check the PR follows the template
+        if: ${{ !github.event.pull_request.draft }}
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python3 - <<'EOF'
+          import os, re, sys
+
+          def strip(text):
+              return re.sub(r"<!--.*?-->", "", text, flags=re.S)
+
+          def sections(text):
+              parts = re.split(r"^##[ \t]+(.+?)[ \t]*$", text, flags=re.M)
+              return {parts[i].strip().lower(): parts[i + 1].strip() for i in range(1, len(parts) - 1, 2)}
+
+          # The template is the only source of truth: its headings must all be present and filled,
+          # and none of its own lines may be left unchanged (issue-link above checks `Fixes #N`).
+          template = strip(open(".github/pull_request_template.md", encoding="utf-8").read())
+          body = strip(os.environ.get("PR_BODY") or "")
+          found = sections(body)
+          errors = []
+          for name in re.findall(r"^##[ \t]+(.+?)[ \t]*$", template, flags=re.M):
+              text = found.get(name.lower())
+              if text is None:
+                  errors.append(f'Missing the "## {name}" section.')
+              elif not text:
+                  errors.append(f'The "{name}" section is empty.')
+          body_lines = {line.strip() for line in body.splitlines()}
+          for line in template.splitlines():
+              line = line.strip()
+              if line and not line.startswith("##") and "Fixes #N" not in line and line in body_lines:
+                  errors.append(f'Replace or fill in the template line "{line}".')
+          for box in re.findall(r"^\s*- \[ \] (.+?)\s*$", template, flags=re.M):
+              if not re.search(r"^\s*- \[[xX]\] " + re.escape(box) + r"\s*$", body, flags=re.M):
+                  errors.append(f'Tick the checklist box "{box}".')
+          if found.get("risk") and not re.match(r"[*_]*(Low|Medium|High)\b", found["risk"]):
+              errors.append("Risk must start with Low, Medium or High.")
+          for e in errors:
+              print(f"Error: {e}")
+          if errors:
+              print("Fill in the PR template, see CONTRIBUTING.md.")
+              sys.exit(1)
+          print("PR body follows the template.")
+          EOF

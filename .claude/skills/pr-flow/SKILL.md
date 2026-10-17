@@ -33,7 +33,7 @@ When a lower PR changes or merges, rebase the stacked branches onto it and force
 - Work from your fork and open the PR against `AKJama/sekiro-rs` `main`.
 - Claim the issue by opening a draft PR with `Fixes #N` before writing code, instead of a board row; mark it ready for review when steps 1 to 4 are done.
 - One issue per PR, never several: if the work covers more (a whole menu system, all of parkour), file one issue per playable piece with the `issues` skill and make one PR each.
-- Branch from the latest upstream `main`, and before marking the PR ready rebase on it (`git fetch upstream`, `git rebase upstream/main`), resolve conflicts, rerun step 4 and push with `--force-with-lease`.
+- Branch from the latest upstream `main`, and rebase on it just before step 4 (`git fetch upstream`, `git rebase upstream/main`), so the full checks run once on the final base; resolve conflicts and push with `--force-with-lease`.
 - Commit under your own name; the AKJama identity rule is for the maintainer.
 - Skip the collab-board steps.
 - Run step 4 and play the game yourself, and describe what you saw in the PR; step 5 becomes the maintainer's review and playtest.
@@ -69,6 +69,7 @@ If a job turns up a second problem, file it as a new issue instead of widening t
 Builds and tests are most of a PR's time, so the implementing agent tests as little as it can and the full checks run once, at step 4.
 
 - The implementing agent writes the code and its tests, and checks that it compiles.
+- New tests stay within the budget in [AGENTS.md](../../../AGENTS.md#tests): usually 1 to 3, each failing without the change.
 - It runs only the new tests and the tests in the files it touched, once, by name filter.
 It does not run the full suite, and does not rerun tests while iterating.
 - When it only needs to know whether something works in the game, it builds the release binary once and stops.
@@ -99,31 +100,9 @@ Keep new shared data read-only; a test that changes state loads or clones its ow
 
 ## 1. Write the PR
 
-Create the branch, commit the change, push, and open the PR with a short body:
-
-```markdown
-## What and why
-Fixes #N.
-In plain words: what this tries to implement and why.
-
-## What to look out for when playing
-Where to go and what to check, for example "load into the Outskirts: the loading bar should finish with the ground already textured".
-
-## Checks
-- code-review: N findings, M fixed
-- simplify: done
-- fmt, clippy, tests: pass (N passed)
-- Render gates: pass / not affected
-- Live game: ready in Xs, Y fps settled, ground textured at spawn
-
-## Before / after
-Paths under D:\sekiro-rs-media\progress\<date>\ (images stay off the repo).
-
-## Open
-Anything left undone, or "None".
-```
-
-Fill in the Checks lines as steps 2 to 4 finish, and edit the PR body to match.
+Create the branch, commit the change, push, and open the PR with the body from [`.github/pull_request_template.md`](../../../.github/pull_request_template.md), filling in every section.
+The `issue-link` check fails a ready PR whose body misses a section, leaves one empty or keeps a template line, so open it as a draft, fill in How it was tested as steps 2 to 4 finish, then mark it ready.
+Screenshots stay off the repo: attach them in the PR conversation, or for maintainers give the path under `D:\sekiro-rs-media\progress\<date>\`.
 Do not paste game assets or personal paths beyond the media folder reference.
 Add the PR link to the matching row on the collab board (`sekiro-collab/WORK.md`).
 When the PR merges, move that row to Done with the PR link.
@@ -140,8 +119,8 @@ Then apply the code-review and simplify findings together in one pass (one agent
 Keep simplify to cleanups of the diff: a deeper refactor it suggests becomes its own issue instead of growing the PR.
 
 `code-review` and `simplify` are built into Claude Code.
-Other agents (Codex and others) do the same two passes by hand: a correctness review of every hunk, its enclosing function and its callers, then a cleanup pass for reuse, redundant state and wasted work.
-If neither is possible, say so in the PR body rather than skipping it silently.
+Every PR must run both in Claude Code, `/code-review` at medium and then `/simplify`, on its final diff, whatever agent wrote the code.
+A review done by hand or by another agent (Codex and others) does not count, and a PR without both is sent back.
 
 ## 4. Checks
 
