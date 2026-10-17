@@ -704,7 +704,12 @@ pub fn step_node(n: &mut NodeInst, lib: &mut FxrLib, parent: Transform, dt: f32,
                     scalar(mv, Field::AccelerationY, active_t, &mut rnd, 0.0) * active_t * dt;
             }
             Some(15) => {
-                let o = game_vec(prop(mv.get(Field::Translation), active_t, &mut rnd, [0.0; 4]));
+                let o = game_vec(prop(
+                    mv.get(Field::Translation),
+                    active_t,
+                    &mut rnd,
+                    [0.0; 4],
+                ));
                 n.local.translation += o - n.offset;
                 n.offset = o;
             }
@@ -970,7 +975,8 @@ pub fn grow_trails(n: &mut NodeInst) {
     if let Some(c) = n.cfg.clone() {
         let a = &c.appearance;
         if matches!(a[Field::Type].as_i64(), Some(606) | Some(10012)) {
-            let interval = (a[Field::SegmentInterval].as_f64().unwrap_or(0.0) as f32).max(1.0 / 60.0);
+            let interval =
+                (a[Field::SegmentInterval].as_f64().unwrap_or(0.0) as f32).max(1.0 / 60.0);
             let seg_life = (a[Field::SegmentDuration].as_f64().unwrap_or(0.0) as f32).max(0.02);
             let max_segs = a[Field::ConcurrentSegments].as_i64().unwrap_or(100).max(2) as usize;
             // TracerOrientationMode: 0 Travel (by the path and the camera, at draw time), 1 the
@@ -1034,7 +1040,8 @@ pub fn frame_uvs(
     let cols = int(a, Field::Columns, 1).max(1) as f32;
     let total = int(a, Field::TotalFrames, 1).max(1) as f32;
     let rows = (total / cols).ceil().max(1.0);
-    let fi = scalar(a, Field::FrameIndex, age, rnd, 0.0) + scalar(a, Field::FrameIndexOffset, age, rnd, 0.0);
+    let fi = scalar(a, Field::FrameIndex, age, rnd, 0.0)
+        + scalar(a, Field::FrameIndexOffset, age, rnd, 0.0);
     let rect = |f: f32| {
         let f = f.rem_euclid(total);
         let (cx, cy) = (f % cols, (f / cols).floor());
@@ -1059,7 +1066,12 @@ pub fn particle_color(
     let c1 = prop(a.get(Field::Color1), p.age, rnd, [1.0; 4]).map(|v| v.clamp(0.0, 1.0));
     let c2 = prop(a.get(Field::Color2), p.emit_t, rnd, [1.0; 4]).map(|v| v.clamp(0.0, 1.0));
     let c3 = prop(a.get(Field::Color3), p.age, rnd, [1.0; 4]);
-    let pm = prop(c.particle_modifier.get(Field::Color), active_t, rnd, [1.0; 4]);
+    let pm = prop(
+        c.particle_modifier.get(Field::Color),
+        active_t,
+        rnd,
+        [1.0; 4],
+    );
     let lit = matches!(a[Field::Lighting].as_i64(), Some(-2 | 0));
     let rgbm = scalar(a, Field::RgbMultiplier, active_t, rnd, 1.0) * if lit { 0.125 } else { 1.0 };
     let am = scalar(a, Field::AlphaMultiplier, active_t, rnd, 1.0);
@@ -1098,7 +1110,10 @@ pub fn view_fade(a: &Action, d: f32) -> f32 {
         f(Field::MaxFadeDistance),
         f(Field::MaxDistance),
     );
-    let (min_t, max_t) = (f(Field::MinDistanceThreshold), f(Field::MaxDistanceThreshold));
+    let (min_t, max_t) = (
+        f(Field::MinDistanceThreshold),
+        f(Field::MaxDistanceThreshold),
+    );
     if (min_t >= 0.0 && d < min_t) || (max_t >= 0.0 && d > max_t) {
         return 0.0;
     }

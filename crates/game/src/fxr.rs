@@ -1646,7 +1646,9 @@ fn render(
             .unwrap_or_else(|| white.clone());
         let material = distort_materials.add(DistortMaterial { texture });
         let batch = new_batch(&mut commands, &mut meshes);
-        commands.entity(batch.entity).insert(MeshMaterial3d(material));
+        commands
+            .entity(batch.entity)
+            .insert(MeshMaterial3d(material));
         player.distort_batches.insert(*key, batch);
     }
     for (key, batch) in &mut player.distort_batches {
@@ -1664,7 +1666,9 @@ fn render(
             additive: key.1,
         });
         let batch = new_batch(&mut commands, &mut meshes);
-        commands.entity(batch.entity).insert(MeshMaterial3d(material));
+        commands
+            .entity(batch.entity)
+            .insert(MeshMaterial3d(material));
         player.batches.insert(*key, batch);
     }
     for key in multi.keys() {
@@ -1699,7 +1703,9 @@ fn render(
             depth: depth.image.clone(),
         });
         let batch = new_batch(&mut commands, &mut meshes);
-        commands.entity(batch.entity).insert(MeshMaterial3d(material));
+        commands
+            .entity(batch.entity)
+            .insert(MeshMaterial3d(material));
         player.multi_batches.insert(*key, batch);
     }
     for (key, batch) in &mut player.batches {
@@ -1750,11 +1756,13 @@ mod tests {
         player.enabled = true;
         let nodes: Vec<_> = [600, 604, 607]
             .into_iter()
-            .map(|kind| serde_json::json!({
-                "type": 2200, "configs": [{"type": 1004,
-                    "appearance": {"type": kind, "layer1": 1, "layer2": 2,
-                        "layer3": 3, "normalMap": 4}}]
-            }))
+            .map(|kind| {
+                serde_json::json!({
+                    "type": 2200, "configs": [{"type": 1004,
+                        "appearance": {"type": kind, "layer1": 1, "layer2": 2,
+                            "layer3": 3, "normalMap": 4}}]
+                })
+            })
             .collect();
         player.lib.insert_for_test(
             1,
@@ -1793,7 +1801,11 @@ mod tests {
         player.effects[0].at.translation.x += 1.0;
         player.advance(0.0);
         app.update();
-        assert_eq!(modified_meshes(&mut app), 3, "changed positions still upload");
+        assert_eq!(
+            modified_meshes(&mut app),
+            3,
+            "changed positions still upload"
+        );
         app.update();
         assert_eq!(modified_meshes(&mut app), 0);
     }
@@ -1823,7 +1835,8 @@ mod tests {
         assert_eq!(modified_meshes(&mut app), 0);
         let world = app.world_mut();
         assert!(
-            world.query_filtered::<&Visibility, With<Mesh3d>>()
+            world
+                .query_filtered::<&Visibility, With<Mesh3d>>()
                 .iter(world)
                 .all(|v| *v == Visibility::Inherited)
         );
