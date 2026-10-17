@@ -331,7 +331,7 @@ LightSet and the material upload retain four separate diffuse/specular RGB recor
 Production retains the existing direct lighting while native material routing and BRDF details remain unrecovered.
 The opt-in `SEKIRO_GI_NATIVE_LIGHTS=1` compositor uses the current material BRDF and sun shadow with separate diffuse/specular inputs; its code is excluded from production shaders by a material pipeline define.
 The raw Outskirts GPARAM contains local-angle entries only for bank 120, while banks 100/110 enable those lights and author their colours without supplying angles or a bank-zero angle fallback.
-Those colours remain retained, but the unresolved local directions are masked rather than replaced with generic angles.
+Those colours remain retained; this masking was superseded later the same day, when the constructor default directions were recovered (see [Light-set defaults and camera-local slots](#light-set-defaults-and-camera-local-slots-2026-10-15)).
 Applying guessed local angles failed the six-view gates; disabling that compositor isolated the regression, and masking missing directions restored the Outskirts gate.
 Castle still rejects the experimental compositor at grey views 0/1/2, measuring 117/25/291 against fixture values 31/7/200, so it is not enabled by default.
 The default GI and fallback path passes the independent Castle ablation with grey total 396 and unchanged geometry counts.
@@ -827,7 +827,7 @@ The settled temple remains dim; matching selected inputs does not establish visu
 
 Shared renderer handoff:
 
-- ~~`lighting.rs:880` consumes two DiffColor lights~~; the [shared correction](#spatial-gi-and-fallback-2026-10-15) retains all four diffuse/specular records and enables, with unresolved local directions masked in its opt-in compositor.
+- ~~`lighting.rs:880` consumes two DiffColor lights~~; the [shared correction](#spatial-gi-and-fallback-2026-10-15) retains all four diffuse/specular records and enables, and the constructor default local directions were recovered later that day.
   Production direct-light composition remains unchanged because that compositor fails the Castle gate.
   `SHADER-INPUTS.md:229-242` also records native sharpness and per-light SSAO weights, which remain fidelity work.
   Morning bank 110 enables LocalLight1 with RGB (.294118, .392157, .490196), W .7, but that term is not uploaded.
@@ -1369,3 +1369,24 @@ Effect on the installed Outskirts rows:
 - `mapbase` also supplies post fields that the Ashina block files omit, most visibly `ToneMapMode` 8 (the old fallback was 7), tone contrast, Reinhard contrast and white balance, `ColorH/S/V`, auto-exposure adaptation speeds, `LightMask Influence` and the SSAO block.
   221 parameters with values exist only in `mapbase` for `m11_00_0000`.
 - The measured default-render effect is in [EXPOSURE.md](EXPOSURE.md#layer-stack-result-2026-10-15): the noon row-100 sun is still 4.4 times row 0 and scenes stay 2 to 5 times retail.
+
+## Sun shadow range and camera rotation, 2026-10-17
+
+Playtest: at the Outskirts first gate, rotating only the camera changed which parts of a distant cliff were lit, and `SEKIRO_ABLATE=nolocal` did not remove it.
+The cause was the sun shadow range, not the shadow map fit.
+Bevy fits each cascade to a bounding sphere and snaps it to texels, so the cascade content is stable under rotation.
+But `fetch_directional_shadow` returns fully lit for any fragment whose view depth is past the last cascade, and our last cascade ended at 60 m.
+That cut is a plane facing the camera, so turning the camera swept it across the cliff and switched its shadowed parts on and off.
+Native `default.gparam` `ShadowParam` authors cascade cut points 10, 30 and 70 m with `Far Fade Start` 1000 m, and the m11_00 files do not override them.
+The sun now uses four cascades with bounds from those fields (10/30/70/1000 m by default), so receivers keep the shadow lookup to the native far fade.
+Map shadow casters reach 300 m from the focus, a renderer budget rather than a native value: with the old 45 m, distant cliffs and the ground seen through the shack door gained their shadows only on approach.
+A playtest on 2026-10-17 held 60 fps at 300 m; `--shadow-casters` overrides it.
+`--shadow cascades,distance` still overrides the count and range, using the native cut points below that range.
+The native far fade (10 m) and `Cascade Fade Range Scale` are not reproduced; Bevy keeps its own cascade overlap.
+
+The native local-light direction was also checked against the executable.
+`DAT_142dca95c` is pi, so `FUN_140152870` and the inline follow branch rotate by pi about Y before the camera matrix.
+`30e6c0` builds `(cos p sin y, -sin p, cos p cos y)` from (pitch, yaw), with an identity quaternion in `3119b0`, which matches our `Quat` construction exactly.
+The constructor default is therefore toward-light `(0.707, 0.707, 0)` before the camera transform: a side light with no forward component, not a headlamp.
+Which instances receive the second light set (`envData`, `FC_DirLight[1]`) remains open.
+

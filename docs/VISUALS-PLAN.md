@@ -609,6 +609,7 @@ No cells or additional map entities are created.
 `--shadow cascades,distance`, `--shadow-casters metres`, `--shadow-bias depth,normal` and `--no-shadow` provide controls.
 Normal bias is 0.6 shadow texels, reduced from Bevy's 1.8, and depth bias remains 0.02.
 The first split reads GPARAM `ShadowParam` `Cascade Dist 0->1`, clamped below half the configured range, or falls back to 15 m when absent.
+Superseded 2026-10-17: the sun now uses the native `ShadowParam` cut points and far fade (10/30/70/1000 m by default), because a 60 m range relit distant cliffs as the camera turned; see LIGHTING.md.
 The dumped m25 base file has 5/25/100 m splits; the m11 base files do not supply these splits.
 The two-cascade/60 m range and 45 m caster distance are an explicit renderer budget following FwLo's measured approach, not recovered Sekiro cascade settings.
 GPARAM's slope-scaled depth bias of 3.0 and kernel scale of 1.5 are retained as research facts because Bevy's depth/normal biases and filtering have different units and no verified direct conversion.
