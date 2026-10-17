@@ -961,7 +961,7 @@ fn setup(
         bevy::core_pipeline::prepass::DepthPrepass,
         bevy::core_pipeline::prepass::MotionVectorPrepass,
         Projection::Perspective(PerspectiveProjection {
-            fov: sim.duel.camera.cam_fov_y.to_radians(),
+            fov: sim.duel.camera_director.fov.to_radians(),
             ..default()
         }),
         Transform::from_xyz(0.0, 2.0, 4.0).looking_at(Vec3::new(0.0, 1.2, 0.0), Vec3::Y),
@@ -1773,11 +1773,15 @@ fn follow_camera(
     fixed: Res<Time<Fixed>>,
     mut orbit: ResMut<Orbit>,
     collision: Option<Res<MapCollision>>,
-    mut cam: Query<&mut Transform, With<FollowCamera>>,
+    mut cam: Query<(&mut Transform, &mut Projection), With<FollowCamera>>,
 ) {
-    let Ok(mut tf) = cam.single_mut() else {
+    let Ok((mut tf, mut projection)) = cam.single_mut() else {
         return;
     };
+    // The field of view follows the camera slot's LockCamParam row (`camFovY`, vertical).
+    if let Some(followed) = follow_fov(&projection, sim.duel.camera_director.fov) {
+        *projection = followed;
+    }
     let wolf = shown(&sim, WOLF, fixed.overstep_fraction()).0;
     // Scripted inspection angle: `--extra hang-view`, parsed here to avoid main.rs.
     if std::env::args().any(|a| a == "hang-view")
@@ -1821,6 +1825,17 @@ fn follow_camera(
     }
     let eye = target + back * distance;
     *tf = Transform::from_translation(eye).looking_at(target, Vec3::Y);
+}
+
+/// The perspective projection at a vertical field of view of `degrees`, or `None` when it already
+/// has it, so the camera is only marked changed (and its frustum rebuilt) while the fov eases.
+fn follow_fov(projection: &Projection, degrees: f32) -> Option<Projection> {
+    let Projection::Perspective(p) = projection else {
+        return None;
+    };
+    let fov = degrees.to_radians();
+    ((p.fov - fov).abs() > 1e-6)
+        .then(|| Projection::Perspective(PerspectiveProjection { fov, ..p.clone() }))
 }
 
 /// Names of the status effects the Owl's tools leave on Wolf, for the HUD.
@@ -2213,7 +2228,7 @@ fn log_camera(
     orbit: Res<Orbit>,
     live: Res<LiveInput>,
     sim: NonSend<Sim>,
-    cam: Query<&Transform, With<FollowCamera>>,
+    cam: Query<(&Transform, &Projection), With<FollowCamera>>,
     replay: Option<Res<crate::input_replay::InputReplay>>,
     window: Query<&Window, With<bevy::window::PrimaryWindow>>,
     fixed: Res<Time<Fixed>>,
@@ -2224,13 +2239,23 @@ fn log_camera(
     let grab = cursor
         .single()
         .map_or("none".to_string(), |c| format!("{:?}", c.grab_mode));
-    let fwd = cam.single().map_or(Vec3::NAN, |t| t.forward().as_vec3());
-    let cam_yaw = (-fwd.x).atan2(-fwd.z);
     let focus = orbit.focus;
+    let (fwd, fov, aspect, eye_dist) = match cam.single() {
+        Ok((t, projection)) => {
+            let (fov, aspect) = match projection {
+                Projection::Perspective(p) => (p.fov.to_degrees(), p.aspect_ratio),
+                _ => (f32::NAN, f32::NAN),
+            };
+            let eye_dist = t.translation.distance(focus);
+            (t.forward().as_vec3(), fov, aspect, eye_dist)
+        }
+        Err(_) => (Vec3::NAN, f32::NAN, f32::NAN, f32::NAN),
+    };
+    let cam_yaw = (-fwd.x).atan2(-fwd.z);
     let wolf = Vec3::from_array(sim.duel.player.body.position);
     let drawn = shown(&sim, WOLF, fixed.overstep_fraction()).0;
     eprintln!(
-        "cam {} t {:.3} dt {:.4} focused {} grab {grab} mouse {:.1},{:.1} lock {} orbit_yaw {:.1} pitch {:.1} cam_yaw {:.1} stick {:.2},{:.2} live_cam {:.1} step {} focus_lag {:.3} drawn {:.3},{:.3} sim {:.3},{:.3}",
+        "cam {} t {:.3} dt {:.4} focused {} grab {grab} mouse {:.1},{:.1} lock {} orbit_yaw {:.1} pitch {:.1} cam_yaw {:.1} stick {:.2},{:.2} live_cam {:.1} step {} focus_lag {:.3} drawn {:.3},{:.3} sim {:.3},{:.3} fov {:.2} aspect {:.3} dist {:.2} boom {:.2} focus_h {:.2}",
         replay.as_ref().map_or(0, |r| r.frame),
         time.elapsed_secs(),
         time.delta_secs(),
@@ -2250,6 +2275,11 @@ fn log_camera(
         drawn.z,
         wolf.x,
         wolf.z,
+        fov,
+        aspect,
+        eye_dist,
+        sim.duel.camera_director.distance,
+        focus.y - wolf.y,
     );
 }
 
@@ -2365,6 +2395,21 @@ fn grapple_marker(
 mod tests {
     use super::*;
     use sekiro_sim::fight::FighterKind;
+
+    /// #46: the follow camera's projection tracks the sim camera's eased field of view, and is
+    /// left untouched once it matches.
+    #[test]
+    fn projection_fov_follows_the_sim_camera() {
+        let projection = Projection::Perspective(PerspectiveProjection {
+            fov: 60f32.to_radians(),
+            ..default()
+        });
+        let Some(Projection::Perspective(p)) = follow_fov(&projection, 43.0) else {
+            panic!("perspective projection");
+        };
+        assert!((p.fov.to_degrees() - 43.0).abs() < 1e-4);
+        assert!(follow_fov(&Projection::Perspective(p), 43.0).is_none());
+    }
 
     #[test]
     fn no_enemy_rejects_lock_and_contacts_without_restarting_wolf() {

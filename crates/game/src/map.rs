@@ -952,17 +952,31 @@ pub fn add_map(
     Ok(())
 }
 
-/// A far plane for every new 3D camera; lighting installs shader fog separately.
-fn camera_environment(mut commands: Commands, cameras: Query<Entity, Added<Camera3d>>) {
-    for e in &cameras {
-        commands
-            .entity(e)
-            .insert(Projection::Perspective(PerspectiveProjection {
-                fov: 60f32.to_radians(),
-                near: 0.1,
-                far: 20_000.0,
-                ..default()
-            }));
+/// The map viewer's vertical field of view, degrees. Wolf's follow camera brings its own, the
+/// game's `camFovY` (#46).
+const VIEWER_FOV_DEG: f32 = 60.0;
+
+/// The free-fly map viewer's and sweep cameras' perspective.
+pub fn viewer_perspective() -> PerspectiveProjection {
+    PerspectiveProjection {
+        fov: VIEWER_FOV_DEG.to_radians(),
+        ..default()
+    }
+}
+
+/// [`viewer_perspective`] as a camera component.
+pub fn viewer_projection() -> Projection {
+    Projection::Perspective(viewer_perspective())
+}
+
+/// Near and far planes for every new 3D camera, keeping the field of view it was spawned with;
+/// lighting installs shader fog separately.
+fn camera_environment(mut cameras: Query<&mut Projection, Added<Camera3d>>) {
+    for mut projection in &mut cameras {
+        if let Projection::Perspective(p) = &mut *projection {
+            p.near = 0.1;
+            p.far = 20_000.0;
+        }
     }
 }
 
@@ -1138,6 +1152,7 @@ fn setup_view(mut commands: Commands, start: Vec3) {
     commands.spawn((
         MapFocus,
         Camera3d::default(),
+        viewer_projection(),
         bevy::core_pipeline::prepass::DepthPrepass,
         bevy::core_pipeline::prepass::MotionVectorPrepass,
         Transform::from_translation(start),
@@ -1896,6 +1911,27 @@ pub fn parse_camera(arg: Option<&str>) -> Result<Option<[f32; 5]>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #46: the map's far plane must not reset a camera's field of view (it forced 60 degrees on
+    /// Wolf's 43-degree follow camera).
+    #[test]
+    fn camera_environment_keeps_the_field_of_view() {
+        let mut app = App::new();
+        app.add_systems(Update, camera_environment);
+        let fov = 43f32.to_radians();
+        let camera = app
+            .world_mut()
+            .spawn((
+                Camera3d::default(),
+                Projection::Perspective(PerspectiveProjection { fov, ..default() }),
+            ))
+            .id();
+        app.update();
+        let Some(Projection::Perspective(p)) = app.world().get::<Projection>(camera) else {
+            panic!("perspective projection");
+        };
+        assert_eq!((p.fov, p.near, p.far), (fov, 0.1, 20_000.0));
+    }
 
     /// #45: GLB textures (rock base colour and normals) must sample with anisotropic, trilinear
     /// filtering, or faces seen at a grazing angle blur to a low mip.

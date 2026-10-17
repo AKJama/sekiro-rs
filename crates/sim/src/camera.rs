@@ -245,12 +245,15 @@ impl CameraBook {
             return book;
         };
         for i in 0..CAMERA_SLOTS {
-            let n = |f: &str| row.f32(&format!("{f}{i}")).unwrap_or(0.0);
+            // The row ids are integer fields and the times f32; reading an id as f32 fails and
+            // would send every slot to row 0.
+            let id = |f: &str| row.i32(&format!("{f}{i}")).unwrap_or(0);
+            let time = |f: &str| row.f32(&format!("{f}{i}")).unwrap_or(0.0).max(0.0);
             let slot = CameraSlot {
-                lock_param: n("lockParamId") as i32,
-                cam_param: n("camParamId") as i32,
-                begin: n("beginTime").max(0.0),
-                end: n("endTime").max(0.0),
+                lock_param: id("lockParamId"),
+                cam_param: id("camParamId"),
+                begin: time("beginTime"),
+                end: time("endTime"),
             };
             let key = (slot.lock_param, slot.cam_param);
             book.params.entry(key).or_insert_with(|| {
@@ -611,5 +614,29 @@ mod tests {
         if cache.join("params/LockCamParam.json").is_file() {
             assert_eq!(CameraParams::load(cache).lock_range, 30.0);
         }
+    }
+
+    /// #46: the free camera (slot 1) is LockCamParam 0 / CameraParam 0: 43 degrees vertical,
+    /// 4.5 m from a focus 1.5 m above the feet; the other slots name their own rows.
+    #[test]
+    fn camera_book_slots_name_their_rows() {
+        let cache = Path::new("../../cache");
+        let (pd, _) = param_dirs(cache);
+        if !pd.join("CameraSetParam.param").is_file() {
+            return;
+        }
+        let book = CameraBook::load(cache);
+        let free = book.slot(1).unwrap();
+        assert_eq!((free.lock_param, free.cam_param), (0, 0));
+        let p = book.params(1);
+        assert_eq!(
+            (p.cam_fov_y, p.cam_dist, p.chr_org_offset_y),
+            (43.0, 4.5, 1.5)
+        );
+        let second = book.slot(2).unwrap();
+        assert_eq!((second.lock_param, second.cam_param), (100, 100));
+        assert_eq!(book.params(2).cam_dist, 3.5);
+        let director = CameraDirector::new(Arc::new(book));
+        assert_eq!((director.fov, director.distance), (43.0, 4.5));
     }
 }
