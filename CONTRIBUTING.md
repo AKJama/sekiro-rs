@@ -47,7 +47,14 @@ cargo test --release --workspace
 
 For rendering changes, also build the release binary and run both render gates listed in step 4.
 Play the game yourself following the live-test skill and describe what you saw.
-Use the PR template and include `Fixes #N` in the PR body.
+
+Keep new tests few, because the test run is most of every PR's time.
+Each new test guards one specific way your change could break and fails without it.
+Usually that is 1 to 3 tests; more needs a reason in the PR.
+Prefer fast data tests over tests that step fights or load the game, and list each new test with its run time in the PR.
+
+Fill in every section of the PR template, with `Fixes #N` in Motivation, real results in How it was tested, and Low, Medium or High in Risk.
+When a PR is ready for review, the `issue-link` check fails it if a section is missing, empty or still has the template text; drafts are not checked.
 
 Before marking the PR ready for review, bring it up to date with `main` and rerun the checks:
 
