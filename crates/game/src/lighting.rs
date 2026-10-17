@@ -337,8 +337,29 @@ fn apply_post_effects(
     }
 }
 
-/// Diagnostic ablation switch: `SEKIRO_ABLATE=nosun,nofill,nolocal,nospec,noamb,nogi,nolayers`
-/// (comma list).
+/// The LightSet row map pieces and objects authoring MSB light set 0 are drawn with.
+/// Native lights each instance with its own light set; collision rows (100, 110, ...) light
+/// the characters. See docs/LIGHTING.md, "Per-part light sets" (#30).
+pub const MAP_PART_LIGHT_SET: i32 = 0;
+
+/// Whether a map part with this MSB light set id follows the collision-selected row.
+pub fn part_follows_scene(msb_light_set: i32) -> bool {
+    msb_light_set > MAP_PART_LIGHT_SET
+}
+
+/// The LightSet row a map surface is drawn with: row 0 for the ordinary MSB light set 0, or
+/// the collision-selected `scene` row for characters and for the few parts that author another
+/// set. `SEKIRO_ABLATE=scenelight` and `SEKIRO_LIGHT_SET` put every surface on the scene row.
+pub fn part_light_set(scene: i32, follows_scene: bool) -> i32 {
+    if follows_scene || ablate("scenelight") || forced_light_set().is_some() {
+        scene
+    } else {
+        MAP_PART_LIGHT_SET
+    }
+}
+
+/// Diagnostic ablation switch:
+/// `SEKIRO_ABLATE=nosun,nofill,nolocal,nospec,noamb,nogi,nolayers,scenelight` (comma list).
 pub fn ablate(name: &str) -> bool {
     static LIST: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     LIST.get_or_init(|| {
@@ -1572,6 +1593,45 @@ mod probe_tests {
                 Some(bevy::render::render_resource::TextureViewDimension::CubeArray)
             );
         }
+    }
+    #[test]
+    fn outskirts_map_pieces_use_row_zero_without_local_light() {
+        let cache = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/raw");
+        let (Ok(msb), Ok(gparam)) = (
+            std::fs::read(cache.join("map/mapstudio/m11_00_00_00.msb")),
+            std::fs::read(cache.join("param/drawparam/m11_00_0000.gparam")),
+        ) else {
+            return;
+        };
+        let msb = sekiro_formats::msb::parse(&msb).unwrap();
+        let g = sekiro_formats::gparam::parse(&gparam).unwrap();
+        assert_eq!(part_light_set(100, false), MAP_PART_LIGHT_SET);
+        let (mut own, mut scene) = (0, 0);
+        for p in &msb.parts {
+            if !matches!(
+                p.kind,
+                sekiro_formats::msb::PartKind::MapPiece | sekiro_formats::msb::PartKind::Object
+            ) {
+                continue;
+            }
+            let id = p.gparam.map_or(-1, |g| g[0]);
+            if part_follows_scene(id) {
+                scene += 1;
+            } else {
+                assert_eq!(id, MAP_PART_LIGHT_SET, "{}", p.name);
+                own += 1;
+            }
+        }
+        assert!(own > 5_000 && scene <= 4, "own {own}, scene {scene}");
+        // Hour 6 outside the shack: the collision row 100 carries bright local lights, the map
+        // parts' row 0 authors them with W 0 (#30).
+        let part = LightSet::from_gparam(&g, part_light_set(100, false), 6.);
+        let collision = LightSet::from_gparam(&g, part_light_set(100, true), 6.);
+        for slot in [7, 10] {
+            assert_eq!(part.direct[slot].xyz(), Vec3::ZERO, "slot {slot}");
+        }
+        assert!(collision.direct[7].xyz().max_element() > 0.);
+        assert!(part.direct[1].xyz().max_element() < collision.direct[1].xyz().max_element());
     }
     #[test]
     fn squared_light_colours_and_hemisphere_endpoints() {

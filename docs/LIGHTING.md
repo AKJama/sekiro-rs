@@ -1384,3 +1384,19 @@ A playtest on 2026-10-17 held 60 fps at 300 m; `--shadow-casters` overrides it.
 `--shadow cascades,distance` still overrides the count and range, using the native cut points below that range.
 The native far fade (10 m) and `Cascade Fade Range Scale` are not reproduced; Bevy keeps its own cascade overlap.
 
+
+## Per-part light sets, 2026-10-17
+
+Outdoors looked flat and evenly bright, like a room lit by LED panels (#30).
+Native lights each instance with its own light set, not one scene-wide set.
+The deferred light shader picks a light record per pixel from `GBuffer3.w`, which each instance writes from its own `envData` index into the scene's list of light sets (`1f3b20` builds one 288-byte record per entry).
+Every draw carries its own (bank, id) pair (`19a690`), and `168e10` resolves id 0 as an ordinary row; only (-1, -1) is remapped.
+The code that copies a part's MSB light set into its draw was not found, so that last link is inferred, not traced.
+
+Every cached map authors light set 0 on its map pieces and objects, -1 on enemies, and 100, 110, 120 or 130 on collisions.
+In the Outskirts at hour 6, row 0 authors its LocalLight colours with W 0 and half the row-100 sun.
+We now draw map pieces and objects with row 0, and characters and the few parts authoring another set with the collision-selected row.
+The collision row still drives post, fog, sky and the shadowed sun direction, which matches row 0 at hour 6.
+Parts authoring a set above 0 probably use their own row natively; we give them the collision row for now.
+
+`SEKIRO_ABLATE=scenelight` restores the old single scene set, and `SEKIRO_LIGHT_SET=<id>` now forces that row on every surface.

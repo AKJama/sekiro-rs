@@ -156,6 +156,21 @@ pub struct MapSpawn;
 #[derive(Component)]
 pub(crate) struct DrawGroups([u32; 8]);
 
+/// A map part whose MSB authors a light set other than the ordinary row 0: it is lit with
+/// the collision-selected light set, as characters are (#30).
+#[derive(Component)]
+pub(crate) struct FollowsSceneLight;
+
+/// A layout part row's MSB GparamConfig ids (light, fog, scattering, env map), -1 when absent.
+fn gparam_config(row: &Value) -> [i32; 4] {
+    std::array::from_fn(|i| row["gparam"][i].as_i64().unwrap_or(-1) as i32)
+}
+
+/// Whether a layout part row authors its own light set (MSB GparamConfig light set id > 0).
+pub(crate) fn follows_scene_light(row: &Value) -> bool {
+    crate::lighting::part_follows_scene(gparam_config(row)[0])
+}
+
 /// Distant render-only scenery is independent of the local collision's draw groups.
 #[derive(Component)]
 struct FarScenery;
@@ -1187,6 +1202,9 @@ fn spawn_map(
             if far_scenery {
                 entity.insert(FarScenery);
             }
+            if follows_scene_light(row) {
+                entity.insert(FollowsSceneLight);
+            }
             if let Some(part) = arena_parts
                 .as_ref()
                 .and_then(|p| p.0.get(row["name"].as_str().unwrap_or_default()))
@@ -1463,10 +1481,9 @@ fn pick_groups(
             && let Some(row) = world.blocks[block].json["parts"]
                 .as_array()
                 .and_then(|parts| parts.iter().find(|p| p["name"].as_str() == Some(collision)))
-            && let Some(config) = row["gparam"].as_array()
+            && row["gparam"].is_array()
         {
-            let config =
-                std::array::from_fn(|i| config.get(i).and_then(Value::as_i64).unwrap_or(-1) as i32);
+            let config = gparam_config(row);
             region.enter(config);
             if block == &world.primary
                 && let Some(selection) = selection.as_mut()

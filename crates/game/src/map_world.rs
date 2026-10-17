@@ -1008,6 +1008,9 @@ pub(crate) fn spawn(
                 Visibility::Hidden,
             ))
             .id();
+        if super::follows_scene_light(row) {
+            commands.entity(root).insert(super::FollowsSceneLight);
+        }
         if enabled(&block.id)
             && row["kind"] == "MapPiece"
             && let (Some(min), Some(max), Some(&available)) = (
