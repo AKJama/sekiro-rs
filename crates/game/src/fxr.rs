@@ -30,6 +30,9 @@ use crate::fxr_tree::{
     particle_color, prop, scalar, step_node, subdivide, view_fade,
 };
 
+#[path = "fxr_stream.rs"]
+mod stream;
+
 /// Live effects and particles are bounded so a runaway effect cannot sink the frame.
 const EFFECT_CAP: usize = 192;
 const PARTICLE_CAP: usize = 8000;
@@ -60,6 +63,7 @@ pub fn plugin(cache: PathBuf, bridge: impl Fn(&mut App) + Send + Sync + 'static)
                 MaterialPlugin::<MultiMaterial>::default(),
                 MaterialPlugin::<DistortMaterial>::default(),
             ));
+            stream::install(app);
             app.insert_resource(FxrPlayer::new(self.cache.clone()))
                 .init_resource::<DepthCopy>()
                 .add_systems(Startup, setup_depth)
@@ -1344,7 +1348,7 @@ fn copy_depth(
     view: bevy::render::renderer::ViewQuery<&bevy::render::view::ViewDepthTexture>,
     copy: Option<Res<DepthCopy>>,
     images: Res<bevy::render::render_asset::RenderAssets<bevy::render::texture::GpuImage>>,
-    mut ctx: bevy::render::renderer::RenderContext,
+    mut ctx: crate::render_context::RenderContext,
 ) {
     let depth = view.into_inner();
     if std::env::var_os("SEKIRO_FX_DEBUG_NOCOPY").is_some() {
@@ -1424,7 +1428,14 @@ const PAD: [f32; 3] = [0.0, -50.0, 0.0];
 trait BatchBuffer {
     fn clear(&mut self);
     fn is_empty(&self) -> bool;
-    fn update_mesh(&self, meshes: &mut Assets<Mesh>, handle: &Handle<Mesh>);
+    fn matches(&self, mesh: &Mesh) -> bool;
+    fn write_mesh(&self, mesh: &mut Mesh);
+    fn update_mesh(&self, meshes: &mut Assets<Mesh>, handle: &Handle<Mesh>) {
+        if self.is_empty() || meshes.get(handle).is_none_or(|mesh| self.matches(mesh)) {
+            return;
+        }
+        self.write_mesh(&mut meshes.get_mut(handle).unwrap());
+    }
 }
 
 // Keep the padding triangle and attribute layout identical across reused buffers.
@@ -1439,17 +1450,13 @@ macro_rules! batch_buffer {
                 self.pos.is_empty()
             }
 
-            fn update_mesh(&self, meshes: &mut Assets<Mesh>, handle: &Handle<Mesh>) {
-                if self.is_empty() {
-                    return;
-                }
-                let Some(mesh) = meshes.get(handle) else { return };
-                if $(matches!(mesh.attribute($attribute),
+            fn matches(&self, mesh: &Mesh) -> bool {
+                $(matches!(mesh.attribute($attribute),
                     Some(VertexAttributeValues::$variant(values))
-                        if values.get(3..) == Some(self.$field.as_slice())) )&&+ {
-                    return;
-                }
-                let mut mesh = meshes.get_mut(handle).unwrap();
+                        if values.get(3..) == Some(self.$field.as_slice())) )&&+
+            }
+
+            fn write_mesh(&self, mesh: &mut Mesh) {
                 $(
                     if let Some(VertexAttributeValues::$variant(values)) = mesh.attribute_mut($attribute) {
                         values.truncate(3);
@@ -1502,6 +1509,7 @@ struct Batch {
     mesh: Handle<Mesh>,
     entity: Entity,
     visible: bool,
+    cpu: Option<Mesh>,
 }
 
 impl Batch {
@@ -1510,6 +1518,7 @@ impl Batch {
         buffer: &impl BatchBuffer,
         commands: &mut Commands,
         meshes: &mut Assets<Mesh>,
+        stream: Option<&mut stream::VertexStreams>,
     ) {
         let visible = !buffer.is_empty();
         if self.visible != visible {
@@ -1520,7 +1529,43 @@ impl Batch {
             });
             self.visible = visible;
         }
-        buffer.update_mesh(meshes, &self.mesh);
+        if let Some(stream) = stream {
+            if !visible {
+                return;
+            }
+            let first = self.cpu.is_none();
+            let cpu = self.cpu.get_or_insert_with(|| {
+                Mesh::new(
+                    PrimitiveTopology::TriangleList,
+                    RenderAssetUsages::default(),
+                )
+            });
+            if buffer.matches(cpu) {
+                return;
+            }
+            buffer.write_mesh(cpu);
+            stream.publish(self.mesh.id(), cpu);
+            if first {
+                // Bevy keeps this small mesh for its layout/material/phase bookkeeping.
+                // Dynamic data is written to a reusable GPU buffer instead of re-preparing it.
+                let mut proxy = cpu.clone();
+                for (_, values) in proxy.attributes_mut() {
+                    match values {
+                        VertexAttributeValues::Float32(v) => v.truncate(3),
+                        VertexAttributeValues::Float32x2(v) => v.truncate(3),
+                        VertexAttributeValues::Float32x3(v) => v.truncate(3),
+                        VertexAttributeValues::Float32x4(v) => v.truncate(3),
+                        _ => unreachable!("FXR float attributes"),
+                    }
+                }
+                proxy.remove_indices();
+                meshes
+                    .insert(self.mesh.id(), proxy)
+                    .expect("existing FXR mesh");
+            }
+        } else {
+            buffer.update_mesh(meshes, &self.mesh);
+        }
     }
 }
 
@@ -1533,6 +1578,7 @@ fn new_batch(commands: &mut Commands, meshes: &mut Assets<Mesh>) -> Batch {
         entity: mesh_entity(commands, mesh.clone()),
         mesh,
         visible: false,
+        cpu: None,
     }
 }
 
@@ -1566,6 +1612,7 @@ fn render(
     mut white: Local<Option<Handle<Image>>>,
     mut lights: Local<Vec<Entity>>,
     mut buffers: Local<FrameBuffers>,
+    mut streams: Option<ResMut<stream::VertexStreams>>,
 ) {
     if !player.enabled {
         return;
@@ -1652,7 +1699,12 @@ fn render(
         player.distort_batches.insert(*key, batch);
     }
     for (key, batch) in &mut player.distort_batches {
-        batch.update(&frame.distort[key], &mut commands, &mut meshes);
+        batch.update(
+            &frame.distort[key],
+            &mut commands,
+            &mut meshes,
+            streams.as_deref_mut(),
+        );
     }
     // New batches for keys seen for the first time.
     for key in bufs.keys() {
@@ -1709,10 +1761,20 @@ fn render(
         player.multi_batches.insert(*key, batch);
     }
     for (key, batch) in &mut player.batches {
-        batch.update(&bufs[key], &mut commands, &mut meshes);
+        batch.update(
+            &bufs[key],
+            &mut commands,
+            &mut meshes,
+            streams.as_deref_mut(),
+        );
     }
     for (key, batch) in &mut player.multi_batches {
-        batch.update(&multi[key], &mut commands, &mut meshes);
+        batch.update(
+            &multi[key],
+            &mut commands,
+            &mut meshes,
+            streams.as_deref_mut(),
+        );
     }
     if std::env::var_os("SEKIRO_FXR_LOG").is_some()
         && (bufs.values().any(|b| !b.is_empty()) || multi.values().any(|b| !b.is_empty()))
@@ -1788,6 +1850,35 @@ mod tests {
             .drain()
             .filter(|e| matches!(e, AssetEvent::Modified { .. }))
             .count()
+    }
+
+    #[test]
+    fn streaming_keeps_pipeline_meshes_static_while_particles_move() {
+        let mut app = batch_test_app();
+        app.init_resource::<stream::VertexStreams>();
+        app.update();
+        assert_eq!(modified_meshes(&mut app), 3);
+        let mut before = app.world().resource::<stream::VertexStreams>().versions();
+        before.sort_unstable();
+        let mut player = app.world_mut().resource_mut::<FxrPlayer>();
+        player.effects[0].at.translation.x += 1.;
+        player.advance(0.);
+        app.update();
+        assert_eq!(
+            modified_meshes(&mut app),
+            0,
+            "motion must not re-prepare the layout mesh"
+        );
+        let mut after = app.world().resource::<stream::VertexStreams>().versions();
+        after.sort_unstable();
+        assert_eq!(after.len(), 3);
+        assert_ne!(before, after, "moving vertices must reach the stream");
+        assert!(
+            app.world()
+                .resource::<Assets<Mesh>>()
+                .iter()
+                .all(|(_, mesh)| mesh.count_vertices() == 3 && mesh.indices().is_none())
+        );
     }
 
     #[test]

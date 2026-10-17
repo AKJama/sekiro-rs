@@ -10,10 +10,12 @@ use bevy::render::{
     extract_component::{ExtractComponent, ExtractComponentPlugin},
     render_asset::RenderAssets,
     render_resource::{binding_types::*, *},
-    renderer::{RenderContext, ViewQuery},
+    renderer::ViewQuery,
     texture::GpuImage,
     view::ViewTarget,
 };
+
+use crate::render_context::RenderContext;
 
 #[derive(Component, Clone, ExtractComponent)]
 pub struct GradingLut(pub Handle<Image>);

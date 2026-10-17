@@ -1,4 +1,5 @@
 //! Shader-derived global fog, integrated in HDR before bloom and tone mapping.
+use crate::render_context::RenderContext;
 use bevy::asset::{embedded_asset, load_embedded_asset};
 use bevy::camera::{Exposure, visibility::NoFrustumCulling};
 use bevy::core_pipeline::{
@@ -15,7 +16,7 @@ use bevy::render::{
         UniformComponentPlugin,
     },
     render_resource::{binding_types::*, *},
-    renderer::{RenderContext, ViewQuery},
+    renderer::ViewQuery,
     view::{ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
 };
 use sekiro_formats::gparam::Gparam;
@@ -43,6 +44,23 @@ pub struct GameFog {
     background: [Vec4; 16],
     // Native scene radiance to the camera's HDR colour space.
     radiance_scale: Vec4,
+}
+
+/// Only retire depth sampling when this effect introduced the usage bit.
+#[derive(Component)]
+struct FogDepthSampling;
+
+fn release_depth_sampling(
+    event: On<Remove, GameFog>,
+    mut commands: Commands,
+    mut cameras: Query<&mut Camera3d, With<FogDepthSampling>>,
+) {
+    if let Ok(mut camera) = cameras.get_mut(event.entity) {
+        let mut depth = TextureUsages::from(camera.depth_texture_usages);
+        depth.remove(TextureUsages::TEXTURE_BINDING);
+        camera.depth_texture_usages = depth.into();
+        commands.entity(event.entity).remove::<FogDepthSampling>();
+    }
 }
 
 #[cfg(test)]
@@ -527,7 +545,8 @@ mod tests {
             source: String::new(),
         })
         .init_resource::<FogSelection>()
-        .add_systems(Update, configure);
+        .add_systems(Update, configure)
+        .add_observer(release_depth_sampling);
         let first = app
             .world_mut()
             .spawn((Camera3d::default(), Msaa::Sample4))
@@ -546,6 +565,53 @@ mod tests {
             assert!(usages.contains(TextureUsages::TEXTURE_BINDING));
         }
         assert_eq!(*app.world().get::<Msaa>(first).unwrap(), Msaa::Sample4);
+        app.world_mut().entity_mut(first).remove::<GameFog>();
+        app.update();
+        assert!(
+            !TextureUsages::from(
+                app.world()
+                    .get::<Camera3d>(first)
+                    .unwrap()
+                    .depth_texture_usages
+            )
+            .contains(TextureUsages::TEXTURE_BINDING)
+        );
+        // Enter a bank with fog disabled: retire only the depth usage owned by fog.
+        let third = app
+            .world_mut()
+            .spawn(Camera3d {
+                depth_texture_usages: (TextureUsages::RENDER_ATTACHMENT
+                    | TextureUsages::TEXTURE_BINDING
+                    | TextureUsages::COPY_SRC)
+                    .into(),
+                ..default()
+            })
+            .id();
+        app.update();
+        app.world_mut()
+            .resource_mut::<super::super::MapLighting>()
+            .gparam = fixture(vec![("VolumetricFog Enable", 0, 0., Value::Bool(false))]);
+        app.world_mut()
+            .resource_mut::<super::super::MapLighting>()
+            .source = "fog disabled".into();
+        app.update();
+        for entity in [first, second] {
+            assert!(app.world().get::<GameFog>(entity).is_none());
+            let usages = TextureUsages::from(
+                app.world()
+                    .get::<Camera3d>(entity)
+                    .unwrap()
+                    .depth_texture_usages,
+            );
+            assert!(!usages.contains(TextureUsages::TEXTURE_BINDING));
+        }
+        let usages = TextureUsages::from(
+            app.world()
+                .get::<Camera3d>(third)
+                .unwrap()
+                .depth_texture_usages,
+        );
+        assert!(usages.contains(TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC));
     }
 
     #[test]
@@ -965,6 +1031,7 @@ impl Plugin for FogPlugin {
             ExtractComponentPlugin::<GameFog>::default(),
             UniformComponentPlugin::<GameFog>::default(),
         ))
+        .add_observer(release_depth_sampling)
         .add_systems(Update, configure.after(super::apply_lighting))
         .add_systems(PostUpdate, update_background);
         if let Some(render) = app.get_sub_app_mut(RenderApp) {
@@ -982,7 +1049,7 @@ impl Plugin for FogPlugin {
 fn configure(
     mut commands: Commands,
     lighting: Res<super::MapLighting>,
-    cameras: Query<(Entity, &Camera3d)>,
+    cameras: Query<(Entity, &Camera3d, Option<&FogDepthSampling>)>,
     mut last: Local<Option<(i32, f32, i32, String)>>,
     added: Query<(), Added<Camera3d>>,
     selection: Res<FogSelection>,
@@ -1016,8 +1083,15 @@ fn configure(
         .then(|| GameFog::from_gparam(&lighting.gparam, key.0, key.1, direction))
         .flatten();
     info!("shader fog: {value:?}");
-    let depth = TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING;
-    for (entity, camera) in &cameras {
+    for (entity, camera, owned) in &cameras {
+        let mut depth = TextureUsages::from(camera.depth_texture_usages);
+        if value.is_some() && !depth.contains(TextureUsages::TEXTURE_BINDING) {
+            depth.insert(TextureUsages::TEXTURE_BINDING);
+            commands.entity(entity).insert(FogDepthSampling);
+        } else if value.is_none() && owned.is_some() {
+            depth.remove(TextureUsages::TEXTURE_BINDING);
+            commands.entity(entity).remove::<FogDepthSampling>();
+        }
         // Only new cameras need this; re-inserting Camera3d at every LightSet change (#15)
         // marked the view changed and rebuilt its depth texture.
         if TextureUsages::from(camera.depth_texture_usages) != depth {
@@ -1216,6 +1290,14 @@ fn fog(
     mut ctx: RenderContext,
 ) {
     let (target, depth, msaa, offset, index) = view.into_inner();
+    // A newly extracted fog component can precede its rebuilt depth attachment.
+    if !depth
+        .texture
+        .usage()
+        .contains(TextureUsages::TEXTURE_BINDING)
+    {
+        return;
+    }
     let multisampled = msaa.samples() > 1;
     let Some(pipeline) = &pipeline.0[msaa.samples().ilog2() as usize] else {
         return;

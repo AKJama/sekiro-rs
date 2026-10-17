@@ -858,6 +858,15 @@ fn tick(world: &mut World) {
         world.insert_resource(sweep);
         return;
     }
+    // Keep the logical material inventory fixed between the normal and all-visible poses.
+    // Mesh batches install over several frames after scene loading finishes.
+    if world
+        .get_resource::<super::StaticBatches>()
+        .is_some_and(|b| !b.ready())
+    {
+        world.insert_resource(sweep);
+        return;
+    }
     // Check all resident blocks before every phase, not just the first normal view.
     let sources: Vec<_> = world
         .query_filtered::<Entity, With<Mesh3d>>()

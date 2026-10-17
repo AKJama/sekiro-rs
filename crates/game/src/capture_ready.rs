@@ -236,11 +236,19 @@ pub(crate) struct Ready<'w> {
     pipelines: Res<'w, Pipelines>,
     wait: ResMut<'w, CaptureWait>,
     pending: Option<Res<'w, super::Pending>>,
+    warmup: Option<Res<'w, crate::pipeline_warmup::PipelineWarmup>>,
+    batches: Option<Res<'w, super::StaticBatches>>,
 }
 
 impl Ready<'_> {
     pub fn allow(&mut self) -> bool {
         if self.pending.as_ref().is_some_and(|p| !p.loaded()) {
+            return false;
+        }
+        if self.warmup.as_ref().is_some_and(|w| !w.ready()) {
+            return false;
+        }
+        if self.batches.as_ref().is_some_and(|b| !b.ready()) {
             return false;
         }
         self.wait.allow(&self.pipelines)
@@ -321,24 +329,34 @@ fn record(
     cache: Res<PipelineCache>,
     uploaded: Res<super::map_material::SweepImages>,
     images: Res<bevy::render::render_asset::RenderAssets<bevy::render::texture::GpuImage>>,
+    mut reported_failures: Local<HashSet<usize>>,
 ) {
     *uploaded.0.lock().unwrap() = images.iter().map(|(id, _)| id).collect();
     let mut next = PipelineStatus {
         pending: cache.waiting_pipelines().count(),
         ..default()
     };
-    for pipeline in cache.pipelines() {
+    for (index, pipeline) in cache.pipelines().enumerate() {
         match &pipeline.state {
             CachedPipelineState::Ok(_) => next.ready += 1,
             CachedPipelineState::Err(
                 bevy::shader::ShaderCacheError::ProcessShaderError(_)
                 | bevy::shader::ShaderCacheError::CreateShaderModule(_),
             ) => {
-                error!("capture GPU pipeline failed: {:?}", pipeline.state);
+                if reported_failures.insert(index) {
+                    // PipelineCache already logs the shader diagnostic once. Reprinting its
+                    // complete embedded shader every frame can produce gigabytes of logs.
+                    error!(
+                        "capture GPU pipeline failed (cache entry {index}); see shader compilation error"
+                    );
+                }
                 next.failed += 1;
             }
             _ => {}
         }
+    }
+    if next.failed == 0 {
+        reported_failures.clear();
     }
     let mut state = status.0.lock().unwrap();
     next.frame = state.frame + 1;

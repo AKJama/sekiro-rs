@@ -25,6 +25,10 @@ const ASHINA: [&str; 2] = ["m11_00_00_00", "m11_01_00_00"];
 #[derive(Resource)]
 pub(crate) struct ArenaMap;
 
+/// MSB explicitly disables sun casting for this part and its mesh descendants.
+#[derive(Component)]
+pub(crate) struct AuthoredNoShadow;
+
 pub(crate) fn enabled(id: &str) -> bool {
     ASHINA.contains(&id)
 }
@@ -1050,6 +1054,9 @@ pub(crate) fn spawn(
             .id();
         if super::follows_scene_light(row) {
             commands.entity(root).insert(super::FollowsSceneLight);
+        }
+        if row["entity_data"]["is_shadow_src"].as_bool() == Some(false) {
+            commands.entity(root).insert(AuthoredNoShadow);
         }
         if enabled(&block.id)
             && row["kind"] == "MapPiece"

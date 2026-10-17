@@ -14,9 +14,11 @@ use bevy::render::{
         UniformComponentPlugin,
     },
     render_resource::{binding_types::*, *},
-    renderer::{RenderContext, ViewQuery},
+    renderer::ViewQuery,
     view::ViewTarget,
 };
+
+use crate::render_context::RenderContext;
 
 // Native renderer-global quality scale is unresolved; constructor G is one.
 pub const BLOOM_QUALITY_SCALE: f32 = 1.0;

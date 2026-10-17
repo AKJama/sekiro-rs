@@ -1,5 +1,5 @@
-//! Grass clumps share mesh/material handles for Bevy's automatic GPU instancing.
-//! Instances are children of their authored terrain part, including its visibility gates.
+//! Grass clumps are baked into shared meshes per authored terrain surface.
+//! Surfaces stay children of their terrain part, including its visibility gates.
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
@@ -31,6 +31,7 @@ struct Block {
     prototypes: BTreeMap<String, Prototype>,
     /// Bound surface names by part index, in manifest order.
     parts: HashMap<usize, Vec<String>>,
+    merged: HashMap<String, Vec<Primitive>>,
 }
 
 struct Prototype {
@@ -135,6 +136,7 @@ pub(crate) fn install(app: &mut App, dir: &Path, prefix: &str) -> Result<()> {
             manifest,
             prototypes,
             parts,
+            merged: HashMap::new(),
         });
     }
     app.insert_resource(grass)
@@ -311,39 +313,109 @@ fn attach(world: &mut World, block: &mut Block, parent: Entity, part_index: usiz
         let surface = &block.manifest["surfaces"][name.as_str()];
         let prototype = &block.prototypes[surface["model"].as_str().unwrap()];
         let cast_shadow = surface["params"]["castShadow"].as_u64().unwrap_or(0) != 0;
-        for placement in surface["placements"].as_array().into_iter().flatten() {
-            let placement = transform(placement).expect("validated grass placement");
+        if !block.merged.contains_key(name) {
+            let _timer = crate::perf_log::SystemTimer::start("grass merge");
+            let mut baked = Vec::new();
             for primitive in prototype.primitives.as_ref().unwrap() {
-                let mut entity = world.spawn((
-                    Mesh3d(primitive.mesh.clone()),
-                    MeshMaterial3d(primitive.material.clone()),
-                    placement.mul_transform(primitive.transform),
-                    Visibility::Inherited,
-                    ChildOf(parent),
-                ));
-                if !cast_shadow {
-                    entity.insert((GrassNoShadow, bevy::light::NotShadowCaster));
-                }
-                if let Some(extras) = &primitive.extras {
-                    entity.insert(extras.clone());
-                }
-                if let Some(extras) = &primitive.mesh_extras {
-                    entity.insert(GltfMeshExtras {
-                        value: extras.value.clone(),
+                let opaque = world
+                    .resource::<Assets<StandardMaterial>>()
+                    .get(&primitive.material)
+                    .is_some_and(|m| {
+                        matches!(
+                            m.alpha_mode,
+                            AlphaMode::Opaque | AlphaMode::Mask(_) | AlphaMode::AlphaToCoverage
+                        )
                     });
+                if !opaque {
+                    // Transparent clumps retain their individual depth-sort positions.
+                    for row in surface["placements"].as_array().into_iter().flatten() {
+                        let mut instance = primitive.clone();
+                        instance.transform = transform(row)
+                            .expect("validated grass placement")
+                            .mul_transform(primitive.transform);
+                        baked.push(instance);
+                    }
+                    continue;
                 }
-                if let Some(extras) = &primitive.material_extras {
-                    entity.insert(GltfMaterialExtras {
-                        value: extras.value.clone(),
-                    });
-                }
-                if let Some(name) = &primitive.material_name {
-                    entity.insert(GltfMaterialName(name.clone()));
-                }
+                let Some(source) = world
+                    .resource::<Assets<Mesh>>()
+                    .get(&primitive.mesh)
+                    .cloned()
+                else {
+                    return false;
+                };
+                let placements =
+                    surface["placements"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|row| {
+                            transform(row)
+                                .expect("validated grass placement")
+                                .mul_transform(primitive.transform)
+                        });
+                let Some(mesh) = merge_placements(&source, placements) else {
+                    continue;
+                };
+                let mut primitive = primitive.clone();
+                primitive.mesh = world.resource_mut::<Assets<Mesh>>().add(mesh);
+                primitive.transform = Transform::IDENTITY;
+                baked.push(primitive);
+            }
+            block.merged.insert(name.clone(), baked);
+        }
+        for primitive in &block.merged[name] {
+            let mut entity = world.spawn((
+                Mesh3d(primitive.mesh.clone()),
+                MeshMaterial3d(primitive.material.clone()),
+                primitive.transform,
+                Visibility::Inherited,
+                ChildOf(parent),
+            ));
+            if !cast_shadow {
+                entity.insert((GrassNoShadow, bevy::light::NotShadowCaster));
+            }
+            if let Some(extras) = &primitive.extras {
+                entity.insert(extras.clone());
+            }
+            if let Some(extras) = &primitive.mesh_extras {
+                entity.insert(GltfMeshExtras {
+                    value: extras.value.clone(),
+                });
+            }
+            if let Some(extras) = &primitive.material_extras {
+                entity.insert(GltfMaterialExtras {
+                    value: extras.value.clone(),
+                });
+            }
+            if let Some(name) = &primitive.material_name {
+                entity.insert(GltfMaterialName(name.clone()));
             }
         }
     }
     true
+}
+
+/// A surface is tied to one terrain part, so baking preserves its exact visibility gate.
+/// Use u32 indices before concatenation, including prototypes with more than 65535 vertices
+/// after placement. Vertex attributes (normals, tangents, colours and all UVs) stay intact.
+fn merge_placements(source: &Mesh, placements: impl Iterator<Item = Transform>) -> Option<Mesh> {
+    let mut source = source.clone();
+    let indices = source.indices().map_or_else(
+        || (0..source.count_vertices() as u32).collect(),
+        |indices| indices.iter().map(|i| i as u32).collect(),
+    );
+    source.insert_indices(bevy::mesh::Indices::U32(indices));
+    let mut combined: Option<Mesh> = None;
+    for placement in placements {
+        let mesh = source.clone().transformed_by(placement);
+        if let Some(combined) = &mut combined {
+            combined.merge(&mesh).expect("same grass prototype layout");
+        } else {
+            combined = Some(mesh);
+        }
+    }
+    combined
 }
 
 fn enforce_shadow_flags(
@@ -366,6 +438,12 @@ mod tests {
     #[test]
     fn clumps_share_gpu_assets_and_inherit_each_source_part_once() {
         let mut world = World::new();
+        let mut meshes = Assets::<Mesh>::default();
+        let mesh = meshes.add(Mesh::from(Triangle3d::new(Vec3::ZERO, Vec3::X, Vec3::Y)));
+        world.insert_resource(meshes);
+        let mut materials = Assets::<StandardMaterial>::default();
+        let material = materials.add(StandardMaterial::default());
+        world.insert_resource(materials);
         let mut roots: Vec<_> = (0..2)
             .map(|_| {
                 world
@@ -400,8 +478,8 @@ mod tests {
             roots: vec![],
             barrier: None,
             primitives: Some(vec![Primitive {
-                mesh: Handle::default(),
-                material: Handle::default(),
+                mesh,
+                material,
                 transform: Transform::IDENTITY,
                 extras: None,
                 mesh_extras: None,
@@ -409,13 +487,14 @@ mod tests {
                 material_name: None,
             }]),
         };
-        let manifest = json!({"bindings":[{"part_index":4,"surface":"ground"}],"surfaces":{"ground":{"model":"tuft","params":{"castShadow":0},"placements":[{"translation":[1.,2.,3.],"rotation":[0.,0.,0.,1.],"scale":[1.,1.,1.]}]}}});
+        let manifest = json!({"bindings":[{"part_index":4,"surface":"ground"}],"surfaces":{"ground":{"model":"tuft","params":{"castShadow":0},"placements":[{"translation":[1.,2.,3.],"rotation":[0.,0.,0.,1.],"scale":[1.,1.,1.]},{"translation":[4.,5.,6.],"rotation":[0.,0.,0.,1.],"scale":[1.,1.,1.]}]}}});
         world.insert_resource(Grass {
             blocks: vec![Block {
                 id: "test".into(),
                 manifest,
                 prototypes: BTreeMap::from([("tuft".into(), prototype)]),
                 parts: HashMap::from([(4, vec!["ground".into()])]),
+                merged: HashMap::new(),
             }],
         });
         world.run_system_once(instantiate).unwrap();
@@ -436,7 +515,23 @@ mod tests {
         assert!(
             children
                 .iter()
-                .all(|c| *c.3 == Visibility::Inherited && c.4.translation == Vec3::new(1., 2., 3.))
+                .all(|c| *c.3 == Visibility::Inherited && *c.4 == Transform::IDENTITY)
+        );
+        let merged = world
+            .resource::<Assets<Mesh>>()
+            .get(&children[0].1.0)
+            .unwrap();
+        assert_eq!(merged.count_vertices(), 6);
+        let bevy::mesh::VertexAttributeValues::Float32x3(positions) =
+            merged.attribute(Mesh::ATTRIBUTE_POSITION).unwrap()
+        else {
+            panic!("positions");
+        };
+        assert_eq!(positions[0], [1., 2., 3.]);
+        assert_eq!(positions[3], [4., 5., 6.]);
+        assert_eq!(
+            merged.indices().unwrap().iter().collect::<Vec<_>>(),
+            [0, 1, 2, 3, 4, 5]
         );
         assert!(
             children
