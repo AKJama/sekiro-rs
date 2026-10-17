@@ -430,9 +430,8 @@ impl ShadowSettings {
             enabled: !args.iter().any(|a| a == "--no-shadow"),
             cascades: 4,
             distance: shadow_param("Far Fade Start", NATIVE_FAR_FADE_START),
-            // Renderer budget, not a native value: map casters within 300 m of the focus. At 45 m
-            // distant cliffs gained their shadows only on approach; 300 m held 60 fps (2026-10-17).
-            caster_distance: 300.,
+            // Set after the arguments: the shadow distance unless `--shadow-casters` names one.
+            caster_distance: 0.,
             depth_bias: 0.02,
             normal_bias: 0.6,
             splits: [
@@ -441,6 +440,7 @@ impl ShadowSettings {
                 shadow_param("Cascade Dist 2->3", NATIVE_SPLITS[2]),
             ],
         };
+        let mut casters = None;
         for (i, arg) in args.iter().enumerate() {
             if arg == "--shadow" {
                 let value = args
@@ -453,10 +453,11 @@ impl ShadowSettings {
                 settings.distance = distance.parse()?;
             }
             if arg == "--shadow-casters" {
-                settings.caster_distance = args
-                    .get(i + 1)
-                    .context("--shadow-casters needs metres")?
-                    .parse()?;
+                casters = Some(
+                    args.get(i + 1)
+                        .context("--shadow-casters needs metres")?
+                        .parse()?,
+                );
             }
             if arg == "--shadow-bias" {
                 let value = args
@@ -469,6 +470,9 @@ impl ShadowSettings {
                 settings.normal_bias = normal.parse()?;
             }
         }
+        // Map casters reach as far as shadows are drawn, so none appears on approach. A 300 m
+        // budget left ground shadows popping in past the opening shack; 1000 m held 60 fps (#66).
+        settings.caster_distance = casters.unwrap_or(settings.distance);
         anyhow::ensure!(
             (1..=4).contains(&settings.cascades),
             "shadow cascades must be 1..4"
@@ -1766,6 +1770,11 @@ mod probe_tests {
         // Without authored values the native defaults reach 1000 m, past distant cliffs (#9).
         let s = ShadowSettings::from_args(&Gparam { groups: vec![] }, 6., &[]).unwrap();
         assert_eq!(s.cascade_bounds(), vec![10., 30., 70., 1000.]);
+        // Map casters reach the shadow distance, so ground shadows don't pop in (#66).
+        assert_eq!(s.caster_distance, 1000.);
+        let args = ["--shadow-casters", "50"].map(String::from);
+        let s = ShadowSettings::from_args(&g, 6., &args).unwrap();
+        assert_eq!((s.distance, s.caster_distance), (400., 50.));
     }
     #[test]
     fn post_effects_only_mark_3d_cameras_and_disabled_lut_is_removed() {

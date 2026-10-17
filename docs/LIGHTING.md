@@ -1379,8 +1379,8 @@ But `fetch_directional_shadow` returns fully lit for any fragment whose view dep
 That cut is a plane facing the camera, so turning the camera swept it across the cliff and switched its shadowed parts on and off.
 Native `default.gparam` `ShadowParam` authors cascade cut points 10, 30 and 70 m with `Far Fade Start` 1000 m, and the m11_00 files do not override them.
 The sun now uses four cascades with bounds from those fields (10/30/70/1000 m by default), so receivers keep the shadow lookup to the native far fade.
-Map shadow casters reach 300 m from the focus, a renderer budget rather than a native value: with the old 45 m, distant cliffs and the ground seen through the shack door gained their shadows only on approach.
-A playtest on 2026-10-17 held 60 fps at 300 m; `--shadow-casters` overrides it.
+Map shadow casters reach as far as the shadow distance (1000 m by default): with 45 m, and later 300 m, ground and cliff shadows popped in on approach (#66).
+A playtest on 2026-10-17 held 60 fps at 1000 m; `--shadow-casters` overrides it.
 `--shadow cascades,distance` still overrides the count and range, using the native cut points below that range.
 The native far fade (10 m) and `Cascade Fade Range Scale` are not reproduced; Bevy keeps its own cascade overlap.
 
