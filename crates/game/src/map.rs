@@ -1612,6 +1612,9 @@ fn budget_map_shadows(
     mut counts: Local<Option<(usize, usize)>>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("budget_map_shadows");
+    let Some(caster_distance) = settings.caster_distance else {
+        return;
+    };
     if time.elapsed_secs() - *last < 0.5 {
         return;
     }
@@ -1628,8 +1631,7 @@ fn budget_map_shadows(
         }
         let (lo, hi) = world_bounds(transform, bounds);
         let cast = settings.enabled
-            && position.distance_squared(position.clamp(lo, hi))
-                <= settings.caster_distance.powi(2);
+            && position.distance_squared(position.clamp(lo, hi)) <= caster_distance.powi(2);
         total += 1;
         casting += usize::from(cast);
         if cast && excluded.is_some() {
@@ -1640,10 +1642,7 @@ fn budget_map_shadows(
         }
     }
     if *counts != Some((casting, total)) {
-        info!(
-            "map shadow casters: {casting}/{total} meshes within {} m of focus",
-            settings.caster_distance
-        );
+        info!("map shadow casters: {casting}/{total} meshes within {caster_distance} m of focus");
         *counts = Some((casting, total));
     }
 }
@@ -2093,9 +2092,12 @@ mod tests {
     #[test]
     fn shadow_budget_preserves_characters_and_large_walls_and_follows_focus() {
         let mut app = App::new();
-        let settings =
-            ShadowSettings::from_args(&sekiro_formats::gparam::Gparam { groups: vec![] }, 12., &[])
-                .unwrap();
+        let settings = ShadowSettings::from_args(
+            &sekiro_formats::gparam::Gparam { groups: vec![] },
+            12.,
+            &["--shadow-casters", "300"].map(String::from),
+        )
+        .unwrap();
         app.insert_resource(settings)
             .insert_resource(Time::<()>::default())
             .add_systems(Update, budget_map_shadows);

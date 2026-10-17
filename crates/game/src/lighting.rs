@@ -405,7 +405,9 @@ pub struct ShadowSettings {
     pub enabled: bool,
     pub cascades: usize,
     pub distance: f32,
-    pub caster_distance: f32,
+    /// `--shadow-casters` metres: map meshes farther from the focus stop casting. None leaves
+    /// caster culling to Bevy's cascade frusta, so nothing gains its shadow on approach (#66).
+    pub caster_distance: Option<f32>,
     /// Native cascade cut points (`ShadowParam` `Cascade Dist 0->1/1->2/2->3`) in metres.
     pub splits: [f32; 3],
     pub depth_bias: f32,
@@ -430,9 +432,7 @@ impl ShadowSettings {
             enabled: !args.iter().any(|a| a == "--no-shadow"),
             cascades: 4,
             distance: shadow_param("Far Fade Start", NATIVE_FAR_FADE_START),
-            // Renderer budget, not a native value: map casters within 300 m of the focus. At 45 m
-            // distant cliffs gained their shadows only on approach; 300 m held 60 fps (2026-10-17).
-            caster_distance: 300.,
+            caster_distance: None,
             depth_bias: 0.02,
             normal_bias: 0.6,
             splits: [
@@ -453,10 +453,11 @@ impl ShadowSettings {
                 settings.distance = distance.parse()?;
             }
             if arg == "--shadow-casters" {
-                settings.caster_distance = args
-                    .get(i + 1)
-                    .context("--shadow-casters needs metres")?
-                    .parse()?;
+                settings.caster_distance = Some(
+                    args.get(i + 1)
+                        .context("--shadow-casters needs metres")?
+                        .parse()?,
+                );
             }
             if arg == "--shadow-bias" {
                 let value = args
@@ -478,7 +479,9 @@ impl ShadowSettings {
             "shadow distance must be finite and >= 1 m"
         );
         anyhow::ensure!(
-            settings.caster_distance.is_finite() && settings.caster_distance > 0.,
+            settings
+                .caster_distance
+                .is_none_or(|d| d.is_finite() && d > 0.),
             "caster distance must be finite and positive"
         );
         anyhow::ensure!(
@@ -1766,6 +1769,11 @@ mod probe_tests {
         // Without authored values the native defaults reach 1000 m, past distant cliffs (#9).
         let s = ShadowSettings::from_args(&Gparam { groups: vec![] }, 6., &[]).unwrap();
         assert_eq!(s.cascade_bounds(), vec![10., 30., 70., 1000.]);
+        // No map caster budget by default, so ground shadows don't pop in (#66).
+        assert_eq!(s.caster_distance, None);
+        let args = ["--shadow-casters", "50"].map(String::from);
+        let s = ShadowSettings::from_args(&g, 6., &args).unwrap();
+        assert_eq!(s.caster_distance, Some(50.));
     }
     #[test]
     fn post_effects_only_mark_3d_cameras_and_disabled_lut_is_removed() {

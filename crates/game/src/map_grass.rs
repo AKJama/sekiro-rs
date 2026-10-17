@@ -336,7 +336,7 @@ fn enforce_shadow_flags(
     mut commands: Commands,
     meshes: Query<Entity, (With<GrassNoShadow>, Without<bevy::light::NotShadowCaster>)>,
 ) {
-    // The shared Update budget restores near map casters. Native type flags still win.
+    // The `--shadow-casters` budget can restore map casters. Native type flags still win.
     for entity in &meshes {
         commands.entity(entity).insert(bevy::light::NotShadowCaster);
     }
