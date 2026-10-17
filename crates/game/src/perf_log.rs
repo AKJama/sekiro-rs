@@ -226,8 +226,15 @@ pub fn install_render_probe(app: &mut App) -> RenderProbe {
         return probe;
     };
     render.insert_resource(probe.clone());
-    if std::env::var_os("PF_RESPAWN_PROBE").is_some() {
-        render.add_systems(Render, count_draw_batches.in_set(RenderSystems::Render));
+    if std::env::var_os("PF_RESPAWN_PROBE").is_some()
+        || std::env::args().any(|a| a == "--profile-systems")
+    {
+        render.add_systems(
+            Render,
+            count_draw_batches
+                .after(RenderSystems::Prepare)
+                .before(RenderSystems::Render),
+        );
     }
     render.add_systems(
         Render,
@@ -237,13 +244,14 @@ pub fn install_render_probe(app: &mut App) -> RenderProbe {
                 d.stamps.clear();
             }
         })
-        .in_set(RenderSystems::ExtractCommands),
+        .before(RenderSystems::ExtractCommands),
     );
     let stamp = |p: Res<RenderProbe>| {
         if let Ok(mut d) = p.0.lock() {
             d.stamps.push(Instant::now());
         }
     };
+    let mut previous = RenderSystems::ExtractCommands;
     for set in [
         RenderSystems::PrepareAssets,
         RenderSystems::Specialize,
@@ -253,7 +261,8 @@ pub fn install_render_probe(app: &mut App) -> RenderProbe {
         RenderSystems::Render,
         RenderSystems::Cleanup,
     ] {
-        render.add_systems(Render, stamp.in_set(set));
+        render.add_systems(Render, stamp.after(previous).before(set.clone()));
+        previous = set;
     }
     render.add_systems(
         Render,
@@ -283,9 +292,174 @@ pub fn install_render_probe(app: &mut App) -> RenderProbe {
                 d.pipelines_waiting = waiting;
             }
         })
-        .in_set(RenderSystems::PostCleanup),
+        .after(RenderSystems::PostCleanup),
     );
+    if std::env::args().any(|a| a == "--profile-systems") {
+        install_detailed_probe(render);
+    }
     probe
+}
+
+/// Ordered boundaries, including submission (not covered by GPU pass diagnostics).
+fn install_detailed_probe(render: &mut SubApp) {
+    use bevy::render::renderer::{RenderGraph, RenderGraphSystems};
+    use bevy::render::{Render, RenderSystems};
+    for (previous, set, next, name) in [
+        (
+            RenderSystems::ExtractCommands,
+            RenderSystems::PrepareAssets,
+            RenderSystems::PrepareMeshes,
+            "render assets",
+        ),
+        (
+            RenderSystems::CreateViews,
+            RenderSystems::Specialize,
+            RenderSystems::PrepareViews,
+            "render specialize",
+        ),
+        (
+            RenderSystems::Specialize,
+            RenderSystems::PrepareViews,
+            RenderSystems::Queue,
+            "render views/acquire",
+        ),
+        (
+            RenderSystems::PhaseSort,
+            RenderSystems::PrepareResources,
+            RenderSystems::PrepareResourcesBatchPhases,
+            "render resources",
+        ),
+        (
+            RenderSystems::PrepareResources,
+            RenderSystems::PrepareResourcesBatchPhases,
+            RenderSystems::PrepareResourcesWritePhaseBuffers,
+            "render batch phases",
+        ),
+        (
+            RenderSystems::PrepareResourcesFlush,
+            RenderSystems::PrepareBindGroups,
+            RenderSystems::Render,
+            "render bind groups",
+        ),
+    ] {
+        let clock = std::sync::Arc::new(std::sync::Mutex::new(Instant::now()));
+        let start = clock.clone();
+        render.add_systems(
+            Render,
+            (move || *start.lock().unwrap() = Instant::now())
+                .after(previous)
+                .before(set.clone()),
+        );
+        render.add_systems(
+            Render,
+            (move || record(name, clock.lock().unwrap().elapsed().as_secs_f64() * 1000.0))
+                .after(set)
+                .before(next),
+        );
+    }
+    let clock = std::sync::Arc::new(std::sync::Mutex::new(Instant::now()));
+    let start = clock.clone();
+    render.add_systems(
+        RenderGraph,
+        (move || *start.lock().unwrap() = Instant::now()).before(RenderGraphSystems::Begin),
+    );
+    for (previous, next, name) in [
+        (
+            RenderGraphSystems::Render,
+            RenderGraphSystems::Submit,
+            "render graph encode",
+        ),
+        (
+            RenderGraphSystems::Submit,
+            RenderGraphSystems::Finish,
+            "render graph submit",
+        ),
+    ] {
+        let clock = clock.clone();
+        render.add_systems(
+            RenderGraph,
+            (move || {
+                let mut last = clock.lock().unwrap();
+                record(name, last.elapsed().as_secs_f64() * 1000.0);
+                *last = Instant::now();
+            })
+            .after(previous)
+            .before(next),
+        );
+    }
+    render.add_systems(
+        Render,
+        (move || {
+            record(
+                "render finish/present",
+                clock.lock().unwrap().elapsed().as_secs_f64() * 1000.0,
+            )
+        })
+        .after(bevy::render::renderer::render_system)
+        .before(RenderSystems::Cleanup),
+    );
+    render.add_systems(
+        Render,
+        render_counts
+            .after(RenderSystems::Prepare)
+            .before(RenderSystems::Render),
+    );
+    use bevy::core_pipeline::schedule::{Core3d, Core3dSystems};
+    let clock = std::sync::Arc::new(std::sync::Mutex::new(Instant::now()));
+    let start = clock.clone();
+    render.add_systems(
+        Core3d,
+        (move || *start.lock().unwrap() = Instant::now())
+            .before(Core3dSystems::Prepass)
+            .before(bevy::pbr::per_view_shadow_pass::<false>),
+    );
+    render.add_systems(
+        Core3d,
+        (move || {
+            record(
+                "render camera passes",
+                clock.lock().unwrap().elapsed().as_secs_f64() * 1000.0,
+            )
+        })
+        .after(Core3dSystems::PostProcess),
+    );
+}
+
+fn render_counts(
+    probe: Res<RenderProbe>,
+    views: Query<(), With<bevy::render::view::ExtractedView>>,
+    shadows: Res<bevy::render::render_phase::ViewBinnedRenderPhases<bevy::pbr::Shadow>>,
+    meshes: Res<bevy::render::render_asset::RenderAssets<bevy::render::mesh::RenderMesh>>,
+    materials: Res<
+        bevy::render::erased_render_asset::ErasedRenderAssets<bevy::pbr::PreparedMaterial>,
+    >,
+    mut last: Local<Option<Instant>>,
+) {
+    if last.is_some_and(|t| t.elapsed().as_secs_f32() < 1.0) {
+        return;
+    }
+    *last = Some(Instant::now());
+    let batches: Vec<_> = shadows
+        .0
+        .values()
+        .map(|p| {
+            p.multidrawable_meshes.len()
+                + p.batchable_meshes.len()
+                + p.unbatchable_meshes
+                    .values()
+                    .map(|b| b.entities.len())
+                    .sum::<usize>()
+        })
+        .collect();
+    info!(
+        "render counts: views {}, shadow views {}, shadow batches {:?}, meshes {}, materials {}, main batches {}",
+        views.iter().count(),
+        batches.len(),
+        batches,
+        meshes.iter().count(),
+        materials.iter().count(),
+        probe.0.lock().map_or(0, |p| p.draw_batches)
+    );
 }
 
 fn count_draw_batches(
