@@ -1773,11 +1773,13 @@ fn follow_camera(
     fixed: Res<Time<Fixed>>,
     mut orbit: ResMut<Orbit>,
     collision: Option<Res<MapCollision>>,
-    mut cam: Query<&mut Transform, With<FollowCamera>>,
+    mut cam: Query<(&mut Transform, &mut Projection), With<FollowCamera>>,
 ) {
-    let Ok(mut tf) = cam.single_mut() else {
+    let Ok((mut tf, mut projection)) = cam.single_mut() else {
         return;
     };
+    // The field of view follows the camera slot's LockCamParam row (`camFovY`, vertical).
+    follow_fov(&mut projection, sim.duel.camera_director.fov);
     let wolf = shown(&sim, WOLF, fixed.overstep_fraction()).0;
     // Scripted inspection angle: `--extra hang-view`, parsed here to avoid main.rs.
     if std::env::args().any(|a| a == "hang-view")
@@ -1821,6 +1823,17 @@ fn follow_camera(
     }
     let eye = target + back * distance;
     *tf = Transform::from_translation(eye).looking_at(target, Vec3::Y);
+}
+
+/// Sets a perspective projection's vertical field of view to `degrees`, touching it only when it
+/// changes so Bevy does not rebuild the frustum every frame.
+fn follow_fov(projection: &mut Projection, degrees: f32) {
+    if let Projection::Perspective(p) = projection {
+        let fov = degrees.to_radians();
+        if (p.fov - fov).abs() > 1e-6 {
+            p.fov = fov;
+        }
+    }
 }
 
 /// Names of the status effects the Owl's tools leave on Wolf, for the HUD.
@@ -2213,7 +2226,7 @@ fn log_camera(
     orbit: Res<Orbit>,
     live: Res<LiveInput>,
     sim: NonSend<Sim>,
-    cam: Query<&Transform, With<FollowCamera>>,
+    cam: Query<(&Transform, &Projection), With<FollowCamera>>,
     replay: Option<Res<crate::input_replay::InputReplay>>,
     window: Query<&Window, With<bevy::window::PrimaryWindow>>,
     fixed: Res<Time<Fixed>>,
@@ -2224,13 +2237,24 @@ fn log_camera(
     let grab = cursor
         .single()
         .map_or("none".to_string(), |c| format!("{:?}", c.grab_mode));
-    let fwd = cam.single().map_or(Vec3::NAN, |t| t.forward().as_vec3());
+    let fwd = cam
+        .single()
+        .map_or(Vec3::NAN, |(t, _)| t.forward().as_vec3());
+    let (fov, aspect, eye_dist) = cam
+        .single()
+        .map_or((f32::NAN, f32::NAN, f32::NAN), |(t, p)| {
+            let (fov, aspect) = match p {
+                Projection::Perspective(p) => (p.fov.to_degrees(), p.aspect_ratio),
+                _ => (f32::NAN, f32::NAN),
+            };
+            (fov, aspect, t.translation.distance(orbit.focus))
+        });
     let cam_yaw = (-fwd.x).atan2(-fwd.z);
     let focus = orbit.focus;
     let wolf = Vec3::from_array(sim.duel.player.body.position);
     let drawn = shown(&sim, WOLF, fixed.overstep_fraction()).0;
     eprintln!(
-        "cam {} t {:.3} dt {:.4} focused {} grab {grab} mouse {:.1},{:.1} lock {} orbit_yaw {:.1} pitch {:.1} cam_yaw {:.1} stick {:.2},{:.2} live_cam {:.1} step {} focus_lag {:.3} drawn {:.3},{:.3} sim {:.3},{:.3}",
+        "cam {} t {:.3} dt {:.4} focused {} grab {grab} mouse {:.1},{:.1} lock {} orbit_yaw {:.1} pitch {:.1} cam_yaw {:.1} stick {:.2},{:.2} live_cam {:.1} step {} focus_lag {:.3} drawn {:.3},{:.3} sim {:.3},{:.3} fov {:.2} aspect {:.3} dist {:.2} boom {:.2} focus_h {:.2}",
         replay.as_ref().map_or(0, |r| r.frame),
         time.elapsed_secs(),
         time.delta_secs(),
@@ -2250,6 +2274,11 @@ fn log_camera(
         drawn.z,
         wolf.x,
         wolf.z,
+        fov,
+        aspect,
+        eye_dist,
+        sim.duel.camera_director.distance,
+        focus.y - wolf.y,
     );
 }
 
@@ -2364,6 +2393,23 @@ fn grapple_marker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #46: the follow camera's projection takes the sim camera's field of view (43 degrees for
+    /// the free camera), whatever another plugin set it to.
+    #[test]
+    fn projection_fov_follows_the_sim_camera() {
+        let director = sekiro_sim::camera::CameraDirector::new(Default::default());
+        assert_eq!(director.fov, 43.0);
+        let mut projection = Projection::Perspective(PerspectiveProjection {
+            fov: 60f32.to_radians(),
+            ..default()
+        });
+        follow_fov(&mut projection, director.fov);
+        let Projection::Perspective(p) = projection else {
+            panic!("perspective projection");
+        };
+        assert!((p.fov.to_degrees() - 43.0).abs() < 1e-4);
+    }
     use sekiro_sim::fight::FighterKind;
 
     #[test]

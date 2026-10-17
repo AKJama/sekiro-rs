@@ -437,7 +437,7 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
             0.
         };
         let projection = PerspectiveProjection {
-            fov: 60f32.to_radians(),
+            fov: super::VIEWER_FOV_DEG.to_radians(),
             aspect_ratio: options.width as f32 / options.height as f32,
             ..default()
         };
@@ -490,6 +490,7 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
             ));
     app.world_mut().spawn((
         Camera3d::default(),
+        super::viewer_projection(),
         Camera::default(),
         Msaa::Off,
         RenderTarget::Image(target.clone().into()),
@@ -503,6 +504,7 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
     for (layer, target) in [(1, depth_target.clone()), (2, collision_target.clone())] {
         app.world_mut().spawn((
             Camera3d::default(),
+            super::viewer_projection(),
             Camera {
                 is_active: false,
                 clear_color: ClearColorConfig::Custom(Color::BLACK),
