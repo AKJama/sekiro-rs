@@ -1,4 +1,5 @@
 //! Shared asset and completed-render checks for window and offscreen captures.
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use bevy::prelude::*;
@@ -41,25 +42,94 @@ impl Pipelines {
 /// when first seen and later are, and [`watch_meshes`] marks their entities changed so Bevy
 /// specializes them again. This runs for the whole session, so meshes streamed or levels of
 /// detail spawned during play are covered too.
+///
+/// It also counts the meshes the world is still loading, for the play gate
+/// ([`LateMeshes::loading`]). Bevy marks `Mesh3d` changed every frame for an entity whose mesh
+/// or material asset is rewritten (effect batches, cloth, the sky's animated materials), and a
+/// rewritten mesh leaves the render world until it is prepared again, so the gate counts only
+/// meshes never seen prepared before and skips [`RuntimeMesh`] entities.
 #[derive(Clone, Default, Resource)]
 pub(crate) struct LateMeshes(Arc<Mutex<LateState>>);
+
+/// A mesh entity that keeps appearing during play (an effect batch), so the play gate does not
+/// wait for its mesh. It is still specialized again when its mesh arrives late.
+#[derive(Clone, Copy, Component, Default)]
+pub(crate) struct RuntimeMesh;
 
 #[derive(Default)]
 struct LateState {
     /// Main to render: meshes of entities that appeared since the last check.
     new: Vec<AssetId<Mesh>>,
     /// Render: meshes not prepared when first checked.
-    waiting: std::collections::HashSet<AssetId<Mesh>>,
+    waiting: HashSet<AssetId<Mesh>>,
     /// Render to main: checked meshes that were prepared in time, and waiting ones now prepared.
     on_time: Vec<AssetId<Mesh>>,
     ready: Vec<AssetId<Mesh>>,
+    /// Reported meshes of the world's own entities not yet seen prepared: what the play gate
+    /// waits for.
+    loading: HashSet<AssetId<Mesh>>,
+    /// Meshes of the world's own entities seen prepared at least once.
+    loaded: HashSet<AssetId<Mesh>>,
+}
+
+impl LateState {
+    /// Main world: an entity's mesh appeared or changed. `runtime` entities never hold the gate.
+    fn report(&mut self, id: AssetId<Mesh>, runtime: bool) {
+        self.new.push(id);
+        if !runtime && !self.loaded.contains(&id) {
+            self.loading.insert(id);
+        }
+    }
+
+    /// Render world: sort newly reported meshes into prepared and waiting, and report waiting
+    /// meshes that have been prepared since.
+    fn check(&mut self, prepared: impl Fn(AssetId<Mesh>) -> bool) {
+        if self.new.is_empty() && self.waiting.is_empty() {
+            return;
+        }
+        for id in std::mem::take(&mut self.new) {
+            if prepared(id) {
+                self.on_time.push(id);
+                self.mark_loaded(id);
+            } else {
+                self.waiting.insert(id);
+            }
+        }
+        let mut ready = Vec::new();
+        self.waiting.retain(|id| {
+            let done = prepared(*id);
+            if done {
+                ready.push(*id);
+            }
+            !done
+        });
+        for id in ready {
+            self.mark_loaded(id);
+            self.ready.push(id);
+        }
+    }
+
+    fn mark_loaded(&mut self, id: AssetId<Mesh>) {
+        if self.loading.remove(&id) {
+            self.loaded.insert(id);
+        }
+    }
+
+    /// Main world: forget meshes whose asset was removed, so one removed before it was
+    /// prepared does not wait forever.
+    fn forget_removed(&mut self, exists: impl Fn(AssetId<Mesh>) -> bool) {
+        self.waiting.retain(|id| exists(*id));
+        self.loading.retain(|id| exists(*id));
+        self.loaded.retain(|id| exists(*id));
+    }
 }
 
 impl LateMeshes {
-    /// Meshes of spawned entities not yet known to be prepared on the GPU.
-    pub fn waiting(&self) -> usize {
-        let state = self.0.lock().unwrap();
-        state.new.len() + state.waiting.len()
+    /// Meshes of the world's own entities (not [`RuntimeMesh`] ones) not yet seen prepared on
+    /// the GPU. A mesh seen prepared once does not count again when its asset or material is
+    /// rewritten.
+    pub fn loading(&self) -> usize {
+        self.0.lock().unwrap().loading.len()
     }
 }
 
@@ -71,7 +141,7 @@ fn watch_meshes(
     late: Res<LateMeshes>,
     assets: Res<Assets<Mesh>>,
     mut meshes: ParamSet<(
-        Query<(Entity, &Mesh3d), Changed<Mesh3d>>,
+        Query<(Entity, &Mesh3d, Has<RuntimeMesh>), Changed<Mesh3d>>,
         Query<&mut Mesh3d>,
     )>,
     mut unchecked: Local<std::collections::HashMap<AssetId<Mesh>, Vec<Entity>>>,
@@ -81,15 +151,16 @@ fn watch_meshes(
     }
     let (on_time, ready) = {
         let mut state = late.0.lock().unwrap();
-        for (entity, mesh) in &meshes.p0() {
+        for (entity, mesh, runtime) in &meshes.p0() {
             // Placeholder handles (`Mesh3d::default()`) never load; a mesh that is not in the
             // main world has nothing to upload from it.
             if !assets.contains(mesh.id()) {
                 continue;
             }
-            state.new.push(mesh.id());
+            state.report(mesh.id(), runtime);
             unchecked.entry(mesh.id()).or_default().push(entity);
         }
+        state.forget_removed(|id| assets.contains(id));
         (
             std::mem::take(&mut state.on_time),
             std::mem::take(&mut state.ready),
@@ -115,26 +186,7 @@ fn check_late_meshes(
     late: Res<LateMeshes>,
     meshes: Res<bevy::render::render_asset::RenderAssets<bevy::render::mesh::RenderMesh>>,
 ) {
-    let mut state = late.0.lock().unwrap();
-    let state = &mut *state;
-    if state.new.is_empty() && state.waiting.is_empty() {
-        return;
-    }
-    for id in std::mem::take(&mut state.new) {
-        if meshes.get(id).is_some() {
-            state.on_time.push(id);
-        } else {
-            state.waiting.insert(id);
-        }
-    }
-    let LateState { waiting, ready, .. } = state;
-    waiting.retain(|id| {
-        let prepared = meshes.get(*id).is_some();
-        if prepared {
-            ready.push(*id);
-        }
-        !prepared
-    });
+    late.0.lock().unwrap().check(|id| meshes.get(id).is_some());
 }
 
 #[derive(Default, Resource)]
@@ -215,9 +267,9 @@ pub(crate) fn textures_pending(world: &World, entities: &[Entity]) -> bool {
 }
 
 /// Render uploads still outstanding: images loaded in the main world for the render world that
-/// it has not prepared yet (queued behind the per-frame upload budget), and meshes of spawned
-/// entities not yet known to be prepared ([`LateMeshes`]). Main-world-only images never
-/// upload, so they do not count.
+/// it has not prepared yet (queued behind the per-frame upload budget), and meshes the world is
+/// still loading ([`LateMeshes::loading`]). Main-world-only images never upload, so they do not
+/// count.
 pub(crate) fn pending_uploads(world: &World) -> (usize, usize) {
     let images: Vec<AssetId<Image>> = world
         .resource::<Assets<Image>>()
@@ -237,7 +289,7 @@ pub(crate) fn pending_uploads(world: &World) -> (usize, usize) {
             .unwrap();
         images.iter().filter(|id| !uploaded.contains(id)).count()
     };
-    (images, world.resource::<LateMeshes>().waiting())
+    (images, world.resource::<LateMeshes>().loading())
 }
 
 pub(crate) fn install(app: &mut App) {
@@ -322,6 +374,41 @@ fn prepare(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gate_waits_for_new_world_meshes_not_rewritten_or_runtime_ones() {
+        let id = |i: u128| AssetId::<Mesh>::Uuid {
+            uuid: bevy::asset::uuid::Uuid::from_u128(i),
+        };
+        let (map, effect, removed) = (id(1), id(2), id(3));
+        let mut state = LateState::default();
+        let mut on_gpu = HashSet::new();
+        state.report(map, false);
+        state.report(effect, true);
+        state.report(removed, false);
+        assert_eq!(
+            state.loading.len(),
+            2,
+            "only the world's own meshes hold the gate"
+        );
+        state.check(|id| on_gpu.contains(&id));
+        assert_eq!(state.loading.len(), 2);
+        on_gpu.insert(map);
+        state.check(|id| on_gpu.contains(&id));
+        assert_eq!(state.ready, vec![map], "a late mesh is still reported");
+        assert_eq!(state.loading, HashSet::from([removed]));
+        state.forget_removed(|id| id != removed);
+        assert!(state.loading.is_empty() && !state.waiting.contains(&removed));
+        // Bevy marks the entity changed again whenever its mesh or material asset is
+        // rewritten, and a rewritten mesh leaves the render world until it is prepared again:
+        // every frame for effect batches, cloth and the animated sky. That must not hold the
+        // gate, but the entity is still specialized again once its mesh is back.
+        on_gpu.remove(&map);
+        state.report(map, false);
+        state.check(|id| on_gpu.contains(&id));
+        assert_eq!(state.loading.len(), 0);
+        assert!(state.waiting.contains(&map));
+    }
 
     #[test]
     fn capture_waits_for_textures_and_distinct_completed_renders() {

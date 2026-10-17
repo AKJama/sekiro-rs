@@ -41,7 +41,7 @@ struct RenderWait {
     textures: bool,
     /// Images queued behind the upload budget.
     images: usize,
-    /// Spawned mesh entities whose mesh is not yet prepared.
+    /// Meshes the world spawned that have not been prepared yet.
     meshes: usize,
 }
 
@@ -275,8 +275,9 @@ pub(super) fn update(
 }
 
 /// Once everything has loaded, checks that the world is drawable: no image upload is still
-/// queued behind the upload budget, every spawned mesh entity's mesh is prepared on the GPU
-/// ([`crate::map::ready::LateMeshes`], which also gets late entities drawn), and the
+/// queued behind the upload budget, every mesh the world spawned has been prepared on the GPU
+/// once ([`crate::map::ready::LateMeshes::loading`]; effect batches and meshes rewritten every
+/// frame do not count, as they keep changing during play), and the
 /// materials of the drawn meshes within [`RENDER_RADIUS`] of Wolf have their textures (the
 /// capture readiness check). The nearby list is made once, when the upload counts first reach
 /// zero.
