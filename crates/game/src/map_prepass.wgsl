@@ -7,6 +7,7 @@
     pbr_functions::SampleBias,
     prepass_io,
     mesh_bindings::mesh,
+    mesh_functions,
     mesh_view_bindings::view,
 }
 
@@ -72,7 +73,7 @@ fn fragment(
     camera_coverage(in.position.xy, in.world_position.xyz, fade);
 #endif
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
-    lod_coverage(in.position.xy, mesh[in.instance_index].tag);
+    lod_coverage(in.position.xy, mesh_functions::get_tag(in.instance_index));
 #endif
     pbr_prepass_functions::prepass_alpha_discard(input);
 #endif  // MESHLET_MESH_MATERIAL_PASS
@@ -185,7 +186,7 @@ fn fragment(in: prepass_io::VertexOutput) {
     camera_coverage(in.position.xy, in.world_position.xyz, fade);
 #endif
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
-    lod_coverage(in.position.xy, mesh[in.instance_index].tag);
+    lod_coverage(in.position.xy, mesh_functions::get_tag(in.instance_index));
 #endif
     pbr_prepass_functions::prepass_alpha_discard(input);
 }

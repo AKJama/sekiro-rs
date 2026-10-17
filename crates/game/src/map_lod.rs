@@ -90,20 +90,18 @@ impl LodTable {
     pub fn map_piece(&self, authored: u8) -> Result<LodRule> {
         // The executable reads the byte as signed; negative MapPiece IDs default to 0.
         let id = i32::from(authored as i8).max(0);
-        let mut rule = *self
-            .rows
+        self.rows
             .get(&id)
-            .with_context(|| format!("LodParam row {id} absent"))?;
-        rule.seconds *= CROSSFADE_STRETCH;
-        Ok(rule)
+            .copied()
+            .with_context(|| format!("LodParam row {id} absent"))
     }
 }
 
-/// The param's crossfade time is stretched by this: side by side with the real game
-/// (2026-10-17 playtest, #63), its dissolve at the same 30 m switch looked about three times
-/// longer than 0.2 s, and the 0.2 s dissolve still showed on rock whose lighting changes
-/// between levels. How the game derives its effective fade time is untraced.
-const CROSSFADE_STRETCH: f32 = 3.0;
+/// Map pieces' crossfade time scale ([`LodScales::crossfade_time`]): side by side with the
+/// real game (2026-10-17 playtest, #63), its dissolve at the same 30 m switch looked about
+/// three times longer than the param's 0.2 s. How the game derives its effective fade time
+/// is untraced.
+pub const CROSSFADE_STRETCH: f32 = 3.0;
 
 /// Effective configuration inputs beyond the param row.
 /// The extra per-type tables/globals are not fully traced, so callers explicitly supply
@@ -116,6 +114,8 @@ pub struct LodScales {
     pub distance_type: [f32; 2],
     pub distance_adjust: [f32; 2],
     pub world_distance: f32,
+    /// Multiplies the param's crossfade time.
+    pub crossfade_time: f32,
 }
 
 impl Default for LodScales {
@@ -127,6 +127,7 @@ impl Default for LodScales {
             distance_type: [1.; 2],
             distance_adjust: [0.; 2],
             world_distance: 1.,
+            crossfade_time: 1.,
         }
     }
 }
@@ -235,7 +236,9 @@ impl LodState {
                 }
             }
             if let Some(target) = self.target {
-                self.progress = (self.progress + delta_seconds.max(0.) / rule.seconds).min(1.);
+                self.progress = (self.progress
+                    + delta_seconds.max(0.) / (rule.seconds * scales.crossfade_time))
+                    .min(1.);
                 weights[self.current] = 1. - self.progress;
                 weights[target] = self.progress;
                 if self.progress >= 1. {
@@ -279,13 +282,9 @@ pub fn crossfade_tags(weights: [f32; 3], shown: usize, ready: [bool; 3]) -> [Opt
         return tags;
     };
     let (low, high) = (shown.min(partner), shown.max(partner));
-    let total = weights[low] + weights[high];
-    let weight = if total > 0. {
-        weights[high] / total
-    } else {
-        0.
-    };
-    let quantized = (weight.clamp(0., 1.) * 65535.).round() as u32;
+    // The partner's weight is in (0, 1), so the total is positive.
+    let weight = weights[high] / (weights[low] + weights[high]);
+    let quantized = (weight * 65535.).round() as u32;
     tags[low] = Some(FADE_TAG | quantized);
     tags[high] = Some(FADE_TAG | FADE_HIGHER | quantized);
     tags
@@ -306,7 +305,8 @@ mod tests {
     use super::*;
 
     /// Issue #63: row 0 (every MapPiece with LOD ID 255) leaves LOD0 at 32 m. The level change
-    /// must dissolve over the row's 0.2 s instead of replacing the mesh in one frame.
+    /// must dissolve over the row's crossfade time instead of replacing the mesh in one frame,
+    /// stretched for map pieces to 0.6 s.
     #[test]
     fn row0_switch_at_32m_dissolves_over_crossfade_time() {
         let rule = rule();
@@ -338,6 +338,17 @@ mod tests {
             crossfade_tags([0., 1., 0.], 1, ready),
             [None, Some(0), None]
         );
+        // Map pieces stretch the fade: still dissolving after 0.5 s, done at 0.6 s.
+        let stretched = LodScales {
+            crossfade_time: CROSSFADE_STRETCH,
+            ..LodScales::default()
+        };
+        let mut state = LodState::default();
+        state.update(rule, stretched, 32.1, 0.0, ready);
+        let weights = state.update(rule, stretched, 32.1, 0.5, ready);
+        assert!(weights[0] > 0. && weights[1] < 1.);
+        state.update(rule, stretched, 32.1, 0.1, ready);
+        assert_eq!(state.current, 1);
     }
 
     fn rule() -> LodRule {

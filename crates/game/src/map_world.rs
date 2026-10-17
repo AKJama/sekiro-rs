@@ -220,8 +220,6 @@ pub(crate) struct DetailPart {
     spawned: [bool; 3],
     /// Whether the slots' meshes carry crossfade coverage tags that must be cleared.
     fading: bool,
-    /// The part's MSB name, for `--lod-debug`.
-    name: String,
 }
 
 /// Submission weight retained for the eventual retail coverage shader.
@@ -1030,6 +1028,7 @@ pub(crate) fn spawn(
                 .expect("validated LOD row");
             let scales = super::lod::LodScales {
                 platform: world.lod.platform_scale,
+                crossfade_time: super::lod::CROSSFADE_STRETCH,
                 ..default()
             };
             // The level the first update selects; capture views and the file-order fallback
@@ -1085,7 +1084,6 @@ pub(crate) fn spawn(
                     capture_handle.is_some() && available[level] || level == initial
                 }),
                 fading: false,
-                name: row["name"].as_str().unwrap_or_default().to_string(),
             });
         } else if let Some(handle) = &capture_handle {
             commands.entity(root).insert(super::capture::CaptureScene {
@@ -1137,7 +1135,15 @@ pub(crate) fn update_detail(
     time: Res<Time>,
     groups: Res<super::Groups>,
     cameras: Query<&Transform, With<Camera3d>>,
-    mut parts: Query<(&Transform, &BlockPart, &mut DetailPart), Without<Camera3d>>,
+    mut parts: Query<
+        (
+            &Transform,
+            &BlockPart,
+            &visibility::VisibilityPart,
+            &mut DetailPart,
+        ),
+        Without<Camera3d>,
+    >,
     mut slots: Query<(
         &mut Visibility,
         &mut DetailWeight,
@@ -1145,7 +1151,7 @@ pub(crate) fn update_detail(
         Option<&WorldInstance>,
     )>,
     children: Query<&Children>,
-    meshes: Query<(), With<Mesh3d>>,
+    meshes: Query<Option<&MeshTag>, With<Mesh3d>>,
     wolf: Query<&Transform, (With<PlayerFocus>, Without<Camera3d>)>,
     mut debug: Local<Option<bool>>,
 ) {
@@ -1155,7 +1161,7 @@ pub(crate) fn update_detail(
     };
     let debug = *debug.get_or_insert_with(|| std::env::args().any(|a| a == "--lod-debug"));
     let wolf = wolf.iter().next().map(|t| t.translation);
-    for (transform, identity, mut part) in &mut parts {
+    for (transform, identity, msb, mut part) in &mut parts {
         let distance =
             super::lod::bounds_distance(camera.translation, transform, part.min, part.max);
         let rule = part.rule;
@@ -1193,12 +1199,14 @@ pub(crate) fn update_detail(
         // A level is ready once its scene has spawned its meshes, so a switch never leaves a
         // gap. Capture scenes are spawned synchronously.
         let ready: [bool; 3] = std::array::from_fn(|level| {
-            part.slots[level].is_some_and(|entity| {
-                part.stream.is_none()
-                    || slots.get(entity).is_ok_and(|(_, _, root, instance)| {
-                        root.is_some() && instance.is_some_and(|i| instances.instance_is_ready(**i))
-                    })
-            })
+            weights[level] > 0.
+                && part.slots[level].is_some_and(|entity| {
+                    part.stream.is_none()
+                        || slots.get(entity).is_ok_and(|(_, _, root, instance)| {
+                            root.is_some()
+                                && instance.is_some_and(|i| instances.instance_is_ready(**i))
+                        })
+                })
         });
         if part.shown != selected && ready[selected] {
             part.shown = selected;
@@ -1226,14 +1234,15 @@ pub(crate) fn update_detail(
                 if *visibility != desired {
                     *visibility = desired;
                     // Only parts near Wolf, where a switch can be seen, keep the log short.
-                    let from_wolf =
-                        wolf.map(|p| super::lod::bounds_distance(p, transform, part.min, part.max));
-                    if debug && from_wolf.is_some_and(|d| d < LOD_DEBUG_RADIUS) {
+                    let from_wolf = wolf
+                        .filter(|_| debug)
+                        .map(|p| super::lod::bounds_distance(p, transform, part.min, part.max));
+                    if from_wolf.is_some_and(|d| d < LOD_DEBUG_RADIUS) {
                         info!(
                             "lod switch: {} part {} {} level {} {}, camera {:.2} m, Wolf {:.2} m (boundaries {:?}, play {:?}), weights {:?}, Wolf at {:.1?}",
                             identity.block,
                             identity.part_index,
-                            part.name,
+                            msb.name,
                             level,
                             if desired == Visibility::Hidden {
                                 "hidden"
@@ -1252,16 +1261,19 @@ pub(crate) fn update_detail(
                 weight.0 = weights[level];
             }
             if fading || part.fading {
+                // Write only changed tags, so a mesh is re-extracted only when its coverage moves.
                 for mesh in children.iter_descendants(entity) {
-                    if meshes.contains(mesh) {
-                        match tags[level] {
-                            Some(tag) if fading && tag != 0 => {
-                                commands.entity(mesh).insert(MeshTag(tag));
-                            }
-                            _ => {
-                                commands.entity(mesh).remove::<MeshTag>();
-                            }
+                    let Ok(current) = meshes.get(mesh) else {
+                        continue;
+                    };
+                    match (tags[level].filter(|&tag| tag != 0), current) {
+                        (Some(tag), current) if current.is_none_or(|c| c.0 != tag) => {
+                            commands.entity(mesh).insert(MeshTag(tag));
                         }
+                        (None, Some(_)) => {
+                            commands.entity(mesh).remove::<MeshTag>();
+                        }
+                        _ => {}
                     }
                 }
             }
