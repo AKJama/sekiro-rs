@@ -100,6 +100,10 @@ pub struct PlayerEnv {
     pub wire_precompute: std::cell::Cell<Option<(i32, i32)>>,
     pub wire_prefer: std::cell::Cell<bool>,
     pub hang_candidate: bool,
+    /// env 3020: a wall within reach of the chest while airborne ([`crate::docking::wall_contact`]).
+    pub wall_contact: bool,
+    /// env 3045: the air catch type of the airborne hang candidate (0 none, 1 short, 2 long).
+    pub air_hang_type: u8,
     pub cover_candidate: bool,
     pub cover_active: bool,
     pub docking_blocked: [bool; 2],
@@ -190,6 +194,8 @@ impl Default for PlayerEnv {
             wire_precompute: std::cell::Cell::new(None),
             wire_prefer: std::cell::Cell::new(false),
             hang_candidate: false,
+            wall_contact: false,
+            air_hang_type: 0,
             cover_candidate: false,
             cover_active: false,
             docking_blocked: [false; 2],
@@ -294,6 +300,7 @@ impl Adapter<'_> {
             3038 => truth(env.can_dive),
             3039 => truth(env.can_surface),
             3000 => truth(env.wire_candidate),
+            3020 => truth(env.wall_contact),
             3011 => env.docking_end as f32,
             3017 => env.docking_variation as f32,
             3029 => 0.0,
@@ -307,7 +314,14 @@ impl Adapter<'_> {
             } else {
                 env.docking_active
             }),
-            3045 | 3048 | 3049 | 3059 | 3060 => 0.0,
+            3045 => {
+                if env.docking_searches.get() & 4 != 0 {
+                    env.air_hang_type as f32
+                } else {
+                    0.0
+                }
+            }
+            3048 | 3049 | 3059 | 3060 => 0.0,
             3061 => -1.0,
             ENV_FALLING => truth(env.falling),
             ENV_LANDED => truth(env.landed),
