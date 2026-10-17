@@ -10,9 +10,16 @@ pub const GROUND_REACH: f32 = 1.0;
 pub const TOP_TOLERANCE: f32 = 0.4;
 pub const HAND_HEIGHT: f32 = 1.5;
 pub const FACING_LIMIT: f32 = 45.0;
-pub const HANG_DEPTH: f32 = 1.5;
-pub const HANG_OUTWARD: f32 = 0.35;
-pub const CLIMB_INWARD: f32 = 0.25;
+/// Where the hanging root sits under and out from the lip, read from the hang idle clips:
+/// HangIdle (a000_020000) and HangFootHoldIdle (a000_020010) both hold the hands 1.55 m over
+/// the root and 0.635 m in front of it, so with the hands on the lip the root is 1.55 m under
+/// it and 0.635 m out. The pelvis is then 0.55 m (plain) or 0.18 m (foot hold) in front of the
+/// root, so it stays off the face.
+pub const HANG_DEPTH: f32 = 1.55;
+pub const HANG_OUTWARD: f32 = 0.635;
+/// Where the climb ends, in from the lip: HangToStand / HangFootHoldToStand (a000_217500 /
+/// 217600) carry the root 1.10 m forward and 1.60 m up from the hang, 1.10 - 0.635 m past it.
+pub const CLIMB_INWARD: f32 = 0.465;
 pub const FLOOR_TOLERANCE: f32 = 0.3;
 pub const END_MARGIN: f32 = 0.2;
 pub const OUTWARD_PROBE: f32 = 0.6;
@@ -409,10 +416,9 @@ impl Docking {
         root_progress: Option<f32>,
     ) -> bool {
         let name = animation.unwrap_or("");
-        if self.active.is_none()
-            && name.starts_with("a000_217")
-            && !CLIMB_CLIPS.contains(&name)
-            && !DROP_CLIPS.contains(&name)
+        // Only the hang starts dock: StandToHang* and FreeFallToHang* (2171xx plain, 2172xx
+        // foot hold). The air grab (AirHangGrab*, 2177xx) is still a free fall.
+        if self.active.is_none() && (name.starts_with("a000_2171") || name.starts_with("a000_2172"))
         {
             self.active = self.candidate.clone();
         }
@@ -449,7 +455,9 @@ impl Docking {
             self.active = None;
             self.climb_start = None;
             return true;
-        } else if name.starts_with("a000_217") || name.starts_with("a000_020") {
+        } else if (name.starts_with("a000_217") && !name.starts_with("a000_2177"))
+            || name.starts_with("a000_020")
+        {
             target.hang_position()
         } else {
             self.active = None;

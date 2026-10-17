@@ -41,7 +41,10 @@ fn closest_reach_facing_and_ends() {
     docking.search(&body, &Step);
     let target = docking.candidate.as_ref().unwrap();
     assert_eq!(target.outward, -Vec3::Z);
-    assert_eq!(target.floor, Vec3::new(0.0, 0.0, 0.25));
+    assert_eq!(
+        target.floor,
+        Vec3::new(0.0, 0.0, sekiro_sim::docking::CLIMB_INWARD)
+    );
     body.yaw = std::f32::consts::PI;
     docking.search(&body, &Step);
     assert!(docking.candidate.is_none());
@@ -120,14 +123,20 @@ fn hks_ground_hang_climb_and_drop() {
         idle |= r.player.animation.as_deref() == Some("a000_020000");
     }
     assert!(idle, "did not reach HangIdle");
-    assert!((duel.player.body.position[1] + 1.5).abs() < 0.01);
+    assert!((duel.player.body.position[1] + sekiro_sim::docking::HANG_DEPTH).abs() < 0.01);
     let r = duel.step(&press, dt);
     assert_eq!(r.player.animation.as_deref(), Some("a000_217500"));
     for _ in 0..180 {
         duel.step(&InputFrame::default(), dt);
     }
     assert!(duel.player.body.grounded);
-    assert!(Vec3::from(duel.player.body.position).distance(Vec3::new(0.0, 0.0, 0.25)) < 0.01);
+    assert!(
+        Vec3::from(duel.player.body.position).distance(Vec3::new(
+            0.0,
+            0.0,
+            sekiro_sim::docking::CLIMB_INWARD
+        )) < 0.01
+    );
     duel.player.body.position = [0.0, 0.0, 0.4];
     duel.player.body.yaw = 0.0;
     duel.step(&press, dt);
@@ -190,15 +199,20 @@ fn castle_start_two_route() {
                 .filter(|(_, b)| b.name.ends_with("Hand"))
             {
                 let hand = world.transform_point3(bones[i].transform_point3(Vec3::ZERO));
-                let floor = duel
-                    .player
-                    .ground
-                    .floor(hand.x, hand.z, hand.y + 0.3)
-                    .unwrap();
+                // The hands rest on the lip: at its height and on its line (the floor right at
+                // the line can be the drop below, so the lip itself is the reference).
+                let lip = duel.player.docking.active.as_ref().unwrap();
                 assert!(
-                    (hand.y - floor).abs() < 0.1,
-                    "{} floats above the ledge: {hand:?} floor={floor}",
-                    bone.name
+                    (hand.y - lip.point.y).abs() < 0.1,
+                    "{} floats above the ledge: {hand:?} lip={:?}",
+                    bone.name,
+                    lip.point
+                );
+                assert!(
+                    (hand - lip.point).dot(lip.outward).abs() < 0.1,
+                    "{} off the lip line: {hand:?} lip={:?}",
+                    bone.name,
+                    lip.point
                 );
                 eprintln!("hang hand {} at {:?}", bone.name, hand);
             }
@@ -230,5 +244,9 @@ fn castle_start_two_route() {
     }
     assert!(entered && idle && climbed);
     assert!(duel.player.body.grounded);
-    assert!(Vec3::from(duel.player.body.position).distance(edge_point.unwrap()) < 0.3);
+    // On the top, the climb's own root motion in from the lip.
+    assert!(
+        Vec3::from(duel.player.body.position).distance(edge_point.unwrap())
+            < sekiro_sim::docking::CLIMB_INWARD + 0.1
+    );
 }

@@ -111,7 +111,7 @@ fn air_catch_band_and_range() {
 #[test]
 fn hks_wall_jump_catches_the_lip_and_climbs() {
     if let Some(mut duel) = cliff_duel() {
-        climb(&mut duel, false);
+        climb(&mut duel, Hold::AfterLaunch);
         assert!((duel.player.body.position[1] - LIP).abs() < 0.01);
         assert!(duel.player.body.position[2] < 0.0, "not on the top");
     }
@@ -121,7 +121,7 @@ fn hks_wall_jump_catches_the_lip_and_climbs() {
 #[test]
 fn hks_wall_jump_with_hang_held_early() {
     if let Some(mut duel) = cliff_duel() {
-        climb(&mut duel, true);
+        climb(&mut duel, Hold::FromWallJump);
         assert!((duel.player.body.position[1] - LIP).abs() < 0.01);
     }
 }
@@ -140,9 +140,27 @@ fn cliff_duel() -> Option<Duel> {
 }
 
 /// Stands still, jumps, wall jumps on the way down, holds the hang button once the take-off
-/// launched (or from the wall jump on, `hold_early`), waits for HangIdle and climbs up. Ends
+/// launched (or earlier, see [`Hold`]), waits for HangIdle and climbs up. Ends
 /// on the top, where the climb's target floor is.
-fn climb(duel: &mut Duel, hold_early: bool) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Hold {
+    /// E pressed once the wall jump launched.
+    AfterLaunch,
+    /// E held from the wall jump on.
+    FromWallJump,
+    /// E held from the first jump on.
+    Always,
+}
+
+fn in_air_grab(duel: &Duel) -> bool {
+    duel.player
+        .behavior
+        .runtime
+        .main_clip()
+        .is_some_and(|c| c.animation.starts_with("a000_2177"))
+}
+
+fn climb(duel: &mut Duel, hold: Hold) {
     let dt = 1.0 / 60.0;
     for _ in 0..30 {
         duel.step(&InputFrame::default(), dt);
@@ -163,13 +181,22 @@ fn climb(duel: &mut Duel, hold_early: bool) {
     duel.step(&press(jump), dt);
     for _ in 0..240 {
         let airborne = !duel.player.body.grounded;
-        let buttons = if !wall_jumped && airborne && duel.player.body.velocity[1] < 0.0 {
+        let mut buttons = if !wall_jumped && airborne && duel.player.body.velocity[1] < 0.0 {
             jump
-        } else if launched || (hold_early && wall_jumped) {
+        } else if launched || (hold != Hold::AfterLaunch && wall_jumped) {
             hang
         } else {
             Buttons::default()
         };
+        // Held from the first jump on, E starts the air grab (AirHangGrab*) before any lip is
+        // in reach; that must not dock Wolf.
+        buttons.action |= hold == Hold::Always;
+        if !caught && in_air_grab(duel) {
+            assert!(
+                duel.player.docking.active.is_none(),
+                "docked in the air grab"
+            );
+        }
         let r = duel.step(&press(buttons), dt);
         peak = peak.max(duel.player.body.position[1] - start);
         wall_jumped |= r
@@ -204,8 +231,33 @@ fn climb(duel: &mut Duel, hold_early: bool) {
         }
     }
     assert!(idle, "did not reach HangIdle");
-    assert!(duel.player.docking.active.is_some());
+    let target = duel.player.docking.active.clone().expect("docked");
     assert!((duel.player.body.position[1] - (lip - docking::HANG_DEPTH)).abs() < 0.01);
+    // A player presses E a moment after the hang settles, not on its first frame.
+    for _ in 0..30 {
+        duel.step(&InputFrame::default(), dt);
+    }
+    // The hands rest on the lip and the pelvis stays out of the face.
+    let bones = duel.player.bone_source_matrices();
+    let world = duel.player.source_to_world();
+    let at = |name: &str| {
+        let i = duel.player.skeleton.bone_index(name).unwrap();
+        world.transform_point3(bones[i].transform_point3(Vec3::ZERO))
+    };
+    for hand in ["L_Hand", "R_Hand"] {
+        let p = at(hand);
+        assert!((p.y - lip).abs() < 0.1, "{hand} {p:?} lip {lip}");
+        assert!(
+            (p - target.point).dot(target.outward).abs() < 0.1,
+            "{hand} {p:?} off the lip line {:?}",
+            target.point
+        );
+    }
+    let pelvis = at("Pelvis");
+    assert!(
+        (pelvis - target.point).dot(target.outward) > 0.05,
+        "pelvis in the face: {pelvis:?}"
+    );
     let r = duel.step(&press(hang), dt);
     assert!(
         matches!(
@@ -220,6 +272,10 @@ fn climb(duel: &mut Duel, hold_early: bool) {
     }
     assert!(duel.player.body.grounded);
     assert!(duel.player.docking.active.is_none());
+    // On the top, in from the lip by the climb's own root motion.
+    let feet = Vec3::from(duel.player.body.position);
+    assert!((feet - target.point).dot(target.outward) < -0.3, "{feet:?}");
+    assert!((feet.y - lip).abs() < 0.3, "{feet:?}");
 }
 
 /// The rock wall just after the grapple tree from m11_00 start 0 (issue #16): its hang edge,
@@ -271,6 +327,12 @@ fn m11_00_wall_after_grapple_tree_has_a_catchable_ledge() {
 /// the lip and climb onto the top.
 #[test]
 fn m11_00_wall_after_grapple_tree_route() {
+    for hold in [Hold::AfterLaunch, Hold::Always] {
+        m11_00_route(hold);
+    }
+}
+
+fn m11_00_route(hold: Hold) {
     let dir = cache().join("maps/m11_00_00_00");
     let Some(mut duel) = cliff_duel() else {
         return;
@@ -294,7 +356,7 @@ fn m11_00_wall_after_grapple_tree_route() {
     duel.player.body.yaw = target.yaw();
     duel.player.ground = Box::new(world);
     duel.player.docking = docking;
-    climb(&mut duel, false);
+    climb(&mut duel, hold);
     assert!(
         duel.player.body.position[1] > mid.y - 0.3,
         "{:?}",

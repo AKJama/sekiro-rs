@@ -622,7 +622,8 @@ impl Character {
         // Docking's idle actions are gated by HKS, not the ground combat buffer.
         let docking_idle = self.docking.active.is_some()
             && self.behavior.runtime.main_clip().is_some_and(|c| {
-                c.animation == "a000_020000"
+                // HangIdle and HangFootHoldIdle.
+                matches!(c.animation.as_str(), "a000_020000" | "a000_020010")
                     || c.animation.starts_with("a000_021")
                     || c.animation.starts_with("a000_022")
                     || c.animation.starts_with("a000_2050")

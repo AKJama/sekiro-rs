@@ -311,6 +311,13 @@ Built on the existing ground hang, adapted from Fireguy32's RustSekiro wall jump
 - Hang edges now include variation 1 (`HANG_EDGE_TYPE_ENABLE_HOLD_FOOT`): the FootHold clips (catch 2172xx, idle 20010, climb 217600, drop 217620).
   The wall after the grapple tree from m11_00 start 0 has such an edge (`h023000` chain 2, lip y -32.8, about 5.7 m over the floor in front).
 - FreeFallToHang (217120) is 3.3 s long and hands over to HangIdle at its end; the FootHold catch (217220) is short.
+- Hang placement is read from the clips [V: bone and root-motion samples of the cached clips].
+  HangIdle (20000) and HangFootHoldIdle (20010) both hold the hands 1.55 m over the root and 0.635 m in front of it, so the root hangs 1.55 m under and 0.635 m out from the lip (`HANG_DEPTH`, `HANG_OUTWARD`; they were 1.5 m and 0.35 m placeholders, which put the body in the face).
+  The pelvis is 0.55 m (plain) or 0.18 m (foot hold) in front of the root.
+  HangToStand and HangFootHoldToStand (217500, 217600) carry the root 1.10 m forward and 1.60 m up, so the climb ends 0.465 m in from the lip (`CLIMB_INWARD`, was 0.25 m).
+- Only the hang starts (2171xx plain, 2172xx foot hold) dock Wolf; the air grab (AirHangGrab*, 2177xx) is a free fall and no longer docks him if a lip comes in reach mid-grab.
+- HangFootHoldIdle (20010) counts as the docked idle like HangIdle: standby, and Shift / Space are not held back by the ground TAE windows.
+- `PLAY_LOG_DOCKING=1` logs env 3044, 3045, 3020, 3050, the edge variation, standby, the requested buttons and the state each step.
 - Not built: hug wall jump (CoverToWallJumpReady), hang jump (HangJumpReady), shimmy, corners, peek, hang and hug deathblows.
 
 ### 6.2 TAE on the hang clips
