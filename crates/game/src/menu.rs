@@ -256,7 +256,7 @@ mod tests {
         }
         equivalent(
             choices,
-            "--play --map m11_01_00_00 --start 0 --no-enemy --objects --simple-ai --progression castle-roof",
+            "--play --map m11_00_00_00 --start 0 --no-enemy --objects --simple-ai --progression castle-roof",
         );
     }
     #[test]
@@ -362,7 +362,8 @@ impl Default for Choices {
                 "Explore map",
                 "c1010",
                 "Flat floor",
-                "m11_01_00_00",
+                // The real game's first Ashina visit: Outskirts before Gyoubu, morning (#47).
+                "m11_00_00_00",
                 "0",
                 "Lua",
                 "none",

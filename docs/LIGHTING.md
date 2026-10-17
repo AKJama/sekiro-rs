@@ -183,6 +183,12 @@ The other maps use the morning branch with no time-advancing boss defeated as th
 Optional map visit order is not uniquely determined by the event files, so this earliest-state policy is explicit rather than a claim that every player first visits those maps in that state.
 Boss arenas instead seed their existing `ArenaSpec.beaten` and `BossEvents.flags`, and preserve `ArenaSpec.story_time` for the actual starting phase.
 An explicit `--story NAME` selects the corresponding map profile, and an explicit `--hour H` remains a clock diagnostic override.
+
+### Matching real-game opening screenshots (#47)
+
+The plain Outskirts start, with no `--story` or `--hour`, is the real game's opening: no Gyoubu flag 9301 and no story-time flag 9800-9803, so common event 100 selects morning variant 1 (the 6 h key), sub-ID 0 and sky `m900000`.
+The render and reference gates use `genichiro-defeated` (12 h), so they are not like-for-like with opening screenshots.
+The engine's clock hour for variant 1 is not in the data; the outdoor row also authors an unused, more orange 4 h key, but a playtest against the reference shot (2026-10-17) matched the sky best at 6 h.
 Unknown story names produce an error listing that map's available names.
 
 The clock names `morning`, `afternoon`, `evening`, `night` and `dawn` correspond respectively to no time flags, 9800, 9800-9801, 9800-9802 and 9800-9803.
