@@ -97,6 +97,12 @@ impl LodTable {
     }
 }
 
+/// Map pieces' crossfade time scale ([`LodScales::crossfade_time`]): side by side with the
+/// real game (2026-10-17 playtest, #63), its dissolve at the same 30 m switch looked about
+/// three times longer than the param's 0.2 s. How the game derives its effective fade time
+/// is untraced.
+pub const CROSSFADE_STRETCH: f32 = 3.0;
+
 /// Effective configuration inputs beyond the param row.
 /// The extra per-type tables/globals are not fully traced, so callers explicitly supply
 /// them rather than treating param distances as proven universal effective thresholds.
@@ -108,6 +114,8 @@ pub struct LodScales {
     pub distance_type: [f32; 2],
     pub distance_adjust: [f32; 2],
     pub world_distance: f32,
+    /// Multiplies the param's crossfade time.
+    pub crossfade_time: f32,
 }
 
 impl Default for LodScales {
@@ -119,6 +127,7 @@ impl Default for LodScales {
             distance_type: [1.; 2],
             distance_adjust: [0.; 2],
             world_distance: 1.,
+            crossfade_time: 1.,
         }
     }
 }
@@ -227,7 +236,9 @@ impl LodState {
                 }
             }
             if let Some(target) = self.target {
-                self.progress = (self.progress + delta_seconds.max(0.) / rule.seconds).min(1.);
+                self.progress = (self.progress
+                    + delta_seconds.max(0.) / (rule.seconds * scales.crossfade_time))
+                    .min(1.);
                 weights[self.current] = 1. - self.progress;
                 weights[target] = self.progress;
                 if self.progress >= 1. {
@@ -251,9 +262,95 @@ impl LodState {
     }
 }
 
+/// `MeshTag` bit marking an instance drawn with crossfade coverage (`map_coverage.wgsl`).
+pub const FADE_TAG: u32 = 1 << 31;
+/// `MeshTag` bit marking the higher level of a crossfading pair.
+pub const FADE_HIGHER: u32 = 1 << 30;
+
+/// Which levels to draw and their coverage tags, from the submission weights, the level drawn
+/// now and which levels' scenes are ready. `None` hides a level and `Some(0)` draws it whole.
+/// While another ready level has a fractional weight, the two levels share the screen through
+/// complementary dither coverage, as the retail renderer submits both representations with
+/// complementary weights during a transition. The low 16 bits carry the higher level's weight.
+pub fn crossfade_tags(weights: [f32; 3], shown: usize, ready: [bool; 3]) -> [Option<u32>; 3] {
+    let mut tags = [None; 3];
+    let partner = (0..3)
+        .filter(|&l| l != shown && ready[l] && weights[l] > 0. && weights[l] < 1.)
+        .max_by(|&a, &b| weights[a].total_cmp(&weights[b]));
+    let Some(partner) = partner else {
+        tags[shown] = Some(0);
+        return tags;
+    };
+    let (low, high) = (shown.min(partner), shown.max(partner));
+    // The partner's weight is in (0, 1), so the total is positive.
+    let weight = weights[high] / (weights[low] + weights[high]);
+    let quantized = (weight * 65535.).round() as u32;
+    tags[low] = Some(FADE_TAG | quantized);
+    tags[high] = Some(FADE_TAG | FADE_HIGHER | quantized);
+    tags
+}
+
+/// Whether a pixel with dither threshold `noise` in (0, 1) is drawn, as `lod_coverage` decides.
+#[cfg(test)]
+fn covers(tag: u32, noise: f32) -> bool {
+    if tag & FADE_TAG == 0 {
+        return true;
+    }
+    let weight = (tag & 0xffff) as f32 / 65535.;
+    (noise < weight) == (tag & FADE_HIGHER != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #63: row 0 (every MapPiece with LOD ID 255) leaves LOD0 at 32 m. The level change
+    /// must dissolve over the row's crossfade time instead of replacing the mesh in one frame,
+    /// stretched for map pieces to 0.6 s.
+    #[test]
+    fn row0_switch_at_32m_dissolves_over_crossfade_time() {
+        let rule = rule();
+        let mut state = LodState::default();
+        let ready = [true; 3];
+        assert_eq!(
+            state.update(rule, LodScales::default(), 31.9, 1. / 60., ready),
+            [1., 0., 0.]
+        );
+        let weights = state.update(rule, LodScales::default(), 32.1, 0.05, ready);
+        assert!((weights[0] - 0.75).abs() < 1e-5 && (weights[1] - 0.25).abs() < 1e-5);
+        let tags = crossfade_tags(weights, 0, ready);
+        let (low, high) = (tags[0].unwrap(), tags[1].unwrap());
+        assert_eq!(tags[2], None);
+        // Every pixel is drawn by exactly one level, and the share follows the weights.
+        let noise: Vec<f32> = (0..64).map(|i| (i as f32 + 0.5) / 64.).collect();
+        assert!(noise.iter().all(|&n| covers(low, n) != covers(high, n)));
+        assert_eq!(noise.iter().filter(|&&n| covers(high, n)).count(), 16);
+        // A level whose scene is not ready yet never takes pixels from the drawn level.
+        assert_eq!(
+            crossfade_tags(weights, 0, [true, false, true]),
+            [Some(0), None, None]
+        );
+        for _ in 0..2 {
+            state.update(rule, LodScales::default(), 32.1, 0.1, ready);
+        }
+        assert_eq!(state.current, 1);
+        assert_eq!(
+            crossfade_tags([0., 1., 0.], 1, ready),
+            [None, Some(0), None]
+        );
+        // Map pieces stretch the fade: still dissolving after 0.5 s, done at 0.6 s.
+        let stretched = LodScales {
+            crossfade_time: CROSSFADE_STRETCH,
+            ..LodScales::default()
+        };
+        let mut state = LodState::default();
+        state.update(rule, stretched, 32.1, 0.0, ready);
+        let weights = state.update(rule, stretched, 32.1, 0.5, ready);
+        assert!(weights[0] > 0. && weights[1] < 1.);
+        state.update(rule, stretched, 32.1, 0.1, ready);
+        assert_eq!(state.current, 1);
+    }
+
     fn rule() -> LodRule {
         LodRule {
             boundary: [30., 60.],
