@@ -156,6 +156,18 @@ pub struct MapSpawn;
 #[derive(Component)]
 pub(crate) struct DrawGroups([u32; 8]);
 
+/// A map part whose MSB authors a light set other than the ordinary row 0: it is lit with
+/// the collision-selected light set, as characters are (#30).
+#[derive(Component)]
+pub(crate) struct FollowsSceneLight;
+
+/// Whether a layout part row authors its own light set (MSB GparamConfig light set id > 0).
+pub(crate) fn follows_scene_light(row: &Value) -> bool {
+    row["gparam"][0]
+        .as_i64()
+        .is_some_and(|id| crate::lighting::part_follows_scene(id as i32))
+}
+
 /// Distant render-only scenery is independent of the local collision's draw groups.
 #[derive(Component)]
 struct FarScenery;
@@ -1186,6 +1198,9 @@ fn spawn_map(
             pending.queue(&glb, None, false, (entity.id(), 0));
             if far_scenery {
                 entity.insert(FarScenery);
+            }
+            if follows_scene_light(row) {
+                entity.insert(FollowsSceneLight);
             }
             if let Some(part) = arena_parts
                 .as_ref()

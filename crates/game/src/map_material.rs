@@ -141,7 +141,7 @@ fn release_materials(
 ) {
     for event in events.read() {
         if let AssetEvent::Removed { id } = event {
-            settings.materials.remove(id);
+            settings.materials.retain(|(source, _), _| source != id);
         }
     }
     // Scene assets can retain their source materials after the rig is gone.
@@ -319,13 +319,16 @@ struct MapLight {
 }
 
 impl MapLight {
+    /// `follows_scene` selects the collision row (characters, parts authoring their own set)
+    /// instead of the map parts' row; see [`crate::lighting::part_light_set`].
     fn new(
         lighting: &crate::lighting::MapLighting,
         ambient: &bevy::light::GlobalAmbientLight,
+        follows_scene: bool,
     ) -> Self {
         let set = crate::lighting::LightSet::from_gparam(
             &lighting.gparam,
-            lighting.light_set,
+            crate::lighting::part_light_set(lighting.light_set, follows_scene),
             lighting.hour,
         );
         let mut direct = set.direct;
@@ -347,18 +350,36 @@ impl MapLight {
     }
 }
 
+/// The two shared light buffers: `part` for map pieces and objects on the ordinary MSB light
+/// set, `scene` for characters and parts that follow the collision-selected row.
 #[derive(Resource)]
-struct MapLightBuffer(Handle<bevy::render::storage::ShaderBuffer>);
+struct MapLightBuffer {
+    part: Handle<bevy::render::storage::ShaderBuffer>,
+    scene: Handle<bevy::render::storage::ShaderBuffer>,
+}
+
+impl MapLightBuffer {
+    fn get(&self, follows_scene: bool) -> Handle<bevy::render::storage::ShaderBuffer> {
+        if follows_scene {
+            self.scene.clone()
+        } else {
+            self.part.clone()
+        }
+    }
+}
 
 impl FromWorld for MapLightBuffer {
     fn from_world(world: &mut World) -> Self {
-        Self(
-            world
-                .resource_mut::<Assets<bevy::render::storage::ShaderBuffer>>()
-                .add(bevy::render::storage::ShaderBuffer::from(
-                    MapLight::default(),
-                )),
-        )
+        let mut buffers = world.resource_mut::<Assets<bevy::render::storage::ShaderBuffer>>();
+        let mut add = || {
+            buffers.add(bevy::render::storage::ShaderBuffer::from(
+                MapLight::default(),
+            ))
+        };
+        Self {
+            part: add(),
+            scene: add(),
+        }
     }
 }
 
@@ -604,7 +625,8 @@ mod tests {
             })
             .insert_resource(bevy::light::GlobalAmbientLight::default())
             .add_systems(Update, update_hemisphere);
-        let buffer = app.world().resource::<MapLightBuffer>().0.clone();
+        let buffers =
+            [false, true].map(|scene| app.world().resource::<MapLightBuffer>().get(scene));
         app.world_mut()
             .resource_mut::<Assets<LayeredMaterial>>()
             .add(ExtendedMaterial {
@@ -615,15 +637,18 @@ mod tests {
         let expected = |app: &App| {
             let lighting = app.world().resource::<crate::lighting::MapLighting>();
             let ambient = app.world().resource::<bevy::light::GlobalAmbientLight>();
-            ShaderBuffer::from(MapLight::new(lighting, ambient)).data
+            [false, true]
+                .map(|scene| ShaderBuffer::from(MapLight::new(lighting, ambient, scene)).data)
         };
         let written = |app: &App| {
-            app.world()
-                .resource::<Assets<ShaderBuffer>>()
-                .get(&buffer)
-                .unwrap()
-                .data
-                .clone()
+            buffers.clone().map(|buffer| {
+                app.world()
+                    .resource::<Assets<ShaderBuffer>>()
+                    .get(&buffer)
+                    .unwrap()
+                    .data
+                    .clone()
+            })
         };
         assert_eq!(written(&app), expected(&app));
         let modified = |app: &mut App| {
@@ -737,7 +762,8 @@ struct LayerSettings {
     primary_texture_prefix: bool,
     enabled: bool,
     debug: bool,
-    materials: HashMap<AssetId<StandardMaterial>, Handle<LayeredMaterial>>,
+    /// Wrappers by source material and whether they read the scene light buffer.
+    materials: HashMap<(AssetId<StandardMaterial>, bool), Handle<LayeredMaterial>>,
     camera_fade: camera_fade::CameraFade,
 }
 
@@ -745,6 +771,7 @@ struct LayerSettings {
 struct MapEnvironment<'w, 's> {
     parents: Query<'w, 's, &'static ChildOf>,
     roots: Query<'w, 's, (), With<super::DrawGroups>>,
+    scene_parts: Query<'w, 's, (), With<super::FollowsSceneLight>>,
     actors: Query<'w, 's, (), With<crate::character::Rig>>,
     irradiance: Option<Res<'w, crate::lighting::MapIrradiance>>,
     light: Option<Res<'w, MapLightBuffer>>,
@@ -820,8 +847,10 @@ fn update_hemisphere(
     }
     *last = Some(key);
     // Same size every write, so Bevy rewrites the GPU buffer in place and no bind group changes.
-    if let Some(mut buffer) = buffers.get_mut(&light.0) {
-        buffer.set_data(MapLight::new(&lighting, &ambient));
+    for follows_scene in [false, true] {
+        if let Some(mut buffer) = buffers.get_mut(&light.get(follows_scene)) {
+            buffer.set_data(MapLight::new(&lighting, &ambient, follows_scene));
+        }
     }
 }
 
@@ -873,6 +902,7 @@ fn replace_materials(
     let MapEnvironment {
         parents,
         roots,
+        scene_parts,
         actors,
         irradiance,
         light,
@@ -898,7 +928,10 @@ fn replace_materials(
         let Some(base) = materials.get(&original.0) else {
             continue;
         };
-        let handle = if let Some(handle) = settings.materials.get(&original.0.id()) {
+        // Characters and parts authoring their own set follow the collision row (#30).
+        let follows_scene = actor_surface || scene_parts.contains(ancestor);
+        let key = (original.0.id(), follows_scene);
+        let handle = if let Some(handle) = settings.materials.get(&key) {
             handle.clone()
         } else {
             let extras = extras
@@ -1042,13 +1075,16 @@ fn replace_materials(
                 specular: irradiance.as_ref().map(|i| i.specular.clone()),
                 diffuse: irradiance.as_ref().map(|i| i.diffuse.clone()),
                 voxels: irradiance.as_ref().map(|i| i.voxels.clone()),
-                light: light.as_ref().map(|l| l.0.clone()).unwrap_or_default(),
+                light: light
+                    .as_ref()
+                    .map(|l| l.get(follows_scene))
+                    .unwrap_or_default(),
             };
             let handle = layered.add(ExtendedMaterial {
                 base: native_surface(base, data),
                 extension,
             });
-            settings.materials.insert(original.0.id(), handle.clone());
+            settings.materials.insert(key, handle.clone());
             handle
         };
         commands
