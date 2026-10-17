@@ -1,6 +1,6 @@
 //! Grass clumps share mesh/material handles for Bevy's automatic GPU instancing.
 //! Instances are children of their authored terrain part, including its visibility gates.
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
@@ -10,21 +10,27 @@ use bevy::gltf::{
 use bevy::prelude::*;
 use serde_json::Value;
 
+use crate::map::MsbPart;
 use crate::map::world::BlockPart;
 
 #[derive(Component)]
 struct GrassNoShadow;
 
+/// A part root whose grass is in place (or that has none), so it is not visited again.
+#[derive(Component)]
+struct GrassAttached;
+
 #[derive(Resource, Default)]
 struct Grass {
-    blocks: BTreeMap<String, Block>,
-    attached: HashSet<Entity>,
-    primary: String,
+    blocks: Vec<Block>,
 }
 
 struct Block {
+    id: String,
     manifest: Value,
     prototypes: BTreeMap<String, Prototype>,
+    /// Bound surface names by part index, in manifest order.
+    parts: HashMap<usize, Vec<String>>,
 }
 
 struct Prototype {
@@ -55,10 +61,7 @@ pub(crate) fn install(app: &mut App, dir: &Path, prefix: &str) -> Result<()> {
     if !matches!(primary, "m11_00_00_00" | "m11_01_00_00") {
         return Ok(());
     }
-    let mut grass = Grass {
-        primary: primary.to_owned(),
-        ..Default::default()
-    };
+    let mut grass = Grass::default();
     for id in ["m11_00_00_00", "m11_01_00_00"] {
         let path = maps.join(id).join("grass/grass.json");
         if !path.is_file() {
@@ -110,13 +113,29 @@ pub(crate) fn install(app: &mut App, dir: &Path, prefix: &str) -> Result<()> {
                 },
             );
         }
-        grass.blocks.insert(
-            id.to_owned(),
-            Block {
-                manifest,
-                prototypes,
-            },
-        );
+        let mut parts: HashMap<usize, Vec<String>> = HashMap::new();
+        for binding in manifest["bindings"].as_array().into_iter().flatten() {
+            let part = binding["part_index"].as_u64().context("grass part index")?;
+            let surface = binding["surface"]
+                .as_str()
+                .context("grass binding surface")?;
+            ensure!(
+                manifest["surfaces"][surface]["model"]
+                    .as_str()
+                    .is_some_and(|m| prototypes.contains_key(m)),
+                "grass surface {surface:?} has no model"
+            );
+            parts
+                .entry(part as usize)
+                .or_default()
+                .push(surface.to_owned());
+        }
+        grass.blocks.push(Block {
+            id: id.to_owned(),
+            manifest,
+            prototypes,
+            parts,
+        });
     }
     app.insert_resource(grass)
         .add_systems(PreUpdate, instantiate)
@@ -209,127 +228,122 @@ fn plan(world: &World, prototype: &Prototype) -> Option<Vec<Primitive>> {
     (!output.is_empty()).then_some(output)
 }
 
-fn instantiate(world: &mut World) {
-    let Some(mut grass) = world.remove_resource::<Grass>() else {
+/// Tagged part roots whose grass is not in place yet.
+type Unattached = QueryState<
+    (Entity, Option<&'static BlockPart>, Option<&'static MsbPart>),
+    (Without<GrassAttached>, Or<(With<BlockPart>, With<MsbPart>)>),
+>;
+
+fn instantiate(world: &mut World, mut roots: Local<Unattached>) {
+    let _timer = crate::perf_log::SystemTimer::start("grass_instantiate");
+    let Some(grass) = world.get_resource::<Grass>() else {
         return;
     };
-    let mut parents: Vec<_> = world
-        .query::<(Entity, &BlockPart)>()
+    // Connected blocks tag their roots with BlockPart; arena and explicitly disconnected
+    // loaders tag theirs with MsbPart. Both name the MSB part the grass manifest binds.
+    let parents: Vec<_> = roots
         .iter(world)
-        .filter(|(entity, _)| !grass.attached.contains(entity))
-        .map(|(entity, part)| (entity, part.block.clone(), part.part_index))
+        .map(|(entity, block_part, msb_part)| {
+            let (block, part_index) = block_part
+                .map(|p| (&p.block, p.part_index))
+                .or(msb_part.map(|p| (&p.block, p.part_index)))
+                .expect("filtered to tagged roots");
+            let block = grass.blocks.iter().position(|b| &b.id == block);
+            (entity, block, part_index)
+        })
         .collect();
-    // Arena and explicitly disconnected map loaders predate BlockPart. Match
-    // their outer scene's authored model and transform, without creating new visibility roots.
-    if let Some(block) = grass.blocks.get(&grass.primary) {
-        for (entity, root, pose) in world.query_filtered::<(Entity,&WorldAssetRoot,&Transform),(Without<ChildOf>,Without<BlockPart>)>().iter(world) {
-            if grass.attached.contains(&entity) { continue; }
-            let Some(path) = world.resource::<AssetServer>().get_path(root.0.id()) else { continue; };
-            let path = path.to_string();
-            let binding = block.manifest["bindings"].as_array().into_iter().flatten().find(|b| {
-                let Some(model) = b["parent_model"].as_str() else { return false; };
-                let Ok(expected) = transform(&b["parent_transform"]) else { return false; };
-                path.contains(&format!("models/{model}.glb#")) && expected.to_matrix().abs_diff_eq(pose.to_matrix(),1e-5)
-            });
-            if let Some(binding) = binding {
-                parents.push((entity,grass.primary.clone(),binding["part_index"].as_u64().unwrap() as usize));
-            }
-        }
+    if parents.is_empty() {
+        return;
     }
-    for (parent, id, part_index) in parents {
-        let Some(block) = grass.blocks.get_mut(&id) else {
-            grass.attached.insert(parent);
-            continue;
-        };
-        let bindings: Vec<_> = block.manifest["bindings"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|b| b["part_index"].as_u64() == Some(part_index as u64))
-            .cloned()
-            .collect();
-        let mut ready = true;
-        for binding in bindings {
-            let surface = &block.manifest["surfaces"][binding["surface"].as_str().unwrap()];
-            let model = surface["model"].as_str().unwrap();
-            let prototype = block.prototypes.get_mut(model).unwrap();
-            if prototype.primitives.is_none() {
-                prototype.primitives = plan(world, prototype);
-                if prototype.primitives.is_none() {
-                    // The ordinary map readiness walk waits for this nested scene as well.
-                    // It is removed before diagnostic geometry is enumerated.
-                    if prototype.barrier.is_none() {
-                        let handle = world
-                            .resource::<AssetServer>()
-                            .load_builder()
-                            .override_unapproved()
-                            .load(GltfAssetLabel::Scene(0).from_asset(prototype.path.clone()));
-                        prototype.barrier = Some(
-                            world
-                                .spawn((
-                                    WorldAssetRoot(handle),
-                                    Transform::IDENTITY,
-                                    Visibility::Hidden,
-                                    ChildOf(parent),
-                                ))
-                                .id(),
-                        );
-                    }
-                    ready = false;
-                    break;
-                }
-                if let Some(barrier) = prototype.barrier.take() {
-                    world.despawn(barrier);
-                }
-            }
-        }
-        if !ready {
-            continue;
-        }
-        for binding in block.manifest["bindings"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|b| b["part_index"].as_u64() == Some(part_index as u64))
+    let mut grass = world.remove_resource::<Grass>().expect("checked above");
+    for (parent, block, part_index) in parents {
+        if let Some(block) = block
+            && !attach(world, &mut grass.blocks[block], parent, part_index)
         {
-            let surface = &block.manifest["surfaces"][binding["surface"].as_str().unwrap()];
-            let prototype = &block.prototypes[surface["model"].as_str().unwrap()];
-            let cast_shadow = surface["params"]["castShadow"].as_u64().unwrap_or(0) != 0;
-            for placement in surface["placements"].as_array().into_iter().flatten() {
-                let placement = transform(placement).expect("validated grass placement");
-                for primitive in prototype.primitives.as_ref().unwrap() {
-                    let mut entity = world.spawn((
-                        Mesh3d(primitive.mesh.clone()),
-                        MeshMaterial3d(primitive.material.clone()),
-                        placement.mul_transform(primitive.transform),
-                        Visibility::Inherited,
-                        ChildOf(parent),
-                    ));
-                    if !cast_shadow {
-                        entity.insert((GrassNoShadow, bevy::light::NotShadowCaster));
-                    }
-                    if let Some(extras) = &primitive.extras {
-                        entity.insert(extras.clone());
-                    }
-                    if let Some(extras) = &primitive.mesh_extras {
-                        entity.insert(GltfMeshExtras {
-                            value: extras.value.clone(),
-                        });
-                    }
-                    if let Some(extras) = &primitive.material_extras {
-                        entity.insert(GltfMaterialExtras {
-                            value: extras.value.clone(),
-                        });
-                    }
-                    if let Some(name) = &primitive.material_name {
-                        entity.insert(GltfMaterialName(name.clone()));
-                    }
-                }
-            }
+            continue;
         }
-        grass.attached.insert(parent);
+        world.entity_mut(parent).insert(GrassAttached);
     }
     world.insert_resource(grass);
+}
+
+/// Spawns the clumps bound to `part_index` under `parent`, or returns false while a
+/// prototype is still loading.
+fn attach(world: &mut World, block: &mut Block, parent: Entity, part_index: usize) -> bool {
+    let Some(surfaces) = block.parts.get(&part_index) else {
+        return true;
+    };
+    for name in surfaces {
+        let model = block.manifest["surfaces"][name.as_str()]["model"]
+            .as_str()
+            .unwrap();
+        let prototype = block.prototypes.get_mut(model).unwrap();
+        if prototype.primitives.is_none() {
+            prototype.primitives = plan(world, prototype);
+            if prototype.primitives.is_none() {
+                // The ordinary map readiness walk waits for this nested scene as well.
+                // It is removed before diagnostic geometry is enumerated.
+                if prototype.barrier.is_none() {
+                    let handle = world
+                        .resource::<AssetServer>()
+                        .load_builder()
+                        .override_unapproved()
+                        .load(GltfAssetLabel::Scene(0).from_asset(prototype.path.clone()));
+                    prototype.barrier = Some(
+                        world
+                            .spawn((
+                                WorldAssetRoot(handle),
+                                Transform::IDENTITY,
+                                Visibility::Hidden,
+                                ChildOf(parent),
+                            ))
+                            .id(),
+                    );
+                }
+                return false;
+            }
+            if let Some(barrier) = prototype.barrier.take() {
+                world.despawn(barrier);
+            }
+        }
+    }
+    for name in surfaces {
+        let surface = &block.manifest["surfaces"][name.as_str()];
+        let prototype = &block.prototypes[surface["model"].as_str().unwrap()];
+        let cast_shadow = surface["params"]["castShadow"].as_u64().unwrap_or(0) != 0;
+        for placement in surface["placements"].as_array().into_iter().flatten() {
+            let placement = transform(placement).expect("validated grass placement");
+            for primitive in prototype.primitives.as_ref().unwrap() {
+                let mut entity = world.spawn((
+                    Mesh3d(primitive.mesh.clone()),
+                    MeshMaterial3d(primitive.material.clone()),
+                    placement.mul_transform(primitive.transform),
+                    Visibility::Inherited,
+                    ChildOf(parent),
+                ));
+                if !cast_shadow {
+                    entity.insert((GrassNoShadow, bevy::light::NotShadowCaster));
+                }
+                if let Some(extras) = &primitive.extras {
+                    entity.insert(extras.clone());
+                }
+                if let Some(extras) = &primitive.mesh_extras {
+                    entity.insert(GltfMeshExtras {
+                        value: extras.value.clone(),
+                    });
+                }
+                if let Some(extras) = &primitive.material_extras {
+                    entity.insert(GltfMaterialExtras {
+                        value: extras.value.clone(),
+                    });
+                }
+                if let Some(name) = &primitive.material_name {
+                    entity.insert(GltfMaterialName(name.clone()));
+                }
+            }
+        }
+    }
+    true
 }
 
 fn enforce_shadow_flags(
@@ -345,12 +359,14 @@ fn enforce_shadow_flags(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::system::RunSystemOnce;
     use serde_json::json;
+    use std::collections::HashSet;
 
     #[test]
     fn clumps_share_gpu_assets_and_inherit_each_source_part_once() {
         let mut world = World::new();
-        let roots: Vec<_> = (0..2)
+        let mut roots: Vec<_> = (0..2)
             .map(|_| {
                 world
                     .spawn((
@@ -364,6 +380,20 @@ mod tests {
                     .id()
             })
             .collect();
+        // Legacy loaders tag their roots with the MSB part instead.
+        roots.push(
+            world
+                .spawn((
+                    MsbPart {
+                        block: "test".into(),
+                        part_index: 4,
+                    },
+                    Transform::default(),
+                    Visibility::Hidden,
+                ))
+                .id(),
+        );
+        let untagged = world.spawn(Transform::default()).id();
         let prototype = Prototype {
             gltf: Handle::default(),
             path: String::new(),
@@ -381,18 +411,15 @@ mod tests {
         };
         let manifest = json!({"bindings":[{"part_index":4,"surface":"ground"}],"surfaces":{"ground":{"model":"tuft","params":{"castShadow":0},"placements":[{"translation":[1.,2.,3.],"rotation":[0.,0.,0.,1.],"scale":[1.,1.,1.]}]}}});
         world.insert_resource(Grass {
-            primary: String::new(),
-            blocks: BTreeMap::from([(
-                "test".into(),
-                Block {
-                    manifest,
-                    prototypes: BTreeMap::from([("tuft".into(), prototype)]),
-                },
-            )]),
-            attached: HashSet::new(),
+            blocks: vec![Block {
+                id: "test".into(),
+                manifest,
+                prototypes: BTreeMap::from([("tuft".into(), prototype)]),
+                parts: HashMap::from([(4, vec!["ground".into()])]),
+            }],
         });
-        instantiate(&mut world);
-        instantiate(&mut world);
+        world.run_system_once(instantiate).unwrap();
+        world.run_system_once(instantiate).unwrap();
         let children: Vec<_> = world
             .query::<(
                 &ChildOf,
@@ -403,14 +430,97 @@ mod tests {
             )>()
             .iter(&world)
             .collect();
-        assert_eq!(children.len(), 2);
-        assert_ne!(children[0].0.parent(), children[1].0.parent());
-        assert!(children.iter().all(|c| roots.contains(&c.0.parent())
-            && *c.3 == Visibility::Inherited
-            && c.4.translation == Vec3::new(1., 2., 3.)));
-        assert_eq!(children[0].1.0.id(), children[1].1.0.id());
-        assert_eq!(children[0].2.0.id(), children[1].2.0.id());
+        assert_eq!(children.len(), 3);
+        let parents: HashSet<_> = children.iter().map(|c| c.0.parent()).collect();
+        assert_eq!(parents, roots.iter().copied().collect());
+        assert!(
+            children
+                .iter()
+                .all(|c| *c.3 == Visibility::Inherited && c.4.translation == Vec3::new(1., 2., 3.))
+        );
+        assert!(
+            children
+                .iter()
+                .all(|c| c.1.0.id() == children[0].1.0.id() && c.2.0.id() == children[0].2.0.id())
+        );
+        assert!(
+            roots
+                .iter()
+                .all(|&r| world.get::<GrassAttached>(r).is_some())
+        );
+        assert!(world.get::<GrassAttached>(untagged).is_none());
         world.despawn(roots[0]);
-        assert_eq!(world.query::<&Mesh3d>().iter(&world).count(), 1);
+        assert_eq!(world.query::<&Mesh3d>().iter(&world).count(), 2);
+    }
+
+    /// MsbPart tags from the disconnected spawn path bind exactly the parts the replaced
+    /// scene path + pose matcher found, for every placed piece and object row.
+    #[test]
+    fn msb_part_tags_bind_the_parts_scene_and_pose_matching_found() {
+        let maps = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/maps");
+        for id in ["m11_00_00_00", "m11_01_00_00"] {
+            let read = |name: &str| {
+                let bytes = std::fs::read(maps.join(id).join(name)).ok()?;
+                Some(serde_json::from_slice::<Value>(&bytes).unwrap())
+            };
+            let (Some(layout), Some(manifest)) = (read("layout.json"), read("grass/grass.json"))
+            else {
+                eprintln!("{id}: skipped (not extracted)");
+                continue;
+            };
+            let bindings: Vec<_> = manifest["bindings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|b| {
+                    (
+                        b["parent_model"]
+                            .as_str()
+                            .map(|m| format!("models/{m}.glb#")),
+                        transform(&b["parent_transform"])
+                            .ok()
+                            .map(|t| t.to_matrix()),
+                        b["part_index"].as_u64().unwrap() as usize,
+                    )
+                })
+                .collect();
+            let bound: HashSet<_> = bindings.iter().map(|b| b.2).collect();
+            // The replaced matcher: the first binding naming the root's scene at its pose.
+            let matched = |scene: &str, pose: Mat4| {
+                bindings
+                    .iter()
+                    .find(|(model, expected, _)| {
+                        model.as_ref().is_some_and(|m| scene.contains(m.as_str()))
+                            && expected.is_some_and(|e| e.abs_diff_eq(pose, 1e-5))
+                    })
+                    .map(|b| b.2)
+            };
+            let mut attached = HashSet::new();
+            for row in ["pieces", "objects"]
+                .iter()
+                .flat_map(|k| layout[*k].as_array().unwrap())
+            {
+                // The rows the disconnected spawn path places as scene roots.
+                let (Some(pose), Some(glb)) = (
+                    crate::map::row_transform(row),
+                    row["model"]
+                        .as_str()
+                        .and_then(|m| layout["models"][m]["glb"].as_str()),
+                ) else {
+                    continue;
+                };
+                let part = MsbPart::from_row(id, row).expect("v2 rows record their part");
+                let tagged = bound.contains(&part.part_index).then_some(part.part_index);
+                let scene = format!("{glb}#Scene0");
+                assert_eq!(
+                    tagged,
+                    matched(&scene, pose.to_matrix()),
+                    "{id} {}",
+                    row["name"]
+                );
+                attached.extend(tagged);
+            }
+            assert_eq!(attached, bound, "{id}: every bound part is placed");
+        }
     }
 }
