@@ -1,21 +1,37 @@
-//! HP and posture bars laid out like Sekiro's: Wolf's vitality at the bottom left and his
-//! posture bar at the bottom centre; the enemy's vitality and posture float above its head.
-//! Posture bars grow from the centre outward as posture damage builds, from yellow toward red,
-//! and turn solid red when broken. A red mark shows when a deathblow is available. Above Wolf's
+//! HP and posture bars laid out like Sekiro's HUD. Wolf's vitality sits at the bottom left, its
+//! length following his maximum vitality, with a light damage trail behind the fill; his posture
+//! bar sits at the bottom centre and shows only while it has damage. A plain enemy's vitality
+//! and posture float over its Head bone, with its deathblow dots over the bar's left end; a boss
+//! bar (one the map events put up) has its vitality at the top left with the deathblow orbs over
+//! it and the name under it, and its posture at the top centre. Posture bars grow from the centre
+//! outward in the game's state colours, with an arrow at each end while they have damage. The
+//! item cluster (quick item and prosthetic tool) sits at the bottom right. Above Wolf's
 //! vitality, a purple bar shows poison build-up and a line names the status effects on him
 //! (poisoned, recovery sealed, ...) with the seconds left. A red 危 marks a perilous attack's
 //! warning on Wolf (see [`update_perilous`]).
+//!
+//! Layout, colours and timings adapted from Fireguy32's RustSekiro fork (MIT), commit d11ef65,
+//! which measured them from captures of the game's HUD. The game's own HUD sprites (SB_FE,
+//! SB_Boss) are not extracted, so plain framed nodes stand in for them.
 
 use bevy::prelude::*;
+use sekiro_sim::deathblow::MAX_BAR_MARKS;
+
+use crate::brain_overlay::{PANEL_INSET, PANEL_WIDTH};
 
 /// What the bars show, filled by the simulation's owner every frame.
 #[derive(Resource, Default, Clone)]
 pub struct Gauges {
-    /// `(current, max)` HP, Wolf then the enemy.
-    pub hp: [(i32, i32); 2],
-    /// `(remaining, max)` posture.
-    pub posture: [(i32, i32); 2],
-    /// Where the enemy's head is, for its floating bars.
+    /// HP left as a fraction of max (`Fighter::hp_fraction`), Wolf then the enemy.
+    pub hp: [f32; 2],
+    /// Wolf's maximum HP, which sets his vitality bar's length.
+    pub wolf_max_hp: i32,
+    /// Posture damage as a fraction of max (`Fighter::posture_fraction`).
+    pub posture: [f32; 2],
+    /// Whether each posture counts as broken (`Posture::broken`).
+    pub broken: [bool; 2],
+    /// Where the enemy's head is (its skeleton's Head bone), for its floating bars and the
+    /// deathblow mark; only filled while one of them shows.
     pub enemy_head: Option<Vec3>,
     /// The enemy's bars are shown: it is alive and, in a boss fight run by the map events,
     /// the events show its health bar (the Owl's is hidden during his heat-up).
@@ -23,9 +39,10 @@ pub struct Gauges {
     /// A map-script boss bar stays on screen rather than following the character's head.
     pub boss_bar: bool,
     pub deathblow: bool,
-    /// The enemy's name over its bars.
+    /// The enemy's name, under the boss bar.
     pub enemy_name: &'static str,
-    /// Deathblow marks the enemy has left (NpcParam `ninsatuNum`, 0 counting as one).
+    /// Deathblow marks drawn over the enemy's vitality (`Duel::enemy_bar_marks`): none on an
+    /// enemy taking a single deathblow.
     pub enemy_marks: i32,
     /// Wolf's poison build-up as a fraction of his resistance.
     pub poison: f32,
@@ -36,14 +53,43 @@ pub struct Gauges {
     pub perilous_at: Option<Vec3>,
     /// Seconds since a perilous warning last reached Wolf; `None` before the first.
     pub perilous_age: Option<f32>,
+    /// The item cluster's buttons held this frame: quick item, then prosthetic tool.
+    pub held: [bool; 2],
 }
 
-#[derive(Component, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Fill {
     Hp(usize),
+    /// The light damage trail behind a vitality fill.
+    Trail(usize),
     Posture(usize),
     /// Wolf's poison build-up.
     Poison,
+}
+
+/// The parts of the bars [`update`] changes each frame.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub enum HudPart {
+    Fill(Fill),
+    /// Wolf's vitality frame, whose length follows his maximum vitality.
+    HpFrame,
+    /// A posture bar's row, shown while the posture has damage (and [`SP_MIN_DISP_TIME`] after).
+    PostureRow(usize),
+    /// A posture bar's end arrow, shown while its posture has damage.
+    PostureArrow(usize),
+    /// The enemy's floating group.
+    EnemyPanel,
+    /// The boss bars' group.
+    BossPanel,
+    /// A deathblow dot (over the floating bars' left end) or orb (over the boss's vitality),
+    /// by index.
+    DeathblowDot(i32),
+    /// The boss's name under its vitality.
+    BossName,
+    /// The deathblow mark on the enemy.
+    DeathblowMark,
+    /// An item cluster slot: 0 the quick item, 1 the prosthetic tool.
+    ItemSlot(usize),
 }
 
 /// Wolf's status line.
@@ -54,81 +100,253 @@ pub struct StatusText;
 #[derive(Component)]
 pub struct PoisonRow;
 
-#[derive(Component)]
-pub struct Label(usize);
-
-/// The enemy's floating group.
-#[derive(Component)]
-pub struct EnemyPanel;
-
-#[derive(Component)]
-pub struct DeathblowMark;
-
-const WOLF_HP_WIDTH: f32 = 340.0;
-const WOLF_POSTURE_WIDTH: f32 = 420.0;
-const ENEMY_WIDTH: f32 = 150.0;
+/// Frame colours: dark lacquer with a thin gold edge, like the game's bars.
+const FRAME: Color = Color::srgba(0.05, 0.04, 0.03, 0.75);
+const EDGE: Color = Color::srgba(0.78, 0.66, 0.42, 0.55);
+/// The vitality fill: the game's muted orange-red (about 180, 70, 48 in captures).
+const VITALITY: Color = Color::srgb(180.0 / 255.0, 70.0 / 255.0, 48.0 / 255.0);
+/// The damage trail's light, desaturated red (about 165, 130, 120 in captures).
+const TRAIL: Color = Color::srgb(165.0 / 255.0, 130.0 / 255.0, 120.0 / 255.0);
 const POISON_WIDTH: f32 = 160.0;
 
-fn frame_color() -> Color {
-    Color::srgba(0.02, 0.02, 0.02, 0.75)
+/// Wolf's vitality bar width (percent of the screen width) at [`HP_BAR_BASE`] maximum
+/// vitality (level 1); it grows in proportion, as the game's does with each Vitality level.
+const HP_BAR_VW: f32 = 9.5;
+const HP_BAR_BASE: f32 = 320.0;
+/// The widest the vitality bar gets (ours: keeps a modded maximum on screen).
+const HP_BAR_MAX_VW: f32 = 60.0;
+/// The over-head bars' width (percent of the screen width).
+const OVERHEAD_W: f32 = 8.5;
+/// How far over the Head bone the floating bars stand (m).
+const OVERHEAD_ABOVE_HEAD: f32 = 0.35;
+/// The gap the floating bars keep from the recording panel (px, ours).
+const OVERLAY_GAP: f32 = 12.0;
+/// MenuParam SpMinimumDispTime: the least time a posture gauge stays up once its damage is gone.
+const SP_MIN_DISP_TIME: f32 = 0.5;
+/// Posture damage below this fraction counts as none: the gauge and its arrows hide.
+const POSTURE_SHOWN: f32 = 0.005;
+/// The damage trail's hold from the first hit (later hits do not restart it) and its collapse
+/// time.
+const TRAIL_HOLD: f32 = 0.5;
+const TRAIL_COLLAPSE: f32 = 0.05;
+/// The posture fill per state (normal, about to break, breakable, broken), from the HUD movie's
+/// colour transforms on the posture bar.
+const POSTURE_FILL: [[u8; 3]; 4] = [[142, 123, 60], [154, 116, 0], [168, 107, 0], [182, 96, 0]];
+
+/// Wolf's vitality bar width, percent of the screen width, for `max_hp`.
+pub fn hp_bar_vw(max_hp: i32) -> f32 {
+    (HP_BAR_VW * max_hp.max(1) as f32 / HP_BAR_BASE).min(HP_BAR_MAX_VW)
 }
 
-/// A bar of `width` x `height` with a dark frame; `centred` fills from the middle out.
-fn bar(parent: &mut ChildSpawnerCommands, fill: Fill, width: f32, height: f32, centred: bool) {
-    parent
-        .spawn((
-            Node {
-                width: if matches!(fill, Fill::Hp(1) | Fill::Posture(1)) {
-                    percent(100.0)
-                } else {
-                    px(width)
-                },
-                height: px(height),
-                padding: UiRect::all(px(2)),
-                justify_content: if centred {
-                    JustifyContent::Center
-                } else {
-                    JustifyContent::FlexStart
-                },
-                ..default()
+/// The posture gauge's state for damage fraction `f`: 0 normal, 1 about to break (at most 30 %
+/// of the posture left), 2 breakable (full), 3 broken.
+fn posture_state(f: f32, broken: bool) -> usize {
+    if broken {
+        3
+    } else if f >= 1.0 {
+        2
+    } else if f >= 0.7 {
+        1
+    } else {
+        0
+    }
+}
+
+fn posture_color(f: f32, broken: bool) -> Color {
+    let [r, g, b] = POSTURE_FILL[posture_state(f, broken)];
+    Color::srgb_u8(r, g, b)
+}
+
+/// Steps a damage trail `(shown, held)` toward the bar's fill `f`: it holds [`TRAIL_HOLD`]
+/// from the first hit, then collapses onto the fill over [`TRAIL_COLLAPSE`].
+fn step_trail(trail: &mut (f32, f32), f: f32, dt: f32) {
+    let (shown, hold) = trail;
+    if f < *shown {
+        *hold += dt;
+        if *hold > TRAIL_HOLD {
+            let left = (TRAIL_HOLD + TRAIL_COLLAPSE - *hold + dt).max(dt);
+            *shown = (*shown - (*shown - f) * (dt / left).min(1.0)).max(f);
+        }
+    } else {
+        *shown = f;
+        *hold = 0.0;
+    }
+}
+
+/// Steps a posture gauge's display hold: full while it has damage, then counting down.
+fn step_hold(hold: &mut f32, damaged: bool, dt: f32) -> bool {
+    *hold = if damaged {
+        SP_MIN_DISP_TIME
+    } else {
+        (*hold - dt).max(0.0)
+    };
+    *hold > 0.0
+}
+
+/// A framed bar of `width` x `height` showing `fill` inside a thin gold frame. A vitality fill
+/// gets its damage trail behind it; a posture fill grows from the middle out and gets an arrow
+/// at each end. Returns the frame.
+fn bar<'a>(
+    parent: &'a mut ChildSpawnerCommands,
+    fill: Fill,
+    (width, height): (Val, Val),
+) -> EntityCommands<'a> {
+    let posture = match fill {
+        Fill::Posture(i) => Some(i),
+        _ => None,
+    };
+    let mut frame = parent.spawn((
+        Node {
+            width,
+            height,
+            border: UiRect::all(px(1)),
+            justify_content: if posture.is_some() {
+                JustifyContent::Center
+            } else {
+                JustifyContent::FlexStart
             },
-            BackgroundColor(frame_color()),
-        ))
-        .with_children(|b| {
+            ..default()
+        },
+        BackgroundColor(FRAME),
+        BorderColor::all(EDGE),
+    ));
+    frame.with_children(|b| {
+        if let Fill::Hp(i) = fill {
             b.spawn((
-                fill,
+                HudPart::Fill(Fill::Trail(i)),
                 Node {
+                    position_type: PositionType::Absolute,
+                    left: px(0),
                     width: percent(100),
                     height: percent(100),
                     ..default()
                 },
-                BackgroundColor(Color::NONE),
+                BackgroundColor(TRAIL),
             ));
+        }
+        b.spawn((
+            HudPart::Fill(fill),
+            Node {
+                width: percent(100),
+                height: percent(100),
+                ..default()
+            },
+            BackgroundColor(Color::NONE),
+        ));
+        // The game's "<" ">" arrows at the posture bar's outer ends; a gold diamond stands in
+        // for the arrow sprite (MENU_Taikan_Arrow, not extracted).
+        if let Some(i) = posture {
+            for right in [false, true] {
+                b.spawn((
+                    HudPart::PostureArrow(i),
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: if right { Val::Auto } else { percent(-2.5) },
+                        right: if right { percent(-2.5) } else { Val::Auto },
+                        top: percent(-10),
+                        height: percent(120),
+                        aspect_ratio: Some(1.0),
+                        ..default()
+                    },
+                    UiTransform::from_rotation(Rot2::degrees(45.0)),
+                    BackgroundColor(Color::srgb(0.85, 0.72, 0.45)),
+                    Visibility::Hidden,
+                ));
+            }
+        }
+    });
+    frame
+}
+
+/// Character `i`'s posture bar of `size`, centred in a full-width row laid out by `node` and
+/// shown while the posture has damage. Returns the row.
+fn posture_row<'a>(
+    parent: &'a mut ChildSpawnerCommands,
+    i: usize,
+    node: Node,
+    size: (Val, Val),
+) -> EntityCommands<'a> {
+    let mut row = parent.spawn((
+        HudPart::PostureRow(i),
+        Node {
+            width: percent(100),
+            justify_content: JustifyContent::Center,
+            ..node
+        },
+        Visibility::Hidden,
+    ));
+    row.with_children(|r| {
+        bar(r, Fill::Posture(i), size);
+    });
+    row
+}
+
+/// The enemy's bars, for the floating and the boss panel: its vitality in a box laid out by
+/// `hp`, then its posture row laid out by `posture`. Returns the posture row.
+fn enemy_bars<'a>(
+    panel: &'a mut ChildSpawnerCommands,
+    (hp, hp_size): (Node, (Val, Val)),
+    (posture, posture_size): (Node, (Val, Val)),
+) -> EntityCommands<'a> {
+    panel.spawn(hp).with_children(|r| {
+        bar(r, Fill::Hp(1), hp_size);
+    });
+    posture_row(panel, 1, posture, posture_size)
+}
+
+/// A row of [`MAX_BAR_MARKS`] round deathblow dots `size` across, `gap` apart, in a row laid
+/// out by `node`.
+fn dots(parent: &mut ChildSpawnerCommands, node: Node, size: Val, gap: Val) {
+    parent
+        .spawn(Node {
+            flex_direction: FlexDirection::Row,
+            column_gap: gap,
+            ..node
+        })
+        .with_children(|r| {
+            for i in 0..MAX_BAR_MARKS {
+                r.spawn((
+                    HudPart::DeathblowDot(i),
+                    Node {
+                        width: size,
+                        height: size,
+                        border: UiRect::all(px(1)),
+                        border_radius: BorderRadius::MAX,
+                        display: Display::None,
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.85, 0.06, 0.05)),
+                    BorderColor::all(Color::srgb(0.25, 0.02, 0.0)),
+                ));
+            }
         });
 }
 
-fn label(parent: &mut ChildSpawnerCommands, actor: usize, size: f32) {
-    parent.spawn((
-        Label(actor),
-        Text::new(""),
+fn text(s: &str, size: f32) -> impl Bundle {
+    (
+        Text::new(s),
         TextFont {
             font_size: bevy::text::FontSize::Px(size),
             ..default()
         },
-        TextColor(Color::srgb(0.92, 0.9, 0.85)),
-    ));
+        TextColor(Color::srgba(0.92, 0.88, 0.8, 1.0)),
+        TextShadow {
+            offset: Vec2::new(1.5, 1.5),
+            color: Color::BLACK,
+        },
+    )
 }
 
 /// Spawns the bars (call once at startup).
 pub fn spawn(commands: &mut Commands) {
-    // Wolf: vitality bottom left.
+    // Wolf: vitality bottom left, status and poison above it.
     commands
         .spawn(Node {
             position_type: PositionType::Absolute,
-            left: px(28),
-            bottom: px(26),
+            left: percent(5.7),
+            bottom: percent(7.8),
             flex_direction: FlexDirection::Column,
-            row_gap: px(3),
+            row_gap: px(6),
             ..default()
         })
         .with_children(|p| {
@@ -142,171 +360,311 @@ pub fn spawn(commands: &mut Commands) {
                 TextColor(Color::srgb(0.78, 0.55, 0.95)),
             ));
             p.spawn((PoisonRow, Node::default(), Visibility::Hidden))
-                .with_children(|r| bar(r, Fill::Poison, POISON_WIDTH, 6.0, false));
-            label(p, 0, 13.0);
-            bar(p, Fill::Hp(0), WOLF_HP_WIDTH, 12.0, false);
+                .with_children(|r| {
+                    bar(r, Fill::Poison, (px(POISON_WIDTH), px(6)));
+                });
+            bar(p, Fill::Hp(0), (Val::Vw(HP_BAR_VW), Val::Vh(1.25))).insert(HudPart::HpFrame);
         });
     // Wolf: posture bottom centre.
     commands
         .spawn(Node {
             position_type: PositionType::Absolute,
             width: percent(100),
-            bottom: px(64),
-            justify_content: JustifyContent::Center,
+            bottom: percent(12.6),
             ..default()
         })
-        .with_children(|p| bar(p, Fill::Posture(0), WOLF_POSTURE_WIDTH, 9.0, true));
-    // The enemy: posture over vitality, above its head.
+        .with_children(|p| {
+            posture_row(p, 0, Node::default(), (Val::Vw(27.0), Val::Vh(1.3)));
+        });
+    // A plain enemy: deathblow dots, vitality over posture, above its head.
     commands
         .spawn((
-            EnemyPanel,
+            HudPart::EnemyPanel,
             Node {
                 position_type: PositionType::Absolute,
-                width: px(ENEMY_WIDTH),
+                width: Val::Vw(OVERHEAD_W),
                 flex_direction: FlexDirection::Column,
-                align_items: AlignItems::Center,
-                row_gap: px(3),
+                row_gap: Val::Vh(0.3),
+                display: Display::None,
                 ..default()
             },
-            Visibility::Hidden,
         ))
         .with_children(|p| {
-            // The deathblow mark: a red square with a dark rim (the default font has no
-            // diamond glyph).
-            p.spawn((
-                DeathblowMark,
+            dots(
+                p,
                 Node {
-                    width: px(14),
-                    height: px(14),
-                    border: UiRect::all(px(2)),
+                    margin: UiRect {
+                        left: Val::Vw(-0.2),
+                        bottom: Val::Vh(0.1),
+                        ..default()
+                    },
                     ..default()
                 },
-                BackgroundColor(Color::srgb(0.85, 0.05, 0.05)),
-                BorderColor::all(Color::srgb(0.15, 0.0, 0.0)),
-                Visibility::Hidden,
-            ));
-            bar(p, Fill::Posture(1), ENEMY_WIDTH, 7.0, true);
-            bar(p, Fill::Hp(1), ENEMY_WIDTH, 6.0, false);
-            label(p, 1, 11.0);
+                Val::Vw(1.15),
+                Val::Vw(0.15),
+            );
+            enemy_bars(
+                p,
+                (Node::default(), (percent(100), Val::Vh(0.75))),
+                (Node::default(), (percent(100), Val::Vh(0.6))),
+            );
         });
+    // A boss: vitality top left with the deathblow orbs over it and the name under it, posture
+    // top centre with its centre mark.
+    commands
+        .spawn((
+            HudPart::BossPanel,
+            Node {
+                position_type: PositionType::Absolute,
+                width: percent(100),
+                height: percent(100),
+                display: Display::None,
+                ..default()
+            },
+        ))
+        .with_children(|c| {
+            dots(
+                c,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: percent(5.5),
+                    top: percent(4.6),
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                Val::Vw(1.4),
+                Val::Vw(0.3),
+            );
+            enemy_bars(
+                c,
+                (
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: percent(5.7),
+                        top: percent(8.3),
+                        ..default()
+                    },
+                    (Val::Vw(21.6), Val::Vh(1.25)),
+                ),
+                (
+                    Node {
+                        position_type: PositionType::Absolute,
+                        top: percent(5.4),
+                        ..default()
+                    },
+                    (Val::Vw(38.4), Val::Vh(1.8)),
+                ),
+            )
+            .with_children(|r| {
+                // The centre mark (MENU_Sp_Center, not extracted: a gold tick), 5 % of the
+                // screen down, over the bar.
+                r.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: percent(50),
+                        top: Val::Vh(-0.4),
+                        margin: UiRect::left(Val::Vh(-0.25)),
+                        width: Val::Vh(0.5),
+                        height: Val::Vh(2.6),
+                        ..default()
+                    },
+                    BackgroundColor(EDGE),
+                ));
+            });
+            c.spawn((
+                HudPart::BossName,
+                text("", 15.0),
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: percent(6.3),
+                    top: percent(11.0),
+                    ..default()
+                },
+            ));
+        });
+    // The deathblow mark on the enemy: a red diamond with a dark rim (the game's MENU_ninsatu
+    // sprite is not extracted).
+    commands.spawn((
+        HudPart::DeathblowMark,
+        Node {
+            position_type: PositionType::Absolute,
+            width: px(16),
+            height: px(16),
+            border: UiRect::all(px(2)),
+            ..default()
+        },
+        UiTransform::from_rotation(Rot2::degrees(45.0)),
+        BackgroundColor(Color::srgb(0.85, 0.05, 0.05)),
+        BorderColor::all(Color::srgb(0.15, 0.0, 0.0)),
+        Visibility::Hidden,
+    ));
+    // The item cluster, bottom right: the quick item's box, then the prosthetic tool's bigger
+    // one (percent of the screen). No items are equipped in our game yet, so each box shows only
+    // its button and lights its edge while it is held.
+    for (slot, ((left, top, w, h), key)) in [(79.1, 87.2, 4.2, 7.3), (84.2, 83.1, 6.3, 11.3)]
+        .into_iter()
+        .zip(crate::play::ITEM_KEY_LABELS)
+        .enumerate()
+    {
+        commands
+            .spawn((
+                HudPart::ItemSlot(slot),
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: percent(left),
+                    top: percent(top),
+                    width: percent(w),
+                    height: percent(h),
+                    border: UiRect::all(px(1)),
+                    border_radius: BorderRadius::all(px(4)),
+                    justify_content: JustifyContent::FlexEnd,
+                    align_items: AlignItems::FlexEnd,
+                    padding: UiRect::all(px(4)),
+                    ..default()
+                },
+                BackgroundColor(FRAME),
+                BorderColor::all(EDGE),
+            ))
+            .with_children(|b| {
+                b.spawn(text(key, 13.0));
+            });
+    }
 }
 
-/// Posture colour: yellow when light, orange, then red near breaking.
-fn posture_color(fraction: f32) -> Color {
-    let t = fraction.clamp(0.0, 1.0);
-    Color::srgb(0.95, 0.78 - 0.62 * t, 0.18 - 0.12 * t)
+/// Writes `value` into the field of `item` that `field` picks, marking the component changed
+/// only when the value differs.
+fn set<T, V: PartialEq>(item: &mut Mut<T>, field: impl FnOnce(&mut T) -> &mut V, value: V) {
+    item.reborrow().map_unchanged(field).set_if_neq(value);
 }
 
-/// Updates widths, colours and the floating panel.
+/// Shows (`Inherited`) or hides a part with a visibility.
+fn show(visibility: Option<Mut<Visibility>>, on: bool) {
+    if let Some(mut v) = visibility {
+        v.set_if_neq(if on {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
+    }
+}
+
+/// Lays a node out, or takes it (and everything under it) out of the layout.
+fn display(node: &mut Mut<Node>, on: bool) {
+    set(
+        node,
+        |n| &mut n.display,
+        if on { Display::Flex } else { Display::None },
+    );
+}
+
+/// Updates widths, colours, the floating panel and the boss bars.
 #[allow(clippy::type_complexity)]
 pub fn update(
     gauges: Res<Gauges>,
+    time: Res<Time>,
+    (mut trails, mut holds): (Local<[(f32, f32); 2]>, Local<[f32; 2]>),
     (recording, overlay_size): (
         Option<Res<crate::brain_overlay::RecordingBrain>>,
         Query<&ComputedNode, With<crate::brain_overlay::Panel>>,
     ),
     camera: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    mut fills: Query<(&Fill, &mut Node, &mut BackgroundColor), Without<EnemyPanel>>,
-    mut labels: Query<(&Label, &mut Text)>,
-    mut panel: Query<(&mut Node, &mut Visibility), (With<EnemyPanel>, Without<Fill>)>,
-    mut mark: Query<&mut Visibility, (With<DeathblowMark>, Without<EnemyPanel>)>,
+    mut parts: Query<(
+        &HudPart,
+        &mut Node,
+        Option<&mut BackgroundColor>,
+        Option<&mut Visibility>,
+        Option<&mut BorderColor>,
+        Option<&mut Text>,
+    )>,
 ) {
-    for (fill, mut node, mut color) in &mut fills {
-        let (fraction, c) = match *fill {
-            Fill::Hp(i) => {
-                let (hp, max) = gauges.hp[i];
-                let f = hp.max(0) as f32 / max.max(1) as f32;
-                (f, Color::srgb(0.72, 0.1, 0.08))
-            }
-            Fill::Posture(i) => {
-                let (left, max) = gauges.posture[i];
-                let f = ((max - left) as f32 / max.max(1) as f32).clamp(0.0, 1.0);
-                let c = if left < 1 {
-                    Color::srgb(0.9, 0.05, 0.04)
-                } else {
-                    posture_color(f)
-                };
-                (f, c)
-            }
-            Fill::Poison => (gauges.poison, Color::srgb(0.55, 0.2, 0.75)),
-        };
-        node.width = percent(fraction * 100.0);
-        color.0 = c;
+    let dt = time.delta_secs();
+    for (trail, &f) in trails.iter_mut().zip(&gauges.hp) {
+        step_trail(trail, f, dt);
     }
-    for (l, mut text) in &mut labels {
-        let (hp, max) = gauges.hp[l.0];
-        text.0 = if l.0 == 0 {
-            format!("Wolf   {hp} / {max}")
-        } else {
-            let marks = if gauges.enemy_marks > 0 {
-                format!(
-                    "   {} deathblow{}",
-                    gauges.enemy_marks,
-                    if gauges.enemy_marks == 1 { "" } else { "s" }
-                )
-            } else {
-                String::new()
-            };
-            format!("{}   {hp}{marks}", gauges.enemy_name)
-        };
-    }
-    let Ok((mut node, mut vis)) = panel.single_mut() else {
-        return;
-    };
-    node.width = px(if gauges.boss_bar { 350.0 } else { ENEMY_WIDTH });
-    if gauges.boss_bar {
-        node.left = px(28.0);
-        node.top = px(190.0);
-        *vis = if gauges.enemy_alive {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
-        if let Ok(mut mark) = mark.single_mut() {
-            *mark = if gauges.deathblow {
-                Visibility::Inherited
-            } else {
-                Visibility::Hidden
-            };
-        }
-        return;
-    }
-    let screen = gauges
-        .enemy_head
-        .filter(|_| gauges.enemy_alive)
-        .and_then(|head| {
-            let (cam, tf) = camera.single().ok()?;
-            cam.world_to_viewport(tf, head).ok()
-        });
-    match screen {
-        Some(p) => {
-            let mut left = p.x - ENEMY_WIDTH * 0.5;
+    let damaged = gauges.posture.map(|f| f > POSTURE_SHOWN);
+    let shown = [0, 1].map(|i| step_hold(&mut holds[i], damaged[i], dt));
+    let posture_colors = [0, 1].map(|i| posture_color(gauges.posture[i], gauges.broken[i]));
+    let wolf_width = Val::Vw(hp_bar_vw(gauges.wolf_max_hp));
+    let boss = gauges.boss_bar && gauges.enemy_alive;
+    let camera = camera.single().ok();
+    let project = |at: Vec3| camera.and_then(|(cam, tf)| cam.world_to_viewport(tf, at).ok());
+    let head = gauges.enemy_head.filter(|_| gauges.enemy_alive);
+    let mark = head.filter(|_| gauges.deathblow).and_then(project);
+    // The floating panel's top-left corner, with the bars' bottom at the point over the head.
+    let floating = head
+        .filter(|_| !gauges.boss_bar)
+        .and_then(|h| project(h + Vec3::Y * OVERHEAD_ABOVE_HEAD))
+        .map(|p| {
+            let viewport = camera
+                .and_then(|(cam, _)| cam.logical_viewport_size())
+                .unwrap_or(Vec2::new(1920.0, 1080.0));
+            let width = viewport.x * OVERHEAD_W / 100.0;
+            let top = p.y - 0.035 * viewport.y;
+            let mut left = p.x - width * 0.5;
             if recording.as_ref().is_some_and(|r| r.enabled)
                 && let Ok(size) = overlay_size.single()
-                && let Ok((cam, _)) = camera.single()
-                && let Some(viewport) = cam.logical_viewport_size()
             {
-                let overlay_left = viewport.x - 24.0 - 344.0;
-                let overlay_bottom = 24.0 + size.size().y * size.inverse_scale_factor;
-                if left + ENEMY_WIDTH > overlay_left - 12.0
-                    && p.y > 24.0
-                    && p.y - 46.0 < overlay_bottom
+                let overlay_left = viewport.x - PANEL_INSET - PANEL_WIDTH;
+                let overlay_bottom = PANEL_INSET + size.size().y * size.inverse_scale_factor;
+                if left + width > overlay_left - OVERLAY_GAP
+                    && p.y > PANEL_INSET
+                    && top < overlay_bottom
                 {
-                    left = overlay_left - ENEMY_WIDTH - 12.0;
+                    left = overlay_left - width - OVERLAY_GAP;
                 }
             }
-            node.left = px(left);
-            node.top = px(p.y - 46.0);
-            *vis = Visibility::Inherited;
+            Vec2::new(left, top)
+        });
+    for (part, mut node, color, visibility, border, text) in &mut parts {
+        match *part {
+            HudPart::Fill(fill) => {
+                let (fraction, c) = match fill {
+                    Fill::Hp(i) => (gauges.hp[i], VITALITY),
+                    Fill::Trail(i) => (trails[i].0, TRAIL),
+                    Fill::Posture(i) => (gauges.posture[i], posture_colors[i]),
+                    Fill::Poison => (gauges.poison, Color::srgb(0.55, 0.2, 0.75)),
+                };
+                set(&mut node, |n| &mut n.width, percent(fraction * 100.0));
+                if let Some(mut color) = color {
+                    color.set_if_neq(BackgroundColor(c));
+                }
+            }
+            HudPart::HpFrame => set(&mut node, |n| &mut n.width, wolf_width),
+            HudPart::PostureRow(i) => show(visibility, shown[i] && (i == 0 || gauges.enemy_alive)),
+            HudPart::PostureArrow(i) => show(visibility, damaged[i]),
+            HudPart::EnemyPanel => {
+                display(&mut node, floating.is_some());
+                if let Some(p) = floating {
+                    set(&mut node, |n| &mut n.left, px(p.x));
+                    set(&mut node, |n| &mut n.top, px(p.y));
+                }
+            }
+            HudPart::BossPanel => display(&mut node, boss),
+            HudPart::DeathblowDot(i) => display(&mut node, i < gauges.enemy_marks),
+            HudPart::BossName => {
+                if let Some(mut t) = text
+                    && t.0 != gauges.enemy_name
+                {
+                    t.0 = gauges.enemy_name.to_string();
+                }
+            }
+            HudPart::DeathblowMark => {
+                show(visibility, mark.is_some());
+                if let Some(p) = mark {
+                    set(&mut node, |n| &mut n.left, px(p.x - 8.0));
+                    set(&mut node, |n| &mut n.top, px(p.y - 8.0));
+                }
+            }
+            HudPart::ItemSlot(slot) => {
+                if let Some(mut border) = border {
+                    border.set_if_neq(BorderColor::all(if gauges.held[slot] {
+                        Color::srgb(1.0, 0.9, 0.6)
+                    } else {
+                        EDGE
+                    }));
+                }
+            }
         }
-        None => *vis = Visibility::Hidden,
-    }
-    if let Ok(mut m) = mark.single_mut() {
-        *m = if gauges.deathblow {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
     }
 }
 
@@ -320,19 +678,15 @@ pub fn update_status(
         if t.0 != gauges.status {
             t.0.clone_from(&gauges.status);
         }
-        color.0 = if gauges.status.contains("Electrified") || gauges.status.contains("Lightning") {
-            Color::srgb(0.4, 0.8, 1.0)
-        } else {
-            Color::WHITE
-        };
+        color.set_if_neq(TextColor(
+            if gauges.status.contains("Electrified") || gauges.status.contains("Lightning") {
+                Color::srgb(0.4, 0.8, 1.0)
+            } else {
+                Color::WHITE
+            },
+        ));
     }
-    if let Ok(mut v) = poison_row.single_mut() {
-        *v = if gauges.poison > 0.0 {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
-    }
+    show(poison_row.single_mut().ok(), gauges.poison > 0.0);
 }
 
 /// The perilous-attack kanji.
@@ -413,3 +767,57 @@ pub fn update_perilous(
 
 /// The kanji's size on screen, pixels.
 const PERILOUS_SIZE: f32 = 96.0;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vitality_bar_length_follows_max_hp() {
+        // Level 1's 320 is the measured 9.5 % of the screen; Vitality 20's 1120 is 3.5 times it.
+        assert!((hp_bar_vw(320) - 9.5).abs() < 1e-4);
+        assert!((hp_bar_vw(1120) - 33.25).abs() < 1e-3);
+        assert!((hp_bar_vw(640) - 2.0 * hp_bar_vw(320)).abs() < 1e-4);
+        // A missing maximum still draws a sliver, and a huge one stays on screen.
+        assert!(hp_bar_vw(0) > 0.0);
+        assert_eq!(hp_bar_vw(100_000), HP_BAR_MAX_VW);
+    }
+
+    #[test]
+    fn posture_states_follow_the_hud_movie_thresholds() {
+        assert_eq!(posture_state(0.0, false), 0);
+        assert_eq!(posture_state(0.69, false), 0);
+        assert_eq!(posture_state(0.7, false), 1);
+        assert_eq!(posture_state(1.0, false), 2);
+        assert_eq!(posture_state(1.0, true), 3);
+        assert_eq!(posture_color(0.0, false), Color::srgb_u8(142, 123, 60));
+    }
+
+    #[test]
+    fn damage_trail_holds_then_collapses_onto_the_fill() {
+        let dt = 1.0 / 60.0;
+        let mut trail = (1.0, 0.0);
+        // Held for the first half second.
+        for _ in 0..29 {
+            step_trail(&mut trail, 0.6, dt);
+        }
+        assert_eq!(trail.0, 1.0);
+        // On the fill a few frames later.
+        for _ in 0..6 {
+            step_trail(&mut trail, 0.6, dt);
+        }
+        assert!((trail.0 - 0.6).abs() < 1e-5);
+        // Healing snaps the trail up with the fill and resets the hold.
+        step_trail(&mut trail, 0.9, dt);
+        assert_eq!(trail, (0.9, 0.0));
+    }
+
+    #[test]
+    fn posture_gauge_stays_up_for_the_minimum_display_time() {
+        let mut hold = 0.0;
+        assert!(!step_hold(&mut hold, false, 0.1));
+        assert!(step_hold(&mut hold, true, 0.1));
+        assert!(step_hold(&mut hold, false, 0.3));
+        assert!(!step_hold(&mut hold, false, 0.3));
+    }
+}

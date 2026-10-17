@@ -1122,6 +1122,12 @@ struct MouseCapture {
     grab_click: bool,
 }
 
+/// The keyboard keys of the item cluster's buttons (quick item, prosthetic tool), and the labels
+/// the HUD's item boxes show for them.
+const ITEM_KEY: KeyCode = KeyCode::KeyR;
+const PROSTHETIC_KEY: KeyCode = KeyCode::ControlLeft;
+pub(crate) const ITEM_KEY_LABELS: [&str; 2] = ["R", "Ctrl"];
+
 #[allow(clippy::too_many_arguments)]
 fn gather_input(
     fade: Res<cinematic_fade::Fade>,
@@ -1174,8 +1180,8 @@ fn gather_input(
         crouch: key(KeyCode::KeyC),
         grapple: key(KeyCode::KeyF),
         action: key(KeyCode::KeyE),
-        prosthetic: key(KeyCode::ControlLeft) || mouse.pressed(MouseButton::Middle),
-        item: key(KeyCode::KeyR),
+        prosthetic: key(PROSTHETIC_KEY) || mouse.pressed(MouseButton::Middle),
+        item: key(ITEM_KEY),
         combat_art: false,
         lock_on: key(KeyCode::KeyQ),
     };
@@ -1841,6 +1847,32 @@ fn status_line(status: &sekiro_sim::status::Status, states: &[String]) -> String
     parts.join("   ")
 }
 
+/// The enemy's head for its floating bars and deathblow mark: its skeleton's Head bone in the
+/// drawn pose (`head`, model space), held over its drawn `root` so a swaying head does not shake
+/// the bars (Fireguy32's RustSekiro fork, MIT, commit d11ef65). Without the bone or a pose yet,
+/// just above the body capsule of `height` (NpcParam hitHeight: 1.8 m soldier, 2.5 m Owl).
+fn enemy_head(root: Vec3, head: Option<&Mat4>, height: f32) -> Vec3 {
+    match head {
+        Some(m) => Vec3::new(root.x, root.y + m.w_axis.y, root.z),
+        None => root + Vec3::Y * (height + 0.2),
+    }
+}
+
+/// The Head bone's index in `rig`'s skeleton, looked up once per skeleton (`cache` keeps the
+/// skeleton it was looked up for).
+fn head_bone(rig: &Rig, cache: &mut Option<(usize, Option<usize>)>) -> Option<usize> {
+    let key = Arc::as_ptr(&rig.skeleton) as usize;
+    match *cache {
+        Some((k, bone)) if k == key => bone,
+        _ => {
+            let bone = rig.skeleton.bone_index("Head");
+            *cache = Some((key, bone));
+            bone
+        }
+    }
+}
+
+#[allow(clippy::type_complexity)]
 fn hud(
     sim: NonSend<Sim>,
     recording: Res<crate::brain_overlay::RecordingBrain>,
@@ -1848,30 +1880,50 @@ fn hud(
     mut debug: ResMut<DebugHud>,
     mut text: Query<&mut Text, With<Hud>>,
     mut gauges: ResMut<combat_hud::Gauges>,
+    (live, actors, mut head_cache): (
+        Option<Res<LiveInput>>,
+        Query<(&Actor, &Transform, &Rig)>,
+        Local<Option<(usize, Option<usize>)>>,
+    ),
 ) {
     let f = &sim.duel.rules.fighters;
+    let held = live.map_or([false; 2], |l| {
+        [l.frame.buttons.item, l.frame.buttons.prosthetic]
+    });
+    // Hidden with him while a warp fades him out.
+    let enemy_alive = sim.enemy_present
+        && !f[1].dead()
+        && sim.duel.enemy_bar_shown()
+        && (!sim.faded[1] || sekiro_sim::duel::old_dragons::owns(&sim.duel.spec));
+    let boss_bar = sim.enemy_present
+        && sim
+            .duel
+            .events
+            .as_ref()
+            .is_some_and(|events| events.boss_bar.is_some());
+    let deathblow = sim.enemy_present
+        && sim.duel.deathblow_available()
+        && !sim.duel.brown_deathblow_available();
+    // Only the floating bars and the deathblow mark use the head.
+    let enemy_head = (enemy_alive && (!boss_bar || deathblow)).then(|| {
+        let height = sim.duel.fighters[ENEMY].height;
+        match actors.iter().find(|(actor, ..)| actor.0 == ENEMY) {
+            Some((_, tf, rig)) => {
+                let head = head_bone(rig, &mut head_cache).and_then(|i| rig.model.get(i));
+                enemy_head(tf.translation, head, height)
+            }
+            None => enemy_head(Vec3::from_array(sim.duel.enemy.body.position), None, height),
+        }
+    });
     *gauges = combat_hud::Gauges {
-        hp: [0, 1].map(|i| (f[i].vitality.hp, f[i].vitality.max_hp)),
-        posture: [0, 1].map(|i| (f[i].posture.remaining, f[i].posture.max)),
-        // Just above the enemy's body capsule (NpcParam hitHeight: 1.8 m soldier, 2.5 m Owl).
-        enemy_head: sim.enemy_present.then_some(
-            Vec3::from_array(sim.duel.enemy.body.position)
-                + Vec3::Y * (sim.duel.fighters[1].height + 0.2),
-        ),
-        // Hidden with him while a warp fades him out.
-        enemy_alive: sim.enemy_present
-            && !f[1].dead()
-            && sim.duel.enemy_bar_shown()
-            && (!sim.faded[1] || sekiro_sim::duel::old_dragons::owns(&sim.duel.spec)),
-        boss_bar: sim.enemy_present
-            && sim
-                .duel
-                .events
-                .as_ref()
-                .is_some_and(|events| events.boss_bar.is_some()),
-        deathblow: sim.enemy_present
-            && sim.duel.deathblow_available()
-            && !sim.duel.brown_deathblow_available(),
+        hp: [0, 1].map(|i| f[i].hp_fraction()),
+        wolf_max_hp: f[0].vitality.max_hp,
+        posture: [0, 1].map(|i| f[i].posture_fraction()),
+        broken: [0, 1].map(|i| f[i].posture.broken()),
+        enemy_head,
+        enemy_alive,
+        boss_bar,
+        deathblow,
         enemy_name: if sim.enemy_present {
             sim.duel.spec.display_name()
         } else {
@@ -1891,6 +1943,7 @@ fn hud(
             .dummy_position(WOLF, sekiro_sim::perilous::KANJI_DUMMY)
             .map(|p| Vec3::from_array(p) + Vec3::Y * 0.6),
         perilous_age: sim.perilous_age,
+        held,
     };
     let Ok(mut text) = text.single_mut() else {
         return;
@@ -2426,9 +2479,38 @@ mod tests {
             assert!(gauges.enemy_head.is_none());
             assert!(gauges.enemy_name.is_empty());
             let world = app.world_mut();
-            let mut panels = world.query_filtered::<&Visibility, With<combat_hud::EnemyPanel>>();
-            assert_eq!(*panels.single(world).unwrap(), Visibility::Hidden);
+            let mut parts = world.query::<(&combat_hud::HudPart, &Node)>();
+            for (part, node) in parts.iter(world) {
+                if matches!(
+                    part,
+                    combat_hud::HudPart::EnemyPanel | combat_hud::HudPart::BossPanel
+                ) {
+                    assert_eq!(node.display, Display::None);
+                }
+            }
         }
+    }
+
+    #[test]
+    fn enemy_head_follows_the_head_bone_over_the_root() {
+        let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let Ok(mut lib) = AnimLibrary::load(&cache, "c1010") else {
+            eprintln!("skipping: cache not extracted");
+            return;
+        };
+        let idle = lib.clip("a000_000000").unwrap();
+        let mut rig = Rig::new(Arc::new(lib.skeleton.clone()));
+        rig.model = rig.skeleton.model_space(&idle.sample(0.0, &rig.skeleton));
+        let mut cache_slot = None;
+        let bone = head_bone(&rig, &mut cache_slot).expect("the soldier has a Head bone");
+        assert_eq!(head_bone(&rig, &mut cache_slot), Some(bone));
+        let root = Vec3::new(1.0, 2.0, 3.0);
+        let head = enemy_head(root, rig.model.get(bone), 1.8);
+        // Over the root, at a standing soldier's head height.
+        assert_eq!((head.x, head.z), (root.x, root.z));
+        assert!((1.3..2.0).contains(&(head.y - root.y)), "head at {head}");
+        // Without a pose, just above the 1.8 m body capsule.
+        assert_eq!(enemy_head(root, None, 1.8), root + Vec3::Y * 2.0);
     }
 
     #[test]
