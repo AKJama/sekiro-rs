@@ -1421,12 +1421,18 @@ fn simulate(
             .as_ref()
             .or(wolf.docking.candidate.as_ref());
         eprintln!(
-            "DOCK step={} env3044={} env3050={} env3043={} end={} blocked={:?} pos={:?} edge={:?} point={:?} anim={:?} events={:?}",
+            "DOCK step={} env3044={} env3045={} env3020={} env3050={} env3043={} end={} variation={} standby={:?} requested={:?} state={:?} blocked={:?} pos={:?} edge={:?} point={:?} anim={:?} events={:?}",
             sim.step,
             wolf.behavior.env.hang_candidate && wolf.behavior.env.docking_searches.get() & 2 != 0,
+            wolf.behavior.env.air_hang_type,
+            wolf.behavior.env.wall_contact,
             wolf.behavior.env.hang_can_climb,
             wolf.behavior.env.cover_candidate && wolf.behavior.env.docking_searches.get() & 1 != 0,
             wolf.behavior.env.docking_end,
+            wolf.behavior.env.docking_variation,
+            wolf.behavior.env.standby,
+            wolf.behavior.env.requested,
+            report.player.behavior.state_path.last(),
             wolf.behavior.env.docking_blocked,
             wolf.body.position,
             target.map(|t| (

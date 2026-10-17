@@ -10,9 +10,16 @@ pub const GROUND_REACH: f32 = 1.0;
 pub const TOP_TOLERANCE: f32 = 0.4;
 pub const HAND_HEIGHT: f32 = 1.5;
 pub const FACING_LIMIT: f32 = 45.0;
-pub const HANG_DEPTH: f32 = 1.5;
-pub const HANG_OUTWARD: f32 = 0.35;
-pub const CLIMB_INWARD: f32 = 0.25;
+/// Where the hanging root sits under and out from the lip, read from the hang idle clips:
+/// HangIdle (a000_020000) and HangFootHoldIdle (a000_020010) both hold the hands 1.55 m over
+/// the root and 0.635 m in front of it, so with the hands on the lip the root is 1.55 m under
+/// it and 0.635 m out. The pelvis is then 0.55 m (plain) or 0.18 m (foot hold) in front of the
+/// root, so it stays off the face.
+pub const HANG_DEPTH: f32 = 1.55;
+pub const HANG_OUTWARD: f32 = 0.635;
+/// Where the climb ends, in from the lip: HangToStand / HangFootHoldToStand (a000_217500 /
+/// 217600) carry the root 1.10 m forward and 1.60 m up from the hang, 1.10 - 0.635 m past it.
+pub const CLIMB_INWARD: f32 = 0.465;
 pub const FLOOR_TOLERANCE: f32 = 0.3;
 pub const END_MARGIN: f32 = 0.2;
 pub const OUTWARD_PROBE: f32 = 0.6;
@@ -27,6 +34,24 @@ pub const COVER_WALL_PROBE: f32 = 1.0;
 pub const COVER_PROBE_LIFT: f32 = 0.6;
 pub const COVER_BLOCK_TOLERANCE: f32 = 0.05;
 pub const COVER_AWAY_ANGLE: f32 = 30.0;
+/// Air hang (env 3045): how far out from the face a fall or jump catches the lip, short range
+/// (type 1) and long range (type 2), and the band of lip heights over the feet. Not traced (the
+/// exe's search); Fireguy32's RustSekiro values.
+pub const AIR_HANG_SHORT: f32 = 1.0;
+pub const AIR_HANG_LONG: f32 = 2.0;
+pub const AIR_HANG_BAND: (f32, f32) = (1.0, 2.6);
+/// c0000_define `AIR_HANG_TYPE_SHORT_LANGE` and `AIR_HANG_TYPE_LONG_LANGE`.
+pub const AIR_HANG_TYPE_SHORT: u8 = 1;
+pub const AIR_HANG_TYPE_LONG: u8 = 2;
+/// The climb-up and drop clips: `HangToStand` / `HangFootHoldToStand` and `HangToFreeFall` /
+/// `HangFootHoldToFreeFall` (variation 0 / 1).
+pub(crate) const CLIMB_CLIPS: [&str; 2] = ["a000_217500", "a000_217600"];
+const DROP_CLIPS: [&str; 2] = ["a000_217520", "a000_217620"];
+
+/// Hang edges: kind 2, variation 0 (`HANG_EDGE_TYPE_DISABLE_HOLD_FOOT`) or 1 (`ENABLE_HOLD_FOOT`).
+fn is_hang(edge: &MapEdge) -> bool {
+    edge.kind == 2 && edge.variation <= 1
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MapEdge {
@@ -76,6 +101,10 @@ pub struct Docking {
     pub edges: Vec<MapEdge>,
     pub candidate: Option<Target>,
     pub active: Option<Target>,
+    /// env 3045 for the airborne candidate: 0 none, [`AIR_HANG_TYPE_SHORT`] or [`AIR_HANG_TYPE_LONG`].
+    pub air_hang_type: u8,
+    /// Skip the airborne edge scan: the script is not asking for an air hang (act 3028).
+    pub skip_air_search: bool,
     climb_start: Option<Vec3>,
 }
 
@@ -228,7 +257,7 @@ impl Docking {
     /// Infer the outward side from an upper floor on one side and a drop on the other.
     pub fn target(&self, index: usize, position: Vec3, ground: &dyn Ground) -> Option<Target> {
         let edge = self.edges.get(index)?;
-        if edge.kind != 2 || edge.variation != 0 {
+        if !is_hang(edge) {
             return None;
         }
         let (point, t) = edge.closest(position);
@@ -270,7 +299,14 @@ impl Docking {
 
     pub fn search(&mut self, body: &Body, ground: &dyn Ground) {
         self.candidate = None;
-        if !body.grounded || self.active.is_some() {
+        self.air_hang_type = 0;
+        if self.active.is_some() {
+            return;
+        }
+        if !body.grounded {
+            if !self.skip_air_search {
+                self.air_search(body, ground);
+            }
             return;
         }
         let p = Vec3::from(body.position);
@@ -291,7 +327,7 @@ impl Docking {
                 }
                 continue;
             }
-            if edge.kind != 2 || edge.variation != 0 {
+            if !is_hang(edge) {
                 continue;
             }
             let (point, _) = edge.closest(p);
@@ -329,6 +365,48 @@ impl Docking {
         }
     }
 
+    /// The air catch (env 3045): a hang edge whose lip is in [`AIR_HANG_BAND`] over the feet,
+    /// with the body off its face within [`AIR_HANG_LONG`]; the nearest one wins. Hands the
+    /// wall jump and plain falls into the ground hang's own docking.
+    fn air_search(&mut self, body: &Body, ground: &dyn Ground) {
+        let p = Vec3::from(body.position);
+        let best = (0..self.edges.len())
+            .filter_map(|i| {
+                let edge = &self.edges[i];
+                if !is_hang(edge) {
+                    return None;
+                }
+                // Beside the edge's span, not past its ends (the unclamped projection).
+                let a = Vec3::from(edge.start);
+                let d = Vec3::from(edge.end) - a;
+                let along = Vec3::new(d.x, 0.0, d.z);
+                let s = (p - a).dot(along) / along.length_squared().max(1e-8);
+                let point = a + d * s.clamp(0.0, 1.0);
+                // Cheap rejections before `target`'s collision probes.
+                if !(0.0..=1.0).contains(&s)
+                    || !(AIR_HANG_BAND.0..=AIR_HANG_BAND.1).contains(&(point.y - p.y))
+                    || Vec3::new(p.x - point.x, 0.0, p.z - point.z).length() > AIR_HANG_LONG
+                {
+                    return None;
+                }
+                let target = self.target(i, p, ground)?;
+                let off = (p - target.point).dot(target.outward);
+                (-0.3..=AIR_HANG_LONG)
+                    .contains(&off)
+                    .then_some((target, off))
+            })
+            .min_by(|a, b| a.1.abs().total_cmp(&b.1.abs()));
+        if let Some((mut target, off)) = best {
+            target.angle = angle_diff(target.yaw(), body.yaw).to_degrees();
+            self.air_hang_type = if off > AIR_HANG_SHORT {
+                AIR_HANG_TYPE_LONG
+            } else {
+                AIR_HANG_TYPE_SHORT
+            };
+            self.candidate = Some(target);
+        }
+    }
+
     /// Returns true while docking owns movement, bypassing gravity and collision pushes.
     pub fn step(
         &mut self,
@@ -338,9 +416,9 @@ impl Docking {
         root_progress: Option<f32>,
     ) -> bool {
         let name = animation.unwrap_or("");
-        if self.active.is_none()
-            && name.starts_with("a000_217")
-            && !matches!(name, "a000_217500" | "a000_217520")
+        // Only the hang starts dock: StandToHang* and FreeFallToHang* (2171xx plain, 2172xx
+        // foot hold). The air grab (AirHangGrab*, 2177xx) is still a free fall.
+        if self.active.is_none() && (name.starts_with("a000_2171") || name.starts_with("a000_2172"))
         {
             self.active = self.candidate.clone();
         }
@@ -350,7 +428,7 @@ impl Docking {
         if self.is_cover(target) {
             return false;
         }
-        if name == "a000_217520" {
+        if DROP_CLIPS.contains(&name) {
             body.grounded = false;
             body.velocity = [0.0; 3];
             body.fall_top = body.position[1];
@@ -358,7 +436,7 @@ impl Docking {
             self.climb_start = None;
             return false;
         }
-        let position = if name == "a000_217500" {
+        let position = if CLIMB_CLIPS.contains(&name) {
             let start = *self.climb_start.get_or_insert(Vec3::from(body.position));
             // Precomputed climb displacement is fitted to the collision floor; progress
             // follows the clip's root track, with a time fallback for missing tracks.
@@ -377,7 +455,9 @@ impl Docking {
             self.active = None;
             self.climb_start = None;
             return true;
-        } else if name.starts_with("a000_217") || name.starts_with("a000_020") {
+        } else if (name.starts_with("a000_217") && !name.starts_with("a000_2177"))
+            || name.starts_with("a000_020")
+        {
             target.hang_position()
         } else {
             self.active = None;
@@ -390,4 +470,34 @@ impl Docking {
         body.fall_top = position.y;
         true
     }
+}
+
+/// Wall jump (c0000_transition `BEH_A_WALL_JUMP`): how far out from the chest a wall counts as
+/// touched. Not traced: the exe's contact check behind env 3020; a 0.8 m probe in eight
+/// directions round the facing, as in Fireguy32's RustSekiro port.
+pub const WALL_REACH: f32 = 0.8;
+/// Height of the wall-contact probe over the feet (the chest).
+pub const WALL_PROBE_LIFT: f32 = 1.0;
+/// Shortfall of the probe below which nothing counts as touched.
+pub const WALL_TOLERANCE: f32 = 0.05;
+
+/// The nearest wall within [`WALL_REACH`] of the chest of a body at `feet` facing `yaw`: the
+/// angle in degrees from the facing to it, positive to the right. This is what the engine hands
+/// the HKS as `ContactWallAngle` and answers env 3020 with; the script turns it into
+/// `Selector_WallContactType` (-45..45 F, beyond +-135 B, -135..-45 L, else R).
+pub fn wall_contact(feet: Vec3, yaw: f32, ground: &dyn Ground) -> Option<f32> {
+    let chest = [feet.x, feet.y + WALL_PROBE_LIFT, feet.z];
+    (0..8)
+        .filter_map(|k| {
+            // Ray k is k * 45 degrees to the right of the facing.
+            let right = k as f32 * 45.0;
+            let dir = crate::arena::forward(yaw - right.to_radians());
+            let delta = dir * WALL_REACH;
+            let slid = ground.slide(chest, [delta.x, delta.z]);
+            let shortfall = WALL_REACH - Vec3::new(slid[0], 0.0, slid[1]).dot(dir);
+            let angle = if right > 180.0 { right - 360.0 } else { right };
+            (shortfall > WALL_TOLERANCE).then_some((angle, shortfall))
+        })
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(angle, _)| angle)
 }

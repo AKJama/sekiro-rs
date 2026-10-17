@@ -44,10 +44,10 @@ No env override is set anywhere outside tests [V: grep of `overrides` in `crates
 | env 3000 | grapple can be fired | `0.0` | true when a target is in range |
 | env 3011 | docking end type | `0.0` | 0 none, 1 left end, 2 right end |
 | env 3017 | docking edge variation id | `0.0` | edge variation of the current edge |
-| env 3020 | touching a wall-jump wall | `0.0` | wall contact flag |
+| env 3020 | touching a wall-jump wall | `docking::wall_contact` while airborne, plus the `ContactWallAngle` variable (section 6.1) | exe contact check not traced |
 | env 3025 | touching a swim volume | `0.0` | water plane contact |
 | env 3038, 3039 | can dive, can surface | `0.0` | water state |
-| env 3043, 3044, 3045 | can start wall hug, ground hang, air hang | `0.0` | edge tests |
+| env 3043, 3044, 3045 | can start wall hug, ground hang, air hang | edge searches in `docking.rs`; 3045 is the air catch type (section 6.1) | exe search boxes not traced |
 | env 3046 | candidate edge variation (arg 1 = hang) | `0.0` | edge variation |
 | env 3048, 3049, 3059, 3060 | hang corner moves | `0.0` | corner geometry |
 | env 3050 | can climb up from hang | `0.0` | top surface test |
@@ -295,6 +295,30 @@ All [V] from `c0000_transition.lua` unless marked.
 - Hang jump: `HangJumpReady` (201304) and `HangFootHoldJumpReady` (201305), then wall-jump rows (`Selector_WallContactType` F).
 - Docking break (`BEH_R_DOCKING_BREAK`) exits the style on damage or contact.
 - Attacks from hang exist (`HangSubAttackCombo1`, `HangAttackCombo1` 314010, eavesdrop clips); out of scope for the first pass.
+
+### 6.1 Wall jump and air catch (issue #16)
+
+Built on the existing ground hang, adapted from Fireguy32's RustSekiro wall jump and air catch (FFwLo/RustSekiro PR 1).
+- env 3020: `docking::wall_contact` probes 0.8 m out from the chest (1.0 m over the feet) in eight directions round the facing with `Ground::slide`, while airborne and not docked.
+  The nearest wall's angle from the facing, positive to the right, goes to the hkb variable `ContactWallAngle`; the script turns it into `Selector_WallContactType` [V: `c0000_transition.lua` `BEH_A_WALL_JUMP`].
+  The 0.8 m reach and the probe height are not traced (the exe's contact check).
+- The script gates the wall jump itself: TAE ref 104 `ENABLE_WALL_JUMP_CANCEL`, falling (env 3003 < 0), fall height under 20 m, the jump button, and `g_wallJumpCount`, which the script sets to `WALL_JUMP_COUNT_MAX` (1) on `W_WallJumpReady` and resets in `_LandReset`.
+  So one wall jump a flight comes from the script, not from an engine counter as in the RustSekiro port.
+  The take-off speed is the WallJumpStart clip's own TAE 920 row.
+- env 3045: when the script asks (act 3028), `Docking::air_search` takes the nearest hang edge whose lip is 1.0 to 2.6 m over the feet, with the body 0.3 m inside to 2.0 m out from its face and beside its span: type 1 (short) up to 1.0 m out, else type 2 (long).
+  The values are Fireguy32's, not traced.
+  The catch reuses the ground hang's docking (`Docking::step`), so HangIdle, the climb and the drop work as before.
+- Hang edges now include variation 1 (`HANG_EDGE_TYPE_ENABLE_HOLD_FOOT`): the FootHold clips (catch 2172xx, idle 20010, climb 217600, drop 217620).
+  The wall after the grapple tree from m11_00 start 0 has such an edge (`h023000` chain 2, lip y -32.8, about 5.7 m over the floor in front).
+- FreeFallToHang (217120) is 3.3 s long and hands over to HangIdle at its end; the FootHold catch (217220) is short.
+- Hang placement is read from the clips [V: bone and root-motion samples of the cached clips].
+  HangIdle (20000) and HangFootHoldIdle (20010) both hold the hands 1.55 m over the root and 0.635 m in front of it, so the root hangs 1.55 m under and 0.635 m out from the lip (`HANG_DEPTH`, `HANG_OUTWARD`; they were 1.5 m and 0.35 m placeholders, which put the body in the face).
+  The pelvis is 0.55 m (plain) or 0.18 m (foot hold) in front of the root.
+  HangToStand and HangFootHoldToStand (217500, 217600) carry the root 1.10 m forward and 1.60 m up, so the climb ends 0.465 m in from the lip (`CLIMB_INWARD`, was 0.25 m).
+- Only the hang starts (2171xx plain, 2172xx foot hold) dock Wolf; the air grab (AirHangGrab*, 2177xx) is a free fall and no longer docks him if a lip comes in reach mid-grab.
+- HangFootHoldIdle (20010) counts as the docked idle like HangIdle: standby, and Shift / Space are not held back by the ground TAE windows.
+- `PLAY_LOG_DOCKING=1` logs env 3044, 3045, 3020, 3050, the edge variation, standby, the requested buttons and the state each step.
+- Not built: hug wall jump (CoverToWallJumpReady), hang jump (HangJumpReady), shimmy, corners, peek, hang and hug deathblows.
 
 ### 6.2 TAE on the hang clips
 

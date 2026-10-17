@@ -71,6 +71,7 @@ mod super_armour;
 mod swim;
 mod sword_saint;
 mod true_monk;
+mod wall_jump;
 mod watering_hole_arena;
 mod wire;
 mod world_events;
