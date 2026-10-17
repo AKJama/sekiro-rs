@@ -52,6 +52,7 @@ impl Plugin for PostEffectsPlugin {
 
 /// Load authored strips as unorm data, even though PNG loaders normally assume sRGB.
 pub fn install_post_effects(app: &mut App, dir: &std::path::Path) -> anyhow::Result<()> {
+    install_probe_residency(app);
     let args: Vec<_> = std::env::args().collect();
     let mut effects = MapPostEffects {
         no_grading: args.iter().any(|a| a == "--no-grading"),
@@ -992,6 +993,84 @@ impl MapProbes {
     }
 }
 
+#[derive(Resource, Clone, Default)]
+pub(crate) struct ProbeResidency(
+    std::sync::Arc<std::sync::RwLock<std::collections::HashSet<AssetId<Image>>>>,
+);
+
+#[derive(Resource, Default)]
+struct RequestedProbes(Vec<AssetId<Image>>);
+
+fn install_probe_residency(app: &mut App) {
+    let residency = ProbeResidency::default();
+    app.insert_resource(residency.clone());
+    if let Some(render) = app.get_sub_app_mut(bevy::render::RenderApp) {
+        render
+            .insert_resource(residency)
+            .init_resource::<RequestedProbes>()
+            .add_systems(bevy::render::ExtractSchedule, extract_probe_requests)
+            .add_systems(
+                bevy::render::Render,
+                prepare_probe_residency.after(bevy::render::RenderSystems::PrepareAssets),
+            );
+    }
+}
+
+fn extract_probe_requests(
+    probes: bevy::render::Extract<Res<MapProbes>>,
+    mut requested: ResMut<RequestedProbes>,
+) {
+    requested.0.clear();
+    for (specular, diffuse) in probes.handles.values() {
+        requested.0.extend([specular.id(), diffuse.id()]);
+    }
+}
+
+fn prepare_probe_residency(
+    requested: Res<RequestedProbes>,
+    residency: Res<ProbeResidency>,
+    images: Res<bevy::render::render_asset::RenderAssets<bevy::render::texture::GpuImage>>,
+) {
+    let mut ready = residency.0.write().unwrap();
+    ready.clear();
+    ready.extend(
+        requested
+            .0
+            .iter()
+            .copied()
+            .filter(|id| images.get(*id).is_some()),
+    );
+}
+
+fn probe_light(
+    current: Option<&EnvironmentMapLight>,
+    ready: Option<&(Handle<Image>, Handle<Image>)>,
+) -> Option<EnvironmentMapLight> {
+    if let Some((specular, diffuse)) = ready {
+        current
+            .is_none_or(|c| {
+                c.specular_map != *specular
+                    || c.diffuse_map != *diffuse
+                    || c.intensity != ENV_PER_UNIT
+            })
+            .then(|| EnvironmentMapLight {
+                specular_map: specular.clone(),
+                diffuse_map: diffuse.clone(),
+                intensity: ENV_PER_UNIT,
+                ..default()
+            })
+    } else {
+        // Removing the component changes the view key and re-specializes every map draw.
+        // Zero intensity has the same fallback lighting while retaining resident textures.
+        current
+            .filter(|c| c.intensity != 0.)
+            .map(|c| EnvironmentMapLight {
+                intensity: 0.,
+                ..c.clone()
+            })
+    }
+}
+
 /// Spatial reflection probes fade per receiver, so crossing boxes never cuts the whole view.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)] // Independent Bevy system parameters.
 pub fn apply_probes(
@@ -1004,6 +1083,7 @@ pub fn apply_probes(
     mut probe_sky: Local<Option<bool>>,
     selection: Res<crate::lighting_selection::RegionSelection>,
     mut last_env_bank: Local<Option<i32>>,
+    residency: Option<Res<ProbeResidency>>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("apply_probes");
     // The probes are captures from points inside the level, so as a sky they show nearby
@@ -1062,7 +1142,12 @@ pub fn apply_probes(
         probes.handles[&id].clone()
     });
     let ready = maps.filter(|(s, d)| {
-        assets.is_loaded_with_dependencies(s.id()) && assets.is_loaded_with_dependencies(d.id())
+        assets.is_loaded_with_dependencies(s.id())
+            && assets.is_loaded_with_dependencies(d.id())
+            && residency.as_ref().is_none_or(|r| {
+                let ready = r.0.read().unwrap();
+                ready.contains(&s.id()) && ready.contains(&d.id())
+            })
     });
     let active = if ready.is_some() { selected } else { None };
     if probes.active != active {
@@ -1079,15 +1164,10 @@ pub fn apply_probes(
         }
     }
     for (entity, current, current_sky) in &cameras {
-        if let Some((specular, diffuse)) = &ready {
-            if current.is_none_or(|c| c.specular_map != *specular) {
-                commands.entity(entity).insert(EnvironmentMapLight {
-                    specular_map: specular.clone(),
-                    diffuse_map: diffuse.clone(),
-                    intensity: ENV_PER_UNIT,
-                    ..default()
-                });
-            }
+        if let Some(light) = probe_light(current, ready.as_ref()) {
+            commands.entity(entity).insert(light);
+        }
+        if let Some((specular, _)) = &ready {
             if show_sky && current_sky.is_none_or(|s| s.image.as_ref() != Some(specular)) {
                 commands.entity(entity).insert(Skybox {
                     image: Some(specular.clone()),
@@ -1095,10 +1175,8 @@ pub fn apply_probes(
                     ..default()
                 });
             }
-        } else if current.is_some() {
-            commands
-                .entity(entity)
-                .remove::<(Skybox, EnvironmentMapLight)>();
+        } else if current_sky.is_some() {
+            commands.entity(entity).remove::<Skybox>();
         }
     }
 }
@@ -1383,6 +1461,26 @@ pub fn apply_lighting(
 #[cfg(test)]
 mod probe_tests {
     use super::*;
+    #[test]
+    fn probe_handoff_keeps_the_view_binding_and_restores_the_authored_intensity() {
+        let mut images = Assets::<Image>::default();
+        let first = (images.add(Image::default()), images.add(Image::default()));
+        let second = (images.add(Image::default()), images.add(Image::default()));
+        let light = probe_light(None, Some(&first)).unwrap();
+        let waiting = probe_light(Some(&light), None).unwrap();
+        assert_eq!(waiting.intensity, 0.);
+        assert_eq!(waiting.specular_map, light.specular_map);
+        assert_eq!(waiting.diffuse_map, light.diffuse_map);
+        assert!(probe_light(Some(&waiting), None).is_none());
+        // The same probe can finish uploading again after an environment event restart.
+        let restored = probe_light(Some(&waiting), Some(&first)).unwrap();
+        assert_eq!(restored.intensity, ENV_PER_UNIT);
+        let switched = probe_light(Some(&waiting), Some(&second)).unwrap();
+        assert_eq!(switched.specular_map, second.0);
+        assert_eq!(switched.diffuse_map, second.1);
+        assert_eq!(switched.intensity, ENV_PER_UNIT);
+    }
+
     #[test]
     fn gi_grid_retains_ordered_coverage_at_rotated_bounds_and_cell_faces() {
         let mut records = Vec::new();

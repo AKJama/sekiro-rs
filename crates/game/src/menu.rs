@@ -20,6 +20,39 @@ pub fn relaunch() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn presentation_flags_survive_play_and_return_to_menu() {
+        let args = ["--uncapped", "--present-mode", "immediate"].map(String::from);
+        let start = PanelState::new(true, &args);
+        let mut play = start.choices.args();
+        play.extend(start.extras);
+        assert!(play.iter().any(|a| a == "--uncapped"));
+        assert_eq!(
+            crate::arg_value(&play, "--present-mode").as_deref(),
+            Some("immediate")
+        );
+
+        let mut pause = PanelState::new(false, &play);
+        pause.paused = true;
+        pause.selected = 1;
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::Enter);
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<KeyboardInput>()
+            .insert_resource(keys)
+            .insert_resource(pause)
+            .add_systems(Update, update);
+        app.update();
+        let returned = NEXT.lock().unwrap().take().expect("return to menu");
+        let menu = PanelState::new(true, &returned);
+        assert!(menu.extras.iter().any(|a| a == "--uncapped"));
+        assert_eq!(
+            crate::arg_value(&menu.extras, "--present-mode").as_deref(),
+            Some("immediate")
+        );
+    }
+
     fn equivalent(choices: Choices, flags: &str) {
         let mut menu = vec!["sekiro-rs".into()];
         menu.extend(choices.args());
@@ -608,6 +641,7 @@ impl PanelState {
         for flag in [
             "--cache",
             "--window-size",
+            "--present-mode",
             "--script",
             "--shots",
             "--input",
@@ -620,7 +654,7 @@ impl PanelState {
                 extras.extend([flag.to_string(), v]);
             }
         }
-        for flag in ["--simple-ai", "--exit"] {
+        for flag in ["--simple-ai", "--exit", "--uncapped"] {
             if args.iter().any(|a| a == flag) {
                 extras.push(flag.into());
             }
@@ -1141,6 +1175,7 @@ fn update(
                     ];
                     for flag in [
                         "--window-size",
+                        "--present-mode",
                         "--cache",
                         "--checkpoint",
                         "--brain-moves",
@@ -1150,6 +1185,9 @@ fn update(
                         if let Some(value) = crate::arg_value(&state.extras, flag) {
                             args.extend([flag.into(), value]);
                         }
+                    }
+                    if state.extras.iter().any(|a| a == "--uncapped") {
+                        args.push("--uncapped".into());
                     }
                     if let Some(script) = &state.return_script {
                         args.extend(["--menu-script".into(), script.clone()]);

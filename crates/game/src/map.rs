@@ -48,6 +48,7 @@ pub(crate) mod visibility;
 pub(crate) mod lod;
 #[path = "map_material.rs"]
 mod map_material;
+pub(crate) use map_material::batches::StaticBatches;
 pub(crate) use map_material::{ATTR_MAP_BLEND2, MaterialStats};
 #[path = "sky.rs"]
 pub(crate) mod sky;
@@ -1703,7 +1704,10 @@ fn budget_map_shadows(
     time: Res<Time>,
     settings: Res<ShadowSettings>,
     focus: Query<&GlobalTransform, With<MapFocus>>,
-    meshes: Query<(Entity, &GlobalTransform, &Aabb, Option<&NotShadowCaster>), With<Mesh3d>>,
+    meshes: Query<
+        (Entity, &GlobalTransform, &Aabb, Option<&NotShadowCaster>),
+        (With<Mesh3d>, Without<world::AuthoredNoShadow>),
+    >,
     parents: Query<&ChildOf>,
     roots: Query<(), With<DrawGroups>>,
     mut last: Local<f32>,

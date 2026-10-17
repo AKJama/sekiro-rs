@@ -48,10 +48,14 @@ mod map;
 mod map_fog_surface;
 mod map_fx;
 mod map_grass;
+mod material_residency;
 mod menu;
+mod parallel_shadows;
 mod perf_log;
+mod pipeline_warmup;
 mod play;
 mod presentation;
+mod render_context;
 #[cfg(feature = "profile-spans")]
 mod span_profile;
 mod viewer;

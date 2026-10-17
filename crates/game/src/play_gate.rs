@@ -201,6 +201,8 @@ pub(super) fn update(
     rigs: Query<&Rig, With<Actor>>,
     pending: Option<Res<crate::map::Pending>>,
     pipelines: Option<Res<crate::map::ready::Pipelines>>,
+    warmup: Option<Res<crate::pipeline_warmup::PipelineWarmup>>,
+    batches: Option<Res<crate::map::StaticBatches>>,
     collision: Option<Res<MapCollision>>,
     screens: Query<Entity, With<LoadingScreen>>,
     mut bars: Query<&mut Node, With<LoadingBar>>,
@@ -213,11 +215,13 @@ pub(super) fn update(
     }
     let progress = if gate.ready_at.is_none() {
         let rigs_bound = !rigs.is_empty() && rigs.iter().all(|r| r.bound);
-        let map = pending.as_ref().is_none_or(|p| p.loaded());
-        let compiled = pipelines.as_ref().is_none_or(|p| {
-            let status = p.status();
-            status.pending == 0 && status.ready > 0
-        });
+        let map = pending.as_ref().is_none_or(|p| p.loaded())
+            && batches.as_ref().is_none_or(|b| b.ready());
+        let compiled = warmup.as_ref().is_none_or(|w| w.ready())
+            && pipelines.as_ref().is_none_or(|p| {
+                let status = p.status();
+                status.pending == 0 && status.ready > 0
+            });
         let p = sim.duel.player.body.position;
         let floor = collision
             .as_ref()
