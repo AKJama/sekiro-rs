@@ -10,10 +10,18 @@ use bevy::prelude::*;
 use bevy::render::erased_render_asset::ErasedRenderAssets;
 use bevy::render::mesh::RenderMesh;
 use bevy::render::render_asset::RenderAssets;
-use bevy::render::renderer::RenderDevice;
 use bevy::render::sync_world::MainEntity;
 use bevy::render::{Extract, ExtractSchedule};
-use std::{any::TypeId, collections::VecDeque};
+use std::{
+    any::TypeId,
+    collections::{HashMap, VecDeque},
+};
+
+type PipelineVariant = (
+    bool,
+    ErasedMaterialPipelineKey,
+    bevy::mesh::MeshVertexBufferLayoutRef,
+);
 
 #[derive(Clone, Copy)]
 struct Resident {
@@ -23,11 +31,17 @@ struct Resident {
 }
 
 #[derive(Resource, Default)]
-struct Residents(Vec<Resident>);
+struct Residents {
+    items: Vec<Resident>,
+    captured: bool,
+}
 
 #[derive(Resource, Default)]
 struct Queue {
-    work: Option<VecDeque<Resident>>,
+    work: VecDeque<Resident>,
+    started: bool,
+    pipelines:
+        HashMap<PipelineVariant, Option<bevy::render::render_resource::CachedRenderPipelineId>>,
     completed: usize,
 }
 
@@ -43,12 +57,12 @@ fn extract<M: Material>(
     mut residents: ResMut<Residents>,
     warmup: Res<super::PipelineWarmup>,
 ) {
-    residents.0.clear();
-    if warmup.ready() {
+    if residents.captured || !warmup.loaded.load(std::sync::atomic::Ordering::Acquire) {
         return;
     }
+    residents.captured = true;
     residents
-        .0
+        .items
         .extend(meshes.iter().map(|(entity, mesh, material)| Resident {
             entity: entity.into(),
             mesh: mesh.0.id(),
@@ -62,8 +76,9 @@ const FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
 pub(super) fn warm<M: Material>(world: &mut World) -> bool {
     let _timer = crate::perf_log::SystemTimer::start("entity pipeline warmup");
     let mut queue = world.remove_resource::<Queue>().unwrap();
-    if queue.work.is_none() {
-        queue.work = Some(world.resource::<Residents>().0.iter().copied().collect());
+    if !queue.started {
+        queue.started = true;
+        queue.work = std::mem::take(&mut world.resource_mut::<Residents>().items).into();
     }
     let colors: Vec<_> = world
         .resource::<ViewKeyCache>()
@@ -76,13 +91,12 @@ pub(super) fn warm<M: Material>(world: &mut World) -> bool {
         .map(|(&view, &key)| (view, key))
         .collect();
     let depth_clip = world
-        .resource::<RenderDevice>()
-        .features()
-        .contains(wgpu::Features::DEPTH_CLIP_CONTROL);
+        .resource::<bevy::pbr::PrepassPipeline>()
+        .depth_clip_control_supported;
     // This runs behind the loading screen, so spend most of each frame on it.
     let start = std::time::Instant::now();
     while start.elapsed() < FRAME_BUDGET {
-        let Some(resident) = queue.work.as_mut().unwrap().pop_front() else {
+        let Some(resident) = queue.work.pop_front() else {
             break;
         };
         let Some(mesh) = world
@@ -116,32 +130,17 @@ pub(super) fn warm<M: Material>(world: &mut World) -> bool {
                 continue;
             };
             for &(view, view_key) in views {
-                let mut key = view_key | bits;
-                if shadow {
-                    if !matches!(
-                        properties.alpha_mode,
-                        AlphaMode::Opaque | AlphaMode::Multiply
-                    ) {
-                        key |= MeshPipelineKey::MAY_DISCARD;
-                    }
-                    if properties
-                        .get_shader(bevy::pbr::PrepassVertexShader)
-                        .is_some()
-                        || properties
-                            .get_shader(bevy::pbr::PrepassFragmentShader)
-                            .is_some()
-                    {
-                        key |= MeshPipelineKey::PREPASS_READS_MATERIAL;
-                    }
-                } else {
-                    key |= properties
-                        .mesh_pipeline_key_bits
-                        .downcast::<MeshPipelineKey>();
-                    key |= bevy::pbr::alpha_mode_pipeline_key(
-                        properties.alpha_mode,
-                        &Msaa::from_samples(view_key.msaa_samples()),
-                    );
-                }
+                let key = super::pass_key(
+                    if shadow {
+                        super::Pass::Shadow
+                    } else {
+                        super::Pass::Color
+                    },
+                    view_key,
+                    bits,
+                    &layout,
+                    &properties,
+                );
                 let draw = if shadow {
                     let depth_only = !key.intersects(
                         MeshPipelineKey::MAY_DISCARD | MeshPipelineKey::PREPASS_READS_MATERIAL,
@@ -164,7 +163,11 @@ pub(super) fn warm<M: Material>(world: &mut World) -> bool {
                     mesh_key: ErasedMeshPipelineKey::new(key),
                     material_key: properties.material_key.clone(),
                 };
-                if let Ok(pipeline) = specialize(world, erased, &layout, &properties) {
+                let cached = queue
+                    .pipelines
+                    .entry((shadow, erased.clone(), layout.clone()))
+                    .or_insert_with(|| specialize(world, erased, &layout, &properties).ok());
+                if let Some(pipeline) = *cached {
                     if let Some(draw) = draw {
                         world
                             .resource_mut::<SpecializedShadowMaterialPipelineCache>()
@@ -183,8 +186,9 @@ pub(super) fn warm<M: Material>(world: &mut World) -> bool {
         }
         queue.completed += 1;
     }
-    let ready = queue.work.as_ref().unwrap().is_empty();
+    let ready = queue.work.is_empty();
     if ready {
+        queue.pipelines.clear();
         info!(
             "map entity warmup complete: {} resident mesh placements",
             queue.completed

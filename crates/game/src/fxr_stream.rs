@@ -31,11 +31,11 @@ struct Upload {
 pub(super) struct VertexStreams(HashMap<AssetId<Mesh>, Arc<Upload>>);
 
 impl VertexStreams {
-    pub(super) fn publish(&mut self, id: AssetId<Mesh>, mesh: &Mesh) {
+    pub(super) fn publish(&mut self, id: AssetId<Mesh>, mesh: &Mesh) -> bool {
         let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
             mesh.attribute(Mesh::ATTRIBUTE_POSITION)
         else {
-            return;
+            return false;
         };
         let (min, max) = positions.iter().fold(
             (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
@@ -49,6 +49,7 @@ impl VertexStreams {
                 center: (min + max) * 0.5,
             }),
         );
+        true
     }
 
     #[cfg(test)]
@@ -76,9 +77,6 @@ type DrawStream = (
 );
 
 pub(super) fn install(app: &mut App) {
-    if std::env::var_os("SEKIRO_FXR_ASSETS").is_some() {
-        return;
-    }
     app.init_resource::<VertexStreams>()
         .add_plugins(ExtractResourcePlugin::<VertexStreams>::default())
         .add_systems(Last, retire_vertices);
@@ -105,8 +103,10 @@ fn retire_vertices(
     mut streams: ResMut<VertexStreams>,
 ) {
     for event in events.read() {
-        if let AssetEvent::Removed { id } = event {
-            streams.0.remove(id);
+        if let AssetEvent::Removed { id } = event
+            && streams.bypass_change_detection().0.remove(id).is_some()
+        {
+            streams.set_changed();
         }
     }
 }
@@ -162,33 +162,35 @@ fn route_draws(
     mut transparent: ResMut<ViewSortedRenderPhases<Transparent3d>>,
     mut transmissive: ResMut<ViewSortedRenderPhases<Transmissive3d>>,
 ) {
+    if streams.0.is_empty() {
+        return;
+    }
     let transparent_id = transparent_draws.read().id::<DrawStream>();
     let transmissive_id = transmissive_draws.read().id::<DrawStream>();
-    for phase in transparent.0.values_mut() {
+    route_phase(&streams, &instances, &mut transparent, |item| {
+        item.draw_function = transparent_id;
+        &mut item.sorting_info
+    });
+    route_phase(&streams, &instances, &mut transmissive, |item| {
+        item.draw_function = transmissive_id;
+        &mut item.sorting_info
+    });
+}
+
+fn route_phase<P: bevy::render::render_phase::SortedPhaseItem>(
+    streams: &VertexStreams,
+    instances: &RenderMeshInstances,
+    phases: &mut ViewSortedRenderPhases<P>,
+    mut route: impl FnMut(&mut P) -> &mut TransparentSortingInfo3d,
+) {
+    for phase in phases.0.values_mut() {
         for item in phase.items.values_mut() {
             if let Some(upload) = instances
                 .mesh_asset_id(item.main_entity())
                 .and_then(|id| streams.0.get(&id))
+                && let TransparentSortingInfo3d::Sorted { mesh_center, .. } = route(item)
             {
-                item.draw_function = transparent_id;
-                if let TransparentSortingInfo3d::Sorted { mesh_center, .. } = &mut item.sorting_info
-                {
-                    *mesh_center = upload.center;
-                }
-            }
-        }
-    }
-    for phase in transmissive.0.values_mut() {
-        for item in phase.items.values_mut() {
-            if let Some(upload) = instances
-                .mesh_asset_id(item.main_entity())
-                .and_then(|id| streams.0.get(&id))
-            {
-                item.draw_function = transmissive_id;
-                if let TransparentSortingInfo3d::Sorted { mesh_center, .. } = &mut item.sorting_info
-                {
-                    *mesh_center = upload.center;
-                }
+                *mesh_center = upload.center;
             }
         }
     }

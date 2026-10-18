@@ -75,14 +75,19 @@ static FRAME_SAMPLES: std::sync::Mutex<SystemSamples> =
 
 pub struct SystemTimer(Option<(&'static str, Instant)>);
 
+pub(crate) fn args() -> &'static [String] {
+    static ARGS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    ARGS.get_or_init(|| std::env::args().collect())
+}
+
+pub(crate) fn profile_systems() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| args().iter().any(|a| a == "--profile-systems"))
+}
+
 impl SystemTimer {
     pub fn start(name: &'static str) -> Self {
-        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        Self(
-            ENABLED
-                .get_or_init(|| std::env::args().any(|a| a == "--profile-systems"))
-                .then(|| (name, Instant::now())),
-        )
+        Self(profile_systems().then(|| (name, Instant::now())))
     }
 }
 
@@ -97,21 +102,21 @@ impl Drop for SystemTimer {
 /// Add one timed run of `name` to the shared store (system timers and, with the
 /// `profile-spans` feature, tracing spans).
 pub fn record(name: impl Into<std::borrow::Cow<'static, str>>, ms: f64) {
+    fn accumulate(samples: &mut SystemSamples, name: std::borrow::Cow<'static, str>, ms: f64) {
+        let sample = samples.entry(name).or_default();
+        sample.0 += 1;
+        sample.1 += ms;
+        sample.2 = sample.2.max(ms);
+    }
     let name = name.into();
     static PER_FRAME: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *PER_FRAME.get_or_init(enabled)
         && let Ok(mut samples) = FRAME_SAMPLES.lock()
     {
-        let sample = samples.entry(name.clone()).or_default();
-        sample.0 += 1;
-        sample.1 += ms;
-        sample.2 = sample.2.max(ms);
+        accumulate(&mut samples, name.clone(), ms);
     }
     if let Ok(mut samples) = SYSTEM_SAMPLES.lock() {
-        let sample = samples.entry(name).or_default();
-        sample.0 += 1;
-        sample.1 += ms;
-        sample.2 = sample.2.max(ms);
+        accumulate(&mut samples, name, ms);
     }
 }
 
@@ -303,9 +308,7 @@ pub fn install_render_probe(app: &mut App) -> RenderProbe {
         return probe;
     };
     render.insert_resource(probe.clone());
-    if std::env::var_os("PF_RESPAWN_PROBE").is_some()
-        || std::env::args().any(|a| a == "--profile-systems")
-    {
+    if std::env::var_os("PF_RESPAWN_PROBE").is_some() || profile_systems() {
         render.add_systems(
             Render,
             count_draw_batches
@@ -371,10 +374,26 @@ pub fn install_render_probe(app: &mut App) -> RenderProbe {
         })
         .after(RenderSystems::PostCleanup),
     );
-    if std::env::args().any(|a| a == "--profile-systems") {
+    if profile_systems() {
         install_detailed_probe(render);
     }
     probe
+}
+
+type ProbeClock = std::sync::Arc<std::sync::Mutex<Instant>>;
+
+fn reset_probe(clock: ProbeClock) -> impl FnMut() {
+    move || *clock.lock().unwrap() = Instant::now()
+}
+
+fn record_probe(clock: ProbeClock, name: &'static str, reset: bool) -> impl FnMut() {
+    move || {
+        let mut last = clock.lock().unwrap();
+        record(name, last.elapsed().as_secs_f64() * 1000.0);
+        if reset {
+            *last = Instant::now();
+        }
+    }
 }
 
 /// Ordered boundaries, including submission (not covered by GPU pass diagnostics).
@@ -421,25 +440,21 @@ fn install_detailed_probe(render: &mut SubApp) {
         ),
     ] {
         let clock = std::sync::Arc::new(std::sync::Mutex::new(Instant::now()));
-        let start = clock.clone();
         render.add_systems(
             Render,
-            (move || *start.lock().unwrap() = Instant::now())
+            reset_probe(clock.clone())
                 .after(previous)
                 .before(set.clone()),
         );
         render.add_systems(
             Render,
-            (move || record(name, clock.lock().unwrap().elapsed().as_secs_f64() * 1000.0))
-                .after(set)
-                .before(next),
+            record_probe(clock, name, false).after(set).before(next),
         );
     }
     let clock = std::sync::Arc::new(std::sync::Mutex::new(Instant::now()));
-    let start = clock.clone();
     render.add_systems(
         RenderGraph,
-        (move || *start.lock().unwrap() = Instant::now()).before(RenderGraphSystems::Begin),
+        reset_probe(clock.clone()).before(RenderGraphSystems::Begin),
     );
     for (previous, next, name) in [
         (
@@ -453,28 +468,18 @@ fn install_detailed_probe(render: &mut SubApp) {
             "render graph submit",
         ),
     ] {
-        let clock = clock.clone();
         render.add_systems(
             RenderGraph,
-            (move || {
-                let mut last = clock.lock().unwrap();
-                record(name, last.elapsed().as_secs_f64() * 1000.0);
-                *last = Instant::now();
-            })
-            .after(previous)
-            .before(next),
+            record_probe(clock.clone(), name, true)
+                .after(previous)
+                .before(next),
         );
     }
     render.add_systems(
         Render,
-        (move || {
-            record(
-                "render finish/present",
-                clock.lock().unwrap().elapsed().as_secs_f64() * 1000.0,
-            )
-        })
-        .after(bevy::render::renderer::render_system)
-        .before(RenderSystems::Cleanup),
+        record_probe(clock, "render finish/present", false)
+            .after(bevy::render::renderer::render_system)
+            .before(RenderSystems::Cleanup),
     );
     render.add_systems(
         Render,
@@ -484,22 +489,15 @@ fn install_detailed_probe(render: &mut SubApp) {
     );
     use bevy::core_pipeline::schedule::{Core3d, Core3dSystems};
     let clock = std::sync::Arc::new(std::sync::Mutex::new(Instant::now()));
-    let start = clock.clone();
     render.add_systems(
         Core3d,
-        (move || *start.lock().unwrap() = Instant::now())
+        reset_probe(clock.clone())
             .before(Core3dSystems::Prepass)
             .before(bevy::pbr::per_view_shadow_pass::<false>),
     );
     render.add_systems(
         Core3d,
-        (move || {
-            record(
-                "render camera passes",
-                clock.lock().unwrap().elapsed().as_secs_f64() * 1000.0,
-            )
-        })
-        .after(Core3dSystems::PostProcess),
+        record_probe(clock, "render camera passes", false).after(Core3dSystems::PostProcess),
     );
 }
 
@@ -654,26 +652,9 @@ macro_rules! register {
         if crate::perf_log::enabled() {
             let probe = crate::perf_log::install_render_probe(&mut $app);
             $app.insert_resource(crate::perf_log::PerfLog::open()?)
-                .insert_resource(crate::perf_log::PerfTour::from_args(&std::env::args().collect::<Vec<_>>())?)
+                .insert_resource(crate::perf_log::PerfTour::from_args(crate::perf_log::args())?)
                 .insert_resource(probe)
-                .add_systems(FixedUpdate, (|mut tour: ResMut<crate::perf_log::PerfTour>,
-                    mut sim: NonSendMut<Sim>, mut orbit: ResMut<Orbit>,
-                    gate: Res<play_gate::PlayGate>, collision: Option<Res<MapCollision>>| {
-                    if !gate.open() { return; }
-                    let Some([x, y, z, yaw]) = tour.next(sim.step) else { return; };
-                    let y = collision.as_ref().and_then(|c| c.0.floor(x, z, y + 1.)).unwrap_or(y);
-                    let body = &mut sim.duel.player.body;
-                    body.position = [x, y, z];
-                    body.velocity = [0.; 3];
-                    body.grounded = true;
-                    body.fall_top = y;
-                    body.yaw = yaw.to_radians();
-                    sim.previous[WOLF] = ([x, y, z], yaw.to_radians());
-                    orbit.focus = Vec3::new(x, y, z) + Vec3::Y * sim.duel.camera_director.focus_height;
-                    orbit.yaw = yaw.to_radians();
-                    orbit.look = Default::default();
-                    info!("perf tour: step {} at {x},{y},{z} yaw {yaw}", sim.step);
-                }).before(simulate))
+                .add_systems(FixedUpdate, apply_perf_tour.before(simulate))
                 .add_systems(First, |mut log: ResMut<crate::perf_log::PerfLog>| {
                     log.frame_start = std::time::Instant::now();
                 })

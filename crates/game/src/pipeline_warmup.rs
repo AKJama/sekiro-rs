@@ -37,20 +37,24 @@ impl PipelineWarmup {
     }
 }
 
-pub(crate) fn install<M: Material>(app: &mut App) {
+pub(crate) fn install<M: Material>(app: &mut App, args: &[String]) {
     // Fixed captures wait for each pose's exact pipelines themselves, including
     // diagnostic passes that never occur in traversal. Avoid compiling unused variants.
-    if std::env::var_os("SEKIRO_NO_PIPELINE_WARMUP").is_some()
-        || std::env::args()
-            .any(|a| matches!(a.as_str(), "--sweep" | "--render-gate" | "--reference-gate"))
+    if args
+        .iter()
+        .any(|a| matches!(a.as_str(), "--sweep" | "--render-gate" | "--reference-gate"))
     {
         return;
     }
     let warmup = PipelineWarmup::default();
     app.insert_resource(warmup.clone()).add_systems(
         First,
-        |pending: Res<crate::map::Pending>, warmup: Res<PipelineWarmup>| {
-            warmup.loaded.store(pending.loaded(), Ordering::Release);
+        |pending: Res<crate::map::Pending>,
+         batches: Res<crate::map::StaticBatches>,
+         warmup: Res<PipelineWarmup>| {
+            warmup
+                .loaded
+                .store(pending.loaded() && batches.ready(), Ordering::Release);
         },
     );
     if let Some(render) = app.get_sub_app_mut(RenderApp) {
@@ -71,10 +75,16 @@ struct Work {
     prepass: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    Color,
+    Prepass,
+    Shadow,
+}
+
 #[derive(Default)]
 struct WarmCache {
-    counts: (usize, usize),
-    stable: usize,
+    started: bool,
     seen: HashSet<(bool, ErasedMaterialPipelineKey, MeshVertexBufferLayoutRef)>,
     work: VecDeque<Work>,
     queued: usize,
@@ -92,26 +102,18 @@ impl WarmCache {
     }
 }
 
-/// Frames after the map loads before warmup stops waiting for steady asset counts.
+/// Maximum loading frames spent specializing and compiling the fixed resident set.
 const SETTLE_DEADLINE_FRAMES: u32 = 300;
 
 fn warm_pipelines<M: Material>(world: &mut World, mut state: Local<WarmCache>) {
     let warmup = world.resource::<PipelineWarmup>().clone();
-    if warmup.ready() || !warmup.loaded.load(Ordering::Acquire) {
+    if warmup.ready() || (!state.started && !warmup.loaded.load(Ordering::Acquire)) {
         return;
     }
     let _timer = crate::perf_log::SystemTimer::start("pipeline warmup");
     state.frames += 1;
-    let counts = (
-        world.resource::<RenderAssets<RenderMesh>>().iter().count(),
-        world
-            .resource::<ErasedRenderAssets<PreparedMaterial>>()
-            .iter()
-            .count(),
-    );
-    if counts != state.counts {
-        state.counts = counts;
-        state.stable = 0;
+    if !state.started {
+        state.started = true;
         let layouts: HashSet<_> = world
             .resource::<RenderAssets<RenderMesh>>()
             .iter()
@@ -147,13 +149,14 @@ fn warm_pipelines<M: Material>(world: &mut World, mut state: Local<WarmCache>) {
                     id.type_id(),
                     p.material_key.clone(),
                     p.mesh_pipeline_key_bits,
-                    format!("{:?}", p.alpha_mode),
+                    alpha_key(p.alpha_mode),
                 ))
                 .then(|| (id.type_id(), p.clone()))
             })
             .collect();
-        // Probe selection removes EnvironmentMapLight between authored probe volumes.
-        // Both view keys must be warm before the first doorway changes that component.
+        // Cameras can start without EnvironmentMapLight until their first probe is ready.
+        // Probe selection then retains the component at zero intensity between volumes.
+        // Warm both initial camera and resident-probe view keys.
         let color: Vec<_> = world
             .resource::<ViewKeyCache>()
             .values()
@@ -179,54 +182,28 @@ fn warm_pipelines<M: Material>(world: &mut World, mut state: Local<WarmCache>) {
             let Some(layouts) = by_type.get(&type_id) else {
                 continue;
             };
-            let reads_material = properties
-                .get_shader(bevy::pbr::PrepassVertexShader)
-                .is_some()
-                || properties
-                    .get_shader(bevy::pbr::PrepassFragmentShader)
-                    .is_some();
             let opaque = matches!(
-                properties.alpha_mode,
-                AlphaMode::Opaque | AlphaMode::Mask(_) | AlphaMode::AlphaToCoverage
+                properties.render_phase_type,
+                bevy::material::RenderPhaseType::Opaque
+                    | bevy::material::RenderPhaseType::AlphaMask
             );
             for (layout, bits) in layouts {
                 let mesh = MeshPipelineKey::from_bits_retain(*bits);
-                for (pass, views) in [(0, &color), (1, &prepass), (2, &shadow)] {
-                    if pass == 1 && !opaque {
+                for (pass, views) in [
+                    (Pass::Color, &color),
+                    (Pass::Prepass, &prepass),
+                    (Pass::Shadow, &shadow),
+                ] {
+                    if pass == Pass::Prepass && !opaque {
                         continue;
                     }
-                    if pass == 1 && !properties.prepass_enabled
-                        || pass == 2 && !properties.shadows_enabled
+                    if pass == Pass::Prepass && !properties.prepass_enabled
+                        || pass == Pass::Shadow && !properties.shadows_enabled
                     {
                         continue;
                     }
                     for &view in views {
-                        let mut key = view | mesh;
-                        if pass == 0 {
-                            key |= properties
-                                .mesh_pipeline_key_bits
-                                .downcast::<MeshPipelineKey>();
-                        }
-                        if pass < 2 {
-                            key |= bevy::pbr::alpha_mode_pipeline_key(
-                                properties.alpha_mode,
-                                &Msaa::from_samples(view.msaa_samples()),
-                            );
-                        } else if !matches!(
-                            properties.alpha_mode,
-                            AlphaMode::Opaque | AlphaMode::Multiply
-                        ) {
-                            key |= MeshPipelineKey::MAY_DISCARD;
-                        }
-                        if pass > 0 && reads_material {
-                            key |= MeshPipelineKey::PREPASS_READS_MATERIAL;
-                        }
-                        if pass < 2
-                            && view.contains(MeshPipelineKey::MOTION_VECTOR_PREPASS)
-                            && layout.0.contains(Mesh::ATTRIBUTE_JOINT_INDEX)
-                        {
-                            key |= MeshPipelineKey::HAS_PREVIOUS_SKIN;
-                        }
+                        let key = pass_key(pass, view, mesh, layout, &properties);
                         state.push(Work {
                             key: ErasedMaterialPipelineKey {
                                 type_id,
@@ -235,14 +212,12 @@ fn warm_pipelines<M: Material>(world: &mut World, mut state: Local<WarmCache>) {
                             },
                             layout: layout.clone(),
                             properties: properties.clone(),
-                            prepass: pass > 0,
+                            prepass: pass != Pass::Color,
                         });
                     }
                 }
             }
         }
-    } else {
-        state.stable += 1;
     }
     // Keep compilation requests bounded even on loading frames.
     for _ in 0..16 {
@@ -261,17 +236,28 @@ fn warm_pipelines<M: Material>(world: &mut World, mut state: Local<WarmCache>) {
             }
         }
     }
-    // Streaming, effects and batch merging can keep the asset counts moving in normal play,
-    // so stop waiting for them to settle after a deadline instead of holding the loading screen.
-    if (state.stable >= 4 || state.frames >= SETTLE_DEADLINE_FRAMES)
-        && state.work.is_empty()
+    // Do not hold loading forever if a pipeline cannot finish compiling.
+    if state.frames >= SETTLE_DEADLINE_FRAMES {
+        warn!("map pipeline warmup deadline reached");
+        state.work.clear();
+        state.seen.clear();
+        warmup.ready.store(true, Ordering::Release);
+        return;
+    }
+    if state.work.is_empty()
         && world
             .resource::<PipelineCache>()
             .waiting_pipelines()
             .count()
             == 0
     {
-        if !entities::warm::<M>(world) {
+        if !entities::warm::<M>(world)
+            || world
+                .resource::<PipelineCache>()
+                .waiting_pipelines()
+                .count()
+                > 0
+        {
             return;
         }
         info!(
@@ -281,4 +267,59 @@ fn warm_pipelines<M: Material>(world: &mut World, mut state: Local<WarmCache>) {
         warmup.ready.store(true, Ordering::Release);
         state.seen.clear();
     }
+}
+
+/// Preserve mask thresholds without allocating formatted material keys.
+fn alpha_key(alpha: AlphaMode) -> (std::mem::Discriminant<AlphaMode>, u32) {
+    (
+        std::mem::discriminant(&alpha),
+        match alpha {
+            AlphaMode::Mask(value) => value.to_bits(),
+            _ => 0,
+        },
+    )
+}
+
+/// Match Bevy's color, prepass and shadow key rules for both warmup paths.
+fn pass_key(
+    pass: Pass,
+    view: MeshPipelineKey,
+    mesh: MeshPipelineKey,
+    layout: &MeshVertexBufferLayoutRef,
+    properties: &MaterialProperties,
+) -> MeshPipelineKey {
+    let mut key = view | mesh;
+    if pass == Pass::Color {
+        key |= properties
+            .mesh_pipeline_key_bits
+            .downcast::<MeshPipelineKey>();
+    }
+    if pass != Pass::Shadow {
+        key |= bevy::pbr::alpha_mode_pipeline_key(
+            properties.alpha_mode,
+            &Msaa::from_samples(view.msaa_samples()),
+        );
+    } else if !matches!(
+        properties.alpha_mode,
+        AlphaMode::Opaque | AlphaMode::Multiply
+    ) {
+        key |= MeshPipelineKey::MAY_DISCARD;
+    }
+    if pass != Pass::Color
+        && (properties
+            .get_shader(bevy::pbr::PrepassVertexShader)
+            .is_some()
+            || properties
+                .get_shader(bevy::pbr::PrepassFragmentShader)
+                .is_some())
+    {
+        key |= MeshPipelineKey::PREPASS_READS_MATERIAL;
+    }
+    if pass != Pass::Shadow
+        && view.contains(MeshPipelineKey::MOTION_VECTOR_PREPASS)
+        && layout.0.contains(Mesh::ATTRIBUTE_JOINT_INDEX)
+    {
+        key |= MeshPipelineKey::HAS_PREVIOUS_SKIN;
+    }
+    key
 }

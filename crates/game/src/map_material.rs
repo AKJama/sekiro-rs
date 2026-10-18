@@ -888,7 +888,7 @@ fn sync_actor_materials(
 }
 
 pub(super) fn install(app: &mut App, prefix: &str, dir: &std::path::Path, args: &[String]) {
-    crate::pipeline_warmup::install::<LayeredMaterial>(app);
+    crate::pipeline_warmup::install::<LayeredMaterial>(app, args);
     batches::install(app);
     crate::material_residency::install(app);
     embedded_asset!(app, "map_material.wgsl");

@@ -19,13 +19,10 @@ pub(crate) struct EncoderState {
 impl SystemBuffer for EncoderState {
     fn queue(&mut self, _meta: &SystemMeta, mut world: DeferredWorld) {
         let _timer = crate::perf_log::SystemTimer::start("game encoder wait");
-        let buffer = self
-            .task
-            .take()
-            .map(block_on)
-            .or_else(|| self.encoder.take().map(|e| e.finish()));
-        if let Some(buffer) = buffer {
-            world.resource_mut::<PendingCommandBuffers>().push([buffer]);
+        if let Some(task) = self.task.take() {
+            world
+                .resource_mut::<PendingCommandBuffers>()
+                .push([block_on(task)]);
         }
     }
 }
@@ -67,10 +64,6 @@ impl<'w, 's> RenderContext<'w, 's> {
 
 impl Drop for RenderContext<'_, '_> {
     fn drop(&mut self) {
-        static SERIAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *SERIAL.get_or_init(|| std::env::var_os("SEKIRO_SERIAL_GAME_PASSES").is_some()) {
-            return;
-        }
         if let Some(encoder) = self.state.encoder.take() {
             self.state.task = Some(ComputeTaskPool::get().spawn(async move {
                 let _timer = crate::perf_log::SystemTimer::start("game encoder finish");

@@ -320,12 +320,7 @@ fn attach(world: &mut World, block: &mut Block, parent: Entity, part_index: usiz
                 let opaque = world
                     .resource::<Assets<StandardMaterial>>()
                     .get(&primitive.material)
-                    .is_some_and(|m| {
-                        matches!(
-                            m.alpha_mode,
-                            AlphaMode::Opaque | AlphaMode::Mask(_) | AlphaMode::AlphaToCoverage
-                        )
-                    });
+                    .is_some_and(|m| crate::map::opaque(m.alpha_mode));
                 if !opaque {
                     // Transparent clumps retain their individual depth-sort positions.
                     for row in surface["placements"].as_array().into_iter().flatten() {
@@ -337,11 +332,7 @@ fn attach(world: &mut World, block: &mut Block, parent: Entity, part_index: usiz
                     }
                     continue;
                 }
-                let Some(source) = world
-                    .resource::<Assets<Mesh>>()
-                    .get(&primitive.mesh)
-                    .cloned()
-                else {
+                let Some(source) = world.resource::<Assets<Mesh>>().get(&primitive.mesh) else {
                     return false;
                 };
                 let placements =
@@ -354,7 +345,7 @@ fn attach(world: &mut World, block: &mut Block, parent: Entity, part_index: usiz
                                 .expect("validated grass placement")
                                 .mul_transform(primitive.transform)
                         });
-                let Some(mesh) = merge_placements(&source, placements) else {
+                let Some(mesh) = merge_placements(source, placements) else {
                     continue;
                 };
                 let mut primitive = primitive.clone();
@@ -400,22 +391,7 @@ fn attach(world: &mut World, block: &mut Block, parent: Entity, part_index: usiz
 /// Use u32 indices before concatenation, including prototypes with more than 65535 vertices
 /// after placement. Vertex attributes (normals, tangents, colours and all UVs) stay intact.
 fn merge_placements(source: &Mesh, placements: impl Iterator<Item = Transform>) -> Option<Mesh> {
-    let mut source = source.clone();
-    let indices = source.indices().map_or_else(
-        || (0..source.count_vertices() as u32).collect(),
-        |indices| indices.iter().map(|i| i as u32).collect(),
-    );
-    source.insert_indices(bevy::mesh::Indices::U32(indices));
-    let mut combined: Option<Mesh> = None;
-    for placement in placements {
-        let mesh = source.clone().transformed_by(placement);
-        if let Some(combined) = &mut combined {
-            combined.merge(&mesh).expect("same grass prototype layout");
-        } else {
-            combined = Some(mesh);
-        }
-    }
-    combined
+    crate::map::merge_meshes(placements.map(|placement| (source, placement)))
 }
 
 fn enforce_shadow_flags(

@@ -242,13 +242,11 @@ pub(crate) struct Ready<'w> {
 
 impl Ready<'_> {
     pub fn allow(&mut self) -> bool {
-        if self.pending.as_ref().is_some_and(|p| !p.loaded()) {
-            return false;
-        }
-        if self.warmup.as_ref().is_some_and(|w| !w.ready()) {
-            return false;
-        }
-        if self.batches.as_ref().is_some_and(|b| !b.ready()) {
+        if !super::ready(
+            self.pending.as_deref(),
+            self.batches.as_deref(),
+            self.warmup.as_deref(),
+        ) {
             return false;
         }
         self.wait.allow(&self.pipelines)

@@ -215,13 +215,11 @@ pub(super) fn update(
     }
     let progress = if gate.ready_at.is_none() {
         let rigs_bound = !rigs.is_empty() && rigs.iter().all(|r| r.bound);
-        let map = pending.as_ref().is_none_or(|p| p.loaded())
-            && batches.as_ref().is_none_or(|b| b.ready());
-        let compiled = warmup.as_ref().is_none_or(|w| w.ready())
-            && pipelines.as_ref().is_none_or(|p| {
-                let status = p.status();
-                status.pending == 0 && status.ready > 0
-            });
+        let map = crate::map::ready(pending.as_deref(), batches.as_deref(), warmup.as_deref());
+        let compiled = pipelines.as_ref().is_none_or(|p| {
+            let status = p.status();
+            status.pending == 0 && status.ready > 0
+        });
         let p = sim.duel.player.body.position;
         let floor = collision
             .as_ref()

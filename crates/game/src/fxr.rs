@@ -269,7 +269,7 @@ impl FxrPlayer {
             return;
         }
         self.spawned += 1;
-        if std::env::var_os("SEKIRO_FXR_LOG").is_some() {
+        if log_enabled() {
             info!("fxr spawn {id} for {key:?} at {:.2?}", at.translation);
         }
         self.effects.push(Effect {
@@ -1518,7 +1518,7 @@ impl Batch {
         buffer: &impl BatchBuffer,
         commands: &mut Commands,
         meshes: &mut Assets<Mesh>,
-        stream: Option<&mut stream::VertexStreams>,
+        stream: Option<&mut ResMut<stream::VertexStreams>>,
     ) {
         let visible = !buffer.is_empty();
         if self.visible != visible {
@@ -1544,7 +1544,12 @@ impl Batch {
                 return;
             }
             buffer.write_mesh(cpu);
-            stream.publish(self.mesh.id(), cpu);
+            if stream
+                .bypass_change_detection()
+                .publish(self.mesh.id(), cpu)
+            {
+                stream.set_changed();
+            }
             if first {
                 // Bevy keeps this small mesh for its layout/material/phase bookkeeping.
                 // Dynamic data is written to a reusable GPU buffer instead of re-preparing it.
@@ -1567,6 +1572,11 @@ impl Batch {
             buffer.update_mesh(meshes, &self.mesh);
         }
     }
+}
+
+fn log_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("SEKIRO_FXR_LOG").is_some())
 }
 
 fn new_batch(commands: &mut Commands, meshes: &mut Assets<Mesh>) -> Batch {
@@ -1703,7 +1713,7 @@ fn render(
             &frame.distort[key],
             &mut commands,
             &mut meshes,
-            streams.as_deref_mut(),
+            streams.as_mut(),
         );
     }
     // New batches for keys seen for the first time.
@@ -1761,22 +1771,12 @@ fn render(
         player.multi_batches.insert(*key, batch);
     }
     for (key, batch) in &mut player.batches {
-        batch.update(
-            &bufs[key],
-            &mut commands,
-            &mut meshes,
-            streams.as_deref_mut(),
-        );
+        batch.update(&bufs[key], &mut commands, &mut meshes, streams.as_mut());
     }
     for (key, batch) in &mut player.multi_batches {
-        batch.update(
-            &multi[key],
-            &mut commands,
-            &mut meshes,
-            streams.as_deref_mut(),
-        );
+        batch.update(&multi[key], &mut commands, &mut meshes, streams.as_mut());
     }
-    if std::env::var_os("SEKIRO_FXR_LOG").is_some()
+    if log_enabled()
         && (bufs.values().any(|b| !b.is_empty()) || multi.values().any(|b| !b.is_empty()))
     {
         let mut v: Vec<String> = bufs
@@ -1858,6 +1858,20 @@ mod tests {
         app.init_resource::<stream::VertexStreams>();
         app.update();
         assert_eq!(modified_meshes(&mut app), 3);
+        let tick = app
+            .world()
+            .get_resource_ref::<stream::VertexStreams>()
+            .unwrap()
+            .last_changed();
+        app.update();
+        assert_eq!(
+            app.world()
+                .get_resource_ref::<stream::VertexStreams>()
+                .unwrap()
+                .last_changed(),
+            tick,
+            "unchanged vertices must not be extracted again"
+        );
         let mut before = app.world().resource::<stream::VertexStreams>().versions();
         before.sort_unstable();
         let mut player = app.world_mut().resource_mut::<FxrPlayer>();

@@ -1,5 +1,5 @@
-//! Record independent sun cascades with separate encoders, including parallel finalization.
-//! The draw-function lock still protects Bevy's cached render commands.
+//! Record sun cascades serially with separate encoders, then finish them on parallel workers.
+//! Serial recording retains the draw-function lock protecting Bevy's cached render commands.
 use bevy::core_pipeline::schedule::Core3d;
 use bevy::ecs::schedule::ScheduleCleanupPolicy;
 use bevy::ecs::system::{Deferred, SystemBuffer, SystemMeta};
@@ -32,9 +32,6 @@ impl Plugin for ParallelShadowsPlugin {
     fn build(&self, _app: &mut App) {}
 
     fn finish(&self, app: &mut App) {
-        if std::env::var_os("SEKIRO_SERIAL_SHADOWS").is_some() {
-            return;
-        }
         let Some(render) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
@@ -84,7 +81,6 @@ fn parallel_shadow_pass(
             label: Some(&shadow.pass_name),
         });
         {
-            let _timer = crate::perf_log::SystemTimer::start("shadow record");
             let pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some(&shadow.pass_name),
                 color_attachments: &[],
@@ -100,9 +96,8 @@ fn parallel_shadow_pass(
                 error!("shadow phase: {error:?}");
             }
         }
-        commands.0.push(ComputeTaskPool::get().spawn(async move {
-            let _timer = crate::perf_log::SystemTimer::start("shadow finish");
-            encoder.finish()
-        }));
+        commands
+            .0
+            .push(ComputeTaskPool::get().spawn(async move { encoder.finish() }));
     }
 }

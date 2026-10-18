@@ -1183,7 +1183,8 @@ fn detail_requests(part: &DetailPart, distance: f32, weights: [f32; 3]) -> [bool
 
 fn prioritize_detail_requests(requests: &mut Vec<(bool, f32, Entity, usize)>) {
     requests.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
-    requests.truncate(DETAIL_SCENES_PER_FRAME);
+    let demanded = requests.partition_point(|r| !r.0);
+    requests.truncate(demanded + DETAIL_SCENES_PER_FRAME);
 }
 
 /// The level with the largest weight, as [`update_detail`] draws it.
@@ -1455,7 +1456,7 @@ struct HierarchyReported;
 #[cfg(test)]
 mod tests {
     #[test]
-    fn detail_spawn_budget_prioritizes_demand_then_nearby_prefetch() {
+    fn detail_spawn_budget_caps_only_prefetch_and_keeps_all_demand() {
         let mut requests: Vec<_> = [
             (true, 1.),
             (false, 50.),
@@ -1463,6 +1464,11 @@ mod tests {
             (false, 20.),
             (true, 3.),
             (true, 2.),
+            (true, 4.),
+            (false, 30.),
+            (false, 40.),
+            (false, 60.),
+            (false, 70.),
         ]
         .into_iter()
         .enumerate()
@@ -1471,7 +1477,7 @@ mod tests {
         prioritize_detail_requests(&mut requests);
         assert_eq!(
             requests.iter().map(|r| r.3).collect::<Vec<_>>(),
-            [3, 1, 0, 5]
+            [3, 7, 8, 1, 9, 10, 0, 5, 4, 6]
         );
     }
 

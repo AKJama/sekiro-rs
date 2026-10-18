@@ -49,6 +49,10 @@ pub(crate) mod lod;
 #[path = "map_material.rs"]
 mod map_material;
 pub(crate) use map_material::batches::StaticBatches;
+#[path = "map_mesh.rs"]
+mod mesh_merge;
+pub(crate) use mesh_merge::{merge_meshes, opaque};
+
 pub(crate) use map_material::{ATTR_MAP_BLEND2, MaterialStats};
 #[path = "sky.rs"]
 pub(crate) mod sky;
@@ -70,6 +74,17 @@ use crate::lighting::{
     MapLighting, MapProbes, ProbeRegion, ShadowSettings, apply_lighting, apply_probes,
     nearest_variant, spawn_lights,
 };
+
+/// Map assets, installed static batches and resident render pipelines are all ready.
+pub(crate) fn ready(
+    pending: Option<&Pending>,
+    batches: Option<&StaticBatches>,
+    warmup: Option<&crate::pipeline_warmup::PipelineWarmup>,
+) -> bool {
+    pending.is_none_or(Pending::loaded)
+        && batches.is_none_or(StaticBatches::ready)
+        && warmup.is_none_or(crate::pipeline_warmup::PipelineWarmup::ready)
+}
 
 pub struct Options {
     pub cache: PathBuf,

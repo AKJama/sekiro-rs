@@ -287,6 +287,36 @@ struct Sim {
     perilous_age: Option<f32>,
 }
 
+fn apply_perf_tour(
+    mut tour: ResMut<crate::perf_log::PerfTour>,
+    mut sim: NonSendMut<Sim>,
+    mut orbit: ResMut<Orbit>,
+    gate: Res<play_gate::PlayGate>,
+    collision: Option<Res<MapCollision>>,
+) {
+    if !gate.open() {
+        return;
+    }
+    let Some([x, y, z, yaw]) = tour.next(sim.step) else {
+        return;
+    };
+    let y = collision
+        .as_ref()
+        .and_then(|c| c.0.floor(x, z, y + 1.))
+        .unwrap_or(y);
+    let body = &mut sim.duel.player.body;
+    body.position = [x, y, z];
+    body.velocity = [0.; 3];
+    body.grounded = true;
+    body.fall_top = y;
+    body.yaw = yaw.to_radians();
+    sim.previous[WOLF] = ([x, y, z], yaw.to_radians());
+    orbit.focus = Vec3::new(x, y, z) + Vec3::Y * sim.duel.camera_director.focus_height;
+    orbit.yaw = yaw.to_radians();
+    orbit.look = Default::default();
+    info!("perf tour: step {} at {x},{y},{z} yaw {yaw}", sim.step);
+}
+
 /// Live input gathered every rendered frame, consumed by the fixed steps.
 #[derive(Resource, Default)]
 struct LiveInput {

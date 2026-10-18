@@ -1049,7 +1049,7 @@ impl Plugin for FogPlugin {
 fn configure(
     mut commands: Commands,
     lighting: Res<super::MapLighting>,
-    cameras: Query<(Entity, &Camera3d, Option<&FogDepthSampling>)>,
+    cameras: Query<(Entity, &Camera3d)>,
     mut last: Local<Option<(i32, f32, i32, String)>>,
     added: Query<(), Added<Camera3d>>,
     selection: Res<FogSelection>,
@@ -1083,14 +1083,11 @@ fn configure(
         .then(|| GameFog::from_gparam(&lighting.gparam, key.0, key.1, direction))
         .flatten();
     info!("shader fog: {value:?}");
-    for (entity, camera, owned) in &cameras {
+    for (entity, camera) in &cameras {
         let mut depth = TextureUsages::from(camera.depth_texture_usages);
         if value.is_some() && !depth.contains(TextureUsages::TEXTURE_BINDING) {
             depth.insert(TextureUsages::TEXTURE_BINDING);
             commands.entity(entity).insert(FogDepthSampling);
-        } else if value.is_none() && owned.is_some() {
-            depth.remove(TextureUsages::TEXTURE_BINDING);
-            commands.entity(entity).remove::<FogDepthSampling>();
         }
         // Only new cameras need this; re-inserting Camera3d at every LightSet change (#15)
         // marked the view changed and rebuilt its depth texture.
