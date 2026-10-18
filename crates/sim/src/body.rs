@@ -13,6 +13,12 @@ use crate::input::angle_diff;
 use crate::tae::VelocityChange;
 use glam::Vec2;
 
+/// Mirror source X and rotate horizontal root motion by the facing's (sin yaw, cos yaw).
+pub(crate) fn root_motion_world(root_motion: [f32; 4], (sin, cos): (f32, f32)) -> [f32; 2] {
+    let [rx, _, rz, _] = root_motion;
+    [-cos * rx + sin * rz, sin * rx + cos * rz]
+}
+
 /// Exe fall-control table values from FwLo's RustSekiro (MIT), `src/data.rs`.
 #[derive(Debug, Clone, Copy)]
 pub struct FallControl {
@@ -242,15 +248,8 @@ impl Body {
     }
 
     pub fn step(&mut self, input: &BodyInput, dt: f32, ground: &dyn Ground) {
-        // Root motion: mirror X (and so the yaw) into Bevy space, then rotate by facing.
-        let [rx, _ry, rz, ryaw] = input.root_motion;
-        let (lx, lz) = (-rx, rz);
-        let (s, c) = self.yaw.sin_cos();
-        // rotate_y(yaw) applied to (lx, 0, lz).
-        let wx = c * lx + s * lz;
-        let wz = -s * lx + c * lz;
-        let mut travel = [wx, wz];
-        self.yaw -= ryaw;
+        let mut travel = root_motion_world(input.root_motion, self.yaw.sin_cos());
+        self.yaw -= input.root_motion[3];
 
         if let Some(target) = input.steer_to
             && input.turn_speed > 0.0

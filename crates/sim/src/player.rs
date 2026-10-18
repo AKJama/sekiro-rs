@@ -109,7 +109,6 @@ pub struct PlayerEnv {
     pub docking_blocked: [bool; 2],
     pub docking_variation: u8,
     pub docking_end: u8,
-    pub docking_active: bool,
     pub hang_can_climb: bool,
     pub docking_searches: std::cell::Cell<u8>,
     pub action_guide: std::cell::Cell<Option<(i32, i32)>>,
@@ -201,7 +200,6 @@ impl Default for PlayerEnv {
             docking_blocked: [false; 2],
             docking_variation: 0,
             docking_end: 0,
-            docking_active: false,
             hang_can_climb: false,
             docking_searches: std::cell::Cell::new(0),
             action_guide: std::cell::Cell::new(None),
@@ -308,12 +306,7 @@ impl Adapter<'_> {
             3043 => truth(env.cover_candidate && env.docking_searches.get() & 1 != 0),
             3046 if arg == Some(1) => env.docking_variation as f32,
             3050 => truth(env.hang_can_climb),
-            // Shimmy and corners are deferred. Both ends block docking movement.
-            3051 | 3052 => truth(if env.cover_active {
-                env.docking_blocked[(id - 3051) as usize]
-            } else {
-                env.docking_active
-            }),
+            3051 | 3052 => truth(env.docking_blocked[(id - 3051) as usize]),
             3045 => {
                 if env.docking_searches.get() & 4 != 0 {
                     env.air_hang_type as f32

@@ -618,15 +618,12 @@ impl Character {
         } else {
             0.0
         };
-        // HangIdle carries turn/prosthetic flags but no step/jump cancel windows.
-        // Docking's idle actions are gated by HKS, not the ground combat buffer.
+        // All held hang clips clear the restriction: HKS gates climb/drop during idle
+        // and shimmy, while their TAE lacks the ground combat step/jump cancel windows.
         let docking_idle = self.docking.active.is_some()
             && self.behavior.runtime.main_clip().is_some_and(|c| {
-                // HangIdle and HangFootHoldIdle.
-                matches!(c.animation.as_str(), "a000_020000" | "a000_020010")
-                    || c.animation.starts_with("a000_021")
-                    || c.animation.starts_with("a000_022")
-                    || c.animation.starts_with("a000_2050")
+                crate::docking::is_hang_clip(&c.animation)
+                    || crate::docking::is_cover_clip(&c.animation)
             });
         if self.kind == ControlKind::Player {
             let mut input_tae = self.tae_runtime.frame.clone();
@@ -711,23 +708,26 @@ impl Character {
             .active
             .as_ref()
             .is_some_and(|t| self.docking.is_cover(t));
-        // Only cover reads the blocked sides (env 3043's path).
-        env.docking_blocked = dock
-            .filter(|t| self.docking.is_cover(t))
-            .map_or([false; 2], |t| {
+        env.docking_blocked = self.docking.active.as_ref().map_or([false; 2], |t| {
+            if self.docking.is_cover(t) {
                 [
                     self.docking.cover_blocked(t, self.ground.as_ref(), true),
                     self.docking.cover_blocked(t, self.ground.as_ref(), false),
                 ]
-            });
-        env.docking_active = self.docking.active.is_some();
+            } else {
+                [
+                    self.docking.hang_blocked(t, true),
+                    self.docking.hang_blocked(t, false),
+                ]
+            }
+        });
         env.docking_variation = dock.map_or(0, |t| self.docking.edges[t.edge].variation);
         env.docking_end = dock.map_or(0, |t| t.end);
-        env.hang_can_climb = self.docking.active.as_ref().is_some_and(|t| {
-            self.docking
-                .target(t.edge, t.point, self.ground.as_ref())
-                .is_some()
-        });
+        env.hang_can_climb = self
+            .docking
+            .active
+            .as_ref()
+            .is_some_and(|t| self.docking.hang_can_climb(t, self.ground.as_ref()));
         self.behavior
             .runtime
             .set_variable("HangStartEdgeAngle", dock.map_or(0.0, |t| t.angle));
@@ -1009,6 +1009,7 @@ impl Character {
             main.as_ref().map(|c| c.animation.as_str()),
             main.as_ref().map_or(0.0, |c| c.time),
             root_progress,
+            root_motion,
         ) {
             if body_input.water_mode.is_some() || self.wire.perch.is_none() {
                 self.body.step(&body_input, dt, self.ground.as_ref());
