@@ -25,6 +25,10 @@ const ASHINA: [&str; 2] = ["m11_00_00_00", "m11_01_00_00"];
 #[derive(Resource)]
 pub(crate) struct ArenaMap;
 
+/// MSB explicitly disables sun casting for this part and its mesh descendants.
+#[derive(Component)]
+pub(crate) struct AuthoredNoShadow;
+
 pub(crate) fn enabled(id: &str) -> bool {
     ASHINA.contains(&id)
 }
@@ -1051,6 +1055,9 @@ pub(crate) fn spawn(
         if super::follows_scene_light(row) {
             commands.entity(root).insert(super::FollowsSceneLight);
         }
+        if row["entity_data"]["is_shadow_src"].as_bool() == Some(false) {
+            commands.entity(root).insert(AuthoredNoShadow);
+        }
         if enabled(&block.id)
             && row["kind"] == "MapPiece"
             && let (Some(min), Some(max), Some(&available)) = (
@@ -1154,6 +1161,32 @@ pub(crate) fn spawn(
 /// past the outermost installed MapPiece boundary plus its play distance (60 + 4 m).
 const LOD_DEBUG_RADIUS: f32 = 70.0;
 
+// GLBs are already resident, but instancing their other scenes and preparing their materials
+// can still hitch. Warm nearby levels without changing their visibility or authored weights.
+const DETAIL_PREFETCH_METRES: f32 = 8.0;
+const DETAIL_SCENES_PER_FRAME: usize = 4;
+
+fn detail_requests(part: &DetailPart, distance: f32, weights: [f32; 3]) -> [bool; 3] {
+    let mut requested = weights.map(|w| w > 0.);
+    for distance in [
+        (distance - DETAIL_PREFETCH_METRES).max(0.),
+        distance + DETAIL_PREFETCH_METRES,
+    ] {
+        let mut state = part.state;
+        let ahead = state.update(part.rule, part.scales, distance, f32::MAX, part.available);
+        for (requested, weight) in requested.iter_mut().zip(ahead) {
+            *requested |= weight > 0.;
+        }
+    }
+    requested
+}
+
+fn prioritize_detail_requests(requests: &mut Vec<(bool, f32, Entity, usize)>) {
+    requests.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
+    let demanded = requests.partition_point(|r| !r.0);
+    requests.truncate(demanded + DETAIL_SCENES_PER_FRAME);
+}
+
 /// The level with the largest weight, as [`update_detail`] draws it.
 fn dominant(weights: [f32; 3]) -> usize {
     weights
@@ -1175,6 +1208,7 @@ pub(crate) fn update_detail(
     cameras: Query<&Transform, With<Camera3d>>,
     mut parts: Query<
         (
+            Entity,
             &Transform,
             &BlockPart,
             &visibility::VisibilityPart,
@@ -1199,7 +1233,8 @@ pub(crate) fn update_detail(
     };
     let debug = *debug.get_or_insert_with(|| std::env::args().any(|a| a == "--lod-debug"));
     let wolf = wolf.iter().next().map(|t| t.translation);
-    for (transform, identity, msb, mut part) in &mut parts {
+    let mut requests = Vec::new();
+    for (part_entity, transform, identity, msb, mut part) in &mut parts {
         let distance =
             super::lod::bounds_distance(camera.translation, transform, part.min, part.max);
         let rule = part.rule;
@@ -1221,18 +1256,29 @@ pub(crate) fn update_detail(
         // it dominates. Every level lives in the same GLB, so once the stream has requested it
         // the scene comes from that load; before then the current level stays, keeping the
         // stream's order and in-flight limit.
-        for (level, &weight) in weights.iter().enumerate() {
-            if weight > 0.
+        let wanted = if part.stream.is_none()
+            || part
+                .available
+                .iter()
+                .zip(part.spawned)
+                .all(|(&exists, spawned)| !exists || spawned)
+        {
+            [false; 3]
+        } else if groups.mode == GroupMode::Off {
+            weights.map(|w| w > 0.)
+        } else {
+            detail_requests(&part, distance, weights)
+        };
+        for (level, &wanted) in wanted.iter().enumerate() {
+            if wanted
                 && !part.spawned[level]
-                && let Some(entity) = part.slots[level]
-                && let Some(scene) = part
+                && part.slots[level].is_some()
+                && part
                     .stream
                     .and_then(|index| pending.requested(index))
-                    .map(|(glb, unapproved)| super::scene_handle(&assets, glb, level, unapproved))
+                    .is_some()
             {
-                commands.entity(entity).insert(WorldAssetRoot(scene));
-                part.spawned[level] = true;
-                pending.add_instance();
+                requests.push((weights[level] == 0., distance, part_entity, level));
             }
         }
         // A level is ready once its scene has spawned its meshes, so a switch never leaves a
@@ -1330,6 +1376,19 @@ pub(crate) fn update_detail(
         }
         part.fading = fading;
     }
+    // Current demand wins over speculative warm-up, then nearest bounds first. Deferred
+    // requests are reconsidered next frame, so movement cannot leave a stale backlog.
+    prioritize_detail_requests(&mut requests);
+    for (_, _, entity, level) in requests {
+        let (_, _, _, _, mut part) = parts.get_mut(entity).expect("queried detail part");
+        let (glb, unapproved) = pending.requested(part.stream.unwrap()).unwrap();
+        let scene = super::scene_handle(&assets, glb, level, unapproved);
+        commands
+            .entity(part.slots[level].unwrap())
+            .insert(WorldAssetRoot(scene));
+        part.spawned[level] = true;
+        pending.add_instance();
+    }
 }
 
 /// One-shot hierarchy audit after loading, for diagnosing scene handoffs at fixed poses.
@@ -1396,6 +1455,32 @@ struct HierarchyReported;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn detail_spawn_budget_caps_only_prefetch_and_keeps_all_demand() {
+        let mut requests: Vec<_> = [
+            (true, 1.),
+            (false, 50.),
+            (true, 5.),
+            (false, 20.),
+            (true, 3.),
+            (true, 2.),
+            (true, 4.),
+            (false, 30.),
+            (false, 40.),
+            (false, 60.),
+            (false, 70.),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (prefetch, distance))| (prefetch, distance, Entity::PLACEHOLDER, i))
+        .collect();
+        prioritize_detail_requests(&mut requests);
+        assert_eq!(
+            requests.iter().map(|r| r.3).collect::<Vec<_>>(),
+            [3, 7, 8, 1, 9, 10, 0, 5, 4, 6]
+        );
+    }
+
     #[test]
     fn settled_detail_is_untouched_and_resumes_on_distance_or_readiness_change() {
         let mut app = App::new();
@@ -1469,6 +1554,16 @@ mod tests {
                 },
             ))
             .id();
+        let detail = app.world().get::<DetailPart>(part).unwrap();
+        assert_eq!(
+            detail_requests(detail, 0., [1., 0., 0.]),
+            [true, false, false]
+        );
+        assert_eq!(
+            detail_requests(detail, 25., [1., 0., 0.]),
+            [true, true, false]
+        );
+        assert_eq!(detail.state, super::super::lod::LodState::default());
         app.update();
         let tick = app
             .world()

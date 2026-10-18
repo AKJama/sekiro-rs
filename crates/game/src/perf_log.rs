@@ -12,22 +12,82 @@ use bevy::prelude::*;
 use std::io::{BufWriter, Write};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+/// Optional profiling route: `step x y z yaw_degrees`, one teleport per line.
+/// The ordinary --script supplies movement between stops and --exit ends the run.
+#[derive(Resource, Default)]
+pub(crate) struct PerfTour(std::collections::VecDeque<(usize, [f32; 4])>);
+
+impl PerfTour {
+    pub(crate) fn from_args(args: &[String]) -> anyhow::Result<Self> {
+        let Some(path) = crate::arg_value(args, "--perf-tour") else {
+            return Ok(Self::default());
+        };
+        let mut tour = Self::default();
+        for line in std::fs::read_to_string(path)?.lines() {
+            let fields: Vec<_> = line
+                .split('#')
+                .next()
+                .unwrap_or("")
+                .split_whitespace()
+                .collect();
+            if fields.is_empty() {
+                continue;
+            }
+            anyhow::ensure!(fields.len() == 5, "perf tour needs step x y z yaw_degrees");
+            let step = fields[0].parse()?;
+            let pose = [
+                fields[1].parse::<f32>()?,
+                fields[2].parse()?,
+                fields[3].parse()?,
+                fields[4].parse()?,
+            ];
+            anyhow::ensure!(
+                pose.iter().all(|x| x.is_finite()),
+                "nonfinite perf tour pose"
+            );
+            anyhow::ensure!(
+                tour.0.back().is_none_or(|(previous, _)| step > *previous),
+                "perf tour steps must increase"
+            );
+            tour.0.push_back((step, pose));
+        }
+        Ok(tour)
+    }
+
+    pub(crate) fn next(&mut self, step: usize) -> Option<[f32; 4]> {
+        if self.0.front().is_some_and(|(at, _)| step >= *at) {
+            self.0.pop_front().map(|(_, pose)| pose)
+        } else {
+            None
+        }
+    }
+}
+
 /// Per timed name: runs, total milliseconds and the longest run.
 pub type SystemSamples =
     std::collections::BTreeMap<std::borrow::Cow<'static, str>, (usize, f64, f64)>;
 static SYSTEM_SAMPLES: std::sync::Mutex<SystemSamples> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
+// Timed scopes completed between CSV rows. Render and main schedules overlap, so these
+// describe the wall interval, rather than attributing asynchronous render work to a sim tick.
+static FRAME_SAMPLES: std::sync::Mutex<SystemSamples> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 pub struct SystemTimer(Option<(&'static str, Instant)>);
 
+pub(crate) fn args() -> &'static [String] {
+    static ARGS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    ARGS.get_or_init(|| std::env::args().collect())
+}
+
+pub(crate) fn profile_systems() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| args().iter().any(|a| a == "--profile-systems"))
+}
+
 impl SystemTimer {
     pub fn start(name: &'static str) -> Self {
-        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        Self(
-            ENABLED
-                .get_or_init(|| std::env::args().any(|a| a == "--profile-systems"))
-                .then(|| (name, Instant::now())),
-        )
+        Self(profile_systems().then(|| (name, Instant::now())))
     }
 }
 
@@ -42,11 +102,21 @@ impl Drop for SystemTimer {
 /// Add one timed run of `name` to the shared store (system timers and, with the
 /// `profile-spans` feature, tracing spans).
 pub fn record(name: impl Into<std::borrow::Cow<'static, str>>, ms: f64) {
-    if let Ok(mut samples) = SYSTEM_SAMPLES.lock() {
-        let sample = samples.entry(name.into()).or_default();
+    fn accumulate(samples: &mut SystemSamples, name: std::borrow::Cow<'static, str>, ms: f64) {
+        let sample = samples.entry(name).or_default();
         sample.0 += 1;
         sample.1 += ms;
         sample.2 = sample.2.max(ms);
+    }
+    let name = name.into();
+    static PER_FRAME: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *PER_FRAME.get_or_init(enabled)
+        && let Ok(mut samples) = FRAME_SAMPLES.lock()
+    {
+        accumulate(&mut samples, name.clone(), ms);
+    }
+    if let Ok(mut samples) = SYSTEM_SAMPLES.lock() {
+        accumulate(&mut samples, name, ms);
     }
 }
 
@@ -109,7 +179,7 @@ impl PerfLog {
         );
         writeln!(
             output,
-            "frame,wall_ms,steps,alpha,sim_step,replay_frame,wolf_state,wolf_clip,wolf_time,wolf_sim_time,draw_x,draw_y,draw_z,sim_x,sim_y,sim_z,owl_state,owl_clip,owl_time,wolf_stop,owl_stop,x_main_ms,x_fixed_ms,x_clip_loads,x_clip_ms,x_render_max_ms,x_render_frames,x_pipelines_ok,x_pipelines_waiting,x_render_sets,hits,sounds,wolf_starts,owl_starts,wolf_stop_max,owl_stop_max"
+            "frame,wall_ms,steps,alpha,sim_step,replay_frame,wolf_state,wolf_clip,wolf_time,wolf_sim_time,draw_x,draw_y,draw_z,sim_x,sim_y,sim_z,owl_state,owl_clip,owl_time,wolf_stop,owl_stop,x_main_ms,x_fixed_ms,x_clip_loads,x_clip_ms,x_render_max_ms,x_render_frames,x_pipelines_ok,x_pipelines_waiting,x_render_sets,hits,sounds,wolf_starts,owl_starts,wolf_stop_max,owl_stop_max,x_systems"
         )?;
         info!("perf log: {}", path.display());
         Ok(Self {
@@ -134,9 +204,21 @@ impl PerfLog {
         self.last = now;
         let started = sounds.saturating_sub(self.sounds);
         self.sounds = sounds;
+        let scopes = FRAME_SAMPLES.lock().map_or_else(
+            |_| String::new(),
+            |mut samples| {
+                std::mem::take(&mut *samples)
+                    .into_iter()
+                    .filter(|(_, (_, sum, _))| *sum >= 0.1)
+                    .map(|(name, (count, sum, max))| format!("{name}={sum:.3}/{max:.3}/{count}"))
+                    .collect::<Vec<_>>()
+                    .join(";")
+            },
+        );
+        let scopes = scopes.replace('"', "\"\"");
         if let Err(error) = writeln!(
             self.output,
-            "{},{ms:.6},{},{fields},{},{started},{},{},{},{}",
+            "{},{ms:.6},{},{fields},{},{started},{},{},{},{},\"{scopes}\"",
             self.frame,
             self.steps,
             self.hits,
@@ -226,8 +308,13 @@ pub fn install_render_probe(app: &mut App) -> RenderProbe {
         return probe;
     };
     render.insert_resource(probe.clone());
-    if std::env::var_os("PF_RESPAWN_PROBE").is_some() {
-        render.add_systems(Render, count_draw_batches.in_set(RenderSystems::Render));
+    if std::env::var_os("PF_RESPAWN_PROBE").is_some() || profile_systems() {
+        render.add_systems(
+            Render,
+            count_draw_batches
+                .after(RenderSystems::Prepare)
+                .before(RenderSystems::Render),
+        );
     }
     render.add_systems(
         Render,
@@ -237,13 +324,14 @@ pub fn install_render_probe(app: &mut App) -> RenderProbe {
                 d.stamps.clear();
             }
         })
-        .in_set(RenderSystems::ExtractCommands),
+        .before(RenderSystems::ExtractCommands),
     );
     let stamp = |p: Res<RenderProbe>| {
         if let Ok(mut d) = p.0.lock() {
             d.stamps.push(Instant::now());
         }
     };
+    let mut previous = RenderSystems::ExtractCommands;
     for set in [
         RenderSystems::PrepareAssets,
         RenderSystems::Specialize,
@@ -253,7 +341,8 @@ pub fn install_render_probe(app: &mut App) -> RenderProbe {
         RenderSystems::Render,
         RenderSystems::Cleanup,
     ] {
-        render.add_systems(Render, stamp.in_set(set));
+        render.add_systems(Render, stamp.after(previous).before(set.clone()));
+        previous = set;
     }
     render.add_systems(
         Render,
@@ -283,9 +372,223 @@ pub fn install_render_probe(app: &mut App) -> RenderProbe {
                 d.pipelines_waiting = waiting;
             }
         })
-        .in_set(RenderSystems::PostCleanup),
+        .after(RenderSystems::PostCleanup),
     );
+    if profile_systems() {
+        install_detailed_probe(render);
+    }
     probe
+}
+
+type ProbeClock = std::sync::Arc<std::sync::Mutex<Instant>>;
+
+fn reset_probe(clock: ProbeClock) -> impl FnMut() {
+    move || *clock.lock().unwrap() = Instant::now()
+}
+
+fn record_probe(clock: ProbeClock, name: &'static str, reset: bool) -> impl FnMut() {
+    move || {
+        let mut last = clock.lock().unwrap();
+        record(name, last.elapsed().as_secs_f64() * 1000.0);
+        if reset {
+            *last = Instant::now();
+        }
+    }
+}
+
+/// Ordered boundaries, including submission (not covered by GPU pass diagnostics).
+fn install_detailed_probe(render: &mut SubApp) {
+    use bevy::render::renderer::{RenderGraph, RenderGraphSystems};
+    use bevy::render::{Render, RenderSystems};
+    render.add_systems(Render, pipeline_misses.after(RenderSystems::Specialize));
+    for (previous, set, next, name) in [
+        (
+            RenderSystems::ExtractCommands,
+            RenderSystems::PrepareAssets,
+            RenderSystems::PrepareMeshes,
+            "render assets",
+        ),
+        (
+            RenderSystems::CreateViews,
+            RenderSystems::Specialize,
+            RenderSystems::PrepareViews,
+            "render specialize",
+        ),
+        (
+            RenderSystems::Specialize,
+            RenderSystems::PrepareViews,
+            RenderSystems::Queue,
+            "render views/acquire",
+        ),
+        (
+            RenderSystems::PhaseSort,
+            RenderSystems::PrepareResources,
+            RenderSystems::PrepareResourcesBatchPhases,
+            "render resources",
+        ),
+        (
+            RenderSystems::PrepareResources,
+            RenderSystems::PrepareResourcesBatchPhases,
+            RenderSystems::PrepareResourcesWritePhaseBuffers,
+            "render batch phases",
+        ),
+        (
+            RenderSystems::PrepareResourcesFlush,
+            RenderSystems::PrepareBindGroups,
+            RenderSystems::Render,
+            "render bind groups",
+        ),
+    ] {
+        let clock = std::sync::Arc::new(std::sync::Mutex::new(Instant::now()));
+        render.add_systems(
+            Render,
+            reset_probe(clock.clone())
+                .after(previous)
+                .before(set.clone()),
+        );
+        render.add_systems(
+            Render,
+            record_probe(clock, name, false).after(set).before(next),
+        );
+    }
+    let clock = std::sync::Arc::new(std::sync::Mutex::new(Instant::now()));
+    render.add_systems(
+        RenderGraph,
+        reset_probe(clock.clone()).before(RenderGraphSystems::Begin),
+    );
+    for (previous, next, name) in [
+        (
+            RenderGraphSystems::Render,
+            RenderGraphSystems::Submit,
+            "render graph encode",
+        ),
+        (
+            RenderGraphSystems::Submit,
+            RenderGraphSystems::Finish,
+            "render graph submit",
+        ),
+    ] {
+        render.add_systems(
+            RenderGraph,
+            record_probe(clock.clone(), name, true)
+                .after(previous)
+                .before(next),
+        );
+    }
+    render.add_systems(
+        Render,
+        record_probe(clock, "render finish/present", false)
+            .after(bevy::render::renderer::render_system)
+            .before(RenderSystems::Cleanup),
+    );
+    render.add_systems(
+        Render,
+        render_counts
+            .after(RenderSystems::Prepare)
+            .before(RenderSystems::Render),
+    );
+    use bevy::core_pipeline::schedule::{Core3d, Core3dSystems};
+    let clock = std::sync::Arc::new(std::sync::Mutex::new(Instant::now()));
+    render.add_systems(
+        Core3d,
+        reset_probe(clock.clone())
+            .before(Core3dSystems::Prepass)
+            .before(bevy::pbr::per_view_shadow_pass::<false>),
+    );
+    render.add_systems(
+        Core3d,
+        record_probe(clock, "render camera passes", false).after(Core3dSystems::PostProcess),
+    );
+}
+
+fn pipeline_misses(
+    cache: Res<bevy::render::render_resource::PipelineCache>,
+    warmup: Option<Res<crate::pipeline_warmup::PipelineWarmup>>,
+    mut seen: Local<usize>,
+) {
+    let count = cache.pipelines().count();
+    if warmup.is_some_and(|w| w.ready()) {
+        for (index, pipeline) in cache.pipelines().enumerate().skip(*seen) {
+            if let bevy::render::render_resource::PipelineDescriptor::RenderPipelineDescriptor(
+                descriptor,
+            ) = &pipeline.descriptor
+            {
+                info!(
+                    "traversal pipeline {index}: {:?}, vertex {:?}, fragment {:?}",
+                    descriptor.label,
+                    descriptor.vertex.shader_defs,
+                    descriptor.fragment.as_ref().map(|f| &f.shader_defs)
+                );
+            }
+        }
+    }
+    *seen = count;
+}
+
+#[allow(clippy::too_many_arguments)] // Independent render-world counters.
+fn render_counts(
+    probe: Res<RenderProbe>,
+    views: Query<(), With<bevy::render::view::ExtractedView>>,
+    shadows: Res<bevy::render::render_phase::ViewBinnedRenderPhases<bevy::pbr::Shadow>>,
+    meshes: Res<bevy::render::render_asset::RenderAssets<bevy::render::mesh::RenderMesh>>,
+    materials: Res<
+        bevy::render::erased_render_asset::ErasedRenderAssets<bevy::pbr::PreparedMaterial>,
+    >,
+    casters: Query<&bevy::render::view::RenderShadowMapVisibleEntities>,
+    instances: Res<bevy::pbr::RenderMeshInstances>,
+    mut last: Local<Option<Instant>>,
+) {
+    if last.is_some_and(|t| t.elapsed().as_secs_f32() < 1.0) {
+        return;
+    }
+    *last = Some(Instant::now());
+    let batches: Vec<_> = shadows
+        .0
+        .values()
+        .map(|p| {
+            p.multidrawable_meshes.len()
+                + p.batchable_meshes.len()
+                + p.unbatchable_meshes
+                    .values()
+                    .map(|b| b.entities.len())
+                    .sum::<usize>()
+        })
+        .collect();
+    let mut caster_counts: Vec<_> = casters
+        .iter()
+        .flat_map(|light| {
+            light.subviews.iter().map(|(view, visible)| {
+                let count: usize = visible
+                    .classes
+                    .values()
+                    .map(|class| {
+                        class.entities_cpu_culling.len() + class.entities_gpu_culling.len()
+                    })
+                    .sum();
+                (format!("{view:?}"), count)
+            })
+        })
+        .collect();
+    caster_counts.sort_unstable();
+    let instances = match &*instances {
+        bevy::pbr::RenderMeshInstances::CpuBuilding(instances) => instances.len(),
+        bevy::pbr::RenderMeshInstances::GpuBuilding(instances) => instances.len(),
+    };
+    let source_materials = materials
+        .iter()
+        .filter(|(id, _)| id.type_id() == std::any::TypeId::of::<StandardMaterial>())
+        .count();
+    info!(
+        "render counts: views {}, shadow views {}, shadow batches {:?}, meshes {}, materials {}, main batches {}",
+        views.iter().count(),
+        batches.len(),
+        batches,
+        meshes.iter().count(),
+        materials.iter().count(),
+        probe.0.lock().map_or(0, |p| p.draw_batches)
+    );
+    info!("render shadow casters: {caster_counts:?}");
+    info!("render instances: {instances}, prepared source materials: {source_materials}");
 }
 
 fn count_draw_batches(
@@ -349,7 +652,9 @@ macro_rules! register {
         if crate::perf_log::enabled() {
             let probe = crate::perf_log::install_render_probe(&mut $app);
             $app.insert_resource(crate::perf_log::PerfLog::open()?)
+                .insert_resource(crate::perf_log::PerfTour::from_args(crate::perf_log::args())?)
                 .insert_resource(probe)
+                .add_systems(FixedUpdate, apply_perf_tour.before(simulate))
                 .add_systems(First, |mut log: ResMut<crate::perf_log::PerfLog>| {
                     log.frame_start = std::time::Instant::now();
                 })

@@ -846,7 +846,14 @@ fn tick(world: &mut World) {
         world.insert_resource(sweep);
         return;
     }
-    if !world.resource::<Pending>().loaded() || world.resource::<Pending>().loaded_for() < 3. {
+    // Keep the logical material inventory fixed between the normal and all-visible poses.
+    // Mesh batches install over several frames after scene loading finishes.
+    if !super::ready(
+        world.get_resource::<Pending>(),
+        world.get_resource::<super::StaticBatches>(),
+        world.get_resource::<crate::pipeline_warmup::PipelineWarmup>(),
+    ) || world.resource::<Pending>().loaded_for() < 3.
+    {
         if Instant::now() >= sweep.next_loading_log {
             let pending = world.resource::<Pending>();
             println!(

@@ -21,6 +21,51 @@ mod camera_fade;
 
 type LayeredMaterial = ExtendedMaterial<StandardMaterial, MapLayers>;
 
+#[path = "map_batches.rs"]
+pub(crate) mod batches;
+
+/// Immutable map descriptors can be repeated in different GLBs (and at each LOD).
+/// Keep source identity for actors, whose tint is changed by gameplay.
+#[derive(Default)]
+struct MaterialInterner {
+    buckets: HashMap<u64, Vec<Handle<LayeredMaterial>>>,
+}
+
+impl MaterialInterner {
+    fn intern(
+        &mut self,
+        material: LayeredMaterial,
+        assets: &mut Assets<LayeredMaterial>,
+    ) -> Handle<LayeredMaterial> {
+        use std::hash::{Hash, Hasher};
+        // Debug includes every descriptor field, including non-reflected cull_mode.
+        // Compute this only once per source, and retain neither strings nor duplicate assets.
+        // A hash match is always checked against the full descriptor, so collisions are safe.
+        let descriptor = format!("{material:?}");
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        descriptor.hash(&mut hash);
+        let bucket = self.buckets.entry(hash.finish()).or_default();
+        for handle in bucket.iter() {
+            if assets
+                .get(handle)
+                .is_some_and(|other| format!("{other:?}") == descriptor)
+            {
+                return handle.clone();
+            }
+        }
+        let handle = assets.add(material);
+        bucket.push(handle.clone());
+        handle
+    }
+
+    fn retain(&mut self, live: &std::collections::HashSet<AssetId<LayeredMaterial>>) {
+        self.buckets.retain(|_, handles| {
+            handles.retain(|h| live.contains(&h.id()));
+            !handles.is_empty()
+        });
+    }
+}
+
 #[derive(Component)]
 pub(super) struct MaterialOrigin(pub bevy::asset::AssetPath<'static>);
 
@@ -141,9 +186,9 @@ fn release_materials(
 ) {
     for event in events.read() {
         if let AssetEvent::Removed { id } = event {
-            for follows_scene in [false, true] {
-                settings.materials.remove(&(*id, follows_scene));
-            }
+            settings.materials.retain(|(source, _, _), _| source != id);
+            let live = settings.materials.values().map(|h| h.id()).collect();
+            settings.interned.retain(&live);
         }
     }
     // Scene assets can retain their source materials after the rig is gone.
@@ -152,6 +197,7 @@ fn release_materials(
         removed_actors.clear();
         let live: std::collections::HashSet<_> = active.iter().map(|h| h.0.id()).collect();
         settings.materials.retain(|_, h| live.contains(&h.id()));
+        settings.interned.retain(&live);
     }
 }
 
@@ -380,6 +426,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn identical_map_descriptors_share_but_surface_and_lighting_changes_do_not() {
+        let mut assets = Assets::<LayeredMaterial>::default();
+        let mut interned = MaterialInterner::default();
+        let original = LayeredMaterial {
+            base: StandardMaterial::default(),
+            extension: MapLayers::default(),
+        };
+        let first = interned.intern(original.clone(), &mut assets);
+        assert_eq!(first, interned.intern(original.clone(), &mut assets));
+        for material in [
+            LayeredMaterial {
+                base: StandardMaterial {
+                    cull_mode: None,
+                    ..original.base.clone()
+                },
+                ..original.clone()
+            },
+            LayeredMaterial {
+                extension: MapLayers {
+                    camera_fade: Vec4::ONE,
+                    ..original.extension.clone()
+                },
+                ..original.clone()
+            },
+            LayeredMaterial {
+                base: StandardMaterial {
+                    base_color_texture: Some(Handle::default()),
+                    ..original.base.clone()
+                },
+                ..original.clone()
+            },
+        ] {
+            assert_ne!(first, interned.intern(material, &mut assets));
+        }
+        assert_eq!(assets.len(), 4);
+    }
+
+    #[test]
     fn render_only_images_are_not_reported_as_missing() {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
@@ -479,6 +563,7 @@ mod tests {
                 enabled: true,
                 debug: false,
                 materials: HashMap::new(),
+                interned: MaterialInterner::default(),
                 camera_fade: camera_fade::CameraFade::load(std::path::Path::new(""), false),
             })
             .add_systems(Update, (release_materials, replace_materials).chain())
@@ -761,7 +846,8 @@ struct LayerSettings {
     enabled: bool,
     debug: bool,
     /// Wrappers by source material and whether they read the scene light buffer.
-    materials: HashMap<(AssetId<StandardMaterial>, bool), Handle<LayeredMaterial>>,
+    materials: HashMap<(AssetId<StandardMaterial>, bool, bool), Handle<LayeredMaterial>>,
+    interned: MaterialInterner,
     camera_fade: camera_fade::CameraFade,
 }
 
@@ -771,6 +857,7 @@ struct MapEnvironment<'w, 's> {
     roots: Query<'w, 's, (), With<super::DrawGroups>>,
     scene_parts: Query<'w, 's, (), With<super::FollowsSceneLight>>,
     actors: Query<'w, 's, (), With<crate::character::Rig>>,
+    no_shadow: Query<'w, 's, (), With<super::world::AuthoredNoShadow>>,
     irradiance: Option<Res<'w, crate::lighting::MapIrradiance>>,
     light: Option<Res<'w, MapLightBuffer>>,
 }
@@ -789,8 +876,10 @@ fn sync_actor_materials(
 ) {
     for (source, target) in &actors {
         if let Some(base) = sources.get(&source.0)
+            && materials.get(&target.0).is_some_and(|target| {
+                target.base.base_color != base.base_color || target.base.emissive != base.emissive
+            })
             && let Some(mut target) = materials.get_mut(&target.0)
-            && (target.base.base_color != base.base_color || target.base.emissive != base.emissive)
         {
             target.base.base_color = base.base_color;
             target.base.emissive = base.emissive;
@@ -799,31 +888,38 @@ fn sync_actor_materials(
 }
 
 pub(super) fn install(app: &mut App, prefix: &str, dir: &std::path::Path, args: &[String]) {
+    crate::pipeline_warmup::install::<LayeredMaterial>(app, args);
+    batches::install(app);
+    crate::material_residency::install(app);
     embedded_asset!(app, "map_material.wgsl");
     embedded_asset!(app, "map_prepass.wgsl");
     bevy::shader::load_shader_library!(app, "map_bindings.wgsl");
     bevy::shader::load_shader_library!(app, "map_coverage.wgsl");
-    app.add_plugins(MaterialPlugin::<LayeredMaterial>::default())
-        .init_resource::<MapLightBuffer>()
-        .insert_resource(LayerSettings {
-            prefix: prefix.to_owned(),
-            primary_texture_prefix: args.iter().any(|s| s == "--test-primary-material-prefix"),
-            enabled: !args.iter().any(|s| s == "--no-layers"),
-            debug: args.iter().any(|s| s == "--show-blend"),
-            materials: HashMap::new(),
-            camera_fade: camera_fade::CameraFade::load(
-                dir,
-                !args.iter().any(|s| s == "--no-camera-fade"),
-            ),
-        })
-        .add_systems(
-            Update,
-            (release_materials, replace_materials, update_hemisphere)
-                .chain()
-                .after(crate::lighting::apply_lighting)
-                .after(crate::lighting::apply_probes),
-        )
-        .add_systems(PostUpdate, sync_actor_materials);
+    app.add_plugins((
+        MaterialPlugin::<LayeredMaterial>::default(),
+        crate::parallel_shadows::ParallelShadowsPlugin,
+    ))
+    .init_resource::<MapLightBuffer>()
+    .insert_resource(LayerSettings {
+        prefix: prefix.to_owned(),
+        primary_texture_prefix: args.iter().any(|s| s == "--test-primary-material-prefix"),
+        enabled: !args.iter().any(|s| s == "--no-layers"),
+        debug: args.iter().any(|s| s == "--show-blend"),
+        materials: HashMap::new(),
+        interned: MaterialInterner::default(),
+        camera_fade: camera_fade::CameraFade::load(
+            dir,
+            !args.iter().any(|s| s == "--no-camera-fade"),
+        ),
+    })
+    .add_systems(
+        Update,
+        (release_materials, replace_materials, update_hemisphere)
+            .chain()
+            .after(crate::lighting::apply_lighting)
+            .after(crate::lighting::apply_probes),
+    )
+    .add_systems(PostUpdate, sync_actor_materials);
 }
 
 fn update_hemisphere(
@@ -902,6 +998,7 @@ fn replace_materials(
         roots,
         scene_parts,
         actors,
+        no_shadow,
         irradiance,
         light,
     } = environment;
@@ -922,13 +1019,18 @@ fn replace_materials(
         if !map_surface && !actor_surface {
             continue;
         }
+        if no_shadow.contains(ancestor) {
+            commands
+                .entity(entity)
+                .insert((super::world::AuthoredNoShadow, bevy::light::NotShadowCaster));
+        }
         // All map surfaces need the hemisphere, even without texture layers.
         let Some(base) = materials.get(&original.0) else {
             continue;
         };
         // Characters and parts authoring their own set follow the collision row (#30).
         let follows_scene = actor_surface || scene_parts.contains(ancestor);
-        let key = (original.0.id(), follows_scene);
+        let key = (original.0.id(), follows_scene, actor_surface);
         let handle = if let Some(handle) = settings.materials.get(&key) {
             handle.clone()
         } else {
@@ -1077,10 +1179,15 @@ fn replace_materials(
                     .map(|l| l.get(follows_scene))
                     .unwrap_or_default(),
             };
-            let handle = layered.add(ExtendedMaterial {
+            let material = ExtendedMaterial {
                 base: native_surface(base, data),
                 extension,
-            });
+            };
+            let handle = if actor_surface {
+                layered.add(material)
+            } else {
+                settings.interned.intern(material, &mut layered)
+            };
             settings.materials.insert(key, handle.clone());
             handle
         };
