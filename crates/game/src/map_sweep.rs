@@ -25,7 +25,7 @@ struct Diagnostic {
 }
 impl MaterialExtension for Diagnostic {
     fn fragment_shader() -> ShaderRef {
-        bevy::asset::AssetPath::from_path_buf(embedded_path!("map_sweep.wgsl"))
+        bevy::asset::AssetPath::from_path_buf(embedded_path!("map_sweep.wesl"))
             .with_source("embedded")
             .into()
     }
@@ -400,15 +400,16 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
             .disable::<bevy::winit::WinitPlugin>()
             .disable::<bevy::audio::AudioPlugin>(),
     )
-    .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(1)))
-    .add_plugins(MaterialPlugin::<DiagnosticMaterial>::default());
+    .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(1)));
+    // MaterialPlugin requests its shaders immediately in Bevy 0.20.
+    embedded_asset!(&mut app, "map_sweep.wesl");
+    app.add_plugins(MaterialPlugin::<DiagnosticMaterial>::default());
     super::capture::install(&mut app);
     // Keep scrolling water/clouds identical in the normal/all comparison.
     // Advance once per pose to allow the shared 0.5 s local-light selection to run.
     let mut clock = app.world_mut().resource_mut::<Time<Virtual>>();
     clock.advance_by(Duration::from_secs(1));
     clock.pause();
-    embedded_asset!(&mut app, "map_sweep.wgsl");
     add_map(
         &mut app,
         &dir,

@@ -48,12 +48,23 @@ fn spawn(mut commands: Commands) {
         },
         GlobalZIndex(i32::MAX),
         BackgroundColor(Color::NONE),
+        Pickable::IGNORE,
     ));
 }
 
-fn draw(mut fade: ResMut<Fade>, mut overlay: Query<&mut BackgroundColor, With<Overlay>>) {
-    if let Ok(mut color) = overlay.single_mut() {
+fn draw(
+    mut fade: ResMut<Fade>,
+    mut overlay: Query<(&mut BackgroundColor, &mut Pickable), With<Overlay>>,
+) {
+    if let Ok((mut color, mut pickable)) = overlay.single_mut() {
         color.0 = Color::srgba(0.0, 0.0, 0.0, fade.alpha);
+        // Picking ignores alpha and no longer uses Node's default FocusPolicy::Pass.
+        // Block menu clicks only while the cinematic actually covers the screen.
+        pickable.set_if_neq(if fade.alpha > 0.0 {
+            Pickable::default()
+        } else {
+            Pickable::IGNORE
+        });
     }
     fade.black_frames = if fade.alpha >= 1.0 {
         fade.black_frames.saturating_add(1)

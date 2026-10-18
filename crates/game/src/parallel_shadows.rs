@@ -1,30 +1,11 @@
-//! Record sun cascades serially with separate encoders, then finish them on parallel workers.
-//! Serial recording retains the draw-function lock protecting Bevy's cached render commands.
+//! Record each sun cascade through Bevy, preserving its native indirect preparation.
+//! Separate encoders let Bevy 0.20 finish the cascades in parallel before submission.
 use bevy::core_pipeline::schedule::Core3d;
-use bevy::ecs::schedule::ScheduleCleanupPolicy;
-use bevy::ecs::system::{Deferred, SystemBuffer, SystemMeta};
-use bevy::ecs::world::DeferredWorld;
-use bevy::pbr::{Shadow, ShadowView, ViewLightEntities, per_view_shadow_pass};
+use bevy::ecs::schedule::{ScheduleCleanupPolicy, ScheduleConfigs};
+use bevy::ecs::system::ScheduleSystem;
+use bevy::pbr::{ViewLightEntities, per_view_shadow_pass};
 use bevy::prelude::*;
-use bevy::render::RenderApp;
-use bevy::render::render_phase::{TrackedRenderPass, ViewBinnedRenderPhases};
-use bevy::render::render_resource::{CommandEncoderDescriptor, RenderPassDescriptor, StoreOp};
-use bevy::render::renderer::{PendingCommandBuffers, RenderDevice, ViewQuery};
-use bevy::render::view::ExtractedView;
-use bevy::tasks::{ComputeTaskPool, Task, futures_lite::future::block_on};
-
-#[derive(Default)]
-struct ShadowCommands(Vec<Task<wgpu::CommandBuffer>>);
-
-impl SystemBuffer for ShadowCommands {
-    fn queue(&mut self, _meta: &SystemMeta, mut world: DeferredWorld) {
-        // Deferred buffers flush in schedule order: indirect-parameter writes, shadows,
-        // then main passes. Finish encoders in the meantime, without delaying those passes.
-        let _timer = crate::perf_log::SystemTimer::start("shadow finish wait");
-        let buffers: Vec<_> = self.0.drain(..).map(block_on).collect();
-        world.resource_mut::<PendingCommandBuffers>().push(buffers);
-    }
-}
+use bevy::render::{RenderApp, renderer::CurrentView};
 
 pub(crate) struct ParallelShadowsPlugin;
 
@@ -48,56 +29,104 @@ impl Plugin for ParallelShadowsPlugin {
             )
             .expect("replace sun shadow pass");
         assert_eq!(removed, 1, "sun shadow pass must be replaced exactly once");
-        // Preserve all existing prepass, occlusion and main-pass ordering edges.
-        schedule.add_systems(parallel_shadow_pass
+        schedule.add_systems(ordered_cascades(parallel_shadow_pass.into_configs())
             .after(bevy::pbr::early_prepass_build_indirect_parameters)
             .before(bevy::core_pipeline::mip_generation::experimental::depth::early_downsample_depth)
             .before(per_view_shadow_pass::<true>)
             .before(bevy::core_pipeline::schedule::Core3dSystems::MainPass));
         world.resource_mut::<Schedules>().insert(schedule);
-        info!("parallel sun shadow encoders installed");
     }
 }
 
-fn parallel_shadow_pass(
-    world: &World,
-    view: ViewQuery<&ViewLightEntities>,
-    views: Query<(&ShadowView, &ExtractedView)>,
-    phases: Res<ViewBinnedRenderPhases<Shadow>>,
-    device: Res<RenderDevice>,
-    mut commands: Deferred<ShadowCommands>,
-) {
+fn ordered_cascades(pass: ScheduleConfigs<ScheduleSystem>) -> ScheduleConfigs<ScheduleSystem> {
+    // Core3d disables automatic deferred barriers. The cached native shadow system
+    // queues immediately, so preceding GPU preprocessing must be queued first.
+    (ApplyDeferred, pass).chain()
+}
+
+fn parallel_shadow_pass(world: &mut World, mut lights: Local<Vec<Entity>>) {
     let _timer = crate::perf_log::SystemTimer::start("shadow tasks");
-    let view = view.into_inner();
-    for &entity in &view.lights {
-        let Ok((shadow, extracted)) = views.get(entity) else {
-            continue;
-        };
-        let Some(phase) = phases.get(&extracted.retained_view_entity) else {
-            continue;
-        };
-        let device = &*device;
-        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some(&shadow.pass_name),
-        });
-        {
-            let pass = encoder.begin_render_pass(&RenderPassDescriptor {
-                label: Some(&shadow.pass_name),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(
-                    shadow.depth_attachment.get_attachment(StoreOp::Store),
-                ),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            let mut pass = TrackedRenderPass::new(device, pass);
-            if let Err(error) = phase.render(&mut pass, world, entity) {
-                error!("shadow phase: {error:?}");
+    let view = world.resource::<CurrentView>().0;
+    let Some(mut view_lights) = world.get_mut::<ViewLightEntities>(view) else {
+        return;
+    };
+    std::mem::swap(&mut *lights, &mut view_lights.lights);
+    // Each invocation flushes its own encoder into Bevy's ordered pending list.
+    // Calling the native system also keeps its per-shadow-view indirect writes.
+    let result = lights.iter().try_for_each(|&light| {
+        world
+            .get_mut::<ViewLightEntities>(view)
+            .unwrap()
+            .lights
+            .push(light);
+        let result = world.run_system_cached(per_view_shadow_pass::<false>);
+        world
+            .get_mut::<ViewLightEntities>(view)
+            .unwrap()
+            .lights
+            .clear();
+        result
+    });
+    std::mem::swap(
+        &mut *lights,
+        &mut world.get_mut::<ViewLightEntities>(view).unwrap().lights,
+    );
+    result.expect("native sun shadow pass");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::{
+        system::{Deferred, SystemBuffer, SystemMeta},
+        world::DeferredWorld,
+    };
+
+    #[derive(Resource, Default)]
+    struct Submitted(Vec<&'static str>);
+
+    #[derive(Default)]
+    struct Encoder(Vec<&'static str>);
+
+    impl SystemBuffer for Encoder {
+        fn queue(&mut self, _: &SystemMeta, mut world: DeferredWorld) {
+            world.resource_mut::<Submitted>().0.append(&mut self.0);
+        }
+    }
+
+    #[test]
+    fn cascades_submit_after_preprocessing_before_color_on_every_frame() {
+        fn preprocess(mut encoder: Deferred<Encoder>) {
+            encoder.0.push("preprocess");
+        }
+        fn cascade(mut encoder: Deferred<Encoder>) {
+            encoder.0.push("cascade");
+        }
+        fn split(world: &mut World) {
+            for _ in 0..4 {
+                world.run_system_cached(cascade).unwrap();
             }
         }
-        commands
-            .0
-            .push(ComputeTaskPool::get().spawn(async move { encoder.finish() }));
+        fn color(mut encoder: Deferred<Encoder>) {
+            encoder.0.push("color");
+        }
+        let mut world = World::new();
+        world.init_resource::<Submitted>();
+        let mut schedule = Core3d::base_schedule();
+        schedule.add_systems((preprocess, ordered_cascades(split.into_configs()), color).chain());
+        for _ in 0..3 {
+            schedule.run(&mut world);
+            assert_eq!(
+                std::mem::take(&mut world.resource_mut::<Submitted>().0),
+                [
+                    "preprocess",
+                    "cascade",
+                    "cascade",
+                    "cascade",
+                    "cascade",
+                    "color"
+                ]
+            );
+        }
     }
 }

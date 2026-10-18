@@ -1,9 +1,11 @@
-#import bevy_pbr::{
-    forward_io::{Vertex, VertexOutput},
-    mesh_view_bindings::{view, view_transmission_texture, view_transmission_sampler},
-}
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var normals: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var normal_sampler: sampler;
+import bevy_pbr::render::forward_io::Vertex;
+import bevy_pbr::render::forward_io::VertexOutput;
+import bevy_pbr::render::mesh_view_bindings::view;
+import bevy_pbr::render::mesh_view_bindings::view_transmission_texture;
+import bevy_pbr::render::mesh_view_bindings::view_transmission_sampler;
+
+@group(constants::MATERIAL_BIND_GROUP) @binding(0) var normals: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(1) var normal_sampler: sampler;
 
 @vertex
 fn vertex(v: Vertex) -> VertexOutput {
@@ -14,9 +16,8 @@ fn vertex(v: Vertex) -> VertexOutput {
     out.uv = v.uv;
     out.color = v.color;
     out.world_tangent = v.tangent;
-#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+@if(VERTEX_OUTPUT_INSTANCE_INDEX)
     out.instance_index = v.instance_index;
-#endif
     return out;
 }
 

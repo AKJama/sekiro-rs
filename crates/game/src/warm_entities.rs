@@ -121,14 +121,6 @@ pub(super) fn warm<M: Material>(world: &mut World) -> bool {
             if shadow && !properties.shadows_enabled {
                 continue;
             }
-            let specialize = if shadow {
-                properties.prepass_specialize
-            } else {
-                properties.base_specialize
-            };
-            let Some(specialize) = specialize else {
-                continue;
-            };
             for &(view, view_key) in views {
                 let key = super::pass_key(
                     if shadow {
@@ -154,7 +146,7 @@ pub(super) fn warm<M: Material>(world: &mut World) -> bool {
                     let Some(draw) = draw else {
                         continue;
                     };
-                    Some(draw)
+                    Some((draw, depth_only))
                 } else {
                     None
                 };
@@ -166,14 +158,24 @@ pub(super) fn warm<M: Material>(world: &mut World) -> bool {
                 let cached = queue
                     .pipelines
                     .entry((shadow, erased.clone(), layout.clone()))
-                    .or_insert_with(|| specialize(world, erased, &layout, &properties).ok());
+                    .or_insert_with(|| {
+                        if shadow {
+                            properties.prepass_specialize.and_then(|specialize| {
+                                specialize(world, &erased, &layout, &properties).ok()
+                            })
+                        } else {
+                            properties.base_specialize.and_then(|specialize| {
+                                specialize(world, erased, &layout, &properties).ok()
+                            })
+                        }
+                    });
                 if let Some(pipeline) = *cached {
-                    if let Some(draw) = draw {
+                    if let Some((draw, depth_only)) = draw {
                         world
                             .resource_mut::<SpecializedShadowMaterialPipelineCache>()
                             .entry(view)
                             .or_default()
-                            .insert(resident.entity, (pipeline, draw));
+                            .insert(resident.entity, (pipeline, draw, depth_only));
                     } else {
                         world
                             .resource_mut::<SpecializedMaterialPipelineCache>()

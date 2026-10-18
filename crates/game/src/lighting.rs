@@ -13,7 +13,7 @@
 //! game's space: the vector `Ry(yaw) * Rx(pitch) * +Z` points toward the light, and is mirrored
 //! on X into Bevy space like everything else.
 
-use anyhow::Context;
+use anyhow::Context as ContextExt;
 use bevy::light::{EnvironmentMapLight, GlobalAmbientLight, Skybox};
 #[path = "fog.rs"]
 pub(crate) mod fog;
@@ -23,9 +23,9 @@ use sekiro_formats::gparam::Gparam;
 #[path = "grading.rs"]
 pub(crate) mod grading;
 use bevy::camera::Hdr;
-use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::post_process::{auto_exposure::AutoExposure, bloom::Bloom};
 use bevy::render::view::ColorGrading;
+use bevy::render::view::{DebandDither, Tonemapping};
 
 #[path = "tonemap.rs"]
 pub(crate) mod tonemap;
@@ -315,7 +315,12 @@ fn apply_post_effects(
         // The view setup is per camera, not per row: re-inserting Hdr and Tonemapping at every
         // LightSet change (doorways, #15) made Bevy re-specialise the camera's view pipelines.
         if applied.is_none() {
-            camera.insert((Hdr, Tonemapping::None, DebandDither::Disabled));
+            camera.insert((
+                Hdr,
+                Tonemapping::None,
+                DebandDither::Disabled,
+                bevy::pbr::ScreenSpaceTransmission::default(),
+            ));
             camera.remove::<(AutoExposure, Bloom)>();
         }
         camera.insert((
@@ -790,7 +795,7 @@ pub fn install_irradiance(
     dir: &std::path::Path,
     probes: &MapProbes,
 ) -> anyhow::Result<()> {
-    use anyhow::{Context, ensure};
+    use anyhow::{Context as ContextExt, ensure};
     let mut regions: Vec<_> = probes.regions.iter().filter(|r| r.size.is_some()).collect();
     regions.sort_by(|a, b| {
         b.size
@@ -1635,15 +1640,7 @@ mod probe_tests {
             .resource::<Assets<bevy::render::storage::ShaderBuffer>>()
             .get(&gi.buffer)
             .unwrap();
-        let words: Vec<u32> = buffer
-            .data
-            .as_ref()
-            .unwrap()
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|b| u32::from_le_bytes(*b))
-            .collect();
+        let words = buffer.cast_slice::<u32>().unwrap();
         assert_eq!(words[0], 1);
         assert_eq!(words[23], 0); // First cube array layer, independent of sparse probe IDs.
         let matrix = Mat4::from_cols_array(&std::array::from_fn(|i| f32::from_bits(words[4 + i])));

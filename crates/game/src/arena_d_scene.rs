@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context as ContextExt, Result};
 use bevy::prelude::*;
 use sekiro_sim::arena::ArenaSpec;
 use serde_json::Value;

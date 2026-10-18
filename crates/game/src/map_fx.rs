@@ -6,7 +6,7 @@ use crate::{
         world::{MapWorld, RequestState},
     },
 };
-use anyhow::{Context, Result};
+use anyhow::{Context as ContextExt, Result};
 use bevy::prelude::*;
 use sekiro_formats::msb::MapRegion;
 use std::{collections::BTreeMap, path::Path};

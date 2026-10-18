@@ -1,5 +1,4 @@
 //! Shader-derived global fog, integrated in HDR before bloom and tone mapping.
-use crate::render_context::RenderContext;
 use bevy::asset::{embedded_asset, load_embedded_asset};
 use bevy::camera::{Exposure, visibility::NoFrustumCulling};
 use bevy::core_pipeline::{
@@ -9,6 +8,8 @@ use bevy::core_pipeline::{
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
+use bevy::render::renderer::RenderContext;
+use bevy::render::view::ViewDepthStencilTexture;
 use bevy::render::{
     RenderApp, RenderStartup,
     extract_component::{
@@ -17,7 +18,7 @@ use bevy::render::{
     },
     render_resource::{binding_types::*, *},
     renderer::ViewQuery,
-    view::{ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
+    view::{ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
 };
 use sekiro_formats::gparam::Gparam;
 
@@ -25,6 +26,7 @@ use sekiro_formats::gparam::Gparam;
 pub(crate) struct FogSelection(pub i32);
 
 #[derive(Component, Clone, ExtractComponent, ShaderType, Debug, PartialEq)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct GameFog {
     // fixed density, height coefficient, height density, affine height offset.
     density: Vec4,
@@ -51,7 +53,7 @@ pub struct GameFog {
 struct FogDepthSampling;
 
 fn release_depth_sampling(
-    event: On<Remove, GameFog>,
+    event: On<Remove<GameFog>>,
     mut commands: Commands,
     mut cameras: Query<&mut Camera3d, With<FogDepthSampling>>,
 ) {
@@ -1026,7 +1028,7 @@ type BackgroundMeshes<'w, 's> = Query<
 pub struct FogPlugin;
 impl Plugin for FogPlugin {
     fn build(&self, app: &mut App) {
-        embedded_asset!(app, "fog.wgsl");
+        embedded_asset!(app, "fog.wesl");
         app.add_plugins((
             ExtractComponentPlugin::<GameFog>::default(),
             UniformComponentPlugin::<GameFog>::default(),
@@ -1250,7 +1252,7 @@ fn init_pipeline(
                         layout: vec![layout.clone()],
                         vertex: fullscreen.to_vertex_state(),
                         fragment: Some(FragmentState {
-                            shader: load_embedded_asset!(assets.as_ref(), "fog.wgsl"),
+                            shader: load_embedded_asset!(assets.as_ref(), "fog.wesl"),
                             shader_defs,
                             targets: vec![Some(ColorTargetState {
                                 format: TextureFormat::Rgba16Float,
@@ -1275,7 +1277,7 @@ fn init_pipeline(
 fn fog(
     view: ViewQuery<(
         &ViewTarget,
-        &ViewDepthTexture,
+        &ViewDepthStencilTexture,
         &Msaa,
         &ViewUniformOffset,
         &DynamicUniformIndex<GameFog>,
@@ -1287,9 +1289,12 @@ fn fog(
     mut ctx: RenderContext,
 ) {
     let (target, depth, msaa, offset, index) = view.into_inner();
+    let Some(depth_view) = depth.attachment.depth_stencil_views().depth_only_view() else {
+        return;
+    };
     // A newly extracted fog component can precede its rebuilt depth attachment.
     if !depth
-        .texture
+        .texture()
         .usage()
         .contains(TextureUsages::TEXTURE_BINDING)
     {
@@ -1325,7 +1330,7 @@ fn fog(
         let bindings = ctx.render_device().create_bind_group(
             "game fog samples",
             &cache.get_bind_group_layout(&pipeline.layout),
-            &BindGroupEntries::sequential((depth.view(), view_binding, fog_binding)),
+            &BindGroupEntries::sequential((depth_view, view_binding, fog_binding)),
         );
         for pso in psos {
             let mut attachment = target.get_color_attachment();
@@ -1346,7 +1351,7 @@ fn fog(
     let bindings = ctx.render_device().create_bind_group(
         "game fog",
         &cache.get_bind_group_layout(&pipeline.layout),
-        &BindGroupEntries::sequential((post.source, depth.view(), view_binding, fog_binding)),
+        &BindGroupEntries::sequential((post.source, depth_view, view_binding, fog_binding)),
     );
     let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("game fog"),

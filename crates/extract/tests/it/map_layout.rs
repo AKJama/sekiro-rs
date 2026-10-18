@@ -22,8 +22,33 @@ fn same_source_values(actual: &Value, expected: &Value) -> bool {
         _ => actual == expected,
     }
 }
+
+// Matrix decomposition can round differently across glam versions.
+// Only derived transforms get this tolerance; source_transform stays exact above.
+fn same_derived_transform(actual: &Value, expected: &Value) -> bool {
+    let (Some(actual), Some(expected)) = (actual.as_array(), expected.as_array()) else {
+        return false;
+    };
+    actual.len() == expected.len()
+        && actual.iter().zip(expected).all(|(a, b)| {
+            let (Some(a), Some(b)) = (a.as_f64(), b.as_f64()) else {
+                return false;
+            };
+            let tolerance = 8.0 * f64::from(f32::EPSILON) * a.abs().max(b.abs()).max(1.0);
+            (a - b).abs() <= tolerance
+        })
+}
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+
+#[test]
+fn decomposition_rounding_does_not_relax_authored_precision() {
+    let authored = json!([0.8_f32]);
+    let rounded = json!([f32::from_bits(0.8_f32.to_bits() + 1)]);
+    assert!(!same_source_values(&authored, &rounded));
+    assert!(same_derived_transform(&authored, &rounded));
+    assert!(!same_derived_transform(&authored, &json!([0.80001])));
+}
 
 #[test]
 fn connection_inventory_matching_preserves_retail_signed_fields() {
@@ -190,7 +215,11 @@ fn installed_layout_preserves_all_parts_and_matches_job_a_audit() {
                 "connection",
             ] {
                 assert!(
-                    same_source_values(&actual[key], &expected[key]),
+                    if matches!(key, "translation" | "rotation" | "scale") {
+                        same_derived_transform(&actual[key], &expected[key])
+                    } else {
+                        same_source_values(&actual[key], &expected[key])
+                    },
                     "{id} {} {key}: {} != {}",
                     actual["name"],
                     actual[key],

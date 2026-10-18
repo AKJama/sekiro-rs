@@ -1,18 +1,18 @@
+import bevy_pbr::render::forward_io::Vertex;
+import bevy_pbr::render::forward_io::VertexOutput;
+import bevy_pbr::render::mesh_view_bindings::view;
+import bevy_pbr::render::view_transformations::depth_ndc_to_view_z;
+
 // FXR sprite and tracer batches: unlit texture x vertex colour, scaled by the camera exposure
 // (the colour arrives in scene units, see fxr.rs). Two alpha controls per vertex ride in the
 // tangent: x the fade threshold, y the hard threshold. w is g_ps_bPreAlphaMult. z is the soft distance: where a particle
 // meets the scene its alpha fades over that distance (soft particles, after the game's soft
 // shaders as traced by FwLo's RustSekiro); 0 keeps a hard edge.
-#import bevy_pbr::{
-    forward_io::{Vertex, VertexOutput},
-    mesh_view_bindings::view,
-    view_transformations::depth_ndc_to_view_z,
-}
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var particle_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var particle_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(0) var particle_texture: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(1) var particle_sampler: sampler;
 // The scene depth after the opaque pass (fxr.rs DepthCopy; 0 = far when not copied).
-@group(#{MATERIAL_BIND_GROUP}) @binding(2) var fx_depth: texture_depth_multisampled_2d;
+@group(constants::MATERIAL_BIND_GROUP) @binding(2) var fx_depth: texture_depth_multisampled_2d;
 
 @vertex
 fn vertex(v: Vertex) -> VertexOutput {
@@ -25,9 +25,8 @@ fn vertex(v: Vertex) -> VertexOutput {
     out.color = v.color;
     // This attribute carries alpha controls, not a surface tangent.
     out.world_tangent = v.tangent;
-#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+@if(VERTEX_OUTPUT_INSTANCE_INDEX)
     out.instance_index = v.instance_index;
-#endif
     return out;
 }
 
@@ -45,22 +44,20 @@ fn fragment(v: VertexOutput) -> @location(0) vec4<f32> {
     var color = texture_color * v.color;
     let soft = v.world_tangent.z;
     if soft > 0.0001 {
-        #ifdef DEPTH_PREPASS
         // Single-sample captures (the map sweep and pose server) carry Bevy's depth prepass,
         // whose depth cannot be copied into the four-sample slot below.
-        let raw_depth = bevy_pbr::prepass_utils::prepass_depth(v.position, 0u);
-#else
+@if(DEPTH_PREPASS)
+        let raw_depth = bevy_pbr::prepass::utils::prepass_depth(v.position, 0u);
+@if(!DEPTH_PREPASS)
         let raw_depth = textureLoad(fx_depth, vec2<i32>(v.position.xy), 0);
-#endif
         let scene = -depth_ndc_to_view_z(raw_depth);
         let me = -depth_ndc_to_view_z(v.position.z);
         color.a = color.a * clamp(min(scene - me, soft) / soft, 0.0, 1.0);
     }
-#ifdef BLEND_PREMULTIPLIED_ALPHA
     // Bevy routes AlphaMode::Add through premultiplied blending. Zero coverage keeps
     // the destination, while source alpha weights the emitted radiance.
+@if(BLEND_PREMULTIPLIED_ALPHA)
     return vec4(color.rgb * view.exposure * clamp(color.a, 0.0, 1.0), 0.0);
-#else
+@if(!BLEND_PREMULTIPLIED_ALPHA)
     return vec4(color.rgb * view.exposure, clamp(color.a, 0.0, 1.0));
-#endif
 }

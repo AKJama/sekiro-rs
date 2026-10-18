@@ -9,7 +9,7 @@
 
 use std::{collections::HashMap, path::Path};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context as ContextExt, Result, bail};
 use bevy::prelude::*;
 use serde_json::Value;
 
@@ -262,7 +262,7 @@ impl LodState {
     }
 }
 
-/// `MeshTag` bit marking an instance drawn with crossfade coverage (`map_coverage.wgsl`).
+/// `MeshTag` bit marking an instance drawn with crossfade coverage (`map_coverage.wesl`).
 pub const FADE_TAG: u32 = 1 << 31;
 /// `MeshTag` bit marking the higher level of a crossfading pair.
 pub const FADE_HIGHER: u32 = 1 << 30;

@@ -133,7 +133,7 @@ impl PlayGate {
 }
 
 #[derive(Component)]
-pub(super) struct LoadingScreen;
+pub(crate) struct LoadingScreen;
 
 #[derive(Component)]
 pub(super) struct LoadingBar;
@@ -207,7 +207,7 @@ pub(super) fn update(
     screens: Query<Entity, With<LoadingScreen>>,
     mut bars: Query<&mut Node, With<LoadingBar>>,
 ) {
-    if sim.step > 0 {
+    if gate.open() {
         for screen in &screens {
             commands.entity(screen).despawn();
         }
@@ -340,6 +340,46 @@ fn near_meshes(world: &mut World) -> Vec<Entity> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loading_does_not_hide_a_pause_that_stops_the_first_simulation_step() {
+        for gamepad in [false, true] {
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins)
+                .init_resource::<Assets<Font>>()
+                .init_resource::<ButtonInput<KeyCode>>()
+                .add_message::<bevy::input::keyboard::KeyboardInput>();
+            crate::menu::install(&mut app);
+            let screen = app.world_mut().spawn(LoadingScreen).id();
+            let pad = app.world_mut().spawn(Gamepad::default()).id();
+            app.update();
+            let press_pause = |app: &mut App| {
+                if gamepad {
+                    let mut pad = app.world_mut().get_mut::<Gamepad>(pad).unwrap();
+                    pad.digital_mut().reset_all();
+                    pad.digital_mut().press(GamepadButton::Start);
+                } else {
+                    let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+                    keys.reset_all();
+                    keys.press(KeyCode::Escape);
+                }
+            };
+            press_pause(&mut app);
+            app.update();
+            assert!(
+                !app.world().resource::<crate::menu::PanelState>().paused,
+                "loading must not activate a pause hidden behind its overlay"
+            );
+            assert!(!app.world().resource::<Time<Virtual>>().is_paused());
+
+            // Once the loading overlay is gone, the same input must still pause play.
+            app.world_mut().despawn(screen);
+            press_pause(&mut app);
+            app.update();
+            assert!(app.world().resource::<crate::menu::PanelState>().paused);
+            assert!(app.world().resource::<Time<Virtual>>().is_paused());
+        }
+    }
 
     /// Feeds (seconds, drawable) frames until the frames settle or run out.
     fn run(frames: impl IntoIterator<Item = (f32, bool)>) -> FrameSettle {

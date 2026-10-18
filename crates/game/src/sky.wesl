@@ -1,14 +1,17 @@
-#import bevy_pbr::{forward_io::{Vertex, VertexOutput}, mesh_view_bindings::view}
+import bevy_pbr::render::forward_io::Vertex;
+import bevy_pbr::render::forward_io::VertexOutput;
+import bevy_pbr::render::mesh_view_bindings::view;
+
 
 struct SkyInputs {
     colors: array<vec4<f32>,11>, floats: array<vec4<f32>,48>,
     vectors: array<vec4<f32>,10>, uv: array<vec4<f32>,10>, sun: vec4<f32>, control: vec4<f32>,
 }
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> sky: SkyInputs;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var high: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(2) var high_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(3) var low: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(4) var low_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> sky: SkyInputs;
+@group(constants::MATERIAL_BIND_GROUP) @binding(1) var high: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(2) var high_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(3) var low: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(4) var low_sampler: sampler;
 
 @vertex
 fn vertex(v: Vertex) -> VertexOutput {

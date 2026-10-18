@@ -12,7 +12,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result};
+use anyhow::{Context as ContextExt, Result};
 use bevy::camera::visibility::VisibilitySystems;
 use bevy::prelude::*;
 use serde_json::Value;
@@ -496,6 +496,7 @@ fn write_visibility(
         Option<&VisibilityDecision>,
     )>,
 ) {
+    let _timer = crate::perf_log::SystemTimer::start("write_visibility");
     static DEBUG: std::sync::OnceLock<(bool, Option<String>)> = std::sync::OnceLock::new();
     let (debug, debug_part) = DEBUG.get_or_init(|| {
         let args: Vec<_> = std::env::args().collect();

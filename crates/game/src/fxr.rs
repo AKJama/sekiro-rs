@@ -55,9 +55,9 @@ pub fn plugin(cache: PathBuf, bridge: impl Fn(&mut App) + Send + Sync + 'static)
                 (self.bridge)(app);
                 return;
             }
-            embedded_asset!(app, "fxr.wgsl");
-            embedded_asset!(app, "fxr_multi.wgsl");
-            embedded_asset!(app, "fxr_distort.wgsl");
+            embedded_asset!(app, "fxr.wesl");
+            embedded_asset!(app, "fxr_multi.wesl");
+            embedded_asset!(app, "fxr_distort.wesl");
             app.add_plugins((
                 MaterialPlugin::<FxrMaterial>::default(),
                 MaterialPlugin::<MultiMaterial>::default(),
@@ -85,9 +85,9 @@ pub fn plugin(cache: PathBuf, bridge: impl Fn(&mut App) + Send + Sync + 'static)
 
 fn shader(name: &'static str) -> ShaderRef {
     bevy::asset::AssetPath::from_path_buf(match name {
-        "fxr.wgsl" => embedded_path!("fxr.wgsl"),
-        "fxr_distort.wgsl" => embedded_path!("fxr_distort.wgsl"),
-        _ => embedded_path!("fxr_multi.wgsl"),
+        "fxr.wesl" => embedded_path!("fxr.wesl"),
+        "fxr_distort.wesl" => embedded_path!("fxr_distort.wesl"),
+        _ => embedded_path!("fxr_multi.wesl"),
     })
     .with_source("embedded")
     .into()
@@ -686,7 +686,7 @@ fn additive(blend: i64) -> bool {
 
 /// Soft particles: pull the quad toward the camera by the particle's half size so it does not
 /// cut a hard line through the floor, and fade it where it meets the scene (the shaders,
-/// `fxr.wgsl` / `fxr_multi.wgsl`). Where the appearance's `depthBlend` is set: (scale, offset) are
+/// `fxr.wesl` / `fxr_multi.wesl`). Where the appearance's `depthBlend` is set: (scale, offset) are
 /// `unkDepthBlend1/2`. Returns the corners and the soft distance (0 = hard).
 fn soften(a: &Action, size: f32, cam: &GlobalTransform, c: [Vec3; 4]) -> ([Vec3; 4], f32) {
     if a[Field::DepthBlend].as_bool() != Some(true) {
@@ -746,10 +746,10 @@ struct DistortMaterial {
 }
 impl Material for DistortMaterial {
     fn vertex_shader() -> ShaderRef {
-        shader("fxr_distort.wgsl")
+        shader("fxr_distort.wesl")
     }
     fn fragment_shader() -> ShaderRef {
-        shader("fxr_distort.wgsl")
+        shader("fxr_distort.wesl")
     }
     fn alpha_mode(&self) -> AlphaMode {
         AlphaMode::Blend
@@ -988,7 +988,7 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                 );
                 let l2 = int(a, Field::Layer2, 0);
                 if at == 604 && l2 > 0 {
-                    // The layers (fxr_multi.wgsl); unk_ds3_f2_10..13 are the shader's
+                    // The layers (fxr_multi.wesl); unk_ds3_f2_10..13 are the shader's
                     // TexBlendType / 2 / 3 / ColorBlendType (FwLo's reading).
                     let l3 = int(a, Field::Layer3, 0).max(0);
                     let m = |k: Field| int(a, k, 0) & 0xf;
@@ -1140,7 +1140,7 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
 }
 
 /// The sprite batches' material: unlit texture x vertex colour with a soft depth fade
-/// (`fxr.wgsl`).
+/// (`fxr.wesl`).
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct FxrMaterial {
     #[texture(0)]
@@ -1167,10 +1167,10 @@ impl Material for FxrMaterial {
         }
     }
     fn vertex_shader() -> ShaderRef {
-        shader("fxr.wgsl")
+        shader("fxr.wesl")
     }
     fn fragment_shader() -> ShaderRef {
-        shader("fxr.wgsl")
+        shader("fxr.wesl")
     }
     fn specialize(
         _: &MaterialPipeline,
@@ -1213,7 +1213,7 @@ const ATTR_SOFT: bevy::mesh::MeshVertexAttribute = bevy::mesh::MeshVertexAttribu
 );
 
 /// MultiTextureBillboardEx (604): three texture layers blended as the game's
-/// GXFfxtessellateBlendMultiTexture shader does (`fxr_multi.wgsl`, FwLo's port). Output is
+/// GXFfxtessellateBlendMultiTexture shader does (`fxr_multi.wesl`, FwLo's port). Output is
 /// premultiplied, so one alpha mode serves normal and additive blends.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub struct MultiMaterial {
@@ -1236,10 +1236,10 @@ pub struct MultiMaterial {
 
 impl Material for MultiMaterial {
     fn vertex_shader() -> ShaderRef {
-        shader("fxr_multi.wgsl")
+        shader("fxr_multi.wesl")
     }
     fn fragment_shader() -> ShaderRef {
-        shader("fxr_multi.wgsl")
+        shader("fxr_multi.wesl")
     }
     fn alpha_mode(&self) -> AlphaMode {
         AlphaMode::Premultiplied
@@ -1281,6 +1281,7 @@ impl Material for MultiMaterial {
 /// DepthPrepass, which draws the whole map twice. Never written (a size or sample-count mismatch)
 /// it stays 0, which reads as infinitely far, and particles keep hard edges.
 #[derive(Resource, Clone, Default, bevy::render::extract_resource::ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct DepthCopy {
     image: Handle<Image>,
 }
@@ -1345,10 +1346,10 @@ fn soft_depth(
 /// Render world: the camera's depth (opaque pass done) into [`DepthCopy`], when size and sample
 /// count match.
 fn copy_depth(
-    view: bevy::render::renderer::ViewQuery<&bevy::render::view::ViewDepthTexture>,
+    view: bevy::render::renderer::ViewQuery<&bevy::render::view::ViewDepthStencilTexture>,
     copy: Option<Res<DepthCopy>>,
     images: Res<bevy::render::render_asset::RenderAssets<bevy::render::texture::GpuImage>>,
-    mut ctx: crate::render_context::RenderContext,
+    mut ctx: bevy::render::renderer::RenderContext,
 ) {
     let depth = view.into_inner();
     if std::env::var_os("SEKIRO_FX_DEBUG_NOCOPY").is_some() {
@@ -1358,7 +1359,7 @@ fn copy_depth(
     let Some(dst) = images.get(&copy.image) else {
         return;
     };
-    let (s, d) = (&depth.texture, &dst.texture);
+    let (s, d) = (depth.texture(), &dst.texture);
     if s.size() != d.size()
         || s.sample_count() != d.sample_count()
         || s.format() != d.format()

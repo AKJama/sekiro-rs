@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context as ContextExt, Result};
 use bevy::camera::primitives::{Aabb, Frustum};
 use bevy::mesh::MeshTag;
 use bevy::prelude::*;
@@ -1363,8 +1363,8 @@ pub(crate) fn update_detail(
                         continue;
                     };
                     match (tags[level].filter(|&tag| tag != 0), current) {
-                        (Some(tag), current) if current.is_none_or(|c| c.0 != tag) => {
-                            commands.entity(mesh).insert(MeshTag(tag));
+                        (Some(tag), current) if current.is_none_or(|c| c.value != tag) => {
+                            commands.entity(mesh).insert(MeshTag::new(tag));
                         }
                         (None, Some(_)) => {
                             commands.entity(mesh).remove::<MeshTag>();

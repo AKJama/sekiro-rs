@@ -1,3 +1,8 @@
+import bevy_pbr::render::mesh_functions::get_world_from_local;
+import bevy_pbr::render::mesh_view_bindings::view;
+import bevy_pbr::render::view_transformations::position_world_to_clip;
+import bevy_pbr::render::view_transformations::depth_ndc_to_view_z;
+
 // FXR MultiTextureBillboardEx (604) particles (fxr.rs `MultiMaterial`; from FwLo's RustSekiro, MIT;
 // the output is scaled by the camera exposure, the colour arrives in scene units), after the game's pixel
 // shader GXFfxtessellateBlendMultiTexture.ppo (shader/gxffxshader.shaderbnd, d3dcompiler_47):
@@ -18,24 +23,19 @@
 // Soft (GXFfxtessellateSoftMultiTexture.ppo): alpha x saturate(min(scene depth - own depth, soft) /
 // soft), soft = the per-vertex distance (location 8; 0 = off), as fx_soft.wgsl.
 
-#import bevy_pbr::{
-    mesh_functions::get_world_from_local,
-    mesh_view_bindings::view,
-    view_transformations::{position_world_to_clip, depth_ndc_to_view_z},
-}
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var t0: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var s0: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(2) var t1: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(3) var s1: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(4) var t2: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(5) var s2: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(0) var t0: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(1) var s0: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(2) var t1: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(3) var s1: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(4) var t2: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(5) var s2: sampler;
 // x: TexBlendType, y: TexBlendType2, z: TexBlendType3, w: ColorBlendType.
-@group(#{MATERIAL_BIND_GROUP}) @binding(6) var<uniform> modes: vec4<u32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(6) var<uniform> modes: vec4<u32>;
 // x: premultiply each layer by its alpha, y: additive (premultiplied output with alpha 0), z: has layer 3.
-@group(#{MATERIAL_BIND_GROUP}) @binding(7) var<uniform> flags: vec4<u32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(7) var<uniform> flags: vec4<u32>;
 // The scene depth after the opaque pass (fxr.rs DepthCopy; 0 = far when not copied).
-@group(#{MATERIAL_BIND_GROUP}) @binding(8) var fx_depth: texture_depth_multisampled_2d;
+@group(constants::MATERIAL_BIND_GROUP) @binding(8) var fx_depth: texture_depth_multisampled_2d;
 
 struct Vertex {
     @builtin(instance_index) instance_index: u32,
@@ -141,13 +141,12 @@ fn fragment(in: VOut) -> @location(0) vec4<f32> {
     a = clamp(a, 0.0, 1.0);
     var out_a = clamp(in.color.a * a, 0.0, 1.0);
     if in.soft > 0.0001 {
-        #ifdef DEPTH_PREPASS
         // Single-sample captures (the map sweep and pose server) carry Bevy's depth prepass,
         // whose depth cannot be copied into the four-sample slot below.
-        let raw_depth = bevy_pbr::prepass_utils::prepass_depth(in.position, 0u);
-#else
+@if(DEPTH_PREPASS)
+        let raw_depth = bevy_pbr::prepass::utils::prepass_depth(in.position, 0u);
+@if(!DEPTH_PREPASS)
         let raw_depth = textureLoad(fx_depth, vec2<i32>(in.position.xy), 0);
-#endif
         let scene = -depth_ndc_to_view_z(raw_depth);
         let me = -depth_ndc_to_view_z(in.position.z);
         out_a *= clamp(min(scene - me, in.soft) / in.soft, 0.0, 1.0);

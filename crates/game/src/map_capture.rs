@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context as ContextExt, Result};
 use bevy::gltf::{
     GltfExtras, GltfMaterialExtras, GltfMaterialName, GltfMesh, GltfMeshExtras, GltfMeshName,
     GltfNode,

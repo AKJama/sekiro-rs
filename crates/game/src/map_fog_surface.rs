@@ -82,7 +82,7 @@ impl From<&FogMaterial> for FogKey {
 
 impl Material for FogMaterial {
     fn fragment_shader() -> ShaderRef {
-        bevy::asset::AssetPath::from_path_buf(embedded_path!("map_fog_surface.wgsl"))
+        bevy::asset::AssetPath::from_path_buf(embedded_path!("map_fog_surface.wesl"))
             .with_source("embedded")
             .into()
     }
@@ -170,7 +170,7 @@ struct Settings {
 pub(crate) struct FogConversion;
 
 pub(crate) fn install(app: &mut App, prefix: &str) {
-    embedded_asset!(app, "map_fog_surface.wgsl");
+    embedded_asset!(app, "map_fog_surface.wesl");
     let empty_gi = app
         .world_mut()
         .resource_mut::<Assets<bevy::render::storage::ShaderBuffer>>()

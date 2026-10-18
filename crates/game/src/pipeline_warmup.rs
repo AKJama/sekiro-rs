@@ -89,6 +89,7 @@ struct WarmCache {
     work: VecDeque<Work>,
     queued: usize,
     frames: u32,
+    entities_ready: bool,
 }
 
 impl WarmCache {
@@ -224,17 +225,24 @@ fn warm_pipelines<M: Material>(world: &mut World, mut state: Local<WarmCache>) {
         let Some(work) = state.work.pop_front() else {
             break;
         };
-        let specialize = if work.prepass {
-            work.properties.prepass_specialize
+        let specialized = if work.prepass {
+            work.properties
+                .prepass_specialize
+                .map(|specialize| specialize(world, &work.key, &work.layout, &work.properties))
         } else {
-            work.properties.base_specialize
+            work.properties
+                .base_specialize
+                .map(|specialize| specialize(world, work.key, &work.layout, &work.properties))
         };
-        if let Some(specialize) = specialize {
-            // Incompatible layout/material combinations are not renderable and need no pipeline.
-            if specialize(world, work.key, &work.layout, &work.properties).is_ok() {
-                state.queued += 1;
-            }
+        // Incompatible layout/material combinations are not renderable and need no pipeline.
+        if specialized.is_some_and(|result| result.is_ok()) {
+            state.queued += 1;
         }
+    }
+    // Populate resident caches while GPU pipelines compile. Waiting for compilation
+    // first can hit the deadline without ever warming newly-visible placements.
+    if state.work.is_empty() && !state.entities_ready {
+        state.entities_ready = entities::warm::<M>(world);
     }
     // Do not hold loading forever if a pipeline cannot finish compiling.
     if state.frames >= SETTLE_DEADLINE_FRAMES {
@@ -245,21 +253,13 @@ fn warm_pipelines<M: Material>(world: &mut World, mut state: Local<WarmCache>) {
         return;
     }
     if state.work.is_empty()
+        && state.entities_ready
         && world
             .resource::<PipelineCache>()
             .waiting_pipelines()
             .count()
             == 0
     {
-        if !entities::warm::<M>(world)
-            || world
-                .resource::<PipelineCache>()
-                .waiting_pipelines()
-                .count()
-                > 0
-        {
-            return;
-        }
         info!(
             "map pipeline warmup complete: {} compatible layout/pass variants",
             state.queued

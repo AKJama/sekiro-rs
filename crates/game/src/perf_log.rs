@@ -557,7 +557,7 @@ fn render_counts(
     let mut caster_counts: Vec<_> = casters
         .iter()
         .flat_map(|light| {
-            light.subviews.iter().map(|(view, visible)| {
+            light.subviews.iter().map(|(view, (_, visible))| {
                 let count: usize = visible
                     .classes
                     .values()

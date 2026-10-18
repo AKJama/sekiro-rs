@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context as ContextExt, Result};
 use bevy::app::AppExit;
 use bevy::asset::AssetPlugin;
 use bevy::gltf::GltfMaterialName;
