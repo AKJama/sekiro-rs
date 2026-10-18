@@ -1,5 +1,5 @@
 //! Collision-backed action-edge selection and body docking.
-use crate::body::{Body, Ground};
+use crate::body::{Body, Ground, root_motion_world};
 use crate::input::angle_diff;
 use glam::Vec3;
 use serde::Deserialize;
@@ -20,6 +20,8 @@ pub const HANG_OUTWARD: f32 = 0.635;
 /// Where the climb ends, in from the lip: HangToStand / HangFootHoldToStand (a000_217500 /
 /// 217600) carry the root 1.10 m forward and 1.60 m up from the hang, 1.10 - 0.635 m past it.
 pub const CLIMB_INWARD: f32 = 0.465;
+/// RustSekiro's stop distance from either hang-edge end.
+pub const HANG_END_MARGIN: f32 = 0.35;
 pub const FLOOR_TOLERANCE: f32 = 0.3;
 pub const END_MARGIN: f32 = 0.2;
 pub const OUTWARD_PROBE: f32 = 0.6;
@@ -53,6 +55,49 @@ fn is_hang(edge: &MapEdge) -> bool {
     edge.kind == 2 && edge.variation <= 1
 }
 
+/// Held hang poses: idle, shimmy start, loop and stop (plain and foothold sets).
+pub(crate) fn is_hang_clip(name: &str) -> bool {
+    name.starts_with("a000_020")
+}
+
+pub(crate) fn is_cover_clip(name: &str) -> bool {
+    name.starts_with("a000_021")
+        || name.starts_with("a000_022")
+        || matches!(
+            name,
+            "a000_205010"
+                | "a000_205011"
+                | "a000_205020"
+                | "a000_205021"
+                | "a000_205030"
+                | "a000_205031"
+        )
+}
+
+/// Hang endpoint bits: 1 at the start, 2 at the end, 3 at both on a short edge.
+fn hang_end(distance: f32, length: f32) -> u8 {
+    const END_EPSILON: f32 = 1e-3;
+    let limit = HANG_END_MARGIN + END_EPSILON;
+    u8::from(distance <= limit) | (u8::from(length - distance <= limit) << 1)
+}
+
+/// Check one known face, without searching the edge again or trying its opposite side.
+fn hang_floor(point: Vec3, outward: Vec3, ground: &dyn Ground) -> Option<Vec3> {
+    let top = point - outward * CLIMB_INWARD;
+    let y = ground.floor(top.x, top.z, point.y + FLOOR_TOLERANCE)?;
+    if (y - point.y).abs() > FLOOR_TOLERANCE {
+        return None;
+    }
+    let outside = point + outward * OUTWARD_PROBE;
+    if ground
+        .floor(outside.x, outside.z, point.y + FLOOR_TOLERANCE)
+        .is_some_and(|h| h >= point.y - MIN_DROP)
+    {
+        return None;
+    }
+    Some(Vec3::new(top.x, y, top.z))
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct MapEdge {
     pub kind: u8,
@@ -64,6 +109,22 @@ pub struct MapEdge {
 }
 
 impl MapEdge {
+    /// Horizontal hang span, inset at both ends; short edges hold at their midpoint.
+    fn hang_span(&self, position: Vec3) -> (Vec3, u8) {
+        let a = Vec3::from(self.start);
+        let delta = Vec3::from(self.end) - a;
+        let horizontal = Vec3::new(delta.x, 0.0, delta.z);
+        let length = horizontal.length();
+        let margin = HANG_END_MARGIN.min(length * 0.5);
+        let distance = if length > 0.0 {
+            ((position - a).dot(horizontal) / length).clamp(margin, length - margin)
+        } else {
+            0.0
+        };
+        let t = if length > 0.0 { distance / length } else { 0.5 };
+        (a + delta * t, hang_end(distance, length))
+    }
+
     pub fn closest(&self, position: Vec3) -> (Vec3, f32) {
         let a = Vec3::from(self.start);
         let delta = Vec3::from(self.end) - a;
@@ -83,6 +144,7 @@ pub struct Target {
     pub point: Vec3,
     pub outward: Vec3,
     pub floor: Vec3,
+    /// Cover: 1 left, 2 right. Hang: 1 start, 2 end, 3 both on short edges.
     pub end: u8,
     pub angle: f32,
 }
@@ -165,6 +227,20 @@ impl Docking {
         None
     }
 
+    /// RustSekiro held_state: block only travel beyond the endpoint in Wolf's own frame.
+    pub fn hang_blocked(&self, target: &Target, left: bool) -> bool {
+        let edge = &self.edges[target.edge];
+        let delta = Vec3::from(edge.end) - Vec3::from(edge.start);
+        let right = Vec3::new(target.outward.z, 0.0, -target.outward.x);
+        let toward_end = (right.dot(delta) > 0.0) != left;
+        target.end & if toward_end { 2 } else { 1 } != 0
+    }
+
+    /// Recheck only the docked face's floor and drop, not the edge search.
+    pub fn hang_can_climb(&self, target: &Target, ground: &dyn Ground) -> bool {
+        is_hang(&self.edges[target.edge])
+            && hang_floor(target.point, target.outward, ground).is_some()
+    }
     pub fn cover_blocked(&self, target: &Target, ground: &dyn Ground, left: bool) -> bool {
         let direction =
             Vec3::new(target.outward.z, 0.0, -target.outward.x) * if left { 1.0 } else { -1.0 };
@@ -190,20 +266,7 @@ impl Docking {
         let Some(target) = self.active.as_ref().filter(|t| self.is_cover(t)) else {
             return false;
         };
-        if matches!(name, "a000_218490" | "a000_218491")
-            || !(entry
-                || name.starts_with("a000_021")
-                || name.starts_with("a000_022")
-                || matches!(
-                    name,
-                    "a000_205010"
-                        | "a000_205011"
-                        | "a000_205020"
-                        | "a000_205021"
-                        | "a000_205030"
-                        | "a000_205031"
-                ))
-        {
+        if matches!(name, "a000_218490" | "a000_218491") || !(entry || is_cover_clip(name)) {
             self.active = None;
             body.grounded = true;
             body.velocity = [0.0; 3];
@@ -260,37 +323,19 @@ impl Docking {
         if !is_hang(edge) {
             return None;
         }
-        let (point, t) = edge.closest(position);
+        let (point, end) = edge.hang_span(position);
         let d = Vec3::from(edge.end) - Vec3::from(edge.start);
         let side = Vec3::new(-d.z, 0.0, d.x).try_normalize()?;
         for outward in [side, -side] {
-            let top = point - outward * CLIMB_INWARD;
-            let Some(y) = ground.floor(top.x, top.z, point.y + FLOOR_TOLERANCE) else {
+            let Some(floor) = hang_floor(point, outward, ground) else {
                 continue;
             };
-            if (y - point.y).abs() > FLOOR_TOLERANCE {
-                continue;
-            }
-            let outside = point + outward * OUTWARD_PROBE;
-            if ground
-                .floor(outside.x, outside.z, point.y + FLOOR_TOLERANCE)
-                .is_some_and(|h| h >= point.y - MIN_DROP)
-            {
-                continue;
-            }
-            let length = Vec3::from(edge.end).distance(Vec3::from(edge.start));
             return Some(Target {
                 edge: index,
                 point,
                 outward,
-                floor: Vec3::new(top.x, y, top.z),
-                end: if t * length < END_MARGIN {
-                    1
-                } else if (1.0 - t) * length < END_MARGIN {
-                    2
-                } else {
-                    0
-                },
+                floor,
+                end,
                 angle: 0.0,
             });
         }
@@ -414,6 +459,7 @@ impl Docking {
         animation: Option<&str>,
         time: f32,
         root_progress: Option<f32>,
+        root_motion: [f32; 4],
     ) -> bool {
         let name = animation.unwrap_or("");
         // Only the hang starts dock: StandToHang* and FreeFallToHang* (2171xx plain, 2172xx
@@ -422,10 +468,10 @@ impl Docking {
         {
             self.active = self.candidate.clone();
         }
-        let Some(target) = &self.active else {
+        let Some(target) = self.active.as_mut() else {
             return false;
         };
-        if self.is_cover(target) {
+        if self.edges[target.edge].kind == 3 {
             return false;
         }
         if DROP_CLIPS.contains(&name) {
@@ -455,9 +501,17 @@ impl Docking {
             self.active = None;
             self.climb_start = None;
             return true;
-        } else if (name.starts_with("a000_217") && !name.starts_with("a000_2177"))
-            || name.starts_with("a000_020")
-        {
+        } else if is_hang_clip(name) {
+            // RustSekiro hold: keep the authored root displacement along the edge.
+            // Outward is (sin yaw, 0, cos yaw), so no angle round-trip is needed.
+            let [x, z] = root_motion_world(root_motion, (target.outward.x, target.outward.z));
+            let (point, end) =
+                self.edges[target.edge].hang_span(target.point + Vec3::new(x, 0.0, z));
+            target.floor += point - target.point;
+            target.point = point;
+            target.end = end;
+            target.hang_position()
+        } else if name.starts_with("a000_217") && !name.starts_with("a000_2177") {
             target.hang_position()
         } else {
             self.active = None;

@@ -1,6 +1,6 @@
 use glam::Vec3;
 use sekiro_sim::body::{Body, Ground};
-use sekiro_sim::docking::{Docking, MapEdge};
+use sekiro_sim::docking::{Docking, HANG_END_MARGIN, MapEdge};
 use sekiro_sim::duel::Duel;
 use sekiro_sim::{Buttons, InputFrame};
 use std::path::PathBuf;
@@ -25,6 +25,13 @@ fn synthetic() -> Docking {
 }
 fn cache() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache")
+}
+
+fn press(buttons: Buttons) -> InputFrame {
+    InputFrame {
+        buttons,
+        ..InputFrame::default()
+    }
 }
 
 #[test]
@@ -58,6 +65,60 @@ fn closest_reach_facing_and_ends() {
 }
 
 #[test]
+fn short_ledge_allows_hanging_at_its_midpoint() {
+    let mut docking = synthetic();
+    docking.edges[0].start[0] = -0.2;
+    docking.edges[0].end[0] = 0.2;
+    let target = docking
+        .target(0, Vec3::new(0.15, 0.0, 0.4), &Step)
+        .expect("a short edge still supports hanging");
+    assert_eq!(target.point, Vec3::ZERO);
+    assert!(docking.hang_blocked(&target, true));
+    assert!(docking.hang_blocked(&target, false));
+    let mut body = Body::default();
+    docking.active = Some(target);
+    for motion in [-1.0, 1.0] {
+        assert!(docking.step(
+            &mut body,
+            Some("a000_020202"),
+            0.0,
+            None,
+            [motion, 0.0, 0.0, 0.0]
+        ));
+        assert_eq!(docking.active.as_ref().unwrap().point, Vec3::ZERO);
+    }
+}
+
+#[test]
+fn hang_travel_updates_endpoint_flags_with_reversed_edges() {
+    for reversed in [false, true] {
+        let mut docking = synthetic();
+        if reversed {
+            let edge = &mut docking.edges[0];
+            std::mem::swap(&mut edge.start, &mut edge.end);
+        }
+        docking.active = docking.target(0, Vec3::new(0.0, 0.0, 0.4), &Step);
+        let mut body = Body::default();
+        for (motion, end) in [
+            (100.0, if reversed { 1 } else { 2 }),
+            (-100.0, if reversed { 2 } else { 1 }),
+        ] {
+            assert!(docking.step(
+                &mut body,
+                Some("a000_020202"),
+                0.0,
+                None,
+                [motion, 0.0, 0.0, 0.0]
+            ));
+            let target = docking.active.as_ref().unwrap();
+            assert_eq!(target.end, end);
+            assert_eq!(docking.hang_blocked(target, true), motion > 0.0);
+            assert_eq!(docking.hang_blocked(target, false), motion < 0.0);
+        }
+    }
+}
+
+#[test]
 fn researched_edge_has_upper_floor_and_outward_drop() {
     let dir = cache().join("maps/m11_01_00_00");
     if !dir.join("edges.json").exists() || !dir.join("collision.bin").exists() {
@@ -86,28 +147,25 @@ fn researched_edge_has_upper_floor_and_outward_drop() {
     assert!(found, "research edge does not sit on a collision ledge");
 }
 
-#[test]
-fn hks_ground_hang_climb_and_drop() {
+fn hanging(variation: u8) -> Option<Duel> {
     if !cache().join("raw/chr/c1010.behbnd.d/c9997.hkx").exists() {
-        return;
+        return None;
     }
     let mut duel = Duel::load(&cache(), 4.0).unwrap();
     duel.enemy_active = false;
     duel.player.ground = Box::new(Step);
     duel.player.docking = synthetic();
+    duel.player.docking.edges[0].variation = variation;
     duel.player.body.position = [0.0, 0.0, 0.4];
     let dt = 1.0 / 60.0;
     for _ in 0..30 {
         duel.step(&InputFrame::default(), dt);
     }
-    let press = InputFrame {
-        buttons: Buttons {
-            action: true,
-            ..Buttons::default()
-        },
-        ..InputFrame::default()
-    };
-    let r = duel.step(&press, dt);
+    let action = press(Buttons {
+        action: true,
+        ..Buttons::default()
+    });
+    let r = duel.step(&action, dt);
     assert!(
         r.player
             .behavior
@@ -120,11 +178,27 @@ fn hks_ground_hang_climb_and_drop() {
     let mut idle = false;
     for _ in 0..180 {
         let r = duel.step(&InputFrame::default(), dt);
-        idle |= r.player.animation.as_deref() == Some("a000_020000");
+        idle |= r.player.animation.as_deref()
+            == Some(if variation == 0 {
+                "a000_020000"
+            } else {
+                "a000_020010"
+            });
     }
     assert!(idle, "did not reach HangIdle");
     assert!((duel.player.body.position[1] + sekiro_sim::docking::HANG_DEPTH).abs() < 0.01);
-    let r = duel.step(&press, dt);
+    Some(duel)
+}
+
+#[test]
+fn hks_ground_hang_climb_and_drop() {
+    let Some(mut duel) = hanging(0) else { return };
+    let dt = 1.0 / 60.0;
+    let action = press(Buttons {
+        action: true,
+        ..Buttons::default()
+    });
+    let r = duel.step(&action, dt);
     assert_eq!(r.player.animation.as_deref(), Some("a000_217500"));
     for _ in 0..180 {
         duel.step(&InputFrame::default(), dt);
@@ -139,17 +213,14 @@ fn hks_ground_hang_climb_and_drop() {
     );
     duel.player.body.position = [0.0, 0.0, 0.4];
     duel.player.body.yaw = 0.0;
-    duel.step(&press, dt);
+    duel.step(&action, dt);
     for _ in 0..180 {
         duel.step(&InputFrame::default(), dt);
     }
-    let drop = InputFrame {
-        buttons: Buttons {
-            dodge: true,
-            ..Buttons::default()
-        },
-        ..InputFrame::default()
-    };
+    let drop = press(Buttons {
+        dodge: true,
+        ..Buttons::default()
+    });
     let r = duel.step(&drop, dt);
     assert!(
         r.player
@@ -168,85 +239,173 @@ fn castle_start_two_route() {
     if !dir.join("edges.json").exists() {
         return;
     }
-    let mut duel = Duel::load(&cache(), 4.0).unwrap();
-    duel.enemy_active = false;
-    let world = sekiro_sim::collision::CollisionWorld::load(&dir.join("collision.bin")).unwrap();
-    let y = world.floor(83.307, 243.649, 31.0).unwrap();
-    duel.player.ground = Box::new(world);
-    duel.player.docking = Docking::load(&dir.join("edges.json")).unwrap();
-    duel.player.body.position = [83.307, y, 243.649];
-    duel.player.body.yaw = 133.216f32.to_radians();
-    let script =
-        std::fs::read_to_string(cache().join("../crates/game/scripts/m11_01_ledge_hang.txt"))
-            .unwrap();
-    let frames = sekiro_sim::input::parse_action_script(&script).unwrap();
-    let mut entered = false;
-    let mut idle = false;
-    let mut climbed = false;
-    let mut edge_point = None;
-    for (step, mut frame) in frames.into_iter().enumerate() {
-        frame.camera_yaw += 133.216f32.to_radians();
-        let r = duel.step(&frame, 1.0 / 60.0);
-        if step == 150 {
-            let bones = duel.player.bone_source_matrices();
-            let world = duel.player.source_to_world();
-            for (i, bone) in duel
+    for script_name in ["m11_01_ledge_hang.txt", "m11_01_ledge_shimmy.txt"] {
+        let mut duel = Duel::load(&cache(), 4.0).unwrap();
+        duel.enemy_active = false;
+        let world =
+            sekiro_sim::collision::CollisionWorld::load(&dir.join("collision.bin")).unwrap();
+        let y = world.floor(83.307, 243.649, 31.0).unwrap();
+        duel.player.ground = Box::new(world);
+        duel.player.docking = Docking::load(&dir.join("edges.json")).unwrap();
+        duel.player.body.position = [83.307, y, 243.649];
+        duel.player.body.yaw = 133.216f32.to_radians();
+        let script =
+            std::fs::read_to_string(cache().join("../crates/game/scripts").join(script_name))
+                .unwrap();
+        let frames = sekiro_sim::input::parse_action_script(&script).unwrap();
+        let mut entered = false;
+        let mut idle = false;
+        let mut climbed = false;
+        let mut edge_point = None;
+        let mut idle_frames = 0;
+        let mut first_point = None;
+        let mut max_travel = 0.0f32;
+        for (step, mut frame) in frames.into_iter().enumerate() {
+            frame.camera_yaw += 133.216f32.to_radians();
+            let r = duel.step(&frame, 1.0 / 60.0);
+            let hanging = r.player.animation.as_deref() == Some("a000_020000");
+            idle_frames += usize::from(hanging);
+            if hanging && idle_frames == 16 {
+                let bones = duel.player.bone_source_matrices();
+                let world = duel.player.source_to_world();
+                for (i, bone) in duel
+                    .player
+                    .skeleton
+                    .bones
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, b)| b.name.ends_with("Hand"))
+                {
+                    let hand = world.transform_point3(bones[i].transform_point3(Vec3::ZERO));
+                    // The hands rest on the lip: at its height and on its line (the floor right at
+                    // the line can be the drop below, so the lip itself is the reference).
+                    let lip = duel.player.docking.active.as_ref().unwrap();
+                    assert!(
+                        (hand.y - lip.point.y).abs() < 0.1,
+                        "{} floats above the ledge: {hand:?} lip={:?}",
+                        bone.name,
+                        lip.point
+                    );
+                    assert!(
+                        (hand - lip.point).dot(lip.outward).abs() < 0.1,
+                        "{} off the lip line: {hand:?} lip={:?}",
+                        bone.name,
+                        lip.point
+                    );
+                    eprintln!("hang hand {} at {:?}", bone.name, hand);
+                }
+            }
+            entered |= r
                 .player
-                .skeleton
-                .bones
+                .behavior
+                .events
                 .iter()
-                .enumerate()
-                .filter(|(_, b)| b.name.ends_with("Hand"))
+                .any(|e| e.starts_with("W_StandToHang"));
+            idle |= r.player.animation.as_deref() == Some("a000_020000");
+            climbed |= r.player.animation.as_deref() == Some("a000_217500");
+            if let Some(t) = &duel.player.docking.active {
+                edge_point = Some(t.point);
+                let first = *first_point.get_or_insert(t.point);
+                max_travel = max_travel.max(first.distance(t.point));
+            }
+            if step % 10 == 0
+                || !r.player.behavior.events.is_empty()
+                || duel.player.docking.candidate.is_some()
             {
-                let hand = world.transform_point3(bones[i].transform_point3(Vec3::ZERO));
-                // The hands rest on the lip: at its height and on its line (the floor right at
-                // the line can be the drop below, so the lip itself is the reference).
-                let lip = duel.player.docking.active.as_ref().unwrap();
-                assert!(
-                    (hand.y - lip.point.y).abs() < 0.1,
-                    "{} floats above the ledge: {hand:?} lip={:?}",
-                    bone.name,
-                    lip.point
+                eprintln!(
+                    "route step {step} pos={:?} env3044={} candidate={:?} anim={:?} events={:?}",
+                    duel.player.body.position,
+                    duel.player.behavior.env.hang_candidate,
+                    duel.player.docking.candidate,
+                    r.player.animation,
+                    r.player.behavior.events
                 );
-                assert!(
-                    (hand - lip.point).dot(lip.outward).abs() < 0.1,
-                    "{} off the lip line: {hand:?} lip={:?}",
-                    bone.name,
-                    lip.point
-                );
-                eprintln!("hang hand {} at {:?}", bone.name, hand);
             }
         }
-        entered |= r
-            .player
-            .behavior
-            .events
-            .iter()
-            .any(|e| e.starts_with("W_StandToHang"));
-        idle |= r.player.animation.as_deref() == Some("a000_020000");
-        climbed |= r.player.animation.as_deref() == Some("a000_217500");
-        if let Some(t) = &duel.player.docking.active {
-            edge_point = Some(t.point);
-        }
-        if step % 10 == 0
-            || !r.player.behavior.events.is_empty()
-            || duel.player.docking.candidate.is_some()
-        {
-            eprintln!(
-                "route step {step} pos={:?} env3044={} candidate={:?} anim={:?} events={:?}",
-                duel.player.body.position,
-                duel.player.behavior.env.hang_candidate,
-                duel.player.docking.candidate,
-                r.player.animation,
-                r.player.behavior.events
+        assert!(entered && idle && climbed);
+        assert!(idle_frames >= 16, "hand placement was checked");
+        if script_name == "m11_01_ledge_shimmy.txt" {
+            assert!(max_travel > 1.0, "did not shimmy: {max_travel}");
+            assert!(
+                first_point.unwrap().distance(edge_point.unwrap()) < 0.1,
+                "did not return along the edge"
             );
         }
+        assert!(duel.player.body.grounded);
+        // On the top, the climb's own root motion in from the lip.
+        assert!(
+            Vec3::from(duel.player.body.position).distance(edge_point.unwrap())
+                < sekiro_sim::docking::CLIMB_INWARD + 0.1
+        );
     }
-    assert!(entered && idle && climbed);
-    assert!(duel.player.body.grounded);
-    // On the top, the climb's own root motion in from the lip.
-    assert!(
-        Vec3::from(duel.player.body.position).distance(edge_point.unwrap())
-            < sekiro_sim::docking::CLIMB_INWARD + 0.1
-    );
+}
+
+// Adapted from RustSekiro src/sim_tests/part12.rs: shimmy, climb and drop.
+#[test]
+fn shimmy_both_ways_stops_at_ends_and_can_climb_or_drop() {
+    for (variation, climb, clip) in [
+        (0, false, "a000_217520"),
+        (0, true, "a000_217500"),
+        (1, false, "a000_217620"),
+        (1, true, "a000_217600"),
+    ] {
+        let Some(mut duel) = hanging(variation) else {
+            return;
+        };
+        let dt = 1.0 / 60.0;
+        let idle = InputFrame::default();
+        let edge = &duel.player.docking.edges[0];
+        let half_span =
+            Vec3::from(edge.start).distance(Vec3::from(edge.end)) * 0.5 - HANG_END_MARGIN;
+        let initial = Vec3::from(duel.player.body.position);
+        for side in [-1.0, 1.0] {
+            let moving = InputFrame {
+                move_stick: [side, 0.0],
+                camera_yaw: std::f32::consts::PI,
+                ..idle
+            };
+            let before = duel.player.body.position[0];
+            let mut clips = std::collections::HashSet::new();
+            for _ in 0..60 {
+                clips.insert(duel.step(&moving, dt).player.animation.unwrap_or_default());
+            }
+            let after = duel.player.body.position[0];
+            assert!(
+                (after - before) * -side > 0.2,
+                "variation {variation}, side {side}: no shimmy {before} -> {after}, {clips:?}"
+            );
+            for _ in 0..600 {
+                duel.step(&moving, dt);
+            }
+            let at = Vec3::from(duel.player.body.position);
+            assert!((at.x + side * half_span).abs() < 0.01, "end: {at:?}");
+            assert!(
+                (at.y - initial.y).abs() < 0.01 && (at.z - initial.z).abs() < 0.01,
+                "left edge line: {at:?}"
+            );
+            for _ in 0..40 {
+                duel.step(&idle, dt);
+            }
+        }
+        let along = duel.player.body.position[0];
+        let leave = press(Buttons {
+            action: climb,
+            dodge: !climb,
+            ..Buttons::default()
+        });
+        let r = duel.step(&leave, dt);
+        assert_eq!(r.player.animation.as_deref(), Some(clip));
+        for _ in 0..180 {
+            duel.step(&idle, dt);
+        }
+        assert!(duel.player.docking.active.is_none());
+        assert!((duel.player.body.position[0] - along).abs() < 0.01);
+        if climb {
+            assert!(duel.player.body.grounded);
+            assert!(duel.player.body.position[1].abs() < 0.01);
+            assert!(duel.player.body.position[2] > 0.0);
+        } else {
+            assert!(duel.player.body.position[1] < initial.y - 1.0);
+        }
+    }
 }
