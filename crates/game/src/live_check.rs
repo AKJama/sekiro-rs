@@ -600,6 +600,18 @@ pub(super) fn observe(
     sample["t"] = serde_json::json!(now);
     sample["step"] = serde_json::json!(sim.step);
     sample["grounded"] = serde_json::json!(body.grounded);
+    let wire = &sim.duel.player.wire;
+    sample["grapple"] = wire
+        .preview
+        .as_ref()
+        .map_or(serde_json::Value::Null, |target| {
+            serde_json::json!({
+                "point": target.point.to_array(),
+                "distance": target.point.distance(Vec3::from_array(body.position)),
+                "state": format!("{:?}", target.state),
+                "can_fire": wire.can_fire(),
+            })
+        });
     info!("live check: sample {sample}");
     check.samples.push(sample);
     // The last stop's screenshot is written before the run ends.

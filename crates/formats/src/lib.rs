@@ -25,6 +25,7 @@ pub mod hknp;
 pub mod hks;
 pub mod hkx;
 pub mod map_layers;
+pub mod menu_layout;
 pub mod msb;
 pub mod mtd;
 pub mod param;

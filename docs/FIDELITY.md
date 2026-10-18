@@ -172,3 +172,10 @@ These data-backed changes do not establish D1/F1 visual parity: the final night 
 The arc is traced to `m925009_9000`, not a moon or sky-dome texture; no authored card, density or scene exposure is removed or retuned to hide it.
 Native per-instance fog-card ambient/SH and atmosphere composition remain investigation candidates rather than established causes of the residual.
 See [BACKDROP.md](BACKDROP.md) for the recovered inputs, limitations and six reference comparisons.
+
+## Grapple marker, issue #100
+
+The extractor crops the five SB_FE wire sprites from the menu layout and texture archives to PNGs in `cache/menu/wire/`; the HUD loads only those cached sprites.
+The XML layout gives sprite rectangles, without movie animation instructions, so distant acquisition uses an expanding radial reveal of MENU_Wire_Distance, starting at a central dot inside MENU_Wire_02.
+MENU_Wire_01 frames the ready MENU_Wire_Marker disc; non-rideable targets show the ring with MENU_Wire_Cursor instead.
+The approximately 49 px outer diameter at 1440p and dot size are fitted to the supplied retail captures; the native FE movie's reveal curve, glow and transition timing remain approximations.

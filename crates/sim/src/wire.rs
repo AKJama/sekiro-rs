@@ -36,10 +36,37 @@ pub struct Variation {
 }
 #[derive(Debug, Clone)]
 pub struct Target {
+    pub state: MarkerState,
     pub index: usize,
     pub point: Vec3,
     pub arrival: Vec3,
     pub rideable: bool,
+}
+/// Recognition and firing are separate: the HUD previews a point before it is usable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MarkerState {
+    Hidden,
+    Distant { fill: f32 },
+    Ready,
+}
+impl Search {
+    pub fn marker_state(&self, distance: f32, extension: f32) -> MarkerState {
+        if !distance.is_finite()
+            || distance < self.action_distance_near
+            || distance > self.find_distance_far
+        {
+            return MarkerState::Hidden;
+        }
+        let action_far = self.action_distance_far + extension;
+        if distance <= action_far {
+            MarkerState::Ready
+        } else {
+            MarkerState::Distant {
+                fill: ((self.find_distance_far - distance) / (self.find_distance_far - action_far))
+                    .clamp(0.0, 1.0),
+            }
+        }
+    }
 }
 #[derive(Default)]
 pub struct Wire {
@@ -50,7 +77,10 @@ pub struct Wire {
     pub variations: HashMap<u32, Variation>,
     pub offsets: HashMap<u32, Vec3>,
     pub collision: Option<CollisionWorld>,
+    /// Best usable hook, also consumed by HKS and dramatic camera angles.
     pub candidate: Option<Target>,
+    /// Best Ready hook, or best Distant hook when none is usable.
+    pub preview: Option<Target>,
     pub active: Option<Target>,
     start: Option<Vec3>,
     elapsed: f32,
@@ -63,6 +93,9 @@ pub struct Wire {
     pub perch: Option<Vec3>,
 }
 impl Wire {
+    pub fn can_fire(&self) -> bool {
+        self.candidate.is_some()
+    }
     pub fn flight_time(&self) -> Option<(f32, f32)> {
         (self.start.is_some() || self.arrived).then_some((self.elapsed, self.duration))
     }
@@ -113,9 +146,10 @@ impl Wire {
     }
     pub fn search(&mut self, body: &Body, camera_yaw: f32) {
         self.candidate = None;
+        self.preview = None;
         let Some(s) = &self.search else { return };
         let origin = Vec3::from(body.position);
-        let mut best = (f32::INFINITY, f32::INFINITY);
+        let mut best = (true, f32::INFINITY, f32::INFINITY);
         for (index, p) in self.points.iter().enumerate() {
             if self.active.as_ref().is_some_and(|t| t.index == index) {
                 continue;
@@ -127,10 +161,8 @@ impl Wire {
             let point = Vec3::from(position);
             let delta = point - origin;
             let distance = delta.length();
-            if distance < s.action_distance_near
-                || distance > s.find_distance_far
-                || distance > s.action_distance_far + v.extend_wire_action_distance
-            {
+            let state = s.marker_state(distance, v.extend_wire_action_distance);
+            if state == MarkerState::Hidden {
                 continue;
             }
             let yaw = (-delta.x).atan2(-delta.z);
@@ -151,8 +183,13 @@ impl Wire {
             }) {
                 continue;
             }
-            // Placeholder: prefer view-centre angle, then distance; screen boxes are not reconstructed.
-            let score = (horizontal.hypot(vertical), distance);
+            // Preserve selection among usable hooks; preview distant hooks when none can fire.
+            // Screen boxes are not reconstructed: rank by view-centre angle, then distance.
+            let score = (
+                state != MarkerState::Ready,
+                horizontal.hypot(vertical),
+                distance,
+            );
             if score >= best {
                 continue;
             }
@@ -164,13 +201,19 @@ impl Wire {
                 .unwrap_or_default();
             let forward = Vec3::new(delta.x, 0.0, delta.z).normalize_or_zero();
             let right = Vec3::new(-forward.z, 0.0, forward.x);
-            self.candidate = Some(Target {
+            self.preview = Some(Target {
+                state,
                 index,
                 point,
                 arrival: point + right * offset.x + Vec3::Y * offset.y + forward * offset.z,
                 rideable: v.target_marker_type == 0,
             });
         }
+        self.candidate = self
+            .preview
+            .as_ref()
+            .filter(|t| t.state == MarkerState::Ready)
+            .cloned();
     }
     pub fn step(
         &mut self,
@@ -218,6 +261,11 @@ impl Wire {
         let changed = self.clip != animation.unwrap_or_default();
         self.clip = animation.unwrap_or_default().to_owned();
         if shot && changed {
+            debug_assert!(
+                self.candidate
+                    .as_ref()
+                    .is_none_or(|t| t.state == MarkerState::Ready)
+            );
             self.active = self.candidate.clone();
             self.arrived = false;
             self.start = None;

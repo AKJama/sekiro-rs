@@ -12,6 +12,7 @@ use sekiro_formats::{bnd4, dvd::Vfs};
 
 mod anims;
 mod maps;
+mod menu;
 mod models;
 mod params;
 mod sound;
@@ -33,6 +34,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Extract the five wire HUD sprites to cache/menu/wire.
+    Menu,
     /// Unpack every archive entry to cache/raw, decompressed, with binders expanded alongside.
     Unpack {
         /// Only unpack paths containing this substring.
@@ -123,6 +126,7 @@ fn main() -> Result<()> {
     }
     let vfs = open_vfs(&cli.game, &cli.cache)?;
     match cli.command {
+        Command::Menu => menu::export(&vfs, &cli.cache)?,
         Command::List { filter } => {
             let mut paths: Vec<_> = vfs
                 .paths()

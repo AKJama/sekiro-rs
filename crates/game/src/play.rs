@@ -59,6 +59,8 @@ mod live_check;
 #[path = "play_gate.rs"]
 mod play_gate;
 pub(crate) use play_gate::PlayGate;
+#[path = "grapple_hud.rs"]
+mod grapple_hud;
 #[path = "rope.rs"]
 mod rope;
 
@@ -649,6 +651,7 @@ pub fn run(options: Options) -> Result<()> {
         perilous_age: None,
     })
     .init_resource::<combat_hud::Gauges>()
+    .add_plugins(grapple_hud::plugin)
     .insert_resource(crate::brain_overlay::RecordingBrain {
         enabled: options.brain_overlay && options.enemy_present,
         mode: options.brain_label,
@@ -962,6 +965,8 @@ fn setup(
     on_map: Option<Res<MapCollision>>,
     sim: NonSend<Sim>,
     rope_cache: Res<rope::RopeCache>,
+    mut images: ResMut<Assets<Image>>,
+    mut wire_materials: ResMut<Assets<grapple_hud::WireFill>>,
 ) {
     rope::spawn(&mut commands, &assets, &rope_cache.0, model_path.0);
     commands.spawn((
@@ -976,20 +981,12 @@ fn setup(
         Transform::from_xyz(0.0, 2.0, 4.0).looking_at(Vec3::new(0.0, 1.2, 0.0), Vec3::Y),
     ));
     combat_hud::spawn(&mut commands);
-    commands.spawn((
-        GrappleMarker,
-        Node {
-            position_type: PositionType::Absolute,
-            width: px(18),
-            height: px(18),
-            border: UiRect::all(px(2)),
-            border_radius: BorderRadius::all(px(9)),
-            display: Display::None,
-            ..default()
-        },
-        BorderColor::all(Color::srgb(0.2, 1.0, 0.4)),
-        GlobalZIndex(20),
-    ));
+    grapple_hud::spawn(
+        &mut commands,
+        &rope_cache.0,
+        &mut images,
+        &mut wire_materials,
+    );
     // Bullets have no model yet (their look is an effect, FXR, not extracted): simple shapes.
     let fx = crate::bullet_fx::spawn(&mut commands, &mut meshes, &mut materials);
     commands.insert_resource(fx);
@@ -2323,9 +2320,6 @@ fn recording_brain(sim: NonSend<Sim>, mut brain: ResMut<crate::brain_overlay::Re
     }
 }
 
-#[derive(Component)]
-struct GrappleMarker;
-
 /// TAE 720's right-hand sheath window frees both hands for docking.
 fn sheath_sword(
     sim: NonSend<Sim>,
@@ -2387,33 +2381,79 @@ fn sheath_sword(
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn grapple_marker(
     sim: NonSend<Sim>,
     cameras: Query<(&Camera, &GlobalTransform), With<FollowCamera>>,
-    mut markers: Query<(&mut Node, &mut BorderColor), With<GrappleMarker>>,
+    mut markers: Query<(&mut Node, &mut ImageNode), With<grapple_hud::Marker>>,
+    sprites: Option<Res<grapple_hud::Sprites>>,
+    mut materials: ResMut<Assets<grapple_hud::WireFill>>,
+    mut cursors: Query<
+        &mut Node,
+        (
+            With<grapple_hud::Cursor>,
+            Without<grapple_hud::Fill>,
+            Without<grapple_hud::Marker>,
+        ),
+    >,
+    mut fills: Query<
+        (&mut Node, &MaterialNode<grapple_hud::WireFill>),
+        (With<grapple_hud::Fill>, Without<grapple_hud::Marker>),
+    >,
 ) {
-    let Ok((mut node, mut color)) = markers.single_mut() else {
+    use crate::change::set;
+    let Ok((mut node, mut image)) = markers.single_mut() else {
         return;
     };
-    node.display = Display::None;
-    let Some(target) = sim.duel.player.wire.candidate.as_ref() else {
+    let Some(target) = sim.duel.player.wire.preview.as_ref() else {
+        set(&mut node, |n| &mut n.display, Display::None);
         return;
     };
     let Ok((camera, transform)) = cameras.single() else {
+        set(&mut node, |n| &mut n.display, Display::None);
         return;
     };
+    let state = target.state;
     let Ok(p) = camera.world_to_viewport(transform, Vec3::from_array(target.point.to_array()))
     else {
+        set(&mut node, |n| &mut n.display, Display::None);
         return;
     };
-    node.display = Display::Flex;
-    node.left = px(p.x - 9.0);
-    node.top = px(p.y - 9.0);
-    *color = BorderColor::all(if target.rideable {
-        Color::srgb(0.2, 1.0, 0.4)
-    } else {
-        Color::srgb(1.0, 0.7, 0.2)
-    });
+    let Some(sprites) = sprites else { return };
+    set(&mut node, |n| &mut n.display, Display::Flex);
+    // At 1440p the ring sprite box is 66 px (the distance sprite's native size);
+    // its visible outer diameter is about 49 px. Scale with the viewport height.
+    let size = sprites.base_size * combat_hud::viewport_size(Some(camera)).y / 1440.0;
+    set(&mut node, |n| &mut n.width, px(size.x));
+    set(&mut node, |n| &mut n.height, px(size.y));
+    set(&mut node, |n| &mut n.left, px(p.x - size.x * 0.5));
+    set(&mut node, |n| &mut n.top, px(p.y - size.y * 0.5));
+    set(&mut image, |i| &mut i.image, sprites.ring(state));
+    if let Ok((mut inner, handle)) = fills.single_mut() {
+        set(
+            &mut inner,
+            |n| &mut n.display,
+            if state == sekiro_sim::wire::MarkerState::Ready && !target.rideable {
+                Display::None
+            } else {
+                Display::Flex
+            },
+        );
+        if let Some(mut material) = materials.get_mut(&handle.0) {
+            sprites.draw(state, &mut material);
+        }
+    }
+    if let Ok(mut cursor) = cursors.single_mut() {
+        set(
+            &mut cursor,
+            |n| &mut n.display,
+            if target.rideable {
+                Display::None
+            } else {
+                Display::Flex
+            },
+        );
+    }
 }
 
 #[cfg(test)]
