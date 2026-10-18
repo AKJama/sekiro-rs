@@ -38,7 +38,13 @@ pub fn parse(bytes: &[u8]) -> Result<Atlas> {
             y: number("y")?,
             width: number("width")?,
             height: number("height")?,
-            half: number("half")? != 0,
+            half: n
+                .attribute("half")
+                .map(str::parse::<u32>)
+                .transpose()
+                .map_err(|e| error(&e))?
+                .unwrap_or(0)
+                != 0,
         };
         if region.width == 0 || region.height == 0 {
             return Err(error(&"empty region"));
@@ -63,5 +69,7 @@ mod tests {
         );
         assert!(super::parse(br#"<TextureAtlas imagePath="test.png"><SubTexture name="bad" x="0"/></TextureAtlas>"#).is_err());
         assert!(super::parse(b"<TextureAtlas").is_err());
+        let optional = super::parse(br#"<TextureAtlas imagePath="test.png"><SubTexture name="dot.png" x="0" y="0" width="2" height="2"/></TextureAtlas>"#).unwrap();
+        assert!(!optional.regions["dot.png"].half);
     }
 }

@@ -20,6 +20,13 @@ use sekiro_sim::deathblow::MAX_BAR_MARKS;
 use crate::brain_overlay::{PANEL_INSET, PANEL_WIDTH};
 use crate::change::set;
 
+/// Logical HUD viewport, shared by projected HUD elements when the camera is unavailable.
+pub(crate) fn viewport_size(camera: Option<&Camera>) -> Vec2 {
+    camera
+        .and_then(Camera::logical_viewport_size)
+        .unwrap_or(Vec2::new(1920.0, 1080.0))
+}
+
 /// What the bars show, filled by the simulation's owner every frame.
 #[derive(Resource, Default, Clone)]
 pub struct Gauges {
@@ -590,9 +597,7 @@ pub fn update(
         .filter(|_| !gauges.boss_bar)
         .and_then(|h| project(h + Vec3::Y * OVERHEAD_ABOVE_HEAD))
         .map(|p| {
-            let viewport = camera
-                .and_then(|(cam, _)| cam.logical_viewport_size())
-                .unwrap_or(Vec2::new(1920.0, 1080.0));
+            let viewport = viewport_size(camera.map(|(cam, _)| cam));
             let width = viewport.x * OVERHEAD_W / 100.0;
             let top = p.y - 0.035 * viewport.y;
             let mut left = p.x - width * 0.5;

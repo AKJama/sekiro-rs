@@ -52,7 +52,14 @@ fn ranges_angles_and_ranking() {
     ] {
         let mut wire = synthetic(distance);
         wire.search(&body, 0.0);
-        assert_eq!(wire.candidate.is_some(), selected);
+        assert_eq!(wire.preview.is_some(), selected);
+        assert_eq!(wire.can_fire(), (3.0..=15.0).contains(&distance));
+        if let Some(target) = &wire.preview {
+            assert_eq!(
+                target.state == sekiro_sim::wire::MarkerState::Ready,
+                distance <= 15.0
+            );
+        }
     }
     let mut wire = synthetic(10.0);
     wire.search(&body, std::f32::consts::PI);
@@ -69,6 +76,11 @@ fn ranges_angles_and_ranking() {
     distant.position = Some([0.0, 8.0, -20.0]);
     wire.points.push(distant);
     wire.search(&body, 0.0);
+    assert_eq!(wire.preview.as_ref().unwrap().index, 0);
+    assert_eq!(
+        wire.candidate.as_ref().unwrap().state,
+        sekiro_sim::wire::MarkerState::Ready
+    );
     assert_eq!(wire.candidate.unwrap().index, 0);
 }
 #[test]

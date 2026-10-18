@@ -602,14 +602,14 @@ pub(super) fn observe(
     sample["grounded"] = serde_json::json!(body.grounded);
     let wire = &sim.duel.player.wire;
     sample["grapple"] = wire
-        .candidate
+        .preview
         .as_ref()
         .map_or(serde_json::Value::Null, |target| {
             serde_json::json!({
                 "point": target.point.to_array(),
                 "distance": target.point.distance(Vec3::from_array(body.position)),
-                "state": format!("{:?}", wire.marker_state(target, body.position)),
-                "can_fire": wire.can_fire(body.position),
+                "state": format!("{:?}", target.state),
+                "can_fire": wire.can_fire(),
             })
         });
     info!("live check: sample {sample}");

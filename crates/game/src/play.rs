@@ -651,6 +651,7 @@ pub fn run(options: Options) -> Result<()> {
         perilous_age: None,
     })
     .init_resource::<combat_hud::Gauges>()
+    .add_plugins(grapple_hud::plugin)
     .insert_resource(crate::brain_overlay::RecordingBrain {
         enabled: options.brain_overlay && options.enemy_present,
         mode: options.brain_label,
@@ -965,6 +966,7 @@ fn setup(
     sim: NonSend<Sim>,
     rope_cache: Res<rope::RopeCache>,
     mut images: ResMut<Assets<Image>>,
+    mut wire_materials: ResMut<Assets<grapple_hud::WireFill>>,
 ) {
     rope::spawn(&mut commands, &assets, &rope_cache.0, model_path.0);
     commands.spawn((
@@ -979,7 +981,12 @@ fn setup(
         Transform::from_xyz(0.0, 2.0, 4.0).looking_at(Vec3::new(0.0, 1.2, 0.0), Vec3::Y),
     ));
     combat_hud::spawn(&mut commands);
-    grapple_hud::spawn(&mut commands, &rope_cache.0, &mut images);
+    grapple_hud::spawn(
+        &mut commands,
+        &rope_cache.0,
+        &mut images,
+        &mut wire_materials,
+    );
     // Bullets have no model yet (their look is an effect, FXR, not extracted): simple shapes.
     let fx = crate::bullet_fx::spawn(&mut commands, &mut meshes, &mut materials);
     commands.insert_resource(fx);
@@ -2374,62 +2381,78 @@ fn sheath_sword(
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn grapple_marker(
     sim: NonSend<Sim>,
     cameras: Query<(&Camera, &GlobalTransform), With<FollowCamera>>,
     mut markers: Query<(&mut Node, &mut ImageNode), With<grapple_hud::Marker>>,
-    mut sprites: Option<ResMut<grapple_hud::Sprites>>,
-    mut images: ResMut<Assets<Image>>,
-    mut cursors: Query<&mut Node, (With<grapple_hud::Cursor>, Without<grapple_hud::Marker>)>,
-    mut fills: Query<&mut ImageNode, (With<grapple_hud::Fill>, Without<grapple_hud::Marker>)>,
+    sprites: Option<Res<grapple_hud::Sprites>>,
+    mut materials: ResMut<Assets<grapple_hud::WireFill>>,
+    mut cursors: Query<
+        &mut Node,
+        (
+            With<grapple_hud::Cursor>,
+            Without<grapple_hud::Fill>,
+            Without<grapple_hud::Marker>,
+        ),
+    >,
+    mut fills: Query<
+        (&mut Node, &MaterialNode<grapple_hud::WireFill>),
+        (With<grapple_hud::Fill>, Without<grapple_hud::Marker>),
+    >,
 ) {
+    use crate::change::set;
     let Ok((mut node, mut image)) = markers.single_mut() else {
         return;
     };
-    node.display = Display::None;
-    let Some(target) = sim.duel.player.wire.candidate.as_ref() else {
+    let Some(target) = sim.duel.player.wire.preview.as_ref() else {
+        set(&mut node, |n| &mut n.display, Display::None);
         return;
     };
     let Ok((camera, transform)) = cameras.single() else {
+        set(&mut node, |n| &mut n.display, Display::None);
         return;
     };
-    let state = sim
-        .duel
-        .player
-        .wire
-        .marker_state(target, sim.duel.player.body.position);
-    if state == sekiro_sim::wire::MarkerState::Hidden {
-        return;
-    }
+    let state = target.state;
     let Ok(p) = camera.world_to_viewport(transform, Vec3::from_array(target.point.to_array()))
     else {
+        set(&mut node, |n| &mut n.display, Display::None);
         return;
     };
-    node.display = Display::Flex;
-    // Captures at 1440p show a 49 px mark. Keep its angular screen size at other resolutions.
-    let size = 66.0 * camera.logical_viewport_size().map_or(1440.0, |v| v.y) / 1440.0;
-    node.width = px(size);
-    node.height = px(size);
-    node.left = px(p.x - size * 0.5);
-    node.top = px(p.y - size * 0.5);
-    if let Some(sprites) = sprites.as_mut() {
-        image.image = sprites.ring(state);
-        let fill = sprites.draw(state, &mut images);
-        for mut inner in &mut fills {
-            inner.image = fill.clone();
-            inner.color = if state == sekiro_sim::wire::MarkerState::Ready && !target.rideable {
-                Color::NONE
+    let Some(sprites) = sprites else { return };
+    set(&mut node, |n| &mut n.display, Display::Flex);
+    // At 1440p the ring sprite box is 66 px (the distance sprite's native size);
+    // its visible outer diameter is about 49 px. Scale with the viewport height.
+    let size = sprites.base_size * combat_hud::viewport_size(Some(camera)).y / 1440.0;
+    set(&mut node, |n| &mut n.width, px(size.x));
+    set(&mut node, |n| &mut n.height, px(size.y));
+    set(&mut node, |n| &mut n.left, px(p.x - size.x * 0.5));
+    set(&mut node, |n| &mut n.top, px(p.y - size.y * 0.5));
+    set(&mut image, |i| &mut i.image, sprites.ring(state));
+    if let Ok((mut inner, handle)) = fills.single_mut() {
+        set(
+            &mut inner,
+            |n| &mut n.display,
+            if state == sekiro_sim::wire::MarkerState::Ready && !target.rideable {
+                Display::None
             } else {
-                Color::WHITE
-            };
+                Display::Flex
+            },
+        );
+        if let Some(mut material) = materials.get_mut(&handle.0) {
+            sprites.draw(state, &mut material);
         }
     }
-    for mut cursor in &mut cursors {
-        cursor.display = if target.rideable {
-            Display::None
-        } else {
-            Display::Flex
-        };
+    if let Ok(mut cursor) = cursors.single_mut() {
+        set(
+            &mut cursor,
+            |n| &mut n.display,
+            if target.rideable {
+                Display::None
+            } else {
+                Display::Flex
+            },
+        );
     }
 }
 
