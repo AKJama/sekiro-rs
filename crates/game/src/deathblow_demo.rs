@@ -6,7 +6,8 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+// Alias avoids Bevy 0.20 prelude ContextExt ambiguity.
+use anyhow::{Context as ContextExt, Result};
 use bevy::prelude::*;
 use sekiro_sim::deathblow::{
     Deathblow, DummyFrame, Phase, Placement, Situation, ThrowTable, ThrowTimes, deathblow_marks,

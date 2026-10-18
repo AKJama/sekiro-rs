@@ -1,7 +1,8 @@
 param(
     [string]$Exe = 'target/agent/release/sekiro-rs.exe',
     [string]$Name = 'traversal',
-    [switch]$WalkOnly
+    [switch]$WalkOnly,
+    [string[]]$Extra = @()
 )
 $ErrorActionPreference = 'Stop'
 $folder = Join-Path 'target/perf' $Name
@@ -24,15 +25,8 @@ if (-not $WalkOnly) {
     }
 }
 [IO.File]::WriteAllText($tour, ($rows -join "`n") + "`n", $encoding)
-$limit = (Get-Date).AddMinutes(15)
-while ($true) {
-    $running = @(Get-Process sekiro-rs -ErrorAction SilentlyContinue)
-    if ($running.Count -eq 0) { break }
-    $running | Select-Object Id,Path
-    if ((Get-Date) -ge $limit) { throw 'Game still running after 15 minutes; no launch.' }
-    Write-Output 'Waiting 60 seconds for the existing game to exit.'
-    Start-Sleep -Seconds 60
-}
+. (Join-Path $PSScriptRoot 'wait-game.ps1')
+Wait-QuietGame
 $saveRoot = Join-Path $env:APPDATA 'Sekiro'
 if (Test-Path -LiteralPath $saveRoot) {
     Copy-Item -LiteralPath $saveRoot -Destination (Join-Path $folder ('saves-' + (Get-Date -Format yyyyMMdd-HHmmss))) -Recurse
@@ -41,6 +35,7 @@ $env:PLAY_LOG_PERF = '1'
 $env:PLAY_PERF_DIR = $folder
 $arguments = @('--play', '--map', 'm11_00_00_00', '--start', '3', '--no-enemy', '--brain-memory', 'off', '--uncapped', '--profile-systems', '--script', $script, '--exit')
 if (-not $WalkOnly) { $arguments += @('--perf-tour', $tour) }
+$arguments += $Extra
 $ErrorActionPreference = 'Continue'
 & $Exe @arguments *> (Join-Path $folder 'run.log')
 $result = $LASTEXITCODE

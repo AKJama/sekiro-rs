@@ -28,6 +28,7 @@ struct Upload {
 }
 
 #[derive(Resource, Clone, Default, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub(super) struct VertexStreams(HashMap<AssetId<Mesh>, Arc<Upload>>);
 
 impl VertexStreams {

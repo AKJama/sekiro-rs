@@ -15,15 +15,16 @@ use bevy::render::{
     view::ViewTarget,
 };
 
-use crate::render_context::RenderContext;
+use bevy::render::renderer::RenderContext;
 
 #[derive(Component, Clone, ExtractComponent)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct GradingLut(pub Handle<Image>);
 
 pub struct GradingPlugin;
 impl Plugin for GradingPlugin {
     fn build(&self, app: &mut App) {
-        embedded_asset!(app, "grading_lut.wgsl");
+        embedded_asset!(app, "grading_lut.wesl");
         app.add_plugins(ExtractComponentPlugin::<GradingLut>::default());
         if let Some(render) = app.get_sub_app_mut(RenderApp) {
             render
@@ -65,7 +66,7 @@ fn init_pipeline(
         layout: vec![layout.clone()],
         vertex: fullscreen.to_vertex_state(),
         fragment: Some(FragmentState {
-            shader: load_embedded_asset!(assets.as_ref(), "grading_lut.wgsl"),
+            shader: load_embedded_asset!(assets.as_ref(), "grading_lut.wesl"),
             targets: vec![Some(ColorTargetState {
                 // HDR views keep their half-float ping-pong buffers after tonemapping.
                 format: TextureFormat::Rgba16Float,

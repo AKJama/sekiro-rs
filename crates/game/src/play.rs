@@ -29,7 +29,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+// Alias avoids Bevy 0.20 prelude ContextExt ambiguity.
+use anyhow::{Context as ContextExt, Result};
 use bevy::app::AppExit;
 use bevy::asset::AssetPlugin;
 use bevy::input::mouse::AccumulatedMouseMotion;
@@ -52,11 +53,12 @@ mod arena_c_scene;
 #[path = "arena_d_scene.rs"]
 mod arena_d_scene;
 #[path = "cinematic_fade.rs"]
-mod cinematic_fade;
+pub(crate) mod cinematic_fade;
 #[path = "live_check.rs"]
 mod live_check;
 #[path = "play_gate.rs"]
 mod play_gate;
+pub(crate) use play_gate::PlayGate;
 #[path = "rope.rs"]
 mod rope;
 

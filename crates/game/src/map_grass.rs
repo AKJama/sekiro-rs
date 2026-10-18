@@ -3,7 +3,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-use anyhow::{Context, Result, ensure};
+// Alias avoids Bevy 0.20 prelude ContextExt ambiguity.
+use anyhow::{Context as ContextExt, Result, ensure};
 use bevy::gltf::{
     GltfExtras, GltfMaterialExtras, GltfMaterialName, GltfMesh, GltfMeshExtras, GltfNode,
 };

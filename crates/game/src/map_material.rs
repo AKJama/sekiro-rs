@@ -367,6 +367,12 @@ struct MapLight {
 }
 
 impl MapLight {
+    fn encoded(&self) -> Vec<u8> {
+        let mut encoded = bevy::render::render_resource::encase::StorageBuffer::new(Vec::new());
+        encoded.write(self).expect("MapLight storage layout");
+        encoded.into_inner()
+    }
+
     /// `follows_scene` selects the collision row (characters, parts authoring their own set)
     /// instead of the map parts' row; see [`crate::lighting::part_light_set`].
     fn new(
@@ -415,7 +421,7 @@ impl FromWorld for MapLightBuffer {
         let mut buffers = world.resource_mut::<Assets<bevy::render::storage::ShaderBuffer>>();
         Self([(); 2].map(|()| {
             buffers.add(bevy::render::storage::ShaderBuffer::from(
-                MapLight::default(),
+                MapLight::default().encoded(),
             ))
         }))
     }
@@ -720,8 +726,7 @@ mod tests {
         let expected = |app: &App| {
             let lighting = app.world().resource::<crate::lighting::MapLighting>();
             let ambient = app.world().resource::<bevy::light::GlobalAmbientLight>();
-            [false, true]
-                .map(|scene| ShaderBuffer::from(MapLight::new(lighting, ambient, scene)).data)
+            [false, true].map(|scene| MapLight::new(lighting, ambient, scene).encoded())
         };
         let written = |app: &App| {
             buffers.clone().map(|buffer| {
@@ -729,8 +734,9 @@ mod tests {
                     .resource::<Assets<ShaderBuffer>>()
                     .get(&buffer)
                     .unwrap()
-                    .data
-                    .clone()
+                    .cast_slice::<u8>()
+                    .unwrap()
+                    .to_vec()
             })
         };
         assert_eq!(written(&app), expected(&app));
@@ -819,20 +825,20 @@ impl MaterialExtension for MapLayers {
     }
 
     fn vertex_shader() -> ShaderRef {
-        shader_path("map_material.wgsl")
+        shader_path("map_material.wesl")
     }
 
     fn fragment_shader() -> ShaderRef {
-        shader_path("map_material.wgsl")
+        shader_path("map_material.wesl")
     }
 
     fn prepass_fragment_shader() -> ShaderRef {
-        shader_path("map_prepass.wgsl")
+        shader_path("map_prepass.wesl")
     }
 }
 
 fn shader_path(name: &str) -> ShaderRef {
-    let path = embedded_path!("map_material.wgsl").with_file_name(name);
+    let path = embedded_path!("map_material.wesl").with_file_name(name);
     ShaderRef::Path(
         bevy::asset::AssetPath::parse(&format!("embedded://{}", path.to_string_lossy()))
             .into_owned(),
@@ -891,13 +897,13 @@ pub(super) fn install(app: &mut App, prefix: &str, dir: &std::path::Path, args: 
     crate::pipeline_warmup::install::<LayeredMaterial>(app, args);
     batches::install(app);
     crate::material_residency::install(app);
-    embedded_asset!(app, "map_material.wgsl");
-    embedded_asset!(app, "map_prepass.wgsl");
-    bevy::shader::load_shader_library!(app, "map_bindings.wgsl");
-    bevy::shader::load_shader_library!(app, "map_coverage.wgsl");
+    embedded_asset!(app, "map_material.wesl");
+    embedded_asset!(app, "map_prepass.wesl");
+    bevy::shader::load_shader_library!(app, "map_bindings.wesl");
+    bevy::shader::load_shader_library!(app, "map_coverage.wesl");
     app.add_plugins((
         MaterialPlugin::<LayeredMaterial>::default(),
-        crate::parallel_shadows::ParallelShadowsPlugin,
+        crate::split_sun_cascades::SplitSunCascadesPlugin,
     ))
     .init_resource::<MapLightBuffer>()
     .insert_resource(LayerSettings {
@@ -943,7 +949,8 @@ fn update_hemisphere(
     // Same size every write, so Bevy rewrites the GPU buffer in place and no bind group changes.
     for follows_scene in [false, true] {
         if let Some(mut buffer) = buffers.get_mut(&light.get(follows_scene)) {
-            buffer.set_data(MapLight::new(&lighting, &ambient, follows_scene));
+            buffer.clear();
+            buffer.extend_from_slice(&MapLight::new(&lighting, &ambient, follows_scene).encoded());
         }
     }
 }

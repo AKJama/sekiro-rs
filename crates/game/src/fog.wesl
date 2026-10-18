@@ -1,5 +1,5 @@
-#import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput
-#import bevy_render::view::View
+import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
+import bevy_render::view::View;
 
 struct Fog {
     density: vec4<f32>, depths: vec4<f32>, sky: vec4<f32>,
@@ -9,16 +9,17 @@ struct Fog {
     background: array<vec4<f32>,16>,
     radiance_scale: vec4<f32>,
 }
-#ifdef MULTISAMPLED_DEPTH
-@group(0) @binding(0) var depth_texture: texture_depth_multisampled_2d;
-@group(0) @binding(1) var<uniform> view: View;
-@group(0) @binding(2) var<uniform> fog: Fog;
-#else
-@group(0) @binding(0) var scene: texture_2d<f32>;
-@group(0) @binding(1) var depth_texture: texture_depth_2d;
-@group(0) @binding(2) var<uniform> view: View;
-@group(0) @binding(3) var<uniform> fog: Fog;
-#endif
+@if(MULTISAMPLED_DEPTH) {
+    @group(0) @binding(0) var depth_texture: texture_depth_multisampled_2d;
+    @group(0) @binding(1) var<uniform> view: View;
+    @group(0) @binding(2) var<uniform> fog: Fog;
+}
+@if(!MULTISAMPLED_DEPTH) {
+    @group(0) @binding(0) var scene: texture_2d<f32>;
+    @group(0) @binding(1) var depth_texture: texture_depth_2d;
+    @group(0) @binding(2) var<uniform> view: View;
+    @group(0) @binding(3) var<uniform> fog: Fog;
+}
 
 // Intersect the live authored dome's polygon-ring profile, in camera-centred world space.
 // Native SkyDome forward permutations use this finite geometry depth for fog continuation.
@@ -92,17 +93,16 @@ fn terminal_source(h: f32, ray: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fragment(in: FullscreenVertexOutput,
-#ifdef MULTISAMPLED_DEPTH
+@if(MULTISAMPLED_DEPTH)
     @builtin(sample_index) sample: u32,
-#endif
 ) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(in.position.xy);
-#ifdef MULTISAMPLED_DEPTH
+@if(MULTISAMPLED_DEPTH)
     let depth = textureLoad(depth_texture,pixel,i32(sample));
-#else
-    let surface = textureLoad(scene,pixel,0);
-    let depth = textureLoad(depth_texture,pixel,0);
-#endif
+    @if(!MULTISAMPLED_DEPTH) {
+        let surface = textureLoad(scene,pixel,0);
+        let depth = textureLoad(depth_texture,pixel,0);
+    }
     let ndc = vec2(in.uv.x*2.0-1.0,1.0-in.uv.y*2.0);
     let reconstructed = view.world_from_clip*vec4(ndc,max(depth,0.000001),1.0);
     let relative = reconstructed.xyz/reconstructed.w - view.world_position;
@@ -151,15 +151,12 @@ fn fragment(in: FullscreenVertexOutput,
         tau += delta;
     }
     let transmission = exp(-fog.extinction.xyz*tau);
-#ifdef MULTISAMPLED_DEPTH
-#ifdef FOG_ATTENUATION
     // Multiply the existing sample colour using destination * source blending.
+@if(MULTISAMPLED_DEPTH && FOG_ATTENUATION)
     return vec4(transmission,1.0);
-#else
     // Add inscattering to that same sample before the render attachment resolves.
+@if(MULTISAMPLED_DEPTH && !FOG_ATTENUATION)
     return vec4(light,0.0);
-#endif
-#else
+@if(!MULTISAMPLED_DEPTH)
     return vec4(surface.rgb*transmission+light,surface.a);
-#endif
 }

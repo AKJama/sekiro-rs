@@ -1,4 +1,4 @@
-#import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput
+import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
 
 @group(0) @binding(0) var source: texture_2d<f32>;
 // Unorm, deliberately not sRGB: the stored bytes are display-space RGB values.

@@ -1,7 +1,8 @@
 //! Camera-centred authored m89 skies, with independent material radiance.
 use std::{collections::BTreeMap, path::Path};
 
-use anyhow::{Context, Result};
+// Alias avoids Bevy 0.20 prelude ContextExt ambiguity.
+use anyhow::{Context as ContextExt, Result};
 use bevy::{
     asset::{RenderAssetUsages, embedded_asset, embedded_path},
     camera::visibility::NoFrustumCulling,
@@ -83,7 +84,7 @@ impl Material for SkyMaterial {
         }
     }
     fn vertex_shader() -> ShaderRef {
-        bevy::asset::AssetPath::from_path_buf(embedded_path!("sky.wgsl"))
+        bevy::asset::AssetPath::from_path_buf(embedded_path!("sky.wesl"))
             .with_source("embedded")
             .into()
     }
@@ -405,7 +406,7 @@ pub(super) fn install(app: &mut App, cache: &Path, id: &str, hour: f32) -> Resul
         return Ok(());
     };
     let json: Value = serde_json::from_slice(&bytes)?;
-    embedded_asset!(app, "sky.wgsl");
+    embedded_asset!(app, "sky.wesl");
     app.add_plugins(MaterialPlugin::<SkyMaterial>::default());
     let mut library = Library {
         id: id.into(),

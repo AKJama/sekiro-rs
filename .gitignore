@@ -35,6 +35,7 @@
 !/crates/**/Cargo.toml
 !/crates/**/*.rs
 !/crates/**/*.wgsl
+!/crates/**/*.wesl
 !/crates/**/scripts/*.txt
 !/crates/game/scripts/fxr_capture.ps1
 !/crates/game/tests/data/*.json

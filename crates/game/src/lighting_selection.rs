@@ -1,7 +1,8 @@
 //! Selection only: event-authored story environments and collision GPARAM keys.
 use std::{collections::BTreeMap, path::Path};
 
-use anyhow::{Context, Result};
+// Alias avoids Bevy 0.20 prelude ContextExt ambiguity.
+use anyhow::{Context as ContextExt, Result};
 use bevy::prelude::*;
 use sekiro_formats::{
     emedf,

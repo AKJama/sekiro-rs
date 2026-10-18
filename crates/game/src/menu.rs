@@ -3,6 +3,7 @@ use bevy::app::AppExit;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+use bevy::ui_widgets::{Activate, ActivateOnPress, Button};
 use bevy::window::{CursorGrabMode, CursorOptions};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -354,6 +355,242 @@ mod tests {
         press(&mut app, KeyCode::ArrowLeft);
         assert!(app.world().resource::<PanelState>().choices.explore());
     }
+
+    #[test]
+    fn windowed_pause_cursor_and_picking() {
+        use bevy::input::{ButtonState, mouse::MouseButtonInput};
+        use bevy::window::{PrimaryWindow, WindowEvent};
+
+        #[derive(Resource, Default)]
+        struct Probe {
+            frame: usize,
+            destination: Option<Vec2>,
+            target: Option<Entity>,
+            moved: bool,
+            clicked: bool,
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn probe(
+            mut probe: ResMut<Probe>,
+            mut events: MessageReader<WindowEvent>,
+            mut commands: Commands,
+            mut windows: Query<(Entity, &Window, &mut CursorOptions), With<PrimaryWindow>>,
+            rows: Query<(&Row, &Children)>,
+            labels: Query<&UiGlobalTransform, With<Text>>,
+            panels: Query<Entity, With<Panel>>,
+            cameras: Query<Entity, With<Camera3d>>,
+            mut state: ResMut<PanelState>,
+            hover: Res<bevy::picking::hover::HoverMap>,
+            mut exit: MessageWriter<AppExit>,
+        ) {
+            probe.frame += 1;
+            let (entity, window, mut cursor) = windows.single_mut().unwrap();
+            if probe.frame == 20 {
+                commands.write_message(KeyboardInput {
+                    key_code: KeyCode::Escape,
+                    logical_key: Key::Unidentified(bevy::input::keyboard::NativeKey::Unidentified),
+                    state: ButtonState::Pressed,
+                    text: None,
+                    repeat: false,
+                    window: entity,
+                });
+            }
+            if probe.frame == 25 {
+                assert!(state.paused);
+                assert!(cursor.visible, "pause must show the native cursor");
+                assert_eq!(cursor.grab_mode, CursorGrabMode::None);
+                eprintln!("native menu probe: paused, cursor visible and ungrabbed");
+            }
+            if matches!(probe.frame, 30 | 60) {
+                let index = if probe.frame == 30 { 0 } else { 4 };
+                let children = rows.iter().find(|(row, _)| row.0 == index).unwrap().1;
+                let label = children[0];
+                let position = labels.get(label).unwrap().translation / window.scale_factor();
+                probe.destination = Some(position);
+                probe.target = Some(label);
+                probe.moved = false;
+                // Enter at winit's Bevy message boundary without taking over the
+                // desktop's physical mouse, never targeting a UI entity directly.
+                commands.write_message(WindowEvent::CursorMoved(bevy::window::CursorMoved {
+                    window: entity,
+                    position,
+                    delta: None,
+                }));
+            }
+            for event in events.read() {
+                if let WindowEvent::CursorMoved(event) = event
+                    && probe
+                        .destination
+                        .is_some_and(|p| p.distance(event.position) < 2.)
+                {
+                    probe.moved = true;
+                    eprintln!("windowed menu probe: cursor event at {:?}", event.position);
+                }
+            }
+            if matches!(probe.frame, 45 | 75) {
+                assert!(probe.moved, "must receive the window CursorMoved event");
+                assert!(
+                    hover
+                        .0
+                        .values()
+                        .any(|hits| hits.contains_key(&probe.target.unwrap())),
+                    "the label must be reached through UI hit testing"
+                );
+                eprintln!("windowed menu probe: picking hits {:?}", hover.0);
+                // Enter at the same WindowEvent boundary used by winit, letting the
+                // normal pointer input, UI hit testing and event dispatch find Resume.
+                for state in [ButtonState::Pressed, ButtonState::Released] {
+                    commands.write_message(WindowEvent::MouseButtonInput(MouseButtonInput {
+                        window: entity,
+                        button: MouseButton::Left,
+                        state,
+                    }));
+                }
+                probe.clicked = true;
+            }
+            if probe.frame == 55 {
+                assert!(
+                    probe.clicked && !state.paused,
+                    "window pointer must resume play"
+                );
+                assert!(!cursor.visible);
+                assert_eq!(cursor.grab_mode, CursorGrabMode::Locked);
+                for panel in &panels {
+                    commands.entity(panel).despawn();
+                }
+                for camera in &cameras {
+                    commands.entity(camera).despawn();
+                }
+                commands.spawn(Camera2d);
+                *state = PanelState::new(true, &[]);
+                state.choices.values[4] = "0".into();
+                cursor.visible = true;
+                cursor.grab_mode = CursorGrabMode::None;
+                commands.run_system_cached(spawn);
+            }
+            if probe.frame == 85 {
+                assert_eq!(state.selected, 4);
+                assert_eq!(
+                    state.choices.values[4], "1",
+                    "start menu must accept pointer input"
+                );
+                eprintln!("windowed menu probe: Resume and start-menu mouse paths passed");
+                exit.write(AppExit::Success);
+            }
+        }
+
+        let mut app = App::new();
+        app.add_plugins(
+            DefaultPlugins
+                .set(bevy::winit::WinitPlugin {
+                    run_on_any_thread: true,
+                })
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "sekiro-rs menu regression".into(),
+                        resolution: (800, 600).into(),
+                        ..default()
+                    }),
+                    primary_cursor_options: Some(CursorOptions {
+                        visible: false,
+                        grab_mode: CursorGrabMode::Locked,
+                        ..default()
+                    }),
+                    ..default()
+                }),
+        )
+        .add_plugins(crate::play::cinematic_fade::CinematicFadePlugin)
+        .insert_resource(PanelState::new(false, &[]))
+        .init_resource::<Probe>()
+        .add_systems(
+            Startup,
+            (
+                |mut c: Commands| {
+                    c.spawn(Camera3d::default());
+                },
+                spawn,
+            ),
+        )
+        .add_systems(Update, probe);
+        install_input(&mut app);
+        assert_eq!(app.run(), AppExit::Success);
+    }
+
+    #[test]
+    fn label_and_row_clicks_survive_release_before_menu_update() {
+        use bevy::camera::{ManualTextureViewHandle, NormalizedRenderTarget};
+        use bevy::picking::{
+            backend::HitData,
+            events::{Pointer, PointerPress, PointerRelease},
+            pointer::{Location, PointerButton, PointerId},
+        };
+        for start in [true, false] {
+            for label in [true, false] {
+                let mut state = PanelState::new(start, &[]);
+                state.paused = true;
+                state.choices.values[4] = "0".into();
+                let mut app = App::new();
+                app.add_plugins((MinimalPlugins, bevy::ui_widgets::ButtonPlugin))
+                    .init_resource::<Assets<Font>>()
+                    .add_message::<KeyboardInput>()
+                    .insert_resource(ButtonInput::<KeyCode>::default())
+                    .insert_resource(state)
+                    .add_systems(Startup, spawn);
+                install_input(&mut app);
+                // Pointer event traversal also queries Window, including in a windowless test.
+                app.world_mut().register_component::<Window>();
+                app.update();
+                let index = if start { 4 } else { 0 };
+                let (row, child) = app
+                    .world_mut()
+                    .query::<(Entity, &Row, &Children)>()
+                    .iter(app.world())
+                    .find_map(|(e, r, children)| (r.0 == index).then_some((e, children[0])))
+                    .unwrap();
+                let entity = if label { child } else { row };
+                let pointer = Pointer::new(
+                    PointerId::Mouse,
+                    Location {
+                        target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(5)),
+                        position: Vec2::ZERO,
+                    },
+                );
+                let hit = HitData::new(row, 0., None, None);
+                app.world_mut().trigger(PointerPress {
+                    entity,
+                    pointer: pointer.clone(),
+                    button: PointerButton::Primary,
+                    hit: hit.clone(),
+                    count: 1,
+                });
+                app.world_mut().trigger(PointerRelease {
+                    entity,
+                    pointer,
+                    button: PointerButton::Primary,
+                    hit,
+                });
+                app.update();
+                let state = app.world().resource::<PanelState>();
+                if start {
+                    assert_eq!(state.selected, 4);
+                    assert_eq!(state.choices.values[4], "1");
+                } else {
+                    assert!(!state.paused, "Resume must accept a click on its label");
+                    let mut keys = ButtonInput::<KeyCode>::default();
+                    keys.press(KeyCode::Escape);
+                    app.insert_resource(keys);
+                    app.update();
+                    assert!(app.world().resource::<PanelState>().paused);
+                    let mut keys = ButtonInput::<KeyCode>::default();
+                    keys.press(KeyCode::Enter);
+                    app.insert_resource(keys);
+                    app.update();
+                    assert!(!app.world().resource::<PanelState>().paused);
+                }
+            }
+        }
+    }
 }
 
 const MAPS: [&str; 10] = [
@@ -625,6 +862,7 @@ pub struct PanelState {
     frame: usize,
     script: Vec<(usize, String)>,
     stick: IVec2,
+    activations: Vec<usize>,
 }
 impl PanelState {
     fn new(start: bool, args: &[String]) -> Self {
@@ -701,6 +939,7 @@ impl PanelState {
             frame: 0,
             script,
             stick: IVec2::ZERO,
+            activations: Vec::new(),
         }
     }
 }
@@ -711,14 +950,30 @@ struct Row(usize);
 #[derive(Component)]
 struct Help;
 
+fn activate_row(event: On<Activate>, rows: Query<&Row>, mut state: ResMut<PanelState>) {
+    if state.paused
+        && let Ok(row) = rows.get(event.entity)
+    {
+        state.activations.push(row.0);
+    }
+}
 pub fn active(state: Res<PanelState>) -> bool {
     !state.paused
 }
 pub fn install(app: &mut App) {
     let args: Vec<_> = std::env::args().collect();
     app.insert_resource(PanelState::new(false, &args))
-        .add_systems(Startup, spawn)
-        .add_systems(PreUpdate, update.after(bevy::input::InputSystems));
+        .add_systems(Startup, spawn);
+    install_input(app);
+}
+
+fn install_input(app: &mut App) {
+    app.add_systems(
+        PreUpdate,
+        update
+            .after(bevy::input::InputSystems)
+            .after(bevy::picking::PickingSystems::Last),
+    );
 }
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     let size = crate::arg_value(args, "--window-size").unwrap_or_else(|| "1600x900".into());
@@ -751,8 +1006,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             spawn,
         ),
     )
-    .add_systems(Update, update)
     .add_systems(Last, save_on_exit);
+    install_input(&mut app);
     app.add_plugins(crate::presentation::PresentationPlugin);
     app.run();
     Ok(())
@@ -778,7 +1033,7 @@ fn spawn(mut commands: Commands, mut fonts: ResMut<Assets<Font>>, state: Res<Pan
                 align_items: AlignItems::Center,
                 ..default()
             },
-            GlobalZIndex(100),
+            GlobalZIndex(200),
             if state.paused {
                 Visibility::Visible
             } else {
@@ -814,6 +1069,7 @@ fn spawn(mut commands: Commands, mut fonts: ResMut<Assets<Font>>, state: Res<Pan
                 for i in 0..if state.start { LABELS.len() } else { 3 } {
                     p.spawn((
                         Button,
+                        ActivateOnPress,
                         Row(i),
                         Node {
                             width: percent(100),
@@ -822,6 +1078,7 @@ fn spawn(mut commands: Commands, mut fonts: ResMut<Assets<Font>>, state: Res<Pan
                             ..default()
                         },
                     ))
+                    .observe(activate_row)
                     .with_children(|r| {
                         r.spawn((
                             Text::new(""),
@@ -859,18 +1116,13 @@ fn update(
     mut typing: MessageReader<KeyboardInput>,
     mut state: ResMut<PanelState>,
     mut panels: Query<&mut Visibility, With<Panel>>,
-    mut rows: Query<(
-        &Row,
-        Ref<Interaction>,
-        &mut BackgroundColor,
-        &Children,
-        &mut Node,
-    )>,
+    mut rows: Query<(&Row, &mut BackgroundColor, &Children, &mut Node)>,
     mut texts: Query<(&mut Text, &mut TextColor)>,
     help: Query<Entity, With<Help>>,
     mut cursors: Query<&mut CursorOptions>,
     mut exit: MessageWriter<AppExit>,
     mut time: ResMut<Time<Virtual>>,
+    gate: Option<Res<crate::play::PlayGate>>,
 ) {
     state.frame += 1;
     let actions: Vec<_> = state
@@ -887,11 +1139,7 @@ fn update(
     {
         state.paused = !state.paused;
         state.selected = 0;
-        if state.paused {
-            time.pause();
-        } else {
-            time.unpause();
-        }
+
         for mut c in &mut cursors {
             c.visible = state.paused;
             c.grab_mode = if state.paused {
@@ -899,6 +1147,14 @@ fn update(
             } else {
                 CursorGrabMode::Locked
             };
+        }
+    }
+    // Loading can show the pause panel, but its clock must keep advancing until ready.
+    if !state.start {
+        if state.paused && gate.is_none_or(|gate| gate.open()) {
+            time.pause();
+        } else {
+            time.unpause();
         }
     }
     for mut p in &mut panels {
@@ -918,6 +1174,7 @@ fn update(
             exit.write(AppExit::Success);
         }
     }
+    let pressed_rows = std::mem::take(&mut state.activations);
     if !state.paused {
         typing.clear();
         return;
@@ -1042,7 +1299,7 @@ fn update(
             typing.clear();
         }
     }
-    for (r, interaction, mut bg, children, mut node) in &mut rows {
+    for (r, mut bg, children, mut node) in &mut rows {
         let visible = !state.start || state.choices.visible_rows().contains(&r.0);
         node.display = if visible {
             Display::Flex
@@ -1052,7 +1309,8 @@ fn update(
         if !visible {
             continue;
         }
-        if interaction.is_changed() && *interaction == Interaction::Pressed {
+        // Button activation includes label hits and a press/release in the same frame.
+        if pressed_rows.contains(&r.0) {
             state.selected = r.0;
             if state.start && r.0 < count - 1 {
                 let cache = state.cache.clone();

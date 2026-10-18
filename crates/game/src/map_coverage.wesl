@@ -1,5 +1,5 @@
-#define_import_path sekiro_map_coverage
-#import bevy_pbr::mesh_view_bindings::view
+import bevy_pbr::render::mesh_view_bindings::view;
+
 
 /// Ordered 8x8 dither threshold in (0, 1) for a pixel.
 fn coverage_noise(position: vec2<f32>) -> f32 {

@@ -20,7 +20,8 @@ mod gate;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+// Alias avoids Bevy 0.20 prelude ContextExt ambiguity.
+use anyhow::{Context as ContextExt, Result};
 use bevy::app::AppExit;
 use bevy::asset::RenderAssetUsages;
 use bevy::asset::{AssetPlugin, LoadState, UntypedAssetId};

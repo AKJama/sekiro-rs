@@ -18,7 +18,7 @@ use bevy::render::{
     view::ViewTarget,
 };
 
-use crate::render_context::RenderContext;
+use bevy::render::renderer::RenderContext;
 
 // Native renderer-global quality scale is unresolved; constructor G is one.
 pub const BLOOM_QUALITY_SCALE: f32 = 1.0;
@@ -27,6 +27,7 @@ pub const OUTPUT_GAMMA: f32 = 2.2;
 const NATIVE_DELTA_UNITS_PER_SECOND: f32 = 1.0;
 
 #[derive(Component, Clone, ExtractComponent, ShaderType, Debug)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct GamePost {
     // Verified 250060: 2^Exposure, shipped inverse PreExposure=1, MiddleGray, auto.
     pub exposure: Vec4,
@@ -51,8 +52,8 @@ pub struct NativePostPlugin;
 pub(super) struct NativePost;
 impl Plugin for NativePostPlugin {
     fn build(&self, app: &mut App) {
-        embedded_asset!(app, "tonemap.wgsl");
-        embedded_asset!(app, "exposure.wgsl");
+        embedded_asset!(app, "tonemap.wesl");
+        embedded_asset!(app, "exposure.wesl");
         app.add_plugins((
             ExtractComponentPlugin::<GamePost>::default(),
             UniformComponentPlugin::<GamePost>::default(),
@@ -125,7 +126,7 @@ fn init_pipeline(
     let meter = cache.queue_compute_pipeline(ComputePipelineDescriptor {
         label: Some("Sekiro log luminance adaptation".into()),
         layout: vec![meter_layout.clone()],
-        shader: load_embedded_asset!(assets.as_ref(), "exposure.wgsl"),
+        shader: load_embedded_asset!(assets.as_ref(), "exposure.wesl"),
         ..default()
     });
     let passes = ["BRIGHT", "BLUR_H", "BLUR_V", "TONE", "COPY", "UPSAMPLE"].map(|variant| {
@@ -134,7 +135,7 @@ fn init_pipeline(
             layout: vec![layout.clone()],
             vertex: fullscreen.to_vertex_state(),
             fragment: Some(FragmentState {
-                shader: load_embedded_asset!(assets.as_ref(), "tonemap.wgsl"),
+                shader: load_embedded_asset!(assets.as_ref(), "tonemap.wesl"),
                 shader_defs: vec![variant.into()],
                 targets: vec![Some(ColorTargetState {
                     format: TextureFormat::Rgba16Float,

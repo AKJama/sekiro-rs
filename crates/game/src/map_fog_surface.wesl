@@ -1,31 +1,37 @@
-#import bevy_pbr::{forward_io::VertexOutput, mesh_view_bindings::{view, globals}, view_transformations::{position_ndc_to_view, position_world_to_view}}
-#ifdef DEPTH_PREPASS
-#import bevy_pbr::prepass_utils::prepass_depth
-#endif
-#ifdef ENVIRONMENT_MAP
-#import bevy_pbr::{environment_map::environment_map_light, lighting::{LightingInput,LAYER_BASE,F_AB}, clustered_forward::{view_fragment_cluster_index,unpack_clusterable_object_index_ranges}}
-#endif
+import bevy_pbr::render::forward_io::VertexOutput;
+import bevy_pbr::render::mesh_view_bindings::view;
+import bevy_pbr::render::mesh_view_bindings::globals;
+import bevy_pbr::render::view_transformations::position_ndc_to_view;
+import bevy_pbr::render::view_transformations::position_world_to_view;
+@if(DEPTH_PREPASS)
+import bevy_pbr::prepass::utils::prepass_depth;
+@if(ENVIRONMENT_MAP)
+import bevy_pbr::{
+    light_probe::environment_map::environment_map_light,
+    render::pbr_lighting::{LightingInput, LAYER_BASE, F_AB},
+    render::clustered_forward::{view_fragment_cluster_index, unpack_clusterable_object_index_ranges},
+};
 
 struct Inputs {
     colors: array<vec4<f32>,4>, floats: array<vec4<f32>,14>, vectors: array<vec4<f32>,18>,
     uv: array<vec4<f32>,4>, control: vec4<f32>, sun: vec4<f32>, direct: vec4<f32>,
     specular: vec4<f32>, ambient: vec4<f32>, hemi_axis: vec4<f32>, hemi_delta: vec4<f32>,
 }
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> fog: Inputs;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var mask: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(2) var mask_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(3) var flow: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(4) var flow_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(5) var ground: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(6) var ground_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(7) var height: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(8) var height_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> fog: Inputs;
+@group(constants::MATERIAL_BIND_GROUP) @binding(1) var mask: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(2) var mask_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(3) var flow: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(4) var flow_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(5) var ground: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(6) var ground_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(7) var height: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(8) var height_sampler: sampler;
 struct GiBuffer { words: array<u32>, }
-@group(#{MATERIAL_BIND_GROUP}) @binding(9) var<storage,read> gi: GiBuffer;
-@group(#{MATERIAL_BIND_GROUP}) @binding(10) var voxels: texture_3d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(11) var voxels_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(12) var diffuse: texture_cube_array<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(13) var diffuse_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(9) var<storage,read> gi: GiBuffer;
+@group(constants::MATERIAL_BIND_GROUP) @binding(10) var voxels: texture_3d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(11) var voxels_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(12) var diffuse: texture_cube_array<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(13) var diffuse_sampler: sampler;
 
 fn gi_vec(index: u32) -> vec4<f32> {
     return bitcast<vec4<f32>>(vec4(gi.words[index],gi.words[index+1u],gi.words[index+2u],gi.words[index+3u]));
@@ -66,9 +72,8 @@ fn ambient_light(position: vec3<f32>, normal: vec3<f32>, fallback: vec3<f32>) ->
 fn f(i: u32) -> f32 { return fog.floats[i].x; }
 fn sample_uv(v: VertexOutput, slot: u32, uv: vec2<f32>) -> vec2<f32> {
     var result=uv;
-#ifdef VERTEX_UVS_B
+@if(VERTEX_UVS_B)
     if fog.uv[slot].z>0.5 { result+=v.uv_b-v.uv; }
-#endif
     return result*fog.uv[slot].xy;
 }
 fn m(uv: vec2<f32>) -> vec3<f32> { return textureSample(mask,mask_sampler,uv).rgb; }
@@ -81,10 +86,10 @@ fn fragment(v: VertexOutput) -> @location(0) vec4<f32> {
     let toward=normalize(view.world_position-v.world_position.xyz);
     var coverage=1.0;
     var occlusion=1.0;
-#ifdef VERTEX_COLORS
-    coverage=v.color.x;
-    occlusion=v.color.w;
-#endif
+    @if(VERTEX_COLORS) {
+        coverage=v.color.x;
+        occlusion=v.color.w;
+    }
     var albedo: vec3<f32>;
     var alpha: f32;
     var fade_scale: f32;
@@ -108,12 +113,12 @@ fn fragment(v: VertexOutput) -> @location(0) vec4<f32> {
         let base_mask=dot(m(sample_uv(v,0u,(uv+warp)*fog.vectors[10].xy)),fog.vectors[0].xyz);
         let base_color=mix(f(9u),1.0,base_mask)*fog.colors[2].rgb;
         var parallax=vec2(0.0);
-#ifdef VERTEX_TANGENTS
-        let tangent=normalize(v.world_tangent.xyz);
-        let bitangent=normalize(cross(n,tangent)*v.world_tangent.w);
-        let ray=normalize(view.world_position-v.world_position.xyz);
-        parallax=vec2(dot(ray,tangent),-dot(ray,bitangent));
-#endif
+        @if(VERTEX_TANGENTS) {
+            let tangent=normalize(v.world_tangent.xyz);
+            let bitangent=normalize(cross(n,tangent)*v.world_tangent.w);
+            let ray=normalize(view.world_position-v.world_position.xyz);
+            parallax=vec2(dot(ray,tangent),-dot(ray,bitangent));
+        }
         let h=textureSample(height,height_sampler,sample_uv(v,3u,uv)).r-f(4u);
         let shifted=uv+parallax*h*f(3u);
         var surface: vec3<f32>;
@@ -136,41 +141,41 @@ fn fragment(v: VertexOutput) -> @location(0) vec4<f32> {
     let grazing=pow(1.0-clamp(dot(fog.sun.xyz,half_vector),0.0,1.0),5.0);
     let specular=grazing*nl/(0.5*max(max(nv,nl),0.0001)+0.5)*0.318310;
     var fallback=max(fog.ambient.rgb+fog.hemi_delta.rgb*dot(n,fog.hemi_axis.xyz),vec3(0.0));
-#ifdef ENVIRONMENT_MAP
     // The native no-volume path uses instance SH. Share the map renderer's default
     // environment-probe approximation instead of leaving far cards without sky lighting.
-    var li: LightingInput;
-    li.layers[LAYER_BASE].N=n;
-    li.layers[LAYER_BASE].R=reflect(-toward,n);
-    li.layers[LAYER_BASE].NdotV=max(nv,0.0001);
-    li.layers[LAYER_BASE].perceptual_roughness=1.0;
-    li.layers[LAYER_BASE].roughness=1.0;
-    li.P=v.world_position.xyz;
-    li.V=toward;
-    li.diffuse_color=vec3(1.0);
-    li.metallic=0.0;
-    li.F0_dielectric=vec3(0.0);
-    li.F0_metallic=vec3(0.0);
-    li.F_ab=F_AB(1.0,max(nv,0.0001));
-    var ranges=unpack_clusterable_object_index_ranges(view_fragment_cluster_index(v.position.xy,position_world_to_view(v.world_position.xyz).z,false));
-    fallback+=environment_map_light(&li,&ranges,false).diffuse;
-#endif
+    @if(ENVIRONMENT_MAP) {
+        var li: LightingInput;
+        li.layers[LAYER_BASE].N=n;
+        li.layers[LAYER_BASE].R=reflect(-toward,n);
+        li.layers[LAYER_BASE].NdotV=max(nv,0.0001);
+        li.layers[LAYER_BASE].perceptual_roughness=1.0;
+        li.layers[LAYER_BASE].roughness=1.0;
+        li.P=v.world_position.xyz;
+        li.V=toward;
+        li.diffuse_color=vec3(1.0);
+        li.metallic=0.0;
+        li.F0_dielectric=vec3(0.0);
+        li.F0_metallic=vec3(0.0);
+        li.F_ab=F_AB(1.0,max(nv,0.0001));
+        var ranges=unpack_clusterable_object_index_ranges(view_fragment_cluster_index(v.position.xy,position_world_to_view(v.world_position.xyz).z,false));
+        fallback+=environment_map_light(&li,&ranges,false).diffuse;
+    }
     let ambient=ambient_light(v.world_position.xyz,n,fallback)*occlusion;
     let radiance=albedo*(ambient+fog.direct.rgb*nl)+fog.specular.rgb*specular;
-#ifdef DEPTH_PREPASS
-    let scene_depth=prepass_depth(v.position,0u);
-    let scene_z=-position_ndc_to_view(vec3(0.0,0.0,scene_depth)).z;
-    let surface_z=-position_world_to_view(v.world_position.xyz).z;
-    alpha*=clamp((scene_z-surface_z)*fade_scale,0.0,1.0);
-#endif
-#ifdef FOG_DIAGNOSTIC
-    if alpha<=0.05 { discard; }
-    let distance=length(v.world_position.xyz-view.world_position);
-    let code=floor(clamp(log2(1.0+distance)/16.0,0.0,1.0)*65534.0)+1.0;
-    let bytes=vec3(floor(code/256.0),code%256.0,0.0)/255.0;
-    let linear=select(pow((bytes+vec3(0.055))/1.055,vec3(2.4)),bytes/12.92,bytes<=vec3(0.04045));
-    return vec4(linear,1.0);
-#else
+    @if(DEPTH_PREPASS) {
+        let scene_depth=prepass_depth(v.position,0u);
+        let scene_z=-position_ndc_to_view(vec3(0.0,0.0,scene_depth)).z;
+        let surface_z=-position_world_to_view(v.world_position.xyz).z;
+        alpha*=clamp((scene_z-surface_z)*fade_scale,0.0,1.0);
+    }
+    @if(FOG_DIAGNOSTIC) {
+        if alpha<=0.05 { discard; }
+        let distance=length(v.world_position.xyz-view.world_position);
+        let code=floor(clamp(log2(1.0+distance)/16.0,0.0,1.0)*65534.0)+1.0;
+        let bytes=vec3(floor(code/256.0),code%256.0,0.0)/255.0;
+        let linear=select(pow((bytes+vec3(0.055))/1.055,vec3(2.4)),bytes/12.92,bytes<=vec3(0.04045));
+        return vec4(linear,1.0);
+    }
+@if(!FOG_DIAGNOSTIC)
     return vec4(radiance*view.exposure,alpha);
-#endif
 }

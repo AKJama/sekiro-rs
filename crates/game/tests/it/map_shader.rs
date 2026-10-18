@@ -1,11 +1,4 @@
-use bevy::{
-    asset::Assets,
-    render::render_resource::{DownlevelFlags, WgpuFeatures},
-    shader::{
-        Shader, ShaderCache, ShaderCacheError, ShaderCacheSource, ShaderDefVal, ValidateShader,
-    },
-};
-use std::path::{Path, PathBuf};
+use bevy::shader::ShaderDefVal;
 
 #[test]
 fn snow_coverage_matches_native_height_and_wet_operations() {
@@ -14,7 +7,7 @@ fn snow_coverage_matches_native_height_and_wet_operations() {
 
     // Native Ground Gbuf 16/18 and Multiple Gbuf 20: fixed instruction-derived
     // samples guard the order of wet exclusion, height subtraction and saturation.
-    let production = include_str!("../../src/map_material.wgsl");
+    let production = include_str!("../../src/map_material.wesl");
     let coverage = production.split("fn snow_coverage(").nth(1).unwrap();
     let coverage = coverage.split("// FLV:").next().unwrap();
     let normal = production.split("fn layer_world_normal(").nth(1).unwrap();
@@ -93,7 +86,7 @@ fn main() {{
         })
         .unwrap();
     receiver.recv().unwrap().unwrap();
-    let bytes = readback.slice(..).get_mapped_range();
+    let bytes = readback.slice(..).get_mapped_range().unwrap();
     for (i, expected) in [0.5812, 0.0, 0.0, 0.64, 0.055, 0.7218655]
         .into_iter()
         .enumerate()
@@ -106,96 +99,40 @@ fn main() {{
     }
 }
 
-fn accept_module(_: &(), _: ShaderCacheSource, _: &ValidateShader) -> Result<(), ShaderCacheError> {
-    Ok(())
-}
-
-fn shader_files(path: &Path, out: &mut Vec<PathBuf>) {
-    for entry in std::fs::read_dir(path).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            shader_files(&path, out);
-        } else if path.extension().is_some_and(|s| s == "wgsl") {
-            out.push(path);
-        }
-    }
-}
-
 #[test]
 fn layered_map_forward_depth_and_motion_shaders_validate() {
-    // Use the exact dependency sources Cargo installed, including Bevy's real PBR interfaces.
-    let cargo = std::env::var_os("CARGO_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(
-                std::env::var_os("USERPROFILE")
-                    .or_else(|| std::env::var_os("HOME"))
-                    .unwrap(),
-            )
-            .join(".cargo")
-        });
-    let mut files = Vec::new();
-    for registry in std::fs::read_dir(cargo.join("registry/src")).unwrap() {
-        for package in std::fs::read_dir(registry.unwrap().path()).unwrap() {
-            let package = package.unwrap().path();
-            let name = package.file_name().unwrap().to_string_lossy();
-            if name.starts_with("bevy_") && name.ends_with("-0.19.1") {
-                shader_files(&package.join("src"), &mut files);
-            }
-        }
-    }
-    let mut cache = ShaderCache::new(
-        (),
-        WgpuFeatures::all(),
-        DownlevelFlags::all(),
-        accept_module,
+    let (mut cache, mut assets) = super::shader_support::cache();
+    super::shader_support::register(
+        &mut cache,
+        &mut assets,
+        "map_coverage",
+        include_str!("../../src/map_coverage.wesl"),
     );
-    let capabilities = cache.composer.capabilities;
-    cache.composer = Default::default();
-    cache.composer = cache.composer.with_capabilities(capabilities);
-    let mut assets = Assets::<Shader>::default();
-    for path in files {
-        let source = std::fs::read_to_string(&path).unwrap();
-        if !source.contains("#define_import_path") {
-            continue;
-        }
-        let shader = Shader::from_wgsl(source, path.to_string_lossy());
-        let id = assets.add(shader.clone()).id();
-        cache.set_shader(id, shader);
-    }
-    let coverage = Shader::from_wgsl(
-        include_str!("../../src/map_coverage.wgsl"),
-        "map_coverage.wgsl",
+    super::shader_support::register(
+        &mut cache,
+        &mut assets,
+        "map_bindings",
+        include_str!("../../src/map_bindings.wesl"),
     );
-    let id = assets.add(coverage.clone()).id();
-    cache.set_shader(id, coverage);
-    let bindings = Shader::from_wgsl(
-        include_str!("../../src/map_bindings.wgsl"),
-        "map_bindings.wgsl",
-    );
-    let id = assets.add(bindings.clone()).id();
-    cache.set_shader(id, bindings);
     for (name, source, prepass) in [
         (
             "map_material",
-            include_str!("../../src/map_material.wgsl"),
+            include_str!("../../src/map_material.wesl"),
             false,
         ),
         (
             "map_prepass",
-            include_str!("../../src/map_prepass.wgsl"),
+            include_str!("../../src/map_prepass.wesl"),
             true,
         ),
-        ("map_sweep", include_str!("../../src/map_sweep.wgsl"), false),
+        ("map_sweep", include_str!("../../src/map_sweep.wesl"), false),
         (
             "map_fog_surface",
-            include_str!("../../src/map_fog_surface.wgsl"),
+            include_str!("../../src/map_fog_surface.wesl"),
             false,
         ),
     ] {
-        let shader = Shader::from_wgsl(source, format!("{name}.wgsl"));
-        let id = assets.add(shader.clone()).id();
-        cache.set_shader(id, shader);
+        let id = super::shader_support::register(&mut cache, &mut assets, name, source);
         if name == "map_sweep" {
             // Collision has positions/normals but no UVs, tangents or colour streams.
             let mut defs: Vec<ShaderDefVal> = [

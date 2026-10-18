@@ -19,7 +19,7 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 #[derive(Resource, Default)]
-pub(super) struct PlayGate {
+pub(crate) struct PlayGate {
     /// When loading finished and play may start.
     pub(super) ready_at: Option<Instant>,
     /// When everything had first loaded; the settle timeout counts from here.
@@ -123,7 +123,7 @@ impl PlayGate {
     /// Whether the simulation may step now. The 60 stable frames before readiness also cover
     /// the presentation stall that once followed the map upload; a further 2.5 s settle made
     /// no difference to the first frames of play (about 80 ms either way, measured 2026-10-16).
-    pub(super) fn open(&self) -> bool {
+    pub(crate) fn open(&self) -> bool {
         self.ready_at.is_some()
     }
 
@@ -207,7 +207,7 @@ pub(super) fn update(
     screens: Query<Entity, With<LoadingScreen>>,
     mut bars: Query<&mut Node, With<LoadingBar>>,
 ) {
-    if sim.step > 0 {
+    if gate.open() {
         for screen in &screens {
             commands.entity(screen).despawn();
         }
@@ -340,6 +340,56 @@ fn near_meshes(world: &mut World) -> Vec<Entity> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loading_pause_keeps_the_clock_running_until_the_gate_opens() {
+        for gamepad in [false, true] {
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins)
+                .init_resource::<Assets<Font>>()
+                .init_resource::<ButtonInput<KeyCode>>()
+                .add_message::<bevy::input::keyboard::KeyboardInput>();
+            crate::menu::install(&mut app);
+            app.init_resource::<PlayGate>();
+            let pad = app.world_mut().spawn(Gamepad::default()).id();
+            app.update();
+            let press_pause = |app: &mut App| {
+                if gamepad {
+                    let mut pad = app.world_mut().get_mut::<Gamepad>(pad).unwrap();
+                    pad.digital_mut().reset_all();
+                    pad.digital_mut().press(GamepadButton::Start);
+                } else {
+                    let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+                    keys.reset_all();
+                    keys.press(KeyCode::Escape);
+                }
+            };
+            press_pause(&mut app);
+            app.update();
+            assert!(
+                app.world().resource::<crate::menu::PanelState>().paused,
+                "loading must leave Back and Quit reachable in the pause panel"
+            );
+            assert!(!app.world().resource::<Time<Virtual>>().is_paused());
+
+            app.world_mut().resource_mut::<PlayGate>().ready_at = Some(Instant::now());
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .reset_all();
+            app.world_mut()
+                .get_mut::<Gamepad>(pad)
+                .unwrap()
+                .digital_mut()
+                .reset_all();
+            app.update();
+            assert!(app.world().resource::<crate::menu::PanelState>().paused);
+            assert!(app.world().resource::<Time<Virtual>>().is_paused());
+            press_pause(&mut app);
+            app.update();
+            assert!(!app.world().resource::<crate::menu::PanelState>().paused);
+            assert!(!app.world().resource::<Time<Virtual>>().is_paused());
+        }
+    }
 
     /// Feeds (seconds, drawable) frames until the frames settle or run out.
     fn run(frames: impl IntoIterator<Item = (f32, bool)>) -> FrameSettle {

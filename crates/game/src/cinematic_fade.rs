@@ -48,12 +48,21 @@ fn spawn(mut commands: Commands) {
         },
         GlobalZIndex(i32::MAX),
         BackgroundColor(Color::NONE),
+        Visibility::Hidden,
     ));
 }
 
-fn draw(mut fade: ResMut<Fade>, mut overlay: Query<&mut BackgroundColor, With<Overlay>>) {
-    if let Ok(mut color) = overlay.single_mut() {
+fn draw(
+    mut fade: ResMut<Fade>,
+    mut overlay: Query<(&mut BackgroundColor, &mut Visibility), With<Overlay>>,
+) {
+    if let Ok((mut color, mut visibility)) = overlay.single_mut() {
         color.0 = Color::srgba(0.0, 0.0, 0.0, fade.alpha);
+        visibility.set_if_neq(if fade.alpha > 0.0 {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        });
     }
     fade.black_frames = if fade.alpha >= 1.0 {
         fade.black_frames.saturating_add(1)

@@ -1,44 +1,17 @@
-//! Validate every native post permutation through Bevy's actual shader composer.
-use bevy::asset::Assets;
-use bevy::render::render_resource::{DownlevelFlags, WgpuFeatures};
-use bevy::shader::{Shader, ShaderCache, ShaderCacheError, ShaderCacheSource, ValidateShader};
-
-fn accept_module(_: &(), _: ShaderCacheSource, _: &ValidateShader) -> Result<(), ShaderCacheError> {
-    Ok(())
-}
+//! Validate every native post permutation through Bevy WESL and Naga.
 
 #[test]
 fn native_post_shaders_compose_and_validate() {
-    let mut cache = ShaderCache::new(
-        (),
-        WgpuFeatures::empty(),
-        DownlevelFlags::all(),
-        accept_module,
-    );
-    // Release builds normally skip composer validation. Tests must retain it.
-    cache.composer = Default::default();
-    let mut assets = Assets::<Shader>::default();
-    let fullscreen = Shader::from_wgsl(
-        "#define_import_path bevy_core_pipeline::fullscreen_vertex_shader\nstruct FullscreenVertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> }",
-        "fullscreen_test.wgsl",
-    );
-    let id = assets.add(fullscreen.clone()).id();
-    cache.set_shader(id, fullscreen);
-    let view = Shader::from_wgsl(
-        "#define_import_path bevy_render::view\nstruct View { world_from_clip: mat4x4<f32>, world_from_view: mat4x4<f32>, world_position: vec3<f32> }",
-        "view_test.wgsl",
-    );
-    let id = assets.add(view.clone()).id();
-    cache.set_shader(id, view);
+    let (mut cache, mut assets) = super::shader_support::cache();
     for (name, source, variants) in [
         (
             "exposure",
-            include_str!("../../src/exposure.wgsl"),
+            include_str!("../../src/exposure.wesl"),
             vec![vec![]],
         ),
         (
             "fog",
-            include_str!("../../src/fog.wgsl"),
+            include_str!("../../src/fog.wesl"),
             vec![
                 vec![],
                 vec!["MULTISAMPLED_DEPTH"],
@@ -47,7 +20,7 @@ fn native_post_shaders_compose_and_validate() {
         ),
         (
             "tonemap",
-            include_str!("../../src/tonemap.wgsl"),
+            include_str!("../../src/tonemap.wesl"),
             vec![
                 vec!["BRIGHT"],
                 vec!["BLUR_H"],
@@ -59,13 +32,11 @@ fn native_post_shaders_compose_and_validate() {
         ),
         (
             "grading",
-            include_str!("../../src/grading_lut.wgsl"),
+            include_str!("../../src/grading_lut.wesl"),
             vec![vec![]],
         ),
     ] {
-        let shader = Shader::from_wgsl(source, format!("{name}.wgsl"));
-        let id = assets.add(shader.clone()).id();
-        cache.set_shader(id, shader);
+        let id = super::shader_support::register(&mut cache, &mut assets, name, source);
         for variant in variants {
             let defs: Vec<_> = variant.iter().copied().map(Into::into).collect();
             cache
@@ -87,7 +58,7 @@ fn sensitometric_curve_matches_native_table_samples() {
         .expect("native tone regression needs a GPU adapter");
     let (device, queue) = bevy::tasks::block_on(adapter.request_device(&Default::default()))
         .expect("native tone regression device");
-    let production = include_str!("../../src/tonemap.wgsl");
+    let production = include_str!("../../src/tonemap.wesl");
     let curve = production.split("fn tone(").nth(1).unwrap();
     let curve = curve.split("@fragment").next().unwrap();
     let source = format!(
@@ -154,7 +125,7 @@ fn main() {{
         })
         .unwrap();
     receiver.recv().unwrap().unwrap();
-    let bytes = readback.slice(..).get_mapped_range();
+    let bytes = readback.slice(..).get_mapped_range().unwrap();
     for (i, expected) in [0.0, 0.0049891566, 0.1211626855, 0.7508116073, 0.9908357271]
         .into_iter()
         .enumerate()
