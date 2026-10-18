@@ -25,7 +25,7 @@ impl Bird {
         duel.events = None;
         duel.shared_player_frame = true;
         duel.enemy.body.position = spot.position;
-        duel.enemy.body.yaw = spot.yaw;
+        duel.enemy.snap_yaw(spot.yaw);
         duel.enemy.body.gravity_enabled = false;
         duel.enemy_active = false;
         Ok(Self {
@@ -142,13 +142,14 @@ impl Duel {
                     };
                     if let Some(point) = point {
                         let yaw = source.body.yaw;
-                        let body = if entity == bird.entity {
-                            &mut bird.duel.enemy.body
+                        let character = if entity == bird.entity {
+                            &mut bird.duel.enemy
                         } else {
-                            &mut self.enemy.body
+                            &mut self.enemy
                         };
+                        character.snap_yaw(yaw);
+                        let body = &mut character.body;
                         body.position = point;
-                        body.yaw = yaw;
                         body.velocity = [0.0; 3];
                     }
                 }

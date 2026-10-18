@@ -76,7 +76,16 @@ pub enum TaeKind {
     },
     ActionFlag(i32),
     SpEffect(i32),
-    TurnSpeed(f32),
+    /// TAE 224; IsLockOnCheck gates the rate (FwLo, FUN_140b574b0).
+    TurnSpeed {
+        speed: f32,
+        lock_only: bool,
+    },
+    /// TAE 605: indexed value sampled from its authored start/end gradient.
+    HavokVariable {
+        id: i32,
+        values: [f32; 2],
+    },
     VelocityChange(i32),
     /// TAE 922 scales existing velocity while its window is active.
     VelocityScale(i32),
@@ -236,6 +245,17 @@ pub struct TimedEvent {
 impl TimedEvent {
     pub fn active_at(&self, t: f32) -> bool {
         t >= self.start && t < self.end
+    }
+
+    /// Clamped linear progress. A point event reaches its end value at its start.
+    pub fn progress(&self, t: f32) -> f32 {
+        if self.end > self.start {
+            ((t - self.start) / (self.end - self.start)).clamp(0.0, 1.0)
+        } else if t >= self.start {
+            1.0
+        } else {
+            0.0
+        }
     }
 }
 
@@ -507,8 +527,23 @@ fn decode(template: &Template, e: &tae::TaeEvent) -> Option<TimedEvent> {
         0 => TaeKind::ActionFlag(int("FlagType")?),
         960 => TaeKind::StaminaControl(int("StaminaRatioType")?),
         66 | 67 | 401 => TaeKind::SpEffect(int("SpEffectID")?),
-        224 => TaeKind::TurnSpeed(d.field("TurnSpeed")?.as_f32()?),
+        224 => {
+            let speed = d.field("TurnSpeed")?.as_f32()?;
+            TaeKind::TurnSpeed {
+                speed,
+                lock_only: int("IsLockOnCheck").unwrap_or(0) != 0,
+            }
+        }
         233 => TaeKind::DrawMask(e.params.get(..32)?.try_into().ok()?),
+        605 => {
+            let tae::FieldValue::Grad(values) = d.field("ValueGradient")? else {
+                return None;
+            };
+            TaeKind::HavokVariable {
+                id: int("VariableID")?,
+                values: *values,
+            }
+        }
         920 => TaeKind::VelocityChange(int("ChrPhysicsVelocityParam ID")?),
         922 => TaeKind::VelocityScale(int("ChrPhysicsVelocityParam ID")?),
         1 => TaeKind::Attack {
@@ -600,6 +635,7 @@ pub struct PlayingClip {
     /// Time before and after this tick's advance.
     pub prev_time: f32,
     pub time: f32,
+    pub looping: bool,
 }
 
 /// The TAE state for this tick.
@@ -615,6 +651,8 @@ pub struct TaeFrame {
     pub behavior_refs: HashSet<i32>,
     /// Smallest active `SetTurnSpeed`, degrees per second.
     pub turn_speed: Option<f32>,
+    pub locked_turn_speed: Option<f32>,
+    pub havok_variables: Vec<(i32, f32)>,
     /// Guard judge of an active `ShieldBlock` flag (see [`TaeKind::Guard`]).
     pub guard_judge: Option<i32>,
     /// Posture recovery control type (TAE 960) of the first playing clip that sets one.
@@ -657,6 +695,14 @@ pub struct EffectCue {
 }
 
 impl TaeFrame {
+    pub fn turn_speed_for(&self, locked: bool) -> Option<f32> {
+        let mut speed = self.turn_speed;
+        if let Some(s) = self.locked_turn_speed.filter(|_| locked) {
+            min_assign(&mut speed, s);
+        }
+        speed
+    }
+
     pub fn flag(&self, f: i32) -> bool {
         self.flags.contains(&f)
     }
@@ -665,6 +711,10 @@ impl TaeFrame {
     pub fn opacity(&self) -> f32 {
         self.opacity.unwrap_or(1.0)
     }
+}
+
+fn min_assign(current: &mut Option<f32>, value: f32) {
+    *current = Some(current.map_or(value, |c| c.min(value)));
 }
 
 /// Tracks timed SpEffects across ticks and builds each [`TaeFrame`].
@@ -797,8 +847,21 @@ impl TaeRuntime {
                             self.applied.push(*id);
                         }
                     }
-                    TaeKind::TurnSpeed(s) => {
-                        f.turn_speed = Some(f.turn_speed.map_or(*s, |c: f32| c.min(*s)));
+                    TaeKind::TurnSpeed { speed, lock_only } => {
+                        min_assign(
+                            if *lock_only {
+                                &mut f.locked_turn_speed
+                            } else {
+                                &mut f.turn_speed
+                            },
+                            *speed,
+                        );
+                    }
+                    TaeKind::HavokVariable { id, values } => {
+                        if e.active_at(t) && !f.havok_variables.iter().any(|(key, _)| key == id) {
+                            f.havok_variables
+                                .push((*id, values[0] + (values[1] - values[0]) * e.progress(t)));
+                        }
                     }
                     TaeKind::VelocityScale(id) => {
                         if e.active_at(t) {
@@ -851,8 +914,7 @@ impl TaeRuntime {
                     }
                     TaeKind::Opacity { from, to } => {
                         if e.active_at(t) {
-                            let span = (e.end - e.start).max(1e-6);
-                            let k = ((t - e.start) / span).clamp(0.0, 1.0);
+                            let k = e.progress(t);
                             let o = from + (to - from) * k;
                             f.opacity = Some(f.opacity.map_or(o, |c: f32| c.min(o)));
                         }
@@ -909,6 +971,94 @@ impl TaeRuntime {
 #[cfg(test)]
 mod fxr_event_tests {
     use super::*;
+
+    #[test]
+    fn turn_speed_lock_check_survives_decoding() {
+        let template = Template::parse_xml(r#"<action_template game="SDT"><action id="224" name="SetTurnSpeed"><f32 name="TurnSpeed"/><b name="IsLockOnCheck"/></action></action_template>"#).unwrap();
+        for locked_only in [false, true] {
+            let mut params = 180.0f32.to_le_bytes().to_vec();
+            params.push(u8::from(locked_only));
+            let decoded = decode(&template, &event(224, params)).unwrap();
+            let db = TaeDb::from_animations([(
+                0,
+                TaeAnim {
+                    hkx_source: 0,
+                    events: Arc::new(vec![decoded]),
+                },
+            )]);
+            let mut runtime = TaeRuntime::default();
+            runtime.update(
+                &db,
+                &[PlayingClip {
+                    animation: "a000_000000".into(),
+                    prev_time: 0.0,
+                    time: 0.5,
+                    looping: false,
+                }],
+                0.5,
+            );
+            let frame = runtime.frame;
+            assert_eq!(frame.turn_speed_for(true), Some(180.0));
+            assert_eq!(frame.turn_speed_for(false), (!locked_only).then_some(180.0));
+        }
+    }
+
+    #[test]
+    fn gradients_are_windowed_even_when_a_tick_skips_the_whole_event() {
+        for span in [0.1, 0.0] {
+            let event = TimedEvent {
+                start: 0.1,
+                end: 0.1 + span,
+                state_info: 0,
+                kind: TaeKind::HavokVariable {
+                    id: 5,
+                    values: [2.0, 4.0],
+                },
+            };
+            let opacity = TimedEvent {
+                kind: TaeKind::Opacity { from: 1.0, to: 0.0 },
+                ..event.clone()
+            };
+            let db = TaeDb::from_animations([(
+                0,
+                TaeAnim {
+                    hkx_source: 0,
+                    events: Arc::new(vec![event.clone(), opacity]),
+                },
+            )]);
+            for (time, expected) in [(0.15, (span > 0.0).then_some(3.0)), (0.25, None)] {
+                let mut runtime = TaeRuntime::default();
+                runtime.update(
+                    &db,
+                    &[PlayingClip {
+                        animation: "a000_000000".into(),
+                        prev_time: 0.0,
+                        time,
+                        looping: false,
+                    }],
+                    time,
+                );
+                let value = runtime
+                    .frame
+                    .havok_variables
+                    .first()
+                    .map(|(_, value)| *value);
+                match expected {
+                    Some(expected) => {
+                        assert!((value.unwrap() - expected).abs() < 1e-6);
+                        assert!((runtime.frame.opacity.unwrap() - 0.5).abs() < 1e-6);
+                    }
+                    None => {
+                        assert!(value.is_none());
+                        assert!(runtime.frame.opacity.is_none());
+                    }
+                }
+            }
+            if span == 0.0 {
+                assert_eq!(event.progress(0.1), 1.0);
+            }
+        }
+    }
 
     const TEMPLATE: &str = r#"<action_template game="SDT">
     <action id="96" name="SpawnOneShotFFX">
@@ -1005,6 +1155,7 @@ mod fxr_event_tests {
                 animation: "a000_003000".into(),
                 prev_time,
                 time,
+                looping: false,
             }]
         };
         runtime.update(&db, &clip(0.0, 0.1), 0.1);

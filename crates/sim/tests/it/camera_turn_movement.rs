@@ -3,26 +3,18 @@
 //! when it is let go. Reproduces "movement inverts / feels like tank controls after spinning
 //! the camera". Skips when `cache/` has not been extracted. `--nocapture` prints a per-step log.
 
+use super::movement_helpers::{
+    DT, OBSERVE_TICKS, RUN_TICKS, Trace, directional_clip, load, reset, settle, stick, tick_speed,
+};
 use sekiro_sim::input::angle_diff;
 use sekiro_sim::tae::cancel;
 use sekiro_sim::{Character, InputFrame};
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
-use std::path::PathBuf;
-
-const DT: f32 = 1.0 / 60.0;
+const CAMERA_PREP_TICKS: usize = 20;
+const RESTART_AT: usize = CAMERA_PREP_TICKS + RUN_TICKS;
 // Preserve the reported stick components exactly for the reproduction.
 #[allow(clippy::approx_constant)]
 const DIAGONAL: f32 = 0.7071;
-
-fn load() -> Option<Character> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
-    if !cache.join("raw/chr/c0000.behbnd.d/c0000.hkx").exists() {
-        return None;
-    }
-    let mut wolf = Character::load_from_cache(&cache).unwrap();
-    wolf.settle(DT, 400);
-    Some(wolf)
-}
 
 /// One step's movement.
 struct Step {
@@ -38,10 +30,9 @@ fn run(wolf: &mut Character, steps: usize, input: impl Fn(usize) -> InputFrame) 
     for i in 0..steps {
         let frame = input(i);
         let before = wolf.body.position;
-        let r = wolf.tick(&frame, DT);
+        let (r, speed) = tick_speed(wolf, &frame);
         let stick = wolf.input.stick_world_yaw();
         let (dx, dz) = (r.position[0] - before[0], r.position[2] - before[2]);
-        let speed = (dx * dx + dz * dz).sqrt() / DT;
         let travel = (-dx).atan2(-dz);
         let err = match stick {
             Some(s) if speed > 0.05 => angle_diff(travel, s).to_degrees(),
@@ -65,14 +56,6 @@ fn run(wolf: &mut Character, steps: usize, input: impl Fn(usize) -> InputFrame) 
         out.push(Step { err, speed });
     }
     out
-}
-
-fn stick(x: f32, y: f32, camera_yaw: f32) -> InputFrame {
-    InputFrame {
-        move_stick: [x, y],
-        camera_yaw,
-        ..InputFrame::default()
-    }
 }
 
 /// Every moving step in `steps` travels within `limit` degrees of the stick.
@@ -119,11 +102,71 @@ fn stick_repushed_after_camera_turn() {
 }
 
 #[test]
+fn free_run_restart_turns_instead_of_strafing() {
+    let Some(mut wolf) = load() else { return };
+    let mut trace = Trace::from_env(
+        "SEKIRO_RUN_RESTART_TRACE",
+        "case,tick,clip,locked,MoveAngle,TurnAngle,MoveDirection,camera_yaw,facing,state\n",
+    );
+    let mut failures = Vec::new();
+    for (before_yaw, after_yaw) in [(0.0, 0.0), (0.8, 0.8), (-1.2, 1.1)] {
+        for gap in [1, 12, 60] {
+            for (x, y) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0)] {
+                reset(&mut wolf);
+                let case = format!("{before_yaw}:{after_yaw}:{gap}:{x}:{y}");
+                let mut strafed = false;
+                for tick in 0..(RESTART_AT + gap + OBSERVE_TICKS) {
+                    let frame = if tick < CAMERA_PREP_TICKS {
+                        stick(
+                            0.0,
+                            0.0,
+                            before_yaw * tick as f32 / (CAMERA_PREP_TICKS - 1) as f32,
+                        )
+                    } else if tick < RESTART_AT {
+                        stick(0.0, 1.0, before_yaw)
+                    } else if tick < RESTART_AT + gap {
+                        stick(0.0, 0.0, after_yaw)
+                    } else {
+                        stick(x, y, after_yaw)
+                    };
+                    let r = wolf.tick(&frame, DT);
+                    let v = |name| wolf.behavior.runtime.variable(name).unwrap_or(f32::NAN);
+                    let clip = r.animation.as_deref().unwrap_or("");
+                    trace.record(format_args!(
+                        "{case},{tick},{clip},{},{:.4},{:.4},{:.0},{:.4},{:.4},{}",
+                        wolf.lock_target.is_some(),
+                        v("MoveAngle"),
+                        v("TurnAngle"),
+                        v("MoveDirection"),
+                        frame.camera_yaw.to_degrees(),
+                        r.yaw.to_degrees(),
+                        wolf.state_name()
+                    ));
+                    assert!(r.behavior.script_errors.is_empty(), "{case}");
+                    // The graph's directional walk/run starts, loops and stops are locked
+                    // strafes. The free 180-degree turn-and-go starts are allowed.
+                    if tick >= RESTART_AT + gap {
+                        strafed |= directional_clip(clip);
+                    }
+                }
+                let expected = after_yaw + (-x).atan2(y);
+                let error = angle_diff(wolf.body.yaw, expected).to_degrees().abs();
+                if strafed || error > 15.0 {
+                    failures.push(format!("{case}: strafe={strafed}, facing error={error:.1}"));
+                }
+            }
+        }
+    }
+    trace.save();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn moves_off_in_every_direction_from_every_facing() {
     let Some(mut wolf) = load() else { return };
     for facing in 0..4 {
         for dir in 0..8 {
-            wolf.settle(DT, 400);
+            settle(&mut wolf);
             wolf.body.yaw = facing as f32 * FRAC_PI_2;
             let a = dir as f32 * TAU / 8.0;
             let (x, y) = (a.sin(), a.cos());
@@ -156,11 +199,23 @@ fn sprint_quick_turn_ends_facing_the_stick() {
     let Some(mut wolf) = load() else { return };
     // Sprint forward (dodge held), then pull the stick back: the script's sprint quick turn
     // turns Wolf by its root motion and he sprints the other way.
-    let steps = run(&mut wolf, 240, |i| {
+    let mut steps = Vec::new();
+    let mut windup_ticks = 0;
+    for i in 0..240 {
+        let before_yaw = wolf.body.yaw;
         let mut f = stick(0.0, if i < 100 { 1.0 } else { -1.0 }, 0.0);
         f.buttons.dodge = i > 5;
-        f
-    });
+        steps.extend(run(&mut wolf, 1, |_| f));
+        if wolf.state_name() == "SprintQuickTurnReady" {
+            windup_ticks += 1;
+            assert_eq!(wolf.tae_runtime.frame.turn_speed_for(false), Some(0.0));
+            assert!(
+                angle_diff(wolf.body.yaw, before_yaw).abs() < 1e-6,
+                "quick-turn wind-up steered before its authored turn"
+            );
+        }
+    }
+    assert!(windup_ticks > 0, "never exercised the zero-rate wind-up");
     assert_follows(&steps[60..100], 15.0, "sprinting");
     assert_follows(&steps[180..], 15.0, "after the sprint quick turn");
 }

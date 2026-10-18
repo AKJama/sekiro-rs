@@ -71,6 +71,7 @@ fn frame_at(db: &TaeDb, anim: &str, time: f32) -> TaeFrame {
         animation: anim.to_owned(),
         prev_time: (time - DT).max(0.0),
         time,
+        looping: false,
     };
     rt.update(db, &[clip], DT);
     rt.frame

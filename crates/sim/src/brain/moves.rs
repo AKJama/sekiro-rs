@@ -748,6 +748,7 @@ pub fn build(duel: &Duel, actions: &BossActions) -> MoveSheet {
                             animation: name.clone(),
                             prev_time: e.start,
                             time: e.start,
+                            looping: false,
                         }],
                         0.0,
                     );
@@ -799,6 +800,7 @@ pub fn build(duel: &Duel, actions: &BossActions) -> MoveSheet {
                                 animation: name.clone(),
                                 prev_time: e.start,
                                 time: e.start,
+                                looping: false,
                             }],
                             0.0,
                         );

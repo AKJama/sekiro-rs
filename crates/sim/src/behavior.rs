@@ -18,6 +18,60 @@ use sekiro_formats::hkb::{Graph, NodeId, NodeKind, Transition, parse_anim_name, 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+const FLAG_IGNORE_FROM_WORLD_FROM_MODEL: i64 = 1;
+const MAX_EFFECT_CHAIN_DEPTH: usize = 16;
+
+fn resolve_effect(graph: &Graph, mut id: usize) -> Option<&sekiro_formats::hkb::TransitionEffect> {
+    for _ in 0..=MAX_EFFECT_CHAIN_DEPTH {
+        let effect = graph.effects.get(id)?;
+        if effect.choices.is_empty() {
+            return Some(effect);
+        }
+        id = effect
+            .choices
+            .get(effect.selected_index.unwrap_or(0).max(0) as usize)
+            .copied()
+            .flatten()?;
+    }
+    None
+}
+
+/// A split motion/animation layer with the engine's locomotion speed selector.
+fn locomotion_layer(graph: &Graph, generator: NodeId) -> bool {
+    let NodeKind::Layers(layers) = &graph.nodes[generator].kind else {
+        return false;
+    };
+    let Some(speed) = graph.variable_index("MoveSpeedIndex") else {
+        return false;
+    };
+    if !layers.iter().any(|l| !l.use_motion) {
+        return false;
+    }
+    let mut pending: Vec<_> = layers
+        .iter()
+        .filter(|l| l.use_motion)
+        .filter_map(|l| l.generator)
+        .collect();
+    let mut seen = HashSet::new();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let node = &graph.nodes[id];
+        if node.bindings.iter().any(|b| {
+            b.binding_type == 0
+                && b.member_path == "selectedGeneratorIndex"
+                && b.variable as usize == speed
+        }) {
+            return true;
+        }
+        if !matches!(node.kind, NodeKind::StateMachine(_)) {
+            pending.extend(node.children());
+        }
+    }
+    false
+}
+
 /// Supplies clip lengths in seconds; `None` means unknown (treated as never ending).
 pub trait ClipDurations {
     fn duration(&mut self, animation: &str) -> Option<f32>;
@@ -66,6 +120,8 @@ pub struct ClipState {
     pub node: NodeId,
     pub animation: String,
     pub time: f32,
+    /// Bound playback offset at activation, distinct from a fresh frame-zero entry.
+    pub start_time: f32,
     pub duration: Option<f32>,
     pub looping: bool,
     pub speed: f32,
@@ -103,7 +159,7 @@ impl AnimOffsets {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct StateRef {
+pub(crate) struct StateRef {
     sm: NodeId,
     index: usize,
 }
@@ -141,6 +197,9 @@ pub struct BehaviorRuntime {
     main_machine: NodeId,
     /// Events that matched no transition, most recent last (bounded).
     pub unhandled_events: VecDeque<String>,
+    /// Per-target graph flags, scoped to the owning machine and state.
+    blend_sources: HashMap<StateRef, bool>,
+    locomotion_layers: HashSet<StateRef>,
 }
 
 impl BehaviorRuntime {
@@ -180,7 +239,46 @@ impl BehaviorRuntime {
         }
         let variables = graph.variables.iter().map(|v| v.initial.as_f32()).collect();
         let main_machine = graph.node_by_name("Master_SM").unwrap_or(graph.root);
+        let mut votes: HashMap<StateRef, i32> = HashMap::new();
+        let mut locomotion_layers = HashSet::new();
+        for (sm_id, sm) in graph.state_machines() {
+            for (index, state) in sm.states.iter().enumerate() {
+                if state
+                    .generator
+                    .is_some_and(|id| locomotion_layer(&graph, id))
+                {
+                    locomotion_layers.insert(StateRef { sm: sm_id, index });
+                }
+            }
+            for t in sm
+                .wildcard_transitions
+                .iter()
+                .chain(sm.states.iter().flat_map(|s| &s.transitions))
+            {
+                let Some(index) = sm.state_index(t.to_state) else {
+                    continue;
+                };
+                if let Some(flags) = t
+                    .effect
+                    .and_then(|id| resolve_effect(&graph, id))
+                    .and_then(|e| e.flags)
+                {
+                    *votes.entry(StateRef { sm: sm_id, index }).or_default() +=
+                        if flags & FLAG_IGNORE_FROM_WORLD_FROM_MODEL == 0 {
+                            1
+                        } else {
+                            -1
+                        };
+                }
+            }
+        }
+        let blend_sources = votes
+            .into_iter()
+            .map(|(state, tally)| (state, tally >= 0))
+            .collect();
         let mut rt = Self {
+            blend_sources,
+            locomotion_layers,
             graph,
             enclosing,
             current: HashMap::new(),
@@ -257,6 +355,19 @@ impl BehaviorRuntime {
                 false
             }
         }
+    }
+
+    /// Havok FLAG_IGNORE_FROM_WORLD_FROM_MODEL, using the target state's majority
+    /// when it has several entry effects (FwLo's data.rs::blend_keeps_src).
+    pub fn blend_keeps_source(&self) -> bool {
+        self.main_states()
+            .find_map(|state| self.blend_sources.get(&state).copied())
+            .unwrap_or(true)
+    }
+
+    pub fn main_is_locomotion_layer(&self) -> bool {
+        self.main_state_key()
+            .is_some_and(|s| self.locomotion_layers.contains(&s))
     }
 
     fn note_unhandled(&mut self, name: String) {
@@ -555,14 +666,18 @@ impl BehaviorRuntime {
                     }
                     s
                 }
-                _ => ClipState {
-                    node: id,
-                    animation: c.animation.clone(),
-                    time: c.start_time,
-                    duration: durations.duration(&c.animation),
-                    looping: c.mode == 1,
-                    speed: c.playback_speed,
-                },
+                _ => {
+                    let start_time = self.bound_value(&graph.nodes[id], "startTime", c.start_time);
+                    ClipState {
+                        node: id,
+                        animation: c.animation.clone(),
+                        time: start_time,
+                        start_time,
+                        duration: durations.duration(&c.animation),
+                        looping: c.mode == 1,
+                        speed: c.playback_speed,
+                    }
+                }
             };
             new_clips.insert(id, state);
         }
@@ -625,12 +740,16 @@ impl BehaviorRuntime {
     }
 
     fn bound_index(&self, node: &sekiro_formats::hkb::Node, member: &str, default: i64) -> usize {
+        self.bound_value(node, member, default as f32).max(0.0) as usize
+    }
+
+    fn bound_value(&self, node: &sekiro_formats::hkb::Node, member: &str, default: f32) -> f32 {
         node.bindings
             .iter()
             .find(|b| b.member_path == member && b.binding_type == 0)
             .and_then(|b| self.variables.get(b.variable as usize))
-            .map(|v| v.max(0.0) as usize)
-            .unwrap_or(default.max(0) as usize)
+            .copied()
+            .unwrap_or(default)
     }
 
     fn pick_cmsg_clip(&self, c: &sekiro_formats::hkb::Cmsg) -> Option<NodeId> {
@@ -710,15 +829,10 @@ impl BehaviorRuntime {
     /// in parallel (layers, blends), the first one that leads to a real clip wins; the
     /// `a*_009999` placeholder clips (the empty "no additive" animation) never do.
     pub fn main_clip(&self) -> Option<&ClipState> {
-        self.descend(self.main_machine, 0).map(|(c, _)| c)
+        self.find_main_clip(self.main_machine, 0)
     }
 
-    fn is_placeholder(c: &ClipState) -> bool {
-        c.animation.ends_with("_009999")
-    }
-
-    /// The best clip under machine `sm` and the state path leading to it.
-    fn descend(&self, sm: NodeId, depth: usize) -> Option<(&ClipState, Vec<StateRef>)> {
+    fn find_main_clip(&self, sm: NodeId, depth: usize) -> Option<&ClipState> {
         if depth > 64 || !self.active[sm] {
             return None;
         }
@@ -731,29 +845,22 @@ impl BehaviorRuntime {
             .iter()
             .filter(|s| s.sm != sm && self.encl(s.sm) == Some(here))
         {
-            if let Some((c, mut path)) = self.descend(child.sm, depth + 1) {
-                path.insert(0, here);
-                return Some((c, path));
+            if let Some(clip) = self.find_main_clip(child.sm, depth + 1) {
+                return Some(clip);
             }
         }
         self.clips
             .values()
             .filter(|c| self.encl(c.node) == Some(here) && !Self::is_placeholder(c))
             .min_by_key(|c| c.node)
-            .map(|c| (c, vec![here]))
     }
 
-    /// Names of the active states under the main machine, outermost first, along the path that
-    /// leads to [`Self::main_clip`] (or the first nested machine when there is no clip).
-    pub fn main_state_path(&self) -> Vec<String> {
-        if let Some((_, path)) = self.descend(self.main_machine, 0) {
-            return path
-                .iter()
-                .map(|s| self.state_name(*s).to_owned())
-                .collect();
+    pub(crate) fn main_state_key(&self) -> Option<StateRef> {
+        if let Some(clip) = self.main_clip() {
+            return self.encl(clip.node);
         }
-        let mut path = Vec::new();
         let mut sm = self.main_machine;
+        let mut last = None;
         for _ in 0..64 {
             if !self.active[sm] {
                 break;
@@ -762,16 +869,47 @@ impl BehaviorRuntime {
                 sm,
                 index: self.current_index(sm),
             };
-            path.push(self.state_name(here).to_owned());
-            match self
+            last = Some(here);
+            let Some(child) = self
                 .active_states
                 .iter()
                 .find(|s| s.sm != sm && self.encl(s.sm) == Some(here))
-            {
-                Some(s) => sm = s.sm,
-                None => break,
-            }
+            else {
+                break;
+            };
+            sm = child.sm;
         }
+        last
+    }
+
+    pub fn main_state_name(&self) -> &str {
+        self.main_state_key().map_or("", |s| self.state_name(s))
+    }
+
+    fn is_placeholder(c: &ClipState) -> bool {
+        c.animation.ends_with("_009999")
+    }
+
+    /// Leaf first, bounded at the full-body machine rather than its outer graph.
+    fn main_states(&self) -> impl Iterator<Item = StateRef> + '_ {
+        std::iter::successors(self.main_state_key(), |s| {
+            if s.sm == self.main_machine {
+                None
+            } else {
+                self.encl(s.sm)
+            }
+        })
+        .take(65)
+    }
+
+    /// Names of the active states under the main machine, outermost first, along the path that
+    /// leads to [`Self::main_clip`] (or the first nested machine when there is no clip).
+    pub fn main_state_path(&self) -> Vec<String> {
+        let mut path: Vec<_> = self
+            .main_states()
+            .map(|s| self.state_name(s).to_owned())
+            .collect();
+        path.reverse();
         path
     }
 
@@ -926,6 +1064,50 @@ mod tests {
             effects: Vec::new(),
             root: 0,
         }
+    }
+
+    #[test]
+    fn blend_flags_are_scoped_to_the_machine_through_effect_selectors() {
+        use sekiro_formats::hkb::TransitionEffect;
+        let mut graph = graph();
+        let effect = |flags| TransitionEffect {
+            type_name: "hkbBlendingTransitionEffect".into(),
+            name: String::new(),
+            bindings: Vec::new(),
+            duration: Some(0.0),
+            self_transition_mode: 0,
+            event_mode: 0,
+            end_mode: None,
+            blend_curve: Some(0),
+            flags: Some(flags),
+            to_generator_start_time_fraction: None,
+            choices: Vec::new(),
+            selected_index: None,
+        };
+        let mut selector = effect(0);
+        selector.choices = vec![Some(1)];
+        graph.effects = vec![
+            effect(FLAG_IGNORE_FROM_WORLD_FROM_MODEL),
+            effect(0),
+            selector,
+        ];
+        let NodeKind::StateMachine(root) = &mut graph.nodes[0].kind else {
+            unreachable!()
+        };
+        root.wildcard_transitions[0].effect = Some(0);
+        let NodeKind::StateMachine(inner) = &mut graph.nodes[2].kind else {
+            unreachable!()
+        };
+        // Both machines have a state named A, with opposite entry motion flags.
+        inner.states[1].name = "A".into();
+        inner.wildcard_transitions[0].effect = Some(2);
+        let mut rt = BehaviorRuntime::new(Arc::new(graph), AnimOffsets::default());
+        assert_eq!(rt.main_state_name(), "A");
+        assert!(!rt.blend_keeps_source());
+        rt.fire_event("W_Y");
+        rt.process_events(&mut |_: &str| Some(1.0));
+        assert_eq!(rt.main_state_name(), "A");
+        assert!(rt.blend_keeps_source());
     }
 
     #[test]

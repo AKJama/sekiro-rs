@@ -793,6 +793,9 @@ pub(super) fn take_mark_with_ai(duel: &mut Duel, enemy_active: bool) {
             duel.rules.fighters[1].posture.remaining = 1;
         }
         let frame = InputFrame {
+            // Follow the boss after contact stops Wolf rather than shoving the pair.
+            move_stick: [0.0, if !broke && !started { 0.3 } else { 0.0 }],
+            camera_yaw: duel.player.yaw_to(duel.enemy.body.position),
             buttons: sekiro_sim::Buttons {
                 attack: if broke {
                     !started && i % 10 == 0
@@ -802,7 +805,6 @@ pub(super) fn take_mark_with_ai(duel: &mut Duel, enemy_active: bool) {
                 lock_on: (2..4).contains(&i),
                 ..sekiro_sim::Buttons::default()
             },
-            ..InputFrame::default()
         };
         let report = duel.step(&frame, 1.0 / 60.0);
         assert!(

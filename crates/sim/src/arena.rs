@@ -501,7 +501,7 @@ impl Arena {
             let p = spot.position;
             let y = ground.floor(p.x, p.z, p.y + 1.0).unwrap_or(p.y);
             c.body.position = p.with_y(y).to_array();
-            c.body.yaw = spot.yaw;
+            c.snap_yaw(spot.yaw);
             c.body.fall_top = c.body.position[1];
             c.ground = ground;
         }

@@ -32,7 +32,7 @@ impl Encounter {
             }
             duel.events = None;
             duel.enemy.body.position = spot.position;
-            duel.enemy.body.yaw = spot.yaw;
+            duel.enemy.snap_yaw(spot.yaw);
             duel.enemy_active = false;
             duel.shared_player_frame = true;
             duel.ai.as_mut().unwrap().state.map_regions = Some(

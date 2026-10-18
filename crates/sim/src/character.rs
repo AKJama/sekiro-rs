@@ -49,6 +49,8 @@ pub struct StepReport {
     pub clip_started: bool,
     /// Authored crossfade into the full-body clip in seconds (TAE `Blend`).
     pub blend_in: f32,
+    /// Target root-motion weight this step (1 when no outgoing motion is blended).
+    pub root_blend_weight: f32,
     /// Seconds this character's own clock advanced in the step: the step's length, less while a
     /// hit stop holds or eases it (0 while held). The renderer draws between steps with it.
     pub advanced: f32,
@@ -149,7 +151,19 @@ pub struct Character {
     /// Clip times before the last step, by clip node.
     last_times: HashMap<NodeId, (String, f32)>,
     last_main: Option<PlayingClip>,
+    last_motion_state: Option<crate::behavior::StateRef>,
+    motion_blend: Option<MotionBlend>,
     last_anim_effects: Vec<i32>,
+}
+
+/// The outgoing generator keeps advancing through TAE Blend (FwLo's actor.rs).
+struct MotionBlend {
+    animation: String,
+    start: f32,
+    looping: bool,
+    twist: f32,
+    elapsed: f32,
+    duration: f32,
 }
 
 /// The locked-on strafe class for a stick `angle` degrees from the facing (positive right),
@@ -260,6 +274,8 @@ impl Character {
             free_move_pending: false,
             last_times: HashMap::new(),
             last_main: None,
+            last_motion_state: None,
+            motion_blend: None,
             last_anim_effects: Vec::new(),
         })
     }
@@ -376,8 +392,10 @@ impl Character {
             .main_clip()
             .is_some_and(|c| c.at_end());
         let may_move = !tae.restricted || tae.flag(cancel::MOVE) || ended;
-        // A TAE that stops turning (the sprint quick turn's wind-up) turns by root motion.
-        let may_turn = !tae.flag(cancel::DISABLE_TURN) && tae.turn_speed != Some(0.0);
+        // TAE 224 limits steering of the current clip, not the heading of a new
+        // movement start. Stops have a zero rate but allow a new move immediately.
+        // Keep the explicit turn prohibition (e.g. the sprint quick-turn wind-up).
+        let may_turn = !tae.flag(cancel::DISABLE_TURN) && !tae.fixed_rotation;
         if self.kind != ControlKind::Player
             || self.attack_target().is_some()
             || !self.body.grounded
@@ -391,9 +409,16 @@ impl Character {
             return;
         };
         let turn = angle_diff(stick, self.body.yaw);
-        self.body.yaw = angle_diff(stick, 0.0);
+        self.snap_yaw(stick);
         self.twist = angle_diff((self.twist.to_radians()) + turn, 0.0).to_degrees();
         self.free_move_pending = false;
+    }
+
+    /// A new facing invalidates travel measured before the snap. Continuous steering
+    /// remains in Body::step; action/throw/teleport snaps go through this handoff.
+    pub fn snap_yaw(&mut self, yaw: f32) {
+        self.body.yaw = angle_diff(yaw, 0.0);
+        self.heading = None;
     }
 
     /// A lock release is a new free-movement start even with the stick held.
@@ -402,7 +427,7 @@ impl Character {
         self.behavior.runtime.set_variable("MoveDirection", 0.0);
         self.walk_twist = 0.0;
         self.walk_twist_target = 0.0;
-        self.heading = None;
+        self.snap_yaw(self.body.yaw);
         self.free_move_pending = true;
     }
 
@@ -469,22 +494,18 @@ impl Character {
                 // motion) could never play: every locked back sprint braked into the sprint stop
                 // slide toward the enemy. Inferred from the script and clips, not traced in the exe.
                 let turn_from_travel = stick_from(self.heading.unwrap_or(self.body.yaw));
-                // The locked-on action directions (step, jump, attack) are read right after the
-                // script turns Wolf to the target (`act(2019)` in `_fireGroundStep` and the jump
-                // starts), and pick a direction relative to that new facing, so they are measured
-                // from the target. Measured from the old facing, a step out of a locked sprint or
-                // quick turn (Wolf facing away) went the wrong way once he snapped to the target.
-                let action = lock_yaw.map_or(turn, stick_from);
+                // FwLo's live-facing correction: action angles are against the current facing.
                 // The engine's stick level runs 0..2; full keyboard or stick deflection runs.
                 rt.set_variable("MoveSpeedLevel", level * 2.0);
                 for name in ["TurnAngle", "TurnAngleReal"] {
                     rt.set_variable(name, turn_from_travel);
                 }
-                for name in ["MoveAngle", "MoveAngleReal"] {
+                for name in ["MoveAngle", "MoveAngleReal", "JumpAngle", "KickAngle"] {
                     rt.set_variable(name, turn);
                 }
-                for name in ["JumpAngle", "AttackAngle", "SubAttackAngle", "KickAngle"] {
-                    rt.set_variable(name, action);
+                // Attack targeting remains on the existing combat path.
+                for name in ["AttackAngle", "SubAttackAngle"] {
+                    rt.set_variable(name, lock_yaw.map_or(turn, stick_from));
                 }
                 for name in [
                     "JumpStickLevel",
@@ -530,6 +551,7 @@ impl Character {
             .collect();
         env.held_ms = self.input.held().collect();
         env.sp_effect_refs = tae.behavior_refs.clone();
+        env.havok_variables.clone_from(&tae.havok_variables);
         // Charged air reactions have no ordinary attack accept flag. Keep the
         // held attack available to HKS, which owns the charged-state transition.
         if !self.body.grounded
@@ -758,15 +780,21 @@ impl Character {
         if self.behavior.env.input_resets.get() != resets_before {
             self.input.reset_requests();
         }
-        // The script always faces the target (act 2019) before tilting off it (act 3025): the
-        // locked step and positioning jump tilts are relative to the target direction.
+        let state_key = self.behavior.runtime.main_state_key();
+        let state = self.behavior.runtime.main_state_name();
+        let locked_step = self.lock_target.is_some() && state == "GroundStep";
+        let positioning_jump = self.lock_target.is_some() && state.contains("GroundJump");
+        // FwLo's live-facing correction: step/jump angles use the current facing,
+        // not a snap to the lock target. The existing HKS tilt still applies.
         if self.behavior.env.face_lock_target.take()
+            && !locked_step
+            && !positioning_jump
             && let Some(t) = self.lock_target
         {
-            self.body.yaw = self.yaw_to(t);
+            self.snap_yaw(self.yaw_to(t));
         }
         if let Some(deg) = self.behavior.env.face_turn.take() {
-            self.body.yaw = angle_diff(self.body.yaw - deg.to_radians(), 0.0);
+            self.snap_yaw(self.body.yaw - deg.to_radians());
         }
         let lock_angle_released = self.behavior.env.release_lock_angle.take();
 
@@ -779,7 +807,8 @@ impl Character {
             .map(|c| {
                 let prev = match self.last_times.get(&c.node) {
                     Some((name, t)) if *name == c.animation && *t <= c.time => *t,
-                    _ => 0.0,
+                    Some((name, _)) if *name == c.animation => 0.0,
+                    _ => c.start_time,
                 };
                 (
                     c.node,
@@ -787,6 +816,7 @@ impl Character {
                         animation: c.animation.clone(),
                         prev_time: prev,
                         time: c.time,
+                        looping: c.looping,
                     },
                 )
             })
@@ -846,38 +876,67 @@ impl Character {
             self.body.grounded = false;
             self.body.velocity[1] = 0.0;
         }
-        let mut root_motion = main
-            .as_ref()
-            .and_then(|c| {
-                let clip = self.clips.clip(&c.animation)?;
-                let rm = clip.root_motion.as_ref()?;
-                let end = clip.duration;
-                // A clip entered from the previous clip's end event starts after this step's
-                // advance, at time 0. Taking its first `dt` of motion keeps the body moving
-                // through the switch instead of standing still for a step (a hitch every time
-                // the run start hands over to the run loop).
+        let main_length = self
+            .behavior
+            .runtime
+            .main_clip()
+            .and_then(|c| c.duration)
+            .unwrap_or(0.0);
+        let changed =
+            main.as_ref().map(|c| &c.animation) != self.last_main.as_ref().map(|c| &c.animation);
+        if changed {
+            let duration = main
+                .as_ref()
+                .and_then(|c| self.tae.blend_in(&c.animation))
+                .unwrap_or(0.0);
+            // FwLo's procedural locomotion plays its start/loop root directly. Those
+            // clips already contain the acceleration; blending them in from idle
+            // applies a second ramp and falls behind his recorded start speeds.
+            let direction_layer = state_key == self.last_motion_state
+                || self.behavior.runtime.main_is_locomotion_layer();
+            self.motion_blend = self
+                .last_main
+                .as_ref()
+                .filter(|_| {
+                    self.kind == ControlKind::Player
+                        && duration > 0.0
+                        && !direction_layer
+                        && self.behavior.runtime.blend_keeps_source()
+                })
+                .map(|c| MotionBlend {
+                    animation: c.animation.clone(),
+                    start: c.time,
+                    looping: c.looping,
+                    twist: self.walk_twist_target,
+                    elapsed: 0.0,
+                    duration,
+                });
+        }
+        let mut root_motion = main.as_ref().map_or([0.0; 4], |c| {
+            let (start, elapsed, looping) = if self.kind == ControlKind::Player && c.looping {
+                let start = self
+                    .last_main
+                    .as_ref()
+                    .filter(|p| p.animation == c.animation)
+                    .map_or(c.prev_time, |p| p.time);
+                let elapsed = if c.time < start || (changed && c.time == 0.0) {
+                    dt
+                } else {
+                    (c.time - start).max(0.0)
+                };
+                (start, elapsed, true)
+            } else {
+                // Preserve non-looping target sampling and its end-event handover.
                 let time = if c.prev_time == 0.0 && c.time == 0.0 {
                     dt
                 } else {
                     c.time
                 };
-                let a = rm.sample(c.prev_time.min(end));
-                let b = rm.sample(time.min(end));
-                // Samples are displacements in the clip's start frame. Turn this step's delta
-                // into the root's own frame (undo the clip's yaw so far); the body then applies
-                // it along its facing. A clip that turns while moving (SprintStartFromStep_L
-                // turns 90 degrees in 0.2 s and travels 5.8 m along its start frame's side) would
-                // otherwise carry Wolf sideways once he has turned.
-                let (dx, dz) = (b[0] - a[0], b[2] - a[2]);
-                let (sin, cos) = (-a[3]).sin_cos();
-                Some([
-                    cos * dx + sin * dz,
-                    b[1] - a[1],
-                    -sin * dx + cos * dz,
-                    b[3] - a[3],
-                ])
-            })
-            .unwrap_or_default();
+                let start = c.prev_time.min(main_length);
+                (start, (time.min(main_length) - start).max(0.0), false)
+            };
+            self.clips.root_delta(&c.animation, start, elapsed, looping)
+        });
         // Locked-on walks and runs travel along the clip's motion turned by the walk twist, so
         // a diagonal goes along the stick, not along the nearest of the four strafe clips.
         // Turned by the target (the stick's angle off the clip) rather than the eased value:
@@ -887,10 +946,33 @@ impl Character {
         if self.walk_twist_target != 0.0 {
             // Source X is mirrored (as in `Body::step`), so a turn to the right is a positive
             // turn about source Y: x' = x cos + z sin, z' = -x sin + z cos.
-            let (sin, cos) = self.walk_twist_target.to_radians().sin_cos();
-            let [x, _, z, _] = root_motion;
-            root_motion[0] = cos * x + sin * z;
-            root_motion[2] = -sin * x + cos * z;
+            let [x, z] = crate::motion::rotate_xz(
+                [root_motion[0], root_motion[2]],
+                self.walk_twist_target.to_radians(),
+            );
+            root_motion[0] = x;
+            root_motion[2] = z;
+        }
+        let mut root_blend_weight = 1.0;
+        if let Some(blend) = self.motion_blend.as_mut() {
+            let mut source = self.clips.root_delta(
+                &blend.animation,
+                blend.start + blend.elapsed,
+                dt,
+                blend.looping,
+            );
+            let [x, z] = crate::motion::rotate_xz([source[0], source[2]], blend.twist.to_radians());
+            source[0] = x;
+            source[2] = z;
+            let weight = crate::motion::smoothstep(blend.elapsed / blend.duration);
+            root_blend_weight = weight;
+            for i in [0, 2, 3] {
+                root_motion[i] = source[i] * (1.0 - weight) + root_motion[i] * weight;
+            }
+            blend.elapsed += dt;
+            if blend.elapsed >= blend.duration {
+                self.motion_blend = None;
+            }
         }
         let tae = &self.tae_runtime.frame;
         // TAE 760: lengthen or shorten the attack's travel so it arrives at its target.
@@ -900,10 +982,18 @@ impl Character {
             root_motion[0] *= scale;
             root_motion[2] *= scale;
         }
+        let facing_guard = self.kind == ControlKind::Player
+            && self.lock_target.is_some()
+            && tae.guard_judge.is_some()
+            && tae.flag(cancel::MOVE);
         let turn_speed = if tae.flag(cancel::DISABLE_TURN) {
             0.0
         } else {
-            tae.turn_speed.unwrap_or(DEFAULT_TURN_SPEED)
+            tae.turn_speed_for(self.kind == ControlKind::Npc || self.lock_target.is_some())
+                // A cancellable guard tracks its lock target even when its idle
+                // locomotion rate is zero. Authored entry rates still take precedence.
+                .filter(|speed| !facing_guard || *speed != 0.0)
+                .unwrap_or(DEFAULT_TURN_SPEED)
         };
         let velocity_change = tae
             .velocity_changes
@@ -918,7 +1008,9 @@ impl Character {
         }
         let steer_to = match self.kind {
             // TAE 703: the swing keeps its direction (what makes side-steps work).
-            _ if tae.fixed_rotation => None,
+            // Keep our data-backed step turn window (a000_2133xx: disabled to
+            // 0.4 s and after 0.6 s); it tracks the target only inside that window.
+            _ if tae.fixed_rotation || positioning_jump => None,
             // Locked on, the character keeps facing the target and strafes; an attack with an
             // auto-aim target turns toward it the same way. A sprint releases the lock-on angle
             // lock (act 2018) so Wolf turns to run along the stick, still locked on.
@@ -1041,6 +1133,7 @@ impl Character {
             .and_then(|c| self.tae.blend_in(&c.animation))
             .unwrap_or(0.0);
         self.last_main = main.clone();
+        self.last_motion_state = state_key;
         StepReport {
             animation: main.as_ref().map(|c| c.animation.clone()),
             anim_time: main.map(|c| c.time).unwrap_or(0.0),
@@ -1054,6 +1147,7 @@ impl Character {
             requested,
             clip_started,
             blend_in,
+            root_blend_weight,
             advanced: dt,
             fade: 1.0 - tae.opacity(),
         }
@@ -1117,19 +1211,18 @@ impl Character {
 
     /// The name of the state the full-body machine is in.
     pub fn state(&self) -> String {
-        self.behavior
-            .runtime
-            .main_state_path()
-            .last()
-            .cloned()
-            .unwrap_or_default()
+        self.state_name().to_owned()
+    }
+
+    pub fn state_name(&self) -> &str {
+        self.behavior.runtime.main_state_name()
     }
 
     /// Steps without input until the character stands idle (`StandIdle` for the player, an
     /// idle state for NPCs), up to `max_steps`.
     pub fn settle(&mut self, dt: f32, max_steps: usize) -> usize {
         for i in 0..max_steps {
-            let s = self.state();
+            let s = self.state_name();
             if s == "StandIdle" || (self.kind == ControlKind::Npc && s.starts_with("Idle")) {
                 return i;
             }

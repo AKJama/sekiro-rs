@@ -124,7 +124,7 @@ impl Encounter {
             }
             duel.events = None;
             duel.enemy.body.position = spot.position;
-            duel.enemy.body.yaw = spot.yaw;
+            duel.enemy.snap_yaw(spot.yaw);
             duel.spawn = Some([placement(&duel.player), placement(&duel.enemy)]);
             duel.ai.as_mut().unwrap().state.map_regions =
                 Some(crate::lua_ai::regions::MapRegions::new(cache, MAP));
@@ -184,7 +184,7 @@ impl Encounter {
                 }
                 duel.events = None;
                 duel.enemy.body.position = spot.position;
-                duel.enemy.body.yaw = spot.yaw;
+                duel.enemy.snap_yaw(spot.yaw);
                 duel.ai.as_mut().unwrap().state.map_regions =
                     Some(crate::lua_ai::regions::MapRegions::new(&self.cache, MAP));
                 if let Some(world) = &self.world {
@@ -275,7 +275,7 @@ impl Encounter {
                             .first()
                     {
                         d.enemy.body.position = frame[0].to_array();
-                        d.enemy.body.yaw = (-frame[1].x).atan2(-frame[1].z);
+                        d.enemy.snap_yaw((-frame[1].x).atan2(-frame[1].z));
                         d.enemy.body.velocity = [0.0; 3];
                         d.enemy.body.grounded = player.body.grounded;
                         d.enemy.body.fall_top = d.enemy.body.position[1];
@@ -295,7 +295,7 @@ impl Encounter {
                 && let Some(spot) = crate::events::warp_point(cache, 20, 0, region)
             {
                 monkey.duel.enemy.body.position = spot.position;
-                monkey.duel.enemy.body.yaw = spot.yaw;
+                monkey.duel.enemy.snap_yaw(spot.yaw);
                 monkey.duel.enemy.body.velocity = [0.0; 3];
             }
             if let Some(&request) = scene.animations.get(&monkey.entity)
