@@ -66,6 +66,8 @@ pub struct ClipState {
     pub node: NodeId,
     pub animation: String,
     pub time: f32,
+    /// Bound playback offset at activation, distinct from a fresh frame-zero entry.
+    pub start_time: f32,
     pub duration: Option<f32>,
     pub looping: bool,
     pub speed: f32,
@@ -141,6 +143,9 @@ pub struct BehaviorRuntime {
     main_machine: NodeId,
     /// Events that matched no transition, most recent last (bounded).
     pub unhandled_events: VecDeque<String>,
+    /// Per-target graph flags, like FwLo's extracted blend_src.json. The graph gives us
+    /// state names directly, so directional aliases never need suffix guessing.
+    blend_sources: HashMap<String, bool>,
 }
 
 impl BehaviorRuntime {
@@ -180,7 +185,44 @@ impl BehaviorRuntime {
         }
         let variables = graph.variables.iter().map(|v| v.initial.as_f32()).collect();
         let main_machine = graph.node_by_name("Master_SM").unwrap_or(graph.root);
+        let mut votes: HashMap<String, (usize, usize)> = HashMap::new();
+        for (_, sm) in graph.state_machines() {
+            for t in sm
+                .wildcard_transitions
+                .iter()
+                .chain(sm.states.iter().flat_map(|s| &s.transitions))
+            {
+                let Some(state) = sm.states.iter().find(|s| s.id == t.to_state) else {
+                    continue;
+                };
+                let mut effect = t.effect.and_then(|id| graph.effects.get(id));
+                for _ in 0..16 {
+                    let Some(e) = effect else { break };
+                    if e.choices.is_empty() {
+                        break;
+                    }
+                    effect = e
+                        .choices
+                        .get(e.selected_index.unwrap_or(0).max(0) as usize)
+                        .and_then(|id| *id)
+                        .and_then(|id| graph.effects.get(id));
+                }
+                if let Some(flags) = effect.and_then(|e| e.flags) {
+                    let count = votes.entry(state.name.clone()).or_default();
+                    if flags & 1 == 0 {
+                        count.0 += 1
+                    } else {
+                        count.1 += 1
+                    }
+                }
+            }
+        }
+        let blend_sources = votes
+            .into_iter()
+            .map(|(name, (keep, drop))| (name, keep >= drop))
+            .collect();
         let mut rt = Self {
+            blend_sources,
             graph,
             enclosing,
             current: HashMap::new(),
@@ -257,6 +299,16 @@ impl BehaviorRuntime {
                 false
             }
         }
+    }
+
+    /// Havok FLAG_IGNORE_FROM_WORLD_FROM_MODEL, using the target state's majority
+    /// when it has several entry effects (FwLo's data.rs::blend_keeps_src).
+    pub fn blend_keeps_source(&self) -> bool {
+        self.main_state_path()
+            .iter()
+            .rev()
+            .find_map(|name| self.blend_sources.get(name).copied())
+            .unwrap_or(true)
     }
 
     fn note_unhandled(&mut self, name: String) {
@@ -555,14 +607,18 @@ impl BehaviorRuntime {
                     }
                     s
                 }
-                _ => ClipState {
-                    node: id,
-                    animation: c.animation.clone(),
-                    time: c.start_time,
-                    duration: durations.duration(&c.animation),
-                    looping: c.mode == 1,
-                    speed: c.playback_speed,
-                },
+                _ => {
+                    let start_time = self.bound_value(&graph.nodes[id], "startTime", c.start_time);
+                    ClipState {
+                        node: id,
+                        animation: c.animation.clone(),
+                        time: start_time,
+                        start_time,
+                        duration: durations.duration(&c.animation),
+                        looping: c.mode == 1,
+                        speed: c.playback_speed,
+                    }
+                }
             };
             new_clips.insert(id, state);
         }
@@ -625,12 +681,16 @@ impl BehaviorRuntime {
     }
 
     fn bound_index(&self, node: &sekiro_formats::hkb::Node, member: &str, default: i64) -> usize {
+        self.bound_value(node, member, default as f32).max(0.0) as usize
+    }
+
+    fn bound_value(&self, node: &sekiro_formats::hkb::Node, member: &str, default: f32) -> f32 {
         node.bindings
             .iter()
             .find(|b| b.member_path == member && b.binding_type == 0)
             .and_then(|b| self.variables.get(b.variable as usize))
-            .map(|v| v.max(0.0) as usize)
-            .unwrap_or(default.max(0) as usize)
+            .copied()
+            .unwrap_or(default)
     }
 
     fn pick_cmsg_clip(&self, c: &sekiro_formats::hkb::Cmsg) -> Option<NodeId> {

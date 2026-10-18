@@ -77,6 +77,13 @@ pub enum TaeKind {
     ActionFlag(i32),
     SpEffect(i32),
     TurnSpeed(f32),
+    /// TAE 224 with IsLockOnCheck: ignored outside lock-on (FwLo, FUN_140b574b0).
+    LockedTurnSpeed(f32),
+    /// TAE 605: indexed value sampled from its authored start/end gradient.
+    HavokVariable {
+        id: i32,
+        values: [f32; 2],
+    },
     VelocityChange(i32),
     /// TAE 922 scales existing velocity while its window is active.
     VelocityScale(i32),
@@ -507,8 +514,24 @@ fn decode(template: &Template, e: &tae::TaeEvent) -> Option<TimedEvent> {
         0 => TaeKind::ActionFlag(int("FlagType")?),
         960 => TaeKind::StaminaControl(int("StaminaRatioType")?),
         66 | 67 | 401 => TaeKind::SpEffect(int("SpEffectID")?),
-        224 => TaeKind::TurnSpeed(d.field("TurnSpeed")?.as_f32()?),
+        224 => {
+            let speed = d.field("TurnSpeed")?.as_f32()?;
+            if int("IsLockOnCheck").unwrap_or(0) != 0 {
+                TaeKind::LockedTurnSpeed(speed)
+            } else {
+                TaeKind::TurnSpeed(speed)
+            }
+        }
         233 => TaeKind::DrawMask(e.params.get(..32)?.try_into().ok()?),
+        605 => {
+            let tae::FieldValue::Grad(values) = d.field("ValueGradient")? else {
+                return None;
+            };
+            TaeKind::HavokVariable {
+                id: int("VariableID")?,
+                values: *values,
+            }
+        }
         920 => TaeKind::VelocityChange(int("ChrPhysicsVelocityParam ID")?),
         922 => TaeKind::VelocityScale(int("ChrPhysicsVelocityParam ID")?),
         1 => TaeKind::Attack {
@@ -615,6 +638,8 @@ pub struct TaeFrame {
     pub behavior_refs: HashSet<i32>,
     /// Smallest active `SetTurnSpeed`, degrees per second.
     pub turn_speed: Option<f32>,
+    pub locked_turn_speed: Option<f32>,
+    pub havok_variables: HashMap<i32, f32>,
     /// Guard judge of an active `ShieldBlock` flag (see [`TaeKind::Guard`]).
     pub guard_judge: Option<i32>,
     /// Posture recovery control type (TAE 960) of the first playing clip that sets one.
@@ -657,6 +682,13 @@ pub struct EffectCue {
 }
 
 impl TaeFrame {
+    pub fn turn_speed_for(&self, locked: bool) -> Option<f32> {
+        match (self.turn_speed, self.locked_turn_speed.filter(|_| locked)) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
     pub fn flag(&self, f: i32) -> bool {
         self.flags.contains(&f)
     }
@@ -800,6 +832,20 @@ impl TaeRuntime {
                     TaeKind::TurnSpeed(s) => {
                         f.turn_speed = Some(f.turn_speed.map_or(*s, |c: f32| c.min(*s)));
                     }
+                    TaeKind::LockedTurnSpeed(s) => {
+                        f.locked_turn_speed =
+                            Some(f.locked_turn_speed.map_or(*s, |c: f32| c.min(*s)));
+                    }
+                    TaeKind::HavokVariable { id, values } => {
+                        let fraction = if e.end > e.start {
+                            ((t - e.start) / (e.end - e.start)).clamp(0.0, 1.0)
+                        } else {
+                            1.0
+                        };
+                        f.havok_variables
+                            .entry(*id)
+                            .or_insert(values[0] + (values[1] - values[0]) * fraction);
+                    }
                     TaeKind::VelocityScale(id) => {
                         if e.active_at(t) {
                             f.velocity_scales.push(*id);
@@ -909,6 +955,24 @@ impl TaeRuntime {
 #[cfg(test)]
 mod fxr_event_tests {
     use super::*;
+
+    #[test]
+    fn turn_speed_lock_check_survives_decoding() {
+        let template = Template::parse_xml(r#"<action_template game="SDT"><action id="224" name="SetTurnSpeed"><f32 name="TurnSpeed"/><b name="IsLockOnCheck"/></action></action_template>"#).unwrap();
+        for locked_only in [false, true] {
+            let mut params = 180.0f32.to_le_bytes().to_vec();
+            params.push(u8::from(locked_only));
+            let decoded = decode(&template, &event(224, params)).unwrap();
+            let mut frame = TaeFrame::default();
+            match decoded.kind {
+                TaeKind::TurnSpeed(speed) => frame.turn_speed = Some(speed),
+                TaeKind::LockedTurnSpeed(speed) => frame.locked_turn_speed = Some(speed),
+                _ => panic!("expected turn speed"),
+            }
+            assert_eq!(frame.turn_speed_for(true), Some(180.0));
+            assert_eq!(frame.turn_speed_for(false), (!locked_only).then_some(180.0));
+        }
+    }
 
     const TEMPLATE: &str = r#"<action_template game="SDT">
     <action id="96" name="SpawnOneShotFFX">

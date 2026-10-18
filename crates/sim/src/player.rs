@@ -128,6 +128,8 @@ pub struct PlayerEnv {
     pub held_ms: HashMap<i32, f32>,
     /// Active behaviour reference ids (env 3036). Will come from TAE events and SpEffects.
     pub sp_effect_refs: HashSet<i32>,
+    /// TAE 605 values, read by env 3063 in milliseconds for HKS start-time handovers.
+    pub havok_variables: HashMap<i32, f32>,
     /// Unlocked action types (env 3033).
     pub unlocked: HashSet<i32>,
     /// Airborne and moving down (env 200).
@@ -212,6 +214,7 @@ impl Default for PlayerEnv {
             requested: HashSet::new(),
             held_ms: HashMap::new(),
             sp_effect_refs: HashSet::new(),
+            havok_variables: HashMap::new(),
             // Main weapon (5) and the basics; progression unlocks are a save-file matter.
             unlocked: [0, 1, 2, 3, 4, 5].into_iter().collect(),
             falling: false,
@@ -330,6 +333,12 @@ impl Adapter<'_> {
                 _ => 0.0,
             },
             ENV_ANIM_END => truth(self.rt.anim_ended(arg.unwrap_or(0), self.hook_state)),
+            3063 => {
+                arg.and_then(|id| env.havok_variables.get(&id))
+                    .copied()
+                    .unwrap_or(0.0)
+                    * 1000.0
+            }
             ENV_HP => env.hp,
             ENV_POSTURE => env.posture,
             ENV_MAX_POSTURE => env.max_posture,

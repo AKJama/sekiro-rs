@@ -1506,7 +1506,7 @@ fn simulate(
         && (step.is_multiple_of(30) || std::env::var_os("PLAY_LOG_ALL").is_some())
     {
         info!(
-            "step {step} wolf {} {} at {:.2?}{} | enemy {} {} | fall_cm {:.1} vy_cm_s {:.1} respawn {}",
+            "step {step} wolf {} {} at {:.2?}{} | enemy {} {} | fall_cm {:.1} vy_cm_s {:.1} respawn {} speed_m_s {:.3} anim_t {:.6} root_blend {:.6}",
             report.player.behavior.state_path.join("/"),
             report.player.animation.as_deref().unwrap_or("-"),
             report.player.position,
@@ -1516,6 +1516,10 @@ fn simulate(
             sim.duel.player.behavior.env.fall_height,
             sim.duel.player.behavior.env.vertical_velocity,
             report.respawned,
+            (report.player.position[0] - before[0]).hypot(report.player.position[2] - before[2])
+                / dt,
+            report.player.anim_time,
+            report.player.root_blend_weight,
         );
     }
     sim.perilous_age = match (&report.perilous, sim.perilous_age) {

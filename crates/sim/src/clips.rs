@@ -91,6 +91,56 @@ impl ClipLibrary {
             .insert(name.to_owned(), clip.clone());
         clip
     }
+
+    /// Clip-local root delta, including a looping generator's tail and head or an ended
+    /// blend source's final velocity
+    /// (FwLo's MIT RustSekiro, actor.rs::advance).
+    pub fn root_delta(&self, name: &str, start: f32, elapsed: f32, looping: bool) -> [f32; 4] {
+        let Some(clip) = self.clip(name) else {
+            return [0.0; 4];
+        };
+        let Some(root) = &clip.root_motion else {
+            return [0.0; 4];
+        };
+        let len = clip.duration;
+        if len <= 0.0 || elapsed <= 0.0 {
+            return [0.0; 4];
+        }
+        let sample = |t: f32| {
+            if looping {
+                let cycles = (t / len).floor();
+                let a = root.sample(0.0);
+                let b = root.sample(len);
+                let p = root.sample(t.rem_euclid(len));
+                std::array::from_fn::<_, 4, _>(|i| p[i] + cycles * (b[i] - a[i]))
+            } else if t > len {
+                // FwLo actor.rs: an ended source carries its last 1/60 s velocity
+                // through the blend (SprintStart -> SprintLoop would otherwise stop).
+                let end = root.sample(len);
+                let before = root.sample((len - 1.0 / 60.0).max(0.0));
+                let interval = len.min(1.0 / 60.0);
+                std::array::from_fn(|i| {
+                    if i == 3 {
+                        end[i]
+                    } else {
+                        end[i] + (end[i] - before[i]) / interval * (t - len)
+                    }
+                })
+            } else {
+                root.sample(t.min(len))
+            }
+        };
+        let a = sample(start);
+        let b = sample(start + elapsed);
+        let (sin, cos) = (-a[3]).sin_cos();
+        let (x, z) = (b[0] - a[0], b[2] - a[2]);
+        [
+            cos * x + sin * z,
+            b[1] - a[1],
+            -sin * x + cos * z,
+            b[3] - a[3],
+        ]
+    }
 }
 
 impl ClipDurations for ClipLibrary {

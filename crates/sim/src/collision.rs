@@ -257,7 +257,8 @@ fn throw_wall_shift(grounds: [&dyn Ground; 2], path: &[[[f32; 3]; 2]]) -> Option
 /// Highest ledge a walking body steps onto, and the furthest it follows the floor down.
 pub const STEP_HEIGHT: f32 = 0.5;
 /// Steepest walkable surface.
-pub const MAX_SLOPE_DEGREES: f32 = 50.0;
+/// Havok character proxy default, FUN_14104d3d0 (FwLo's RustSekiro, map.rs).
+pub const MAX_SLOPE_DEGREES: f32 = 60.0;
 /// Heights of the collision spheres' centres above the feet. The lowest sphere's bottom sits
 /// at the step height, so stairs reach the floor query rather than the wall push.
 const SPHERES: [f32; 3] = [STEP_HEIGHT + RADIUS, 1.2, 1.55];

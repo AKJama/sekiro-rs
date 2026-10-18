@@ -119,6 +119,72 @@ fn stick_repushed_after_camera_turn() {
 }
 
 #[test]
+fn free_run_restart_turns_instead_of_strafing() {
+    use std::fmt::Write;
+    let mut trace = String::from(
+        "case,tick,clip,locked,MoveAngle,TurnAngle,MoveDirection,camera_yaw,facing,state\n",
+    );
+    let mut failures = Vec::new();
+    for (before_yaw, after_yaw) in [(0.0, 0.0), (0.8, 0.8), (0.8, 1.1), (-1.2, 1.1)] {
+        for gap in [1, 12, 60] {
+            for (x, y) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0)] {
+                let Some(mut wolf) = load() else { return };
+                let case = format!("{before_yaw}:{after_yaw}:{gap}:{x}:{y}");
+                let mut strafed = false;
+                for tick in 0..(140 + gap + 90) {
+                    let frame = if tick < 20 {
+                        stick(0.0, 0.0, before_yaw * tick as f32 / 19.0)
+                    } else if tick < 140 {
+                        stick(0.0, 1.0, before_yaw)
+                    } else if tick < 140 + gap {
+                        stick(0.0, 0.0, after_yaw)
+                    } else {
+                        stick(x, y, after_yaw)
+                    };
+                    let r = wolf.tick(&frame, DT);
+                    let v = |name| wolf.behavior.runtime.variable(name).unwrap_or(f32::NAN);
+                    let clip = r.animation.as_deref().unwrap_or("");
+                    writeln!(
+                        trace,
+                        "{case},{tick},{clip},{},{:.4},{:.4},{:.0},{:.4},{:.4},{}",
+                        wolf.lock_target.is_some(),
+                        v("MoveAngle"),
+                        v("TurnAngle"),
+                        v("MoveDirection"),
+                        frame.camera_yaw.to_degrees(),
+                        r.yaw.to_degrees(),
+                        wolf.state()
+                    )
+                    .unwrap();
+                    assert!(r.behavior.script_errors.is_empty(), "{case}");
+                    // The graph's directional walk/run starts, loops and stops are locked
+                    // strafes. The free 180-degree turn-and-go starts are allowed.
+                    if tick >= 140 + gap {
+                        let id = clip
+                            .strip_prefix("a000_000")
+                            .and_then(|s| s.parse::<u32>().ok());
+                        strafed |= id.is_some_and(|id| {
+                            [100, 200, 400, 500, 600]
+                                .iter()
+                                .any(|base| (1..=3).contains(&id.saturating_sub(*base)))
+                        });
+                    }
+                }
+                let expected = after_yaw + (-x).atan2(y);
+                let error = angle_diff(wolf.body.yaw, expected).to_degrees().abs();
+                if strafed || error > 15.0 {
+                    failures.push(format!("{case}: strafe={strafed}, facing error={error:.1}"));
+                }
+            }
+        }
+    }
+    if let Some(path) = std::env::var_os("SEKIRO_RUN_RESTART_TRACE") {
+        std::fs::write(path, &trace).unwrap();
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn moves_off_in_every_direction_from_every_facing() {
     let Some(mut wolf) = load() else { return };
     for facing in 0..4 {

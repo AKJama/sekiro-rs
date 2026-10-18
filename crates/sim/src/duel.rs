@@ -1271,7 +1271,7 @@ impl Duel {
     /// While the enemy still plays the last throw's defender clip (getting up after a deathblow)
     /// only Wolf gives way, so walking into him does not shove him out of his animation (ours,
     /// after FwLo's RustSekiro, where throw pairs skip the push-apart).
-    fn separate(&mut self) {
+    fn separate(&mut self, before: [[f32; 3]; 2]) {
         let body = |f: &Combatant| {
             if f.body_radius > 0.0 {
                 f.body_radius
@@ -1283,7 +1283,8 @@ impl Duel {
         let (p, e) = (self.player.body.position, self.enemy.body.position);
         let (dx, dz) = (e[0] - p[0], e[2] - p[2]);
         let d = (dx * dx + dz * dz).sqrt();
-        if d >= min || !self.player.body.grounded || !self.enemy.body.grounded {
+        let (ph, eh) = (1.5, self.fighters[1].height);
+        if d >= min || p[1] >= e[1] + eh || e[1] >= p[1] + ph {
             return;
         }
         let (nx, nz) = if d > 1e-4 {
@@ -1291,7 +1292,18 @@ impl Duel {
         } else {
             (0.0, -1.0)
         };
-        let enemy_share = if self.enemy_in_throw_clip() { 0.0 } else { 0.5 };
+        // FwLo actor.rs::separate, recorded proxy response: the side that approached
+        // absorbs the overlap, so an idle body is blocked rather than shoved.
+        let player_came = ((p[0] - before[0][0]) * nx + (p[2] - before[0][2]) * nz).max(0.0);
+        let enemy_came = (-(e[0] - before[1][0]) * nx - (e[2] - before[1][2]) * nz).max(0.0);
+        let enemy_share =
+            if self.enemy_in_throw_clip() || self.player.state() == "SprintToDeflectGuard" {
+                0.0
+            } else if player_came + enemy_came > 1e-5 {
+                enemy_came / (player_came + enemy_came)
+            } else {
+                0.5
+            };
         let overlap = min - d;
         for (c, share, sign) in [
             (&mut self.player, 1.0 - enemy_share, -1.0),
@@ -1304,6 +1316,10 @@ impl Duel {
             let [mx, mz] = c.ground.slide(c.body.position, [nx * push, nz * push]);
             c.body.position[0] += mx;
             c.body.position[2] += mz;
+            if !c.body.grounded {
+                c.body.velocity[0] = 0.0;
+                c.body.velocity[2] = 0.0;
+            }
         }
     }
 
@@ -3301,6 +3317,7 @@ impl Duel {
         let was_grounded = self.player.body.grounded;
         let pair_before = [self.player.body.clone(), self.enemy.body.clone()];
         let player_before = pair_before[0].position;
+        let enemy_before = pair_before[1].position;
         let paired_active = self.deathblow.is_some() || self.throw_held();
         let recovering = [
             self.player.state().starts_with("Throw"),
@@ -3351,7 +3368,7 @@ impl Duel {
         }
         if self.deathblow.is_none() && !self.throw_held() && enemy_alive && self.spec.chr != "c5005"
         {
-            self.separate();
+            self.separate([player_before, enemy_before]);
         }
         if !self.shared_player_frame {
             self.return_fallen_enemy();

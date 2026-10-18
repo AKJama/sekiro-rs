@@ -158,10 +158,11 @@ fn guarding_owl_at_castle_roof_progression() {
     assert!(run.guarded_hits >= 5);
     assert_eq!(run.guard_rate, 60.0);
     assert_eq!(run.guarded_hits, 11);
-    assert_eq!(run.lowest, 512);
+    // Root blending shifts hit arrival by a tick; the recovery rate remains 60/s.
+    assert_eq!(run.lowest, 514);
     assert_eq!(
         run.after_hits,
-        [628, 611, 613, 559, 560, 565, 566, 512, 513, 522, 523]
+        [628, 611, 613, 560, 561, 566, 567, 514, 515, 524, 525]
     );
 }
 
