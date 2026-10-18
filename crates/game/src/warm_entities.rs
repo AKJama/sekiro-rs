@@ -70,10 +70,13 @@ fn extract<M: Material>(
         }));
 }
 
-/// Time spent warming placements per loading frame.
-const FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
+pub(super) fn cancel(world: &mut World) {
+    let mut queue = world.resource_mut::<Queue>();
+    queue.work.clear();
+    queue.pipelines.clear();
+}
 
-pub(super) fn warm<M: Material>(world: &mut World) -> bool {
+pub(super) fn warm<M: Material>(world: &mut World, budget: std::time::Duration) -> bool {
     let _timer = crate::perf_log::SystemTimer::start("entity pipeline warmup");
     let mut queue = world.remove_resource::<Queue>().unwrap();
     if !queue.started {
@@ -93,9 +96,8 @@ pub(super) fn warm<M: Material>(world: &mut World) -> bool {
     let depth_clip = world
         .resource::<bevy::pbr::PrepassPipeline>()
         .depth_clip_control_supported;
-    // This runs behind the loading screen, so spend most of each frame on it.
     let start = std::time::Instant::now();
-    while start.elapsed() < FRAME_BUDGET {
+    while start.elapsed() < budget {
         let Some(resident) = queue.work.pop_front() else {
             break;
         };
@@ -155,21 +157,21 @@ pub(super) fn warm<M: Material>(world: &mut World) -> bool {
                     mesh_key: ErasedMeshPipelineKey::new(key),
                     material_key: properties.material_key.clone(),
                 };
-                let cached = queue
+                let cached = match queue
                     .pipelines
                     .entry((shadow, erased.clone(), layout.clone()))
-                    .or_insert_with(|| {
-                        if shadow {
-                            properties.prepass_specialize.and_then(|specialize| {
-                                specialize(world, &erased, &layout, &properties).ok()
-                            })
-                        } else {
-                            properties.base_specialize.and_then(|specialize| {
-                                specialize(world, erased, &layout, &properties).ok()
-                            })
-                        }
-                    });
-                if let Some(pipeline) = *cached {
+                {
+                    std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        let Some(result) =
+                            super::specialize(world, shadow, erased, &layout, &properties)
+                        else {
+                            continue;
+                        };
+                        *entry.insert(result.ok())
+                    }
+                };
+                if let Some(pipeline) = cached {
                     if let Some((draw, depth_only)) = draw {
                         world
                             .resource_mut::<SpecializedShadowMaterialPipelineCache>()

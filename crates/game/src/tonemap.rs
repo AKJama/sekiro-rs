@@ -53,7 +53,7 @@ pub(super) struct NativePost;
 impl Plugin for NativePostPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "tonemap.wesl");
-        embedded_asset!(app, "exposure.wgsl");
+        embedded_asset!(app, "exposure.wesl");
         app.add_plugins((
             ExtractComponentPlugin::<GamePost>::default(),
             UniformComponentPlugin::<GamePost>::default(),
@@ -126,7 +126,7 @@ fn init_pipeline(
     let meter = cache.queue_compute_pipeline(ComputePipelineDescriptor {
         label: Some("Sekiro log luminance adaptation".into()),
         layout: vec![meter_layout.clone()],
-        shader: load_embedded_asset!(assets.as_ref(), "exposure.wgsl"),
+        shader: load_embedded_asset!(assets.as_ref(), "exposure.wesl"),
         ..default()
     });
     let passes = ["BRIGHT", "BLUR_H", "BLUR_V", "TONE", "COPY", "UPSAMPLE"].map(|variant| {

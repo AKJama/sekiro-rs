@@ -3,6 +3,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+// Alias avoids Bevy 0.20 prelude ContextExt ambiguity.
 use anyhow::{Context as ContextExt, Result};
 use bevy::prelude::*;
 use sekiro_sim::arena::ArenaSpec;

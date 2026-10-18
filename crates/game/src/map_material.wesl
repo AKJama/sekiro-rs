@@ -1,131 +1,109 @@
-import sekiro_rs::map_coverage::camera_coverage;
-import sekiro_rs::map_coverage::lod_coverage;
-import bevy_pbr::render::forward_io::VertexOutput;
-import bevy_pbr::render::forward_io::FragmentOutput;
-import bevy_pbr::render::pbr_fragment::pbr_input_from_standard_material;
-import bevy_pbr::render::pbr_functions::alpha_discard;
-import bevy_pbr::render::pbr_functions::apply_pbr_lighting;
-import bevy_pbr::render::pbr_functions::main_pass_post_lighting_processing;
-import bevy_pbr::render::pbr_functions::calculate_tbn_mikktspace;
-import bevy_pbr::render::pbr_functions::calculate_F0;
-import bevy_pbr::render::pbr_functions::calculate_F0_dielectric;
-import bevy_pbr::render::pbr_functions::calculate_diffuse_color;
-import bevy_pbr::render::pbr_lighting::EnvBRDFApprox;
-import bevy_pbr::render::pbr_lighting::F_AB;
-import bevy_pbr::render::pbr_lighting::LightingInput;
-import bevy_pbr::render::pbr_lighting::LAYER_BASE;
-import bevy_pbr::render::pbr_lighting::perceptualRoughnessToRoughness;
-import bevy_pbr::render::mesh_view_bindings::lights;
-import bevy_pbr::render::mesh_view_bindings::view;
-import bevy_pbr::render::pbr_types::STANDARD_MATERIAL_FLAGS_UNLIT_BIT;
-import bevy_pbr::render::pbr_types::PbrInput;
-import bevy_pbr::render::mesh_functions;
-import bevy_pbr::render::view_transformations::position_world_to_clip;
-import bevy_pbr::render::mesh_view_bindings::globals;
-import bevy_pbr::render::pbr_bindings;
+import sekiro_rs::{
+    map_coverage::camera_coverage,
+    map_coverage::lod_coverage,
+};
+import bevy_pbr::{
+    render::forward_io::VertexOutput,
+    render::forward_io::FragmentOutput,
+    render::pbr_fragment::pbr_input_from_standard_material,
+    render::pbr_functions::alpha_discard,
+    render::pbr_functions::apply_pbr_lighting,
+    render::pbr_functions::main_pass_post_lighting_processing,
+    render::pbr_functions::calculate_tbn_mikktspace,
+    render::pbr_functions::calculate_F0,
+    render::pbr_functions::calculate_F0_dielectric,
+    render::pbr_functions::calculate_diffuse_color,
+    render::pbr_lighting::EnvBRDFApprox,
+    render::pbr_lighting::F_AB,
+    render::pbr_lighting::LightingInput,
+    render::pbr_lighting::LAYER_BASE,
+    render::pbr_lighting::perceptualRoughnessToRoughness,
+    render::mesh_view_bindings::lights,
+    render::mesh_view_bindings::view,
+    render::pbr_types::STANDARD_MATERIAL_FLAGS_UNLIT_BIT,
+    render::pbr_types::PbrInput,
+    render::mesh_functions,
+    render::view_transformations::position_world_to_clip,
+    render::mesh_view_bindings::globals,
+    render::pbr_bindings,
+};
 @if(ENVIRONMENT_MAP)
 import bevy_pbr::light_probe::environment_map::environment_map_light;
-import bevy_pbr::render::clustered_forward::view_fragment_cluster_index;
-import bevy_pbr::render::clustered_forward::unpack_clusterable_object_index_ranges;
-import bevy_pbr::render::clustered_forward::get_clusterable_object_id;
-import bevy_pbr::render::mesh_view_bindings::clustered_lights;
-import bevy_pbr::render::mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT;
-import bevy_pbr::render::mesh_view_types::POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE;
-import bevy_pbr::render::shadows::fetch_point_shadow;
-import bevy_pbr::render::shadows::fetch_spot_shadow;
-import bevy_pbr::render::pbr_lighting::derive_lighting_input;
-import bevy_pbr::render::pbr_lighting::Fd_Burley;
-import bevy_pbr::render::pbr_lighting::directional_light;
-import bevy_pbr::render::pbr_lighting as native_lighting;
-import bevy_pbr::render::shadows::fetch_directional_shadow;
-import bevy_pbr::render::mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT;
-import bevy_pbr::render::mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT;
-import sekiro_rs::map_bindings::MapGame;
-import sekiro_rs::map_bindings::Layers;
-import sekiro_rs::map_bindings::MapLight;
+import bevy_pbr::{
+    render::clustered_forward::view_fragment_cluster_index,
+    render::clustered_forward::unpack_clusterable_object_index_ranges,
+    render::clustered_forward::get_clusterable_object_id,
+    render::mesh_view_bindings::clustered_lights,
+    render::mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
+    render::mesh_view_types::POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE,
+    render::shadows::fetch_point_shadow,
+    render::shadows::fetch_spot_shadow,
+    render::pbr_lighting::derive_lighting_input,
+    render::pbr_lighting::Fd_Burley,
+    render::pbr_lighting::directional_light,
+    render::pbr_lighting as native_lighting,
+    render::shadows::fetch_directional_shadow,
+    render::mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT,
+    render::mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
+};
+import sekiro_rs::{
+    map_bindings::MapGame,
+    map_bindings::Layers,
+    map_bindings::MapLight,
+};
 @if(BINDLESS)
-import bevy_render::bindless::bindless_textures_2d;
+import bevy_render::bindless::{
+    bindless_textures_2d,
+    bindless_textures_3d,
+    bindless_textures_cube_array,
+    bindless_samplers_filtering,
+};
 @if(BINDLESS)
-import bevy_render::bindless::bindless_textures_3d;
+import bevy_pbr::{
+    render::mesh_bindings::mesh,
+    render::pbr_bindings::material_indices,
+};
 @if(BINDLESS)
-import bevy_render::bindless::bindless_textures_cube_array;
-@if(BINDLESS)
-import bevy_render::bindless::bindless_samplers_filtering;
-@if(BINDLESS)
-import bevy_pbr::render::mesh_bindings::mesh;
-@if(BINDLESS)
-import bevy_pbr::render::pbr_bindings::material_indices;
-@if(BINDLESS)
-import sekiro_rs::map_bindings::layer_array;
-@if(BINDLESS)
-import sekiro_rs::map_bindings::layer_indices;
-@if(BINDLESS)
-import sekiro_rs::map_bindings::giiv_buffers;
-@if(BINDLESS)
-import sekiro_rs::map_bindings::light_buffers;
+import sekiro_rs::map_bindings::{
+    layer_array,
+    layer_indices,
+    giiv_buffers,
+    light_buffers,
+};
 @if(!BINDLESS)
-import sekiro_rs::map_bindings::layers;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::overlay;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::overlay_sampler;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::snow;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::snow_sampler;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::layer_c;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::c_sampler;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::overlay_normal;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::overlay_normal_sampler;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::snow_normal;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::snow_normal_sampler;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::c_normal;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::c_normal_sampler;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::height_mask;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::height_sampler;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::giiv_buffer;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::gi_specular;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::gi_specular_sampler;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::gi_diffuse;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::gi_diffuse_sampler;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::gi_voxels;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::gi_voxels_sampler;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::base_normal;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::base_normal_sampler;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::detail;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::detail_sampler;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::mask_l;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::mask_l_sampler;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::wet;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::wet_sampler;
-@if(!BINDLESS)
-import sekiro_rs::map_bindings::map_light;
-
+import sekiro_rs::map_bindings::{
+    layers,
+    overlay,
+    overlay_sampler,
+    snow,
+    snow_sampler,
+    layer_c,
+    c_sampler,
+    overlay_normal,
+    overlay_normal_sampler,
+    snow_normal,
+    snow_normal_sampler,
+    c_normal,
+    c_normal_sampler,
+    height_mask,
+    height_sampler,
+    giiv_buffer,
+    gi_specular,
+    gi_specular_sampler,
+    gi_diffuse,
+    gi_diffuse_sampler,
+    gi_voxels,
+    gi_voxels_sampler,
+    base_normal,
+    base_normal_sampler,
+    detail,
+    detail_sampler,
+    mask_l,
+    mask_l_sampler,
+    wet,
+    wet_sampler,
+    map_light,
+};
 
 struct GiScatter { FssEss: vec3<f32>, FmsEms: vec3<f32>, Edss: vec3<f32>, }
 fn gi_multiscatter(f0: vec3<f32>, f_ab: vec2<f32>, missing: f32, occlusion: f32) -> GiScatter {
@@ -135,17 +113,16 @@ fn gi_multiscatter(f0: vec3<f32>, f_ab: vec2<f32>, missing: f32, occlusion: f32)
     return GiScatter(single,multiple,1.0-single-multiple);
 }
 
-
 fn gi_cube(slot: u32, index: u32, direction: vec3<f32>, mip: f32, diffuse: bool) -> vec3<f32> {
     let d = vec3(direction.xy,-direction.z);
-@if(BINDLESS)
-    if diffuse { return textureSampleLevel(bindless_textures_cube_array[layer_indices[slot].diffuse],bindless_samplers_filtering[layer_indices[slot].diffuse_sampler],d,i32(index),0.0).rgb; }
-@if(BINDLESS)
-    return textureSampleLevel(bindless_textures_cube_array[layer_indices[slot].specular],bindless_samplers_filtering[layer_indices[slot].specular_sampler],d,i32(index),mip).rgb;
-@if(!BINDLESS)
-    if diffuse { return textureSampleLevel(gi_diffuse,gi_diffuse_sampler,d,i32(index),0.0).rgb; }
-@if(!BINDLESS)
-    return textureSampleLevel(gi_specular,gi_specular_sampler,d,i32(index),mip).rgb;
+    @if(BINDLESS) {
+        if diffuse { return textureSampleLevel(bindless_textures_cube_array[layer_indices[slot].diffuse],bindless_samplers_filtering[layer_indices[slot].diffuse_sampler],d,i32(index),0.0).rgb; }
+        return textureSampleLevel(bindless_textures_cube_array[layer_indices[slot].specular],bindless_samplers_filtering[layer_indices[slot].specular_sampler],d,i32(index),mip).rgb;
+    }
+    @if(!BINDLESS) {
+        if diffuse { return textureSampleLevel(gi_diffuse,gi_diffuse_sampler,d,i32(index),0.0).rgb; }
+        return textureSampleLevel(gi_specular,gi_specular_sampler,d,i32(index),mip).rgb;
+    }
 }
 
 fn gi_word(slot: u32, index: u32) -> u32 {
@@ -174,14 +151,14 @@ fn gi_sample(slot: u32, record: u32, uv: vec3<f32>, bias: vec3<f32>, axis: u32) 
     // Clamp to the region's voxel centres so filtering never touches another atlas tile.
     let p = clamp(sample_uv*vec3<f32>(dimensions),vec3(0.5),vec3<f32>(dimensions)-0.5);
     let origin = vec3(gi_word(slot,record+20u)+axis*gi_word(slot,record+23u),gi_word(slot,record+21u),gi_word(slot,record+22u));
-@if(BINDLESS)
-    let size = vec3<f32>(textureDimensions(bindless_textures_3d[layer_indices[slot].voxels]));
-@if(BINDLESS)
-    let encoded = textureSampleLevel(bindless_textures_3d[layer_indices[slot].voxels],bindless_samplers_filtering[layer_indices[slot].voxels_sampler],(vec3<f32>(origin)+p)/size,0.0);
-@if(!BINDLESS)
-    let size = vec3<f32>(textureDimensions(gi_voxels));
-@if(!BINDLESS)
-    let encoded = textureSampleLevel(gi_voxels,gi_voxels_sampler,(vec3<f32>(origin)+p)/size,0.0);
+    @if(BINDLESS) {
+        let size = vec3<f32>(textureDimensions(bindless_textures_3d[layer_indices[slot].voxels]));
+        let encoded = textureSampleLevel(bindless_textures_3d[layer_indices[slot].voxels],bindless_samplers_filtering[layer_indices[slot].voxels_sampler],(vec3<f32>(origin)+p)/size,0.0);
+    }
+    @if(!BINDLESS) {
+        let size = vec3<f32>(textureDimensions(gi_voxels));
+        let encoded = textureSampleLevel(gi_voxels,gi_voxels_sampler,(vec3<f32>(origin)+p)/size,0.0);
+    }
     return 2.0*(encoded.rgb-0.5)*exp2(20.0*(encoded.a-0.5));
 }
 
@@ -564,13 +541,12 @@ fn vertex(v: MapVertex) -> MapVertexOutput {
     out.visibility_range_dither = mesh_functions::get_visibility_range_dither_level(v.instance_index, world_from_local[3]);
     out.blend2 = v.blend2;
     out.uv_scale = length(world_from_local[0].xyz);
-@if(!GAME_LAYERS)
-    out.blend2 = vec4(1.0, 1.0, 1.0, 0.0);
-@if(!GAME_LAYERS)
-    out.uv_scale = 1.0;
+    @if(!GAME_LAYERS) {
+        out.blend2 = vec4(1.0, 1.0, 1.0, 0.0);
+        out.uv_scale = 1.0;
+    }
     return out;
 }
-
 
 // hb: the game's height blend of a vertex weight against a mask height.
 fn hb(w: f32, h: f32, map_game: MapGame) -> f32 {
@@ -631,14 +607,12 @@ fn game_layers(in: VertexOutput, b: vec4<f32>, b2: vec4<f32>, uv_scale: f32, is_
         pbr_input.specular_occlusion *= b.x;
         var nt = mix(vec3(0.0,0.0,1.0),flv(normal_sample),p[2].x);
         nt = vec3(nt.xy+flv(sample_detail(layer_uv(in,p[12].z)*p[12].xy,slot)).xy*p[2].w,nt.z);
-@if(VERTEX_TANGENTS)
-        let n = normalize(in.world_normal);
-@if(VERTEX_TANGENTS)
-        let t = normalize(in.world_tangent.xyz);
-@if(VERTEX_TANGENTS)
-        let bitangent = in.world_tangent.w*cross(n,t);
-@if(VERTEX_TANGENTS)
-        pbr_input.N = normalize(nt.x*t+nt.y*bitangent+nt.z*n);
+        @if(VERTEX_TANGENTS) {
+            let n = normalize(in.world_normal);
+            let t = normalize(in.world_tangent.xyz);
+            let bitangent = in.world_tangent.w*cross(n,t);
+            pbr_input.N = normalize(nt.x*t+nt.y*bitangent+nt.z*n);
+        }
         return pbr_input;
     }
     let ground = map_game.flags.y == 2u;
@@ -746,7 +720,6 @@ fn game_layers(in: VertexOutput, b: vec4<f32>, b2: vec4<f32>, uv_scale: f32, is_
     return pbr_input;
 }
 
-
 @fragment
 fn fragment(
 @if(GAME_LAYERS)
@@ -754,14 +727,12 @@ m: MapVertexOutput,
 @if(!GAME_LAYERS)
 vertex: VertexOutput,
 @builtin(front_facing) is_front: bool) -> FragmentOutput {
-@if(BINDLESS && GAME_LAYERS)
-    var vertex: VertexOutput;
-@if(BINDLESS && GAME_LAYERS)
-    vertex.position = m.position;
-@if(BINDLESS && GAME_LAYERS)
-    vertex.world_position = m.world_position;
-@if(BINDLESS && GAME_LAYERS)
-    vertex.world_normal = m.world_normal;
+    @if(BINDLESS && GAME_LAYERS) {
+        var vertex: VertexOutput;
+        vertex.position = m.position;
+        vertex.world_position = m.world_position;
+        vertex.world_normal = m.world_normal;
+    }
 @if(BINDLESS && GAME_LAYERS && VERTEX_UVS_A)
     vertex.uv = m.uv;
 @if(BINDLESS && GAME_LAYERS && VERTEX_UVS_B)
@@ -774,18 +745,16 @@ vertex: VertexOutput,
     vertex.instance_index = m.instance_index;
 @if(BINDLESS && GAME_LAYERS && VISIBILITY_RANGE_DITHER)
     vertex.visibility_range_dither = m.visibility_range_dither;
-@if(BINDLESS)
-    let slot = mesh[vertex.instance_index].material_and_lightmap_bind_group_slot & 0xffffu;
-@if(BINDLESS)
-    let layers = layer_array[layer_indices[slot].layers];
-@if(!BINDLESS && GAME_LAYERS)
-    var vertex: VertexOutput;
-@if(!BINDLESS && GAME_LAYERS)
-    vertex.position = m.position;
-@if(!BINDLESS && GAME_LAYERS)
-    vertex.world_position = m.world_position;
-@if(!BINDLESS && GAME_LAYERS)
-    vertex.world_normal = m.world_normal;
+    @if(BINDLESS) {
+        let slot = mesh[vertex.instance_index].material_and_lightmap_bind_group_slot & 0xffffu;
+        let layers = layer_array[layer_indices[slot].layers];
+    }
+    @if(!BINDLESS && GAME_LAYERS) {
+        var vertex: VertexOutput;
+        vertex.position = m.position;
+        vertex.world_position = m.world_position;
+        vertex.world_normal = m.world_normal;
+    }
 @if(!BINDLESS && GAME_LAYERS && VERTEX_UVS_A)
     vertex.uv = m.uv;
 @if(!BINDLESS && GAME_LAYERS && VERTEX_UVS_B)
@@ -810,59 +779,46 @@ vertex: VertexOutput,
 @if(VERTEX_COLORS)
     b = input.color;
     var weights = vec3(0.0);
-@if(VERTEX_COLORS)
-    if layers.albedo_enabled.w > 0.0 {
-@if(VERTEX_COLORS)
-        weights = input.color.rgb;
-        // Exported layer colours carry weights; ordinary vertex tint is preserved.
-@if(VERTEX_COLORS)
-        input.color = vec4(1.0);
+    @if(VERTEX_COLORS) {
+        if layers.albedo_enabled.w > 0.0 {
+            weights = input.color.rgb;
+            // Exported layer colours carry weights; ordinary vertex tint is preserved.
+            input.color = vec4(1.0);
+        }
     }
     var pbr = pbr_input_from_standard_material(input, is_front);
 @if(GAME_LAYERS)
     pbr = game_layers(input, b, m.blend2, m.uv_scale, is_front, pbr, layers.game, slot);
-@if(!GAME_LAYERS)
-    var height = 0.5;
-@if(!GAME_LAYERS)
-    if layers.enabled.w > 0.0 {
-@if(!GAME_LAYERS)
-        height = sample_height_mask(layer_uv(input, layers.albedo_uv.w), slot).r;
+    @if(!GAME_LAYERS) {
+        var height = 0.5;
+        if layers.enabled.w > 0.0 {
+            height = sample_height_mask(layer_uv(input, layers.albedo_uv.w), slot).r;
+        }
+        let facing = smoothstep(0.2, 0.7, normalize(input.world_normal).y);
+        let w = vec3(coverage(weights.x, height), coverage(weights.y, 1.0-height) * facing, coverage(weights.z, height)) * layers.enabled.xyz;
+        var color = pbr.material.base_color.rgb;
+        if layers.albedo_enabled.x > 0.0 { color = mix(color, sample_overlay(layer_uv(input, layers.albedo_uv.x), slot).rgb, w.x); }
+        if layers.albedo_enabled.z > 0.0 { color = mix(color, sample_layer_c(layer_uv(input, layers.albedo_uv.z), slot).rgb, w.z); }
+        if layers.albedo_enabled.y > 0.0 { color = mix(color, sample_snow(layer_uv(input, layers.albedo_uv.y), slot).rgb, w.y); }
+        pbr.material.base_color = vec4(color, pbr.material.base_color.a);
     }
-@if(!GAME_LAYERS)
-    let facing = smoothstep(0.2, 0.7, normalize(input.world_normal).y);
-@if(!GAME_LAYERS)
-    let w = vec3(coverage(weights.x, height), coverage(weights.y, 1.0-height) * facing, coverage(weights.z, height)) * layers.enabled.xyz;
-@if(!GAME_LAYERS)
-    var color = pbr.material.base_color.rgb;
-@if(!GAME_LAYERS)
-    if layers.albedo_enabled.x > 0.0 { color = mix(color, sample_overlay(layer_uv(input, layers.albedo_uv.x), slot).rgb, w.x); }
-@if(!GAME_LAYERS)
-    if layers.albedo_enabled.z > 0.0 { color = mix(color, sample_layer_c(layer_uv(input, layers.albedo_uv.z), slot).rgb, w.z); }
-@if(!GAME_LAYERS)
-    if layers.albedo_enabled.y > 0.0 { color = mix(color, sample_snow(layer_uv(input, layers.albedo_uv.y), slot).rgb, w.y); }
-@if(!GAME_LAYERS)
-    pbr.material.base_color = vec4(color, pbr.material.base_color.a);
-@if(!GAME_LAYERS && VERTEX_TANGENTS)
-    let tbn = calculate_tbn_mikktspace(input.world_normal, input.world_tangent);
-@if(!GAME_LAYERS && VERTEX_TANGENTS)
-    if layers.normal_enabled.x > 0.0 { pbr.N = normalize(mix(pbr.N, normalize(tbn * unpack_normal(sample_overlay_normal(layer_uv(input, layers.normal_uv.x), slot).rg)), w.x)); }
-@if(!GAME_LAYERS && VERTEX_TANGENTS)
-    if layers.normal_enabled.z > 0.0 { pbr.N = normalize(mix(pbr.N, normalize(tbn * unpack_normal(sample_c_normal(layer_uv(input, layers.normal_uv.z), slot).rg)), w.z)); }
-@if(!GAME_LAYERS && VERTEX_TANGENTS)
-    if layers.normal_enabled.y > 0.0 { pbr.N = normalize(mix(pbr.N, normalize(tbn * unpack_normal(sample_snow_normal(layer_uv(input, layers.normal_uv.y), slot).rg)), w.y)); }
+    @if(!GAME_LAYERS && VERTEX_TANGENTS) {
+        let tbn = calculate_tbn_mikktspace(input.world_normal, input.world_tangent);
+        if layers.normal_enabled.x > 0.0 { pbr.N = normalize(mix(pbr.N, normalize(tbn * unpack_normal(sample_overlay_normal(layer_uv(input, layers.normal_uv.x), slot).rg)), w.x)); }
+        if layers.normal_enabled.z > 0.0 { pbr.N = normalize(mix(pbr.N, normalize(tbn * unpack_normal(sample_c_normal(layer_uv(input, layers.normal_uv.z), slot).rg)), w.z)); }
+        if layers.normal_enabled.y > 0.0 { pbr.N = normalize(mix(pbr.N, normalize(tbn * unpack_normal(sample_snow_normal(layer_uv(input, layers.normal_uv.y), slot).rg)), w.y)); }
+    }
     pbr.material.base_color = alpha_discard(pbr.material.flags, pbr.material.alpha_cutoff, pbr.material.base_color);
     var out: FragmentOutput;
     let unlit = (pbr.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) != 0u;
     out.color = pbr.material.base_color;
     if !unlit { out.color = apply_pbr_lighting(pbr); }
-@if(NATIVE_DIRECT)
-    if !unlit && light.direct[12].x>0.0 {
-@if(NATIVE_DIRECT)
-        out.color = vec4(out.color.rgb+native_direct(pbr,light),out.color.a);
-@if(NATIVE_DIRECT)
-        if light.direct[12].y>0.0 {
-@if(NATIVE_DIRECT)
-            out.color = vec4(out.color.rgb+native_point_lights(pbr,light.direct[12].z),out.color.a);
+    @if(NATIVE_DIRECT) {
+        if !unlit && light.direct[12].x>0.0 {
+            out.color = vec4(out.color.rgb+native_direct(pbr,light),out.color.a);
+            if light.direct[12].y>0.0 {
+                out.color = vec4(out.color.rgb+native_point_lights(pbr,light.direct[12].z),out.color.a);
+            }
         }
     }
     if light.hemi_axis.w > 0.0 && !unlit {
@@ -882,42 +838,26 @@ vertex: VertexOutput,
             let diffuse = calculate_diffuse_color(pbr.material.base_color.rgb,pbr.material.metallic,pbr.material.specular_transmission,pbr.material.diffuse_transmission);
             var fallback = vec3(0.0);
             var fallback_specular = vec3(0.0);
-@if(ENVIRONMENT_MAP)
-            var li: LightingInput;
-@if(ENVIRONMENT_MAP)
-            li.layers[LAYER_BASE].N = pbr.N;
-@if(ENVIRONMENT_MAP)
-            li.layers[LAYER_BASE].R = reflect(-pbr.V,pbr.N);
-@if(ENVIRONMENT_MAP)
-            li.layers[LAYER_BASE].NdotV = nv;
-@if(ENVIRONMENT_MAP)
-            li.layers[LAYER_BASE].perceptual_roughness = pbr.material.perceptual_roughness;
-@if(ENVIRONMENT_MAP)
-            li.layers[LAYER_BASE].roughness = perceptualRoughnessToRoughness(pbr.material.perceptual_roughness);
-@if(ENVIRONMENT_MAP)
-            li.P = pbr.world_position.xyz;
-@if(ENVIRONMENT_MAP)
-            li.V = pbr.V;
-@if(ENVIRONMENT_MAP)
-            li.diffuse_color = diffuse;
-@if(ENVIRONMENT_MAP)
-            li.metallic = pbr.material.metallic;
-@if(ENVIRONMENT_MAP)
-            li.F0_dielectric = calculate_F0_dielectric(pbr.material.reflectance);
-@if(ENVIRONMENT_MAP)
-            li.F0_metallic = pbr.material.base_color.rgb;
-@if(ENVIRONMENT_MAP)
-            li.F_ab = F_AB(pbr.material.perceptual_roughness,nv);
-@if(ENVIRONMENT_MAP)
-            let vz = (view.view_from_world*pbr.world_position).z;
-@if(ENVIRONMENT_MAP)
-            var ranges = unpack_clusterable_object_index_ranges(view_fragment_cluster_index(pbr.frag_coord.xy,vz,pbr.is_orthographic));
-@if(ENVIRONMENT_MAP)
-            let environment = environment_map_light(&li,&ranges,false);
-@if(ENVIRONMENT_MAP)
-            fallback = environment.diffuse;
-@if(ENVIRONMENT_MAP)
-            fallback_specular = environment.specular;
+            @if(ENVIRONMENT_MAP) {
+                var li: LightingInput;
+                li.layers[LAYER_BASE].N = pbr.N;
+                li.layers[LAYER_BASE].R = reflect(-pbr.V,pbr.N);
+                li.layers[LAYER_BASE].NdotV = nv;
+                li.layers[LAYER_BASE].perceptual_roughness = pbr.material.perceptual_roughness;
+                li.layers[LAYER_BASE].roughness = perceptualRoughnessToRoughness(pbr.material.perceptual_roughness);
+                li.P = pbr.world_position.xyz;
+                li.V = pbr.V;
+                li.diffuse_color = diffuse;
+                li.metallic = pbr.material.metallic;
+                li.F0_dielectric = calculate_F0_dielectric(pbr.material.reflectance);
+                li.F0_metallic = pbr.material.base_color.rgb;
+                li.F_ab = F_AB(pbr.material.perceptual_roughness,nv);
+                let vz = (view.view_from_world*pbr.world_position).z;
+                var ranges = unpack_clusterable_object_index_ranges(view_fragment_cluster_index(pbr.frag_coord.xy,vz,pbr.is_orthographic));
+                let environment = environment_map_light(&li,&ranges,false);
+                fallback = environment.diffuse;
+                fallback_specular = environment.specular;
+            }
             if light.hemi_axis.w>0.0 {
                 // Remove the same response that the fallback adds, including its specular lobe.
                 fallback += hemisphere_response(pbr)*max(lights.ambient_color.rgb+dot(light.hemi_axis.xyz,pbr.N)*light.hemi_delta.xyz,vec3(0.0));

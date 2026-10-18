@@ -1,5 +1,5 @@
 //! Validate the authored billboard shader stage interfaces and bindings.
-use bevy::shader::{Shader, ShaderDefVal};
+use bevy::shader::ShaderDefVal;
 
 #[test]
 fn billboard_shader_composes_and_validates() {
@@ -8,9 +8,7 @@ fn billboard_shader_composes_and_validates() {
         ("fxr", include_str!("../../src/fxr.wesl")),
         ("fxr_multi", include_str!("../../src/fxr_multi.wesl")),
     ] {
-        let shader = Shader::from_wesl(source, format!("embedded://sekiro_rs/{name}.wesl"));
-        let id = assets.add(shader.clone()).id();
-        cache.set_shader(id, shader);
+        let id = super::shader_support::register(&mut cache, &mut assets, name, source);
         if name == "fxr" || name == "fxr_multi" {
             for (index, (additive, prepass)) in
                 [(false, false), (true, false), (false, true), (true, true)]

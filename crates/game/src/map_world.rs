@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::Path;
 
+// Alias avoids Bevy 0.20 prelude ContextExt ambiguity.
 use anyhow::{Context as ContextExt, Result};
 use bevy::camera::primitives::{Aabb, Frustum};
 use bevy::mesh::MeshTag;

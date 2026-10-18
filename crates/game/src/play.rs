@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+// Alias avoids Bevy 0.20 prelude ContextExt ambiguity.
 use anyhow::{Context as ContextExt, Result};
 use bevy::app::AppExit;
 use bevy::asset::AssetPlugin;
@@ -57,7 +58,7 @@ pub(crate) mod cinematic_fade;
 mod live_check;
 #[path = "play_gate.rs"]
 mod play_gate;
-pub(crate) use play_gate::LoadingScreen;
+pub(crate) use play_gate::PlayGate;
 #[path = "rope.rs"]
 mod rope;
 

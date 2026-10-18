@@ -55,6 +55,8 @@ pub fn plugin(cache: PathBuf, bridge: impl Fn(&mut App) + Send + Sync + 'static)
                 (self.bridge)(app);
                 return;
             }
+            // DistortMaterial samples the opaque scene, as Camera3d did by default in 0.19.
+            app.register_required_components::<Camera3d, bevy::pbr::ScreenSpaceTransmission>();
             embedded_asset!(app, "fxr.wesl");
             embedded_asset!(app, "fxr_multi.wesl");
             embedded_asset!(app, "fxr_distort.wesl");

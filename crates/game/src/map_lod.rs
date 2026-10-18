@@ -9,6 +9,7 @@
 
 use std::{collections::HashMap, path::Path};
 
+// Alias avoids Bevy 0.20 prelude ContextExt ambiguity.
 use anyhow::{Context as ContextExt, Result, bail};
 use bevy::prelude::*;
 use serde_json::Value;

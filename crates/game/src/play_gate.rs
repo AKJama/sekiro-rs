@@ -19,7 +19,7 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 #[derive(Resource, Default)]
-pub(super) struct PlayGate {
+pub(crate) struct PlayGate {
     /// When loading finished and play may start.
     pub(super) ready_at: Option<Instant>,
     /// When everything had first loaded; the settle timeout counts from here.
@@ -123,7 +123,7 @@ impl PlayGate {
     /// Whether the simulation may step now. The 60 stable frames before readiness also cover
     /// the presentation stall that once followed the map upload; a further 2.5 s settle made
     /// no difference to the first frames of play (about 80 ms either way, measured 2026-10-16).
-    pub(super) fn open(&self) -> bool {
+    pub(crate) fn open(&self) -> bool {
         self.ready_at.is_some()
     }
 
@@ -133,7 +133,7 @@ impl PlayGate {
 }
 
 #[derive(Component)]
-pub(crate) struct LoadingScreen;
+pub(super) struct LoadingScreen;
 
 #[derive(Component)]
 pub(super) struct LoadingBar;
@@ -342,7 +342,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn loading_does_not_hide_a_pause_that_stops_the_first_simulation_step() {
+    fn loading_pause_keeps_the_clock_running_until_the_gate_opens() {
         for gamepad in [false, true] {
             let mut app = App::new();
             app.add_plugins(MinimalPlugins)
@@ -350,7 +350,7 @@ mod tests {
                 .init_resource::<ButtonInput<KeyCode>>()
                 .add_message::<bevy::input::keyboard::KeyboardInput>();
             crate::menu::install(&mut app);
-            let screen = app.world_mut().spawn(LoadingScreen).id();
+            app.init_resource::<PlayGate>();
             let pad = app.world_mut().spawn(Gamepad::default()).id();
             app.update();
             let press_pause = |app: &mut App| {
@@ -367,17 +367,27 @@ mod tests {
             press_pause(&mut app);
             app.update();
             assert!(
-                !app.world().resource::<crate::menu::PanelState>().paused,
-                "loading must not activate a pause hidden behind its overlay"
+                app.world().resource::<crate::menu::PanelState>().paused,
+                "loading must leave Back and Quit reachable in the pause panel"
             );
             assert!(!app.world().resource::<Time<Virtual>>().is_paused());
 
-            // Once the loading overlay is gone, the same input must still pause play.
-            app.world_mut().despawn(screen);
-            press_pause(&mut app);
+            app.world_mut().resource_mut::<PlayGate>().ready_at = Some(Instant::now());
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .reset_all();
+            app.world_mut()
+                .get_mut::<Gamepad>(pad)
+                .unwrap()
+                .digital_mut()
+                .reset_all();
             app.update();
             assert!(app.world().resource::<crate::menu::PanelState>().paused);
             assert!(app.world().resource::<Time<Virtual>>().is_paused());
+            press_pause(&mut app);
+            app.update();
+            assert!(!app.world().resource::<crate::menu::PanelState>().paused);
+            assert!(!app.world().resource::<Time<Virtual>>().is_paused());
         }
     }
 

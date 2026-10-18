@@ -1,7 +1,6 @@
 import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
 import bevy_render::view::View;
 
-
 struct Fog {
     density: vec4<f32>, depths: vec4<f32>, sky: vec4<f32>,
     direct: vec4<f32>, opposite: vec4<f32>, direction: vec4<f32>, extinction: vec4<f32>,
@@ -10,20 +9,17 @@ struct Fog {
     background: array<vec4<f32>,16>,
     radiance_scale: vec4<f32>,
 }
-@if(MULTISAMPLED_DEPTH)
-@group(0) @binding(0) var depth_texture: texture_depth_multisampled_2d;
-@if(MULTISAMPLED_DEPTH)
-@group(0) @binding(1) var<uniform> view: View;
-@if(MULTISAMPLED_DEPTH)
-@group(0) @binding(2) var<uniform> fog: Fog;
-@if(!MULTISAMPLED_DEPTH)
-@group(0) @binding(0) var scene: texture_2d<f32>;
-@if(!MULTISAMPLED_DEPTH)
-@group(0) @binding(1) var depth_texture: texture_depth_2d;
-@if(!MULTISAMPLED_DEPTH)
-@group(0) @binding(2) var<uniform> view: View;
-@if(!MULTISAMPLED_DEPTH)
-@group(0) @binding(3) var<uniform> fog: Fog;
+@if(MULTISAMPLED_DEPTH) {
+    @group(0) @binding(0) var depth_texture: texture_depth_multisampled_2d;
+    @group(0) @binding(1) var<uniform> view: View;
+    @group(0) @binding(2) var<uniform> fog: Fog;
+}
+@if(!MULTISAMPLED_DEPTH) {
+    @group(0) @binding(0) var scene: texture_2d<f32>;
+    @group(0) @binding(1) var depth_texture: texture_depth_2d;
+    @group(0) @binding(2) var<uniform> view: View;
+    @group(0) @binding(3) var<uniform> fog: Fog;
+}
 
 // Intersect the live authored dome's polygon-ring profile, in camera-centred world space.
 // Native SkyDome forward permutations use this finite geometry depth for fog continuation.
@@ -103,10 +99,10 @@ fn fragment(in: FullscreenVertexOutput,
     let pixel = vec2<i32>(in.position.xy);
 @if(MULTISAMPLED_DEPTH)
     let depth = textureLoad(depth_texture,pixel,i32(sample));
-@if(!MULTISAMPLED_DEPTH)
-    let surface = textureLoad(scene,pixel,0);
-@if(!MULTISAMPLED_DEPTH)
-    let depth = textureLoad(depth_texture,pixel,0);
+    @if(!MULTISAMPLED_DEPTH) {
+        let surface = textureLoad(scene,pixel,0);
+        let depth = textureLoad(depth_texture,pixel,0);
+    }
     let ndc = vec2(in.uv.x*2.0-1.0,1.0-in.uv.y*2.0);
     let reconstructed = view.world_from_clip*vec4(ndc,max(depth,0.000001),1.0);
     let relative = reconstructed.xyz/reconstructed.w - view.world_position;

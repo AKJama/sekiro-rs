@@ -1,6 +1,6 @@
 //! Compose production WESL with Cargo's Bevy sources, then validate the resulting WGSL.
 use bevy::{
-    asset::Assets,
+    asset::{AssetId, Assets},
     shader::{Shader, ShaderCache, ShaderCacheError, ShaderCacheSource, ValidateShader},
 };
 use std::path::{Path, PathBuf};
@@ -43,6 +43,32 @@ fn load(path: &Path, root: &Path, package: &str, shaders: &mut Vec<Shader>) {
     }
 }
 
+/// Register a production module with the game's embedded asset path.
+pub fn register(
+    cache: &mut ShaderCache<(), ()>,
+    assets: &mut Assets<Shader>,
+    name: &str,
+    source: &'static str,
+) -> AssetId<Shader> {
+    let shader = Shader::from_wesl(source, format!("embedded://sekiro_rs/{name}.wesl"));
+    let id = assets.add(shader.clone()).id();
+    cache.set_shader(id, shader);
+    id
+}
+
+fn bevy_version() -> &'static str {
+    include_str!("../../../../Cargo.lock")
+        .split("[[package]]")
+        .find(|package| package.lines().any(|line| line == "name = \"bevy\""))
+        .and_then(|package| {
+            package
+                .lines()
+                .find_map(|line| line.strip_prefix("version = \""))
+        })
+        .and_then(|version| version.strip_suffix('"'))
+        .expect("locked Bevy version")
+}
+
 pub fn cache() -> (ShaderCache<(), ()>, Assets<Shader>) {
     let cargo = std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
@@ -60,7 +86,7 @@ pub fn cache() -> (ShaderCache<(), ()>, Assets<Shader>) {
             let package = package.unwrap().path();
             let name = package.file_name().unwrap().to_string_lossy();
             if let Some(name) = name
-                .strip_suffix("-0.20.0")
+                .strip_suffix(&format!("-{}", bevy_version()))
                 .filter(|s| s.starts_with("bevy_"))
             {
                 let root = package.join("src");
@@ -68,6 +94,10 @@ pub fn cache() -> (ShaderCache<(), ()>, Assets<Shader>) {
             }
         }
     }
+    assert!(
+        !shaders.is_empty(),
+        "locked Bevy shader sources must be available"
+    );
     let mut cache = ShaderCache::new((), validate);
     let mut assets = Assets::<Shader>::default();
     for shader in shaders {

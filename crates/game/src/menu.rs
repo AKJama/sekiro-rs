@@ -3,7 +3,7 @@ use bevy::app::AppExit;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
-use bevy::ui_widgets::Button;
+use bevy::ui_widgets::{Activate, ActivateOnPress, Button};
 use bevy::window::{CursorGrabMode, CursorOptions};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -41,7 +41,6 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .add_message::<KeyboardInput>()
-            .add_message::<MenuPress>()
             .insert_resource(keys)
             .insert_resource(pause)
             .add_systems(Update, update);
@@ -308,7 +307,6 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .add_message::<KeyboardInput>()
-            .add_message::<MenuPress>()
             .insert_resource(ButtonInput::<KeyCode>::default())
             .insert_resource(PanelState::new(true, &args))
             .add_systems(Update, update);
@@ -359,7 +357,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "slow: opens a real winit window for UI layout and picking"]
     fn windowed_pause_cursor_and_picking() {
         use bevy::input::{ButtonState, mouse::MouseButtonInput};
         use bevy::window::{PrimaryWindow, WindowEvent};
@@ -368,6 +365,7 @@ mod tests {
         struct Probe {
             frame: usize,
             destination: Option<Vec2>,
+            target: Option<Entity>,
             moved: bool,
             clicked: bool,
         }
@@ -378,7 +376,8 @@ mod tests {
             mut events: MessageReader<WindowEvent>,
             mut commands: Commands,
             mut windows: Query<(Entity, &Window, &mut CursorOptions), With<PrimaryWindow>>,
-            rows: Query<(&Row, &UiGlobalTransform)>,
+            rows: Query<(&Row, &Children)>,
+            labels: Query<&UiGlobalTransform, With<Text>>,
             panels: Query<Entity, With<Panel>>,
             cameras: Query<Entity, With<Camera3d>>,
             mut state: ResMut<PanelState>,
@@ -405,9 +404,11 @@ mod tests {
             }
             if matches!(probe.frame, 30 | 60) {
                 let index = if probe.frame == 30 { 0 } else { 4 };
-                let target = rows.iter().find(|(row, _)| row.0 == index).unwrap().1;
-                let position = target.translation / window.scale_factor();
+                let children = rows.iter().find(|(row, _)| row.0 == index).unwrap().1;
+                let label = children[0];
+                let position = labels.get(label).unwrap().translation / window.scale_factor();
                 probe.destination = Some(position);
+                probe.target = Some(label);
                 probe.moved = false;
                 // Enter at winit's Bevy message boundary without taking over the
                 // desktop's physical mouse, never targeting a UI entity directly.
@@ -429,6 +430,13 @@ mod tests {
             }
             if matches!(probe.frame, 45 | 75) {
                 assert!(probe.moved, "must receive the window CursorMoved event");
+                assert!(
+                    hover
+                        .0
+                        .values()
+                        .any(|hits| hits.contains_key(&probe.target.unwrap())),
+                    "the label must be reached through UI hit testing"
+                );
                 eprintln!("windowed menu probe: picking hits {:?}", hover.0);
                 // Enter at the same WindowEvent boundary used by winit, letting the
                 // normal pointer input, UI hit testing and event dispatch find Resume.
@@ -854,6 +862,7 @@ pub struct PanelState {
     frame: usize,
     script: Vec<(usize, String)>,
     stick: IVec2,
+    activations: Vec<usize>,
 }
 impl PanelState {
     fn new(start: bool, args: &[String]) -> Self {
@@ -930,6 +939,7 @@ impl PanelState {
             frame: 0,
             script,
             stick: IVec2::ZERO,
+            activations: Vec::new(),
         }
     }
 }
@@ -940,22 +950,13 @@ struct Row(usize);
 #[derive(Component)]
 struct Help;
 
-#[derive(Message)]
-struct MenuPress(usize);
-
-fn press_row(
-    mut press: On<bevy::picking::events::PointerPress>,
-    rows: Query<&Row>,
-    mut presses: MessageWriter<MenuPress>,
-) {
-    if press.button == bevy::picking::pointer::PointerButton::Primary
-        && let Ok(row) = rows.get(press.entity)
+fn activate_row(event: On<Activate>, rows: Query<&Row>, mut state: ResMut<PanelState>) {
+    if state.paused
+        && let Ok(row) = rows.get(event.entity)
     {
-        press.propagate(false);
-        presses.write(MenuPress(row.0));
+        state.activations.push(row.0);
     }
 }
-
 pub fn active(state: Res<PanelState>) -> bool {
     !state.paused
 }
@@ -967,7 +968,7 @@ pub fn install(app: &mut App) {
 }
 
 fn install_input(app: &mut App) {
-    app.add_message::<MenuPress>().add_systems(
+    app.add_systems(
         PreUpdate,
         update
             .after(bevy::input::InputSystems)
@@ -1032,7 +1033,7 @@ fn spawn(mut commands: Commands, mut fonts: ResMut<Assets<Font>>, state: Res<Pan
                 align_items: AlignItems::Center,
                 ..default()
             },
-            GlobalZIndex(100),
+            GlobalZIndex(200),
             if state.paused {
                 Visibility::Visible
             } else {
@@ -1068,6 +1069,7 @@ fn spawn(mut commands: Commands, mut fonts: ResMut<Assets<Font>>, state: Res<Pan
                 for i in 0..if state.start { LABELS.len() } else { 3 } {
                     p.spawn((
                         Button,
+                        ActivateOnPress,
                         Row(i),
                         Node {
                             width: percent(100),
@@ -1076,7 +1078,7 @@ fn spawn(mut commands: Commands, mut fonts: ResMut<Assets<Font>>, state: Res<Pan
                             ..default()
                         },
                     ))
-                    .observe(press_row)
+                    .observe(activate_row)
                     .with_children(|r| {
                         r.spawn((
                             Text::new(""),
@@ -1112,7 +1114,6 @@ fn update(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
     mut typing: MessageReader<KeyboardInput>,
-    mut presses: MessageReader<MenuPress>,
     mut state: ResMut<PanelState>,
     mut panels: Query<&mut Visibility, With<Panel>>,
     mut rows: Query<(&Row, &mut BackgroundColor, &Children, &mut Node)>,
@@ -1121,7 +1122,7 @@ fn update(
     mut cursors: Query<&mut CursorOptions>,
     mut exit: MessageWriter<AppExit>,
     mut time: ResMut<Time<Virtual>>,
-    loading: Query<(), With<crate::play::LoadingScreen>>,
+    gate: Option<Res<crate::play::PlayGate>>,
 ) {
     state.frame += 1;
     let actions: Vec<_> = state
@@ -1131,21 +1132,14 @@ fn update(
         .map(|(_, a)| a.clone())
         .collect();
     let mut activate = keys.just_pressed(KeyCode::Enter);
-    // A paused clock cannot take the first simulation step that follows loading.
-    // Do not open a pause panel underneath the loading screen.
     if !state.start
-        && loading.is_empty()
         && (keys.just_pressed(KeyCode::Escape)
             || actions.iter().any(|a| a == "pause")
             || pads.iter().any(|p| p.just_pressed(GamepadButton::Start)))
     {
         state.paused = !state.paused;
         state.selected = 0;
-        if state.paused {
-            time.pause();
-        } else {
-            time.unpause();
-        }
+
         for mut c in &mut cursors {
             c.visible = state.paused;
             c.grab_mode = if state.paused {
@@ -1153,6 +1147,14 @@ fn update(
             } else {
                 CursorGrabMode::Locked
             };
+        }
+    }
+    // Loading can show the pause panel, but its clock must keep advancing until ready.
+    if !state.start {
+        if state.paused && gate.is_none_or(|gate| gate.open()) {
+            time.pause();
+        } else {
+            time.unpause();
         }
     }
     for mut p in &mut panels {
@@ -1172,7 +1174,7 @@ fn update(
             exit.write(AppExit::Success);
         }
     }
-    let pressed_rows: Vec<_> = presses.read().map(|press| press.0).collect();
+    let pressed_rows = std::mem::take(&mut state.activations);
     if !state.paused {
         typing.clear();
         return;
@@ -1307,8 +1309,7 @@ fn update(
         if !visible {
             continue;
         }
-        // Pointer events bubble from labels to their row, and survive a press/release
-        // in one frame. Polling the widget's transient Pressed component does neither.
+        // Button activation includes label hits and a press/release in the same frame.
         if pressed_rows.contains(&r.0) {
             state.selected = r.0;
             if state.start && r.0 < count - 1 {

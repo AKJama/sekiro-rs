@@ -6,18 +6,11 @@ import bevy_pbr::render::view_transformations::position_world_to_view;
 @if(DEPTH_PREPASS)
 import bevy_pbr::prepass::utils::prepass_depth;
 @if(ENVIRONMENT_MAP)
-import bevy_pbr::light_probe::environment_map::environment_map_light;
-@if(ENVIRONMENT_MAP)
-import bevy_pbr::render::pbr_lighting::LightingInput;
-@if(ENVIRONMENT_MAP)
-import bevy_pbr::render::pbr_lighting::LAYER_BASE;
-@if(ENVIRONMENT_MAP)
-import bevy_pbr::render::pbr_lighting::F_AB;
-@if(ENVIRONMENT_MAP)
-import bevy_pbr::render::clustered_forward::view_fragment_cluster_index;
-@if(ENVIRONMENT_MAP)
-import bevy_pbr::render::clustered_forward::unpack_clusterable_object_index_ranges;
-
+import bevy_pbr::{
+    light_probe::environment_map::environment_map_light,
+    render::pbr_lighting::{LightingInput, LAYER_BASE, F_AB},
+    render::clustered_forward::{view_fragment_cluster_index, unpack_clusterable_object_index_ranges},
+};
 
 struct Inputs {
     colors: array<vec4<f32>,4>, floats: array<vec4<f32>,14>, vectors: array<vec4<f32>,18>,
@@ -93,10 +86,10 @@ fn fragment(v: VertexOutput) -> @location(0) vec4<f32> {
     let toward=normalize(view.world_position-v.world_position.xyz);
     var coverage=1.0;
     var occlusion=1.0;
-@if(VERTEX_COLORS)
-    coverage=v.color.x;
-@if(VERTEX_COLORS)
-    occlusion=v.color.w;
+    @if(VERTEX_COLORS) {
+        coverage=v.color.x;
+        occlusion=v.color.w;
+    }
     var albedo: vec3<f32>;
     var alpha: f32;
     var fade_scale: f32;
@@ -120,14 +113,12 @@ fn fragment(v: VertexOutput) -> @location(0) vec4<f32> {
         let base_mask=dot(m(sample_uv(v,0u,(uv+warp)*fog.vectors[10].xy)),fog.vectors[0].xyz);
         let base_color=mix(f(9u),1.0,base_mask)*fog.colors[2].rgb;
         var parallax=vec2(0.0);
-@if(VERTEX_TANGENTS)
-        let tangent=normalize(v.world_tangent.xyz);
-@if(VERTEX_TANGENTS)
-        let bitangent=normalize(cross(n,tangent)*v.world_tangent.w);
-@if(VERTEX_TANGENTS)
-        let ray=normalize(view.world_position-v.world_position.xyz);
-@if(VERTEX_TANGENTS)
-        parallax=vec2(dot(ray,tangent),-dot(ray,bitangent));
+        @if(VERTEX_TANGENTS) {
+            let tangent=normalize(v.world_tangent.xyz);
+            let bitangent=normalize(cross(n,tangent)*v.world_tangent.w);
+            let ray=normalize(view.world_position-v.world_position.xyz);
+            parallax=vec2(dot(ray,tangent),-dot(ray,bitangent));
+        }
         let h=textureSample(height,height_sampler,sample_uv(v,3u,uv)).r-f(4u);
         let shifted=uv+parallax*h*f(3u);
         var surface: vec3<f32>;
@@ -152,58 +143,39 @@ fn fragment(v: VertexOutput) -> @location(0) vec4<f32> {
     var fallback=max(fog.ambient.rgb+fog.hemi_delta.rgb*dot(n,fog.hemi_axis.xyz),vec3(0.0));
     // The native no-volume path uses instance SH. Share the map renderer's default
     // environment-probe approximation instead of leaving far cards without sky lighting.
-@if(ENVIRONMENT_MAP)
-    var li: LightingInput;
-@if(ENVIRONMENT_MAP)
-    li.layers[LAYER_BASE].N=n;
-@if(ENVIRONMENT_MAP)
-    li.layers[LAYER_BASE].R=reflect(-toward,n);
-@if(ENVIRONMENT_MAP)
-    li.layers[LAYER_BASE].NdotV=max(nv,0.0001);
-@if(ENVIRONMENT_MAP)
-    li.layers[LAYER_BASE].perceptual_roughness=1.0;
-@if(ENVIRONMENT_MAP)
-    li.layers[LAYER_BASE].roughness=1.0;
-@if(ENVIRONMENT_MAP)
-    li.P=v.world_position.xyz;
-@if(ENVIRONMENT_MAP)
-    li.V=toward;
-@if(ENVIRONMENT_MAP)
-    li.diffuse_color=vec3(1.0);
-@if(ENVIRONMENT_MAP)
-    li.metallic=0.0;
-@if(ENVIRONMENT_MAP)
-    li.F0_dielectric=vec3(0.0);
-@if(ENVIRONMENT_MAP)
-    li.F0_metallic=vec3(0.0);
-@if(ENVIRONMENT_MAP)
-    li.F_ab=F_AB(1.0,max(nv,0.0001));
-@if(ENVIRONMENT_MAP)
-    var ranges=unpack_clusterable_object_index_ranges(view_fragment_cluster_index(v.position.xy,position_world_to_view(v.world_position.xyz).z,false));
-@if(ENVIRONMENT_MAP)
-    fallback+=environment_map_light(&li,&ranges,false).diffuse;
+    @if(ENVIRONMENT_MAP) {
+        var li: LightingInput;
+        li.layers[LAYER_BASE].N=n;
+        li.layers[LAYER_BASE].R=reflect(-toward,n);
+        li.layers[LAYER_BASE].NdotV=max(nv,0.0001);
+        li.layers[LAYER_BASE].perceptual_roughness=1.0;
+        li.layers[LAYER_BASE].roughness=1.0;
+        li.P=v.world_position.xyz;
+        li.V=toward;
+        li.diffuse_color=vec3(1.0);
+        li.metallic=0.0;
+        li.F0_dielectric=vec3(0.0);
+        li.F0_metallic=vec3(0.0);
+        li.F_ab=F_AB(1.0,max(nv,0.0001));
+        var ranges=unpack_clusterable_object_index_ranges(view_fragment_cluster_index(v.position.xy,position_world_to_view(v.world_position.xyz).z,false));
+        fallback+=environment_map_light(&li,&ranges,false).diffuse;
+    }
     let ambient=ambient_light(v.world_position.xyz,n,fallback)*occlusion;
     let radiance=albedo*(ambient+fog.direct.rgb*nl)+fog.specular.rgb*specular;
-@if(DEPTH_PREPASS)
-    let scene_depth=prepass_depth(v.position,0u);
-@if(DEPTH_PREPASS)
-    let scene_z=-position_ndc_to_view(vec3(0.0,0.0,scene_depth)).z;
-@if(DEPTH_PREPASS)
-    let surface_z=-position_world_to_view(v.world_position.xyz).z;
-@if(DEPTH_PREPASS)
-    alpha*=clamp((scene_z-surface_z)*fade_scale,0.0,1.0);
-@if(FOG_DIAGNOSTIC)
-    if alpha<=0.05 { discard; }
-@if(FOG_DIAGNOSTIC)
-    let distance=length(v.world_position.xyz-view.world_position);
-@if(FOG_DIAGNOSTIC)
-    let code=floor(clamp(log2(1.0+distance)/16.0,0.0,1.0)*65534.0)+1.0;
-@if(FOG_DIAGNOSTIC)
-    let bytes=vec3(floor(code/256.0),code%256.0,0.0)/255.0;
-@if(FOG_DIAGNOSTIC)
-    let linear=select(pow((bytes+vec3(0.055))/1.055,vec3(2.4)),bytes/12.92,bytes<=vec3(0.04045));
-@if(FOG_DIAGNOSTIC)
-    return vec4(linear,1.0);
+    @if(DEPTH_PREPASS) {
+        let scene_depth=prepass_depth(v.position,0u);
+        let scene_z=-position_ndc_to_view(vec3(0.0,0.0,scene_depth)).z;
+        let surface_z=-position_world_to_view(v.world_position.xyz).z;
+        alpha*=clamp((scene_z-surface_z)*fade_scale,0.0,1.0);
+    }
+    @if(FOG_DIAGNOSTIC) {
+        if alpha<=0.05 { discard; }
+        let distance=length(v.world_position.xyz-view.world_position);
+        let code=floor(clamp(log2(1.0+distance)/16.0,0.0,1.0)*65534.0)+1.0;
+        let bytes=vec3(floor(code/256.0),code%256.0,0.0)/255.0;
+        let linear=select(pow((bytes+vec3(0.055))/1.055,vec3(2.4)),bytes/12.92,bytes<=vec3(0.04045));
+        return vec4(linear,1.0);
+    }
 @if(!FOG_DIAGNOSTIC)
     return vec4(radiance*view.exposure,alpha);
 }

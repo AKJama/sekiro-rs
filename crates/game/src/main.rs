@@ -50,13 +50,13 @@ mod map_fx;
 mod map_grass;
 mod material_residency;
 mod menu;
-mod parallel_shadows;
 mod perf_log;
 mod pipeline_warmup;
 mod play;
 mod presentation;
 #[cfg(feature = "profile-spans")]
 mod span_profile;
+mod split_sun_cascades;
 mod viewer;
 
 use std::path::PathBuf;

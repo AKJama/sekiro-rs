@@ -5,10 +5,12 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::{Duration, Instant};
 
 use bevy::material::{
     MaterialProperties,
     key::{ErasedMaterialPipelineKey, ErasedMeshPipelineKey},
+    specialize::SpecializedMeshPipelineError,
 };
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::pbr::{
@@ -19,7 +21,7 @@ use bevy::prelude::*;
 use bevy::render::erased_render_asset::ErasedRenderAssets;
 use bevy::render::mesh::RenderMesh;
 use bevy::render::render_asset::RenderAssets;
-use bevy::render::render_resource::PipelineCache;
+use bevy::render::render_resource::{CachedRenderPipelineId, PipelineCache};
 use bevy::render::{Render, RenderApp, RenderSystems};
 
 #[path = "warm_entities.rs"]
@@ -84,11 +86,12 @@ enum Pass {
 
 #[derive(Default)]
 struct WarmCache {
-    started: bool,
+    started: Option<Instant>,
     seen: HashSet<(bool, ErasedMaterialPipelineKey, MeshVertexBufferLayoutRef)>,
     work: VecDeque<Work>,
     queued: usize,
-    frames: u32,
+    entities_started: Option<Instant>,
+    gpu_timed_out: bool,
     entities_ready: bool,
 }
 
@@ -103,18 +106,19 @@ impl WarmCache {
     }
 }
 
-/// Maximum loading frames spent specializing and compiling the fixed resident set.
-const SETTLE_DEADLINE_FRAMES: u32 = 300;
+// Hundreds of asynchronous GPU compiles take much longer than 300 fast loading frames.
+// Entity specialization has its own limit so compilation does not consume its budget.
+const GPU_COMPILE_LIMIT: Duration = Duration::from_secs(90);
+const ENTITY_WARMUP_LIMIT: Duration = Duration::from_secs(30);
 
 fn warm_pipelines<M: Material>(world: &mut World, mut state: Local<WarmCache>) {
     let warmup = world.resource::<PipelineWarmup>().clone();
-    if warmup.ready() || (!state.started && !warmup.loaded.load(Ordering::Acquire)) {
+    if warmup.ready() || (state.started.is_none() && !warmup.loaded.load(Ordering::Acquire)) {
         return;
     }
     let _timer = crate::perf_log::SystemTimer::start("pipeline warmup");
-    state.frames += 1;
-    if !state.started {
-        state.started = true;
+    if state.started.is_none() {
+        state.started = Some(Instant::now());
         let layouts: HashSet<_> = world
             .resource::<RenderAssets<RenderMesh>>()
             .iter()
@@ -225,47 +229,73 @@ fn warm_pipelines<M: Material>(world: &mut World, mut state: Local<WarmCache>) {
         let Some(work) = state.work.pop_front() else {
             break;
         };
-        let specialized = if work.prepass {
-            work.properties
-                .prepass_specialize
-                .map(|specialize| specialize(world, &work.key, &work.layout, &work.properties))
-        } else {
-            work.properties
-                .base_specialize
-                .map(|specialize| specialize(world, work.key, &work.layout, &work.properties))
-        };
+        let specialized = specialize(
+            world,
+            work.prepass,
+            work.key,
+            &work.layout,
+            &work.properties,
+        );
         // Incompatible layout/material combinations are not renderable and need no pipeline.
         if specialized.is_some_and(|result| result.is_ok()) {
             state.queued += 1;
         }
     }
-    // Populate resident caches while GPU pipelines compile. Waiting for compilation
-    // first can hit the deadline without ever warming newly-visible placements.
-    if state.work.is_empty() && !state.entities_ready {
-        state.entities_ready = entities::warm::<M>(world);
-    }
-    // Do not hold loading forever if a pipeline cannot finish compiling.
-    if state.frames >= SETTLE_DEADLINE_FRAMES {
-        warn!("map pipeline warmup deadline reached");
-        state.work.clear();
-        state.seen.clear();
-        warmup.ready.store(true, Ordering::Release);
-        return;
-    }
-    if state.work.is_empty()
-        && state.entities_ready
-        && world
-            .resource::<PipelineCache>()
-            .waiting_pipelines()
-            .count()
-            == 0
+    let compiling = world
+        .resource::<PipelineCache>()
+        .waiting_pipelines()
+        .next()
+        .is_some();
+    if !state.gpu_timed_out
+        && (compiling || !state.work.is_empty())
+        && state.started.unwrap().elapsed() >= GPU_COMPILE_LIMIT
     {
+        warn!("map GPU pipeline warmup deadline reached after {GPU_COMPILE_LIMIT:?}");
+        state.gpu_timed_out = true;
+        state.work.clear();
+    }
+    // Leave CPU time for asynchronous shader compilation, then use the full loading budget.
+    if state.work.is_empty() && !state.entities_ready {
+        let started = *state.entities_started.get_or_insert_with(Instant::now);
+        if started.elapsed() >= ENTITY_WARMUP_LIMIT {
+            warn!("map entity warmup deadline reached after {ENTITY_WARMUP_LIMIT:?}");
+            entities::cancel(world);
+            state.entities_ready = true;
+        } else {
+            let budget = Duration::from_millis(if compiling && !state.gpu_timed_out {
+                12
+            } else {
+                50
+            });
+            state.entities_ready = entities::warm::<M>(world, budget);
+        }
+    }
+    if state.work.is_empty() && state.entities_ready && (!compiling || state.gpu_timed_out) {
         info!(
             "map pipeline warmup complete: {} compatible layout/pass variants",
             state.queued
         );
         warmup.ready.store(true, Ordering::Release);
         state.seen.clear();
+    }
+}
+
+/// Both resident warmup paths select the same Bevy material specializer.
+fn specialize(
+    world: &mut World,
+    prepass: bool,
+    key: ErasedMaterialPipelineKey,
+    layout: &MeshVertexBufferLayoutRef,
+    properties: &Arc<MaterialProperties>,
+) -> Option<Result<CachedRenderPipelineId, SpecializedMeshPipelineError>> {
+    if prepass {
+        properties
+            .prepass_specialize
+            .map(|specialize| specialize(world, &key, layout, properties))
+    } else {
+        properties
+            .base_specialize
+            .map(|specialize| specialize(world, key, layout, properties))
     }
 }
 

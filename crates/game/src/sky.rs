@@ -1,6 +1,7 @@
 //! Camera-centred authored m89 skies, with independent material radiance.
 use std::{collections::BTreeMap, path::Path};
 
+// Alias avoids Bevy 0.20 prelude ContextExt ambiguity.
 use anyhow::{Context as ContextExt, Result};
 use bevy::{
     asset::{RenderAssetUsages, embedded_asset, embedded_path},

@@ -3,6 +3,8 @@ mod layout;
 
 use sekiro_formats::msb;
 use serde_json::{Value, json};
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 
 // Authored MSBS scalars are f32; JSON reparsing can differ by one f64 ULP.
 // Require exact authored precision, not a tolerance that can conceal an MSB change.
@@ -38,8 +40,6 @@ fn same_derived_transform(actual: &Value, expected: &Value) -> bool {
             (a - b).abs() <= tolerance
         })
 }
-use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
 
 #[test]
 fn decomposition_rounding_does_not_relax_authored_precision() {

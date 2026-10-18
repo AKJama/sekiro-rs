@@ -367,10 +367,10 @@ struct MapLight {
 }
 
 impl MapLight {
-    fn values(&self) -> impl Iterator<Item = Vec4> {
-        self.direct
-            .into_iter()
-            .chain([self.hemi_axis, self.hemi_delta])
+    fn encoded(&self) -> Vec<u8> {
+        let mut encoded = bevy::render::render_resource::encase::StorageBuffer::new(Vec::new());
+        encoded.write(self).expect("MapLight storage layout");
+        encoded.into_inner()
     }
 
     /// `follows_scene` selects the collision row (characters, parts authoring their own set)
@@ -421,7 +421,7 @@ impl FromWorld for MapLightBuffer {
         let mut buffers = world.resource_mut::<Assets<bevy::render::storage::ShaderBuffer>>();
         Self([(); 2].map(|()| {
             buffers.add(bevy::render::storage::ShaderBuffer::from(
-                MapLight::default().values().collect::<Vec<_>>(),
+                MapLight::default().encoded(),
             ))
         }))
     }
@@ -430,25 +430,6 @@ impl FromWorld for MapLightBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn light_buffer_upload_matches_shader_layout() {
-        let mut buffer = bevy::render::storage::ShaderBuffer::from(
-            MapLight::default().values().collect::<Vec<_>>(),
-        );
-        let light = MapLight {
-            direct: std::array::from_fn(|i| Vec4::splat(i as f32 + 0.5)),
-            hemi_axis: Vec4::new(1., 2., 3., 4.),
-            hemi_delta: Vec4::new(5., 6., 7., 8.),
-        };
-        let mut encoded =
-            bevy::render::render_resource::encase::StorageBuffer::new(Vec::<u8>::new());
-        encoded.write(&light).unwrap();
-        buffer.clear();
-        buffer.extend(light.values());
-        assert_eq!(buffer.cast_slice::<u8>().unwrap(), encoded.as_ref());
-        assert_eq!(buffer.buffer_size() as usize, encoded.as_ref().len());
-    }
 
     #[test]
     fn identical_map_descriptors_share_but_surface_and_lighting_changes_do_not() {
@@ -745,14 +726,7 @@ mod tests {
         let expected = |app: &App| {
             let lighting = app.world().resource::<crate::lighting::MapLighting>();
             let ambient = app.world().resource::<bevy::light::GlobalAmbientLight>();
-            [false, true].map(|scene| {
-                let mut encoded =
-                    bevy::render::render_resource::encase::StorageBuffer::new(Vec::<u8>::new());
-                encoded
-                    .write(&MapLight::new(lighting, ambient, scene))
-                    .unwrap();
-                encoded.into_inner()
-            })
+            [false, true].map(|scene| MapLight::new(lighting, ambient, scene).encoded())
         };
         let written = |app: &App| {
             buffers.clone().map(|buffer| {
@@ -929,7 +903,7 @@ pub(super) fn install(app: &mut App, prefix: &str, dir: &std::path::Path, args: 
     bevy::shader::load_shader_library!(app, "map_coverage.wesl");
     app.add_plugins((
         MaterialPlugin::<LayeredMaterial>::default(),
-        crate::parallel_shadows::ParallelShadowsPlugin,
+        crate::split_sun_cascades::SplitSunCascadesPlugin,
     ))
     .init_resource::<MapLightBuffer>()
     .insert_resource(LayerSettings {
@@ -976,7 +950,7 @@ fn update_hemisphere(
     for follows_scene in [false, true] {
         if let Some(mut buffer) = buffers.get_mut(&light.get(follows_scene)) {
             buffer.clear();
-            buffer.extend(MapLight::new(&lighting, &ambient, follows_scene).values());
+            buffer.extend_from_slice(&MapLight::new(&lighting, &ambient, follows_scene).encoded());
         }
     }
 }

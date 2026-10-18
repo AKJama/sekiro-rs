@@ -41,63 +41,46 @@ fn tone(x: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
-@if(BRIGHT)
-    let c = sample_scene(in.uv) * settings.exposure.x * adapted.y;
-@if(BRIGHT)
-    let y = dot(c, vec3(0.29891, 0.58661, 0.11448));
-@if(BRIGHT)
-    var bright = c * max(y - settings.bloom.x, 0.0) / (y + 0.0001);
-@if(BRIGHT)
-    if any(bright != bright) { bright = vec3(0.0); }
-@if(BRIGHT)
-    let gray = dot(bright, vec3(0.29891, 0.58661, 0.11448));
-@if(BRIGHT)
-    return vec4(mix(bright, vec3(gray), settings.controls.x), 1.0);
-@if(!BRIGHT && COPY)
-    return vec4(sample_scene(in.uv), 1.0);
-@if(!BRIGHT && !COPY && UPSAMPLE)
-    return vec4(sample_scene(in.uv)
-        + settings.reinhard.z * textureSampleLevel(level0, linear_sampler, in.uv, 0.0).rgb, 1.0);
-@if(!BRIGHT && !COPY && !UPSAMPLE && TONE)
-    var x = max(sample_scene(in.uv) * settings.exposure.x * adapted.y, vec3(0.0));
-@if(!BRIGHT && !COPY && !UPSAMPLE && TONE)
-    if settings.bloom.y > 0.0 {
-@if(!BRIGHT && !COPY && !UPSAMPLE && TONE)
-        let glare = textureSampleLevel(level0, linear_sampler, in.uv, 0.0).rgb;
-@if(!BRIGHT && !COPY && !UPSAMPLE && TONE)
-        x += glare * settings.bloom.y * settings.bloom.w;
+    @if(BRIGHT) {
+        let c = sample_scene(in.uv) * settings.exposure.x * adapted.y;
+        let y = dot(c, vec3(0.29891, 0.58661, 0.11448));
+        var bright = c * max(y - settings.bloom.x, 0.0) / (y + 0.0001);
+        if any(bright != bright) { bright = vec3(0.0); }
+        let gray = dot(bright, vec3(0.29891, 0.58661, 0.11448));
+        return vec4(mix(bright, vec3(gray), settings.controls.x), 1.0);
     }
-@if(!BRIGHT && !COPY && !UPSAMPLE && TONE)
-    let corrected = (settings.colour * vec4(tone(x), 1.0)).rgb;
-@if(!BRIGHT && !COPY && !UPSAMPLE && TONE)
-    var display = pow(max(corrected, vec3(0.0)), vec3(settings.transfer.y));
-@if(!BRIGHT && !COPY && !UPSAMPLE && TONE)
-    if settings.controls.z < 0.5 {
-@if(!BRIGHT && !COPY && !UPSAMPLE && TONE)
-        let noise = fract(52.9829189 * fract(dot(in.position.xy, vec2(0.06711056, 0.00583715)))) - 0.5;
-@if(!BRIGHT && !COPY && !UPSAMPLE && TONE)
-        display = max(display + noise / 255.0, vec3(0.0));
+    @if(!BRIGHT && COPY) {
+        return vec4(sample_scene(in.uv), 1.0);
     }
-    // Bevy's final output converts linear to sRGB. This storage conversion is
-    // undone by grading before lookup, preserving the native output-power domain.
-@if(!BRIGHT && !COPY && !UPSAMPLE && TONE)
-    return vec4(display_to_linear(display), 1.0);
-    // 2556e0 normalizes exp(-offset^2/(2*sigma^2)), sigma=1.5.
-@if(!BRIGHT && !COPY && !UPSAMPLE && !TONE)
-    let weights = array<f32, 7>(0.036633, 0.111281, 0.216745, 0.270682, 0.216745, 0.111281, 0.036633);
-@if(!BRIGHT && !COPY && !UPSAMPLE && !TONE)
-    let size = vec2<f32>(textureDimensions(scene));
-@if(!BRIGHT && !COPY && !UPSAMPLE && !TONE && BLUR_H)
-    let axis = vec2(1.0, 0.0);
-@if(!BRIGHT && !COPY && !UPSAMPLE && !TONE && !BLUR_H)
-    let axis = vec2(0.0, 1.0);
-@if(!BRIGHT && !COPY && !UPSAMPLE && !TONE)
-    var result = vec3(0.0);
-@if(!BRIGHT && !COPY && !UPSAMPLE && !TONE)
-    for (var i = 0; i < 7; i++) {
-@if(!BRIGHT && !COPY && !UPSAMPLE && !TONE)
-        result += sample_scene(in.uv + axis * f32(i - 3) * settings.bloom.z / size) * weights[i];
+    @if(!BRIGHT && !COPY && UPSAMPLE) {
+        return vec4(sample_scene(in.uv)
+            + settings.reinhard.z * textureSampleLevel(level0, linear_sampler, in.uv, 0.0).rgb, 1.0);
     }
-@if(!BRIGHT && !COPY && !UPSAMPLE && !TONE)
-    return vec4(result, 1.0);
+    @if(!BRIGHT && !COPY && !UPSAMPLE && TONE) {
+        var x = max(sample_scene(in.uv) * settings.exposure.x * adapted.y, vec3(0.0));
+        if settings.bloom.y > 0.0 {
+            let glare = textureSampleLevel(level0, linear_sampler, in.uv, 0.0).rgb;
+            x += glare * settings.bloom.y * settings.bloom.w;
+        }
+        let corrected = (settings.colour * vec4(tone(x), 1.0)).rgb;
+        var display = pow(max(corrected, vec3(0.0)), vec3(settings.transfer.y));
+        if settings.controls.z < 0.5 {
+            let noise = fract(52.9829189 * fract(dot(in.position.xy, vec2(0.06711056, 0.00583715)))) - 0.5;
+            display = max(display + noise / 255.0, vec3(0.0));
+        }
+        // Grading undoes this storage conversion before its lookup.
+        return vec4(display_to_linear(display), 1.0);
+    }
+    @if(!BRIGHT && !COPY && !UPSAMPLE && !TONE) {
+        // 2556e0 normalizes exp(-offset^2/(2*sigma^2)), sigma=1.5.
+        let weights = array<f32, 7>(0.036633, 0.111281, 0.216745, 0.270682, 0.216745, 0.111281, 0.036633);
+        let size = vec2<f32>(textureDimensions(scene));
+        @if(BLUR_H) { let axis = vec2(1.0, 0.0); }
+        @if(!BLUR_H) { let axis = vec2(0.0, 1.0); }
+        var result = vec3(0.0);
+        for (var i = 0; i < 7; i++) {
+            result += sample_scene(in.uv + axis * f32(i - 3) * settings.bloom.z / size) * weights[i];
+        }
+        return vec4(result, 1.0);
+    }
 }

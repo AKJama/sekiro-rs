@@ -1,4 +1,4 @@
-use bevy::shader::{Shader, ShaderDefVal};
+use bevy::shader::ShaderDefVal;
 
 #[test]
 fn snow_coverage_matches_native_height_and_wet_operations() {
@@ -102,18 +102,18 @@ fn main() {{
 #[test]
 fn layered_map_forward_depth_and_motion_shaders_validate() {
     let (mut cache, mut assets) = super::shader_support::cache();
-    let coverage = Shader::from_wesl(
+    super::shader_support::register(
+        &mut cache,
+        &mut assets,
+        "map_coverage",
         include_str!("../../src/map_coverage.wesl"),
-        "embedded://sekiro_rs/map_coverage.wesl",
     );
-    let id = assets.add(coverage.clone()).id();
-    cache.set_shader(id, coverage);
-    let bindings = Shader::from_wesl(
+    super::shader_support::register(
+        &mut cache,
+        &mut assets,
+        "map_bindings",
         include_str!("../../src/map_bindings.wesl"),
-        "embedded://sekiro_rs/map_bindings.wesl",
     );
-    let id = assets.add(bindings.clone()).id();
-    cache.set_shader(id, bindings);
     for (name, source, prepass) in [
         (
             "map_material",
@@ -132,9 +132,7 @@ fn layered_map_forward_depth_and_motion_shaders_validate() {
             false,
         ),
     ] {
-        let shader = Shader::from_wesl(source, format!("embedded://sekiro_rs/{name}.wesl"));
-        let id = assets.add(shader.clone()).id();
-        cache.set_shader(id, shader);
+        let id = super::shader_support::register(&mut cache, &mut assets, name, source);
         if name == "map_sweep" {
             // Collision has positions/normals but no UVs, tangents or colour streams.
             let mut defs: Vec<ShaderDefVal> = [

@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+// Alias avoids Bevy 0.20 prelude ContextExt ambiguity.
 use anyhow::{Context as ContextExt, Result};
 use bevy::prelude::*;
 use sekiro_formats::anim::{AnimClip, Skeleton, Trs, to_bevy};

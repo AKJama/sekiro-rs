@@ -6,6 +6,7 @@ use crate::{
         world::{MapWorld, RequestState},
     },
 };
+// Alias avoids Bevy 0.20 prelude ContextExt ambiguity.
 use anyhow::{Context as ContextExt, Result};
 use bevy::prelude::*;
 use sekiro_formats::msb::MapRegion;

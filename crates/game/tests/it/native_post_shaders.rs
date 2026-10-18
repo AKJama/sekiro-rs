@@ -1,5 +1,4 @@
 //! Validate every native post permutation through Bevy WESL and Naga.
-use bevy::shader::Shader;
 
 #[test]
 fn native_post_shaders_compose_and_validate() {
@@ -7,7 +6,7 @@ fn native_post_shaders_compose_and_validate() {
     for (name, source, variants) in [
         (
             "exposure",
-            include_str!("../../src/exposure.wgsl"),
+            include_str!("../../src/exposure.wesl"),
             vec![vec![]],
         ),
         (
@@ -37,13 +36,7 @@ fn native_post_shaders_compose_and_validate() {
             vec![vec![]],
         ),
     ] {
-        let shader = if name == "exposure" {
-            Shader::from_wgsl(source, "exposure.wgsl")
-        } else {
-            Shader::from_wesl(source, format!("embedded://sekiro_rs/{name}.wesl"))
-        };
-        let id = assets.add(shader.clone()).id();
-        cache.set_shader(id, shader);
+        let id = super::shader_support::register(&mut cache, &mut assets, name, source);
         for variant in variants {
             let defs: Vec<_> = variant.iter().copied().map(Into::into).collect();
             cache

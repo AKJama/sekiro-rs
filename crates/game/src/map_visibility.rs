@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 
+// Alias avoids Bevy 0.20 prelude ContextExt ambiguity.
 use anyhow::{Context as ContextExt, Result};
 use bevy::camera::visibility::VisibilitySystems;
 use bevy::prelude::*;

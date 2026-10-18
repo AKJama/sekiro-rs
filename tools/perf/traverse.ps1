@@ -25,18 +25,8 @@ if (-not $WalkOnly) {
     }
 }
 [IO.File]::WriteAllText($tour, ($rows -join "`n") + "`n", $encoding)
-$bevy020Root = [IO.Path]::GetFullPath((Join-Path $PWD 'target/bevy020')) + '\'
-$limit = (Get-Date).AddMinutes(15)
-while ($true) {
-    $running = @(Get-Process sekiro-rs,sekiro -ErrorAction SilentlyContinue)
-    $running += @(Get-Process | Where-Object { $_.Path -and $_.Path.StartsWith($bevy020Root, [StringComparison]::OrdinalIgnoreCase) })
-    $running = @($running | Sort-Object Id -Unique)
-    if ($running.Count -eq 0) { break }
-    $running | Select-Object Id,Path
-    if ((Get-Date) -ge $limit) { throw 'Game still running after 15 minutes; no launch.' }
-    Write-Output 'Waiting 60 seconds for the existing game to exit.'
-    Start-Sleep -Seconds 60
-}
+. (Join-Path $PSScriptRoot 'wait-game.ps1')
+Wait-QuietGame
 $saveRoot = Join-Path $env:APPDATA 'Sekiro'
 if (Test-Path -LiteralPath $saveRoot) {
     Copy-Item -LiteralPath $saveRoot -Destination (Join-Path $folder ('saves-' + (Get-Date -Format yyyyMMdd-HHmmss))) -Recurse

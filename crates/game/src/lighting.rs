@@ -13,6 +13,7 @@
 //! game's space: the vector `Ry(yaw) * Rx(pitch) * +Z` points toward the light, and is mirrored
 //! on X into Bevy space like everything else.
 
+// Alias avoids Bevy 0.20 prelude ContextExt ambiguity.
 use anyhow::Context as ContextExt;
 use bevy::light::{EnvironmentMapLight, GlobalAmbientLight, Skybox};
 #[path = "fog.rs"]
@@ -315,12 +316,7 @@ fn apply_post_effects(
         // The view setup is per camera, not per row: re-inserting Hdr and Tonemapping at every
         // LightSet change (doorways, #15) made Bevy re-specialise the camera's view pipelines.
         if applied.is_none() {
-            camera.insert((
-                Hdr,
-                Tonemapping::None,
-                DebandDither::Disabled,
-                bevy::pbr::ScreenSpaceTransmission::default(),
-            ));
+            camera.insert((Hdr, Tonemapping::None, DebandDither::Disabled));
             camera.remove::<(AutoExposure, Bloom)>();
         }
         camera.insert((
@@ -795,6 +791,7 @@ pub fn install_irradiance(
     dir: &std::path::Path,
     probes: &MapProbes,
 ) -> anyhow::Result<()> {
+    // Alias avoids Bevy 0.20 prelude ContextExt ambiguity.
     use anyhow::{Context as ContextExt, ensure};
     let mut regions: Vec<_> = probes.regions.iter().filter(|r| r.size.is_some()).collect();
     regions.sort_by(|a, b| {

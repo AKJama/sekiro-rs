@@ -1287,9 +1287,14 @@ fn fog(
     views: Res<ViewUniforms>,
     uniforms: Res<ComponentUniforms<GameFog>>,
     mut ctx: RenderContext,
+    mut warned_depth: Local<bool>,
 ) {
     let (target, depth, msaa, offset, index) = view.into_inner();
     let Some(depth_view) = depth.attachment.depth_stencil_views().depth_only_view() else {
+        if !*warned_depth {
+            warn!("global fog skipped: depth-only view is unavailable");
+            *warned_depth = true;
+        }
         return;
     };
     // A newly extracted fog component can precede its rebuilt depth attachment.
