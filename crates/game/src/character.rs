@@ -260,11 +260,7 @@ impl Animator {
     }
 }
 
-/// Havok curve 0 (SMOOTH), traced at sekiro.exe RVA 0x1408650.
-fn smooth_blend_weight(fraction: f32) -> f32 {
-    let t = fraction.clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
+use sekiro_sim::motion::smoothstep as smooth_blend_weight;
 
 /// Havok skeleton plus the glTF joint entity for each bone (filled once the scene spawns).
 #[derive(Component)]

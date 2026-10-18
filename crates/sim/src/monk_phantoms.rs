@@ -27,7 +27,7 @@ impl Encounter {
             }
             duel.events = None;
             duel.enemy.body.position = spot.position;
-            duel.enemy.body.yaw = spot.yaw;
+            duel.enemy.snap_yaw(spot.yaw);
             duel.enemy_active = false;
             duel.shared_player_frame = true;
             duel.ai.as_mut().unwrap().state.map_regions = Some(
@@ -124,7 +124,7 @@ impl Duel {
                     && let Some(spot) = crate::events::warp_point(&self.cache, 25, 0, region)
                 {
                     d.enemy.body.position = spot.position;
-                    d.enemy.body.yaw = spot.yaw;
+                    d.enemy.snap_yaw(spot.yaw);
                     d.enemy.body.velocity = [0.0; 3];
                 }
             }

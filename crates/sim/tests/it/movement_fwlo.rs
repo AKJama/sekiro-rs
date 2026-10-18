@@ -2,43 +2,13 @@
 //! (part03, part07, part09 and part10), limited to the requested smoothing ports.
 //! These drive our real HKS graph and clip/param data, not his procedural states.
 
+use super::movement_helpers::{
+    DT, OBSERVE_TICKS, RUN_FROM_SPRINT_LOOP, RUN_FROM_SPRINT_START, RUN_LOOP, RUNUP_TICKS,
+    SPRINT_TICKS, Trace, advance, cache, load as wolf, movement, reset, tick_speed,
+};
 use glam::Vec3;
 use sekiro_sim::duel::Duel;
-use sekiro_sim::{Buttons, Character, InputFrame};
-use std::path::PathBuf;
-
-const DT: f32 = 1.0 / 60.0;
-
-fn cache() -> Option<PathBuf> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
-    path.join("raw/chr/c0000.behbnd.d/c0000.hkx")
-        .is_file()
-        .then_some(path)
-}
-
-fn wolf() -> Option<Character> {
-    let mut wolf = Character::load_from_cache(&cache()?).unwrap();
-    assert!(wolf.settle(DT, 400) < 400);
-    Some(wolf)
-}
-
-fn movement(x: f32, y: f32) -> InputFrame {
-    InputFrame {
-        move_stick: [x, y],
-        ..Default::default()
-    }
-}
-
-fn advance(wolf: &mut Character, input: &InputFrame, frames: usize) {
-    for _ in 0..frames {
-        let report = wolf.tick(input, DT);
-        assert!(
-            report.behavior.script_errors.is_empty(),
-            "{:?}",
-            report.behavior.script_errors
-        );
-    }
-}
+use sekiro_sim::{Buttons, InputFrame};
 
 // part03: releasing_the_stick_at_a_run_stops_in_about_a_third_of_a_metre.
 #[test]
@@ -103,12 +73,10 @@ fn sprint_keeps_its_speed_into_the_loop() {
     let Some(mut wolf) = wolf() else { return };
     let mut start_min = f32::INFINITY;
     let mut loop_min = f32::INFINITY;
-    for i in 0..300 {
+    for i in 0..RUNUP_TICKS + SPRINT_TICKS + OBSERVE_TICKS {
         let mut input = movement(0.0, 1.0);
-        input.buttons.dodge = i >= 90;
-        let before = Vec3::from(wolf.body.position);
-        wolf.tick(&input, DT);
-        let speed = before.distance(Vec3::from(wolf.body.position)) / DT;
+        input.buttons.dodge = i >= RUNUP_TICKS;
+        let (_, speed) = tick_speed(&mut wolf, &input);
         match wolf.state().as_str() {
             "SprintStartFromStep" => start_min = start_min.min(speed),
             "SprintLoop" => loop_min = loop_min.min(speed),
@@ -124,36 +92,35 @@ fn sprint_keeps_its_speed_into_the_loop() {
 
 #[test]
 fn releasing_sprint_with_forward_held_keeps_the_clip_clock_moving() {
-    use std::fmt::Write;
     let Some(mut wolf) = wolf() else { return };
     let mut input = movement(0.0, 1.0);
-    advance(&mut wolf, &input, 90);
+    advance(&mut wolf, &input, RUNUP_TICKS);
     input.buttons.dodge = true;
-    advance(&mut wolf, &input, 120);
+    advance(&mut wolf, &input, SPRINT_TICKS);
     assert_eq!(wolf.state(), "SprintLoop");
     input.buttons.dodge = false;
-    let period = wolf.clips.clip("a000_000500").unwrap().duration;
-    let budget =
-        wolf.tae.blend_in("a000_000450").unwrap() + wolf.tae.blend_in("a000_000460").unwrap() + DT;
-    let mut trace = String::from("tick,state,clip,time,root_blend_weight,speed_m_s,blend_in\n");
+    let period = wolf.clips.clip(RUN_LOOP).unwrap().duration;
+    let budget = wolf.tae.blend_in(RUN_FROM_SPRINT_START).unwrap()
+        + wolf.tae.blend_in(RUN_FROM_SPRINT_LOOP).unwrap()
+        + DT;
+    let mut trace = Trace::from_env(
+        "SEKIRO_SPRINT_RELEASE_TRACE",
+        "tick,state,clip,time,root_blend_weight,speed_m_s,blend_in\n",
+    );
     let mut previous: Option<f32> = None;
     let mut first_run = None;
-    for tick in 0..90 {
-        let before = Vec3::from(wolf.body.position);
-        let r = wolf.tick(&input, DT);
+    for tick in 0..OBSERVE_TICKS {
+        let (r, speed) = tick_speed(&mut wolf, &input);
         let clip = r.animation.as_deref().unwrap();
-        let speed = before.distance(Vec3::from(r.position)) / DT;
-        writeln!(
-            trace,
+        trace.record(format_args!(
             "{tick},{},{clip},{:.6},{:.6},{speed:.6},{:.6}",
-            wolf.state(),
+            wolf.state_name(),
             r.anim_time,
             r.root_blend_weight,
             r.blend_in
-        )
-        .unwrap();
+        ));
         assert!(r.behavior.script_errors.is_empty(), "{trace}");
-        assert_eq!(wolf.clips.alias(clip), "a000_000500", "{trace}");
+        assert_eq!(wolf.clips.alias(clip), RUN_LOOP, "{trace}");
         if let Some(time) = previous {
             let expected = (time + r.advanced) % period;
             assert!(
@@ -166,14 +133,11 @@ fn releasing_sprint_with_forward_held_keeps_the_clip_clock_moving() {
             "offset applied as travel\n{trace}"
         );
         previous = Some(r.anim_time);
-        if clip == "a000_000500" {
+        if clip == RUN_LOOP {
             first_run.get_or_insert((tick + 1) as f32 * DT);
         }
     }
-    if let Some(path) = std::env::var_os("SEKIRO_SPRINT_RELEASE_TRACE") {
-        std::fs::write(path, &trace).unwrap();
-        eprintln!("{trace}");
-    }
+    trace.save();
     assert!(
         first_run.is_some_and(|time| time <= budget),
         "run did not start within authored handover blend time {budget}\n{trace}"
@@ -212,10 +176,14 @@ fn mashed_air_kicks_kick_once_per_jump() {
 #[test]
 fn approaching_a_body_stops_the_mover_and_its_air_launch() {
     let Some(cache) = cache() else { return };
-    for airborne in [false, true] {
-        let mut duel = Duel::load(&cache, 3.0).unwrap();
-        duel.enemy_active = false;
-        duel.enemy.body.yaw = std::f32::consts::PI;
+    let mut duel = Duel::load(&cache, 3.0).unwrap();
+    duel.enemy_active = false;
+    let height = duel.fighters[1].height;
+    for (airborne, missing_height) in [(false, false), (true, false), (false, true), (true, true)] {
+        reset(&mut duel.player);
+        duel.enemy.body.position = [0.0, 0.0, -3.0];
+        duel.enemy.snap_yaw(std::f32::consts::PI);
+        duel.fighters[1].height = if missing_height { 0.0 } else { height };
         if airborne {
             duel.player.body.position = [0.0, 0.4, -2.0];
             duel.player.body.grounded = false;
@@ -229,11 +197,34 @@ fn approaching_a_body_stops_the_mover_and_its_air_launch() {
             enemy_start.distance(Vec3::from(duel.enemy.body.position)) < 0.02,
             "idle enemy shoved"
         );
+        assert!(
+            duel.player.body.position[2] > duel.enemy.body.position[2],
+            "body separation silently disabled (missing_height={missing_height})"
+        );
         if airborne {
             assert!(
                 duel.player.body.velocity[2].abs() < 1.0,
                 "{:?}",
                 duel.player.body.velocity
+            );
+        }
+        if !airborne {
+            let mut sprint = movement(0.0, 1.0);
+            sprint.buttons.dodge = true;
+            for _ in 0..SPRINT_TICKS {
+                duel.step(&sprint, DT);
+            }
+            sprint.buttons.dodge = false;
+            sprint.buttons.guard = true;
+            for tick in 0..30 {
+                duel.step(&sprint, DT);
+                if tick == 0 {
+                    assert_eq!(duel.player.state_name(), "SprintToDeflectGuard");
+                }
+            }
+            assert!(
+                enemy_start.distance(Vec3::from(duel.enemy.body.position)) < 0.02,
+                "sprint-deflect entry shoved an idle body"
             );
         }
     }
@@ -242,8 +233,9 @@ fn approaching_a_body_stops_the_mover_and_its_air_launch() {
 // part03: a_locked_sprint_deflect_turns_to_the_enemy_instead_of_snapping.
 #[test]
 fn locked_sprint_deflect_turns_at_the_authored_rate() {
+    let Some(mut wolf) = wolf() else { return };
     for sx in [1.0, -0.7] {
-        let Some(mut wolf) = wolf() else { return };
+        reset(&mut wolf);
         wolf.lock_target = Some([0.0, 0.0, -14.0]);
         let mut errors = Vec::new();
         for i in 0..110 {
@@ -267,8 +259,9 @@ fn locked_sprint_deflect_turns_at_the_authored_rate() {
 
 #[test]
 fn locked_steps_and_jumps_use_the_current_facing() {
+    let Some(mut wolf) = wolf() else { return };
     for jump in [false, true] {
-        let Some(mut wolf) = wolf() else { return };
+        reset(&mut wolf);
         wolf.lock_target = Some([100.0, 0.0, 0.0]);
         let input = InputFrame {
             move_stick: [0.0, 1.0],

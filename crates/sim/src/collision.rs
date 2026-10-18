@@ -263,7 +263,7 @@ pub const MAX_SLOPE_DEGREES: f32 = 60.0;
 /// at the step height, so stairs reach the floor query rather than the wall push.
 const SPHERES: [f32; 3] = [STEP_HEIGHT + RADIUS, 1.2, 1.55];
 /// The player's physics capsule height (see [`RADIUS`]).
-const CAPSULE_HEIGHT: f32 = 1.5;
+pub const CAPSULE_HEIGHT: f32 = 1.5;
 const CELL: f32 = 4.0;
 
 pub struct CollisionWorld {

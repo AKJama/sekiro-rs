@@ -79,7 +79,7 @@ impl Encounter {
             }
             duel.events = None;
             duel.enemy.body.position = spot.position;
-            duel.enemy.body.yaw = spot.yaw;
+            duel.enemy.snap_yaw(spot.yaw);
             duel.enemy_active = duel.spec.chr == "c5310";
             duel.ai.as_mut().unwrap().state.map_regions =
                 Some(crate::lua_ai::regions::MapRegions::new(cache, MAP));

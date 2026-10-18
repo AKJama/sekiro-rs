@@ -100,7 +100,7 @@ impl Duel {
                         .first()
                     {
                         d.enemy.body.position = point.to_array();
-                        d.enemy.body.yaw = (-forward.x).atan2(-forward.z);
+                        d.enemy.snap_yaw((-forward.x).atan2(-forward.z));
                         d.enemy.body.velocity = [0.0; 3];
                     }
                 }
@@ -120,7 +120,7 @@ impl Duel {
                         .bone_warps
                         .remove(&actor.entity);
                     d.enemy.body.position = spot.position;
-                    d.enemy.body.yaw = spot.yaw;
+                    d.enemy.snap_yaw(spot.yaw);
                     d.enemy.body.velocity = [0.0; 3];
                 }
             }

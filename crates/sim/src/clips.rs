@@ -14,6 +14,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
+/// FwLo actor.rs: sample the last simulation frame for ended-source velocity.
+const END_VELOCITY_SAMPLE_INTERVAL: f32 = 1.0 / 60.0;
+
 #[derive(Default)]
 struct Inner {
     dir: PathBuf,
@@ -106,19 +109,24 @@ impl ClipLibrary {
         if len <= 0.0 || elapsed <= 0.0 {
             return [0.0; 4];
         }
+        let cycle_delta = if looping {
+            let a = root.sample(0.0);
+            let b = root.sample(len);
+            std::array::from_fn(|i| b[i] - a[i])
+        } else {
+            [0.0; 4]
+        };
         let sample = |t: f32| {
             if looping {
                 let cycles = (t / len).floor();
-                let a = root.sample(0.0);
-                let b = root.sample(len);
                 let p = root.sample(t.rem_euclid(len));
-                std::array::from_fn::<_, 4, _>(|i| p[i] + cycles * (b[i] - a[i]))
+                std::array::from_fn::<_, 4, _>(|i| p[i] + cycles * cycle_delta[i])
             } else if t > len {
                 // FwLo actor.rs: an ended source carries its last 1/60 s velocity
                 // through the blend (SprintStart -> SprintLoop would otherwise stop).
                 let end = root.sample(len);
-                let before = root.sample((len - 1.0 / 60.0).max(0.0));
-                let interval = len.min(1.0 / 60.0);
+                let before = root.sample((len - END_VELOCITY_SAMPLE_INTERVAL).max(0.0));
+                let interval = len.min(END_VELOCITY_SAMPLE_INTERVAL);
                 std::array::from_fn(|i| {
                     if i == 3 {
                         end[i]
@@ -127,19 +135,13 @@ impl ClipLibrary {
                     }
                 })
             } else {
-                root.sample(t.min(len))
+                root.sample(t)
             }
         };
         let a = sample(start);
         let b = sample(start + elapsed);
-        let (sin, cos) = (-a[3]).sin_cos();
-        let (x, z) = (b[0] - a[0], b[2] - a[2]);
-        [
-            cos * x + sin * z,
-            b[1] - a[1],
-            -sin * x + cos * z,
-            b[3] - a[3],
-        ]
+        let [x, z] = crate::motion::rotate_xz([b[0] - a[0], b[2] - a[2]], -a[3]);
+        [x, b[1] - a[1], z, b[3] - a[3]]
     }
 }
 

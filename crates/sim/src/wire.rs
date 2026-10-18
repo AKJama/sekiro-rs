@@ -349,7 +349,7 @@ impl Wire {
         if self.start.is_none() && launch.is_some_and(|t| time < t) {
             // FwLo traced row 1101 and Linear/EaseIn curve ids; the latter's shape is a fit.
             if let Some(e) = event(904) {
-                let blend = ((time - e.start) / (e.end - e.start)).clamp(0.0, 1.0);
+                let blend = e.progress(time);
                 let d = target.point - Vec3::from(body.position);
                 let horizontal = Vec3::new(d.x, 0.0, d.z).normalize_or_zero();
                 body.velocity =

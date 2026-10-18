@@ -308,12 +308,12 @@ fn apply_perf_tour(
         .as_ref()
         .and_then(|c| c.0.floor(x, z, y + 1.))
         .unwrap_or(y);
+    sim.duel.player.snap_yaw(yaw.to_radians());
     let body = &mut sim.duel.player.body;
     body.position = [x, y, z];
     body.velocity = [0.; 3];
     body.grounded = true;
     body.fall_top = y;
-    body.yaw = yaw.to_radians();
     sim.previous[WOLF] = ([x, y, z], yaw.to_radians());
     orbit.focus = Vec3::new(x, y, z) + Vec3::Y * sim.duel.camera_director.focus_height;
     orbit.yaw = yaw.to_radians();

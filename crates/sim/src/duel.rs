@@ -14,7 +14,7 @@ use crate::events::{EventCommand, EventHost, EventScripts, PLAYER_ENTITY};
 use crate::fight::CombatRules;
 use crate::grab::{EnemyThrow, GrabPhase};
 use crate::hits::{Combatant, HitDetector, HitEvent, HitResult};
-use crate::input::{InputFrame, angle_diff};
+use crate::input::InputFrame;
 use crate::lua_ai::{AiActor, AiBrain, AiWorld, ThinkParams, anim_id_from_clip};
 use crate::player::LoadError;
 use sekiro_formats::flver::{self, Flver};
@@ -1016,7 +1016,7 @@ impl Duel {
             }
         }
         enemy.body.position = [0.0, 0.0, -distance];
-        enemy.body.yaw = std::f32::consts::PI;
+        enemy.snap_yaw(std::f32::consts::PI);
         let dt = 1.0 / 60.0;
         player.settle(dt, 400);
         enemy.settle(dt, 400);
@@ -1047,8 +1047,10 @@ impl Duel {
         player.wire.collision = self.player.wire.collision.take();
         std::mem::swap(&mut enemy.ground, &mut self.enemy.ground);
         if let Some([p, e]) = self.spawn {
-            (player.body.position, player.body.yaw) = (p.position, p.yaw);
-            (enemy.body.position, enemy.body.yaw) = (e.position, e.yaw);
+            player.body.position = p.position;
+            player.snap_yaw(p.yaw);
+            enemy.body.position = e.position;
+            enemy.snap_yaw(e.yaw);
         }
         self.player = player;
         self.enemy = enemy;
@@ -1150,7 +1152,7 @@ impl Duel {
         }
         std::mem::swap(&mut next.enemy.ground, &mut self.enemy.ground);
         next.enemy.body.position = spot.position;
-        next.enemy.body.yaw = spot.yaw;
+        next.enemy.snap_yaw(spot.yaw);
         next.rules.fighters[0] = self.rules.fighters[0].clone();
         let flags = self.events.as_ref().map(|e| e.scripts.flags.clone());
         if let Some(events) = next.events.as_mut()
@@ -1283,7 +1285,12 @@ impl Duel {
         let (p, e) = (self.player.body.position, self.enemy.body.position);
         let (dx, dz) = (e[0] - p[0], e[2] - p[2]);
         let d = (dx * dx + dz * dz).sqrt();
-        let (ph, eh) = (1.5, self.fighters[1].height);
+        let ph = crate::collision::CAPSULE_HEIGHT;
+        let eh = if self.fighters[1].height > 0.0 {
+            self.fighters[1].height
+        } else {
+            ph
+        };
         if d >= min || p[1] >= e[1] + eh || e[1] >= p[1] + ph {
             return;
         }
@@ -1296,14 +1303,13 @@ impl Duel {
         // absorbs the overlap, so an idle body is blocked rather than shoved.
         let player_came = ((p[0] - before[0][0]) * nx + (p[2] - before[0][2]) * nz).max(0.0);
         let enemy_came = (-(e[0] - before[1][0]) * nx - (e[2] - before[1][2]) * nz).max(0.0);
-        let enemy_share =
-            if self.enemy_in_throw_clip() || self.player.state() == "SprintToDeflectGuard" {
-                0.0
-            } else if player_came + enemy_came > 1e-5 {
-                enemy_came / (player_came + enemy_came)
-            } else {
-                0.5
-            };
+        let enemy_share = if self.enemy_in_throw_clip() {
+            0.0
+        } else if player_came + enemy_came > 1e-5 {
+            enemy_came / (player_came + enemy_came)
+        } else {
+            0.5
+        };
         let overlap = min - d;
         for (c, share, sign) in [
             (&mut self.player, 1.0 - enemy_share, -1.0),
@@ -1523,7 +1529,7 @@ impl Duel {
         }
         self.last_throw_def_clip = body.defender_anim();
         if let Some(yaw) = db.start_facing(&attacker, &defender) {
-            self.player.body.yaw = yaw;
+            self.player.snap_yaw(yaw);
         }
         if let Some(clip) = first.attacker_clip.as_deref().and_then(anim_id) {
             let rt = &mut self.player.behavior.runtime;
@@ -1714,7 +1720,7 @@ impl Duel {
         };
         moved.body.position[0] += a.delta[0];
         moved.body.position[2] += a.delta[2];
-        moved.body.yaw = angle_diff(moved.body.yaw + a.yaw, 0.0);
+        moved.snap_yaw(moved.body.yaw + a.yaw);
     }
 
     /// Validate actual paired travel too: grabs, velocity events and lethal branches are
@@ -1801,7 +1807,7 @@ impl Duel {
                 // Keep the last safe feet while the paired clips and turning continue.
                 let yaw = c.body.yaw;
                 c.body = before[i].clone();
-                c.body.yaw = yaw;
+                c.snap_yaw(yaw);
             }
         }
     }
@@ -1853,8 +1859,10 @@ impl Duel {
         } else {
             DummyFrame::from_flver(&throws.model, row.atk_sorb_dummy)?
         };
-        self.player.body.yaw = self.player.yaw_to(self.enemy.body.position);
-        self.enemy.body.yaw = self.enemy.yaw_to(self.player.body.position);
+        self.player
+            .snap_yaw(self.player.yaw_to(self.enemy.body.position));
+        self.enemy
+            .snap_yaw(self.enemy.yaw_to(self.player.body.position));
         let slide = crate::deathblow::AbsorbSlide::new(
             absorbed,
             &sorb,
@@ -1997,7 +2005,7 @@ impl Duel {
             &attacker,
             &defender,
         )?;
-        self.enemy.body.yaw = attacker.yaw;
+        self.enemy.snap_yaw(attacker.yaw);
         let aligned = if row.atk_sorb_dummy <= 0 && row.def_sorb_dummy > 0 {
             [
                 defender.position,
@@ -2175,7 +2183,7 @@ impl Duel {
         // the thrown clip's own death branch plays instead of the ordinary death.
         let thrown = self.enemy_throw.as_ref().is_some_and(|t| {
             t.phase == GrabPhase::Held
-                && (!t.branched || !self.player.state().starts_with("ThrowDefDeath"))
+                && (!t.branched || !self.player.state_name().starts_with("ThrowDefDeath"))
         });
         let count = self.fighter_count();
         for (i, (c, f)) in [&mut self.player, &mut self.enemy]
@@ -2433,7 +2441,7 @@ impl Duel {
         // TAE opens no move window. Our clip-end stand-in for env 2000 / 1105 would hand them to
         // the AI's turn or move at the end instead (ours).
         let frame = self.enemy.tae_frame();
-        let event_anim = self.enemy.state().starts_with("Event")
+        let event_anim = self.enemy.state_name().starts_with("Event")
             && frame.restricted
             && !frame.flag(crate::tae::cancel::MOVE)
             && !frame.flag(AI_MOVE_FLAG);
@@ -2539,7 +2547,7 @@ impl Duel {
                 && let Some(spot) = crate::events::warp_point(&self.cache, area, block, region)
             {
                 self.enemy.body.position = spot.position;
-                self.enemy.body.yaw = spot.yaw;
+                self.enemy.snap_yaw(spot.yaw);
                 self.enemy.body.velocity = [0.0; 3];
             }
         }
@@ -2841,7 +2849,7 @@ impl Duel {
             let start = spawn[1];
             if self.enemy.body.position[1] < start.position[1] - depth {
                 self.enemy.body.position = start.position;
-                self.enemy.body.yaw = start.yaw;
+                self.enemy.snap_yaw(start.yaw);
                 self.enemy.body.velocity = [0.0; 3];
                 self.enemy.body.grounded = true;
                 self.enemy.body.fall_top = start.position[1];
@@ -2941,9 +2949,9 @@ impl Duel {
                     "placeholder void depth"
                 }
             );
+            self.player.snap_yaw(yaw);
             let body = &mut self.player.body;
             body.position = position;
-            body.yaw = yaw;
             body.velocity = [0.0; 3];
             body.grounded = true;
             body.fall_top = position[1];
@@ -3166,7 +3174,7 @@ impl Duel {
                 cinematic.applied = true;
                 if let Some(warp) = cinematic.warp {
                     self.player.body.position = warp.position;
-                    self.player.body.yaw = warp.yaw;
+                    self.player.snap_yaw(warp.yaw);
                     self.player.body.velocity = [0.0; 3];
                     self.player.body.fall_top = warp.position[1];
                     self.player.body.grounded = true;
@@ -3320,7 +3328,7 @@ impl Duel {
         let enemy_before = pair_before[1].position;
         let paired_active = self.deathblow.is_some() || self.throw_held();
         let recovering = [
-            self.player.state().starts_with("Throw"),
+            self.player.state_name().starts_with("Throw"),
             self.enemy_in_throw_clip(),
         ];
         let held = self
@@ -3623,14 +3631,8 @@ fn throw_body_path(db: &Deathblow, player: &Character, enemy: &Character) -> Vec
                 .map_or([0.0; 4], |rm| {
                     let a = rm.sample(time);
                     let b = rm.sample(time + dt);
-                    let (sin, cos) = (-a[3]).sin_cos();
-                    let (dx, dz) = (b[0] - a[0], b[2] - a[2]);
-                    [
-                        cos * dx + sin * dz,
-                        b[1] - a[1],
-                        -sin * dx + cos * dz,
-                        b[3] - a[3],
-                    ]
+                    let [x, z] = crate::motion::rotate_xz([b[0] - a[0], b[2] - a[2]], -a[3]);
+                    [x, b[1] - a[1], z, b[3] - a[3]]
                 });
             bodies[i].step(
                 &BodyInput {
