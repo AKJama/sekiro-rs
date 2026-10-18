@@ -59,6 +59,8 @@ mod live_check;
 #[path = "play_gate.rs"]
 mod play_gate;
 pub(crate) use play_gate::PlayGate;
+#[path = "grapple_hud.rs"]
+mod grapple_hud;
 #[path = "rope.rs"]
 mod rope;
 
@@ -962,6 +964,7 @@ fn setup(
     on_map: Option<Res<MapCollision>>,
     sim: NonSend<Sim>,
     rope_cache: Res<rope::RopeCache>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     rope::spawn(&mut commands, &assets, &rope_cache.0, model_path.0);
     commands.spawn((
@@ -976,20 +979,7 @@ fn setup(
         Transform::from_xyz(0.0, 2.0, 4.0).looking_at(Vec3::new(0.0, 1.2, 0.0), Vec3::Y),
     ));
     combat_hud::spawn(&mut commands);
-    commands.spawn((
-        GrappleMarker,
-        Node {
-            position_type: PositionType::Absolute,
-            width: px(18),
-            height: px(18),
-            border: UiRect::all(px(2)),
-            border_radius: BorderRadius::all(px(9)),
-            display: Display::None,
-            ..default()
-        },
-        BorderColor::all(Color::srgb(0.2, 1.0, 0.4)),
-        GlobalZIndex(20),
-    ));
+    grapple_hud::spawn(&mut commands, &rope_cache.0, &mut images);
     // Bullets have no model yet (their look is an effect, FXR, not extracted): simple shapes.
     let fx = crate::bullet_fx::spawn(&mut commands, &mut meshes, &mut materials);
     commands.insert_resource(fx);
@@ -2323,9 +2313,6 @@ fn recording_brain(sim: NonSend<Sim>, mut brain: ResMut<crate::brain_overlay::Re
     }
 }
 
-#[derive(Component)]
-struct GrappleMarker;
-
 /// TAE 720's right-hand sheath window frees both hands for docking.
 fn sheath_sword(
     sim: NonSend<Sim>,
@@ -2390,9 +2377,13 @@ fn sheath_sword(
 fn grapple_marker(
     sim: NonSend<Sim>,
     cameras: Query<(&Camera, &GlobalTransform), With<FollowCamera>>,
-    mut markers: Query<(&mut Node, &mut BorderColor), With<GrappleMarker>>,
+    mut markers: Query<(&mut Node, &mut ImageNode), With<grapple_hud::Marker>>,
+    mut sprites: Option<ResMut<grapple_hud::Sprites>>,
+    mut images: ResMut<Assets<Image>>,
+    mut cursors: Query<&mut Node, (With<grapple_hud::Cursor>, Without<grapple_hud::Marker>)>,
+    mut fills: Query<&mut ImageNode, (With<grapple_hud::Fill>, Without<grapple_hud::Marker>)>,
 ) {
-    let Ok((mut node, mut color)) = markers.single_mut() else {
+    let Ok((mut node, mut image)) = markers.single_mut() else {
         return;
     };
     node.display = Display::None;
@@ -2402,18 +2393,44 @@ fn grapple_marker(
     let Ok((camera, transform)) = cameras.single() else {
         return;
     };
+    let state = sim
+        .duel
+        .player
+        .wire
+        .marker_state(target, sim.duel.player.body.position);
+    if state == sekiro_sim::wire::MarkerState::Hidden {
+        return;
+    }
     let Ok(p) = camera.world_to_viewport(transform, Vec3::from_array(target.point.to_array()))
     else {
         return;
     };
     node.display = Display::Flex;
-    node.left = px(p.x - 9.0);
-    node.top = px(p.y - 9.0);
-    *color = BorderColor::all(if target.rideable {
-        Color::srgb(0.2, 1.0, 0.4)
-    } else {
-        Color::srgb(1.0, 0.7, 0.2)
-    });
+    // Captures at 1440p show a 49 px mark. Keep its angular screen size at other resolutions.
+    let size = 66.0 * camera.logical_viewport_size().map_or(1440.0, |v| v.y) / 1440.0;
+    node.width = px(size);
+    node.height = px(size);
+    node.left = px(p.x - size * 0.5);
+    node.top = px(p.y - size * 0.5);
+    if let Some(sprites) = sprites.as_mut() {
+        image.image = sprites.ring(state);
+        let fill = sprites.draw(state, &mut images);
+        for mut inner in &mut fills {
+            inner.image = fill.clone();
+            inner.color = if state == sekiro_sim::wire::MarkerState::Ready && !target.rideable {
+                Color::NONE
+            } else {
+                Color::WHITE
+            };
+        }
+    }
+    for mut cursor in &mut cursors {
+        cursor.display = if target.rideable {
+            Display::None
+        } else {
+            Display::Flex
+        };
+    }
 }
 
 #[cfg(test)]

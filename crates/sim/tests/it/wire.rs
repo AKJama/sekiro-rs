@@ -46,7 +46,8 @@ fn ranges_angles_and_ranking() {
         (2.9, false),
         (3.0, true),
         (15.0, true),
-        (15.1, false),
+        (15.1, true),
+        (25.0, true),
         (26.0, false),
     ] {
         let mut wire = synthetic(distance);
@@ -61,6 +62,32 @@ fn ranges_angles_and_ranking() {
     wire.points.insert(0, off_centre);
     wire.search(&body, 0.0);
     assert_eq!(wire.candidate.unwrap().index, 1);
+    // A distant, more centred preview must not steal a usable hook (including wire chains).
+    let mut wire = synthetic(10.0);
+    wire.points[0].position = Some([0.0, 6.0, -10.0]);
+    let mut distant = wire.points[0].clone();
+    distant.position = Some([0.0, 8.0, -20.0]);
+    wire.points.push(distant);
+    wire.search(&body, 0.0);
+    assert_eq!(wire.candidate.unwrap().index, 0);
+}
+#[test]
+fn marker_distance_boundaries_and_variation_extension() {
+    use sekiro_sim::wire::MarkerState::{Distant, Hidden, Ready};
+    let search = synthetic(10.0).search.unwrap();
+    for (distance, state) in [
+        (2.99, Hidden),
+        (3.0, Ready),
+        (15.0, Ready),
+        (20.0, Distant { fill: 0.5 }),
+        (25.0, Distant { fill: 0.0 }),
+        (25.01, Hidden),
+    ] {
+        assert_eq!(search.marker_state(distance, 0.0), state);
+    }
+    assert_eq!(search.marker_state(20.0, 5.0), Ready);
+    assert_eq!(search.marker_state(22.5, 5.0), Distant { fill: 0.5 });
+    assert_eq!(search.marker_state(25.0, 10.0), Ready);
 }
 #[test]
 fn extracted_counts_transform_and_collision() {
@@ -114,7 +141,7 @@ fn real_hks_synthetic_ground_shot_and_out_of_range() {
     if !cache().join("raw/chr/c1010.behbnd.d/c9997.hkx").exists() {
         return;
     }
-    for distance in [10.0, 30.0] {
+    for distance in [10.0, 20.0, 30.0] {
         let mut duel = Duel::load(&cache(), 4.0).unwrap();
         duel.enemy_active = false;
         duel.player.ground = Box::new(FlatGround::default());

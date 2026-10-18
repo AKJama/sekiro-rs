@@ -41,6 +41,32 @@ pub struct Target {
     pub arrival: Vec3,
     pub rideable: bool,
 }
+/// Recognition and firing are separate: the HUD previews a point before it is usable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MarkerState {
+    Hidden,
+    Distant { fill: f32 },
+    Ready,
+}
+impl Search {
+    pub fn marker_state(&self, distance: f32, extension: f32) -> MarkerState {
+        if !distance.is_finite()
+            || distance < self.action_distance_near
+            || distance > self.find_distance_far
+        {
+            return MarkerState::Hidden;
+        }
+        let action_far = self.action_distance_far + extension;
+        if distance <= action_far {
+            MarkerState::Ready
+        } else {
+            MarkerState::Distant {
+                fill: ((self.find_distance_far - distance) / (self.find_distance_far - action_far))
+                    .clamp(0.0, 1.0),
+            }
+        }
+    }
+}
 #[derive(Default)]
 pub struct Wire {
     /// Camera downward pitch, radians; headless callers use the body's horizontal view.
@@ -63,6 +89,23 @@ pub struct Wire {
     pub perch: Option<Vec3>,
 }
 impl Wire {
+    pub fn marker_state(&self, target: &Target, position: [f32; 3]) -> MarkerState {
+        let Some(search) = &self.search else {
+            return MarkerState::Hidden;
+        };
+        let extension = self
+            .points
+            .get(target.index)
+            .and_then(|p| self.variations.get(&p.variation))
+            .map_or(0.0, |v| v.extend_wire_action_distance);
+        search.marker_state(target.point.distance(Vec3::from(position)), extension)
+    }
+
+    pub fn can_fire(&self, position: [f32; 3]) -> bool {
+        self.candidate
+            .as_ref()
+            .is_some_and(|t| self.marker_state(t, position) == MarkerState::Ready)
+    }
     pub fn flight_time(&self) -> Option<(f32, f32)> {
         (self.start.is_some() || self.arrived).then_some((self.elapsed, self.duration))
     }
@@ -115,7 +158,7 @@ impl Wire {
         self.candidate = None;
         let Some(s) = &self.search else { return };
         let origin = Vec3::from(body.position);
-        let mut best = (f32::INFINITY, f32::INFINITY);
+        let mut best = (true, f32::INFINITY, f32::INFINITY);
         for (index, p) in self.points.iter().enumerate() {
             if self.active.as_ref().is_some_and(|t| t.index == index) {
                 continue;
@@ -127,10 +170,7 @@ impl Wire {
             let point = Vec3::from(position);
             let delta = point - origin;
             let distance = delta.length();
-            if distance < s.action_distance_near
-                || distance > s.find_distance_far
-                || distance > s.action_distance_far + v.extend_wire_action_distance
-            {
+            if distance < s.action_distance_near || distance > s.find_distance_far {
                 continue;
             }
             let yaw = (-delta.x).atan2(-delta.z);
@@ -151,8 +191,13 @@ impl Wire {
             }) {
                 continue;
             }
-            // Placeholder: prefer view-centre angle, then distance; screen boxes are not reconstructed.
-            let score = (horizontal.hypot(vertical), distance);
+            // Preserve selection among usable hooks; preview distant hooks when none can fire.
+            // Screen boxes are not reconstructed: rank by view-centre angle, then distance.
+            let score = (
+                distance > s.action_distance_far + v.extend_wire_action_distance,
+                horizontal.hypot(vertical),
+                distance,
+            );
             if score >= best {
                 continue;
             }
@@ -218,7 +263,10 @@ impl Wire {
         let changed = self.clip != animation.unwrap_or_default();
         self.clip = animation.unwrap_or_default().to_owned();
         if shot && changed {
-            self.active = self.candidate.clone();
+            self.active = self
+                .candidate
+                .clone()
+                .filter(|t| self.marker_state(t, body.position) == MarkerState::Ready);
             self.arrived = false;
             self.start = None;
             self.elapsed = 0.0;
