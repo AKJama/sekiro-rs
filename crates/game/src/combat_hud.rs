@@ -56,6 +56,9 @@ pub struct Gauges {
     pub poison: f32,
     /// Wolf's status effects, one line (empty for none).
     pub status: String,
+    /// Seconds until the simulation restarts the scene after Wolf's death (`Duel::respawn_in`),
+    /// `None` when no restart is coming.
+    pub respawn_in: Option<f32>,
     /// Where the perilous-attack kanji is drawn: Wolf's dummy poly 220 (`Spine2`, where
     /// SpEffectVfxParam 48100 plays the game's kanji effect), lifted to above his head.
     pub perilous_at: Option<Vec3>,

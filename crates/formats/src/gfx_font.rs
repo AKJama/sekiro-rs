@@ -60,6 +60,17 @@ fn scaled(v: i32) -> Result<i16> {
         .map_err(|_| Error::Format(format!("glyph coordinate {v} out of range")))
 }
 
+/// The binary-search header of `n` entries of `entry_size` bytes (cmap 4, kern, the table
+/// directory): searchRange, entrySelector, rangeShift.
+fn search_header(n: usize, entry_size: usize) -> [u16; 3] {
+    let power = 1_usize << n.ilog2();
+    [
+        (power * entry_size) as u16,
+        n.ilog2() as u16,
+        ((n - power) * entry_size) as u16,
+    ]
+}
+
 /// A point in TrueType space (y up; Flash's y points down).
 fn point(x: i32, y: i32, on: bool) -> Result<Point> {
     Ok(Point {
@@ -286,20 +297,20 @@ fn font3(data: &[u8]) -> Result<Vec<u8>> {
             codes.insert(code, (i + 1) as u16);
         }
     }
-    let scale = |v: i16| (f64::from(v) / SCALE).round() as i16;
-    let ascent = match scale(r.i16()?) {
+    let scale = |v: i16| scaled(i32::from(v));
+    let ascent = match scale(r.i16()?)? {
         0 => 1800,
         a => a,
     };
-    let descent = match scale(r.i16()?).abs() {
+    let descent = match scale(r.i16()?)?.abs() {
         0 => -450,
         d => -d,
     };
-    let leading = scale(r.i16()?);
+    let leading = scale(r.i16()?)?;
     let mut hmtx = vec![0; 4];
     let (mut max_advance, mut advance_sum) = (0_u16, 0_u64);
     for bearing in &bearings {
-        let advance = scale(r.i16()?).max(0) as u16;
+        let advance = scale(r.i16()?)?.max(0) as u16;
         max_advance = max_advance.max(advance);
         advance_sum += u64::from(advance);
         u16be(&mut hmtx, advance);
@@ -318,7 +329,7 @@ fn font3(data: &[u8]) -> Result<Vec<u8>> {
     let pairs = r.u16()?;
     let mut kern_pairs = Vec::new();
     for _ in 0..pairs {
-        let (left, right, adjust) = (r.u16()?, r.u16()?, scale(r.i16()?));
+        let (left, right, adjust) = (r.u16()?, r.u16()?, scale(r.i16()?)?);
         if let (Some(&left), Some(&right)) = (codes.get(&left), codes.get(&right)) {
             kern_pairs.push((left, right, adjust));
         }
@@ -401,17 +412,11 @@ fn font3(data: &[u8]) -> Result<Vec<u8>> {
 
     // cmap format 4, one segment per code plus the closing 0xFFFF.
     let segs = codes.len() + 1;
-    let power = 1_usize << segs.ilog2();
     let mut sub = Vec::new();
-    for v in [
-        4,
-        (16 + segs * 8) as u16,
-        0,
-        (segs * 2) as u16,
-        (power * 2) as u16,
-        segs.ilog2() as u16,
-        ((segs - power) * 2) as u16,
-    ] {
+    for v in [4, (16 + segs * 8) as u16, 0, (segs * 2) as u16]
+        .into_iter()
+        .chain(search_header(segs, 2))
+    {
         u16be(&mut sub, v);
     }
     for code in codes.keys() {
@@ -467,19 +472,11 @@ fn font3(data: &[u8]) -> Result<Vec<u8>> {
 
     if !kern_pairs.is_empty() {
         let n = kern_pairs.len();
-        let power = 1_usize << n.ilog2();
         let mut kern = Vec::new();
-        for v in [
-            0,
-            1,
-            0,
-            (14 + n * 6) as u16,
-            1,
-            n as u16,
-            (power * 6) as u16,
-            n.ilog2() as u16,
-            ((n - power) * 6) as u16,
-        ] {
+        for v in [0, 1, 0, (14 + n * 6) as u16, 1, n as u16]
+            .into_iter()
+            .chain(search_header(n, 6))
+        {
             u16be(&mut kern, v);
         }
         for (a, b, v) in kern_pairs {
@@ -491,15 +488,9 @@ fn font3(data: &[u8]) -> Result<Vec<u8>> {
     }
 
     let n = tables.len();
-    let power = 1_usize << n.ilog2();
     let mut out = Vec::new();
     u32be(&mut out, 0x10000);
-    for v in [
-        n as u16,
-        (power * 16) as u16,
-        n.ilog2() as u16,
-        ((n - power) * 16) as u16,
-    ] {
+    for v in [n as u16].into_iter().chain(search_header(n, 16)) {
         u16be(&mut out, v);
     }
     let mut offset = 12 + n * 16;

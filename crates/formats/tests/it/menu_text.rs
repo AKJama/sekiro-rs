@@ -19,6 +19,8 @@ fn menu_fmg_and_fonts_read_from_the_install() {
         "{:?}",
         events.get(&10010310)
     );
+    // The death screen's caption.
+    assert_eq!(events[&10010902], "DEATH");
 
     // The menu font draws Latin text; the Japanese one also the death mark.
     for (font, text) in [("engus_std", "Resurrect"), ("jpnjp_std", "死")] {

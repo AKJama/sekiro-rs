@@ -502,6 +502,7 @@ mod tests {
         )
         .add_plugins(crate::play::cinematic_fade::CinematicFadePlugin)
         .insert_resource(PanelState::new(false, &[]))
+        .init_resource::<crate::game_ui::GameFonts>()
         .init_resource::<Probe>()
         .add_systems(
             Startup,
@@ -532,7 +533,7 @@ mod tests {
                 state.choices.values[4] = "0".into();
                 let mut app = App::new();
                 app.add_plugins((MinimalPlugins, bevy::ui_widgets::ButtonPlugin))
-                    .init_resource::<Assets<Font>>()
+                    .init_resource::<crate::game_ui::GameFonts>()
                     .add_message::<KeyboardInput>()
                     .insert_resource(ButtonInput::<KeyCode>::default())
                     .insert_resource(state)
@@ -962,6 +963,7 @@ pub fn active(state: Res<PanelState>) -> bool {
 }
 pub fn install(app: &mut App) {
     let args: Vec<_> = std::env::args().collect();
+    crate::game_ui::GameFonts::insert(app);
     app.insert_resource(PanelState::new(false, &args))
         .add_systems(Startup, spawn);
     install_input(app);
@@ -1007,6 +1009,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         ),
     )
     .add_systems(Last, save_on_exit);
+    crate::game_ui::GameFonts::insert(&mut app);
     install_input(&mut app);
     app.add_plugins(crate::presentation::PresentationPlugin);
     app.run();
@@ -1017,11 +1020,7 @@ fn save_on_exit(state: Res<PanelState>, mut exits: MessageReader<AppExit>) {
         state.choices.save();
     }
 }
-fn spawn(mut commands: Commands, mut fonts: ResMut<Assets<Font>>, state: Res<PanelState>) {
-    let font =
-        crate::game_ui::font_bytes(&sekiro_sim::cache::root(), "engus_std", &["segoeui.ttf"])
-            .map(|b| bevy::text::FontSource::Handle(fonts.add(Font::from_bytes(b))))
-            .unwrap_or_default();
+fn spawn(mut commands: Commands, fonts: Res<crate::game_ui::GameFonts>, state: Res<PanelState>) {
     commands
         .spawn((
             Panel,
@@ -1055,11 +1054,7 @@ fn spawn(mut commands: Commands, mut fonts: ResMut<Assets<Font>>, state: Res<Pan
             .with_children(|p| {
                 p.spawn((
                     Text::new("Sekiro-rs"),
-                    TextFont {
-                        font: font.clone(),
-                        font_size: bevy::text::FontSize::Px(32.),
-                        ..default()
-                    },
+                    fonts.ui(32.0),
                     TextColor(Color::srgb(0.91, 0.78, 0.54)),
                     Node {
                         margin: UiRect::bottom(px(12)),
@@ -1080,24 +1075,13 @@ fn spawn(mut commands: Commands, mut fonts: ResMut<Assets<Font>>, state: Res<Pan
                     ))
                     .observe(activate_row)
                     .with_children(|r| {
-                        r.spawn((
-                            Text::new(""),
-                            TextFont {
-                                font: font.clone(),
-                                font_size: bevy::text::FontSize::Px(18.),
-                                ..default()
-                            },
-                        ));
+                        r.spawn((Text::new(""), fonts.ui(18.0)));
                     });
                 }
                 p.spawn((
                     Help,
                     Text::new(""),
-                    TextFont {
-                        font,
-                        font_size: bevy::text::FontSize::Px(14.),
-                        ..default()
-                    },
+                    fonts.ui(14.0),
                     TextColor(Color::srgb(0.68, 0.71, 0.75)),
                     Node {
                         margin: UiRect::top(px(12)),
