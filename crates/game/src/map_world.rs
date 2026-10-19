@@ -435,14 +435,15 @@ pub(crate) fn collision_world(
     world.add_helpers(&helpers);
     for block in layouts.keys() {
         // Objects the story has switched off (`DeactivateObject`) have no collision either,
-        // except the fall-prevention walls (collisionType 6 and 11): the story switches them
-        // all off and the game turns a pine's on while Wolf rides it (SpEffect 4100, draft PR
-        // #33), which is not ported, so they stay on (#119).
+        // except the rideable pines' fall-prevention walls (`o002501`, collisionType 6): the
+        // game turns a pine's on while Wolf rides it (SpEffect 4100, draft PR #33), which is
+        // not ported, so they stay on (#119). Other switched-off walls stay off, such as
+        // `o002541_0000` across the gateway near start 0.
         let story = story.maps.get(block);
         let mut switched_off = 0;
         let (parts, triangles) = world
             .add_block_objects(&cache.join("maps").join(block), block, |part| {
-                let on = matches!(part.collision_type, 6 | 11)
+                let on = part.name.starts_with("o002501_")
                     || story
                         .and_then(|s| s.part(&part.name))
                         .is_none_or(|p| p.enabled);
@@ -2105,3 +2106,4 @@ mod tests {
         assert!(far < 0.5 && grounded, "ran {far:.2} m off the pine");
     }
 }
+
