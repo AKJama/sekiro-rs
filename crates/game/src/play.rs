@@ -794,6 +794,7 @@ pub fn run(options: Options) -> Result<()> {
             .chain(),
     );
     crate::menu::install(&mut app);
+    crate::death_screen::install(&mut app);
     if options.enemy_present {
         arena_d_scene::install(&mut app, &cache, options.arena, options.objects)?;
         arena_c_scene::install(&mut app, &cache, options.arena)?;

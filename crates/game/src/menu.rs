@@ -1018,10 +1018,10 @@ fn save_on_exit(state: Res<PanelState>, mut exits: MessageReader<AppExit>) {
     }
 }
 fn spawn(mut commands: Commands, mut fonts: ResMut<Assets<Font>>, state: Res<PanelState>) {
-    let font = std::fs::read("C:/Windows/Fonts/segoeui.ttf")
-        .ok()
-        .map(|b| bevy::text::FontSource::Handle(fonts.add(Font::from_bytes(b))))
-        .unwrap_or_default();
+    let font =
+        crate::game_ui::font_bytes(&sekiro_sim::cache::root(), "engus_std", &["segoeui.ttf"])
+            .map(|b| bevy::text::FontSource::Handle(fonts.add(Font::from_bytes(b))))
+            .unwrap_or_default();
     commands
         .spawn((
             Panel,
