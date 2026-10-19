@@ -3,13 +3,11 @@
 //! states (`act(3016, 0)`) but not in `SprintLoop` or a jump, so walking at the edge holds Wolf
 //! and sprinting carries him over. Skips when the map has not been exported.
 
-use std::path::PathBuf;
-
 use sekiro_sim::collision::CollisionWorld;
 use sekiro_sim::hit_filter::FALL_ASSIST_MOVE;
 use sekiro_sim::{Buttons, Character, InputFrame};
 
-const DT: f32 = 1.0 / 60.0;
+use crate::movement_helpers::{DT, cache, settle, stick};
 
 /// A cliff top 35 m east of the Outskirts' start 2: a point on the wall and the way out over
 /// the edge, where the ground falls away 7.5 m and then further down the slope.
@@ -18,11 +16,9 @@ const OUT: [f32; 2] = [0.43, 0.90];
 
 /// Wolf on the map 4 m inside the edge, facing out, and the camera yaw that pushes him out.
 fn wolf_at_the_edge() -> Option<(Character, f32)> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = cache()?;
     let dir = cache.join("maps/m11_00_00_00");
-    if !dir.join("collision.bin").is_file()
-        || !cache.join("raw/chr/c0000.behbnd.d/c0000.hkx").exists()
-    {
+    if !dir.join("collision.bin").is_file() {
         return None;
     }
     let world = CollisionWorld::load_map(&dir).unwrap();
@@ -31,7 +27,7 @@ fn wolf_at_the_edge() -> Option<(Character, f32)> {
     let mut wolf = Character::load_from_cache(&cache).unwrap();
     wolf.ground = Box::new(world);
     wolf.body.position = [x, y, z];
-    wolf.settle(DT, 400);
+    settle(&mut wolf);
     // The stick's forward is the camera's: yaw 0 looks along -Z.
     Some((wolf, (-OUT[0]).atan2(-OUT[1])))
 }
@@ -44,14 +40,18 @@ fn push_out(wolf: &mut Character, yaw: f32, sprint: bool, ticks: usize) -> (f32,
     let (mut past, mut crossed, mut asked) = (f32::MIN, ticks, false);
     for tick in 0..ticks {
         let input = InputFrame {
-            move_stick: [0.0, 1.0],
-            camera_yaw: yaw,
             buttons: Buttons {
                 dodge: sprint,
                 ..Buttons::default()
             },
+            ..stick(0.0, 1.0, yaw)
         };
-        wolf.tick(&input, DT);
+        let report = wolf.tick(&input, DT);
+        assert!(
+            report.behavior.script_errors.is_empty(),
+            "{:?}",
+            report.behavior.script_errors
+        );
         let p = wolf.body.position;
         past = past.max((p[0] - EDGE[0]) * OUT[0] + (p[2] - EDGE[1]) * OUT[1]);
         if past > 0.0 {
@@ -69,10 +69,6 @@ fn walking_at_a_cliff_edge_holds_wolf_and_sprinting_goes_over() {
     };
     // Run at the edge for 3 s: held at the wall, still on the cliff top.
     let (past, fell, _, asked) = push_out(&mut wolf, yaw, false, 180);
-    println!(
-        "run: {past:.2} m past the wall, fell {fell:.2} m, state {}",
-        wolf.state()
-    );
     assert!(asked, "the walk and run states never asked for the walls");
     assert!(past < 0.0, "ran {past:.2} m past the wall");
     assert!(fell.abs() < 0.5 && wolf.body.grounded, "fell {fell:.2} m");
@@ -80,10 +76,9 @@ fn walking_at_a_cliff_edge_holds_wolf_and_sprinting_goes_over() {
     // Sprint into it: held through the sprint's start, then the loop asks for nothing and he
     // goes over.
     let (past, fell, crossed, _) = push_out(&mut wolf, yaw, true, 240);
-    println!(
-        "sprint: over after {:.2} s, {past:.2} m past the wall, fell {fell:.2} m",
-        crossed as f32 * DT
-    );
+    let over = crossed as f32 * DT;
+    // The sprint's start still asks for the walls; the loop (from about 0.6 s) does not.
+    assert!((0.3..1.0).contains(&over), "went over after {over:.2} s");
     assert!(past > 1.0, "sprint held at the wall ({past:.2} m past it)");
     assert!(
         fell > 3.0,

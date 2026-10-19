@@ -270,12 +270,13 @@ impl Body {
     /// than a step below.
     fn rim_support(&self, ground: &dyn Ground) -> Option<f32> {
         let [x, y, z] = self.position;
+        let step = ground.max_step();
         (0..8)
             .filter_map(|i| {
                 let (s, c) = (i as f32 * std::f32::consts::FRAC_PI_4).sin_cos();
                 ground.floor(x + RIM_SUPPORT * c, z + RIM_SUPPORT * s, y + 0.05)
             })
-            .filter(|h| y - h < ground.max_step())
+            .filter(|h| y - h < step)
             .reduce(f32::max)
     }
 
@@ -377,8 +378,8 @@ impl Body {
                 .filter(|h| self.position[1] - h < reach)
                 .or_else(|| self.rim_support(ground));
             match floor {
-                Some(h) if self.position[1] - h < reach => self.position[1] = h,
-                _ => {
+                Some(h) => self.position[1] = h,
+                None => {
                     self.fall_type = 0;
                     self.grounded = false;
                     self.fall_top = self.position[1];

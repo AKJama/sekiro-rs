@@ -850,29 +850,38 @@ impl CollisionWorld {
         let start = Vec3::from(feet);
         let d = Vec2::from(delta);
         let len = d.length();
-        // Sub-steps of half the smallest clearance, so no wall is stepped across.
-        let clearance = if assist != 0 {
-            FALL_ASSIST_RADIUS
-        } else {
-            RADIUS
-        };
-        let steps = ((len / (clearance * 0.5)).ceil() as usize).clamp(1, 64);
         let mut p = start;
         let mut tris = Vec::new();
-        let reach = RADIUS + len / steps as f32 + 0.05;
+        let coarse = ((len / (RADIUS * 0.5)).ceil() as usize).clamp(1, 32);
+        let reach = RADIUS + len / coarse as f32 + 0.05;
         self.gather(
             Vec2::new(p.x.min(p.x + d.x), p.z.min(p.z + d.y)) - reach,
             Vec2::new(p.x.max(p.x + d.x), p.z.max(p.z + d.y)) + reach,
             &mut tris,
         );
+        // The assist's walls are rare, so only a move near one pays for them.
+        let walls: Vec<u32> = if assist == 0 {
+            Vec::new()
+        } else {
+            tris.iter()
+                .copied()
+                .filter(|&t| self.live(t, assist))
+                .collect()
+        };
+        // Sub-steps of half the smallest clearance, so no wall is stepped across.
+        let steps = if walls.is_empty() {
+            coarse
+        } else {
+            ((len / (FALL_ASSIST_RADIUS * 0.5)).ceil() as usize).clamp(1, 64)
+        };
         for _ in 0..steps {
             p.x += d.x / steps as f32;
             p.z += d.y / steps as f32;
             for _ in 0..4 {
                 let mut push = self.push_out(p, &tris, who);
                 // The assist's walls last, so they hold where both push.
-                if assist != 0 {
-                    push += self.hold_inside(p + Vec3::new(push.x, 0.0, push.y), &tris, assist);
+                if !walls.is_empty() {
+                    push += self.hold_inside(p + Vec3::new(push.x, 0.0, push.y), &walls);
                 }
                 if push == Vec2::ZERO {
                     break;
@@ -885,20 +894,20 @@ impl CollisionWorld {
     }
 
     /// Horizontal correction that keeps the feet [`FALL_ASSIST_RADIUS`] on the inner side of
-    /// the fall-prevention walls in `walls` they are near. The walls are tested at the feet (the
+    /// the fall-prevention wall triangles `walls` they are near. The walls are tested at the feet (the
     /// height the exe tests at is not traced); the map's walls are bands from the floor at the
     /// edge to about 1 m above it. They are one-sided: `FUN_140bc68d0` cuts a move only along a
     /// hit triangle's face normal and only while the body is behind that face, so they keep a
     /// body in and let one outside walk in. The export's mirror into Bevy space reverses the
     /// winding, so the inner side is the one the Bevy-space normal points to.
-    fn hold_inside(&self, feet: Vec3, tris: &[u32], walls: u8) -> Vec2 {
+    fn hold_inside(&self, feet: Vec3, walls: &[u32]) -> Vec2 {
         let mut push = Vec2::ZERO;
-        for &t in tris {
-            if !self.live(t, walls) {
-                continue;
-            }
+        for &t in walls {
             let [a, b, c] = self.corners(t);
-            if feet.distance(closest_on_triangle(feet, a, b, c)) >= FALL_ASSIST_RADIUS {
+            if feet.distance_squared(feet.clamp(a.min(b).min(c), a.max(b).max(c)))
+                >= FALL_ASSIST_RADIUS * FALL_ASSIST_RADIUS
+                || feet.distance(closest_on_triangle(feet, a, b, c)) >= FALL_ASSIST_RADIUS
+            {
                 continue;
             }
             let n = self.normals[t as usize];
@@ -1025,7 +1034,7 @@ impl Ground for View<'_> {
     }
 
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
-        self.world.slide_for(feet, delta, self.who, 0)
+        self.slide_assisted(feet, delta, 0)
     }
 
     fn slide_assisted(&self, feet: [f32; 3], delta: [f32; 2], walls: u8) -> [f32; 2] {
