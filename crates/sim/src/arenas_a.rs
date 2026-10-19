@@ -409,16 +409,17 @@ pub fn hidden_parts(cache: &Path, spec: &ArenaSpec) -> Result<HashSet<String>, S
         .collect())
 }
 
+/// Zeroes the triangles of the collision parts `hidden` names; returns how many parts it removed.
 pub fn remove_hidden_collision(
     mesh: &mut CollisionMesh,
     layout: &serde_json::Value,
-    hidden: &HashSet<String>,
-) {
+    hidden: impl Fn(&str) -> bool,
+) -> usize {
     let ranges: Vec<_> = layout["collisions"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|r| r["name"].as_str().is_some_and(|n| hidden.contains(n)))
+        .filter(|r| r["name"].as_str().is_some_and(&hidden))
         .filter_map(|r| {
             Some((
                 r["triangles"][0].as_u64()? as usize,
@@ -426,9 +427,7 @@ pub fn remove_hidden_collision(
             ))
         })
         .collect();
-    if ranges.is_empty() {
-        return;
-    }
+    let removed = ranges.len();
     // Keep MSB triangle ranges and material indices valid for fog and draw-group selection.
     for (first, count) in ranges {
         let end = (first + count).min(mesh.indices.len() / 3);
@@ -438,4 +437,5 @@ pub fn remove_hidden_collision(
             }
         }
     }
+    removed
 }

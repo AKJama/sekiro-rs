@@ -408,9 +408,9 @@ pub(crate) fn play_blocks(cache: &Path, id: &str) -> Result<BTreeMap<String, Val
 /// Physics bootstrap uses the same bounded block inventory as rendering ([`play_blocks`]).
 /// Collision/group records remain separate in MapWorld; only the broad-phase query
 /// mesh is concatenated, without adding MapOffset or translating any vertex.
-/// Each block's helper parts the player does not collide with (`sekiro_sim::hit_filter`)
-/// leave the walkable mesh first and join the world as camera-only triangles or event walls.
-/// Placed objects join last, without those the block's `story` switches off.
+/// Collision parts and placed objects the block's `story` switches off are left out.
+/// Helper parts the player does not collide with (`sekiro_sim::hit_filter`) leave the
+/// walkable mesh and join the world as camera-only triangles or event walls.
 pub(crate) fn collision_world(
     cache: &Path,
     layouts: &BTreeMap<String, Value>,
@@ -418,16 +418,24 @@ pub(crate) fn collision_world(
 ) -> Result<sekiro_sim::collision::CollisionWorld> {
     let mut mesh = CollisionMesh::default();
     let mut helpers = sekiro_sim::hit_filter::HelperCollision::default();
+    let mut story_off = 0;
     for (block, layout) in layouts {
         let path = cache.join("maps").join(block).join("collision.bin");
         if path.is_file() {
             let mut part = CollisionMesh::from_bytes(&std::fs::read(path)?)?;
+            // Before the helpers, so a switched-off helper part does not come back as one.
+            if let Some(story) = story.maps.get(block) {
+                story_off +=
+                    sekiro_sim::arenas_a::remove_hidden_collision(&mut part, layout, |n| {
+                        story.switched_off(n)
+                    });
+            }
             helpers.extend(sekiro_sim::hit_filter::strip_helpers(&mut part, layout));
             mesh.extend(&part);
         }
     }
     eprintln!(
-        "collision: helper triangles kept off the player by hit filter {:?}, {} event walls",
+        "collision: {story_off} parts switched off by the story, helper triangles kept off the player by hit filter {:?}, {} event walls",
         helpers.removed,
         helpers.triggers.len()
     );
@@ -2031,5 +2039,26 @@ mod tests {
             world.floor_object(x, z, -40.0),
             Some("m11_00_00_00/o002500_0005")
         );
+    }
+
+    /// #85: the first-visit story switches off h003401 and h003501, the other state of the
+    /// courtyard before the Outskirts samurai general (`c1020_0000`), whose floors stand up to
+    /// 6 m above the ground there. Left in, Wolf ran into them and stood on them in mid-air.
+    #[test]
+    fn story_switched_off_collision_parts_hold_no_one() {
+        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        if !cache.join("maps/m11_00_00_00/collision.bin").is_file() {
+            return;
+        }
+        let blocks = BTreeMap::from([(
+            ASHINA[0].to_string(),
+            read_layout(&cache.join("maps").join(ASHINA[0])).unwrap(),
+        )]);
+        let stories = super::super::story::load_blocks(&cache, &blocks).unwrap();
+        assert!(stories.maps[ASHINA[0]].switched_off("h003401"));
+        let world = collision_world(&cache, &blocks, &stories).unwrap();
+        // Inside h003401's footprint, 5.7 m above the courtyard: the floor is the ground.
+        let floor = world.floor(-212.0, -1.0, -20.0).expect("courtyard ground");
+        assert!((floor + 40.5).abs() < 0.3, "floor at {floor}");
     }
 }
