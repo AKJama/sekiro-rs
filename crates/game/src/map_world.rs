@@ -435,20 +435,25 @@ pub(crate) fn collision_world(
     world.add_helpers(&helpers);
     for block in layouts.keys() {
         // Objects the story has switched off (`DeactivateObject`) have no collision either,
-        // except the rideable pines' fall-prevention walls (`o002501`, collisionType 6): the
-        // game turns a pine's on while Wolf rides it (SpEffect 4100, draft PR #33), which is
-        // not ported, so they stay on (#119). Other switched-off walls stay off, such as
-        // `o002541_0000` across the gateway near start 0.
+        // except the trees' fall-prevention walls (group 1106200), which the game switches on
+        // while Wolf stands on a rideable object (SpEffect 4100): they hold only riders (#119).
         let story = story.maps.get(block);
+        let riders = ride_walls(&layouts[block]);
         let mut switched_off = 0;
         let (parts, triangles) = world
-            .add_block_objects(&cache.join("maps").join(block), block, |part| {
-                let on = part.name.starts_with("o002501_")
-                    || story
-                        .and_then(|s| s.part(&part.name))
-                        .is_none_or(|p| p.enabled);
-                switched_off += usize::from(!on);
-                on
+            .add_block_objects(&cache.join("maps").join(block), block, |part, who| {
+                let on = story
+                    .and_then(|s| s.part(&part.name))
+                    .is_none_or(|p| p.enabled);
+                if on {
+                    return who;
+                }
+                switched_off += 1;
+                if riders.contains(part.name.as_str()) {
+                    who << 2
+                } else {
+                    0
+                }
             })
             .map_err(anyhow::Error::msg)?;
         if parts > 0 {
@@ -459,6 +464,25 @@ pub(crate) fn collision_world(
         }
     }
     Ok(world)
+}
+
+/// The story group of fall-prevention walls that common event 20005560 switches on while Wolf
+/// has SpEffect 4100 ([`sekiro_sim::hit_filter::RIDE_ASSIST_MOVE`]).
+const RIDE_WALL_GROUP: i64 = 1_106_200;
+
+/// Names of a block's objects in [`RIDE_WALL_GROUP`].
+fn ride_walls(layout: &Value) -> BTreeSet<&str> {
+    layout["objects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|row| {
+            row["entity_group_ids"]
+                .as_array()
+                .is_some_and(|g| g.iter().any(|v| v.as_i64() == Some(RIDE_WALL_GROUP)))
+        })
+        .filter_map(|row| row["name"].as_str())
+        .collect()
 }
 
 impl MapWorld {
@@ -2078,7 +2102,8 @@ mod tests {
     /// The play world keeps the fall-prevention walls (#119), on the same shared world the game
     /// hands Wolf: running at the cliff top east of start 2 (`crates/sim/tests/it/edge_hold.rs`)
     /// holds him at the map's filter-28 wall, and running off the side of the grapple pine holds
-    /// him at its collisionType 6 part, which the first-visit story switches off.
+    /// him at its collisionType 6 part, which the first-visit story switches off and which holds
+    /// only a body standing on the trunk's rideable material (808).
     #[test]
     fn play_collision_world_holds_wolf_at_edges() {
         let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
@@ -2106,4 +2131,3 @@ mod tests {
         assert!(far < 0.5 && grounded, "ran {far:.2} m off the pine");
     }
 }
-

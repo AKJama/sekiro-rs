@@ -70,6 +70,27 @@ pub const CAMERA: u8 = 4;
 /// player script asks for the assist ([`fall_assist_walls`]).
 pub const FALL_ASSIST_MOVE: u8 = 8;
 pub const FALL_ASSIST_ACTION: u8 = 16;
+/// [`FALL_ASSIST_MOVE`] and [`FALL_ASSIST_ACTION`] walls that are on only while the body stands
+/// on an object that can be ridden ([`RIDEABLE_SPECIAL`]). The story switches these off (m11_00
+/// group 1106200), and common event 20005560 switches them on while Wolf has SpEffect 4100,
+/// which HitMaterialSpecialSettingParam 8 ("objects that can be ridden") gives him.
+pub const RIDE_ASSIST_MOVE: u8 = FALL_ASSIST_MOVE << 2;
+pub const RIDE_ASSIST_ACTION: u8 = FALL_ASSIST_ACTION << 2;
+/// HitMaterialSpecialSettingParam row of "objects that can be ridden" (乗れるオブジェ), the one
+/// that gives SpEffect 4100. A collision triangle's material id is its special setting times
+/// 100 plus its HitMtrlParam row: the rideable pines' trunks are 808 (tree, row 8), and wood
+/// floors 204 and 504 (wood, rows 2 and 5).
+pub const RIDEABLE_SPECIAL: u32 = 8;
+
+/// The walls of `walls` ([`fall_assist_walls`] bits) plus their [`RIDE_ASSIST_MOVE`] and
+/// [`RIDE_ASSIST_ACTION`] twins when the body stands on a rideable object.
+pub fn riding_walls(walls: u8, floor_material: Option<u32>) -> u8 {
+    if floor_material.is_some_and(|m| m / 100 == RIDEABLE_SPECIAL) {
+        walls | (walls & (FALL_ASSIST_MOVE | FALL_ASSIST_ACTION)) << 2
+    } else {
+        walls
+    }
+}
 
 /// The fall-prevention walls the assist tests for HKS `act(3016, arg)`. The script
 /// (`_UpdateFallProtection`) sends arg 0 in states whose `ENABLE_FALL_PROTECT_WALL_STRONG` is
@@ -290,6 +311,12 @@ mod tests {
         assert_eq!(mask(28), FALL_ASSIST_MOVE);
         assert_eq!(fall_assist_walls(0), FALL_ASSIST_MOVE);
         assert_eq!(fall_assist_walls(1), FALL_ASSIST_ACTION);
+        assert_eq!(
+            riding_walls(FALL_ASSIST_MOVE, Some(808)),
+            FALL_ASSIST_MOVE | RIDE_ASSIST_MOVE
+        );
+        assert_eq!(riding_walls(FALL_ASSIST_MOVE, Some(8)), FALL_ASSIST_MOVE);
+        assert_eq!(riding_walls(0, Some(808)), 0);
     }
 
     #[test]

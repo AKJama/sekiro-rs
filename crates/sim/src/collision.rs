@@ -475,23 +475,24 @@ impl CollisionWorld {
         }
     }
 
-    /// Adds the collision of a block's placed objects (`object_collision.bin`) that `enabled`
-    /// keeps, for those [`crate::hit_filter::object_mask`] says collide with them: objects
-    /// everyone collides with as ordinary triangles, the rest as helpers of their mask. Each
-    /// mask's objects join the grid as one mesh, and each object is recorded by its triangles in
-    /// it as `<block>/<part>`, since part names repeat across blocks. Returns the parts and
-    /// triangles added.
+    /// Adds the collision of a block's placed objects (`object_collision.bin`), each with the
+    /// mask `mask` gives it from its part and [`crate::hit_filter::object_mask`] (0 leaves it
+    /// out): objects everyone collides with as ordinary triangles, the rest as helpers of their
+    /// mask. Each mask's objects join the grid as one mesh, and each object is recorded by its
+    /// triangles in it as `<block>/<part>`, since part names repeat across blocks. Returns the
+    /// parts and triangles added.
     pub fn add_objects(
         &mut self,
         block: &str,
         objects: &ObjectCollision,
-        mut enabled: impl FnMut(&ObjectCollisionPart) -> bool,
+        mut mask: impl FnMut(&ObjectCollisionPart, u8) -> u8,
     ) -> (usize, usize) {
         let mut by_mask: std::collections::BTreeMap<u8, Vec<&ObjectCollisionPart>> =
             Default::default();
         for part in &objects.parts {
             let who = crate::hit_filter::object_mask(part.collision_type);
-            if who != 0 && enabled(part) {
+            let who = if who == 0 { 0 } else { mask(part, who) };
+            if who != 0 {
                 by_mask.entry(who).or_default().push(part);
             }
         }
@@ -540,7 +541,7 @@ impl CollisionWorld {
         &mut self,
         dir: &Path,
         block: &str,
-        enabled: impl FnMut(&ObjectCollisionPart) -> bool,
+        mask: impl FnMut(&ObjectCollisionPart, u8) -> u8,
     ) -> Result<(usize, usize), String> {
         let path = dir.join("object_collision.bin");
         if !path.is_file() {
@@ -548,7 +549,7 @@ impl CollisionWorld {
         }
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let objects = ObjectCollision::from_bytes(&bytes).map_err(|e| e.to_string())?;
-        Ok(self.add_objects(block, &objects, enabled))
+        Ok(self.add_objects(block, &objects, mask))
     }
 
     /// Appends a mesh only those `mask` holds collide with ([`crate::hit_filter::PLAYER`],

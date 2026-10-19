@@ -87,6 +87,9 @@ What the simulation does:
   A capsule is tessellated from its segment and radius instead (`hknp::capsule`).
 - `CollisionWorld::add_objects` adds the parts the story keeps enabled: types 0 as ordinary collision, 1 and 2 as collision for the player and enemies only, 3 and 7 for the camera only, and leaves the rest out (`hit_filter::object_group`, `hit_filter::object_mask`).
 - The play world (`map_world::collision_world`) adds every block's objects (`CollisionWorld::add_block_objects`), skipping those the first-visit story has switched off (`DeactivateObject`, `docs/MAP-COMPLETENESS.md`): on the reference story 168 Outskirts and 64 Castle objects with collision are off.
+- The exception is the trees' fall-prevention walls in m11_00 group 1106200 (collisionType 6), which common event 20005560 switches on while Wolf has SpEffect 4100.
+  HitMaterialSpecialSettingParam 8 ("objects that can be ridden") gives that SpEffect, and a triangle's material id is its special setting times 100 plus its HitMtrlParam row, so the pines' trunks are 808.
+  The play world adds these walls with `hit_filter::RIDE_ASSIST_MOVE` / `RIDE_ASSIST_ACTION`, and a body asks for them only while its floor's special setting is 8 (`hit_filter::riding_walls`), so they hold riders and nobody on the ground.
 - `CollisionWorld::floor_object` names the object under a point as `<block>/<part>` (`m11_00_00_00/o002500_0005`), since 200 object part names repeat between the Outskirts and Castle blocks, and the live check records it per sample as `floor_object`.
 - The play setup loads a connected world's stories once (`story::load_blocks`) for both the objects' collision and the map (`add_map`), which would otherwise evaluate each block's story a second time (about 0.9 s per block).
   A map played alone (`--no-connected-blocks`) has no story for its drawn parts, so its objects' collision does not use one either.

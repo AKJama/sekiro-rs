@@ -328,7 +328,13 @@ impl Body {
         let [mx, mz] = if input.ignore_walls {
             travel
         } else {
-            ground.slide_assisted(self.position, travel, input.fall_assist)
+            let [x, y, z] = self.position;
+            let walls = if input.fall_assist == 0 {
+                0
+            } else {
+                crate::hit_filter::riding_walls(input.fall_assist, ground.material(x, z, y + 0.1))
+            };
+            ground.slide_assisted(self.position, travel, walls)
         };
         self.position[0] += mx;
         self.position[2] += mz;
