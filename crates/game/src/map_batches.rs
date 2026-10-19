@@ -185,7 +185,7 @@ fn update(world: &mut World) {
         };
         let job = state.jobs.swap_remove(i);
         completed += 1;
-        let Some(mesh) = mesh else {
+        let Some(mut mesh) = mesh else {
             continue;
         };
         if job
@@ -196,6 +196,9 @@ fn update(world: &mut World) {
         {
             continue;
         }
+        // Collision is loaded independently. Sources retain CPU data for guarded fallback,
+        // but the generated batch only needs its GPU copy after bounds are calculated.
+        mesh.asset_usage = bevy::asset::RenderAssetUsages::RENDER_WORLD;
         let mesh = world.resource_mut::<Assets<Mesh>>().add(mesh);
         let parent = job.group.sources[0].root;
         let mut entity = world.spawn((

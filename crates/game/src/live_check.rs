@@ -269,7 +269,7 @@ fn ground_triangle(drawn: &[Drawn], meshes: &Assets<Mesh>, p: Vec3) -> Option<bo
             continue;
         };
         let Some(VertexAttributeValues::Float32x3(positions)) =
-            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+            mesh.try_attribute(Mesh::ATTRIBUTE_POSITION).ok()
         else {
             continue;
         };

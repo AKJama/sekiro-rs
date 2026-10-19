@@ -19,7 +19,7 @@ use serde_json::Value;
 #[path = "camera_fade.rs"]
 mod camera_fade;
 
-type LayeredMaterial = ExtendedMaterial<StandardMaterial, MapLayers>;
+pub(crate) type LayeredMaterial = ExtendedMaterial<StandardMaterial, MapLayers>;
 
 #[path = "map_batches.rs"]
 pub(crate) mod batches;
@@ -205,7 +205,7 @@ fn release_materials(
 #[bind_group_data(MapPipelineKey)]
 #[data(50, MapLayersUniform, binding_array(101))]
 #[bindless(index_table(range(50..81), binding(100)))]
-struct MapLayers {
+pub(crate) struct MapLayers {
     // xyz: enabled albedo layers; w: mask present.
     enabled: Vec4,
     albedo_enabled: Vec4,
@@ -278,7 +278,7 @@ pub(crate) const ATTR_MAP_BLEND2: bevy::mesh::MeshVertexAttribute =
     );
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct MapPipelineKey {
+pub(crate) struct MapPipelineKey {
     camera_fade: bool,
     game: bool,
     native_direct: bool,
@@ -897,6 +897,8 @@ pub(super) fn install(app: &mut App, prefix: &str, dir: &std::path::Path, args: 
     crate::pipeline_warmup::install::<LayeredMaterial>(app, args);
     batches::install(app);
     crate::material_residency::install(app);
+    crate::mesh_residency::install(app);
+    crate::texture_residency::install(app);
     embedded_asset!(app, "map_material.wesl");
     embedded_asset!(app, "map_prepass.wesl");
     bevy::shader::load_shader_library!(app, "map_bindings.wesl");

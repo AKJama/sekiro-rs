@@ -5284,6 +5284,7 @@ dependencies = [
  "serde_json",
  "tracing",
  "wgpu",
+ "windows",
 ]
 
 [[package]]
