@@ -104,7 +104,7 @@ pub struct Character {
     pub wire: crate::wire::Wire,
     pub chr: String,
     pub kind: ControlKind,
-    pub behavior: PlayerBehavior,
+    pub behavior: crate::shared::BehaviorSlot,
     pub clips: ClipLibrary,
     pub tae: Arc<TaeDb>,
     pub tae_runtime: TaeRuntime,
@@ -207,19 +207,68 @@ const HEADING_MIN_SPEED: f32 = 1.0;
 pub type PlayerCharacter = Character;
 
 fn load_skeleton(cache: &Path, chr: &str) -> Arc<Skeleton> {
-    std::fs::read(cache.join(format!("anim/{chr}/skeleton.bin")))
-        .ok()
-        .and_then(|b| Skeleton::from_bytes(&b).ok())
-        .map(Arc::new)
-        .unwrap_or_else(|| {
-            Arc::new(Skeleton {
-                name: chr.to_owned(),
-                bones: Vec::new(),
-            })
+    let path = cache.join(format!("anim/{chr}/skeleton.bin"));
+    crate::shared::load(path.clone(), || {
+        std::fs::read(&path)
+            .ok()
+            .and_then(|b| Skeleton::from_bytes(&b).ok())
+    })
+    .unwrap_or_else(|| {
+        Arc::new(Skeleton {
+            name: chr.to_owned(),
+            bones: Vec::new(),
         })
+    })
 }
 
 impl Character {
+    /// Move out the live actor, leaving only an inert shell without VM, graph or assets.
+    pub(crate) fn take(&mut self) -> Option<Self> {
+        self.is_present()
+            .then(|| std::mem::replace(self, Self::vacant()))
+    }
+
+    pub fn is_present(&self) -> bool {
+        self.behavior.is_present()
+    }
+
+    fn vacant() -> Self {
+        Self {
+            chr: String::new(),
+            kind: ControlKind::Player,
+            behavior: crate::shared::BehaviorSlot::empty(),
+            clips: ClipLibrary::default(),
+            tae: Arc::default(),
+            tae_runtime: TaeRuntime::default(),
+            body: Body::default(),
+            docking: Default::default(),
+            wire: Default::default(),
+            input: Default::default(),
+            npc: Default::default(),
+            lock_target: None,
+            aim_candidates: Vec::new(),
+            homing: None,
+            auto_aim: AutoAimLimits::default(),
+            npc_target: None,
+            pending_damage: None,
+            skeleton: Arc::new(Skeleton {
+                name: String::new(),
+                bones: Vec::new(),
+            }),
+            ground: Box::new(FlatGround::default()),
+            throw_ignore_walls: false,
+            twist: 0.0,
+            walk_twist: 0.0,
+            walk_twist_target: 0.0,
+            heading: None,
+            free_move_pending: false,
+            last_times: HashMap::new(),
+            last_main: None,
+            last_motion_state: None,
+            motion_blend: None,
+            last_anim_effects: Vec::new(),
+        }
+    }
     fn assemble(
         cache: &Path,
         chr: &str,
@@ -228,8 +277,11 @@ impl Character {
         graph: &str,
         offsets: AnimOffsets,
     ) -> Result<Self, LoadError> {
-        let tae = Arc::new(TaeDb::load_from_cache(cache, chr));
-        let clips = ClipLibrary::new(cache.join("anim").join(chr));
+        let tae = crate::shared::load(cache.join("anim").join(chr), || {
+            Some(TaeDb::load_from_cache(cache, chr))
+        })
+        .unwrap();
+        let clips = ClipLibrary::shared(cache.join("anim").join(chr));
         for (id, src) in tae.hkx_aliases() {
             clips.add_alias(id, src);
         }
@@ -249,7 +301,7 @@ impl Character {
         Ok(Self {
             chr: chr.to_owned(),
             kind,
-            behavior,
+            behavior: behavior.into(),
             clips,
             tae,
             tae_runtime: TaeRuntime::for_kind(kind == ControlKind::Npc && chr == crate::demon::CHR),
@@ -334,6 +386,7 @@ impl Character {
     /// Runs the script and behaviour graph for one step, watching the script's auto-aim
     /// calls (`act(156)` refresh, `act(157)` stop) for the player.
     fn tick_behavior(&mut self, dt: f32) -> TickReport {
+        let _timer = crate::perf::Scope::start("sim behavior HKS");
         if self.kind != ControlKind::Player {
             return self.behavior.tick(dt);
         }
@@ -543,7 +596,8 @@ impl Character {
     fn fill_env(&mut self, dt: f32) {
         let authored_airborne = self.authored_air_height() > 0.0;
         let tae = &self.tae_runtime.frame;
-        let env = &mut self.behavior.env;
+        let behavior = &mut *self.behavior;
+        let env = &mut behavior.env;
         env.requested = self
             .input
             .pending_actions()
@@ -556,7 +610,7 @@ impl Character {
         // held attack available to HKS, which owns the charged-state transition.
         if !self.body.grounded
             && (tae.behavior_refs.contains(&510) || tae.behavior_refs.contains(&511))
-            && !self.behavior.runtime.main_clip().is_some_and(|c| {
+            && !behavior.runtime.main_clip().is_some_and(|c| {
                 matches!(
                     c.animation.as_str(),
                     "a050_308900" | "a050_308901" | "a050_308910" | "a050_308911"
@@ -581,11 +635,7 @@ impl Character {
         }
         // Free animations (no action flags at all) are standby; otherwise the move-cancel window
         // marks both standby and move cancel. Ended clips count as standby too.
-        let ended = self
-            .behavior
-            .runtime
-            .main_clip()
-            .is_some_and(|c| c.at_end());
+        let ended = behavior.runtime.main_clip().is_some_and(|c| c.at_end());
         let move_window = !tae.restricted || tae.flag(cancel::MOVE) || ended;
         env.standby = Some(move_window);
         env.move_cancel = Some(move_window);
@@ -635,6 +685,7 @@ impl Character {
 
     /// Runs one step of `dt` seconds. `frame` is the player's input; NPCs read [`Self::npc`].
     pub fn tick(&mut self, frame: &InputFrame, dt: f32) -> StepReport {
+        let _timer = crate::perf::Scope::start("sim character");
         let interrupted_height = if self.pending_damage.is_some() {
             self.authored_air_height()
         } else {
@@ -710,7 +761,8 @@ impl Character {
             .active
             .as_ref()
             .or(self.docking.candidate.as_ref());
-        let env = &mut self.behavior.env;
+        let behavior = &mut *self.behavior;
+        let env = &mut behavior.env;
         env.docking_searches.set(0);
         env.action_guide.set(None);
         env.hang_candidate = self.body.grounded
@@ -750,17 +802,17 @@ impl Character {
             .active
             .as_ref()
             .is_some_and(|t| self.docking.hang_can_climb(t, self.ground.as_ref()));
-        self.behavior
+        behavior
             .runtime
             .set_variable("HangStartEdgeAngle", dock.map_or(0.0, |t| t.angle));
-        self.behavior
+        behavior
             .runtime
             .set_variable("CoverStartEdgeAngle", dock.map_or(0.0, |t| t.angle));
         let docking_angle = self
             .input
             .stick_world_yaw()
             .map_or(0.0, |yaw| -angle_diff(yaw, self.body.yaw).to_degrees());
-        self.behavior
+        behavior
             .runtime
             .set_variable("DockingStickAngle", docking_angle);
         // Placeholder away-stick exit: offer arm 12 to the existing HKS end transition.
@@ -822,11 +874,13 @@ impl Character {
             })
             .collect();
         playing.sort_by_key(|(n, _)| (Some(*n) != main_node, *n));
+        let tae_timer = crate::perf::Scope::start("sim TAE");
         self.tae_runtime.update(
             &self.tae,
             &playing.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>(),
             dt,
         );
+        drop(tae_timer);
         // NPC animation-set effects persist after the TAE window, replacing the resident
         // category-100 choice. CMSG offset type 15 selects a000/a100/... (FwLo's notes).
         if self.kind == ControlKind::Npc {

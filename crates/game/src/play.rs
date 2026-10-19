@@ -56,6 +56,8 @@ mod arena_d_scene;
 pub(crate) mod cinematic_fade;
 #[path = "live_check.rs"]
 mod live_check;
+#[path = "map_enemies.rs"]
+mod map_enemies;
 #[path = "play_gate.rs"]
 mod play_gate;
 pub(crate) use play_gate::PlayGate;
@@ -65,6 +67,7 @@ mod grapple_hud;
 mod rope;
 
 pub struct Options {
+    pub map_enemies: bool,
     pub brain_overlay: bool,
     pub brain_label: String,
     pub window_size: (u32, u32),
@@ -345,6 +348,10 @@ struct Captures {
 }
 
 pub fn run(options: Options) -> Result<()> {
+    anyhow::ensure!(
+        !options.map_enemies || (options.map.is_some() && options.arena.is_none()),
+        "--map-enemies requires --play --map and cannot be combined with a boss arena"
+    );
     let cache = options.cache.canonicalize().context("cache directory")?;
     if let Some(arena) = options.arena {
         let missing_b = sekiro_sim::arena_b::missing_models(&cache, arena);
@@ -529,6 +536,38 @@ pub fn run(options: Options) -> Result<()> {
     if !options.enemy_present {
         vacant_enemy_slot(&mut duel);
     }
+    if options.map_enemies {
+        let (_, id, world) = on_map.as_ref().context("--map-enemies requires a map")?;
+        let mut population = sekiro_sim::duel::population::Population::load_map(
+            &cache,
+            id,
+            world.clone(),
+            duel.player.body.position,
+            stories.maps.get(id).map(|s| &s.state),
+        )
+        .map_err(anyhow::Error::msg)?;
+        let mut kinds = std::collections::BTreeMap::<String, usize>::new();
+        for foe in &mut population.foes {
+            *kinds.entry(foe.duel.spec.chr.clone()).or_default() += 1;
+            foe.duel
+                .rules
+                .set_attack_power(options.attack_power)
+                .map_err(anyhow::Error::msg)?;
+            foe.duel.enemy_active = options.enemy;
+            foe.duel.force_act = options.force_act;
+        }
+        eprintln!(
+            "map enemies {id}: spawned={} active={} kinds={kinds:?}",
+            population.foes.len(),
+            population.foes.iter().filter(|f| f.active).count()
+        );
+        eprintln!(
+            "map enemies excluded: {}",
+            serde_json::to_string(&population.excluded)?
+        );
+        duel.set_population(population);
+        stage("map enemies");
+    }
     let script = match options.script.as_deref() {
         None => None,
         Some("builtin") => Some(demo::parse(demo::DEMO).map_err(anyhow::Error::msg)?),
@@ -641,7 +680,7 @@ pub fn run(options: Options) -> Result<()> {
         script,
         route: ScriptRoute::parse(&std::env::args().collect::<Vec<_>>())?,
         step: 0,
-        lock_requested: options.lock_on && options.enemy_present,
+        lock_requested: options.lock_on && (options.enemy_present || options.map_enemies),
         break_posture: options.break_posture,
         passive: !options.enemy,
         enemy_present: options.enemy_present,
@@ -825,6 +864,9 @@ pub fn run(options: Options) -> Result<()> {
         if options.arena.is_some() && options.enemy_present {
             crate::arena_b::install(&mut app, &cache, &id)?;
         }
+    }
+    if options.map_enemies {
+        map_enemies::install(&mut app, &cache)?;
     }
     map::ready::install(&mut app);
     app.add_plugins(crate::presentation::PresentationPlugin)
@@ -1465,7 +1507,11 @@ fn simulate(
     if std::env::var_os("PLAY_LOG_COMBO").is_some() {
         log_combo(sim.step, &frame, &sim.duel, &report);
     }
-    crate::audio::emit(&sim.duel, &report, &mut sounds, &mut cues);
+    if let Some(population) = &sim.duel.population {
+        crate::audio::emit_population(&sim.duel, population, &mut sounds, &mut cues);
+    } else {
+        crate::audio::emit(&sim.duel, &report, &mut sounds, &mut cues);
+    }
     for (i, r) in [&report.player, &report.enemy].into_iter().enumerate() {
         if !r.behavior.script_errors.is_empty() {
             warn!("script errors ({i}): {:?}", r.behavior.script_errors);
@@ -1482,8 +1528,16 @@ fn simulate(
     for (hit, res) in &report.hits {
         let text = format!(
             "step {step}: {} hit {} ({}), AtkParam {}: HP -{}, posture -{} / attacker -{}",
-            ["Wolf", "enemy"][hit.attacker],
-            ["Wolf", "enemy"][hit.defender],
+            if hit.attacker == 0 {
+                "Wolf".into()
+            } else {
+                format!("enemy {}", hit.attacker)
+            },
+            if hit.defender == 0 {
+                "Wolf".into()
+            } else {
+                format!("enemy {}", hit.defender)
+            },
             if res.deflected {
                 "deflected"
             } else if res.guarded {
@@ -1754,6 +1808,22 @@ fn sync_bullets(
         .collect();
     if let Some(bird) = sim.duel.father_bird.as_ref().filter(|b| b.enabled) {
         shown.extend(bird.duel.bullets.live.iter().cloned());
+    }
+    if let Some(population) = &sim.duel.population {
+        for (i, foe) in population.foes.iter().enumerate().filter(|(_, f)| f.active) {
+            shown.extend(
+                foe.duel
+                    .bullets
+                    .live
+                    .iter()
+                    .filter(|b| b.shooter == 1 || population.selected == Some(i))
+                    .cloned()
+                    .map(|mut b| {
+                        b.serial ^= (i as u64 + 1) << 48;
+                        b
+                    }),
+            );
+        }
     }
     crate::lightning_fx::draw(
         &sim.duel,
@@ -2049,7 +2119,7 @@ fn hud(
         s += "E / Y: Ring bell\n";
     }
     s += "WASD move, mouse look, LMB attack, RMB guard, Space jump, Shift step/sprint, C crouch, ";
-    if sim.enemy_present {
+    if sim.enemy_present || sim.duel.population.is_some() {
         s += "Q lock-on, ";
     }
     s += "Esc pause, F3 debug text, -/= volume";

@@ -35,6 +35,7 @@ pub mod headless_ape;
 pub mod monk_phantoms;
 #[path = "old_dragons.rs"]
 pub mod old_dragons;
+pub mod population;
 #[path = "screen_monkeys.rs"]
 pub mod screen_monkeys;
 
@@ -146,13 +147,17 @@ pub struct DuelReport {
 
 /// ThrowParam and both models' sorb dummies, for deathblows.
 struct Throws {
-    table: ThrowTable,
-    model: Flver,
+    table: Arc<ThrowTable>,
+    model: Arc<Flver>,
     /// The enemy's model, for rows that snap Wolf to one of its dummies (`defSorbDmyId`).
-    enemy_model: Option<Flver>,
+    enemy_model: Option<Arc<Flver>>,
 }
 
 pub struct Duel {
+    /// Optional independent map foes sharing this duel's single live Wolf.
+    pub population: Option<population::Population>,
+    /// Population kernels receive their target and auto-aim candidates from the owner.
+    population_target: Option<bool>,
     /// Independent combatants in the Hall of Illusions, sharing this duel's Wolf.
     pub screen_monkeys: Option<screen_monkeys::Encounter>,
     pub monk_phantoms: Option<monk_phantoms::Encounter>,
@@ -711,7 +716,16 @@ impl Duel {
 
     /// Like [`Duel::load`], against the enemy `spec`.
     pub fn load_with(cache: &Path, distance: f32, spec: EnemySpec) -> Result<Self, LoadError> {
-        let (player, enemy) = Self::load_characters(cache, distance, &spec)?;
+        Self::load_with_player(cache, distance, spec, None)
+    }
+
+    fn load_with_player(
+        cache: &Path,
+        distance: f32,
+        spec: EnemySpec,
+        player: Option<Character>,
+    ) -> Result<Self, LoadError> {
+        let (player, enemy) = Self::load_characters_with(cache, distance, &spec, player)?;
         let fighters = [
             Combatant::player(cache, &player.skeleton),
             Combatant::npc(cache, &spec.chr, spec.npc_param, &enemy.skeleton),
@@ -719,10 +733,15 @@ impl Duel {
         let rules = CombatRules::load(cache, &[&fighters[0], &fighters[1]]);
         let ai = Self::load_ai(cache, &spec);
         let read_model = |chr: &str| {
-            let bytes = std::fs::read(cache.join(format!("raw/chr/{chr}.chrbnd.d/{chr}.flver")));
-            flver::parse(&bytes.ok()?).ok()
+            let path = cache.join(format!("raw/chr/{chr}.chrbnd.d/{chr}.flver"));
+            crate::shared::load(path.clone(), || {
+                flver::parse(&std::fs::read(&path).ok()?).ok()
+            })
         };
-        let throws = ThrowTable::load_from_cache(cache).ok().and_then(|table| {
+        let throws = crate::shared::load(cache.join("ThrowParam"), || {
+            ThrowTable::load_from_cache(cache).ok()
+        })
+        .and_then(|table| {
             Some(Throws {
                 table,
                 model: read_model("c0000")?,
@@ -743,6 +762,8 @@ impl Duel {
             butterfly_illusions: None,
             headless_ape: None,
             shared_player_frame: false,
+            population: None,
+            population_target: None,
             defer_map_events: false,
             auxiliary_ezstate: None,
             auxiliary_animation_enabled: true,
@@ -966,7 +987,8 @@ impl Duel {
         AiWorld {
             dt,
             me: actor(&self.enemy, 1),
-            target: (!self.rules.fighters[0].dead()).then(|| actor(&self.player, 0)),
+            target: (!self.rules.fighters[0].dead() && self.population_target != Some(false))
+                .then(|| actor(&self.player, 0)),
             hit_radius: self.fighters[1].radius,
             current_anim: main.and_then(|c| anim_id_from_clip(&c.animation)),
             current_anim_time: main.map_or(0.0, |c| c.time),
@@ -992,7 +1014,19 @@ impl Duel {
         distance: f32,
         spec: &EnemySpec,
     ) -> Result<(Character, Character), LoadError> {
-        let mut player = Character::load_from_cache(cache)?;
+        Self::load_characters_with(cache, distance, spec, None)
+    }
+
+    fn load_characters_with(
+        cache: &Path,
+        distance: f32,
+        spec: &EnemySpec,
+        player: Option<Character>,
+    ) -> Result<(Character, Character), LoadError> {
+        let mut player = match player {
+            Some(player) => player,
+            None => Character::load_from_cache(cache)?,
+        };
         let registry = crate::registry::Registry::load(cache).ok();
         let anim_chr = registry.as_ref().map_or_else(
             || spec.chr.clone(),
@@ -1859,8 +1893,8 @@ impl Duel {
         } else {
             DummyFrame::from_flver(&throws.model, row.atk_sorb_dummy)?
         };
-        self.player
-            .snap_yaw(self.player.yaw_to(self.enemy.body.position));
+        let yaw = self.player.yaw_to(self.enemy.body.position);
+        self.player.snap_yaw(yaw);
         self.enemy
             .snap_yaw(self.enemy.yaw_to(self.player.body.position));
         let slide = crate::deathblow::AbsorbSlide::new(
@@ -3151,6 +3185,9 @@ impl Duel {
     }
 
     pub fn step(&mut self, input: &InputFrame, dt: f32) -> DuelReport {
+        if self.population.is_some() {
+            return self.step_population(input, dt);
+        }
         if !self.enemy_present {
             return self.step_solo(input, dt);
         }
@@ -3296,11 +3333,13 @@ impl Duel {
         self.force_enemy_act(enemy_alive);
         self.publish_player_frame(endure_action);
         // Who each side aims at: auto-aim candidates for Wolf, Wolf for the soldier.
-        self.player.aim_candidates = if enemy_alive {
-            vec![self.enemy.body.position]
-        } else {
-            Vec::new()
-        };
+        if self.population_target.is_none() {
+            self.player.aim_candidates = if enemy_alive {
+                vec![self.enemy.body.position]
+            } else {
+                Vec::new()
+            };
+        }
         self.enemy.npc_target =
             (!self.rules.fighters[0].dead()).then_some(self.player.body.position);
         // Hit stop: each character advances only by what is left of the step after its freeze.

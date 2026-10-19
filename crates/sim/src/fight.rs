@@ -176,9 +176,9 @@ impl Fighter {
 /// HP, posture and the hit rules for the characters of one fight.
 pub struct CombatRules {
     pub fighters: Vec<Fighter>,
-    effects: HashMap<i32, ActiveEffect>,
-    damage_motion: HashMap<i32, DamageMotionEffect>,
-    knockback: KnockbackTable,
+    effects: std::sync::Arc<HashMap<i32, ActiveEffect>>,
+    damage_motion: std::sync::Arc<HashMap<i32, DamageMotionEffect>>,
+    knockback: std::sync::Arc<KnockbackTable>,
     /// Status fields of every SpEffect (build-up, periodic HP change).
     pub statuses: StatusBook,
 }
@@ -222,7 +222,7 @@ fn param_dirs(cache: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
     )
 }
 
-fn row_f32(t: Option<&Table>, id: i32, field: &str) -> Option<f32> {
+fn row_f32(t: Option<&std::sync::Arc<Table>>, id: i32, field: &str) -> Option<f32> {
     let row = t?.find(id)?;
     row.f32(field)
         .ok()
@@ -294,39 +294,52 @@ impl CombatRules {
         let control = load_table(&pd, &dd, "StaminaControlParam", "StaminaControlParam");
         let graphs = load_table(&pd, &dd, "CalcCorrectGraph", "CalcCorrectGraph");
         let tentative = load_table(&pd, &dd, "TentativePlayerParam", "TentativePlayerParam");
-        let knockback = load_table(&pd, &dd, "KnockBackParam", "KnockBackParam")
-            .map(|t| KnockbackTable::from_table(&t))
-            .unwrap_or_default();
+        let knockback = crate::shared::load(cache.join("shared-knockback"), || {
+            Some(
+                load_table(&pd, &dd, "KnockBackParam", "KnockBackParam")
+                    .map(|t| KnockbackTable::from_table(&t))
+                    .unwrap_or_default(),
+            )
+        })
+        .unwrap();
         let wolf_knockback_row = player_knockback_row(&pd, &dd);
 
-        let effects = sp
-            .as_ref()
-            .map(|t| {
-                t.rows()
-                    .filter_map(|r| ActiveEffect::from_row(&r).ok().map(|e| (r.id(), e)))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let damage_motion = sp
-            .as_ref()
-            .map(|table| {
-                table
-                    .rows()
-                    .filter(|r| r.int("spCategory").ok() == Some(1001))
-                    .map(|r| {
-                        (
-                            r.id(),
-                            DamageMotionEffect {
-                                priority: r.int("categoryPriority").unwrap_or(255) as u8,
-                                requires_armour: r.int("stateInfo").ok() == Some(120),
-                                levels: DAMAGE_LEVEL_FIELDS
-                                    .map(|field| r.int(field).unwrap_or(0) as i32),
-                            },
-                        )
+        let effects = crate::shared::load(cache.join("shared-active-effects"), || {
+            Some(
+                sp.as_ref()
+                    .map(|t| {
+                        t.rows()
+                            .filter_map(|r| ActiveEffect::from_row(&r).ok().map(|e| (r.id(), e)))
+                            .collect()
                     })
-                    .collect()
-            })
-            .unwrap_or_default();
+                    .unwrap_or_default(),
+            )
+        })
+        .unwrap();
+        let damage_motion = crate::shared::load(cache.join("shared-damage-motion"), || {
+            Some(
+                sp.as_ref()
+                    .map(|table| {
+                        table
+                            .rows()
+                            .filter(|r| r.int("spCategory").ok() == Some(1001))
+                            .map(|r| {
+                                (
+                                    r.id(),
+                                    DamageMotionEffect {
+                                        priority: r.int("categoryPriority").unwrap_or(255) as u8,
+                                        requires_armour: r.int("stateInfo").ok() == Some(120),
+                                        levels: DAMAGE_LEVEL_FIELDS
+                                            .map(|field| r.int(field).unwrap_or(0) as i32),
+                                    },
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            )
+        })
+        .unwrap();
         let control_row = |id: i32| {
             control
                 .as_ref()?
@@ -339,7 +352,16 @@ impl CombatRules {
                 .find(id)
                 .and_then(|r| CalcCorrectGraph::from_row(&r).ok())
         };
-        let statuses = sp.as_ref().map(StatusBook::from_table).unwrap_or_default();
+        let statuses = crate::shared::load(cache.join("shared-statuses"), || {
+            Some(
+                sp.as_ref()
+                    .map(|t| StatusBook::from_table(t))
+                    .unwrap_or_default(),
+            )
+        })
+        .unwrap()
+        .as_ref()
+        .clone();
         let tentative_f = |f: &str| row_f32(tentative.as_ref(), 0, f).unwrap_or(0.0);
         let mut wolf_status = Status::new(
             graph(GRAPH_POISON_RESIST).map_or(0.0, |g| g.eval(PLAYER_GROWTH_LEVEL).trunc())

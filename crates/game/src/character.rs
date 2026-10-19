@@ -342,14 +342,38 @@ pub fn bind_rigs(
     }
 }
 
+/// Placed actors outside their simulation activation range retain their last skinned pose.
+#[derive(Component)]
+pub struct PoseDormant;
+
+/// Population presentation budget, chosen before animation; absent on the existing boss path.
+#[derive(Component, Clone, Copy)]
+pub struct PresentationLod {
+    pub draw: bool,
+    pub pose: bool,
+    pub cloth: bool,
+}
+
+#[allow(clippy::type_complexity)] // Typed pose budgets share the existing joint writer.
 pub fn animate(
     time: Res<Time>,
-    mut q: Query<(&mut Animator, &mut Rig, &mut Transform)>,
+    mut q: Query<(
+        &mut Animator,
+        &mut Rig,
+        &mut Transform,
+        Option<&PresentationLod>,
+        Has<PoseDormant>,
+    )>,
     mut joints: Query<&mut Transform, Without<Rig>>,
 ) {
+    let _timer = crate::perf_log::SystemTimer::start("animation pose upload");
     let dt = time.delta_secs();
-    for (mut anim, mut rig, mut body) in &mut q {
+    for (mut anim, mut rig, mut body, lod, dormant) in &mut q {
         if !rig.bound {
+            continue;
+        }
+        // Initialize a standing pose once; otherwise don't touch joints or upload a hidden pose.
+        if !rig.model.is_empty() && (dormant || lod.is_some_and(|l| !l.pose)) {
             continue;
         }
         let prev = anim.time;

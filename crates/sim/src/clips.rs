@@ -30,6 +30,18 @@ struct Inner {
 pub struct ClipLibrary(Rc<RefCell<Inner>>);
 
 impl ClipLibrary {
+    /// One lazy clip library per animation donor on the simulation thread.
+    pub fn shared(dir: PathBuf) -> Self {
+        thread_local! { static LIBRARIES: RefCell<HashMap<PathBuf, ClipLibrary>> = RefCell::new(HashMap::new()); }
+        let dir = dir.canonicalize().unwrap_or(dir);
+        LIBRARIES.with(|libraries| {
+            libraries
+                .borrow_mut()
+                .entry(dir.clone())
+                .or_insert_with(|| Self::new(dir))
+                .clone()
+        })
+    }
     /// Opens `dir` (`cache/anim/<chr>`), reading the extractor's `aliases.json` (animation name
     /// to the decoded clip it plays, chains already resolved) when present.
     pub fn new(dir: impl Into<PathBuf>) -> Self {

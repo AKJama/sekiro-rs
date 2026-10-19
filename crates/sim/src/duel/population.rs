@@ -1,0 +1,543 @@
+//! Independent combat kernels sharing one authoritative Wolf, like the installed boss adds.
+use super::*;
+
+/// Our scheduling policy, not a recovered engine LOD distance.
+/// Activation/deactivation still comes from NpcParam (100 m for a zero border).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lod {
+    Dormant,
+    Reduced,
+    Full,
+}
+
+impl Lod {
+    pub fn for_distance(distance: f32, activation: f32, engaged: bool) -> Self {
+        if engaged {
+            Self::Full
+        } else if distance > activation {
+            Self::Dormant
+        } else if distance <= 20.0 {
+            Self::Full
+        } else {
+            Self::Reduced
+        }
+    }
+
+    /// Distant unaware actors run at 10 Hz; wake immediately without a catch-up spike.
+    pub fn step_dt(self, accrued: &mut f32, dt: f32) -> Option<f32> {
+        match self {
+            Self::Dormant => {
+                *accrued = 0.0;
+                None
+            }
+            Self::Full => {
+                *accrued = 0.0;
+                Some(dt)
+            }
+            Self::Reduced => {
+                *accrued += dt;
+                if *accrued + 1e-6 >= 0.1 {
+                    Some(std::mem::take(accrued))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+pub struct Foe {
+    pub part: String,
+    pub entity: i32,
+    /// Own Character, Combatant, brain, contact history, projectiles and paired-throw state.
+    pub duel: Box<Duel>,
+    pub report: DuelReport,
+    pub active: bool,
+    pub lod: Lod,
+    pub clock: f32,
+    pub previous: ([f32; 3], f32),
+    pub can_deathblow: bool,
+    pub stepped: bool,
+    initial_patrol: Option<crate::lua_ai::patrol::Patrol>,
+    activation: f32,
+    deactivation: f32,
+    memory: f32,
+    accrued: f32,
+    search_left: f32,
+    search_rng: u64,
+    sees: bool,
+}
+
+pub struct Population {
+    pub foes: Vec<Foe>,
+    pub selected: Option<usize>,
+    locked: Option<usize>,
+    world: Option<Arc<crate::collision::CollisionWorld>>,
+    pub excluded: Vec<Excluded>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct Excluded {
+    pub part: String,
+    pub chr: String,
+    pub entity: i32,
+    pub reason: String,
+}
+
+pub type PlacedFoes = Vec<(EnemySpec, crate::registry::Placement)>;
+pub type StartingPlacements = (PlacedFoes, Vec<Excluded>);
+
+impl Population {
+    pub fn load_map(
+        cache: &Path,
+        map: &str,
+        world: Arc<crate::collision::CollisionWorld>,
+        wolf: [f32; 3],
+        story: Option<&crate::world_events::WorldState>,
+    ) -> Result<Self, String> {
+        let (placements, excluded) = Self::starting_placements(cache, map, story)?;
+        let mut p = Self::load(cache, placements).map_err(|e| e.to_string())?;
+        p.excluded = excluded;
+        let bytes = std::fs::read(cache.join(format!("raw/map/MapStudio/{map}.msb")))
+            .map_err(|e| e.to_string())?;
+        let msb = sekiro_formats::msb::parse(&bytes).map_err(|e| e.to_string())?;
+        let registry = crate::registry::Registry::load(cache)?;
+        for foe in &mut p.foes {
+            let part = msb.parts.iter().find(|part| part.name == foe.part).unwrap();
+            if let Some(ai) = &mut foe.duel.ai {
+                ai.state.patrol = crate::lua_ai::patrol::Patrol::from_msb(&msb, part);
+                foe.initial_patrol.clone_from(&ai.state.patrol);
+                ai.state.map_regions = Some(crate::lua_ai::regions::MapRegions::new(cache, map));
+            }
+            foe.duel.enemy.ground = Box::new(crate::collision::EnemyGround(world.clone()));
+            if let Some(row) = registry.npc_row(foe.duel.spec.npc_param) {
+                let border = row["activateBorderDist"].as_f64().unwrap_or(0.0) as f32;
+                // Zero delegates to an unrecovered engine default: use a documented fallback.
+                foe.activation = if border > 0.0 { border } else { 100.0 };
+                foe.deactivation =
+                    foe.activation + row["deactivateIntervalDist"].as_f64().unwrap_or(0.0) as f32;
+            }
+            foe.active = glam::Vec3::from_array(wolf)
+                .distance(glam::Vec3::from_array(foe.duel.enemy.body.position))
+                <= foe.activation;
+        }
+        p.world = Some(world);
+        Ok(p)
+    }
+
+    /// Use the visibility interpreter's entity/group writes before allocating any actor.
+    pub fn starting_placements(
+        cache: &Path,
+        map: &str,
+        story: Option<&crate::world_events::WorldState>,
+    ) -> Result<StartingPlacements, String> {
+        let placements = Self::map_placements(cache, map)?;
+        let registry = crate::registry::Registry::load(cache)?;
+        let layout: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(cache.join(format!("maps/{map}/layout.json")))
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        let parts: std::collections::HashMap<_, _> = story
+            .into_iter()
+            .flat_map(|s| s.parts(&layout))
+            .map(|p| (p.name.clone(), p))
+            .collect();
+        let mut kept = Vec::new();
+        let mut excluded = Vec::new();
+        for (spec, spot) in placements {
+            let team = registry
+                .npc_row(spec.npc_param)
+                .and_then(|row| row["teamType"].as_i64())
+                .unwrap_or(0);
+            let reason = if let Some(part) = parts.get(&spot.part).filter(|p| !p.enabled) {
+                Some(part.source.as_ref().map_or_else(
+                    || "disabled by map startup".into(),
+                    |s| {
+                        format!(
+                            "disabled by event {} slot {} target {}",
+                            s.event, s.slot, s.target
+                        )
+                    },
+                ))
+            } else if matches!(spec.chr.as_str(), "c1000" | "c1001") {
+                // Invisible event/controller models can borrow hostile NpcParam rows.
+                Some("event/controller model without a combat body".into())
+            } else if !matches!(team, 6 | 24 | 29) {
+                // Start-role allowlist, not a reconstruction of the engine hostility table:
+                // 0 is a named NPC, 26 a neutral NPC, and 30 an event/dummy actor.
+                Some(format!(
+                    "no initial enemy combat role (NpcParam teamType {team})"
+                ))
+            } else if spec.chr == "c5010" {
+                Some("Great Serpent is a region-scripted setpiece, not a roaming combatant".into())
+            } else if map == "m11_00_00_00"
+                && team == 24
+                && story.is_none_or(|s| !s.flags.contains(&9802))
+            {
+                // The offline interpreter leaves unsupported event predicates blocked.
+                // Outskirts' Ministry invasion rows belong to the late/night state.
+                Some("late Ministry invasion role, absent at the Outskirts first visit".into())
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                excluded.push(Excluded {
+                    part: spot.part,
+                    chr: spec.chr,
+                    entity: spot.entity,
+                    reason,
+                });
+            } else {
+                kept.push((spec, spot));
+            }
+        }
+        Ok((kept, excluded))
+    }
+    /// Exact MSB Enemy parts, excluding Wolf, object models and reviewed boss rows.
+    pub fn map_placements(
+        cache: &Path,
+        map: &str,
+    ) -> Result<Vec<(EnemySpec, crate::registry::Placement)>, String> {
+        use sekiro_formats::msb::{self, PartKind};
+        let path = cache.join(format!("raw/map/MapStudio/{map}.msb"));
+        let msb =
+            msb::parse(&std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?)
+                .map_err(|e| e.to_string())?;
+        let registry = crate::registry::Registry::load(cache)?;
+        let mut placements = Vec::new();
+        for part in &msb.parts {
+            if part.kind != PartKind::Enemy {
+                continue;
+            }
+            let Some(model) = usize::try_from(part.model_index)
+                .ok()
+                .and_then(|i| msb.models.get(i))
+            else {
+                continue;
+            };
+            if !model.name.starts_with('c') || model.name == "c0000" {
+                continue;
+            }
+            let spot = registry
+                .placed
+                .get(&model.name)
+                .and_then(|ps| ps.iter().find(|p| p.map == map && p.part == part.name))
+                .ok_or_else(|| format!("{map}: missing registry placement {}", part.name))?;
+            let mut spec = registry.placement_spec(&model.name, spot)?;
+            if crate::arena::boss_events(&spec).is_some() {
+                continue;
+            }
+            spec.starts_in_battle = false;
+            placements.push((spec, spot.clone()));
+        }
+        Ok(placements)
+    }
+
+    pub fn load(
+        cache: &Path,
+        placements: Vec<(EnemySpec, crate::registry::Placement)>,
+    ) -> Result<Self, LoadError> {
+        let mut foes = Vec::new();
+        let mut player = None;
+        for (i, (spec, spot)) in placements.into_iter().enumerate() {
+            let mut duel = Duel::load_with_player(cache, 0.0, spec, player.take())?;
+            duel.events = None;
+            duel.enemy.body.position = spot.position;
+            duel.enemy.snap_yaw(spot.yaw);
+            duel.spawn = Some([placement(&duel.player), placement(&duel.enemy)]);
+            duel.population_target = Some(false);
+            player = duel.player.take();
+            duel.fighters[0] = Combatant::default();
+            if let Some(ai) = &mut duel.ai {
+                ai.state.rng ^= (i as u64 + 1).wrapping_mul(0x85eb_ca6b);
+            }
+            foes.push(Foe {
+                previous: (spot.position, spot.yaw),
+                entity: spot.entity,
+                part: spot.part,
+                duel: Box::new(duel),
+                report: Default::default(),
+                active: true,
+                lod: Lod::Full,
+                clock: 0.0,
+                can_deathblow: false,
+                stepped: false,
+                initial_patrol: None,
+                activation: 100.0,
+                deactivation: 100.0,
+                memory: 0.0,
+                accrued: 0.0,
+                search_left: 0.0,
+                search_rng: (i as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15),
+                sees: false,
+            });
+        }
+        Ok(Self {
+            foes,
+            selected: None,
+            locked: None,
+            world: None,
+            excluded: Vec::new(),
+        })
+    }
+}
+
+impl Duel {
+    pub fn set_population(&mut self, population: Population) {
+        self.events = None;
+        self.boss_brain = None;
+        self.enemy_present = false;
+        self.enemy_active = false;
+        self.population = Some(population);
+    }
+
+    pub(super) fn step_population(&mut self, input: &InputFrame, dt: f32) -> DuelReport {
+        let _timer = crate::perf::Scope::start("sim population");
+        if self.spawn.is_none() {
+            self.spawn = Some([placement(&self.player), placement(&self.enemy)]);
+        }
+        let mut population = self.population.take().unwrap();
+        let mut respawned = false;
+        if let Some(left) = self.respawn_in.as_mut() {
+            *left -= dt;
+            if *left <= 0.0 {
+                if let Err(error) = self.reset() {
+                    eprintln!("population Wolf respawn failed: {error}");
+                } else {
+                    for foe in &mut population.foes {
+                        self.swap_screen_player(&mut foe.duel);
+                        if let Err(error) = foe.duel.reset() {
+                            eprintln!("population {} respawn failed: {error}", foe.part);
+                        }
+                        self.swap_screen_player(&mut foe.duel);
+                        if let Some(ai) = &mut foe.duel.ai {
+                            ai.state.patrol.clone_from(&foe.initial_patrol);
+                        }
+                        foe.clock = 0.0;
+                        foe.memory = 0.0;
+                        foe.accrued = 0.0;
+                        foe.search_left = 0.0;
+                        foe.sees = false;
+                    }
+                    population.locked = None;
+                    respawned = true;
+                }
+            }
+        }
+        let wolf = glam::Vec3::from_array(self.player.body.position);
+        let distance =
+            |foe: &Foe| glam::Vec3::from_array(foe.duel.enemy.body.position).distance_squared(wolf);
+        if let Some(world) = &population.world {
+            let locked = population.locked;
+            for (i, foe) in population.foes.iter_mut().enumerate() {
+                let d = &mut foe.duel;
+                let range = if foe.active {
+                    foe.deactivation
+                } else {
+                    foe.activation
+                };
+                let engaged = foe.memory > 0.0
+                    || d.enemy_damaged
+                    || d.deathblow.is_some()
+                    || d.enemy_throw.is_some()
+                    || locked == Some(i);
+                let distance = glam::Vec3::from_array(d.enemy.body.position).distance(wolf);
+                foe.lod = Lod::for_distance(distance, range, engaged);
+                foe.active = foe.lod != Lod::Dormant;
+                if !foe.active {
+                    continue;
+                }
+                let Some(ai) = &mut d.ai else {
+                    d.enemy_active = false;
+                    continue;
+                };
+                let field =
+                    |name: &str| ai.state.think.fields.get(name).copied().unwrap_or(0.0) as f32;
+                let eye = glam::Vec3::from_array(d.enemy.body.position)
+                    + glam::Vec3::Y * d.fighters[1].height * 0.8;
+                let delta = wolf + glam::Vec3::Y - eye;
+                let horizontal = delta.x.hypot(delta.z);
+                let angle = ((-delta.x).atan2(-delta.z) - d.enemy.body.yaw + std::f32::consts::PI)
+                    .rem_euclid(std::f32::consts::TAU)
+                    - std::f32::consts::PI;
+                let elevation = delta.y.atan2(horizontal).to_degrees();
+                foe.search_left -= dt;
+                if foe.search_left <= 0.0 {
+                    // FwLo, stealth.rs:333-335 / exe FUN_140623ca0: 0.2 + rand*0.2 s.
+                    // Separate sensory RNG keeps the Lua battle RNG sequence unchanged.
+                    foe.search_rng ^= foe.search_rng << 13;
+                    foe.search_rng ^= foe.search_rng >> 7;
+                    foe.search_rng ^= foe.search_rng << 17;
+                    foe.search_left =
+                        0.2 + (foe.search_rng >> 40) as f32 / (1u32 << 24) as f32 * 0.2;
+                    foe.sees = horizontal <= field("eye_dist_normal")
+                        && angle.to_degrees() >= -field("eye_ang_right_normal")
+                        && angle.to_degrees() <= field("eye_ang_left_normal")
+                        && elevation >= -field("eye_ang_bottom_normal")
+                        && elevation <= field("eye_ang_upper_normal")
+                        && world
+                            .raycast(eye, delta.normalize_or_zero(), delta.length())
+                            .is_none();
+                }
+                if foe.sees || d.enemy_damaged || horizontal < field("nose_dist") {
+                    foe.memory = field("SightTargetForgetTime").max(dt);
+                    if !ai.state.battle {
+                        ai.state.replan = true;
+                    }
+                } else {
+                    foe.memory = (foe.memory - dt).max(0.0);
+                }
+                let aware = foe.memory > 0.0;
+                if !aware && ai.state.battle {
+                    ai.state.battle = false;
+                    ai.state.target_state = 0;
+                    ai.state.replan = true;
+                }
+                d.population_target = Some(aware);
+                if aware {
+                    foe.lod = Lod::Full;
+                }
+            }
+        }
+        let paired = population
+            .foes
+            .iter()
+            .position(|f| f.duel.deathblow.is_some() || f.duel.enemy_throw.is_some());
+        let alive = |f: &Foe| f.active && !f.duel.rules.fighters[1].dead();
+        if population
+            .locked
+            .is_some_and(|i| !alive(&population.foes[i]))
+        {
+            population.locked = None;
+            self.release_lock();
+        }
+        let nearest = population
+            .foes
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| alive(f))
+            .min_by(|(_, a), (_, b)| distance(a).total_cmp(&distance(b)))
+            .map(|(i, _)| i);
+        let mut deathblow = None;
+        let mut deathblow_distance = f32::INFINITY;
+        if paired.is_none() {
+            // The existing ThrowParam selection remains the authority for range and facing.
+            for (i, foe) in population.foes.iter_mut().enumerate() {
+                foe.can_deathblow = false;
+                if !alive(foe) {
+                    continue;
+                }
+                self.swap_screen_player(&mut foe.duel);
+                let available = foe.duel.deathblow_available();
+                foe.can_deathblow = available;
+                self.swap_screen_player(&mut foe.duel);
+                if available && distance(foe) < deathblow_distance {
+                    deathblow = Some(i);
+                    deathblow_distance = distance(foe);
+                }
+            }
+        }
+        let selected = paired
+            .or(if input.buttons.attack && !self.attack_button {
+                deathblow
+            } else {
+                None
+            })
+            .or(population.locked)
+            .or(nearest);
+        population.selected = selected;
+        self.player.aim_candidates = population
+            .foes
+            .iter()
+            .filter(|f| alive(f))
+            .map(|f| f.duel.enemy.body.position)
+            .collect();
+        let mut result = DuelReport::default();
+        let passive = InputFrame::default();
+        for foe in &mut population.foes {
+            foe.stepped = false;
+            foe.can_deathblow &= paired.is_none();
+        }
+        if let Some(i) = selected
+            .filter(|&i| input.buttons.lock_on && distance(&population.foes[i]) <= 30.0 * 30.0)
+        {
+            population.foes[i].lod = Lod::Full;
+        }
+        let player_foe = selected.filter(|&i| population.foes[i].lod == Lod::Full);
+        if player_foe.is_none() {
+            // Wolf still advances at the fixed rate even when every visible foe is reduced.
+            result = self.step(input, dt);
+        }
+        {
+            let mut pair_held = paired.is_some();
+            for i in player_foe
+                .into_iter()
+                .chain((0..population.foes.len()).filter(|&i| Some(i) != player_foe))
+            {
+                let foe = &mut population.foes[i];
+                let foe_dt = foe.lod.step_dt(&mut foe.accrued, dt);
+                if !foe.active || foe_dt.is_none() || (Some(i) != player_foe && pair_held) {
+                    foe.report.enemy.advanced = 0.0;
+                    foe.report.enemy.clip_started = false;
+                    continue;
+                }
+                let foe_dt = foe_dt.unwrap();
+                foe.previous = (foe.duel.enemy.body.position, foe.duel.enemy.visual_yaw());
+                self.swap_screen_player(&mut foe.duel);
+                let d = &mut foe.duel;
+                d.shared_player_frame = Some(i) != player_foe;
+                d.god = self.god;
+                d.immortal = self.immortal;
+                if population.world.is_none() {
+                    d.population_target = Some(true);
+                }
+                d.respawn_in = None;
+                if let Some(spawn) = &mut d.spawn {
+                    spawn[0] = self.spawn.unwrap()[0];
+                }
+                let report = d.step(
+                    if Some(i) == player_foe {
+                        input
+                    } else {
+                        &passive
+                    },
+                    foe_dt,
+                );
+                d.respawn_in = None;
+                pair_held |= d.deathblow.is_some() || d.enemy_throw.is_some();
+                foe.clock += report.enemy.advanced;
+                foe.stepped = true;
+                foe.report = report.clone();
+                self.swap_screen_player(d);
+                if Some(i) == player_foe {
+                    result = report;
+                    result.hits.clear();
+                } else if Some(i) == selected {
+                    result.enemy = report.enemy;
+                }
+                for (mut hit, res) in foe.report.hits.iter().cloned() {
+                    if hit.attacker == 1 {
+                        hit.attacker = i + 1;
+                    }
+                    if hit.defender == 1 {
+                        hit.defender = i + 1;
+                    }
+                    result.hits.push((hit, res));
+                }
+                if let Some(mut warning) = foe.report.perilous {
+                    warning.attacker = i + 1;
+                    result.perilous = Some(warning);
+                }
+            }
+            population.locked = selected.filter(|_| self.player.lock_target.is_some());
+        }
+        self.last_steps[0] = result.player.clone();
+        result.respawned = respawned;
+        if self.rules.fighters[0].dead() && self.respawn_in.is_none() {
+            self.respawn_in = Some(RESPAWN_DELAY);
+        }
+        self.population = Some(population);
+        result
+    }
+}

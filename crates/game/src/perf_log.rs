@@ -82,7 +82,11 @@ pub(crate) fn args() -> &'static [String] {
 
 pub(crate) fn profile_systems() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| args().iter().any(|a| a == "--profile-systems"))
+    *ENABLED.get_or_init(|| {
+        args()
+            .iter()
+            .any(|a| a == "--profile-systems" || a == "--perf")
+    })
 }
 
 impl SystemTimer {
@@ -164,7 +168,13 @@ impl PerfLog {
     pub fn open() -> std::io::Result<Self> {
         let dir = std::env::var_os("PLAY_PERF_DIR")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| "cache/perf".into());
+            .unwrap_or_else(|| {
+                if args().iter().any(|a| a == "--perf") {
+                    "target/enemies/perf".into()
+                } else {
+                    "cache/perf".into()
+                }
+            });
         std::fs::create_dir_all(&dir)?;
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -199,6 +209,14 @@ impl PerfLog {
     }
 
     pub fn row(&mut self, fields: &str, sounds: usize) {
+        for (name, (count, sum, max)) in sekiro_sim::perf::take() {
+            if let Ok(mut samples) = FRAME_SAMPLES.lock() {
+                let row = samples.entry(name.into()).or_default();
+                row.0 += count;
+                row.1 += sum;
+                row.2 = row.2.max(max);
+            }
+        }
         let now = Instant::now();
         let ms = now.duration_since(self.last).as_secs_f64() * 1000.0;
         self.last = now;
@@ -644,7 +662,39 @@ fn count_draw_batches(
 }
 
 pub fn enabled() -> bool {
-    std::env::var("PLAY_LOG_PERF").is_ok_and(|v| v == "1")
+    args().iter().any(|a| a == "--perf") || std::env::var("PLAY_LOG_PERF").is_ok_and(|v| v == "1")
+}
+
+pub(crate) fn scene_counts(
+    skins: Query<
+        (
+            &bevy::camera::visibility::ViewVisibility,
+            Has<bevy::light::NotShadowCaster>,
+        ),
+        With<bevy::mesh::skinning::SkinnedMesh>,
+    >,
+    diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
+    time: Res<Time>,
+    mut last: Local<f32>,
+) {
+    for d in diagnostics
+        .iter()
+        .filter(|d| d.path().as_str().ends_with("elapsed_gpu"))
+    {
+        if let Some(ms) = d.value() {
+            record(format!("gpu {}", d.path()), ms);
+        }
+    }
+    if time.elapsed_secs() - *last < 1.0 {
+        return;
+    }
+    *last = time.elapsed_secs();
+    let visible = skins.iter().filter(|(v, _)| v.get()).count();
+    let casters = skins.iter().filter(|(_, no_shadow)| !*no_shadow).count();
+    info!(
+        "skinned meshes: {} total, {visible} visible (any view), {casters} shadow eligible",
+        skins.iter().count()
+    );
 }
 
 macro_rules! register {
@@ -654,6 +704,7 @@ macro_rules! register {
             $app.insert_resource(crate::perf_log::PerfLog::open()?)
                 .insert_resource(crate::perf_log::PerfTour::from_args(crate::perf_log::args())?)
                 .insert_resource(probe)
+                .add_systems(Last, crate::perf_log::scene_counts)
                 .add_systems(FixedUpdate, apply_perf_tour.before(simulate))
                 .add_systems(First, |mut log: ResMut<crate::perf_log::PerfLog>| {
                     log.frame_start = std::time::Instant::now();

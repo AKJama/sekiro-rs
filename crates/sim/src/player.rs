@@ -529,8 +529,16 @@ impl PlayerBehavior {
         offsets: AnimOffsets,
     ) -> Result<Self, LoadError> {
         let read = |p: &Path| std::fs::read(p).map_err(|e| LoadError::Io(p.to_owned(), e));
-        let graph: Graph = sekiro_formats::hkb::parse(&read(behavior_hkx)?)?;
-        let runtime = BehaviorRuntime::new(Arc::new(graph), offsets);
+        let graph: Arc<Graph> = crate::shared::load(behavior_hkx.to_owned(), || {
+            sekiro_formats::hkb::parse(&std::fs::read(behavior_hkx).ok()?).ok()
+        })
+        .ok_or_else(|| {
+            LoadError::Io(
+                behavior_hkx.to_owned(),
+                std::io::Error::other("cannot load shared behaviour graph"),
+            )
+        })?;
+        let runtime = BehaviorRuntime::new(graph, offsets);
         let mut me = Self {
             vm: Vm::new(),
             runtime,

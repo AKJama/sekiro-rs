@@ -348,10 +348,13 @@ pub(crate) fn load_table(
     defs_dir: &Path,
     file: &str,
     def: &str,
-) -> Option<Table> {
-    let raw = RawParam::parse(std::fs::read(param_dir.join(format!("{file}.param"))).ok()?).ok()?;
-    let def = ParamDef::load(&defs_dir.join(format!("{def}.xml"))).ok()?;
-    Table::new(file, &raw, Arc::new(def), None).ok()
+) -> Option<Arc<Table>> {
+    crate::shared::load(param_dir.join(format!("{file}.param#{def}")), || {
+        let raw =
+            RawParam::parse(std::fs::read(param_dir.join(format!("{file}.param"))).ok()?).ok()?;
+        let def = ParamDef::load(&defs_dir.join(format!("{def}.xml"))).ok()?;
+        Table::new(file, &raw, Arc::new(def), None).ok()
+    })
 }
 
 /// What a character attacks with: its dummy rig, behaviour variation and body size.
@@ -421,7 +424,11 @@ impl Combatant {
     /// The player with the starting katana (CharaInitParam 10010).
     pub fn player(cache: &Path, skeleton: &Skeleton) -> Self {
         let (pd, dd) = param_dirs(cache);
-        let read = |p: &Path| std::fs::read(p).ok().and_then(|b| flver::parse(&b).ok());
+        let read = |p: &Path| {
+            crate::shared::load(p.to_owned(), || {
+                std::fs::read(p).ok().and_then(|b| flver::parse(&b).ok())
+            })
+        };
         let mut c = Combatant {
             radius: 0.4,
             height: 1.7,
@@ -493,11 +500,12 @@ impl Combatant {
             height: 1.7,
             ..Combatant::default()
         };
-        if let Some(model) =
-            std::fs::read(cache.join(format!("raw/chr/{chr}.chrbnd.d/{chr}.flver")))
+        let model_path = cache.join(format!("raw/chr/{chr}.chrbnd.d/{chr}.flver"));
+        if let Some(model) = crate::shared::load(model_path.clone(), || {
+            std::fs::read(&model_path)
                 .ok()
                 .and_then(|b| flver::parse(&b).ok())
-        {
+        }) {
             c.rig = DummyRig::from_flver(&model, skeleton);
         }
         if let Some(row) = load_table(&pd, &dd, "NpcParam", "NpcParam").and_then(|t| {

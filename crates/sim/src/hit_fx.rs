@@ -169,7 +169,9 @@ pub fn hit_stain_id(base: i32, material: i32, variant: i32) -> Option<i32> {
 
 impl HitFx {
     pub fn load(param_dir: &Path, defs_dir: &Path, npc_param: i32) -> Option<Self> {
-        let set = ParamSet::load(param_dir, defs_dir).ok()?;
+        let set = crate::shared::load(param_dir.to_owned(), || {
+            ParamSet::load(param_dir, defs_dir).ok()
+        })?;
         let armour = set
             .table("CharaInitParam")
             .ok()

@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::{DynamicSkinnedMeshBounds, NoFrustumCulling};
 use bevy::gltf::{GltfMaterialName, GltfMeshName};
 use bevy::math::Affine3A;
@@ -33,12 +34,24 @@ use bevy::mesh::{Mesh, VertexAttributeValues};
 use bevy::prelude::*;
 use sekiro_formats::hkx::cloth as data;
 
-use crate::character::Rig;
+use crate::character::{PresentationLod, Rig};
 use crate::perf_log::SystemTimer;
 
 /// Cloth further than this from the camera (plus its own rest reach) is carried rigidly in its
 /// rest pose on the model root instead of being solved.
 const RANGE: f32 = 15.0;
+
+// FwLo's MIT RustSekiro SHINOBI_CLOTH_RANGE; keep the shipped 15 m default.
+fn cloth_range() -> f32 {
+    static RANGE_OVERRIDE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *RANGE_OVERRIDE.get_or_init(|| {
+        std::env::var("SHINOBI_CLOTH_RANGE")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|r| r.is_finite() && *r >= 0.0)
+            .unwrap_or(RANGE)
+    })
+}
 
 /// A cloth that blows up this many frames running is carried rigidly for good.
 const GIVE_UP: u32 = 5;
@@ -72,7 +85,8 @@ impl Plugin for ClothPlugin {
             PostUpdate,
             (simulate, apply)
                 .chain()
-                .after(bevy::transform::TransformSystems::Propagate),
+                .after(bevy::transform::TransformSystems::Propagate)
+                .before(bevy::camera::visibility::VisibilitySystems::CalculateBounds),
         );
     }
 }
@@ -561,8 +575,8 @@ fn attach(
                 };
                 commands
                     .entity(entity)
-                    .insert((Mesh3d(display.handle.clone()), NoFrustumCulling))
-                    .remove::<(SkinnedMesh, DynamicSkinnedMeshBounds)>();
+                    .insert(Mesh3d(display.handle.clone()))
+                    .remove::<(SkinnedMesh, DynamicSkinnedMeshBounds, NoFrustumCulling)>();
                 claimed.insert(entity, which);
                 inst.displays.push(display);
             }
@@ -834,7 +848,7 @@ fn solve(
 #[allow(clippy::type_complexity)]
 fn simulate(
     time: Res<Time>,
-    mut actors: Query<&mut Cloths>,
+    mut actors: Query<(&mut Cloths, Option<&PresentationLod>, Ref<Rig>)>,
     globals: Query<&GlobalTransform>,
     transforms: Query<&Transform>,
     children: Query<&Children>,
@@ -845,7 +859,19 @@ fn simulate(
     let camera = cameras.iter().next().map(|t| t.translation());
     let debug = debug_now(&time);
     let (globals, transforms, children) = (&globals, &transforms, &children);
-    actors.par_iter_mut().for_each(|mut cloths| {
+    actors.par_iter_mut().for_each(|(mut cloths, lod, rig)| {
+        // Far actors carry the restart pose only when their pose changes.
+        // Hidden actors neither skin CPU cloth vertices nor dirty mesh assets for upload.
+        if lod.is_some_and(|l| !l.draw || (!l.pose && !rig.is_changed())) {
+            for c in &mut cloths.0 {
+                c.out.bones.clear();
+                c.out.meshes.clear();
+                if lod.is_some_and(|l| !l.draw) {
+                    c.started = false;
+                }
+            }
+            return;
+        }
         // World transforms this character's cloth-driven bones (and what hangs from them) take
         // this frame, ahead of `apply`: the display meshes skin from them.
         let mut overrides: HashMap<Entity, GlobalTransform> = HashMap::new();
@@ -855,6 +881,7 @@ fn simulate(
                 dt,
                 camera,
                 debug,
+                lod.is_some_and(|l| !l.cloth),
                 globals,
                 transforms,
                 children,
@@ -870,6 +897,7 @@ fn step(
     dt: f32,
     camera: Option<Vec3>,
     debug: bool,
+    force_rigid: bool,
     globals: &Query<&GlobalTransform>,
     transforms: &Query<&Transform>,
     children: &Query<&Children>,
@@ -887,8 +915,9 @@ fn step(
     // Out of range: carried rigidly (the restart pose every frame), no simulation. The range
     // is measured to the model root plus the cloth's own rest reach.
     let culled = c.rigid
+        || force_rigid
         || match (camera, root) {
-            (Some(cam), Some(r)) => r.translation().distance(cam) > RANGE + def.rest_far,
+            (Some(cam), Some(r)) => r.translation().distance(cam) > cloth_range(),
             _ => false,
         };
     // One world matrix per reference bone, and the collision capsules in Havok world space.
@@ -1177,6 +1206,7 @@ fn apply(
     transforms: Query<&Transform>,
     children: Query<&Children>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut bounds: Query<&mut Aabb>,
 ) {
     let _timer = SystemTimer::start("cloth apply");
     for mut cloths in &mut actors {
@@ -1186,6 +1216,14 @@ fn apply(
             }
             for out in c.out.meshes.drain(..) {
                 if let Some(mut mesh) = meshes.get_mut(&out.handle) {
+                    // CPU cloth replaces GPU skinning, so publish bounds from the actual output.
+                    if let Some(aabb) = Aabb::enclosing(out.pos.iter().copied().map(Vec3::from)) {
+                        for dm in c.displays.iter().filter(|d| d.handle == out.handle) {
+                            if let Ok(mut bound) = bounds.get_mut(dm.entity) {
+                                *bound = aabb;
+                            }
+                        }
+                    }
                     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, out.pos);
                     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, out.normal);
                     if !out.tangent.is_empty() {

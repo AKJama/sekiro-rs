@@ -224,7 +224,7 @@ impl FxrPlayer {
     }
 
     /// Loads the hit tables (effects, stains) for this fight's NPC when they are not loaded yet.
-    fn ensure_tables(&mut self, duel: &Duel) {
+    pub(crate) fn ensure_tables(&mut self, duel: &Duel) {
         if self.enabled && (self.hit_fx.is_none() || self.npc_param != duel.spec.npc_param) {
             self.npc_param = duel.spec.npc_param;
             self.hit_fx =
@@ -375,6 +375,7 @@ impl FxrPlayer {
     /// Effects for the step's hits: sparks on a deflect or block, blood on a landed hit, at the
     /// contact point and facing the attacker. Returns the hits' floor stains for the caller.
     pub fn hits(&mut self, duel: &Duel, report: &DuelReport) -> Vec<StainRequest> {
+        let _timer = crate::perf_log::SystemTimer::start("fxr hits");
         if !self.enabled || report.hits.is_empty() {
             return Vec::new();
         }
@@ -392,7 +393,10 @@ impl FxrPlayer {
                 let body = if hit.defender == 0 {
                     &duel.player.body
                 } else {
-                    &duel.enemy.body
+                    duel.population
+                        .as_ref()
+                        .and_then(|p| p.foes.get(hit.defender - 1))
+                        .map_or(&duel.enemy.body, |f| &f.duel.enemy.body)
                 };
                 let at = Transform::from_translation(on_body(
                     Vec3::from_array(hit.position),
@@ -418,6 +422,7 @@ impl FxrPlayer {
     /// Called after each simulation step by the registration bridge.
     /// Positions use the simulation's posed dummy polys, including body fallback.
     pub fn observe(&mut self, duel: &Duel) {
+        let _timer = crate::perf_log::SystemTimer::start("fxr observe");
         if !self.enabled {
             return;
         }

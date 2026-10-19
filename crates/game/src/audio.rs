@@ -44,15 +44,21 @@ pub struct SoundLibrary {
     missing: HashSet<String>,
     cache: PathBuf,
     /// Hit sounds for the NpcParam row they were loaded for.
-    hit_sounds: Option<(i32, HitSounds)>,
-    /// The enemy character whose sound project the FMOD path should load.
-    enemy_chr: Option<String>,
+    hit_sounds: HashMap<i32, Option<HitSounds>>,
+    /// Project requests waiting to be consumed once, separate from the known project set.
+    enemy_projects: HashSet<String>,
+    known_projects: HashSet<String>,
     rng: u64,
     /// Every key played, in order (for logs and tests).
     pub played: Vec<String>,
 }
 
 impl SoundLibrary {
+    fn require_project(&mut self, chr: &str) {
+        if self.known_projects.insert(chr.to_owned()) {
+            self.enemy_projects.insert(chr.to_owned());
+        }
+    }
     /// Reads every `cache/sound/*/events.json` (the fallback samples) when `decoded`.
     pub fn load(cache: &Path, decoded: bool) -> Self {
         let mut lib = SoundLibrary {
@@ -94,15 +100,10 @@ impl SoundLibrary {
 
     /// The hit sounds for the enemy of NpcParam row `npc_param`, loaded on first use.
     fn hit_sounds(&mut self, npc_param: i32) -> Option<&HitSounds> {
-        if self
-            .hit_sounds
+        self.hit_sounds
+            .entry(npc_param)
+            .or_insert_with(|| HitSounds::load_from_cache(&self.cache, npc_param))
             .as_ref()
-            .is_none_or(|(id, _)| *id != npc_param)
-        {
-            self.hit_sounds =
-                HitSounds::load_from_cache(&self.cache, npc_param).map(|h| (npc_param, h));
-        }
-        self.hit_sounds.as_ref().map(|(_, h)| h)
     }
 
     fn pick(&mut self, event: &str) -> Option<PathBuf> {
@@ -142,6 +143,9 @@ pub struct FmodAudio {
     loaded: HashSet<String>,
     /// Keys already reported as missing or failing.
     reported: HashSet<String>,
+    diagnostics: bool,
+    last_diagnostic: Option<std::time::Instant>,
+    population_resident: HashSet<String>,
 }
 
 impl FmodAudio {
@@ -158,6 +162,9 @@ impl FmodAudio {
             system,
             loaded: HashSet::new(),
             reported: HashSet::new(),
+            diagnostics: std::env::var_os("SEKIRO_AUDIO_DIAGNOSTICS").is_some(),
+            last_diagnostic: None,
+            population_resident: HashSet::new(),
         };
         for p in start_projects(map) {
             audio.load(&p);
@@ -174,12 +181,17 @@ impl FmodAudio {
     /// Loads project `name` once. The samples of the common, enemy and map projects are read
     /// now, so no sound waits for the disk the first time it plays.
     fn load(&mut self, name: &str) {
+        self.load_project(name, true);
+    }
+
+    fn load_project(&mut self, name: &str, warm_samples: bool) {
         if !self.loaded.insert(name.to_string()) {
             return;
         }
         match self.system.load_project(&format!("{name}.fev")) {
             Ok(n) => {
-                let preload = name == "main" || name.starts_with('c') || name.starts_with('m');
+                let preload = warm_samples
+                    && (name == "main" || name.starts_with('c') || name.starts_with('m'));
                 let note = match preload.then(|| self.system.preload(name)) {
                     Some((_, Some(code))) => {
                         format!(", samples not preloaded (FMOD error {code})")
@@ -197,6 +209,37 @@ impl FmodAudio {
     fn play(&mut self, keys: &[String], position: Vec3) -> Option<(String, Played)> {
         let key = keys.iter().find(|k| self.system.has(k))?;
         Some((key.clone(), self.system.play(key, position.to_array())))
+    }
+
+    /// Check residency before cue playback, loading/freeing data only on activation changes.
+    /// Never open dormant banks or first-load wave data as many actors start events together.
+    pub(crate) fn population_banks<'a>(&mut self, required: impl Iterator<Item = &'a str>) {
+        let required = required.collect::<std::collections::BTreeSet<_>>();
+        let leaving = self
+            .population_resident
+            .iter()
+            .filter(|chr| !required.contains(chr.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        for chr in leaving {
+            match self.system.free_samples(&chr) {
+                Ok(()) => {
+                    self.population_resident.remove(&chr);
+                    info!("FMOD: {chr} dormant, event data released");
+                }
+                Err(error) => {
+                    if self.reported.insert(format!("free:{chr}")) {
+                        warn!("FMOD: {chr} release: {error}");
+                    }
+                }
+            }
+        }
+        for chr in required {
+            if self.population_resident.insert(chr.to_owned()) {
+                let result = self.system.preload(chr);
+                info!("FMOD: {chr} activated, event data preload={result:?}");
+            }
+        }
     }
 }
 
@@ -248,6 +291,36 @@ impl Plugin for GameAudioPlugin {
             .add_message::<SoundCue>()
             .add_systems(Startup, spawn_volume_readout)
             .add_systems(Update, (adjust_volume, play_cues).chain());
+    }
+}
+
+/// Prepare sound tables and project metadata behind the loading screen.
+/// Loading every character's event data exhausts FMOD resources (error 43), preventing
+/// even Wolf's footsteps from starting. Warm only active kinds and evict them on dormancy.
+pub(crate) fn prepare_population(app: &mut App, foes: &[(String, i32, bool)]) {
+    {
+        let mut library = app.world_mut().resource_mut::<SoundLibrary>();
+        for (chr, npc, _) in foes {
+            library.hit_sounds(*npc);
+            library.require_project(chr);
+        }
+    }
+    let mut projects = app
+        .world_mut()
+        .resource_mut::<SoundLibrary>()
+        .enemy_projects
+        .drain()
+        .collect::<Vec<_>>();
+    projects.sort(); // Preserve lookup order when projects share an event key.
+    if let Some(mut fmod) = app.world_mut().get_non_send_mut::<FmodAudio>() {
+        for chr in projects {
+            fmod.load_project(&chr, false);
+        }
+        fmod.population_banks(
+            foes.iter()
+                .filter(|(_, _, active)| *active)
+                .map(|(chr, _, _)| chr.as_str()),
+        );
     }
 }
 
@@ -363,6 +436,7 @@ fn attach_listener(
 
 /// The listener follows the camera, then FMOD does its frame's work.
 fn update_fmod(mut fmod: NonSendMut<FmodAudio>, camera: Query<&GlobalTransform, With<Camera3d>>) {
+    let _timer = crate::perf_log::SystemTimer::start("audio FMOD");
     if let Ok(cam) = camera.single() {
         let t = cam.compute_transform();
         fmod.system.set_listener(
@@ -371,7 +445,18 @@ fn update_fmod(mut fmod: NonSendMut<FmodAudio>, camera: Query<&GlobalTransform, 
             t.up().to_array(),
         );
     }
-    fmod.system.update();
+    let result = fmod.system.update_result();
+    if result != 0 && fmod.reported.insert(format!("update:{result}")) {
+        warn!("FMOD update result={result}");
+    }
+    if fmod.diagnostics
+        && fmod
+            .last_diagnostic
+            .is_none_or(|t| t.elapsed().as_secs() >= 1)
+    {
+        info!("audio diagnostic {}", fmod.system.diagnostics());
+        fmod.last_diagnostic = Some(std::time::Instant::now());
+    }
 }
 
 /// Plays queued cues: through FMOD when it runs, else as decoded positional one-shots.
@@ -382,13 +467,21 @@ pub fn play_cues(
     mut sources: ResMut<Assets<AudioSource>>,
     fmod: Option<NonSendMut<FmodAudio>>,
 ) {
+    let _timer = crate::perf_log::SystemTimer::start("audio cues");
     if let Some(mut fmod) = fmod {
-        if let Some(chr) = lib.enemy_chr.clone() {
+        for chr in lib.enemy_projects.drain() {
             fmod.load(&chr);
         }
         for cue in cues.read() {
             let position = cue.position + Vec3::Y * EMITTER_HEIGHT;
-            match fmod.play(&cue.keys, position) {
+            let played = fmod.play(&cue.keys, position);
+            if fmod.diagnostics {
+                info!(
+                    "audio cue keys={:?} source={:?} position={:?} played={played:?}",
+                    cue.keys, cue.source, position
+                );
+            }
+            match played {
                 Some((key, Played::Started)) => lib.played.push(key),
                 Some((key, Played::Failed(code))) => {
                     if fmod.reported.insert(key.clone()) {
@@ -445,15 +538,51 @@ pub fn play_cues(
 }
 
 /// The cues of one duel step: TAE sound events of both characters and the sounds of the hits.
+pub fn emit_population(
+    duel: &Duel,
+    population: &sekiro_sim::duel::population::Population,
+    lib: &mut SoundLibrary,
+    out: &mut MessageWriter<SoundCue>,
+) {
+    let _timer = crate::perf_log::SystemTimer::start("audio emit");
+    let row = population.selected.map_or(duel.spec.npc_param, |i| {
+        population.foes[i].duel.spec.npc_param
+    });
+    if let Some(hs) = lib.hit_sounds(row) {
+        for c in tae_cues(0, &duel.player, hs.materials[0]) {
+            out.write(SoundCue {
+                keys: c.keys,
+                position: Vec3::from_array(c.position),
+                source: c.source,
+            });
+        }
+    }
+    for foe in population.foes.iter().filter(|f| f.stepped) {
+        let Some(hs) = lib.hit_sounds(foe.duel.spec.npc_param) else {
+            continue;
+        };
+        let mut cues = tae_cues(1, &foe.duel.enemy, hs.materials[1]);
+        for (hit, res) in &foe.report.hits {
+            cues.extend(hs.cues(hit, res));
+        }
+        for c in cues {
+            out.write(SoundCue {
+                keys: c.keys,
+                position: Vec3::from_array(c.position),
+                source: c.source,
+            });
+        }
+    }
+}
+
 pub fn emit(
     duel: &Duel,
     report: &DuelReport,
     lib: &mut SoundLibrary,
     out: &mut MessageWriter<SoundCue>,
 ) {
-    if lib.enemy_chr.as_deref() != Some(duel.spec.chr.as_str()) {
-        lib.enemy_chr = Some(duel.spec.chr.clone());
-    }
+    let _timer = crate::perf_log::SystemTimer::start("audio emit");
+    lib.require_project(&duel.spec.chr);
     let Some(hs) = lib.hit_sounds(duel.spec.npc_param) else {
         return;
     };
@@ -474,6 +603,73 @@ pub fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consumed_project_requests_do_not_reload_each_frame() {
+        let mut library = SoundLibrary::default();
+        for _ in 0..43 {
+            library.require_project("c1010");
+        }
+        assert_eq!(
+            library.enemy_projects.drain().collect::<Vec<_>>(),
+            ["c1010"]
+        );
+        for _ in 0..600 {
+            library.require_project("c1010");
+        }
+        assert!(library.enemy_projects.is_empty());
+        library.require_project("c1020");
+        assert_eq!(
+            library.enemy_projects.drain().collect::<Vec<_>>(),
+            ["c1020"]
+        );
+    }
+
+    #[test]
+    fn population_preparation_keeps_wolf_audio_playable() {
+        let cache = sekiro_sim::cache::root();
+        let game = sekiro_fmod::game_dir();
+        if !cache.join("raw/sound/c5020.fev").is_file() || !game.join("fmodex64.dll").is_file() {
+            return;
+        }
+        let mut system = EventSystem::open(&game, true).unwrap();
+        system.set_media_path(&cache.join("raw/sound")).unwrap();
+        let mut fmod = FmodAudio {
+            system,
+            loaded: HashSet::new(),
+            reported: HashSet::new(),
+            diagnostics: false,
+            last_diagnostic: None,
+            population_resident: HashSet::new(),
+        };
+        for name in start_projects(Some("m11_00_00_00")) {
+            fmod.load(&name);
+        }
+        let mut app = App::new();
+        app.insert_resource(SoundLibrary { cache, ..default() })
+            .insert_non_send(fmod);
+        let foes = [
+            "c1010", "c1020", "c1100", "c1120", "c1150", "c1180", "c1190", "c1240", "c1350",
+            "c1360", "c5020",
+        ]
+        .map(|chr| (chr.to_owned(), 10100000, matches!(chr, "c1010" | "c1150")));
+        prepare_population(&mut app, &foes);
+        let mut fmod = app.world_mut().non_send_mut::<FmodAudio>();
+        assert_eq!(fmod.system.projects().len(), 18);
+        assert_eq!(fmod.population_resident.len(), 2);
+        fmod.population_banks(["c1010"].into_iter());
+        assert!(!fmod.population_resident.contains("c1150"));
+        fmod.population_banks(["c1010", "c1150"].into_iter());
+        assert_eq!(fmod.population_resident.len(), 2);
+        assert_eq!(
+            fmod.system.channels_playing(),
+            0,
+            "preparation must not start events"
+        );
+        for key in ["c000001001", "c000004010"] {
+            assert_eq!(fmod.system.play(key, [0.0; 3]), Played::Started, "{key}");
+        }
+    }
 
     #[test]
     fn projects_follow_the_map_area() {

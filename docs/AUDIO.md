@@ -35,6 +35,13 @@ The game loads `main`, the map area's projects (`m11_01_00_00` gives `m11`, `sm1
 The samples of `main`, the enemy and `m11` are loaded up front (about 0.1 s), so no first play waits for the disk.
 Nothing is decrypted: events in the encrypted banks fail once, are logged, and stay silent.
 
+With `--map-enemies`, every character project is indexed once, but only character kinds with an active NPC have their event data warmed.
+When the last active NPC of a kind becomes dormant, its event data is released while its project metadata remains indexed.
+This uses the simulation's NpcParam activation ranges, including engagement overrides.
+Warming every map character exhausted FMOD resources (error 43); fetching their wave data during simultaneous cue starts also stalled the live mixer.
+Bank residency changes happen before cue playback, and transient resource or playback-limit errors never permanently mute a key.
+`SEKIRO_AUDIO_DIAGNOSTICS=1` logs cue results and one mixer snapshot per second, including project memory, real/virtual voices, loops, starvation, CPU, DSP clock and output RMS.
+
 ## Event keys
 
 A key is a type letter plus a nine-digit id.

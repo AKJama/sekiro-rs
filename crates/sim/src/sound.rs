@@ -15,6 +15,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use sekiro_formats::param::ParamSet;
 
@@ -117,12 +118,27 @@ struct AttackSe {
     guard_rows: [i32; 2],
 }
 
+/// Shared immutable lookup, copy-on-write for callers that customize a sound table.
+#[derive(Debug, Clone, Default)]
+struct Shared<T>(Arc<T>);
+impl<T> std::ops::Deref for Shared<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+impl<T: Clone> std::ops::DerefMut for Shared<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        Arc::make_mut(&mut self.0)
+    }
+}
+
 /// Hit-sound tables and the materials of the two duel characters.
 #[derive(Debug, Clone, Default)]
 pub struct HitSounds {
-    hit: HashMap<i32, HashMap<String, i64>>,
-    just_guard: HashMap<i32, HashMap<String, i64>>,
-    attacks: [HashMap<i32, AttackSe>; 2],
+    hit: Shared<HashMap<i32, HashMap<String, i64>>>,
+    just_guard: Shared<HashMap<i32, HashMap<String, i64>>>,
+    attacks: [Shared<HashMap<i32, AttackSe>>; 2],
     /// Each character's two materials, [player, enemy]: rows of the hit sounds they take and
     /// the offsets of their armour (`b`) sounds. Wolf: his body armour's
     /// `defenseMaterial1/2` (113, 139); an NPC: NpcParam `materialSe1/2` (Owl and the soldier
@@ -176,7 +192,10 @@ impl HitSounds {
     /// Loads the tables for Wolf (CharaInitParam 10010, his body armour's materials) against
     /// the NPC of NpcParam row `npc_param`.
     pub fn load(param_dir: &Path, defs_dir: &Path, npc_param: i32) -> Option<Self> {
-        let set = ParamSet::load(param_dir, defs_dir).ok()?;
+        let _timer = crate::perf::Scope::start("audio param load");
+        let set = crate::shared::load(param_dir.to_owned(), || {
+            ParamSet::load(param_dir, defs_dir).ok()
+        })?;
         let armour = set
             .table("CharaInitParam")
             .ok()
@@ -193,9 +212,22 @@ impl HitSounds {
         let npc =
             pair(&set, "NpcParam", npc_param, ["materialSe1", "materialSe2"]).unwrap_or([114, 108]);
         Some(Self {
-            hit: table(&set, "HitEffectSeParam"),
-            just_guard: table(&set, "HitEffectSeJustGuardParam"),
-            attacks: [attacks(&set, "AtkParam_Pc"), attacks(&set, "AtkParam_Npc")],
+            hit: Shared(crate::shared::load(
+                param_dir.join("sound-HitEffectSeParam"),
+                || Some(table(&set, "HitEffectSeParam")),
+            )?),
+            just_guard: Shared(crate::shared::load(
+                param_dir.join("sound-HitEffectSeJustGuardParam"),
+                || Some(table(&set, "HitEffectSeJustGuardParam")),
+            )?),
+            attacks: ["AtkParam_Pc", "AtkParam_Npc"].map(|name| {
+                Shared(
+                    crate::shared::load(param_dir.join(format!("sound-{name}")), || {
+                        Some(attacks(&set, name))
+                    })
+                    .unwrap(),
+                )
+            }),
             materials: [wolf, npc],
         })
     }
@@ -310,6 +342,24 @@ pub fn tae_cues(actor: usize, ch: &Character, armour: [i32; 2]) -> Vec<SoundCue>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sound_tables_share_without_sharing_mutations() {
+        let cache = crate::cache::root();
+        if !cache
+            .join("raw/param/gameparam/gameparam.parambnd.d")
+            .is_dir()
+        {
+            return;
+        }
+        let mut a = HitSounds::load_from_cache(&cache, 10100000).unwrap();
+        let b = HitSounds::load_from_cache(&cache, 10109009).unwrap();
+        assert!(Arc::ptr_eq(&a.hit.0, &b.hit.0));
+        assert!(Arc::ptr_eq(&a.attacks[1].0, &b.attacks[1].0));
+        let original = b.hit.get(&114).cloned();
+        a.hit.insert(114, HashMap::new());
+        assert_eq!(b.hit.get(&114).cloned(), original);
+    }
 
     #[test]
     fn floor_sounds_pick_the_floor_material() {

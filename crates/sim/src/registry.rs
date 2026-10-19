@@ -122,6 +122,47 @@ impl Registry {
         self.npc.get(&id)
     }
 
+    /// Resolve the exact placed think row, including its own map's script bundle first.
+    pub fn placement_spec(&self, chr: &str, p: &Placement) -> Result<EnemySpec, String> {
+        let row = self
+            .npc
+            .get(&p.npc)
+            .ok_or_else(|| format!("{}: missing NpcParam {}", p.part, p.npc))?;
+        let think = self
+            .think
+            .get(&p.think)
+            .ok_or_else(|| format!("{}: missing NpcThinkParam {}", p.part, p.think))?;
+        let logic = think["logicId"].as_i64().ok_or("missing logicId")?;
+        let battle = think["battleGoalID"]
+            .as_i64()
+            .ok_or("missing battleGoalID")?;
+        let has = |files: &Vec<String>| {
+            files.contains(&format!("{logic:06}_logic.lua"))
+                && files.contains(&format!("{battle:06}_battle.lua"))
+        };
+        let own = format!("{}.luabnd.d", p.map);
+        let bundle = self
+            .bundles
+            .get(&own)
+            .filter(|f| has(f))
+            .map(|_| own.clone())
+            .or_else(|| {
+                self.bundles
+                    .iter()
+                    .find(|(_, f)| has(f))
+                    .map(|(name, _)| name.clone())
+            })
+            .ok_or_else(|| format!("{}: think {} has no extracted Lua bundle", p.part, p.think))?;
+        Ok(EnemySpec {
+            chr: chr.into(),
+            npc_param: p.npc,
+            think: p.think,
+            ai_bundle: bundle,
+            starts_in_battle: (0..32)
+                .any(|i| row[format!("spEffectID{i}")].as_i64() == Some(200004)),
+        })
+    }
+
     pub fn entity(&self, map: &str, entity: i32) -> Result<(EnemySpec, &Placement), String> {
         for (chr, placements) in &self.placed {
             if let Some(p) = placements

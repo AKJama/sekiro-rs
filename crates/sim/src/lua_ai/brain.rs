@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use super::lua50::{LuaError, Value, Vm, load_chunk};
+use super::lua50::{LuaError, Proto, Value, Vm, load_chunk};
 use super::runtime::{ActHook, AiEvent, AiState, SCRIPT_BATTLE_ACTIVATE, tick};
 use super::world::{AiWorld, ThinkParams};
 use crate::character::NpcControl;
@@ -81,6 +81,26 @@ pub struct AiBrain {
     log_read: usize,
 }
 
+/// Code/constants are immutable; each VM still owns its globals, closures and upvalues.
+/// Unlike FwLo's per-actor file reads, common Lua chunks are read/decoded once per script.
+fn compiled_chunk(path: &Path) -> Result<std::rc::Rc<Proto>, AiLoadError> {
+    use std::{cell::RefCell, rc::Rc};
+    thread_local! { static CHUNKS: RefCell<HashMap<PathBuf, Rc<Proto>>> = RefCell::default(); }
+    let key = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+    if let Some(proto) = CHUNKS.with_borrow(|c| c.get(&key).cloned()) {
+        return Ok(proto);
+    }
+    let data = std::fs::read(path).map_err(|e| AiLoadError::Io(path.to_owned(), e))?;
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let proto = load_chunk(&data).map_err(|e| AiLoadError::Lua(name, e))?;
+    CHUNKS.with_borrow_mut(|c| c.insert(key, proto.clone()));
+    Ok(proto)
+}
+
 impl AiBrain {
     /// Loads `aicommon.luabnd` and the given per-enemy scripts from an extracted cache, for the
     /// think params `think` (the soldier: NpcThinkParam 10100000, logic and battle goal 101000).
@@ -128,9 +148,8 @@ impl AiBrain {
         }
         let mut state = AiState::new(think, names, seed);
         for f in &files {
-            let data = read(f)?;
             let name = f.file_name().unwrap().to_string_lossy().into_owned();
-            let proto = load_chunk(&data).map_err(|e| AiLoadError::Lua(name.clone(), e))?;
+            let proto = compiled_chunk(f)?;
             vm.exec_chunk(&mut state, proto)
                 .map_err(|e| AiLoadError::Lua(name.clone(), e))?;
         }
@@ -182,6 +201,7 @@ impl AiBrain {
 
     /// Runs one AI tick and returns the control for the character's next step.
     pub fn think(&mut self, world: AiWorld) -> NpcControl {
+        let _timer = crate::perf::Scope::start("sim Lua brain");
         tick(&mut self.vm, &mut self.state, world);
         let r = &self.state.request;
         let mut c = NpcControl {
