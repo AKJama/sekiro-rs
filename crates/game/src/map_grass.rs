@@ -346,9 +346,10 @@ fn attach(world: &mut World, block: &mut Block, parent: Entity, part_index: usiz
                                 .expect("validated grass placement")
                                 .mul_transform(primitive.transform)
                         });
-                let Some(mesh) = merge_placements(source, placements) else {
+                let Some(mut mesh) = merge_placements(source, placements) else {
                     continue;
                 };
+                mesh.asset_usage = bevy::asset::RenderAssetUsages::RENDER_WORLD;
                 let mut primitive = primitive.clone();
                 primitive.mesh = world.resource_mut::<Assets<Mesh>>().add(mesh);
                 primitive.transform = Transform::IDENTITY;

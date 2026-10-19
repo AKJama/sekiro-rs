@@ -607,6 +607,7 @@ pub fn run(options: Options) -> Result<()> {
     let defaults = DefaultPlugins;
     app.add_plugins(
         defaults
+            .set(crate::vram::render_plugin())
             .set(crate::map::layered_gltf_plugin())
             .set(WindowPlugin {
                 primary_window: Some(Window {

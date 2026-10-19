@@ -140,13 +140,20 @@ impl LateMeshes {
 fn watch_meshes(
     late: Res<LateMeshes>,
     assets: Res<Assets<Mesh>>,
+    refs: Res<crate::mesh_residency::MeshRefs>,
     mut meshes: ParamSet<(
         Query<(Entity, &Mesh3d, Has<RuntimeMesh>), Changed<Mesh3d>>,
         Query<&mut Mesh3d>,
     )>,
     mut unchecked: Local<std::collections::HashMap<AssetId<Mesh>, Vec<Entity>>>,
+    mut removed: RemovedComponents<Mesh3d>,
+    mut asset_events: MessageReader<bevy::asset::AssetEvent<Mesh>>,
 ) {
-    if unchecked.is_empty() && meshes.p0().is_empty() {
+    let retired = removed.read().next().is_some();
+    removed.clear();
+    let retired_assets = asset_events.read().next().is_some();
+    asset_events.clear();
+    if unchecked.is_empty() && meshes.p0().is_empty() && !retired && !retired_assets {
         return;
     }
     let (on_time, ready) = {
@@ -160,7 +167,11 @@ fn watch_meshes(
             state.report(mesh.id(), runtime);
             unchecked.entry(mesh.id()).or_default().push(entity);
         }
-        state.forget_removed(|id| assets.contains(id));
+        // A static merge can retire the last entity using a source before its upload.
+        // CPU fallback assets still exist, but are no longer part of the loading gate.
+        if retired || retired_assets {
+            state.forget_removed(|id| assets.contains(id) && refs.contains(id));
+        }
         (
             std::mem::take(&mut state.on_time),
             std::mem::take(&mut state.ready),
@@ -177,7 +188,9 @@ fn watch_meshes(
         }
     }
     // A mesh asset removed before the render world prepared it never reports back.
-    unchecked.retain(|id, _| assets.contains(*id));
+    if retired || retired_assets {
+        unchecked.retain(|id, _| assets.contains(*id) && refs.contains(*id));
+    }
 }
 
 /// Render world, after specialization: sort newly reported meshes into prepared and waiting,
@@ -309,7 +322,8 @@ pub(crate) fn install(app: &mut App) {
         .insert_resource(images.clone())
         .insert_resource(late.clone())
         .init_resource::<CaptureWait>()
-        .add_systems(PostUpdate, (prepare, watch_meshes));
+        .add_systems(PostUpdate, prepare)
+        .add_systems(Last, watch_meshes.after(crate::mesh_residency::track));
     if let Some(render) = app.get_sub_app_mut(RenderApp) {
         render
             .insert_resource(pipelines)

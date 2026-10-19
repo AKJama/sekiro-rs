@@ -54,7 +54,7 @@ pub(crate) use map_material::batches::StaticBatches;
 mod mesh_merge;
 pub(crate) use mesh_merge::{merge_meshes, opaque};
 
-pub(crate) use map_material::{ATTR_MAP_BLEND2, MaterialStats};
+pub(crate) use map_material::{ATTR_MAP_BLEND2, LayeredMaterial, MaterialStats};
 #[path = "sky.rs"]
 pub(crate) mod sky;
 #[path = "map_sweep.rs"]
@@ -920,6 +920,7 @@ pub fn add_map(
         crate::perf_log::install_render_probe(app);
     }
     map_material::install(app, &scene.prefix, dir, &args);
+    crate::vram::install(app);
     crate::map_fog_surface::install(app, &scene.prefix);
     crate::map_grass::install(app, dir, &scene.prefix)?;
     stage("materials and grass");
@@ -1033,6 +1034,7 @@ pub fn run(options: Options) -> Result<()> {
     let mut app = App::new();
     app.add_plugins((
         DefaultPlugins
+            .set(crate::vram::render_plugin())
             .set(layered_gltf_plugin())
             .set(WindowPlugin {
                 primary_window: Some(Window {

@@ -20,6 +20,8 @@
 //! `--no-grading`, `--no-bloom`, `--no-auto-exposure` disable individual map post effects.
 //! `--native-tone-reinhard` / `--native-tone-filmic` override the authored/default sensitometric operator.
 //! `--visual-stats` logs periodic map frame times in viewer and play modes.
+//! `--perf` logs VRAM and asset bytes every five seconds; `--perf-seconds N` self-exits.
+//! `--vram-budget GB` simulates a smaller card (GiB), reserving 20% for headroom.
 //! `--profile-systems` also logs map-system CPU timers and render-schedule/pass diagnostics.
 //! `--no-fxr` disables authored FXR playback and keeps the existing effect stand-ins.
 //! `--no-cloth` disables the Havok cloth simulation (characters keep their rigid skin).
@@ -50,6 +52,7 @@ mod map_fx;
 mod map_grass;
 mod material_residency;
 mod menu;
+mod mesh_residency;
 mod perf_log;
 mod pipeline_warmup;
 mod play;
@@ -57,7 +60,9 @@ mod presentation;
 #[cfg(feature = "profile-spans")]
 mod span_profile;
 mod split_sun_cascades;
+mod texture_residency;
 mod viewer;
+mod vram;
 
 use std::path::PathBuf;
 
@@ -95,6 +100,7 @@ fn arg_f32(args: &[String], name: &str, default: f32) -> anyhow::Result<f32> {
 
 fn dispatch() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    vram::validate_args(&args)?;
     let cache = arg_value(&args, "--cache").map(PathBuf::from);
     if args.iter().any(|a| a == "--cache")
         && cache

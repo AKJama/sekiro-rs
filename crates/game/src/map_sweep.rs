@@ -387,6 +387,7 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
     raise_io_stack();
     app.add_plugins(
         DefaultPlugins
+            .set(crate::vram::render_plugin())
             .set(layered_gltf_plugin())
             .set(WindowPlugin {
                 primary_window: None,
