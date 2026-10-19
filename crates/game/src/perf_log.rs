@@ -81,12 +81,7 @@ pub(crate) fn args() -> &'static [String] {
 }
 
 pub(crate) fn profile_systems() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        args()
-            .iter()
-            .any(|a| a == "--profile-systems" || a == "--perf")
-    })
+    sekiro_sim::perf::enabled()
 }
 
 impl SystemTimer {
@@ -168,13 +163,7 @@ impl PerfLog {
     pub fn open() -> std::io::Result<Self> {
         let dir = std::env::var_os("PLAY_PERF_DIR")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| {
-                if args().iter().any(|a| a == "--perf") {
-                    "target/enemies/perf".into()
-                } else {
-                    "cache/perf".into()
-                }
-            });
+            .unwrap_or_else(|| "cache/perf".into());
         std::fs::create_dir_all(&dir)?;
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -689,11 +678,16 @@ pub(crate) fn scene_counts(
         return;
     }
     *last = time.elapsed_secs();
-    let visible = skins.iter().filter(|(v, _)| v.get()).count();
-    let casters = skins.iter().filter(|(_, no_shadow)| !*no_shadow).count();
+    let (total, visible, casters) = skins.iter().fold((0, 0, 0), |(n, v, c), (vis, no_shadow)| {
+        (
+            n + 1,
+            v + usize::from(vis.get()),
+            c + usize::from(!no_shadow),
+        )
+    });
     info!(
         "skinned meshes: {} total, {visible} visible (any view), {casters} shadow eligible",
-        skins.iter().count()
+        total
     );
 }
 

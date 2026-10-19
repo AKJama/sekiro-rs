@@ -96,6 +96,22 @@ pub struct StatusBook {
 }
 
 impl StatusBook {
+    pub fn shared(cache: &std::path::Path, table: Option<&Table>) -> Self {
+        Self {
+            effects: crate::shared::load(cache.join("shared-statuses"), || {
+                Some(
+                    table
+                        .map(|t| {
+                            t.rows()
+                                .map(|r| (r.id(), StatusEffect::from_row(&r)))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                )
+            })
+            .unwrap(),
+        }
+    }
     pub fn from_table(table: &Table) -> Self {
         Self {
             effects: table

@@ -255,45 +255,9 @@ impl Registry {
                 .unwrap()
                 .0
         });
-        let row = self
-            .npc
-            .get(&npc)
-            .ok_or_else(|| format!("missing NpcParam {npc}"))?;
         for p in placements.iter().filter(|p| p.npc == npc) {
-            let Some(think) = self.think.get(&p.think) else {
-                continue;
-            };
-            let Some(logic) = think["logicId"].as_i64() else {
-                continue;
-            };
-            let Some(battle) = think["battleGoalID"].as_i64() else {
-                continue;
-            };
-            let has = |files: &Vec<String>| {
-                files.contains(&format!("{logic:06}_logic.lua"))
-                    && files.contains(&format!("{battle:06}_battle.lua"))
-            };
-            let own = format!("{}.luabnd.d", p.map);
-            let bundle = self
-                .bundles
-                .get(&own)
-                .filter(|files| has(files))
-                .map(|_| own.clone())
-                .or_else(|| {
-                    self.bundles
-                        .iter()
-                        .find(|(_, files)| has(files))
-                        .map(|(name, _)| name.clone())
-                });
-            if let Some(ai_bundle) = bundle {
-                return Ok(EnemySpec {
-                    chr: chr.into(),
-                    npc_param: npc,
-                    think: p.think,
-                    ai_bundle,
-                    starts_in_battle: (0..32)
-                        .any(|i| row[format!("spEffectID{i}")].as_i64() == Some(200004)),
-                });
+            if let Ok(spec) = self.placement_spec(chr, p) {
+                return Ok(spec);
             }
         }
         Err(format!(

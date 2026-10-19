@@ -352,16 +352,7 @@ impl CombatRules {
                 .find(id)
                 .and_then(|r| CalcCorrectGraph::from_row(&r).ok())
         };
-        let statuses = crate::shared::load(cache.join("shared-statuses"), || {
-            Some(
-                sp.as_ref()
-                    .map(|t| StatusBook::from_table(t))
-                    .unwrap_or_default(),
-            )
-        })
-        .unwrap()
-        .as_ref()
-        .clone();
+        let statuses = StatusBook::shared(cache, sp.as_deref());
         let tentative_f = |f: &str| row_f32(tentative.as_ref(), 0, f).unwrap_or(0.0);
         let mut wolf_status = Status::new(
             graph(GRAPH_POISON_RESIST).map_or(0.0, |g| g.eval(PLAYER_GROWTH_LEVEL).trunc())

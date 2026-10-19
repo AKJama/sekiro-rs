@@ -340,6 +340,26 @@ impl Duel {
         std::mem::swap(&mut self.lock_button, &mut other.lock_button);
     }
 
+    /// Advance an independent opponent with the authoritative Wolf borrowed for this step.
+    pub(super) fn step_kernel(
+        &mut self,
+        other: &mut Duel,
+        input: &InputFrame,
+        dt: f32,
+        advance_player: bool,
+    ) -> DuelReport {
+        self.swap_screen_player(other);
+        other.shared_player_frame = !advance_player;
+        other.god = self.god;
+        other.immortal = self.immortal;
+        if let (Some(spawn), Some(arena_spawn)) = (&mut other.spawn, self.spawn) {
+            spawn[0] = arena_spawn[0];
+        }
+        let report = other.step(input, dt);
+        other.respawn_in = None;
+        self.swap_screen_player(other);
+        report
+    }
     pub(super) fn step_screen_monkeys(&mut self, input: &InputFrame, dt: f32) -> DuelReport {
         if self.spawn.is_none() {
             self.spawn = Some([placement(&self.player), placement(&self.enemy)]);
@@ -408,27 +428,18 @@ impl Duel {
             {
                 monkey.duel.auxiliary_ezstate = None;
             }
-            self.swap_screen_player(&mut monkey.duel);
-            monkey.duel.shared_player_frame = i != selected;
-            monkey.duel.god = self.god;
-            monkey.duel.immortal = self.immortal;
-            monkey.duel.respawn_in = None;
-            // Auxiliary Duels were loaded with an origin Wolf placeholder. A shared
-            // player's void return must use the arena start, never that placeholder.
-            if let (Some(spawn), Some(arena_spawn)) = (&mut monkey.duel.spawn, self.spawn) {
-                spawn[0] = arena_spawn[0];
-            }
-            let report = monkey
-                .duel
-                .step(if i == selected { input } else { &passive }, dt);
-            monkey.duel.respawn_in = None;
+            let report = self.step_kernel(
+                &mut monkey.duel,
+                if i == selected { input } else { &passive },
+                dt,
+                i == selected,
+            );
             if i == selected {
                 result = report.clone();
             } else {
                 result.hits.extend(report.hits.clone());
             }
             monkey.report = report;
-            self.swap_screen_player(&mut monkey.duel);
             if let Some(events) = &mut self.events {
                 for (flag, on) in monkey
                     .duel

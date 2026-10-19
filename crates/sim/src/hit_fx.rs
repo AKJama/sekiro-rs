@@ -97,6 +97,7 @@ pub struct DecalRow {
 /// The tables for one fight: Wolf (player) against the NPC of one NpcParam row.
 #[derive(Debug, Clone, Default)]
 pub struct HitFx {
+    _params: Option<std::sync::Arc<ParamSet>>,
     concept: HashMap<i32, HashMap<String, i64>>,
     concept_just_guard: HashMap<i32, HashMap<String, i64>>,
     sfx: HashMap<i32, HashMap<String, i64>>,
@@ -230,6 +231,7 @@ impl HitFx {
             }
         }
         Some(Self {
+            _params: Some(set.clone()),
             concept: table(&set, "HitEffectSfxConceptParam"),
             concept_just_guard: table(&set, "HitEffectSfxConceptJustGuardParam"),
             sfx: table(&set, "HitEffectSfxParam"),

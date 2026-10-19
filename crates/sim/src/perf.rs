@@ -6,12 +6,14 @@ thread_local! { static SAMPLES: RefCell<Samples> = RefCell::default(); }
 
 pub struct Scope(Option<(&'static str, Instant)>);
 
+pub fn enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::args().any(|a| a == "--perf" || a == "--profile-systems"))
+}
+
 impl Scope {
     pub fn start(name: &'static str) -> Self {
-        static ENABLED: OnceLock<bool> = OnceLock::new();
-        let enabled = *ENABLED
-            .get_or_init(|| std::env::args().any(|a| a == "--perf" || a == "--profile-systems"));
-        Self(enabled.then(|| (name, Instant::now())))
+        Self(enabled().then(|| (name, Instant::now())))
     }
 }
 

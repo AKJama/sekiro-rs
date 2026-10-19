@@ -76,6 +76,7 @@ pub fn read_luainfo(data: &[u8]) -> HashMap<i32, String> {
 /// The game's AI for one character.
 pub struct AiBrain {
     vm: Vm,
+    _chunks: Vec<std::rc::Rc<Proto>>,
     pub state: AiState,
     /// How many log lines [`AiBrain::drain_log`] has returned.
     log_read: usize,
@@ -85,9 +86,9 @@ pub struct AiBrain {
 /// Unlike FwLo's per-actor file reads, common Lua chunks are read/decoded once per script.
 fn compiled_chunk(path: &Path) -> Result<std::rc::Rc<Proto>, AiLoadError> {
     use std::{cell::RefCell, rc::Rc};
-    thread_local! { static CHUNKS: RefCell<HashMap<PathBuf, Rc<Proto>>> = RefCell::default(); }
+    thread_local! { static CHUNKS: RefCell<HashMap<PathBuf, std::rc::Weak<Proto>>> = RefCell::default(); }
     let key = path.canonicalize().unwrap_or_else(|_| path.to_owned());
-    if let Some(proto) = CHUNKS.with_borrow(|c| c.get(&key).cloned()) {
+    if let Some(proto) = CHUNKS.with_borrow(|c| c.get(&key).and_then(std::rc::Weak::upgrade)) {
         return Ok(proto);
     }
     let data = std::fs::read(path).map_err(|e| AiLoadError::Io(path.to_owned(), e))?;
@@ -97,7 +98,7 @@ fn compiled_chunk(path: &Path) -> Result<std::rc::Rc<Proto>, AiLoadError> {
         .to_string_lossy()
         .into_owned();
     let proto = load_chunk(&data).map_err(|e| AiLoadError::Lua(name, e))?;
-    CHUNKS.with_borrow_mut(|c| c.insert(key, proto.clone()));
+    CHUNKS.with_borrow_mut(|c| c.insert(key, Rc::downgrade(&proto)));
     Ok(proto)
 }
 
@@ -147,14 +148,17 @@ impl AiBrain {
             vm.set_global(f, Value::Host(f.into()));
         }
         let mut state = AiState::new(think, names, seed);
+        let mut chunks = Vec::new();
         for f in &files {
             let name = f.file_name().unwrap().to_string_lossy().into_owned();
             let proto = compiled_chunk(f)?;
+            chunks.push(proto.clone());
             vm.exec_chunk(&mut state, proto)
                 .map_err(|e| AiLoadError::Lua(name.clone(), e))?;
         }
         Ok(Self {
             vm,
+            _chunks: chunks,
             state,
             log_read: 0,
         })

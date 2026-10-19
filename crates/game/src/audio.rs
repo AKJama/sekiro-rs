@@ -36,6 +36,28 @@ pub struct SoundCue {
     pub source: CueSource,
 }
 
+impl From<sekiro_sim::sound::SoundCue> for SoundCue {
+    fn from(cue: sekiro_sim::sound::SoundCue) -> Self {
+        Self {
+            keys: cue.keys,
+            position: Vec3::from_array(cue.position),
+            source: cue.source,
+        }
+    }
+}
+
+fn actor_cues(
+    actor: usize,
+    character: &sekiro_sim::character::Character,
+    sounds: &HitSounds,
+    out: &mut MessageWriter<SoundCue>,
+) {
+    out.write_batch(
+        tae_cues(actor, character, sounds.materials[actor])
+            .into_iter()
+            .map(SoundCue::from),
+    );
+}
 /// Hit-sound tables and the decoded-sample fallback.
 #[derive(Resource, Default)]
 pub struct SoundLibrary {
@@ -143,9 +165,9 @@ pub struct FmodAudio {
     loaded: HashSet<String>,
     /// Keys already reported as missing or failing.
     reported: HashSet<String>,
-    diagnostics: bool,
-    last_diagnostic: Option<std::time::Instant>,
     population_resident: HashSet<String>,
+    population_required: HashSet<String>,
+    pending_cues: Vec<SoundCue>,
 }
 
 impl FmodAudio {
@@ -162,9 +184,9 @@ impl FmodAudio {
             system,
             loaded: HashSet::new(),
             reported: HashSet::new(),
-            diagnostics: std::env::var_os("SEKIRO_AUDIO_DIAGNOSTICS").is_some(),
-            last_diagnostic: None,
             population_resident: HashSet::new(),
+            population_required: HashSet::new(),
+            pending_cues: Vec::new(),
         };
         for p in start_projects(map) {
             audio.load(&p);
@@ -211,6 +233,22 @@ impl FmodAudio {
         Some((key.clone(), self.system.play(key, position.to_array())))
     }
 
+    pub(crate) fn population_banks_pending(&self) -> bool {
+        self.population_required
+            .iter()
+            .any(|chr| !self.population_resident.contains(chr))
+    }
+
+    fn cue_ready(&self, cue: &SoundCue) -> bool {
+        let bank = cue
+            .keys
+            .iter()
+            .find_map(|key| self.system.path_of(key))
+            .and_then(|path| path.split('/').next());
+        bank.is_none_or(|bank| {
+            !self.population_required.contains(bank) || self.population_resident.contains(bank)
+        })
+    }
     /// Check residency before cue playback, loading/freeing data only on activation changes.
     /// Never open dormant banks or first-load wave data as many actors start events together.
     pub(crate) fn population_banks<'a>(&mut self, required: impl Iterator<Item = &'a str>) {
@@ -222,9 +260,9 @@ impl FmodAudio {
             .cloned()
             .collect::<Vec<_>>();
         for chr in leaving {
+            self.population_resident.remove(&chr);
             match self.system.free_samples(&chr) {
                 Ok(()) => {
-                    self.population_resident.remove(&chr);
                     info!("FMOD: {chr} dormant, event data released");
                 }
                 Err(error) => {
@@ -234,10 +272,12 @@ impl FmodAudio {
                 }
             }
         }
+        self.population_required = required.iter().map(|chr| (*chr).to_owned()).collect();
         for chr in required {
             if self.population_resident.insert(chr.to_owned()) {
                 let result = self.system.preload(chr);
                 info!("FMOD: {chr} activated, event data preload={result:?}");
+                break; // Bound activation warmup to one kind per Update frame.
             }
         }
     }
@@ -316,11 +356,17 @@ pub(crate) fn prepare_population(app: &mut App, foes: &[(String, i32, bool)]) {
         for chr in projects {
             fmod.load_project(&chr, false);
         }
-        fmod.population_banks(
-            foes.iter()
-                .filter(|(_, _, active)| *active)
-                .map(|(chr, _, _)| chr.as_str()),
-        );
+        // The loading screen may warm all initially active kinds; Update warms only one.
+        loop {
+            fmod.population_banks(
+                foes.iter()
+                    .filter(|(_, _, active)| *active)
+                    .map(|(chr, _, _)| chr.as_str()),
+            );
+            if !fmod.population_banks_pending() {
+                break;
+            }
+        }
     }
 }
 
@@ -445,17 +491,9 @@ fn update_fmod(mut fmod: NonSendMut<FmodAudio>, camera: Query<&GlobalTransform, 
             t.up().to_array(),
         );
     }
-    let result = fmod.system.update_result();
+    let result = fmod.system.update();
     if result != 0 && fmod.reported.insert(format!("update:{result}")) {
         warn!("FMOD update result={result}");
-    }
-    if fmod.diagnostics
-        && fmod
-            .last_diagnostic
-            .is_none_or(|t| t.elapsed().as_secs() >= 1)
-    {
-        info!("audio diagnostic {}", fmod.system.diagnostics());
-        fmod.last_diagnostic = Some(std::time::Instant::now());
     }
 }
 
@@ -472,15 +510,15 @@ pub fn play_cues(
         for chr in lib.enemy_projects.drain() {
             fmod.load(&chr);
         }
-        for cue in cues.read() {
+        let waiting = std::mem::take(&mut fmod.pending_cues);
+        for cue in waiting.into_iter().chain(cues.read().cloned()) {
+            if !fmod.cue_ready(&cue) {
+                fmod.pending_cues.push(cue);
+                continue;
+            }
             let position = cue.position + Vec3::Y * EMITTER_HEIGHT;
             let played = fmod.play(&cue.keys, position);
-            if fmod.diagnostics {
-                info!(
-                    "audio cue keys={:?} source={:?} position={:?} played={played:?}",
-                    cue.keys, cue.source, position
-                );
-            }
+
             match played {
                 Some((key, Played::Started)) => lib.played.push(key),
                 Some((key, Played::Failed(code))) => {
@@ -549,32 +587,20 @@ pub fn emit_population(
         population.foes[i].duel.spec.npc_param
     });
     if let Some(hs) = lib.hit_sounds(row) {
-        for c in tae_cues(0, &duel.player, hs.materials[0]) {
-            out.write(SoundCue {
-                keys: c.keys,
-                position: Vec3::from_array(c.position),
-                source: c.source,
-            });
-        }
+        actor_cues(0, &duel.player, hs, out);
     }
     for foe in population.foes.iter().filter(|f| f.stepped) {
         let Some(hs) = lib.hit_sounds(foe.duel.spec.npc_param) else {
             continue;
         };
-        let mut cues = tae_cues(1, &foe.duel.enemy, hs.materials[1]);
+        actor_cues(1, &foe.duel.enemy, hs, out);
         for (hit, res) in &foe.report.hits {
-            cues.extend(hs.cues(hit, res));
-        }
-        for c in cues {
-            out.write(SoundCue {
-                keys: c.keys,
-                position: Vec3::from_array(c.position),
-                source: c.source,
-            });
+            out.write_batch(hs.cues(hit, res).into_iter().map(SoundCue::from));
         }
     }
 }
 
+/// The cues of one duel step: TAE sounds of both characters and resolved hit sounds.
 pub fn emit(
     duel: &Duel,
     report: &DuelReport,
@@ -586,17 +612,10 @@ pub fn emit(
     let Some(hs) = lib.hit_sounds(duel.spec.npc_param) else {
         return;
     };
-    let mut cues = tae_cues(0, &duel.player, hs.materials[0]);
-    cues.extend(tae_cues(1, &duel.enemy, hs.materials[1]));
+    actor_cues(0, &duel.player, hs, out);
+    actor_cues(1, &duel.enemy, hs, out);
     for (hit, res) in &report.hits {
-        cues.extend(hs.cues(hit, res));
-    }
-    for c in cues {
-        out.write(SoundCue {
-            keys: c.keys,
-            position: Vec3::from_array(c.position),
-            source: c.source,
-        });
+        out.write_batch(hs.cues(hit, res).into_iter().map(SoundCue::from));
     }
 }
 
@@ -638,9 +657,9 @@ mod tests {
             system,
             loaded: HashSet::new(),
             reported: HashSet::new(),
-            diagnostics: false,
-            last_diagnostic: None,
             population_resident: HashSet::new(),
+            population_required: HashSet::new(),
+            pending_cues: Vec::new(),
         };
         for name in start_projects(Some("m11_00_00_00")) {
             fmod.load(&name);
@@ -661,6 +680,35 @@ mod tests {
         assert!(!fmod.population_resident.contains("c1150"));
         fmod.population_banks(["c1010", "c1150"].into_iter());
         assert_eq!(fmod.population_resident.len(), 2);
+        // One new kind warms each frame; retain the next kind's first cue until ready.
+        fmod.population_banks(["c1010"].into_iter());
+        fmod.population_banks(["c1010", "c1150", "c1180"].into_iter());
+        assert_eq!(fmod.population_resident.len(), 2);
+        let key = fmod
+            .system
+            .projects()
+            .iter()
+            .find(|p| p.name == "c1180")
+            .unwrap()
+            .events[0]
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_owned();
+        let first_cue = SoundCue {
+            keys: vec![key],
+            position: Vec3::ZERO,
+            source: CueSource::Tae,
+        };
+        assert!(!fmod.cue_ready(&first_cue));
+        fmod.pending_cues.push(first_cue);
+        fmod.population_banks(["c1010", "c1150", "c1180"].into_iter());
+        assert!(fmod.cue_ready(&fmod.pending_cues[0]));
+        assert_eq!(
+            fmod.pending_cues.len(),
+            1,
+            "first cue is retained until ready"
+        );
         assert_eq!(
             fmod.system.channels_playing(),
             0,

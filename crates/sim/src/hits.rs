@@ -595,7 +595,9 @@ fn load_attacks(
 /// One contact between an attack and a defender.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HitEvent {
+    /// Kernel-local 0/1 during resolution; population reports use 0 for Wolf and foe index + 1.
     pub attacker: usize,
+    /// Same namespace as attacker. Aggregated reports must not be resolved by a duel again.
     pub defender: usize,
     pub judge: i32,
     pub attack: AttackData,

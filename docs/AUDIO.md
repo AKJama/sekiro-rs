@@ -40,7 +40,8 @@ When the last active NPC of a kind becomes dormant, its event data is released w
 This uses the simulation's NpcParam activation ranges, including engagement overrides.
 Warming every map character exhausted FMOD resources (error 43); fetching their wave data during simultaneous cue starts also stalled the live mixer.
 Bank residency changes happen before cue playback, and transient resource or playback-limit errors never permanently mute a key.
-`SEKIRO_AUDIO_DIAGNOSTICS=1` logs cue results and one mixer snapshot per second, including project memory, real/virtual voices, loops, starvation, CPU, DSP clock and output RMS.
+Activation warmup is limited to one new character kind per rendered frame; its first cues wait in a queue until that bank is ready.
+Detailed mixer diagnostics are kept out of the shipping FMOD API; bank_probe provides a bounded headless load/play probe.
 
 ## Event keys
 

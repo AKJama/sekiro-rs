@@ -129,7 +129,7 @@ macro_rules! api {
                     Ok(Api {
                         $($field: {
                             let name: &[u8] = $sym;
-                            let lib = if name.starts_with(b"FMOD_System_") || name.starts_with(b"FMOD_Channel") || name.starts_with(b"FMOD_Sound_") || name.starts_with(b"FMOD_Memory_") { ex } else { ev };
+                            let lib = if name.starts_with(b"FMOD_System_") || name.starts_with(b"FMOD_Channel") { ex } else { ev };
                             *lib.get::<unsafe extern "system" fn($($arg),*) -> i32>(name)
                                 .map_err(|e| FmodError::Library(format!(
                                     "{}: {e}",
@@ -177,17 +177,6 @@ api! {
     group_subgroup: b"FMOD_ChannelGroup_GetGroup" => fn(Ptr, i32, *mut Ptr);
     channel_playing: b"FMOD_Channel_IsPlaying" => fn(Ptr, *mut i32);
     channel_audibility: b"FMOD_Channel_GetAudibility" => fn(Ptr, *mut f32);
-    cpu_usage: b"FMOD_System_GetCPUUsage" => fn(Ptr, *mut f32, *mut f32, *mut f32, *mut f32, *mut f32);
-    system_channel: b"FMOD_System_GetChannel" => fn(Ptr, i32, *mut Ptr);
-    channel_virtual: b"FMOD_Channel_IsVirtual" => fn(Ptr, *mut i32);
-    channel_sound: b"FMOD_Channel_GetCurrentSound" => fn(Ptr, *mut Ptr);
-    channel_mode: b"FMOD_Channel_GetMode" => fn(Ptr, *mut u32);
-    sound_name: b"FMOD_Sound_GetName" => fn(Ptr, *mut c_char, i32);
-    sound_state: b"FMOD_Sound_GetOpenState" => fn(Ptr, *mut i32, *mut u32, *mut i32, *mut i32);
-    project_memory: b"FMOD_EventProject_GetMemoryInfo" => fn(Ptr, u32, u32, *mut u32, Ptr);
-    memory_stats: b"FMOD_Memory_GetStats" => fn(*mut i32, *mut i32, i32);
-    dsp_clock: b"FMOD_System_GetDSPClock" => fn(Ptr, *mut u32, *mut u32);
-    wave_data: b"FMOD_System_GetWaveData" => fn(Ptr, *mut f32, i32, i32);
     event_stop: b"FMOD_Event_Stop" => fn(Ptr, i32);
     event_properties: b"FMOD_Event_GetNumProperties" => fn(Ptr, *mut i32);
     event_property_info: b"FMOD_Event_GetPropertyInfo" => fn(Ptr, *mut i32, *mut *const c_char, *mut i32);
@@ -357,11 +346,6 @@ impl EventSystem {
         self.preload_resource(name, RESOURCE_STREAMS_AND_SAMPLES)
     }
 
-    /// Warm resident samples without reserving every event's streaming decoder in advance.
-    pub fn preload_samples(&mut self, name: &str) -> (usize, Option<i32>) {
-        self.preload_resource(name, 2)
-    }
-
     fn preload_resource(&mut self, name: &str, resource: i32) -> (usize, Option<i32>) {
         let Some(i) = self.projects.iter().position(|p| p.name == name) else {
             return (0, None);
@@ -396,6 +380,7 @@ impl EventSystem {
         let Some(i) = self.projects.iter().position(|p| p.name == name) else {
             return Ok(());
         };
+        let mut first = None;
         unsafe {
             let mut n = 0;
             check(
@@ -404,19 +389,23 @@ impl EventSystem {
             )?;
             for g in 0..n {
                 let mut group = std::ptr::null_mut();
-                check(
+                let result = check(
                     "FMOD_EventProject_GetGroupByIndex",
                     (self.api.project_group)(self.handles[i], g, 0, &mut group),
-                )?;
-                check(
-                    "FMOD_EventGroup_FreeEventData",
-                    (self.api.group_free)(group, std::ptr::null_mut(), 1),
-                )?;
+                )
+                .and_then(|()| {
+                    check(
+                        "FMOD_EventGroup_FreeEventData",
+                        (self.api.group_free)(group, std::ptr::null_mut(), 1),
+                    )
+                });
+                if let Err(error) = result {
+                    first.get_or_insert(error);
+                }
             }
         }
-        Ok(())
+        first.map_or(Ok(()), Err)
     }
-
     /// The full path of event `key`, if a loaded project has it.
     pub fn path_of(&self, key: &str) -> Option<&str> {
         self.index.get(key).map(String::as_str)
@@ -488,10 +477,8 @@ impl EventSystem {
     }
 
     /// Runs FMOD's per-frame work: 3D positions, voice limits, finished events.
-    pub fn update(&mut self) {
-        unsafe {
-            (self.api.update)(self.es);
-        }
+    pub fn update(&mut self) -> i32 {
+        unsafe { (self.api.update)(self.es) }
     }
 
     /// Diagnostics: starts event `key` at `position`, lets FMOD mix a few updates and returns
@@ -598,109 +585,6 @@ impl EventSystem {
             }
         }
         out
-    }
-
-    /// Bounded mixer and bank diagnostic snapshot, for occasional use outside the hot path.
-    pub fn diagnostics(&self) -> String {
-        let mut cpu = [0.0; 5];
-        let cpu_result = unsafe {
-            (self.api.cpu_usage)(
-                self.sys,
-                &mut cpu[0],
-                &mut cpu[1],
-                &mut cpu[2],
-                &mut cpu[3],
-                &mut cpu[4],
-            )
-        };
-        let mut playing = 0;
-        let channels_result = unsafe { (self.api.channels_playing)(self.sys, &mut playing) };
-        let (mut real, mut virtuals, mut loops, mut starving, mut errors) = (0, 0, 0, 0, 0);
-        let mut voices = Vec::new();
-        for i in 0..MAX_CHANNELS {
-            unsafe {
-                let mut channel = std::ptr::null_mut();
-                let mut active = 0;
-                if (self.api.system_channel)(self.sys, i, &mut channel) != 0
-                    || (self.api.channel_playing)(channel, &mut active) != 0
-                    || active == 0
-                {
-                    continue;
-                }
-                let mut virtual_voice = 0;
-                (self.api.channel_virtual)(channel, &mut virtual_voice);
-                if virtual_voice == 0 {
-                    real += 1;
-                } else {
-                    virtuals += 1;
-                }
-                let mut mode = 0;
-                (self.api.channel_mode)(channel, &mut mode);
-                if mode & 6 != 0 {
-                    loops += 1;
-                }
-                let mut sound = std::ptr::null_mut();
-                let mut name = [0 as c_char; 192];
-                let (mut state, mut buffered, mut starved, mut busy) = (0, 0, 0, 0);
-                let mut result = (self.api.channel_sound)(channel, &mut sound);
-                if result == 0 && !sound.is_null() {
-                    (self.api.sound_name)(sound, name.as_mut_ptr(), name.len() as i32);
-                    result = (self.api.sound_state)(
-                        sound,
-                        &mut state,
-                        &mut buffered,
-                        &mut starved,
-                        &mut busy,
-                    );
-                    if result != 0 {
-                        errors += 1;
-                    }
-                    starving += i32::from(starved != 0);
-                }
-                let mut audibility = 0.0;
-                (self.api.channel_audibility)(channel, &mut audibility);
-                if voices.len() < 12 {
-                    voices.push(format!("{}:loop={}:virtual={virtual_voice}:aud={audibility:.4}:open={state}:buffer={buffered}:starving={starved}:busy={busy}:result={result}", c_str(name.as_ptr()), mode & 6 != 0));
-                }
-            }
-        }
-        let (mut current, mut peak) = (0, 0);
-        let memory_result = unsafe { (self.api.memory_stats)(&mut current, &mut peak, 0) };
-        let (mut hi, mut lo) = (0, 0);
-        let clock_result = unsafe { (self.api.dsp_clock)(self.sys, &mut hi, &mut lo) };
-        let clock = (u64::from(hi) << 32) | u64::from(lo);
-        let mut wave = [0.0f32; 256];
-        let wave_result =
-            unsafe { (self.api.wave_data)(self.sys, wave.as_mut_ptr(), wave.len() as i32, 0) };
-        let rms = (wave.iter().map(|v| v * v).sum::<f32>() / wave.len() as f32).sqrt();
-        let mut out = format!(
-            "channels={playing} result={channels_result} real={real} virtual={virtuals} loops={loops} starving={starving} sound_query_errors={errors} memory_current={current} memory_peak={peak} memory_result={memory_result} cpu_result={cpu_result} cpu_dsp_stream_geometry_update_total={cpu:?} voices={voices:?}"
-        );
-        out.push_str(&format!(
-            " dsp_clock={clock}:result={clock_result} output_rms={rms}:result={wave_result}"
-        ));
-        for (project, &handle) in self.projects.iter().zip(&self.handles) {
-            let mut bytes = 0;
-            let result = unsafe {
-                (self.api.project_memory)(
-                    handle,
-                    u32::MAX,
-                    u32::MAX,
-                    &mut bytes,
-                    std::ptr::null_mut(),
-                )
-            };
-            out.push_str(&format!(
-                " bank_project={}:bytes={bytes}:result={result}",
-                project.name
-            ));
-        }
-        out
-    }
-
-    /// Per-frame update retaining its FMOD result for diagnostics.
-    pub fn update_result(&mut self) -> i32 {
-        unsafe { (self.api.update)(self.es) }
     }
 
     /// Channels mixing right now.

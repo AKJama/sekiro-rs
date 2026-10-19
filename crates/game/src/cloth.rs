@@ -917,7 +917,7 @@ fn step(
     let culled = c.rigid
         || force_rigid
         || match (camera, root) {
-            (Some(cam), Some(r)) => r.translation().distance(cam) > cloth_range(),
+            (Some(cam), Some(r)) => r.translation().distance(cam) > cloth_range() + def.rest_far,
             _ => false,
         };
     // One world matrix per reference bone, and the collision capsules in Havok world space.

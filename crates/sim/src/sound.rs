@@ -136,6 +136,7 @@ impl<T: Clone> std::ops::DerefMut for Shared<T> {
 /// Hit-sound tables and the materials of the two duel characters.
 #[derive(Debug, Clone, Default)]
 pub struct HitSounds {
+    _params: Option<std::sync::Arc<ParamSet>>,
     hit: Shared<HashMap<i32, HashMap<String, i64>>>,
     just_guard: Shared<HashMap<i32, HashMap<String, i64>>>,
     attacks: [Shared<HashMap<i32, AttackSe>>; 2],
@@ -212,6 +213,7 @@ impl HitSounds {
         let npc =
             pair(&set, "NpcParam", npc_param, ["materialSe1", "materialSe2"]).unwrap_or([114, 108]);
         Some(Self {
+            _params: Some(set.clone()),
             hit: Shared(crate::shared::load(
                 param_dir.join("sound-HitEffectSeParam"),
                 || Some(table(&set, "HitEffectSeParam")),

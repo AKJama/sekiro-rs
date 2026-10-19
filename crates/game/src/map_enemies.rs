@@ -13,39 +13,29 @@ use std::path::Path;
 use std::sync::Arc;
 
 #[derive(Component)]
-pub(super) struct FoeActor(usize, Vec<Entity>, f32, bool);
+pub(super) struct FoeActor {
+    index: usize,
+    meshes: Vec<Entity>,
+    posed_clock: f32,
+    drawn: bool,
+    donor: String,
+}
 #[derive(Component)]
 struct Panel(usize);
-#[derive(Component)]
-struct Fill(usize, bool);
 #[derive(Component)]
 struct Mark(usize);
 #[derive(Resource)]
 struct Libraries(HashMap<String, AnimLibrary>);
-#[derive(Resource)]
-struct Placements(Vec<(String, String, Option<[bool; 32]>)>);
 
 pub(super) fn install(app: &mut App, cache: &Path) -> Result<()> {
-    let roster = sekiro_sim::registry::Registry::load(cache).map_err(anyhow::Error::msg)?;
+    let assets = app.world().resource::<AssetServer>().clone();
     let sim = app.world().non_send::<Sim>();
+    let population = sim.duel.population.as_ref().unwrap();
+    let roster = population.registry.as_ref().unwrap();
     let mut libraries = HashMap::new();
-    let mut placements = Vec::new();
-    let sound_foes = sim
-        .duel
-        .population
-        .as_ref()
-        .unwrap()
-        .foes
-        .iter()
-        .map(|foe| {
-            (
-                foe.duel.spec.chr.clone(),
-                foe.duel.spec.npc_param,
-                foe.active,
-            )
-        })
-        .collect::<Vec<_>>();
-    for foe in &sim.duel.population.as_ref().unwrap().foes {
+    let mut actors = Vec::new();
+    let mut sound_foes = Vec::new();
+    for (index, foe) in population.foes.iter().enumerate() {
         let spec = &foe.duel.spec;
         let donor = roster.anim_chr(&spec.chr, spec.npc_param);
         if let std::collections::hash_map::Entry::Vacant(entry) = libraries.entry(donor.clone()) {
@@ -53,15 +43,53 @@ pub(super) fn install(app: &mut App, cache: &Path) -> Result<()> {
             lib.clip("a000_000000")?;
             entry.insert(lib);
         }
-        if foe.active {
-            libraries.get_mut(&donor).unwrap().prefetch_all();
+        let lib = libraries.get_mut(&donor).unwrap();
+        if foe.active() {
+            lib.prefetch_all();
         }
         anyhow::ensure!(
             cache.join(format!("models/{}.glb", spec.chr)).is_file(),
             "map enemies: missing model {}",
             spec.chr
         );
-        placements.push((spec.chr.clone(), donor, roster.draw_mask(cache, spec)));
+        let mut idle = Animator::new(lib.clip("a000_000000")?, false);
+        idle.apply_root_motion = false;
+        idle.speed = 0.0;
+        sound_foes.push((spec.chr.clone(), spec.npc_param, foe.active()));
+        actors.push((
+            FoeActor {
+                index,
+                meshes: Vec::new(),
+                posed_clock: f32::NAN,
+                drawn: false,
+                donor,
+            },
+            WorldAssetRoot(
+                assets
+                    .load_builder()
+                    .with_settings(|settings: &mut bevy::gltf::GltfLoaderSettings| {
+                        settings.skinned_mesh_bounds_policy =
+                            Some(bevy::gltf::GltfSkinnedMeshBoundsPolicy::Dynamic);
+                    })
+                    .load(GltfAssetLabel::Scene(0).from_asset(format!("models/{}.glb", spec.chr))),
+            ),
+            Transform::from_translation(Vec3::from_array(foe.duel.enemy.body.position))
+                .with_rotation(Quat::from_rotation_y(foe.duel.enemy.visual_yaw())),
+            Visibility::Inherited,
+            Rig::new(Arc::new(lib.skeleton.clone())),
+            idle,
+            roster
+                .draw_mask(cache, spec)
+                .map_or_else(|| DrawMask::new(MaskSource::Combat), DrawMask::with_groups),
+            PresentationLod {
+                draw: true,
+                pose: true,
+                cloth: foe.active(),
+            },
+        ));
+    }
+    for actor in actors {
+        app.world_mut().spawn(actor);
     }
     crate::audio::prepare_population(app, &sound_foes);
     app.world_mut()
@@ -69,8 +97,7 @@ pub(super) fn install(app: &mut App, cache: &Path) -> Result<()> {
             fx.ensure_tables(&world.non_send::<Sim>().duel);
         });
     app.insert_resource(Libraries(libraries))
-        .insert_resource(Placements(placements))
-        .add_systems(Startup, spawn.before(crate::map::MapSpawn))
+        .add_systems(Startup, spawn_gauges.before(crate::map::MapSpawn))
         .add_systems(Update, sound_banks.before(crate::audio::play_cues))
         .add_systems(
             Update,
@@ -83,118 +110,65 @@ pub(super) fn install(app: &mut App, cache: &Path) -> Result<()> {
     Ok(())
 }
 
-fn sound_banks(sim: NonSend<Sim>, fmod: Option<NonSendMut<crate::audio::FmodAudio>>) {
-    if let Some(mut fmod) = fmod {
-        fmod.population_banks(
-            sim.duel
-                .population
-                .as_ref()
-                .unwrap()
-                .foes
-                .iter()
-                .filter(|foe| foe.active)
-                .map(|foe| foe.duel.spec.chr.as_str()),
-        );
-    }
-}
-
-fn spawn(
-    mut commands: Commands,
-    assets: Res<AssetServer>,
-    mut libraries: ResMut<Libraries>,
-    placements: Res<Placements>,
+fn sound_banks(
     sim: NonSend<Sim>,
+    fmod: Option<NonSendMut<crate::audio::FmodAudio>>,
+    mut previous: Local<Vec<bool>>,
+    mut required: Local<Vec<String>>,
 ) {
-    let population = sim.duel.population.as_ref().unwrap();
-    for (i, (model, donor, mask)) in placements.0.iter().enumerate() {
-        let foe = &population.foes[i];
-        let lib = libraries.0.get_mut(donor).unwrap();
-        let mut idle = Animator::new(lib.clip("a000_000000").unwrap(), false);
-        idle.apply_root_motion = false;
-        idle.speed = 0.0;
-        let mut e = commands.spawn((
-            FoeActor(i, Vec::new(), f32::NAN, false),
-            WorldAssetRoot(
-                assets
-                    .load_builder()
-                    .with_settings(|settings: &mut bevy::gltf::GltfLoaderSettings| {
-                        // Generate per-joint mesh bounds once on the shared mesh asset.
-                        settings.skinned_mesh_bounds_policy =
-                            Some(bevy::gltf::GltfSkinnedMeshBoundsPolicy::Dynamic);
-                    })
-                    .load(GltfAssetLabel::Scene(0).from_asset(format!("models/{model}.glb"))),
-            ),
-            Transform::from_translation(Vec3::from_array(foe.duel.enemy.body.position))
-                .with_rotation(Quat::from_rotation_y(foe.duel.enemy.visual_yaw())),
-            Visibility::Inherited,
-            Rig::new(Arc::new(lib.skeleton.clone())),
-            idle,
-            mask.map_or_else(|| DrawMask::new(MaskSource::Combat), DrawMask::with_groups),
-        ));
-        if !foe.active {
-            e.insert(PoseDormant);
-        }
+    let Some(mut fmod) = fmod else {
+        return;
+    };
+    let foes = &sim.duel.population.as_ref().unwrap().foes;
+    let changed = previous.len() != foes.len()
+        || previous
+            .iter()
+            .zip(foes)
+            .any(|(was, foe)| *was != foe.active());
+    if !changed && !fmod.population_banks_pending() {
+        return;
+    }
+    if changed {
+        previous.clear();
+        previous.extend(foes.iter().map(|foe| foe.active()));
+        required.clear();
+        required.extend(
+            foes.iter()
+                .filter(|foe| foe.active())
+                .map(|foe| foe.duel.spec.chr.clone()),
+        );
+        required.sort();
+        required.dedup();
+    }
+    fmod.population_banks(required.iter().map(String::as_str));
+}
+fn spawn_gauges(mut commands: Commands, sim: NonSend<Sim>) {
+    use crate::combat_hud::{Fill, OVERHEAD_W, bar, deathblow_mark};
+    for index in 0..sim.duel.population.as_ref().unwrap().foes.len() {
+        commands.spawn((Mark(index), deathblow_mark()));
         commands
             .spawn((
-                Panel(i),
+                Panel(index),
                 Node {
                     position_type: PositionType::Absolute,
-                    width: px(130.0),
+                    width: Val::Vw(OVERHEAD_W),
                     flex_direction: FlexDirection::Column,
-                    row_gap: px(3.0),
+                    row_gap: px(3),
                     ..default()
                 },
                 Visibility::Hidden,
             ))
-            .with_children(|p| {
-                p.spawn((
-                    Mark(i),
-                    Text::new("●"),
-                    TextFont {
-                        font_size: bevy::text::FontSize::Px(20.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.95, 0.05, 0.04)),
-                    Node {
-                        position_type: PositionType::Absolute,
-                        right: px(-20.0),
-                        top: px(-8.0),
-                        ..default()
-                    },
-                    Visibility::Hidden,
-                ));
-                for posture in [true, false] {
-                    p.spawn((
-                        Node {
-                            width: percent(100.0),
-                            height: px(if posture { 5.0 } else { 8.0 }),
-                            padding: UiRect::all(px(1.0)),
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgba(0.02, 0.02, 0.02, 0.8)),
-                    ))
-                    .with_children(|bar| {
-                        bar.spawn((
-                            Fill(i, posture),
-                            Node {
-                                width: percent(100.0),
-                                height: percent(100.0),
-                                ..default()
-                            },
-                            BackgroundColor(Color::NONE),
-                        ));
-                    });
-                }
+            .with_children(|panel| {
+                bar(panel, Fill::Posture(index + 2), (percent(100), px(5)));
+                bar(panel, Fill::Hp(index + 2), (percent(100), px(8)));
             });
     }
 }
-
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn sync(
     mut commands: Commands,
     sim: NonSend<Sim>,
     fixed: Res<Time<Fixed>>,
-    placements: Res<Placements>,
     mut libraries: ResMut<Libraries>,
     cameras: Query<(&Frustum, &GlobalTransform), With<Camera3d>>,
     children: Query<&Children>,
@@ -214,11 +188,14 @@ fn sync(
         &mut Transform,
         Option<&PoseDormant>,
         &mut Visibility,
+        &mut PresentationLod,
     )>,
 ) {
     let p = sim.duel.population.as_ref().unwrap();
-    for (entity, mut actor, mut anim, mut tf, dormant, mut visibility) in &mut actors {
-        let foe = &p.foes[actor.0];
+    for (entity, mut actor, mut anim, mut tf, dormant, mut visibility, mut presentation) in
+        &mut actors
+    {
+        let foe = &p.foes[actor.index];
         let position = Vec3::from_array(foe.duel.enemy.body.position);
         let radius = (foe.duel.fighters[1].height * 2.0).max(8.0);
         let near = position.distance(Vec3::from_array(sim.duel.player.body.position)) <= 20.0;
@@ -233,26 +210,27 @@ fn sync(
                 )
             });
         let full = foe.lod == sekiro_sim::duel::population::Lod::Full;
-        let pose = draw && ((foe.active && (full || actor.2 != foe.clock)) || !actor.3);
+        let pose =
+            draw && ((foe.active() && (full || actor.posed_clock != foe.clock)) || !actor.drawn);
         if pose {
-            actor.2 = foe.clock;
+            actor.posed_clock = foe.clock;
         }
-        actor.3 = draw;
+        actor.drawn = draw;
         let lod = PresentationLod {
             draw,
             pose,
-            cloth: draw && foe.active && full,
+            cloth: draw && foe.active() && full,
         };
-        commands.entity(entity).insert(lod);
+        presentation.set_if_neq(lod);
         visibility.set_if_neq(if draw {
             Visibility::Inherited
         } else {
             Visibility::Hidden
         });
         let bound = rigs.get(entity).is_ok_and(|r| r.bound);
-        let first = actor.1.is_empty() && bound;
+        let first = actor.meshes.is_empty() && bound;
         if first {
-            actor.1 = children
+            actor.meshes = children
                 .iter_descendants(entity)
                 .filter(|e| meshes.contains(*e))
                 .collect();
@@ -263,7 +241,7 @@ fn sync(
             .iter()
             .next()
             .is_none_or(|(_, cam)| position.distance(cam.translation()) <= 30.0);
-        for &mesh in &actor.1 {
+        for &mesh in &actor.meshes {
             let Ok((skin, dynamic, no_shadow)) = meshes.get(mesh) else {
                 continue;
             };
@@ -284,7 +262,7 @@ fn sync(
                 commands.entity(mesh).insert(NotShadowCaster);
             }
         }
-        if !foe.active {
+        if !foe.active() {
             if dormant.is_none() {
                 commands.entity(entity).insert(PoseDormant);
             }
@@ -295,21 +273,16 @@ fn sync(
         }
         let r = &foe.report.enemy;
         let alpha = fixed.overstep_fraction();
-        tf.translation = super::interpolate_position(
-            Vec3::from_array(foe.previous.0),
-            Vec3::from_array(foe.duel.enemy.body.position),
-            alpha,
-        );
-        let yaw = foe.duel.enemy.visual_yaw();
-        let turn = (yaw - foe.previous.1 + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
-            - std::f32::consts::PI;
-        tf.rotation = Quat::from_rotation_y(foe.previous.1 + turn * alpha);
+        let (position, yaw) =
+            super::shown_transform(foe.previous, &foe.duel.enemy, alpha, sim.step == 0);
+        tf.translation = position;
+        tf.rotation = Quat::from_rotation_y(yaw);
         anim.walk_twist = foe.duel.enemy.walk_twist;
         anim.clock = Some(foe.clock - super::behind(r, alpha));
         let Some(name) = &r.animation else {
             continue;
         };
-        let lib = libraries.0.get_mut(&placements.0[actor.0].1).unwrap();
+        let lib = libraries.0.get_mut(&actor.donor).unwrap();
         if anim.clip_name() != name || (r.clip_started && anim.time > r.anim_time) {
             match lib.clip(name) {
                 Ok(clip) => anim.play_named(name, clip, false, r.blend_in),
@@ -328,47 +301,104 @@ fn gauges(
     sim: NonSend<Sim>,
     camera: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     mut panels: Query<(&Panel, &mut Node, &mut Visibility)>,
-    mut fills: Query<(&Fill, &mut Node, &mut BackgroundColor), Without<Panel>>,
-    mut marks: Query<(&Mark, &mut Visibility), Without<Panel>>,
+    mut fills: Query<
+        (
+            &crate::combat_hud::HudPart,
+            &mut Node,
+            Option<&mut BackgroundColor>,
+            Option<&mut Visibility>,
+        ),
+        Without<Panel>,
+    >,
+    mut marks: Query<
+        (&Mark, &mut Node, &mut Visibility),
+        (Without<Panel>, Without<crate::combat_hud::HudPart>),
+    >,
 ) {
-    let p = sim.duel.population.as_ref().unwrap();
+    use crate::change::set;
+    use crate::combat_hud::{Fill, HudPart, OVERHEAD_W, posture_color, viewport_size};
+    let population = sim.duel.population.as_ref().unwrap();
     let Ok((camera, tf)) = camera.single() else {
         return;
     };
+    let viewport = viewport_size(Some(camera));
     for (panel, mut node, mut vis) in &mut panels {
-        let foe = &p.foes[panel.0];
+        let foe = &population.foes[panel.0];
         let d = &foe.duel;
+        let engaged = foe.engaged()
+            || (population.selected == Some(panel.0) && sim.duel.player.lock_target.is_some());
+        let nearby = Vec3::from_array(d.enemy.body.position)
+            .distance(Vec3::from_array(sim.duel.player.body.position))
+            <= 30.0;
         let head =
             Vec3::from_array(d.enemy.body.position) + Vec3::Y * (d.fighters[1].height + 0.35);
-        *vis = Visibility::Hidden;
-        if !foe.active || d.rules.fighters[1].dead() {
-            continue;
-        }
-        if let Ok(screen) = camera.world_to_viewport(tf, head) {
-            node.left = px(screen.x - 65.0);
-            node.top = px(screen.y - 16.0);
-            *vis = Visibility::Inherited;
+        let projected = (foe.active() && engaged && nearby && !d.rules.fighters[1].dead())
+            .then(|| camera.world_to_viewport(tf, head).ok())
+            .flatten();
+        vis.set_if_neq(if projected.is_some() {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
+        if let Some(screen) = projected {
+            set(
+                &mut node,
+                |n| &mut n.left,
+                px(screen.x - viewport.x * OVERHEAD_W / 200.0),
+            );
+            set(&mut node, |n| &mut n.top, px(screen.y - 0.035 * viewport.y));
         }
     }
-    for (fill, mut node, mut color) in &mut fills {
-        let f = &p.foes[fill.0].duel.rules.fighters[1];
-        let fraction = if fill.1 {
+    for (part, mut node, color, visibility) in &mut fills {
+        let (index, posture, arrow) = match *part {
+            HudPart::Fill(Fill::Hp(i) | Fill::Trail(i)) if i >= 2 => (i - 2, false, false),
+            HudPart::Fill(Fill::Posture(i)) if i >= 2 => (i - 2, true, false),
+            HudPart::PostureArrow(i) if i >= 2 => (i - 2, true, true),
+            _ => continue,
+        };
+        let f = &population.foes[index].duel.rules.fighters[1];
+        let fraction = if posture {
             f.posture_fraction()
         } else {
             f.hp_fraction()
         };
-        node.width = percent(fraction.clamp(0.0, 1.0) * 100.0);
-        color.0 = if fill.1 {
-            Color::srgb(0.95, 0.65, 0.16)
+        if arrow {
+            if let Some(mut vis) = visibility {
+                vis.set_if_neq(if fraction > 0.005 {
+                    Visibility::Inherited
+                } else {
+                    Visibility::Hidden
+                });
+            }
         } else {
-            Color::srgb(0.72, 0.1, 0.08)
-        };
+            set(
+                &mut node,
+                |n| &mut n.width,
+                percent(fraction.clamp(0.0, 1.0) * 100.0),
+            );
+            if posture && let Some(mut color) = color {
+                color.set_if_neq(BackgroundColor(posture_color(fraction, f.posture.broken())));
+            }
+        }
     }
-    for (mark, mut vis) in &mut marks {
-        *vis = if p.foes[mark.0].active && p.foes[mark.0].can_deathblow {
+    for (mark, mut node, mut vis) in &mut marks {
+        let foe = &population.foes[mark.0];
+        let head =
+            Vec3::from_array(foe.duel.enemy.body.position) + Vec3::Y * foe.duel.fighters[1].height;
+        let nearby = Vec3::from_array(foe.duel.enemy.body.position)
+            .distance(Vec3::from_array(sim.duel.player.body.position))
+            <= 30.0;
+        let projected = (foe.active() && foe.can_deathblow && nearby)
+            .then(|| camera.world_to_viewport(tf, head).ok())
+            .flatten();
+        vis.set_if_neq(if projected.is_some() {
             Visibility::Inherited
         } else {
             Visibility::Hidden
-        };
+        });
+        if let Some(screen) = projected {
+            set(&mut node, |n| &mut n.left, px(screen.x - 8.0));
+            set(&mut node, |n| &mut n.top, px(screen.y - 8.0));
+        }
     }
 }

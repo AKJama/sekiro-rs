@@ -714,7 +714,6 @@ impl CollisionWorld {
 
     /// The highest walkable surface under `(x, z)` no higher than `top`: height and triangle.
     fn floor_triangle(&self, x: f32, z: f32, top: f32, who: u8) -> Option<(f32, u32)> {
-        let _timer = crate::perf::Scope::start("sim collision");
         let cell = self.cells.get(&cell_of(x, z))?;
         let mut best: Option<(f32, u32)> = None;
         for &t in cell {
@@ -755,7 +754,6 @@ impl CollisionWorld {
 
     /// Distance along `dir` (unit length) to the first triangle within `max`.
     pub fn raycast(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<f32> {
-        let _timer = crate::perf::Scope::start("sim collision");
         self.ray(origin, dir, max, PLAYER)
     }
 
@@ -764,69 +762,72 @@ impl CollisionWorld {
         if max < 0.0 || !origin.is_finite() || !end.is_finite() {
             return None;
         }
-        let mut tris = Vec::new();
-        // Traverse the cells the ray actually crosses, rather than sorting every triangle
-        // in its horizontal bounding rectangle (especially costly on diagonal sight rays).
-        let (mut x, mut z) = cell_of(origin.x, origin.z);
-        let (ex, ez) = cell_of(end.x, end.z);
-        let axis = |start: f32, delta: f32, cell: i32| {
-            if delta == 0.0 {
-                return (0, f32::INFINITY, f32::INFINITY);
+        thread_local! { static TRIS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) }; }
+        TRIS.with_borrow_mut(|tris| {
+            tris.clear();
+            // Traverse the cells the ray actually crosses, rather than sorting every triangle
+            // in its horizontal bounding rectangle (especially costly on diagonal sight rays).
+            let (mut x, mut z) = cell_of(origin.x, origin.z);
+            let (ex, ez) = cell_of(end.x, end.z);
+            let axis = |start: f32, delta: f32, cell: i32| {
+                if delta == 0.0 {
+                    return (0, f32::INFINITY, f32::INFINITY);
+                }
+                let step = if delta > 0.0 { 1 } else { -1 };
+                let boundary = (cell as f32 + if step > 0 { 1.0 } else { 0.0 }) * CELL;
+                (step, (boundary - start) / delta, CELL / delta.abs())
+            };
+            let (sx, mut tx, dx) = axis(origin.x, end.x - origin.x, x);
+            let (sz, mut tz, dz) = axis(origin.z, end.z - origin.z, z);
+            for _ in 0..(u64::from(x.abs_diff(ex)) + u64::from(z.abs_diff(ez)) + 1) {
+                if let Some(cell) = self.cells.get(&(x, z)) {
+                    tris.extend_from_slice(cell);
+                }
+                if (x, z) == (ex, ez) {
+                    break;
+                }
+                // Roundoff must not step an axis beyond the endpoint's cell.
+                if x == ex {
+                    tx = f32::INFINITY;
+                }
+                if z == ez {
+                    tz = f32::INFINITY;
+                }
+                if tx < tz {
+                    x += sx;
+                    tx += dx;
+                } else if tz < tx {
+                    z += sz;
+                    tz += dz;
+                } else {
+                    x += sx;
+                    z += sz;
+                    tx += dx;
+                    tz += dz;
+                }
             }
-            let step = if delta > 0.0 { 1 } else { -1 };
-            let boundary = (cell as f32 + if step > 0 { 1.0 } else { 0.0 }) * CELL;
-            (step, (boundary - start) / delta, CELL / delta.abs())
-        };
-        let (sx, mut tx, dx) = axis(origin.x, end.x - origin.x, x);
-        let (sz, mut tz, dz) = axis(origin.z, end.z - origin.z, z);
-        for _ in 0..(u64::from(x.abs_diff(ex)) + u64::from(z.abs_diff(ez)) + 1) {
-            if let Some(cell) = self.cells.get(&(x, z)) {
-                tris.extend_from_slice(cell);
+            tris.sort_unstable();
+            tris.dedup();
+            let low_y = origin.y.min(end.y);
+            let high_y = origin.y.max(end.y);
+            let mut best: Option<f32> = None;
+            for &t in tris.iter() {
+                if matches!(self.materials[t as usize], 22 | 36 | 38) || !self.live(t, who) {
+                    continue;
+                }
+                let [a, b, c] = self.corners(t);
+                if a.y.min(b.y).min(c.y) > high_y || a.y.max(b.y).max(c.y) < low_y {
+                    continue;
+                }
+                if let Some(d) = ray_triangle(origin, dir, a, b, c)
+                    && d <= max
+                    && best.is_none_or(|b| d < b)
+                {
+                    best = Some(d);
+                }
             }
-            if (x, z) == (ex, ez) {
-                break;
-            }
-            // Roundoff must not step an axis beyond the endpoint's cell.
-            if x == ex {
-                tx = f32::INFINITY;
-            }
-            if z == ez {
-                tz = f32::INFINITY;
-            }
-            if tx < tz {
-                x += sx;
-                tx += dx;
-            } else if tz < tx {
-                z += sz;
-                tz += dz;
-            } else {
-                x += sx;
-                z += sz;
-                tx += dx;
-                tz += dz;
-            }
-        }
-        tris.sort_unstable();
-        tris.dedup();
-        let low_y = origin.y.min(end.y);
-        let high_y = origin.y.max(end.y);
-        let mut best: Option<f32> = None;
-        for t in tris {
-            if matches!(self.materials[t as usize], 22 | 36 | 38) || !self.live(t, who) {
-                continue;
-            }
-            let [a, b, c] = self.corners(t);
-            if a.y.min(b.y).min(c.y) > high_y || a.y.max(b.y).max(c.y) < low_y {
-                continue;
-            }
-            if let Some(d) = ray_triangle(origin, dir, a, b, c)
-                && d <= max
-                && best.is_none_or(|b| d < b)
-            {
-                best = Some(d);
-            }
-        }
-        best
+            best
+        })
     }
 
     /// Moves a body standing at `feet` by the horizontal `delta`, stopping at walls and
@@ -836,7 +837,6 @@ impl CollisionWorld {
     }
 
     fn slide_for(&self, feet: [f32; 3], delta: [f32; 2], who: u8) -> [f32; 2] {
-        let _timer = crate::perf::Scope::start("sim collision");
         let start = Vec3::from(feet);
         let d = Vec2::from(delta);
         let len = d.length();
@@ -925,7 +925,6 @@ struct View<'a> {
 
 impl Ground for View<'_> {
     fn water_surface(&self, x: f32, z: f32, top: f32) -> Option<WaterSurface> {
-        let _timer = crate::perf::Scope::start("sim collision");
         let w = self.world;
         w.cells
             .get(&cell_of(x, z))?

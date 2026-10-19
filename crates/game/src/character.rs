@@ -347,7 +347,7 @@ pub fn bind_rigs(
 pub struct PoseDormant;
 
 /// Population presentation budget, chosen before animation; absent on the existing boss path.
-#[derive(Component, Clone, Copy)]
+#[derive(Component, Clone, Copy, PartialEq)]
 pub struct PresentationLod {
     pub draw: bool,
     pub pose: bool,

@@ -131,8 +131,16 @@ fn main() {
         for (h, res) in &r.hits {
             println!(
                 "{i:5} HIT {} -> {} judge {} atk {} guarded={} deflected={} defender type {} level {} hp {:?}",
-                ["wolf", "enemy"][h.attacker],
-                ["wolf", "enemy"][h.defender],
+                if h.attacker == 0 {
+                    "wolf".into()
+                } else {
+                    format!("enemy {}", h.attacker)
+                },
+                if h.defender == 0 {
+                    "wolf".into()
+                } else {
+                    format!("enemy {}", h.defender)
+                },
                 h.judge,
                 h.attack.atk_id,
                 res.guarded,

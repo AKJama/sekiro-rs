@@ -559,7 +559,7 @@ pub fn run(options: Options) -> Result<()> {
         eprintln!(
             "map enemies {id}: spawned={} active={} kinds={kinds:?}",
             population.foes.len(),
-            population.foes.iter().filter(|f| f.active).count()
+            population.foes.iter().filter(|f| f.active()).count()
         );
         eprintln!(
             "map enemies excluded: {}",
@@ -1713,17 +1713,24 @@ fn shown(sim: &Sim, i: usize, alpha: f32) -> (Vec3, f32) {
     } else {
         &sim.duel.enemy
     };
+    shown_transform(sim.previous[i], chr, alpha, sim.step == 0)
+}
+
+fn shown_transform(
+    previous: ([f32; 3], f32),
+    chr: &sekiro_sim::character::Character,
+    alpha: f32,
+    first: bool,
+) -> (Vec3, f32) {
     let (now, yaw) = (Vec3::from_array(chr.body.position), chr.visual_yaw());
-    let (before, yaw_before) = sim.previous[i];
+    let (before, yaw_before) = previous;
     let before = Vec3::from_array(before);
-    // Teleports (respawn, arena reset) are not drawn as a slide.
-    if sim.step == 0 || before.distance(now) > 2.0 {
+    if first || before.distance(now) > 2.0 {
         return (now, yaw);
     }
-    let turn = sekiro_sim::input::angle_diff(yaw, yaw_before);
     (
         interpolate_position(before, now, alpha),
-        yaw_before + turn * alpha,
+        yaw_before + sekiro_sim::input::angle_diff(yaw, yaw_before) * alpha,
     )
 }
 
@@ -1810,7 +1817,12 @@ fn sync_bullets(
         shown.extend(bird.duel.bullets.live.iter().cloned());
     }
     if let Some(population) = &sim.duel.population {
-        for (i, foe) in population.foes.iter().enumerate().filter(|(_, f)| f.active) {
+        for (i, foe) in population
+            .foes
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.active())
+        {
             shown.extend(
                 foe.duel
                     .bullets
