@@ -29,8 +29,12 @@ pub(crate) fn install(app: &mut App) {
         .add_systems(Startup, choose_budget)
         .add_systems(Last, trim_textures);
     if crate::perf_log::enabled() {
-        app.insert_resource(MemoryClock(Instant::now()))
-            .add_systems(Last, cpu_assets);
+        app.insert_resource(MemoryClock {
+            start: Instant::now(),
+            limit: crate::arg_value(crate::perf_log::args(), "--perf-seconds")
+                .and_then(|v| v.parse().ok()),
+        })
+        .add_systems(Last, cpu_assets);
     }
     if crate::perf_log::enabled()
         && let Some(render) = app.get_sub_app_mut(RenderApp)
@@ -40,6 +44,7 @@ pub(crate) fn install(app: &mut App) {
 }
 
 const GIB: u64 = 1 << 30;
+const MAX_SKIPPED_MIPS: u32 = 3;
 
 pub(crate) fn validate_args(args: &[String]) -> anyhow::Result<()> {
     for (flag, max) in [("--vram-budget", 1024.0), ("--perf-seconds", 86400.0)] {
@@ -55,20 +60,28 @@ pub(crate) fn validate_args(args: &[String]) -> anyhow::Result<()> {
 }
 
 #[derive(Resource, Default)]
-struct Budget {
+pub(crate) struct Budget {
     bytes: u64,
     mips: u32,
     memory: Option<VideoMemory>,
     sampled: Option<Instant>,
+    requested: Option<f64>,
 }
 
 impl Budget {
+    fn fallback(requested: Option<f64>) -> (u64, u32) {
+        requested.map_or((0, 0), |gb| {
+            let capacity = (gb * GIB as f64) as u64;
+            Self::decision(capacity, capacity, requested)
+        })
+    }
+
     fn decision(capacity: u64, driver: u64, requested: Option<f64>) -> (u64, u32) {
         let card = requested.map_or(capacity, |gb| ((gb * GIB as f64) as u64).min(capacity));
         let bytes = (card * 4 / 5).min(driver);
         // DXGI excludes a little reserved capacity on a marketed 16 GiB card.
         let mips = match card.div_ceil(GIB) {
-            0..4 => 3,
+            0..4 => MAX_SKIPPED_MIPS,
             4..8 => 2,
             8..16 => 1,
             _ => 0,
@@ -80,10 +93,14 @@ impl Budget {
 fn choose_budget(adapter: Res<RenderAdapterInfo>, mut budget: ResMut<Budget>) {
     budget.memory = VideoMemory::open(&adapter);
     let sample = budget.memory.as_ref().and_then(VideoMemory::sample);
-    let (capacity, _, driver) = sample.unwrap_or((10 * GIB, 0, 8 * GIB));
     let requested =
         crate::arg_value(crate::perf_log::args(), "--vram-budget").and_then(|v| v.parse().ok());
-    (budget.bytes, budget.mips) = Budget::decision(capacity, driver, requested);
+    budget.requested = requested;
+    let capacity = sample.as_ref().map_or(0, |s| s.dedicated);
+    (budget.bytes, budget.mips) = sample.map_or_else(
+        || Budget::fallback(requested),
+        |s| Budget::decision(s.dedicated, s.budget, requested),
+    );
     info!(
         "VRAM budget: adapter={:?} dedicated_bytes={capacity} usable_bytes={} texture_mips_skipped={} override_GiB={requested:?} source={}",
         adapter.name,
@@ -92,34 +109,39 @@ fn choose_budget(adapter: Res<RenderAdapterInfo>, mut budget: ResMut<Budget>) {
         if sample.is_some() {
             "DXGI"
         } else {
-            "conservative fallback"
+            "no DXGI reading"
         }
     );
 }
 
-#[allow(clippy::too_many_arguments)]
-fn trim_textures(
+pub(crate) fn trim_textures(
     mut budget: ResMut<Budget>,
     assets: Res<AssetServer>,
     mut events: MessageReader<bevy::asset::AssetEvent<Image>>,
     mut images: ResMut<Assets<Image>>,
-    mut standard: ResMut<Assets<StandardMaterial>>,
-    mut layered: ResMut<Assets<crate::map::LayeredMaterial>>,
     mut levels: Local<std::collections::HashMap<AssetId<Image>, u32>>,
 ) {
-    let mut pressure = false;
     if budget.sampled.is_none_or(|t| t.elapsed().as_secs() >= 5) {
         budget.sampled = Some(Instant::now());
-        if let Some((_, usage, driver)) = budget.memory.as_ref().and_then(VideoMemory::sample)
-            && usage > budget.bytes.min(driver)
-            && budget.mips < 3
-        {
-            budget.mips += 1;
-            pressure = true;
-            warn!(
-                "VRAM pressure: usage_bytes={usage}, skipping {} top texture mips",
-                budget.mips
-            );
+        if let Some(sample) = budget.memory.as_ref().and_then(VideoMemory::sample) {
+            if crate::perf_log::enabled() {
+                info!(
+                    "VRAM DXGI: dedicated_bytes={} usage_bytes={} budget_bytes={}",
+                    sample.dedicated, sample.usage, sample.budget
+                );
+            }
+            let (bytes, mips) = Budget::decision(sample.dedicated, sample.budget, budget.requested);
+            budget.bytes = bytes;
+            budget.mips = budget.mips.max(mips);
+            if sample.usage > budget.bytes && budget.mips < MAX_SKIPPED_MIPS {
+                budget.mips += 1;
+                warn!(
+                    "VRAM pressure: usage_bytes={}, skipping {} top texture mips",
+                    sample.usage, budget.mips
+                );
+            }
+        } else {
+            (budget.bytes, budget.mips) = Budget::fallback(budget.requested);
         }
     }
     let mut ids: Vec<_> = events
@@ -133,35 +155,19 @@ fn trim_textures(
             _ => None,
         })
         .collect();
-    if pressure {
-        ids.extend(images.ids());
-    }
     ids.sort_unstable();
     ids.dedup();
-    let mut changed = false;
     for id in ids {
         let done = levels.get(&id).copied().unwrap_or(0);
-        if done >= budget.mips
-            || !assets.get_path(id).is_some_and(|p| {
-                p.path()
-                    .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("dds"))
-            })
-        {
+        if done >= budget.mips || !crate::map::world::asset_has_extension(&assets, id, "dds") {
             continue;
         }
         if let Some(mut image) = images.get_mut(id) {
             let removed = skip_mips(&mut image, budget.mips - done);
             if removed > 0 {
                 levels.insert(id, done + removed);
-                changed = true;
             }
         }
-    }
-    if pressure && changed {
-        // Rebuild descriptors that hold the former views, allowing old GPU images to drop.
-        standard.iter_mut().for_each(|_| {});
-        layered.iter_mut().for_each(|_| {});
     }
 }
 
@@ -187,7 +193,7 @@ fn skip_mips(image: &mut Image, requested: u32) -> u32 {
     if offset >= data.len() {
         return 0;
     }
-    *data = data[offset..].to_vec();
+    data.drain(..offset);
     let d = &mut image.texture_descriptor;
     d.size.width = (d.size.width >> count).max(1);
     d.size.height = (d.size.height >> count).max(1);
@@ -196,7 +202,10 @@ fn skip_mips(image: &mut Image, requested: u32) -> u32 {
 }
 
 #[derive(Resource)]
-struct MemoryClock(Instant);
+struct MemoryClock {
+    start: Instant,
+    limit: Option<f64>,
+}
 
 fn cpu_assets(
     meshes: Res<Assets<Mesh>>,
@@ -205,10 +214,9 @@ fn cpu_assets(
     mut last: Local<u64>,
     mut exit: MessageWriter<bevy::app::AppExit>,
 ) {
-    let seconds = clock.0.elapsed().as_secs();
-    if let Some(limit) = crate::arg_value(crate::perf_log::args(), "--perf-seconds")
-        .and_then(|v| v.parse::<f64>().ok())
-        && clock.0.elapsed().as_secs_f64() >= limit
+    let seconds = clock.start.elapsed().as_secs();
+    if let Some(limit) = clock.limit
+        && clock.start.elapsed().as_secs_f64() >= limit
     {
         exit.write(bevy::app::AppExit::Success);
     }
@@ -236,25 +244,14 @@ fn cpu_assets(
 
 fn gpu_assets(
     device: Res<RenderDevice>,
-    adapter: Res<RenderAdapterInfo>,
     images: Res<RenderAssets<GpuImage>>,
     meshes: Res<RenderAssets<bevy::render::mesh::RenderMesh>>,
     mut last: Local<Option<Instant>>,
-    mut dxgi: Local<Option<VideoMemory>>,
 ) {
     if last.is_some_and(|t| t.elapsed().as_secs() < 5) {
         return;
     }
-    if last.is_none() {
-        *dxgi = VideoMemory::open(&adapter);
-    }
     *last = Some(Instant::now());
-    if let Some(memory) = dxgi.as_ref().and_then(VideoMemory::sample) {
-        info!(
-            "VRAM DXGI: dedicated_bytes={} usage_bytes={} budget_bytes={}",
-            memory.0, memory.1, memory.2
-        );
-    }
     let mut textures = BTreeMap::<String, (usize, u64)>::new();
     let mut unique = std::collections::HashSet::new();
     for (_, image) in images.iter() {
@@ -285,6 +282,9 @@ fn gpu_assets(
             "VRAM allocator: allocated_bytes={} reserved_bytes={}",
             report.total_allocated_bytes, report.total_reserved_bytes
         );
+        if std::env::var_os("SEKIRO_VRAM_DETAIL").is_none() {
+            return;
+        }
         let mut kinds = BTreeMap::<String, (usize, u64)>::new();
         for allocation in report.allocations {
             let entry = kinds.entry(allocation.name).or_default();
@@ -319,6 +319,13 @@ fn texture_bytes(
         .sum()
 }
 
+#[derive(Clone, Copy)]
+struct MemorySample {
+    dedicated: u64,
+    usage: u64,
+    budget: u64,
+}
+
 #[cfg(windows)]
 struct VideoMemory {
     adapter: windows::Win32::Graphics::Dxgi::IDXGIAdapter3,
@@ -349,7 +356,7 @@ impl VideoMemory {
         None
     }
 
-    fn sample(&self) -> Option<(u64, u64, u64)> {
+    fn sample(&self) -> Option<MemorySample> {
         use windows::Win32::Graphics::Dxgi::{
             DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO,
         };
@@ -360,7 +367,11 @@ impl VideoMemory {
                 .QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info)
                 .ok()?;
         }
-        Some((self.dedicated, info.CurrentUsage, info.Budget))
+        Some(MemorySample {
+            dedicated: self.dedicated,
+            usage: info.CurrentUsage,
+            budget: info.Budget,
+        })
     }
 }
 
@@ -372,7 +383,7 @@ impl VideoMemory {
     fn open(_: &wgpu::AdapterInfo) -> Option<Self> {
         None
     }
-    fn sample(&self) -> Option<(u64, u64, u64)> {
+    fn sample(&self) -> Option<MemorySample> {
         None
     }
 }
@@ -383,6 +394,8 @@ mod tests {
 
     #[test]
     fn budget_respects_card_driver_and_simulated_capacity() {
+        assert_eq!(Budget::fallback(None), (0, 0));
+        assert_eq!(Budget::fallback(Some(10.0)), (8 * GIB, 1));
         for (capacity, driver, requested, expected, mips) in [
             (
                 16 * GIB - 5 * (1 << 20),

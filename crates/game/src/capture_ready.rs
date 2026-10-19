@@ -140,6 +140,7 @@ impl LateMeshes {
 fn watch_meshes(
     late: Res<LateMeshes>,
     assets: Res<Assets<Mesh>>,
+    refs: Res<crate::mesh_residency::MeshRefs>,
     mut meshes: ParamSet<(
         Query<(Entity, &Mesh3d, Has<RuntimeMesh>), Changed<Mesh3d>>,
         Query<&mut Mesh3d>,
@@ -148,18 +149,13 @@ fn watch_meshes(
     mut removed: RemovedComponents<Mesh3d>,
     mut asset_events: MessageReader<bevy::asset::AssetEvent<Mesh>>,
 ) {
-    let retired = removed.read().count() > 0;
-    let retired_assets = asset_events.read().any(|event| {
-        matches!(
-            event,
-            bevy::asset::AssetEvent::Unused { .. } | bevy::asset::AssetEvent::Removed { .. }
-        )
-    });
+    let retired = removed.read().next().is_some();
+    removed.clear();
+    let retired_assets = asset_events.read().next().is_some();
+    asset_events.clear();
     if unchecked.is_empty() && meshes.p0().is_empty() && !retired && !retired_assets {
         return;
     }
-    let referenced: Option<HashSet<_>> =
-        (retired || retired_assets).then(|| meshes.p1().iter().map(|mesh| mesh.id()).collect());
     let (on_time, ready) = {
         let mut state = late.0.lock().unwrap();
         for (entity, mesh, runtime) in &meshes.p0() {
@@ -173,8 +169,8 @@ fn watch_meshes(
         }
         // A static merge can retire the last entity using a source before its upload.
         // CPU fallback assets still exist, but are no longer part of the loading gate.
-        if let Some(referenced) = &referenced {
-            state.forget_removed(|id| assets.contains(id) && referenced.contains(&id));
+        if retired || retired_assets {
+            state.forget_removed(|id| assets.contains(id) && refs.contains(id));
         }
         (
             std::mem::take(&mut state.on_time),
@@ -192,8 +188,8 @@ fn watch_meshes(
         }
     }
     // A mesh asset removed before the render world prepared it never reports back.
-    if let Some(referenced) = &referenced {
-        unchecked.retain(|id, _| assets.contains(*id) && referenced.contains(id));
+    if retired || retired_assets {
+        unchecked.retain(|id, _| assets.contains(*id) && refs.contains(*id));
     }
 }
 
@@ -326,7 +322,8 @@ pub(crate) fn install(app: &mut App) {
         .insert_resource(images.clone())
         .insert_resource(late.clone())
         .init_resource::<CaptureWait>()
-        .add_systems(PostUpdate, (prepare, watch_meshes));
+        .add_systems(PostUpdate, prepare)
+        .add_systems(Last, watch_meshes.after(crate::mesh_residency::track));
     if let Some(render) = app.get_sub_app_mut(RenderApp) {
         render
             .insert_resource(pipelines)

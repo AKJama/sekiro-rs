@@ -244,6 +244,9 @@ fn update(world: &mut World) {
             continue;
         };
         guard(world, batch);
+        if !batch.merged && world.get::<Visibility>(batch.entity) != Some(&Visibility::Hidden) {
+            state.dirty.push(index);
+        }
         if world.get_entity(batch.entity).is_err()
             || batch
                 .sources
@@ -298,6 +301,16 @@ fn guard(world: &mut World, batch: &mut Batch) {
             }
         }
         batch.merged = coherent;
+    }
+    let waiting = !coherent
+        && world
+            .get_resource::<crate::mesh_residency::OffGpuMeshes>()
+            .is_some_and(|off_gpu| {
+                let off_gpu = off_gpu.0.lock().unwrap();
+                batch.sources.iter().any(|s| off_gpu.contains(&s.mesh.id()))
+            });
+    if waiting {
+        return;
     }
     let shown = coherent && first == Some(true);
     if let Some(mut visibility) = world.get_mut::<Visibility>(batch.entity) {
@@ -544,6 +557,49 @@ mod tests {
             region: [0; 2],
             scale: 1_f32.to_bits(),
         }
+    }
+
+    #[test]
+    fn unmerging_waits_for_source_mesh_residency() {
+        let mut world = World::new();
+        let off_gpu = crate::mesh_residency::OffGpuMeshes::default();
+        world.insert_resource(off_gpu.clone());
+        let mesh = Handle::<Mesh>::default();
+        off_gpu.0.lock().unwrap().insert(mesh.id());
+        let source = world
+            .spawn((
+                GlobalTransform::IDENTITY,
+                InheritedVisibility::VISIBLE,
+                MeshMaterial3d::<LayeredMaterial>(Handle::default()),
+            ))
+            .id();
+        let entity = world
+            .spawn((Visibility::Inherited, InheritedVisibility::VISIBLE))
+            .id();
+        let mut batch = Batch {
+            entity,
+            sources: vec![Source {
+                entity: source,
+                mesh: mesh.clone(),
+                root: source,
+                root_pose: Mat4::IDENTITY,
+                pose: Mat4::from_translation(Vec3::X),
+            }],
+            merged: true,
+            key: key(Handle::<LayeredMaterial>::default().id()),
+        };
+        guard(&mut world, &mut batch);
+        assert!(!batch.merged);
+        assert!(world.get::<Mesh3d>(source).is_some());
+        assert_eq!(
+            world.get::<Visibility>(entity),
+            Some(&Visibility::Inherited)
+        );
+        assert!(world.get::<InheritedVisibility>(entity).unwrap().get());
+        off_gpu.0.lock().unwrap().clear();
+        guard(&mut world, &mut batch);
+        assert_eq!(world.get::<Visibility>(entity), Some(&Visibility::Hidden));
+        assert!(!world.get::<InheritedVisibility>(entity).unwrap().get());
     }
 
     #[test]

@@ -1,10 +1,11 @@
 //! Share identical immutable DDS uploads across connected blocks, preserving sampler identity.
+use bevy::platform::hash::FixedHasher;
 use bevy::prelude::*;
 use bevy::render::render_asset::{AssetExtractionSystems, ExtractedAssets, RenderAssets};
 use bevy::render::texture::GpuImage;
-use bevy::render::{ExtractSchedule, MainWorld, Render, RenderApp, RenderSystems};
+use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderSystems};
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher};
 
 #[derive(Resource, Default)]
 struct Textures {
@@ -13,10 +14,12 @@ struct Textures {
 }
 
 pub(crate) fn install(app: &mut App) {
+    app.init_resource::<Textures>()
+        .add_systems(Last, intern.after(crate::vram::trim_textures));
     if let Some(render) = app.get_sub_app_mut(RenderApp) {
         render
             .init_resource::<Textures>()
-            .add_systems(ExtractSchedule, intern.after(AssetExtractionSystems))
+            .add_systems(ExtractSchedule, extract.after(AssetExtractionSystems))
             .add_systems(
                 Render,
                 share
@@ -37,73 +40,93 @@ pub(crate) fn install(app: &mut App) {
 }
 
 fn fingerprint(image: &Image) -> u64 {
-    let mut hash = std::collections::hash_map::DefaultHasher::new();
-    format!(
-        "{:?}/{:?}/{:?}/{:?}/{:?}/{}",
-        image.texture_descriptor,
-        image.sampler,
-        image.texture_view_descriptor,
-        image.data_order,
-        image.asset_usage,
-        image.copy_on_resize
-    )
-    .hash(&mut hash);
+    let mut hash = FixedHasher.build_hasher();
+    let d = &image.texture_descriptor;
+    d.format.hash(&mut hash);
+    d.size.hash(&mut hash);
+    d.mip_level_count.hash(&mut hash);
+    d.sample_count.hash(&mut hash);
+    d.dimension.hash(&mut hash);
+    d.usage.hash(&mut hash);
+    d.view_formats.hash(&mut hash);
+    format!("{:?}", image.sampler).hash(&mut hash);
+    image.texture_view_descriptor.is_some().hash(&mut hash);
+    if let Some(view) = &image.texture_view_descriptor {
+        view.label.hash(&mut hash);
+        view.format.hash(&mut hash);
+        view.dimension.hash(&mut hash);
+        view.usage.hash(&mut hash);
+        view.aspect.hash(&mut hash);
+        view.base_mip_level.hash(&mut hash);
+        view.mip_level_count.hash(&mut hash);
+        view.base_array_layer.hash(&mut hash);
+        view.array_layer_count.hash(&mut hash);
+    }
+    image.data_order.hash(&mut hash);
+    image.asset_usage.hash(&mut hash);
+    image.copy_on_resize.hash(&mut hash);
     image.data.hash(&mut hash);
     hash.finish()
 }
 
 fn intern(
-    mut main: ResMut<MainWorld>,
+    mut images: ResMut<Assets<Image>>,
+    assets: Res<AssetServer>,
+    mut events: MessageReader<bevy::asset::AssetEvent<Image>>,
+    mut state: ResMut<Textures>,
+) {
+    for event in events.read() {
+        let id = match event {
+            bevy::asset::AssetEvent::Added { id } => *id,
+            bevy::asset::AssetEvent::Removed { id } | bevy::asset::AssetEvent::Unused { id } => {
+                state.aliases.remove(id);
+                continue;
+            }
+            _ => continue,
+        };
+        if !crate::map::world::asset_has_extension(&assets, id, "dds") {
+            continue;
+        }
+        let Some(image) = images.get(id).filter(|image| image.data.is_some()) else {
+            continue;
+        };
+        let key = fingerprint(image);
+        let bucket = state.buckets.entry(key).or_default();
+        bucket.retain(|candidate| images.contains(*candidate));
+        // Compare the complete image on a hash hit, including format, mips and sampler.
+        let canonical = bucket
+            .iter()
+            .copied()
+            .find(|candidate| *candidate != id && images.get(*candidate) == Some(image));
+        if let Some(canonical) = canonical.and_then(|id| images.get_strong_handle(id)) {
+            state.aliases.insert(id, canonical);
+            if let Some(mut image) = images.get_mut(id) {
+                image.data = None;
+            }
+        } else if !bucket.contains(&id) {
+            bucket.push(id);
+        }
+    }
+}
+
+fn extract(
+    main: Extract<Res<Textures>>,
     mut state: ResMut<Textures>,
     mut extracted: ResMut<ExtractedAssets<GpuImage>>,
 ) {
-    main.resource_scope(|world, mut images: Mut<Assets<Image>>| {
-        let assets = world.resource::<AssetServer>();
-        let extracted = &mut *extracted;
-        for id in &extracted.removed {
-            state.aliases.remove(id);
+    if main.is_changed() {
+        state.aliases.clone_from(&main.aliases);
+    }
+    let extracted = &mut *extracted;
+    extracted.extracted.retain(|(id, _)| {
+        if state.aliases.contains_key(id) {
+            extracted.added.remove(id);
+            extracted.modified.remove(id);
+            extracted.removed.insert(*id);
+            false
+        } else {
+            true
         }
-        extracted.extracted.retain(|(id, image)| {
-            if state.aliases.contains_key(id) {
-                extracted.added.remove(id);
-                extracted.modified.remove(id);
-                return false;
-            }
-            if image.data.is_none()
-                || !assets.get_path(*id).is_some_and(|p| {
-                    p.path()
-                        .extension()
-                        .is_some_and(|e| e.eq_ignore_ascii_case("dds"))
-                })
-            {
-                return true;
-            }
-            let key = fingerprint(image);
-            let bucket = state.buckets.entry(key).or_default();
-            bucket.retain(|candidate| images.contains(*candidate));
-            // Always compare the complete image after hashing, including format, mips and sampler.
-            let canonical = bucket
-                .iter()
-                .copied()
-                .find(|candidate| *candidate != *id && images.get(*candidate) == Some(image));
-            if let Some(canonical) = canonical.and_then(|id| images.get_strong_handle(id)) {
-                state.aliases.insert(*id, canonical);
-                extracted.added.remove(id);
-                extracted.modified.remove(id);
-                extracted.removed.insert(*id);
-                // The canonical CPU copy supports exact comparisons of future blocks.
-                // Duplicate copies have no CPU consumers and need no pixel buffer.
-                if let Some(mut image) = images.get_mut(*id) {
-                    image.data = None;
-                }
-                false
-            } else {
-                if !bucket.contains(id) {
-                    bucket.push(*id);
-                }
-                true
-            }
-        });
     });
 }
 

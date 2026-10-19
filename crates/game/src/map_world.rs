@@ -54,6 +54,31 @@ fn relative_material_texture(path: &bevy::asset::AssetPath<'_>, uri: &str) -> Op
         .map(|p| p.to_string())
 }
 
+pub(crate) fn asset_has_extension(
+    server: &AssetServer,
+    id: impl Into<bevy::asset::UntypedAssetId>,
+    ext: &str,
+) -> bool {
+    server.get_path(id).is_some_and(|p| {
+        p.path()
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case(ext))
+    })
+}
+
+pub(crate) fn asset_under(
+    server: &AssetServer,
+    id: impl Into<bevy::asset::UntypedAssetId>,
+    first_dir: &str,
+) -> bool {
+    server.get_path(id).is_some_and(|p| {
+        p.path()
+            .components()
+            .next()
+            .is_some_and(|c| c.as_os_str() == first_dir)
+    })
+}
+
 /// Executable target matching: signed negative block selects zero; other negative
 /// fields bypass equality. The all-negative sentinel requests nothing.
 pub(crate) fn targets(pattern: [u8; 4], inventory: &[String]) -> Vec<String> {

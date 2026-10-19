@@ -1,12 +1,34 @@
 //! Upload reusable source meshes only while an entity references them.
 //! CPU sources remain available for streamed instances and static-batch fallback.
 use bevy::asset::RenderAssetUsages;
+use bevy::platform::hash::FixedHasher;
 use bevy::prelude::*;
 use bevy::render::mesh::{MeshMetadataFallbackMesh, RenderMesh};
-use bevy::render::render_asset::{AssetExtractionSystems, ExtractedAssets};
-use bevy::render::{Extract, ExtractSchedule, RenderApp};
+use bevy::render::render_asset::{AssetExtractionSystems, ExtractedAssets, RenderAssets};
+use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderSystems};
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher};
+use std::sync::{Arc, Mutex};
+
+/// Meshes retired from the GPU or still re-uploading, shared with the main world.
+#[derive(Resource, Clone, Default)]
+pub(crate) struct OffGpuMeshes(pub(crate) Arc<Mutex<HashSet<AssetId<Mesh>>>>);
+
+fn publish_off_gpu(
+    off_gpu: Res<OffGpuMeshes>,
+    mut resident: ResMut<Resident>,
+    meshes: Res<RenderAssets<RenderMesh>>,
+) {
+    let resident = &mut *resident;
+    let before = resident.resuming.len();
+    resident.resuming.retain(|id| meshes.get(*id).is_none());
+    if resident.publish || resident.resuming.len() != before {
+        resident.publish = false;
+        let mut off_gpu = off_gpu.0.lock().unwrap();
+        off_gpu.clear();
+        off_gpu.extend(resident.suspended.iter().chain(&resident.resuming).copied());
+    }
+}
 
 #[derive(Resource, Default)]
 struct SharedMeshes {
@@ -16,24 +38,52 @@ struct SharedMeshes {
 }
 
 #[derive(Resource, Default)]
-struct Revision(u64);
+pub(crate) struct MeshRefs {
+    entities: HashMap<Entity, AssetId<Mesh>>,
+    counts: HashMap<AssetId<Mesh>, u32>,
+    revision: u64,
+}
+
+impl MeshRefs {
+    pub(crate) fn contains(&self, id: AssetId<Mesh>) -> bool {
+        self.counts.contains_key(&id)
+    }
+
+    fn remove(&mut self, entity: Entity) {
+        if let Some(id) = self.entities.remove(&entity) {
+            let count = self.counts.get_mut(&id).unwrap();
+            *count -= 1;
+            if *count == 0 {
+                self.counts.remove(&id);
+                self.revision += 1;
+            }
+        }
+    }
+}
 
 #[derive(Resource, Default)]
 struct Resident {
     revision: Option<u64>,
     referenced: HashSet<AssetId<Mesh>>,
     suspended: HashSet<AssetId<Mesh>>,
+    resuming: HashSet<AssetId<Mesh>>,
+    retirement_started: bool,
+    publish: bool,
 }
 
 pub(crate) fn install(app: &mut App) {
-    app.init_resource::<Revision>()
+    let off_gpu = OffGpuMeshes::default();
+    app.insert_resource(off_gpu.clone())
+        .init_resource::<MeshRefs>()
         .init_resource::<SharedMeshes>()
         .add_systems(Update, share_sources)
         .add_systems(Last, track);
     if let Some(render) = app.get_sub_app_mut(RenderApp) {
         render
+            .insert_resource(off_gpu)
             .init_resource::<Resident>()
-            .add_systems(ExtractSchedule, extract.after(AssetExtractionSystems));
+            .add_systems(ExtractSchedule, extract.after(AssetExtractionSystems))
+            .add_systems(Render, publish_off_gpu.in_set(RenderSystems::PostCleanup));
     }
 }
 
@@ -56,14 +106,7 @@ fn share_sources(
             handle.0 = canonical.clone();
             continue;
         }
-        if state.seen.contains(&id)
-            || !server.get_path(id).is_some_and(|p| {
-                p.path()
-                    .components()
-                    .next()
-                    .is_some_and(|c| c.as_os_str() == "maps")
-            })
-        {
+        if state.seen.contains(&id) || !crate::map::world::asset_under(&server, id, "maps") {
             continue;
         }
         let Some(mesh) = assets.get(id) else {
@@ -76,7 +119,7 @@ fn share_sources(
         {
             continue;
         }
-        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        let mut hash = FixedHasher.build_hasher();
         mesh.primitive_topology().hash(&mut hash);
         for (attribute, values) in mesh.attributes() {
             attribute.id.hash(&mut hash);
@@ -101,27 +144,48 @@ fn share_sources(
     }
 }
 
-fn track(
-    changed: Query<(), Changed<Mesh3d>>,
+pub(crate) fn track(
+    changed: Query<(Entity, &Mesh3d), Changed<Mesh3d>>,
     mut removed: RemovedComponents<Mesh3d>,
-    mut revision: ResMut<Revision>,
+    mut refs: ResMut<MeshRefs>,
 ) {
-    if removed.read().count() > 0 || !changed.is_empty() {
-        revision.0 += 1;
+    for entity in removed.read() {
+        refs.remove(entity);
+    }
+    for (entity, mesh) in &changed {
+        let id = mesh.id();
+        if refs.entities.get(&entity) == Some(&id) {
+            continue;
+        }
+        refs.remove(entity);
+        refs.entities.insert(entity, id);
+        let count = refs.counts.entry(id).or_default();
+        *count += 1;
+        if *count == 1 {
+            refs.revision += 1;
+        }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extract(
-    meshes: Extract<Query<&Mesh3d>>,
+    refs: Extract<Res<MeshRefs>>,
     assets: Extract<Res<Assets<Mesh>>>,
-    revision: Extract<Res<Revision>>,
+    mut events: Extract<MessageReader<bevy::asset::AssetEvent<Mesh>>>,
     fallback: Res<MeshMetadataFallbackMesh>,
     mut resident: ResMut<Resident>,
     mut extracted: ResMut<ExtractedAssets<RenderMesh>>,
+    warmup: Option<Res<crate::pipeline_warmup::PipelineWarmup>>,
+    prepared: Res<RenderAssets<RenderMesh>>,
 ) {
-    if resident.revision != Some(revision.0) {
-        resident.revision = Some(revision.0);
-        let mut referenced: HashSet<_> = meshes.iter().map(|m| m.0.id()).collect();
+    let ready = warmup.is_none_or(|warmup| warmup.ready());
+    let changed = resident.revision != Some(refs.revision);
+    let asset_event = events.read().next().is_some();
+    events.clear();
+    let suspended = resident.suspended.len();
+    if changed {
+        resident.revision = Some(refs.revision);
+        let mut referenced: HashSet<_> = refs.counts.keys().copied().collect();
         referenced.insert(fallback.0.id());
         let retired: Vec<_> = resident
             .referenced
@@ -129,9 +193,10 @@ fn extract(
             .copied()
             .collect();
         for id in retired {
-            if assets
-                .get(id)
-                .is_some_and(|m| m.asset_usage.contains(RenderAssetUsages::MAIN_WORLD))
+            if ready
+                && assets
+                    .get(id)
+                    .is_some_and(|m| m.asset_usage.contains(RenderAssetUsages::MAIN_WORLD))
             {
                 extracted.removed.insert(id);
                 resident.suspended.insert(id);
@@ -139,18 +204,42 @@ fn extract(
         }
         resident.referenced = referenced;
     }
-    reconcile(&assets, &mut resident, &mut extracted);
+    let start_retirement = ready && !resident.retirement_started;
+    if start_retirement {
+        for (id, _) in prepared.iter() {
+            if !resident.referenced.contains(&id)
+                && assets
+                    .get(id)
+                    .is_some_and(|mesh| mesh.asset_usage.contains(RenderAssetUsages::MAIN_WORLD))
+            {
+                extracted.removed.insert(id);
+                resident.suspended.insert(id);
+            }
+        }
+        resident.retirement_started = true;
+    }
+    reconcile(
+        &assets,
+        &mut resident,
+        &mut extracted,
+        changed || asset_event || start_retirement,
+        ready,
+    );
+    resident.publish |= changed || start_retirement || resident.suspended.len() != suspended;
 }
 
 fn reconcile(
     assets: &Assets<Mesh>,
     resident: &mut Resident,
     extracted: &mut ExtractedAssets<RenderMesh>,
+    changed: bool,
+    ready: bool,
 ) {
     // Retire GLTF primitives that have not been instantiated yet. Their main-world data
     // is still owned by the GLTF, so it can be extracted when a later LOD needs it.
     extracted.extracted.retain(|(id, mesh)| {
-        let keep = !mesh.asset_usage.contains(RenderAssetUsages::MAIN_WORLD)
+        let keep = !ready
+            || !mesh.asset_usage.contains(RenderAssetUsages::MAIN_WORLD)
             || resident.referenced.contains(id);
         if !keep {
             resident.suspended.insert(*id);
@@ -160,6 +249,9 @@ fn reconcile(
         }
         keep
     });
+    if !changed {
+        return;
+    }
     let resume: Vec<_> = resident
         .suspended
         .intersection(&resident.referenced)
@@ -173,6 +265,7 @@ fn reconcile(
         {
             extracted.extracted.push((id, mesh.clone()));
             extracted.added.insert(id);
+            resident.resuming.insert(id);
         }
         extracted.removed.remove(&id);
     }
@@ -182,6 +275,27 @@ fn reconcile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn references_change_revision_only_when_membership_changes() {
+        let mut app = App::new();
+        app.init_resource::<MeshRefs>().add_systems(Last, track);
+        let mesh = Handle::<Mesh>::default();
+        let first = app.world_mut().spawn(Mesh3d(mesh.clone())).id();
+        app.update();
+        let revision = app.world().resource::<MeshRefs>().revision;
+        let second = app.world_mut().spawn(Mesh3d(mesh.clone())).id();
+        app.update();
+        assert_eq!(app.world().resource::<MeshRefs>().revision, revision);
+        app.world_mut().entity_mut(first).remove::<Mesh3d>();
+        app.update();
+        assert_eq!(app.world().resource::<MeshRefs>().revision, revision);
+        assert!(app.world().resource::<MeshRefs>().contains(mesh.id()));
+        app.world_mut().despawn(second);
+        app.update();
+        assert_eq!(app.world().resource::<MeshRefs>().revision, revision + 1);
+        assert!(!app.world().resource::<MeshRefs>().contains(mesh.id()));
+    }
 
     #[test]
     fn merged_sources_release_gpu_buffers_and_can_be_restored() {
@@ -194,12 +308,18 @@ mod tests {
             .extracted
             .push((id, assets.get(id).unwrap().clone()));
         extracted.added.insert(id);
-        reconcile(&assets, &mut resident, &mut extracted);
+        reconcile(&assets, &mut resident, &mut extracted, true, false);
+        assert_eq!(
+            extracted.extracted.len(),
+            1,
+            "warmup retains unused layouts"
+        );
+        reconcile(&assets, &mut resident, &mut extracted, true, true);
         assert!(extracted.extracted.is_empty());
         assert!(extracted.removed.contains(&id));
         assert!(!extracted.added.contains(&id));
         resident.referenced.insert(id);
-        reconcile(&assets, &mut resident, &mut extracted);
+        reconcile(&assets, &mut resident, &mut extracted, true, true);
         assert!(!extracted.removed.contains(&id));
         assert_eq!(extracted.extracted[0].1.count_vertices(), 3);
         assert!(extracted.added.contains(&id));
