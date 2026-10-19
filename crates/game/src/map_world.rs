@@ -408,10 +408,9 @@ pub(crate) fn play_blocks(cache: &Path, id: &str) -> Result<BTreeMap<String, Val
 /// Physics bootstrap uses the same bounded block inventory as rendering ([`play_blocks`]).
 /// Collision/group records remain separate in MapWorld; only the broad-phase query
 /// mesh is concatenated, without adding MapOffset or translating any vertex.
-/// Each block's collision parts its `story` switches off are left out, and its helper parts
-/// the player does not collide with (`sekiro_sim::hit_filter`)
-/// leave the walkable mesh first and join the world as camera-only triangles or event walls.
-/// Placed objects join last, without those the block's `story` switches off.
+/// Collision parts and placed objects the block's `story` switches off are left out.
+/// Helper parts the player does not collide with (`sekiro_sim::hit_filter`) leave the
+/// walkable mesh and join the world as camera-only triangles or event walls.
 pub(crate) fn collision_world(
     cache: &Path,
     layouts: &BTreeMap<String, Value>,
@@ -419,28 +418,24 @@ pub(crate) fn collision_world(
 ) -> Result<sekiro_sim::collision::CollisionWorld> {
     let mut mesh = CollisionMesh::default();
     let mut helpers = sekiro_sim::hit_filter::HelperCollision::default();
+    let mut story_off = 0;
     for (block, layout) in layouts {
         let path = cache.join("maps").join(block).join("collision.bin");
         if path.is_file() {
             let mut part = CollisionMesh::from_bytes(&std::fs::read(path)?)?;
-            // Collision parts the story switches off (the other state of a pair such as the
-            // Outskirts courtyard's h003400/h003401) hold no one, and do not come back as helpers.
+            // Before the helpers, so a switched-off helper part does not come back as one.
             if let Some(story) = story.maps.get(block) {
-                let off: std::collections::HashSet<String> = story
-                    .parts
-                    .iter()
-                    .filter(|p| p.kind == sekiro_sim::world_events::PartKind::Collision)
-                    .filter(|p| !p.enabled)
-                    .map(|p| p.name.clone())
-                    .collect();
-                sekiro_sim::arenas_a::remove_hidden_collision(&mut part, layout, &off);
+                story_off +=
+                    sekiro_sim::arenas_a::remove_hidden_collision(&mut part, layout, |n| {
+                        story.switched_off(n)
+                    });
             }
             helpers.extend(sekiro_sim::hit_filter::strip_helpers(&mut part, layout));
             mesh.extend(&part);
         }
     }
     eprintln!(
-        "collision: helper triangles kept off the player by hit filter {:?}, {} event walls",
+        "collision: {story_off} parts switched off by the story, helper triangles kept off the player by hit filter {:?}, {} event walls",
         helpers.removed,
         helpers.triggers.len()
     );
@@ -2060,16 +2055,7 @@ mod tests {
             read_layout(&cache.join("maps").join(ASHINA[0])).unwrap(),
         )]);
         let stories = super::super::story::load_blocks(&cache, &blocks).unwrap();
-        let off: Vec<&str> = stories.maps[ASHINA[0]]
-            .parts
-            .iter()
-            .filter(|p| p.kind == sekiro_sim::world_events::PartKind::Collision && !p.enabled)
-            .map(|p| p.name.as_str())
-            .collect();
-        assert!(
-            off.contains(&"h003401") && off.contains(&"h003501"),
-            "{off:?}"
-        );
+        assert!(stories.maps[ASHINA[0]].switched_off("h003401"));
         let world = collision_world(&cache, &blocks, &stories).unwrap();
         // Inside h003401's footprint, 5.7 m above the courtyard: the floor is the ground.
         let floor = world.floor(-212.0, -1.0, -20.0).expect("courtyard ground");

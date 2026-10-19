@@ -482,7 +482,7 @@ impl Arena {
         crate::arena_c::filter_collision(spec, &json, &mut mesh);
         let event_collision = crate::arena_c::take_event_collision(spec, &json, &mut mesh);
         let hidden = crate::arenas_a::hidden_parts(cache, spec)?;
-        crate::arenas_a::remove_hidden_collision(&mut mesh, &json, &hidden);
+        crate::arenas_a::remove_hidden_collision(&mut mesh, &json, |n| hidden.contains(n));
         let mut helpers = crate::hit_filter::strip_helpers(&mut mesh, &json);
         if !full_map {
             for helper in helpers.meshes_mut() {

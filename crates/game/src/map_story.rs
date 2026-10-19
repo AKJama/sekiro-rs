@@ -44,6 +44,11 @@ impl StoryMap {
     pub fn part(&self, name: &str) -> Option<&PartState> {
         self.by_name.get(name).map(|&i| &self.parts[i])
     }
+
+    /// The story has switched this part off (unknown parts stay on).
+    pub fn switched_off(&self, name: &str) -> bool {
+        self.part(name).is_some_and(|p| !p.enabled)
+    }
 }
 
 pub(crate) fn initial_state(
