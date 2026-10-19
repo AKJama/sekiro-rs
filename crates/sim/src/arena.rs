@@ -139,6 +139,59 @@ pub fn boss_events(spec: &EnemySpec) -> Option<&'static BossEvents> {
         .map(|(_, _, events)| events)
 }
 
+/// Reviewed first-visit exclusions alongside the boss identity rows.
+/// The team allowlist is a start-role policy, not a recovered hostility table.
+/// Unsupported event predicates stay blocked; Ministry invasion needs the night flag.
+pub enum PopulationExclusion {
+    Models(&'static [&'static str], &'static str),
+    EnemyTeams(&'static [i64], &'static str),
+    RequiresFlag {
+        map: &'static str,
+        team: i64,
+        flag: i32,
+        reason: &'static str,
+    },
+}
+pub const POPULATION_EXCLUSIONS: &[PopulationExclusion] = &[
+    PopulationExclusion::Models(
+        &["c1000", "c1001"],
+        "event/controller model without a combat body",
+    ),
+    PopulationExclusion::EnemyTeams(&[6, 24, 29], "no initial enemy combat role"),
+    PopulationExclusion::Models(
+        &["c5010"],
+        "Great Serpent is a region-scripted setpiece, not a roaming combatant",
+    ),
+    PopulationExclusion::RequiresFlag {
+        map: "m11_00_00_00",
+        team: 24,
+        flag: 9802,
+        reason: "late Ministry invasion role, absent at the Outskirts first visit",
+    },
+];
+
+pub fn population_exclusion(
+    chr: &str,
+    map: &str,
+    team: i64,
+    flag: impl Fn(i32) -> bool,
+) -> Option<String> {
+    POPULATION_EXCLUSIONS.iter().find_map(|rule| match rule {
+        PopulationExclusion::Models(models, reason) if models.contains(&chr) => {
+            Some((*reason).into())
+        }
+        PopulationExclusion::EnemyTeams(teams, reason) if !teams.contains(&team) => {
+            Some(format!("{reason} (NpcParam teamType {team})"))
+        }
+        PopulationExclusion::RequiresFlag {
+            map: wanted,
+            team: wanted_team,
+            flag: required,
+            reason,
+        } if map == *wanted && team == *wanted_team && !flag(*required) => Some((*reason).into()),
+        _ => None,
+    })
+}
 /// Reviewed map-event rows, keyed by boss identity instead of dispatch code.
 pub const BOSS_EVENT_ROWS: &[(&str, i32, BossEvents)] = &[
     ("c5060", 50_600_000, OWL_EVENTS),

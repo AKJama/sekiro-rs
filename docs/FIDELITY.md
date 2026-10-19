@@ -1,5 +1,31 @@
 # Known fidelity approximations
 
+## Optional map enemy population
+
+`--map-enemies` loads actual Enemy parts and exact NpcParam/NpcThinkParam rows, excluding dummy parts and reviewed boss rows.
+The population uses the map visibility interpreter's startup entity/group disables before allocating actors.
+Neutral NPCs and event/controller bodies are omitted, and Outskirts Ministry rows have an explicit first-visit/night-role filter where event predicates remain unsupported.
+The Great Serpent remains a scripted setpiece and is omitted from the roaming combat population.
+Each foe retains the existing pair combat state but no placeholder Wolf VM or player assets; the authoritative Wolf moves between kernels and advances once.
+Behaviour graphs, animation clips, skeletons, TAE, FLVER throw models, ThrowParam, PARAM tables and common combat-effect lookups are shared, while actor state and status mutations remain isolated.
+NpcParam `activateBorderDist` and `deactivateIntervalDist` control distance sleeping; zero activation distance currently uses an inferred 100 m default rather than a recovered engine default.
+Our scheduling policy keeps near (20 m), engaged and locked foes at the full fixed rate, updates distant unaware foes at 10 Hz, and holds dormant foes outside their activation border.
+Engagement wakes immediately without a backlog step; the LOD thresholds and rate are our policy, not recovered engine values.
+Sight rays run at FwLo's recovered 0.2 + rand*0.2 second search interval (FUN_140623ca0), with damage and nose distance checked immediately.
+Population presentation skips far offscreen pose/cloth uploads, updates distant visible poses with their simulation, and limits foe shadows to 30 m from the camera.
+Cloth uses the 15 m camera range from FwLo's RustSekiro (`SHINOBI_CLOTH_RANGE`), is carried in its restart pose outside that range, and runs one parallel task per character.
+CPU cloth writes its actual output bounds; other foe meshes use dynamic skinned bounds when the pose changes.
+Compiled Lua script prototypes and model mesh/material handles are shared across actors; mutable VM globals and cloth buffers remain separate.
+Sight/camera rays traverse only the horizontal grid cells they cross, preserving the triangle narrow phase and rejecting vertically disjoint geometry.
+Map sound rows, FMOD project metadata, active character banks and the hit-effect tables are prepared behind the loading screen; sound lookups and raw parameter data are shared across NPC rows.
+Character-bank event data follows NPC activation and is released when no actor of that kind remains active, before cue playback.
+Acquisition uses the think row's normal sight cone, collision occlusion and sight-forget duration, plus damage and nose distance.
+Native caution accumulation, hearing, bush concealment, navigation and platoon roles remain incomplete.
+PatrolInfo routes use FwLo's documented loop, ping-pong and one-way stepping and Lua arrival actions, but shaped arrival regions and type-5 home-pose updates remain incomplete.
+Other foes pause during a paired throw to preserve the single player's throw ownership.
+Player projectiles retain per-foe contact histories rather than a shared cross-foe first-impact ordering, and population FXR presentation remains incomplete.
+FwLo sources: MIT RustSekiro `src/enemy.rs` spawn_lineup/StartUnaware, `src/ai.rs` Patrol, `tools/patrols.py`, and `docs/kb/enemy.md` patrol-route notes.
+
 ## Exposure and tone
 
 Mode 7 now uses the native base-two sensitometric exponentials; the earlier natural-exponential transcription is corrected.

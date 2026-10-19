@@ -60,6 +60,7 @@ mod owl_tools;
 mod owl_warp;
 mod perilous;
 mod player_guard;
+mod population;
 mod posture_recovery;
 mod projectile_guard;
 mod roster;

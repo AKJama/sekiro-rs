@@ -164,6 +164,7 @@ api! {
     group_events: b"FMOD_EventGroup_GetNumEvents" => fn(Ptr, *mut i32);
     group_event: b"FMOD_EventGroup_GetEventByIndex" => fn(Ptr, i32, u32, *mut Ptr);
     group_load: b"FMOD_EventGroup_LoadEventData" => fn(Ptr, i32, u32);
+    group_free: b"FMOD_EventGroup_FreeEventData" => fn(Ptr, Ptr, i32);
     event_info: b"FMOD_Event_GetInfo" => fn(Ptr, *mut i32, *mut *const c_char, Ptr);
     event_3d: b"FMOD_Event_Set3DAttributes" => fn(Ptr, *const FVec, *const FVec, *const FVec);
     event_start: b"FMOD_Event_Start" => fn(Ptr);
@@ -342,6 +343,10 @@ impl EventSystem {
     /// Loads the sample data of every event of project `name` now, so the first time each
     /// plays does not wait for the disk. Returns the groups that loaded and the first error.
     pub fn preload(&mut self, name: &str) -> (usize, Option<i32>) {
+        self.preload_resource(name, RESOURCE_STREAMS_AND_SAMPLES)
+    }
+
+    fn preload_resource(&mut self, name: &str, resource: i32) -> (usize, Option<i32>) {
         let Some(i) = self.projects.iter().position(|p| p.name == name) else {
             return (0, None);
         };
@@ -355,7 +360,7 @@ impl EventSystem {
                 if (self.api.project_group)(project, g, 0, &mut group) != 0 || group.is_null() {
                     continue;
                 }
-                match (self.api.group_load)(group, RESOURCE_STREAMS_AND_SAMPLES, EVENT_DEFAULT) {
+                match (self.api.group_load)(group, resource, EVENT_DEFAULT) {
                     0 => loaded += 1,
                     r => {
                         error.get_or_insert(r);
@@ -370,6 +375,37 @@ impl EventSystem {
         &self.projects
     }
 
+    /// Release a dormant character's event data while retaining its project metadata.
+    pub fn free_samples(&mut self, name: &str) -> Result<(), FmodError> {
+        let Some(i) = self.projects.iter().position(|p| p.name == name) else {
+            return Ok(());
+        };
+        let mut first = None;
+        unsafe {
+            let mut n = 0;
+            check(
+                "FMOD_EventProject_GetNumGroups",
+                (self.api.project_groups)(self.handles[i], &mut n),
+            )?;
+            for g in 0..n {
+                let mut group = std::ptr::null_mut();
+                let result = check(
+                    "FMOD_EventProject_GetGroupByIndex",
+                    (self.api.project_group)(self.handles[i], g, 0, &mut group),
+                )
+                .and_then(|()| {
+                    check(
+                        "FMOD_EventGroup_FreeEventData",
+                        (self.api.group_free)(group, std::ptr::null_mut(), 1),
+                    )
+                });
+                if let Err(error) = result {
+                    first.get_or_insert(error);
+                }
+            }
+        }
+        first.map_or(Ok(()), Err)
+    }
     /// The full path of event `key`, if a loaded project has it.
     pub fn path_of(&self, key: &str) -> Option<&str> {
         self.index.get(key).map(String::as_str)
@@ -408,9 +444,9 @@ impl EventSystem {
             self.started.insert(key.to_string());
             Played::Started
         } else {
-            // A first failure is the event's data (a bank FMOD cannot open); after a success it
-            // is the event's own playback limit, which the game also just skips.
-            if !self.started.contains(key) {
+            // Resource exhaustion and playback limits are transient, even on the first play.
+            // Only remember file/format errors, so a busy mixer cannot permanently mute a cue.
+            if !self.started.contains(key) && unopenable_bank(r) {
                 self.broken.insert(key.to_string(), r);
             }
             Played::Failed(r)
@@ -441,10 +477,8 @@ impl EventSystem {
     }
 
     /// Runs FMOD's per-frame work: 3D positions, voice limits, finished events.
-    pub fn update(&mut self) {
-        unsafe {
-            (self.api.update)(self.es);
-        }
+    pub fn update(&mut self) -> i32 {
+        unsafe { (self.api.update)(self.es) }
     }
 
     /// Diagnostics: starts event `key` at `position`, lets FMOD mix a few updates and returns
@@ -581,6 +615,11 @@ fn c_str(p: *const c_char) -> String {
     }
 }
 
+fn unopenable_bank(result: i32) -> bool {
+    // FMOD Ex: FILE_BAD, FILE_EOF, FILE_NOTFOUND, FORMAT.
+    matches!(result, 19 | 22 | 23 | 25)
+}
+
 /// The projects a fight against `enemy` (such as `c5060`) on map area `area` (such as `m11`)
 /// loads, in lookup order: the common project (Wolf and shared sounds), the enemy's, the area's
 /// sound projects, then the common SFX project. Each is skipped when missing.
@@ -596,6 +635,14 @@ pub fn fight_projects(enemy: &str, area: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transient_failures_do_not_poison_event_keys() {
+        assert!(!unopenable_bank(43), "resource exhaustion can recover");
+        assert!(!unopenable_bank(83), "an event playback limit can recover");
+        assert!(unopenable_bank(23));
+        assert!(unopenable_bank(25));
+    }
 
     #[test]
     fn event_paths() {

@@ -109,10 +109,10 @@ pub struct StatusText;
 pub struct PoisonRow;
 
 /// Frame colours: dark lacquer with a thin gold edge, like the game's bars.
-const FRAME: Color = Color::srgba(0.05, 0.04, 0.03, 0.75);
+pub(crate) const FRAME: Color = Color::srgba(0.05, 0.04, 0.03, 0.75);
 const EDGE: Color = Color::srgba(0.78, 0.66, 0.42, 0.55);
 /// The vitality fill: the game's muted orange-red (about 180, 70, 48 in captures).
-const VITALITY: Color = Color::srgb(180.0 / 255.0, 70.0 / 255.0, 48.0 / 255.0);
+pub(crate) const VITALITY: Color = Color::srgb(180.0 / 255.0, 70.0 / 255.0, 48.0 / 255.0);
 /// The damage trail's light, desaturated red (about 165, 130, 120 in captures).
 const TRAIL: Color = Color::srgb(165.0 / 255.0, 130.0 / 255.0, 120.0 / 255.0);
 const POISON_WIDTH: f32 = 160.0;
@@ -124,7 +124,7 @@ const HP_BAR_BASE: f32 = 320.0;
 /// The widest the vitality bar gets (ours: keeps a modded maximum on screen).
 const HP_BAR_MAX_VW: f32 = 60.0;
 /// The over-head bars' width (percent of the screen width).
-const OVERHEAD_W: f32 = 8.5;
+pub(crate) const OVERHEAD_W: f32 = 8.5;
 /// How far over the Head bone the floating bars stand (m).
 const OVERHEAD_ABOVE_HEAD: f32 = 0.35;
 /// The gap the floating bars keep from the recording panel (px, ours).
@@ -160,7 +160,7 @@ fn posture_state(f: f32, broken: bool) -> usize {
     }
 }
 
-fn posture_color(f: f32, broken: bool) -> Color {
+pub(crate) fn posture_color(f: f32, broken: bool) -> Color {
     let [r, g, b] = POSTURE_FILL[posture_state(f, broken)];
     Color::srgb_u8(r, g, b)
 }
@@ -194,7 +194,7 @@ fn step_hold(hold: &mut f32, damaged: bool, dt: f32) -> bool {
 /// A framed bar of `width` x `height` showing `fill` inside a thin gold frame. A vitality fill
 /// gets its damage trail behind it; a posture fill grows from the middle out and gets an arrow
 /// at each end. Returns the frame.
-fn bar<'a>(
+pub(crate) fn bar<'a>(
     parent: &'a mut ChildSpawnerCommands,
     fill: Fill,
     (width, height): (Val, Val),
@@ -239,7 +239,12 @@ fn bar<'a>(
                 height: percent(100),
                 ..default()
             },
-            BackgroundColor(Color::NONE),
+            BackgroundColor(match fill {
+                Fill::Hp(_) => VITALITY,
+                Fill::Trail(_) => TRAIL,
+                Fill::Posture(_) => posture_color(0.0, false),
+                Fill::Poison => Color::NONE,
+            }),
         ));
         // The game's "<" ">" arrows at the posture bar's outer ends; a gold diamond stands in
         // for the arrow sprite (MENU_Taikan_Arrow, not extracted).
@@ -492,20 +497,7 @@ pub fn spawn(commands: &mut Commands) {
         });
     // The deathblow mark on the enemy: a red diamond with a dark rim (the game's MENU_ninsatu
     // sprite is not extracted).
-    commands.spawn((
-        HudPart::DeathblowMark,
-        Node {
-            position_type: PositionType::Absolute,
-            width: px(16),
-            height: px(16),
-            border: UiRect::all(px(2)),
-            ..default()
-        },
-        UiTransform::from_rotation(Rot2::degrees(45.0)),
-        BackgroundColor(Color::srgb(0.85, 0.05, 0.05)),
-        BorderColor::all(Color::srgb(0.15, 0.0, 0.0)),
-        Visibility::Hidden,
-    ));
+    commands.spawn((HudPart::DeathblowMark, deathblow_mark()));
     // The item cluster, bottom right: the quick item's box, then the prosthetic tool's bigger
     // one (percent of the screen). No items are equipped in our game yet, so each box shows only
     // its button and lights its edge while it is held.
@@ -559,6 +551,21 @@ fn display(node: &mut Mut<Node>, on: bool) {
     );
 }
 
+pub(crate) fn deathblow_mark() -> impl Bundle {
+    (
+        Node {
+            position_type: PositionType::Absolute,
+            width: px(16),
+            height: px(16),
+            border: UiRect::all(px(2)),
+            ..default()
+        },
+        UiTransform::from_rotation(Rot2::degrees(45.0)),
+        BackgroundColor(Color::srgb(0.85, 0.05, 0.05)),
+        BorderColor::all(Color::srgb(0.15, 0.0, 0.0)),
+        Visibility::Hidden,
+    )
+}
 /// Updates widths, colours, the floating panel and the boss bars.
 #[allow(clippy::type_complexity)]
 pub fn update(
@@ -616,6 +623,11 @@ pub fn update(
             Vec2::new(left, top)
         });
     for (part, mut node, color, visibility, border, text) in &mut parts {
+        // Population bars use actor slots above the two duel HUD slots.
+        if matches!(*part, HudPart::Fill(Fill::Hp(i) | Fill::Trail(i) | Fill::Posture(i)) | HudPart::PostureArrow(i) if i >= 2)
+        {
+            continue;
+        }
         match *part {
             HudPart::Fill(fill) => {
                 let (fraction, c) = match fill {

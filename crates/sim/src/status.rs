@@ -92,16 +92,33 @@ impl StatusEffect {
 /// Every SpEffect's status fields, by id.
 #[derive(Debug, Clone, Default)]
 pub struct StatusBook {
-    effects: HashMap<i32, StatusEffect>,
+    effects: std::sync::Arc<HashMap<i32, StatusEffect>>,
 }
 
 impl StatusBook {
+    pub fn shared(cache: &std::path::Path, table: Option<&Table>) -> Self {
+        Self {
+            effects: crate::shared::load(cache.join("shared-statuses"), || {
+                Some(
+                    table
+                        .map(|t| {
+                            t.rows()
+                                .map(|r| (r.id(), StatusEffect::from_row(&r)))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                )
+            })
+            .unwrap(),
+        }
+    }
     pub fn from_table(table: &Table) -> Self {
         Self {
             effects: table
                 .rows()
                 .map(|r| (r.id(), StatusEffect::from_row(&r)))
-                .collect(),
+                .collect::<HashMap<_, _>>()
+                .into(),
         }
     }
 
@@ -115,7 +132,7 @@ impl StatusBook {
     }
 
     pub fn insert(&mut self, effect: StatusEffect) {
-        self.effects.insert(effect.id, effect);
+        std::sync::Arc::make_mut(&mut self.effects).insert(effect.id, effect);
     }
 }
 

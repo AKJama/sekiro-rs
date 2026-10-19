@@ -28,6 +28,9 @@ pub const UNTRIED_BONUS: f32 = 1.5;
 pub struct Rng(u64);
 
 impl Rng {
+    pub(crate) fn from_state(state: u64) -> Self {
+        Self(state)
+    }
     pub fn new(seed: u64) -> Self {
         // Never zero (xorshift would stay there).
         Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)

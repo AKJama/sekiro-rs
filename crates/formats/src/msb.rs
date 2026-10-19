@@ -270,6 +270,15 @@ pub struct Msb {
     pub env_regions: Vec<EnvRegion>,
     pub map_offsets: Vec<MapOffset>,
     pub regions: Vec<MapRegion>,
+    pub patrols: Vec<PatrolInfo>,
+}
+
+/// MSBS type-14 PatrolInfo, in event-list order (EnemyData::walk_route_index).
+#[derive(Debug, Clone)]
+pub struct PatrolInfo {
+    pub kind: i32,
+    pub regions: [i16; 32],
+    pub arrivals: [(i16, i32, i32); 5],
 }
 
 /// MSBS region identity and effect placement, in native map space.
@@ -445,6 +454,9 @@ pub fn parse(data: &[u8]) -> Result<Msb> {
             }
             "EVENT_PARAM_ST" => {
                 for &e in &entries {
+                    if let Some(route) = read_patrol(data, e)? {
+                        msb.patrols.push(route);
+                    }
                     if let Some(offset) = read_map_offset(data, e)? {
                         msb.map_offsets.push(offset);
                     }
@@ -455,6 +467,32 @@ pub fn parse(data: &[u8]) -> Result<Msb> {
         pos = next;
     }
     Ok(msb)
+}
+
+fn read_patrol(data: &[u8], start: usize) -> Result<Option<PatrolInfo>> {
+    let mut header = Reader::at(data, start + 12);
+    if header.u32()? != 14 {
+        return Ok(None);
+    }
+    let offset = Reader::at(data, start + 32).offset64()?;
+    let mut r = Reader::at(data, start + offset);
+    let kind = r.i32()?;
+    r.skip(12);
+    let mut regions = [-1; 32];
+    for region in &mut regions {
+        *region = r.i16()?;
+    }
+    let mut arrivals = [(-1, -1, 0); 5];
+    for arrival in &mut arrivals {
+        let region = r.i16()?;
+        r.skip(2);
+        *arrival = (region, r.i32()?, r.i32()?);
+    }
+    Ok(Some(PatrolInfo {
+        kind,
+        regions,
+        arrivals,
+    }))
 }
 
 fn read_map_offset(data: &[u8], start: usize) -> Result<Option<MapOffset>> {

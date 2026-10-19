@@ -348,6 +348,7 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
         _ => f32::NAN,
     };
     Ok(play::Options {
+        map_enemies: args.iter().any(|a| a == "--map-enemies"),
         brain_overlay: args.iter().any(|a| a == "--brain-overlay"),
         brain_label,
         window_size,
@@ -358,7 +359,9 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
         screenshots,
         exit_after_script: args.iter().any(|a| a == "--exit"),
         enemy: !args.iter().any(|a| a == "--no-enemy" || a == "--passive"),
-        enemy_present: !args.iter().any(|a| a == "--no-enemy"),
+        enemy_present: !args
+            .iter()
+            .any(|a| a == "--no-enemy" || a == "--map-enemies"),
         arena: boss_arena,
         full_map: args.iter().any(|a| a == "--full-map"),
         hide: arg_list(args, "--hide"),

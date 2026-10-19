@@ -192,13 +192,15 @@ pub(super) fn spawn_screen(mut commands: Commands) {
         });
 }
 
+type CharacterRigs = Or<(With<Actor>, With<super::map_enemies::FoeActor>)>;
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn update(
     mut commands: Commands,
     mut gate: ResMut<PlayGate>,
     sim: NonSend<Sim>,
     time: Res<Time<Real>>,
-    rigs: Query<&Rig, With<Actor>>,
+    rigs: Query<&Rig, CharacterRigs>,
     pending: Option<Res<crate::map::Pending>>,
     pipelines: Option<Res<crate::map::ready::Pipelines>>,
     warmup: Option<Res<crate::pipeline_warmup::PipelineWarmup>>,

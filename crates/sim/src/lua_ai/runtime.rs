@@ -311,6 +311,7 @@ pub struct AiState {
     /// Lua writes awaiting publication to the encounter's other actors.
     pub event_flag_changes: HashMap<i32, bool>,
     pub map_regions: Option<super::regions::MapRegions>,
+    pub patrol: Option<super::patrol::Patrol>,
     pub timers: HashMap<i32, f32>,
     /// Seconds since each action id was last requested.
     pub action_age: HashMap<i32, f32>,
@@ -364,6 +365,7 @@ impl AiState {
             event_flags: HashSet::new(),
             event_flag_changes: HashMap::new(),
             map_regions: None,
+            patrol: None,
             timers: HashMap::new(),
             action_age: HashMap::new(),
             time: 0.0,
@@ -472,6 +474,7 @@ impl AiState {
             20 => self.event_target.as_ref().map(|t| t.position),
             100 | 111 | 121 | 125 => Some(self.world.home),
             102 => self.event_move_target,
+            103 => self.patrol.as_ref().and_then(|p| p.position()),
             _ => None,
         }
     }
@@ -1053,6 +1056,26 @@ impl AiState {
             "IsCautionState" => boolean(self.target_state == 1),
             "IsChangeState" => boolean(self.target_state != self.prev_target_state),
             "GetPrevTargetState" => num(self.prev_target_state as f64),
+            "GetMovePointNumber" => num(self.patrol.as_ref().map_or(-1, |p| p.current) as f64),
+            "GetPrevMovePointNumber" => num(self.patrol.as_ref().map_or(-1, |p| p.previous) as f64),
+            "GetMovePointType" => num(self.patrol.as_ref().map_or(0, |p| p.kind) as f64),
+            "GetMovePointAnimId" => num(self
+                .patrol
+                .as_ref()
+                .and_then(|p| p.arrival(t(0)))
+                .map_or(-1, |a| a.0) as f64),
+            "GetMovePointWaitTime" => num(self
+                .patrol
+                .as_ref()
+                .and_then(|p| p.arrival(t(0)))
+                .map_or(0, |a| a.1) as f64),
+            "IsRouteEnd" => boolean(self.patrol.as_ref().is_none_or(|p| p.ended())),
+            "StepNextMovePoint" => {
+                if let Some(p) = &mut self.patrol {
+                    p.step(self.rng);
+                }
+                vec![]
+            }
             "IsSearchTarget" | "IsVisibleTarget" | "IsVisibleCurrTarget" => {
                 boolean(self.world.target.is_some())
             }
@@ -1625,7 +1648,19 @@ fn native_update(st: &mut AiState, id: u32, n: NativeGoal) -> i32 {
             let target = g.param(0) as i32;
             let dist = g.param(2) as f32;
             let walk = g.param_bool(4);
-            if st.dist(target) <= dist.max(0.0) {
+            if st.dist(target)
+                <= dist.max(0.0)
+                    + if target == 103 {
+                        st.world.hit_radius
+                    } else {
+                        0.0
+                    }
+            {
+                if target == 103
+                    && let Some(p) = &mut st.patrol
+                {
+                    p.step(st.rng);
+                }
                 return RESULT_SUCCESS;
             }
             st.request.move_yaw = st.yaw_to(target);
