@@ -95,6 +95,9 @@ pub struct PlayerEnv {
     pub can_surface: bool,
     /// This tick's HKS movement mode: Some(false) surface, Some(true) underwater.
     pub water_mode: std::cell::Cell<Option<bool>>,
+    /// The fall-prevention walls this tick's `act(3016)` calls asked for
+    /// ([`crate::hit_filter::fall_assist_walls`]); the script asks every frame.
+    pub fall_assist: std::cell::Cell<u8>,
     pub wire_candidate: bool,
     pub wire_action: std::cell::Cell<bool>,
     pub wire_precompute: std::cell::Cell<Option<(i32, i32)>>,
@@ -190,6 +193,7 @@ impl Default for PlayerEnv {
             can_dive: false,
             can_surface: false,
             water_mode: std::cell::Cell::new(None),
+            fall_assist: std::cell::Cell::new(0),
             wire_candidate: false,
             wire_action: std::cell::Cell::new(false),
             wire_precompute: std::cell::Cell::new(None),
@@ -421,6 +425,13 @@ impl Host for Adapter<'_> {
         if id == CommandId::Number(3037) {
             self.env.water_mode.set(Some(false));
         }
+        if id == CommandId::Number(3016)
+            && let Some(arg) = num(args.first())
+        {
+            self.env
+                .fall_assist
+                .set(self.env.fall_assist.get() | crate::hit_filter::fall_assist_walls(arg));
+        }
         if id == CommandId::Number(3018) {
             self.env.wire_action.set(num(args.first()) == Some(1));
         }
@@ -646,6 +657,7 @@ impl PlayerBehavior {
         let mut ran = Vec::new();
         self.env.recovery_disabled.set(false);
         self.env.water_mode.set(None);
+        self.env.fall_assist.set(0);
         self.call(&[("Update".to_owned(), None)], &mut events, &mut errors);
         let updates = self.runtime.update_hooks();
         self.run_hooks(&updates, &mut events, &mut errors, &mut ran);

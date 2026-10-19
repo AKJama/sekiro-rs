@@ -93,6 +93,13 @@ fn air_velocity(mut v: Vec2, stick: Vec2, control: FallControl, dt: f32) -> Vec2
 /// RustSekiro, `docs/kb/movement.md`); a 9.64 m/s jump rises about 2 m and lands after 0.82 s.
 pub const GRAVITY: f32 = 9.8 + 13.72;
 
+/// How far past a floor's edge the capsule's rounded bottom still rests on it: the 0.4 m
+/// radius ([`crate::collision::RADIUS`]) touches the edge with a contact normal within the
+/// walkable slope (60 degrees, [`crate::collision::MAX_SLOPE_DEGREES`]) until the centre is
+/// `r sin 60` = 0.35 m out. The game's cliff-top fall-prevention walls stand up to about 0.2 m
+/// past the floor's end, so a point foot would drop before they hold it (#119).
+const RIM_SUPPORT: f32 = crate::collision::RADIUS * 0.866;
+
 /// Authored water collision, separate from supporting terrain.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WaterSurface {
@@ -157,6 +164,14 @@ pub trait Ground {
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
         let _ = feet;
         delta
+    }
+
+    /// [`Ground::slide`] that also stops at the fall-prevention walls in `walls`
+    /// ([`crate::hit_filter::FALL_ASSIST_MOVE`], `FALL_ASSIST_ACTION` bits), for a body whose
+    /// script asks for the assist. Grounds without such walls just slide.
+    fn slide_assisted(&self, feet: [f32; 3], delta: [f32; 2], walls: u8) -> [f32; 2] {
+        let _ = walls;
+        self.slide(feet, delta)
     }
 
     /// Highest ledge a grounded body steps onto, and the furthest it follows the floor down
@@ -224,6 +239,9 @@ pub struct BodyInput {
     pub ignore_walls: bool,
     /// HKS act 3037 = surface, act 3011 = dive. None uses ordinary physics.
     pub water_mode: Option<bool>,
+    /// The fall-prevention walls this tick's HKS `act(3016)` asked for
+    /// ([`crate::hit_filter::fall_assist_walls`]); 0 moves freely past them.
+    pub fall_assist: u8,
     /// World-space horizontal movement stick, with magnitude at most one.
     pub stick: Vec2,
     /// Root-motion delta in the character's local source space: `[x, y, z, yaw]`.
@@ -245,6 +263,20 @@ impl Body {
     /// True while airborne and moving down.
     pub fn falling(&self) -> bool {
         !self.grounded && self.velocity[1] < 0.0
+    }
+
+    /// The floor the capsule's rim still rests on when none is under its centre: the highest
+    /// of eight points [`RIM_SUPPORT`] around the feet that is no higher than them and no more
+    /// than a step below.
+    fn rim_support(&self, ground: &dyn Ground) -> Option<f32> {
+        let [x, y, z] = self.position;
+        (0..8)
+            .filter_map(|i| {
+                let (s, c) = (i as f32 * std::f32::consts::FRAC_PI_4).sin_cos();
+                ground.floor(x + RIM_SUPPORT * c, z + RIM_SUPPORT * s, y + 0.05)
+            })
+            .filter(|h| y - h < ground.max_step())
+            .reduce(f32::max)
     }
 
     pub fn step(&mut self, input: &BodyInput, dt: f32, ground: &dyn Ground) {
@@ -295,7 +327,7 @@ impl Body {
         let [mx, mz] = if input.ignore_walls {
             travel
         } else {
-            ground.slide(self.position, travel)
+            ground.slide_assisted(self.position, travel, input.fall_assist)
         };
         self.position[0] += mx;
         self.position[2] += mz;
@@ -340,7 +372,10 @@ impl Body {
             // Follow the floor up or down by a step, plus what a 50 degree slope rises over
             // this tick's travel, so a fast tick on a ramp or stairs keeps contact.
             let reach = step + (mx * mx + mz * mz).sqrt() * 1.2;
-            let floor = ground.floor(self.position[0], self.position[2], self.position[1] + reach);
+            let floor = ground
+                .floor(self.position[0], self.position[2], self.position[1] + reach)
+                .filter(|h| self.position[1] - h < reach)
+                .or_else(|| self.rim_support(ground));
             match floor {
                 Some(h) if self.position[1] - h < reach => self.position[1] = h,
                 _ => {

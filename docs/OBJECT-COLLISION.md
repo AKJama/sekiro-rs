@@ -38,6 +38,34 @@ Addresses are RVAs in the 1.06 exe (`re/dump/manifest.json`), read with the head
 
 So the player stands on the static and keyframed bodies of objects whose `collisionType` is 0, 1 or 2, and on nothing of the others.
 Type 6 is the "fall prevention" variant of a rideable pine (`o002501`, 落下防止), group 92, the fall-prevention assist hit, which the player's capsule does not collide with.
+Type 11 is group 93, its "ground actions only" twin.
+
+## The fall-prevention assist
+
+This is how the game stops Wolf at an edge: authored walls that only the assist sees, switched per behaviour state by the player script.
+First traced for the grapple pine in draft PR #33 (#17); the map-wall part is applied for #119.
+
+- Group names (`FUN_140932c00`): 92 落下防止アシストヒット(地上移動＆地上アクション) (fall-prevention assist hit, ground movement and ground actions), 93 the same for ground actions only, 94, 95 and 96 the sphere casts for 92, for 93, and for both.
+- In the collision matrix `FUN_140933390`, group 92 meets only 94, 96 and 113, and group 93 only 95, 96, 113 and 114: no capsule, ray or other body.
+- The walls are map parts with hit filter 28 (`h900400`, `h900410` in the Outskirts; every exported map has some) and objects of collisionType 6 and 11.
+  In m11_00 `h900400` is 1400 triangles, bands about 1 m tall from the floor at the edge, spread over the Outskirts' cliff tops and ledges; 743 of its wall triangles have a drop of more than 2 m on their outer side.
+  There are none within 130 m of start 0.
+- The player script asks for the assist every frame: `_UpdateFallProtection` (`c0000_transition.lua`, called from the `Update` in `c0000.lua`) sends `act(3016, 0)` in states whose `ENABLE_FALL_PROTECT_WALL_STRONG` flag is set and `act(3016, 1)` where `ENABLE_FALL_PROTECT_WALL_WEAK` is set (`g_paramHkbState` in `c0000_cmsg.lua`).
+  Of 1310 states, 770 set both, 90 only the strong one (walk and run loops, idle, item and sub-weapon moves, crouch moves) and 450 neither: every jump, fall, wire, hang, cover, swim, dive and event state, and `SPRINT_LOOP`.
+  It skips the request in cover, hang, wire fall, cling, swim, dive and aged-fall styles, in the wire-ready states, and while SpEffect behaviour ref 6 (`TAE_DISABLE_FALL_PROTECT`) is on; refs 11 and 12 switch off the strong and weak request.
+- `FUN_140bc6800` reads the two request bits: bit 0 alone casts with group 94, bit 1 alone with 95, both with 96.
+  So `act(3016, 0)` is taken as group 92 and `act(3016, 1)` as group 93; the act's own handler is not traced.
+- `FUN_140bc68d0` casts the body along its move with that filter and cuts the move so the body stays `FallAssistMinRadius` (0.16 m, physics module `+0xaec`, constructor `FUN_140bbb010`) from a wall it heads into; a wall the body is in front of is skipped, so the walls keep a body in and let one outside walk in.
+- NPCs share `FallPreventionAssist` (`c9997.lua`), which sends only `act(3016, 1)`: enemies are held by group 93 walls (collisionType 11 objects) and not by the map's group 92 cliff walls.
+- Sprinting: `SPRINT_LOOP` sends no request, while the step and sprint-start states before it do, so a sprint into a wall is held until the loop starts (0.62 s in `edge_hold.rs`; the user saw half a second to 1.5 s in the real game, #86, #32).
+
+What the simulation does:
+
+- `hit_filter::mask` gives filter 28 the `FALL_ASSIST_MOVE` bit and `object_mask` gives types 6 and 11 `FALL_ASSIST_MOVE` and `FALL_ASSIST_ACTION`; they join the world as helpers no capsule, ray or floor query sees.
+- The behaviour adapter records `act(3016, arg)` per tick (`PlayerEnv::fall_assist`, cleared before each script update) for Wolf and NPCs alike, and `BodyInput::fall_assist` hands the bits to `Body::step`, which moves through `Ground::slide_assisted`.
+- `CollisionWorld::slide_for` then also keeps the feet `FALL_ASSIST_RADIUS` (0.16 m) on the inner side of those walls (`hold_inside`), in sub-steps of 0.08 m so none is stepped across.
+- The walls often stand up to 0.2 m past the floor's end, where the game's 0.4 m capsule still rests on the lip.
+  A grounded body now stays on a floor its capsule rim reaches (`Body::rim_support`: eight points 0.35 m out, `RADIUS * sin 60`, the walkable slope limit), so it is held rather than dropped short of the wall.
 
 | collisionType | Group | Player and enemies | Camera | Outskirts objects (triangles) | Castle objects (triangles) |
 |---|---|---|---|---|---|

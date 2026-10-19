@@ -28,6 +28,7 @@ mod demon_arena;
 mod divine_dragon;
 mod docking;
 mod duel;
+mod edge_hold;
 mod emma;
 mod folding_screen_monkeys;
 mod fountainhead_bridge;

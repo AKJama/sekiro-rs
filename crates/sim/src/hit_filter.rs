@@ -13,8 +13,8 @@
 //!
 //! The exported `collision.bin` holds every part's triangles; [`strip_helpers`] takes the ones
 //! the player does not collide with out of it (in place, so the triangle ranges recorded in
-//! `layout.json` stay valid) and returns the enemy and camera parts and the contact triggers
-//! for [`crate::collision::CollisionWorld::add_helpers`]. Enemies and bosses use
+//! `layout.json` stay valid) and returns the enemy, camera and fall-prevention parts and the
+//! contact triggers for [`crate::collision::CollisionWorld::add_helpers`]. Enemies and bosses use
 //! [`crate::collision::EnemyGround`]: they also stand on water surfaces and stop at
 //! enemy-only walls.
 
@@ -64,13 +64,35 @@ const CAMERA_GROUPS: [u8; 6] = [24, 39, 40, 41, 46, 108];
 pub const PLAYER: u8 = 1;
 pub const ENEMY: u8 = 2;
 pub const CAMERA: u8 = 4;
+/// The fall-prevention assist walls (落下防止アシストヒット): group 92 for ground movement and
+/// ground actions, group 93 for ground actions only. No capsule collides with them; the
+/// assist's sphere casts do (groups 94 and 96 meet 92, 95 and 96 meet 93), and only while the
+/// player script asks for the assist ([`fall_assist_walls`]).
+pub const FALL_ASSIST_MOVE: u8 = 8;
+pub const FALL_ASSIST_ACTION: u8 = 16;
 
-/// [`PLAYER`], [`ENEMY`] and [`CAMERA`] bits for a Havok collision group.
+/// The fall-prevention walls the assist tests for HKS `act(3016, arg)`. The script
+/// (`_UpdateFallProtection`) sends arg 0 in states whose `ENABLE_FALL_PROTECT_WALL_STRONG` is
+/// set (standing, walking, running, dodges, landings) and arg 1 where
+/// `ENABLE_FALL_PROTECT_WALL_WEAK` is set (ground actions), every frame. `FUN_140bc6800` picks
+/// the sphere cast's group from the two request bits: bit 0 alone casts with group 94, bit 1
+/// alone with 95, both with 96.
+pub fn fall_assist_walls(arg: i32) -> u8 {
+    match arg {
+        0 => FALL_ASSIST_MOVE,
+        1 => FALL_ASSIST_ACTION,
+        _ => 0,
+    }
+}
+
+/// [`PLAYER`], [`ENEMY`], [`CAMERA`] and fall-prevention bits for a Havok collision group.
 pub fn group_mask(group: u8) -> u8 {
     [
         (&PLAYER_GROUPS[..], PLAYER),
         (&ENEMY_GROUPS[..], ENEMY),
         (&CAMERA_GROUPS[..], CAMERA),
+        (&[92][..], FALL_ASSIST_MOVE),
+        (&[93][..], FALL_ASSIST_ACTION),
     ]
     .into_iter()
     .filter(|(groups, _)| groups.contains(&group))
@@ -127,8 +149,8 @@ pub fn object_group(collision_type: u8) -> u8 {
 /// [`PLAYER`], [`ENEMY`] and [`CAMERA`] bits for an object's static bodies ([`group_mask`] of
 /// its [`object_group`]): the player (`FUN_1409325c0` for group 1) and enemies
 /// (`FUN_140932480` for group 2) collide with the object groups 24 to 27, the camera ray
-/// (group 48) with 24, the camera-only map hit 41 and 108. Groups 32, 47, 51, 67, 92 and 93
-/// hold none of them.
+/// (group 48) with 24, the camera-only map hit 41 and 108. Groups 32, 47, 51 and 67 hold none
+/// of them; 92 and 93 are fall-prevention walls ([`FALL_ASSIST_MOVE`], [`FALL_ASSIST_ACTION`]).
 pub fn object_mask(collision_type: u8) -> u8 {
     group_mask(object_group(collision_type))
 }
@@ -136,7 +158,8 @@ pub fn object_mask(collision_type: u8) -> u8 {
 /// The helper triangles taken out of the player's collision.
 #[derive(Debug, Default, Clone)]
 pub struct HelperCollision {
-    /// Parts only enemies or the camera collide with, by [`mask`] (hit filters 9, 11, 16 and 19).
+    /// Parts only enemies, the camera or the fall-prevention assist collide with, by [`mask`]
+    /// (hit filters 9, 11, 16, 19 and 28).
     pub parts: BTreeMap<u8, CollisionMesh>,
     /// Map action event walls by hit filter, each with its part names.
     pub triggers: Vec<Trigger>,
@@ -264,6 +287,9 @@ mod tests {
         assert_eq!(mask(8), PLAYER | ENEMY | CAMERA);
         assert_eq!(mask(16), ENEMY | CAMERA);
         assert_eq!(mask(15), 0);
+        assert_eq!(mask(28), FALL_ASSIST_MOVE);
+        assert_eq!(fall_assist_walls(0), FALL_ASSIST_MOVE);
+        assert_eq!(fall_assist_walls(1), FALL_ASSIST_ACTION);
     }
 
     #[test]
@@ -276,7 +302,9 @@ mod tests {
         assert_eq!(object_mask(2), PLAYER | ENEMY);
         assert_eq!(object_mask(3), CAMERA);
         assert_eq!(object_mask(7), CAMERA);
-        for t in [4, 5, 6, 8, 9, 10, 11] {
+        assert_eq!(object_mask(6), FALL_ASSIST_MOVE);
+        assert_eq!(object_mask(11), FALL_ASSIST_ACTION);
+        for t in [4, 5, 8, 9, 10] {
             assert_eq!(object_mask(t), 0, "{t}");
         }
     }

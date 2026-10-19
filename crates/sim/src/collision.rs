@@ -264,6 +264,11 @@ pub const MAX_SLOPE_DEGREES: f32 = 60.0;
 const SPHERES: [f32; 3] = [STEP_HEIGHT + RADIUS, 1.2, 1.55];
 /// The player's physics capsule height (see [`RADIUS`]).
 pub const CAPSULE_HEIGHT: f32 = 1.5;
+/// How close the fall-prevention assist lets a body come to its walls: `FallAssistMinRadius`,
+/// physics module `+0xaec`, 0.16 m from the constructor `FUN_140bbb010` (`+0xae8`,
+/// `FallAssistMaxRadius`, is 0.4). `FUN_140bc68d0` slides the body's move along the walls its
+/// sphere cast meets and cuts it where the body would come nearer than this to one.
+pub const FALL_ASSIST_RADIUS: f32 = 0.16;
 const CELL: f32 = 4.0;
 
 pub struct CollisionWorld {
@@ -376,8 +381,9 @@ impl CollisionWorld {
         self.gate_open.load(Ordering::Relaxed)
     }
 
-    /// Whether triangle `t` takes part in `who`'s queries: every ordinary one, a helper one
-    /// when it holds `who`, an event one while on and holding `who`, a gate one while on.
+    /// Whether triangle `t` takes part in `who`'s queries: every ordinary one (except for the
+    /// fall-prevention assist's), a helper one when it holds `who`, an event one while on and
+    /// holding `who`, a gate one while on.
     fn live(&self, t: u32, who: u8) -> bool {
         if let Some((_, mask)) = self.masked.iter().find(|(range, _)| range.contains(&t)) {
             return mask & who != 0;
@@ -389,7 +395,8 @@ impl CollisionWorld {
         {
             return mask & who != 0 && on.load(Ordering::Relaxed);
         }
-        t < self.gate_from || self.gate_open.load(Ordering::Relaxed)
+        who & (PLAYER | ENEMY | CAMERA) != 0
+            && (t < self.gate_from || self.gate_open.load(Ordering::Relaxed))
     }
 
     fn build(mesh: &CollisionMesh, gate_start: Option<usize>) -> Self {
@@ -833,14 +840,23 @@ impl CollisionWorld {
     /// Moves a body standing at `feet` by the horizontal `delta`, stopping at walls and
     /// sliding along them. Returns the horizontal displacement actually made.
     pub fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
-        self.slide_for(feet, delta, PLAYER)
+        self.slide_for(feet, delta, PLAYER, 0)
     }
 
-    fn slide_for(&self, feet: [f32; 3], delta: [f32; 2], who: u8) -> [f32; 2] {
+    /// [`CollisionWorld::slide`] for `who` that also keeps the body [`FALL_ASSIST_RADIUS`]
+    /// from the fall-prevention walls in `assist` ([`crate::hit_filter::FALL_ASSIST_MOVE`],
+    /// `FALL_ASSIST_ACTION` bits), which nothing else collides with.
+    fn slide_for(&self, feet: [f32; 3], delta: [f32; 2], who: u8, assist: u8) -> [f32; 2] {
         let start = Vec3::from(feet);
         let d = Vec2::from(delta);
         let len = d.length();
-        let steps = ((len / (RADIUS * 0.5)).ceil() as usize).clamp(1, 32);
+        // Sub-steps of half the smallest clearance, so no wall is stepped across.
+        let clearance = if assist != 0 {
+            FALL_ASSIST_RADIUS
+        } else {
+            RADIUS
+        };
+        let steps = ((len / (clearance * 0.5)).ceil() as usize).clamp(1, 64);
         let mut p = start;
         let mut tris = Vec::new();
         let reach = RADIUS + len / steps as f32 + 0.05;
@@ -853,7 +869,11 @@ impl CollisionWorld {
             p.x += d.x / steps as f32;
             p.z += d.y / steps as f32;
             for _ in 0..4 {
-                let push = self.push_out(p, &tris, who);
+                let mut push = self.push_out(p, &tris, who);
+                // The assist's walls last, so they hold where both push.
+                if assist != 0 {
+                    push += self.hold_inside(p + Vec3::new(push.x, 0.0, push.y), &tris, assist);
+                }
                 if push == Vec2::ZERO {
                     break;
                 }
@@ -862,6 +882,39 @@ impl CollisionWorld {
             }
         }
         [p.x - start.x, p.z - start.z]
+    }
+
+    /// Horizontal correction that keeps the feet [`FALL_ASSIST_RADIUS`] on the inner side of
+    /// the fall-prevention walls in `walls` they are near. The walls are tested at the feet (the
+    /// height the exe tests at is not traced); the map's walls are bands from the floor at the
+    /// edge to about 1 m above it. They are one-sided: `FUN_140bc68d0` cuts a move only along a
+    /// hit triangle's face normal and only while the body is behind that face, so they keep a
+    /// body in and let one outside walk in. The export's mirror into Bevy space reverses the
+    /// winding, so the inner side is the one the Bevy-space normal points to.
+    fn hold_inside(&self, feet: Vec3, tris: &[u32], walls: u8) -> Vec2 {
+        let mut push = Vec2::ZERO;
+        for &t in tris {
+            if !self.live(t, walls) {
+                continue;
+            }
+            let [a, b, c] = self.corners(t);
+            if feet.distance(closest_on_triangle(feet, a, b, c)) >= FALL_ASSIST_RADIUS {
+                continue;
+            }
+            let n = self.normals[t as usize];
+            let flat = Vec2::new(n.x, n.z);
+            let inside = n.dot(feet - a);
+            // Outside the wall, or a face too flat to push sideways from.
+            if inside < 0.0 || flat.length_squared() < 0.09 {
+                continue;
+            }
+            let dir = flat.normalize();
+            let depth = (FALL_ASSIST_RADIUS - inside) / flat.length();
+            if depth > push.dot(dir) {
+                push += dir * (depth - push.dot(dir));
+            }
+        }
+        push
     }
 
     /// Horizontal correction that takes the body's spheres out of the given triangles.
@@ -972,7 +1025,11 @@ impl Ground for View<'_> {
     }
 
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
-        self.world.slide_for(feet, delta, self.who)
+        self.world.slide_for(feet, delta, self.who, 0)
+    }
+
+    fn slide_assisted(&self, feet: [f32; 3], delta: [f32; 2], walls: u8) -> [f32; 2] {
+        self.world.slide_for(feet, delta, self.who, walls)
     }
 
     fn max_step(&self) -> f32 {
@@ -1022,6 +1079,10 @@ macro_rules! ground_via_view {
 
             fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
                 self.$view().slide(feet, delta)
+            }
+
+            fn slide_assisted(&self, feet: [f32; 3], delta: [f32; 2], walls: u8) -> [f32; 2] {
+                self.$view().slide_assisted(feet, delta, walls)
             }
 
             fn max_step(&self) -> f32 {
@@ -1089,6 +1150,10 @@ impl<T: Ground + ?Sized> Ground for std::sync::Arc<T> {
 
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
         (**self).slide(feet, delta)
+    }
+
+    fn slide_assisted(&self, feet: [f32; 3], delta: [f32; 2], walls: u8) -> [f32; 2] {
+        (**self).slide_assisted(feet, delta, walls)
     }
 
     fn max_step(&self) -> f32 {

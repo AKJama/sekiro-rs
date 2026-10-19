@@ -68,6 +68,7 @@ Filter 15 under a pit is the fall return's trigger: Wolf falls through it, fades
 - The switched event collision `h900900` (entity 1124860, `arena_c::take_event_collision`) has hit filter 9, so while on it holds only the camera.
 - The removed parts that enemies or the camera collide with stay in the world, tagged with who: enemies and bosses query it through `collision::EnemyGround` (filters 11, 16 and 19), and `CollisionWorld::camera_raycast` (the play camera) stops at filters 9 and 16.
   The player's queries skip them all.
+- Fall-prevention parts (hit filter 28, group 92) stay as walls only the fall-prevention assist sees: they hold Wolf at cliff edges while his script asks for it (`docs/OBJECT-COLLISION.md`, #119).
 - Event walls (group 44) become contact triggers (`CollisionWorld::trigger_contact`, tested along the capsule's path at its bottom, middle and top).
   Contact with filter 15 starts the fall return: after the 0.5 s fade Wolf is returned to where he last stood, the existing return path.
   Every contact is logged (`helper collision: ...`) and kept in `Duel::helper_events`; reactions other than 15's are only recorded.
