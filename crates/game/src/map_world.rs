@@ -434,14 +434,18 @@ pub(crate) fn collision_world(
     let mut world = sekiro_sim::collision::CollisionWorld::from_mesh(&mesh);
     world.add_helpers(&helpers);
     for block in layouts.keys() {
-        // Objects the story has switched off (`DeactivateObject`) have no collision either.
+        // Objects the story has switched off (`DeactivateObject`) have no collision either,
+        // except the fall-prevention walls (collisionType 6 and 11): the story switches them
+        // all off and the game turns a pine's on while Wolf rides it (SpEffect 4100, draft PR
+        // #33), which is not ported, so they stay on (#119).
         let story = story.maps.get(block);
         let mut switched_off = 0;
         let (parts, triangles) = world
             .add_block_objects(&cache.join("maps").join(block), block, |part| {
-                let on = story
-                    .and_then(|s| s.part(&part.name))
-                    .is_none_or(|p| p.enabled);
+                let on = matches!(part.collision_type, 6 | 11)
+                    || story
+                        .and_then(|s| s.part(&part.name))
+                        .is_none_or(|p| p.enabled);
                 switched_off += usize::from(!on);
                 on
             })
@@ -2031,5 +2035,73 @@ mod tests {
             world.floor_object(x, z, -40.0),
             Some("m11_00_00_00/o002500_0005")
         );
+    }
+
+    /// Runs Wolf from `from` (x, z) along the unit `dir` for `ticks` on `world` and returns how
+    /// far along `dir` he got at most and whether he is still grounded.
+    fn run_along(
+        world: &std::sync::Arc<sekiro_sim::collision::CollisionWorld>,
+        cache: &Path,
+        from: [f32; 2],
+        top: f32,
+        dir: [f32; 2],
+        ticks: usize,
+    ) -> (f32, bool) {
+        let y = world
+            .floor(from[0], from[1], top)
+            .expect("a floor to start on");
+        let mut wolf = sekiro_sim::Character::load_from_cache(cache).unwrap();
+        wolf.ground = Box::new(world.clone());
+        wolf.body.position = [from[0], y, from[1]];
+        wolf.settle(1.0 / 60.0, 400);
+        // The stick's forward is the camera's: yaw 0 looks along -Z.
+        let input = sekiro_sim::InputFrame {
+            move_stick: [0.0, 1.0],
+            camera_yaw: (-dir[0]).atan2(-dir[1]),
+            ..Default::default()
+        };
+        let mut far = f32::MIN;
+        for _ in 0..ticks {
+            wolf.tick(&input, 1.0 / 60.0);
+            let p = wolf.body.position;
+            far = far.max((p[0] - from[0]) * dir[0] + (p[2] - from[1]) * dir[1]);
+        }
+        println!(
+            "{far:.2} m along, grounded {}, state {}",
+            wolf.body.grounded,
+            wolf.state()
+        );
+        (far, wolf.body.grounded)
+    }
+
+    /// The play world keeps the fall-prevention walls (#119), on the same shared world the game
+    /// hands Wolf: running at the cliff top east of start 2 (`crates/sim/tests/it/edge_hold.rs`)
+    /// holds him at the map's filter-28 wall, and running off the side of the grapple pine holds
+    /// him at its collisionType 6 part, which the first-visit story switches off.
+    #[test]
+    fn play_collision_world_holds_wolf_at_edges() {
+        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        if !cache
+            .join("maps/m11_00_00_00/object_collision.bin")
+            .is_file()
+            || !cache.join("raw/chr/c0000.behbnd.d/c0000.hkx").exists()
+        {
+            return;
+        }
+        let blocks = play_blocks(&cache, ASHINA[0]).unwrap();
+        let stories = super::super::story::load_blocks(&cache, &blocks).unwrap();
+        let world = std::sync::Arc::new(collision_world(&cache, &blocks, &stories).unwrap());
+        // 4 m inside the cliff's wall line.
+        let (edge, out) = ([-126.8f32, 28.06f32], [0.43f32, 0.90f32]);
+        let from = [edge[0] - out[0] * 4.0, edge[1] - out[1] * 4.0];
+        let (far, grounded) = run_along(&world, &cache, from, -24.0, out, 180);
+        assert!(
+            far < 4.0 && grounded,
+            "ran {:.2} m past the cliff's wall",
+            far - 4.0
+        );
+        // The trunk's tip; without its wall he is off the side within 0.6 m.
+        let (far, grounded) = run_along(&world, &cache, [-140.9, -124.1], -40.0, [-1.0, 0.0], 120);
+        assert!(far < 0.5 && grounded, "ran {far:.2} m off the pine");
     }
 }
