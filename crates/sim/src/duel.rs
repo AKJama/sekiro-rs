@@ -221,6 +221,9 @@ pub struct Duel {
     idols: idol::Idols,
     /// What Wolf carries: tools, goods, Sen, skills (the in-game menu shows it).
     pub kit: crate::kit::Kit,
+    /// The opponent was dead last step, so [`Duel::pay_kill`] pays on the death edge only:
+    /// once per life, again after a rest or respawn stands it up.
+    was_dead: bool,
     lock_button: bool,
     attack_button: bool,
     /// The enemy took a hit last step (the AI's damage interrupt).
@@ -799,6 +802,7 @@ impl Duel {
             spawn: None,
             idols: idol::Idols::default(),
             kit: crate::kit::Kit::default(),
+            was_dead: false,
             lock_button: false,
             attack_button: false,
             enemy_damaged: false,
@@ -1132,6 +1136,7 @@ impl Duel {
             self.ai = Self::load_ai(&self.cache, &self.spec);
         }
         self.enemy_damaged = false;
+        self.was_dead = false;
         self.hit_stop = [HitStop::default(); 2];
         self.knockback = [None; 2];
         self.deathblow = None;
@@ -3616,6 +3621,7 @@ impl Duel {
         if !self.shared_player_frame && self.rules.fighters[1].dead() {
             self.release_lock();
         }
+        self.pay_kill();
         let mut report = DuelReport {
             projectile_sources,
             locked_on: self.player.lock_target.is_some(),
@@ -3640,6 +3646,27 @@ impl Duel {
         self.step_dragon_trees(dt, &mut report);
         self.step_butterfly_illusions(dt, &mut report);
         report
+    }
+
+    /// A defeated opponent pays its NpcParam `skillPoint` experience and `getSoul` Sen into
+    /// Wolf's kit, once per life; a hidden opponent pays nothing. A map foe's duel holds Wolf's
+    /// kit while it steps (`swap_screen_player`), so its reward lands in the one kit.
+    /// Boss and encounter NpcParam rows (5000xxxx, 5060xxxx, 7100xxxx) pay 0, so phase deaths
+    /// pay nothing extra.
+    fn pay_kill(&mut self) {
+        let dead = self.rules.fighters[1].dead();
+        if dead
+            && !self.was_dead
+            && self.enemy_present
+            && let crate::fight::FighterKind::Npc(npc) = &self.rules.fighters[1].kind
+        {
+            let points = self.kit.earn(npc.skill_point, npc.get_soul);
+            eprintln!(
+                "defeated NpcParam {}: +{} experience, +{} Sen, +{points} skill points",
+                npc.id, npc.skill_point, npc.get_soul
+            );
+        }
+        self.was_dead = dead;
     }
 }
 

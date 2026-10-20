@@ -8,7 +8,9 @@
 //! item cluster (quick item and prosthetic tool) sits at the bottom right. Above Wolf's
 //! vitality, a purple bar shows poison build-up and a line names the status effects on him
 //! (poisoned, recovery sealed, ...) with the seconds left. A red 危 marks a perilous attack's
-//! warning on Wolf (see [`update_perilous`]).
+//! warning on Wolf (see [`update_perilous`]). Over the item cluster, Wolf's skill points with
+//! the experience gauge and his Sen show for a few seconds after a kill's reward, as the game
+//! shows them there (see [`update_reward`]).
 //!
 //! Layout, colours and timings adapted from Fireguy32's RustSekiro fork (MIT), commit d11ef65,
 //! which measured them from captures of the game's HUD. The game's own HUD sprites (SB_FE,
@@ -19,6 +21,7 @@ use sekiro_sim::deathblow::MAX_BAR_MARKS;
 
 use crate::brain_overlay::{PANEL_INSET, PANEL_WIDTH};
 use crate::change::set;
+use crate::game_ui::{GameFonts, MenuArt};
 
 /// Logical HUD viewport, shared by projected HUD elements when the camera is unavailable.
 pub(crate) fn viewport_size(camera: Option<&Camera>) -> Vec2 {
@@ -66,6 +69,14 @@ pub struct Gauges {
     pub perilous_age: Option<f32>,
     /// The item cluster's buttons held this frame: quick item, then prosthetic tool.
     pub held: [bool; 2],
+    /// Wolf's Sen (`Kit::sen`).
+    pub sen: u32,
+    /// Wolf's unspent skill points (`Kit::skill_points`).
+    pub skill_points: u32,
+    /// How full the experience gauge to the next skill point is (`Kit::xp_fill`).
+    pub xp_fill: f32,
+    /// Rewards earned so far (`Kit::rewards`): a change pops the reward panel.
+    pub rewards: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -76,6 +87,8 @@ pub enum Fill {
     Posture(usize),
     /// Wolf's poison build-up.
     Poison,
+    /// The experience gauge toward the next skill point.
+    Xp,
 }
 
 /// The parts of the bars [`update`] changes each frame.
@@ -114,6 +127,8 @@ pub struct PoisonRow;
 /// Frame colours: dark lacquer with a thin gold edge, like the game's bars.
 pub(crate) const FRAME: Color = Color::srgba(0.05, 0.04, 0.03, 0.75);
 const EDGE: Color = Color::srgba(0.78, 0.66, 0.42, 0.55);
+/// The HUD's cream text colour (labels, the boss name, the Sen count).
+const CREAM: Color = Color::srgb(0.92, 0.88, 0.8);
 /// The vitality fill: the game's muted orange-red (about 180, 70, 48 in captures).
 pub(crate) const VITALITY: Color = Color::srgb(180.0 / 255.0, 70.0 / 255.0, 48.0 / 255.0);
 /// The damage trail's light, desaturated red (about 165, 130, 120 in captures).
@@ -184,13 +199,10 @@ fn step_trail(trail: &mut (f32, f32), f: f32, dt: f32) {
     }
 }
 
-/// Steps a posture gauge's display hold: full while it has damage, then counting down.
-fn step_hold(hold: &mut f32, damaged: bool, dt: f32) -> bool {
-    *hold = if damaged {
-        SP_MIN_DISP_TIME
-    } else {
-        (*hold - dt).max(0.0)
-    };
+/// Steps a display hold: `duration` while `on` (a posture gauge's damage, a new reward), then
+/// counting down. Returns whether it still shows.
+fn step_hold(hold: &mut f32, on: bool, duration: f32, dt: f32) -> bool {
+    *hold = if on { duration } else { (*hold - dt).max(0.0) };
     *hold > 0.0
 }
 
@@ -247,6 +259,7 @@ pub(crate) fn bar<'a>(
                 Fill::Trail(_) => TRAIL,
                 Fill::Posture(_) => posture_color(0.0, false),
                 Fill::Poison => Color::NONE,
+                Fill::Xp => SKILL_BLUE,
             }),
         ));
         // The game's "<" ">" arrows at the posture bar's outer ends; a gold diamond stands in
@@ -345,7 +358,7 @@ fn text(s: &str, size: f32) -> impl Bundle {
             font_size: bevy::text::FontSize::Px(size),
             ..default()
         },
-        TextColor(Color::srgba(0.92, 0.88, 0.8, 1.0)),
+        TextColor(CREAM),
         TextShadow {
             offset: Vec2::new(1.5, 1.5),
             color: Color::BLACK,
@@ -534,6 +547,115 @@ pub fn spawn(commands: &mut Commands) {
     }
 }
 
+/// The skill points, experience gauge and Sen over the item cluster.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub enum RewardPart {
+    Panel,
+    SkillPoints,
+    Sen,
+}
+
+/// The skill-point blue of the experience gauge and its count (the menu's status bar too).
+pub(crate) const SKILL_BLUE: Color = Color::srgb(0.55, 0.85, 0.9);
+/// Seconds the reward panel stays after the last reward.
+const REWARD_SHOWN: f32 = 4.0;
+
+/// Spawns the reward panel, hidden (call once at startup, after the game fonts and menu art).
+pub fn spawn_reward(mut commands: Commands, fonts: Res<GameFonts>, art: Res<MenuArt>) {
+    commands
+        .spawn((
+            RewardPart::Panel,
+            Node {
+                position_type: PositionType::Absolute,
+                right: percent(9.5),
+                top: percent(75.6),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::FlexEnd,
+                row_gap: Val::Vh(0.5),
+                ..default()
+            },
+            Visibility::Hidden,
+        ))
+        .with_children(|p| {
+            p.spawn(Node {
+                align_items: AlignItems::Center,
+                column_gap: Val::Vh(0.8),
+                ..default()
+            })
+            .with_children(|r| {
+                r.spawn((
+                    RewardPart::SkillPoints,
+                    fonts.shadowed("0", 16.0, SKILL_BLUE),
+                ));
+                bar(r, Fill::Xp, (Val::Vw(8.0), Val::Vh(0.7)));
+            });
+            p.spawn(Node {
+                align_items: AlignItems::Center,
+                column_gap: Val::Vh(0.6),
+                ..default()
+            })
+            .with_children(|r| {
+                if let Some((mut coin, _)) = art.sprite("SB_FE", "MENU_Money") {
+                    coin.image_mode = bevy::ui::widget::NodeImageMode::Stretch;
+                    r.spawn((
+                        Node {
+                            width: Val::Vh(2.3),
+                            height: Val::Vh(2.3),
+                            ..default()
+                        },
+                        coin,
+                    ));
+                }
+                r.spawn((RewardPart::Sen, fonts.shadowed("0", 19.0, CREAM)));
+            });
+        });
+}
+
+/// The reward count and the skill points and Sen last written, the seconds the panel has left,
+/// and whether it is hidden.
+#[derive(Default)]
+pub struct RewardShown {
+    rewards: Option<u32>,
+    values: Option<(u32, u32)>,
+    left: f32,
+    hidden: bool,
+}
+
+/// Fills the reward panel and shows it for [`REWARD_SHOWN`] seconds after a new reward
+/// (`Kit::rewards` changes, so spending or the death penalty does not pop it). The gauge's
+/// fill is set by [`update`] with the other bars.
+pub fn update_reward(
+    gauges: Res<Gauges>,
+    time: Res<Time>,
+    mut shown: Local<RewardShown>,
+    mut parts: Query<(&RewardPart, Option<&mut Text>, Option<&mut Visibility>)>,
+) {
+    let new = shown.rewards.is_some_and(|r| r != gauges.rewards);
+    shown.rewards = Some(gauges.rewards);
+    let values = (gauges.skill_points, gauges.sen);
+    let changed = shown.values != Some(values);
+    if !new && !changed && shown.hidden {
+        return;
+    }
+    shown.values = Some(values);
+    let on = step_hold(&mut shown.left, new, REWARD_SHOWN, time.delta_secs());
+    shown.hidden = !on;
+    let texts = changed.then(|| [values.0.to_string(), values.1.to_string()]);
+    for (part, text, visibility) in &mut parts {
+        let value = match part {
+            RewardPart::Panel => {
+                show(visibility, on);
+                continue;
+            }
+            RewardPart::SkillPoints => texts.as_ref().map(|t| &t[0]),
+            RewardPart::Sen => texts.as_ref().map(|t| &t[1]),
+        };
+        if let (Some(value), Some(mut t)) = (value, text) {
+            set(&mut t, |t| &mut t.0, value.clone());
+        }
+    }
+}
+
 /// Shows (`Inherited`) or hides a part with a visibility.
 fn show(visibility: Option<Mut<Visibility>>, on: bool) {
     if let Some(mut v) = visibility {
@@ -594,7 +716,7 @@ pub fn update(
         step_trail(trail, f, dt);
     }
     let damaged = gauges.posture.map(|f| f > POSTURE_SHOWN);
-    let shown = [0, 1].map(|i| step_hold(&mut holds[i], damaged[i], dt));
+    let shown = [0, 1].map(|i| step_hold(&mut holds[i], damaged[i], SP_MIN_DISP_TIME, dt));
     let posture_colors = [0, 1].map(|i| posture_color(gauges.posture[i], gauges.broken[i]));
     let wolf_width = Val::Vw(hp_bar_vw(gauges.wolf_max_hp));
     let boss = gauges.boss_bar && gauges.enemy_alive;
@@ -638,6 +760,7 @@ pub fn update(
                     Fill::Trail(i) => (trails[i].0, TRAIL),
                     Fill::Posture(i) => (gauges.posture[i], posture_colors[i]),
                     Fill::Poison => (gauges.poison, Color::srgb(0.55, 0.2, 0.75)),
+                    Fill::Xp => (gauges.xp_fill, SKILL_BLUE),
                 };
                 set(&mut node, |n| &mut n.width, percent(fraction * 100.0));
                 if let Some(mut color) = color {
@@ -830,9 +953,9 @@ mod tests {
     #[test]
     fn posture_gauge_stays_up_for_the_minimum_display_time() {
         let mut hold = 0.0;
-        assert!(!step_hold(&mut hold, false, 0.1));
-        assert!(step_hold(&mut hold, true, 0.1));
-        assert!(step_hold(&mut hold, false, 0.3));
-        assert!(!step_hold(&mut hold, false, 0.3));
+        assert!(!step_hold(&mut hold, false, SP_MIN_DISP_TIME, 0.1));
+        assert!(step_hold(&mut hold, true, SP_MIN_DISP_TIME, 0.1));
+        assert!(step_hold(&mut hold, false, SP_MIN_DISP_TIME, 0.3));
+        assert!(!step_hold(&mut hold, false, SP_MIN_DISP_TIME, 0.3));
     }
 }

@@ -228,3 +228,56 @@ fn two_soldiers_keep_independent_hits_and_survive_one_death() {
         "each soldier must independently execute attacks"
     );
 }
+
+#[test]
+fn a_dead_map_soldier_pays_its_npc_param_into_wolfs_kit_once() {
+    let cache = sekiro_sim::cache::root();
+    if !cache.join("anim/c1010").is_dir() {
+        return;
+    }
+    let spec = sekiro_sim::enemy::EnemySpec::soldier();
+    let spot = sekiro_sim::registry::Placement {
+        map: "m11_00_00_00".into(),
+        part: "soldier_0".into(),
+        entity: 0,
+        npc: spec.npc_param,
+        think: spec.think,
+        position: [0.0, 0.0, -3.0],
+        yaw: std::f32::consts::PI,
+    };
+    let mut wolf = Duel::load(&cache, 5.0).unwrap();
+    let mut population = Population::load(&cache, vec![(spec, spot)]).unwrap();
+    population.foes[0].duel.enemy_active = false;
+    let dead = &mut population.foes[0].duel.rules.fighters[1].vitality;
+    dead.cannot_die = false;
+    dead.deathblows_left = 0;
+    dead.hp = 0;
+    wolf.set_population(population);
+    let start = wolf.kit.clone();
+    for _ in 0..30 {
+        wolf.step(&InputFrame::default(), 1.0 / 60.0);
+    }
+    // NpcParam 10100000 (Ochimusha, castle town): skillPoint 21, getSoul 11, paid once.
+    assert_eq!(
+        (wolf.kit.skill_xp - start.skill_xp, wolf.kit.sen - start.sen),
+        (21, 11)
+    );
+    // Stood up again (as a rest does) and killed again, it pays a second time.
+    fn soldier(wolf: &mut Duel) -> &mut sekiro_sim::combat::hp::Vitality {
+        &mut wolf.population.as_mut().unwrap().foes[0]
+            .duel
+            .rules
+            .fighters[1]
+            .vitality
+    }
+    for hp in [soldier(&mut wolf).max_hp.max(1), 0] {
+        soldier(&mut wolf).hp = hp;
+        for _ in 0..5 {
+            wolf.step(&InputFrame::default(), 1.0 / 60.0);
+        }
+    }
+    assert_eq!(
+        (wolf.kit.skill_xp - start.skill_xp, wolf.kit.sen - start.sen),
+        (42, 22)
+    );
+}
