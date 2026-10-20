@@ -147,6 +147,13 @@ pub struct PlayerEnv {
     pub dt: f32,
     /// Lock-on active (env 1118).
     pub locked_on: bool,
+    /// The player moves freely: no lock-on and no auto-aim target. `MoveDirection` (the strafe
+    /// class the directional move starts, loops and stops select on) then stays forward.
+    pub free_movement: bool,
+    /// The script seeded a sideways or backward `MoveDirection` in free movement (a move start
+    /// out of an attack's move cancel or a landing reads `MoveAngle` off the old facing). It was
+    /// held at forward; the body turns to the stick instead. The body reads and clears it.
+    pub free_move_turn: std::cell::Cell<bool>,
     /// env 1105 ("standby state") from TAE cancel windows; `None` uses the clip-end
     /// approximation.
     pub standby: Option<bool>,
@@ -227,6 +234,8 @@ impl Default for PlayerEnv {
             landing_ready: false,
             dt: 1.0 / 30.0,
             locked_on: false,
+            free_movement: false,
+            free_move_turn: std::cell::Cell::new(false),
             standby: None,
             move_cancel: None,
             input_resets: std::cell::Cell::new(0),
@@ -391,6 +400,20 @@ impl Adapter<'_> {
         }
     }
 
+    /// A script write to a behaviour variable. In free movement every move start runs forward
+    /// with the body turned to the stick: the directional starts, loops and stops are the
+    /// locked-on strafes (#26, #144). The idle start gets that turn before the script runs, but
+    /// a move cancel out of an attack recovery (whose TAE still disables turning) or a landing
+    /// straight into a move start seeded a strafe from `MoveAngle` instead.
+    fn set_script_variable(&mut self, name: &str, value: f32) {
+        if self.env.free_movement && name == "MoveDirection" && value != 0.0 {
+            self.env.free_move_turn.set(true);
+            self.rt.set_variable(name, 0.0);
+        } else {
+            self.rt.set_variable(name, value);
+        }
+    }
+
     fn record(&mut self, function: &str, args: Vec<Value>, result: Vec<Value>) {
         if let Some(log) = self.log.as_deref_mut() {
             log.push(CallRecord {
@@ -474,7 +497,7 @@ impl Host for Adapter<'_> {
             && let (Some(name), Some(value)) =
                 (args.first(), args.get(1).and_then(Value::as_number))
         {
-            self.rt.set_variable(&name.to_display(), value);
+            self.set_script_variable(&name.to_display(), value);
         }
         self.record("act", with_id(id, args), Vec::new());
         Value::Nil
@@ -491,7 +514,7 @@ impl Host for Adapter<'_> {
             "hkbGetVariable" => vec![Value::Number(self.rt.variable(&first).unwrap_or(0.0))],
             "hkbSetVariable" => {
                 if let Some(v) = args.get(1).and_then(Value::as_number) {
-                    self.rt.set_variable(&first, v);
+                    self.set_script_variable(&first, v);
                 }
                 Vec::new()
             }

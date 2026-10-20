@@ -458,6 +458,12 @@ impl Character {
         {
             return;
         }
+        self.turn_body_to_stick();
+    }
+
+    /// The free move start's turn: the body faces the stick at once and the turn becomes the
+    /// lower-body twist, which unwinds so the model turns smoothly.
+    fn turn_body_to_stick(&mut self) {
         let Some(stick) = self.input.stick_world_yaw() else {
             return;
         };
@@ -595,6 +601,7 @@ impl Character {
 
     fn fill_env(&mut self, dt: f32) {
         let authored_airborne = self.authored_air_height() > 0.0;
+        let free_movement = self.kind == ControlKind::Player && self.attack_target().is_none();
         let tae = &self.tae_runtime.frame;
         let behavior = &mut *self.behavior;
         let env = &mut behavior.env;
@@ -679,6 +686,7 @@ impl Character {
         env.vertical_velocity = self.body.velocity[1] * 100.0;
         env.dt = dt;
         env.locked_on = self.lock_target.is_some();
+        env.free_movement = free_movement;
         env.damage = self.pending_damage.take();
         env.damage_motion_disabled = tae.flag(cancel::DISABLE_DAMAGE_MOTION);
     }
@@ -847,6 +855,11 @@ impl Character {
         }
         if let Some(deg) = self.behavior.env.face_turn.take() {
             self.snap_yaw(self.body.yaw - deg.to_radians());
+        }
+        // A free move start the script began off the old facing (held at forward) runs along
+        // the stick, as the idle start does.
+        if self.behavior.env.free_move_turn.take() {
+            self.turn_body_to_stick();
         }
         let lock_angle_released = self.behavior.env.release_lock_angle.take();
 

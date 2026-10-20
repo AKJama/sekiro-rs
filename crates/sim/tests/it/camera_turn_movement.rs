@@ -161,6 +161,65 @@ fn free_run_restart_turns_instead_of_strafing() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Free (no lock-on) run, then `action` pressed for a few ticks, then the stick held sideways:
+/// Wolf must turn and run that way, never play a locked directional strafe (#144).
+fn check_free_sideways_after(action: fn(&mut InputFrame), what: &str) {
+    let Some(mut wolf) = load() else { return };
+    let mut failures = Vec::new();
+    // Stick held through the action (forward) or released; sideways right after it ends or later.
+    for hold in [true, false] {
+        for (action_ticks, x) in [(60, -1.0), (60, 1.0), (120, -1.0), (120, 1.0)] {
+            reset(&mut wolf);
+            let case = format!("{what} hold={hold} wait={action_ticks} x={x}");
+            let mut strafed = Vec::new();
+            for tick in 0..(RUN_TICKS + action_ticks + OBSERVE_TICKS) {
+                let frame = if tick < RUN_TICKS {
+                    stick(0.0, 1.0, 0.0)
+                } else if tick < RUN_TICKS + action_ticks {
+                    let mut f = stick(0.0, if hold { 1.0 } else { 0.0 }, 0.0);
+                    if tick < RUN_TICKS + 4 {
+                        action(&mut f);
+                    }
+                    f
+                } else {
+                    stick(x, 0.0, 0.0)
+                };
+                let r = wolf.tick(&frame, DT);
+                assert!(r.behavior.script_errors.is_empty(), "{case}");
+                let clip = r.animation.as_deref().unwrap_or("");
+                if tick >= RUN_TICKS + action_ticks && directional_clip(clip) {
+                    let v = |name| wolf.behavior.runtime.variable(name).unwrap_or(f32::NAN);
+                    strafed.push(format!(
+                        "{tick}:{clip}:{}:MoveDirection={}:MoveAngle={:.0}",
+                        wolf.state_name(),
+                        v("MoveDirection"),
+                        v("MoveAngle")
+                    ));
+                }
+            }
+            let expected = (-x).atan2(0.0);
+            let error = angle_diff(wolf.body.yaw, expected).to_degrees().abs();
+            if !strafed.is_empty() || error > 15.0 {
+                strafed.truncate(4);
+                failures.push(format!(
+                    "{case}: strafe {strafed:?}, facing error={error:.1}"
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn free_swing_then_sideways_turns_instead_of_strafing() {
+    check_free_sideways_after(|f| f.buttons.attack = true, "swing");
+}
+
+#[test]
+fn free_jump_landing_then_sideways_turns_instead_of_strafing() {
+    check_free_sideways_after(|f| f.buttons.jump = true, "jump");
+}
+
 #[test]
 fn moves_off_in_every_direction_from_every_facing() {
     let Some(mut wolf) = load() else { return };
