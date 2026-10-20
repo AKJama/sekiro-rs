@@ -2088,6 +2088,7 @@ fn hud(
         sen: sim.duel.kit.sen,
         skill_points: sim.duel.kit.skill_points,
         xp_fill: sim.duel.kit.xp_fill(),
+        rewards: sim.duel.kit.rewards,
     };
     let Ok(mut text) = text.single_mut() else {
         return;

@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use bevy::prelude::*;
-use sekiro_sim::kit::{Kit, xp_to_next};
+use sekiro_sim::kit::Kit;
 
 use super::Sim;
 use crate::combat_hud::SKILL_BLUE;
@@ -837,7 +837,7 @@ fn status_bar(root: &mut ChildSpawnerCommands, ui: &Ui, kit: &Kit, book: &Book, 
                 });
             });
             b.spawn((
-                abs(14.6, 33.0, 58.8 * kit.xp_fill().clamp(0.0, 1.0), 4.0),
+                abs(14.6, 33.0, 58.8 * kit.xp_fill(), 4.0),
                 BackgroundColor(SKILL_BLUE),
             ));
             b.spawn((
@@ -851,7 +851,7 @@ fn status_bar(root: &mut ChildSpawnerCommands, ui: &Ui, kit: &Kit, book: &Book, 
                 ..default()
             },))
                 .with_children(|c| {
-                    let left = xp_to_next(kit.skill_level) - kit.skill_xp;
+                    let left = kit.xp_left();
                     c.spawn(ui.text(&format!("to next Skill Point  {left}"), 14.0, SKILL_BLUE));
                 });
         });
