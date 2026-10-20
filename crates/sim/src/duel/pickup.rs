@@ -1,6 +1,8 @@
 //! Picking up map items (#136): the action button inside an item's ActionButtonParam reach takes
 //! its lot into Wolf's kit and sets the lot's taken flag there, so the item stays gone through
 //! Rest and death. The press goes to the nearer of an item and an idol's kneeling spot.
+//! Each pickup keeps its own taken state too, seeded from the kit's flags, so a lot with no
+//! flag goes away once taken (for this load).
 //! After FwLo's RustSekiro `src/items.rs` (Fireguy32's pickups): goods 1000 is a Spirit Emblem,
 //! and there is no pickup animation (60070 has no clip).
 //! gap: the lot is drawn with a fixed sequence, not the exe's random numbers (every m11_00
@@ -12,24 +14,17 @@ use std::sync::Arc;
 use super::Duel;
 use crate::items::{ItemData, MapPickup};
 
-/// The goods one pickup gave, for the "got" line.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Got {
-    /// The pickup's index in [`Duel::pickups`].
-    pub pickup: usize,
-    /// EquipParamGoods id and count added.
-    pub goods: Vec<(i32, u32)>,
-}
-
-/// The play world's map items.
+/// The play world's map items, by a stable index (later drops append).
 #[derive(Debug, Default)]
 pub(super) struct Pickups {
     spots: Vec<MapPickup>,
+    /// Per pickup: taken already.
+    taken: Vec<bool>,
     data: Arc<ItemData>,
-    /// Pickups taken so far, so a screen can tell a new one.
-    taken: u32,
-    last: Option<Got>,
-    draws: u32,
+    /// Pickups taken so far, so a screen can tell a new one; it also seeds the draw.
+    count: u32,
+    /// The goods (EquipParamGoods id, count) the latest pickup gave.
+    last: Option<(i32, u32)>,
 }
 
 /// What the action button would act on.
@@ -40,7 +35,12 @@ pub enum ActionTarget {
 }
 
 impl Duel {
+    /// The play world's items; those whose lot flag the kit holds start taken.
     pub fn set_pickups(&mut self, spots: Vec<MapPickup>, data: Arc<ItemData>) {
+        self.pickups.taken = spots
+            .iter()
+            .map(|p| p.lot.flag > 0 && self.kit.taken_flags.contains(&p.lot.flag))
+            .collect();
         self.pickups.spots = spots;
         self.pickups.data = data;
     }
@@ -49,17 +49,14 @@ impl Duel {
         &self.pickups.spots
     }
 
-    /// Whether the item is still on the map (its lot's flag not taken).
+    /// Whether the item is still on the map.
     pub fn pickup_lies(&self, i: usize) -> bool {
-        self.pickups
-            .spots
-            .get(i)
-            .is_some_and(|p| p.lot.flag <= 0 || !self.kit.taken_flags.contains(&p.lot.flag))
+        self.pickups.taken.get(i) == Some(&false)
     }
 
-    /// The number of pickups taken, and the latest one's goods.
-    pub fn last_pickup(&self) -> (u32, Option<&Got>) {
-        (self.pickups.taken, self.pickups.last.as_ref())
+    /// The number of pickups taken, and the goods the latest one gave.
+    pub fn last_pickup(&self) -> (u32, Option<(i32, u32)>) {
+        (self.pickups.count, self.pickups.last)
     }
 
     /// The nearest item lying with Wolf's feet in its reach, and how far it is.
@@ -70,13 +67,13 @@ impl Duel {
             .iter()
             .enumerate()
             .filter(|(i, _)| self.pickup_lies(*i))
-            .filter_map(|(i, p)| Some((i, p.reach.distance(p.position, feet)?)))
+            .filter_map(|(i, p)| Some((i, p.reach.distance(p.position, feet, 0.0)?)))
             .min_by(|a, b| a.1.total_cmp(&b.1))
     }
 
     /// What the action button acts on now: the nearer of an idol in reach and an item.
     pub fn action_target(&self) -> Option<ActionTarget> {
-        if self.idol().is_some() || !self.can_kneel() {
+        if self.idol().is_some() || !self.can_act() {
             return None;
         }
         match (self.idol_near(), self.pickup_near()) {
@@ -100,25 +97,20 @@ impl Duel {
         let Some(spot) = self.pickups.spots.get(i) else {
             return;
         };
-        let data = self.pickups.data.clone();
-        let lot = spot.lot.clone();
+        let lot = &spot.lot;
         // A golden-ratio sequence in 0..1 stands in for the exe's random draw.
-        self.pickups.draws += 1;
-        let r = (self.pickups.draws as f32 * 0.618_034).fract();
-        let mut goods = Vec::new();
-        if let Some((id, n)) = lot.roll(0.0, r) {
+        let r = ((self.pickups.count + 1) as f32 * 0.618_034).fract();
+        let got = lot.roll(0.0, r);
+        if let Some((id, n)) = got {
             // The line names the lot's count even when some is over the carry limit.
-            self.kit.add(id, n, data.max(id));
-            goods.push((id, n));
+            self.kit.add(id, n, self.pickups.data.max(id));
         }
         if lot.flag > 0 {
             self.kit.taken_flags.insert(lot.flag);
         }
-        eprintln!(
-            "picked up {} (ItemLotParam {}): {goods:?}",
-            spot.name, lot.id
-        );
-        self.pickups.taken += 1;
-        self.pickups.last = Some(Got { pickup: i, goods });
+        eprintln!("picked up {} (ItemLotParam {}): {got:?}", spot.name, lot.id);
+        self.pickups.taken[i] = true;
+        self.pickups.count += 1;
+        self.pickups.last = got;
     }
 }

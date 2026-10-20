@@ -154,13 +154,12 @@ impl Kit {
     }
 
     /// Takes `n` of the goods `id` up to `max` carried (EquipParamGoods `maxNum`); Spirit
-    /// Emblems (goods 1000) go onto their count. Returns how many were added.
+    /// Emblems (goods 1000) go onto their count.
     /// gap: the game sends what is over `max` to the Storage; here it is left behind.
-    pub fn add(&mut self, id: i32, n: u32, max: u32) -> u32 {
+    pub fn add(&mut self, id: i32, n: u32, max: u32) {
         if id == crate::items::SPIRIT_EMBLEM {
-            let added = n.min(max.saturating_sub(self.spirit_emblems));
-            self.spirit_emblems += added;
-            return added;
+            self.spirit_emblems += n.min(max.saturating_sub(self.spirit_emblems));
+            return;
         }
         let added = n.min(max.saturating_sub(self.count(id)));
         match self.goods.iter_mut().find(|(g, _)| *g == id) {
@@ -168,7 +167,6 @@ impl Kit {
             None if added > 0 => self.goods.push((id, added)),
             None => {}
         }
-        added
     }
 
     /// A defeated enemy's reward: its experience fills the gauge, each full gauge a skill point

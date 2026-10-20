@@ -284,7 +284,6 @@ pub struct Treasure {
     pub item_lot: i32,
     /// ActionButtonParam row, -1 for the default pick-up button.
     pub action_button: i32,
-    pub pickup_anim: i32,
     pub in_chest: bool,
     pub start_disabled: bool,
 }
@@ -549,21 +548,20 @@ fn read_treasure(data: &[u8], start: usize) -> Result<Option<Treasure>> {
     }
     let type_offset = Reader::at(data, start + 0x20).offset64()?;
     // Type data: 8 unused bytes, part index, 4 unused, item lot, 0x24 bytes of 0xFF, then
-    // ActionButtonID, PickupAnimID, InChest and StartDisabled.
+    // ActionButtonID, PickupAnimID (unused here), InChest and StartDisabled.
     let mut t = Reader::at(data, start + type_offset + 8);
     let part_index = t.i32()?;
     t.skip(4);
     let item_lot = t.i32()?;
     t.skip(0x24);
     let action_button = t.i32()?;
-    let pickup_anim = t.i32()?;
+    t.skip(4);
     let flags = t.bytes(2)?;
     Ok(Some(Treasure {
         name: utf16z(data, start + name_offset)?,
         part_index,
         item_lot,
         action_button,
-        pickup_anim,
         in_chest: flags[0] != 0,
         start_disabled: flags[1] != 0,
     }))

@@ -2,10 +2,10 @@
 //! effect (FFX 61, common_func 20006030) until it is taken; in reach, the "Pick Up Item" guide
 //! (ActionButtonParam 4000 textId 10010103 in イベントテキスト) shows with its key, and the
 //! action button (E, or Y on a pad) takes it (`Duel::action_target`). A short line then names
-//! what was got and how many for 2.5 s.
+//! what was got and how many for 2.5 s, and the item's marker part (o000100) is hidden.
 //!
 //! After FwLo's RustSekiro `src/items.rs` (`spawn_line`, the glint) and `src/action_guide.rs`
-//! (Fireguy32's pickups); the guide is built like the idol's (`super::idol`).
+//! (Fireguy32's pickups); the guide is the idol's (`crate::game_ui::spawn_action_guide`).
 //! gap: the first-time item dialog and the line's item icon.
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -15,14 +15,16 @@ use sekiro_sim::items::{ItemData, MapPickup};
 
 use super::Sim;
 use crate::game_ui::{GameFonts, MenuArt, abs};
+use crate::map::visibility::TakenVisibility;
 
 /// The item glint (`sfxbnd_commoneffects` f000000061).
 const GLINT: i32 = 61;
+/// Glints are held only this near Wolf (m).
+const GLINT_RANGE: f32 = 60.0;
 /// イベントテキスト: "Pick Up Item".
 const PICK_UP: i32 = 10010103;
 /// How long the "got" line stays (s).
 const LINE_SECS: f32 = 2.5;
-const GUIDE_TEXT: Color = Color::srgb(0.9, 0.87, 0.8);
 const COUNT_TEXT: Color = Color::srgb(0.88, 0.85, 0.78);
 
 /// The items lying on the play `blocks`, with the params they read; empty when the params or
@@ -58,15 +60,16 @@ struct LineName;
 #[derive(Component)]
 struct LineCount;
 
-/// Item names (アイテム名) and the pickups already shown in the line.
+/// Item names (アイテム名), the pickups already shown in the line and how long it stays up.
 #[derive(Resource, Default)]
 struct Book {
     names: BTreeMap<i32, String>,
     shown: u32,
-    since: Option<f32>,
+    left: f32,
 }
 
-/// The glints, the guide and the line; nothing when the play world has no items.
+/// The glints, the guide, the line and the taken parts; nothing when the play world has no
+/// items.
 pub(super) fn install(app: &mut App, any: bool) {
     if !any {
         return;
@@ -81,7 +84,7 @@ pub(super) fn install(app: &mut App, any: bool) {
     .add_systems(Startup, spawn)
     .add_systems(
         Update,
-        (glint, show)
+        (glint, show, hide_taken)
             .after(super::simulate)
             .run_if(crate::menu::active),
     );
@@ -90,38 +93,11 @@ pub(super) fn install(app: &mut App, any: bool) {
 fn spawn(mut commands: Commands, fonts: Res<GameFonts>, art: Res<MenuArt>) {
     let cache = sekiro_sim::cache::root();
     let events = crate::game_ui::menu_texts(&cache, "イベントテキスト");
-    let text = |t: String, px: f32, color: Color| fonts.shadowed(t, px, color);
+    let label = events.get(&PICK_UP).cloned().unwrap_or_default();
     // The guide, low in the middle like the idol's: "[E] : Pick Up Item".
-    commands
-        .spawn((
-            Guide,
-            Node {
-                position_type: PositionType::Absolute,
-                width: percent(100),
-                bottom: percent(5),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                column_gap: px(2),
-                ..default()
-            },
-            Visibility::Hidden,
-        ))
-        .with_children(|r| {
-            match art.sprite("SB_KeyTop", "KG_Key_E") {
-                Some((image, aspect)) => r.spawn((
-                    image,
-                    Node {
-                        height: vh(22.0 / 10.8),
-                        aspect_ratio: Some(aspect),
-                        ..default()
-                    },
-                )),
-                None => r.spawn(text("E".into(), 16.5, GUIDE_TEXT)),
-            };
-            let label = events.get(&PICK_UP).cloned().unwrap_or_default();
-            r.spawn(text(format!(" : {label}"), 16.5, GUIDE_TEXT));
-        });
+    crate::game_ui::spawn_action_guide(&mut commands, &fonts, &art, &label, Guide);
     // The "got" line above the guide: the item's name and count on the game's item plate.
+    let text = |t: String, px: f32, color: Color| fonts.shadowed(t, px, color);
     let plate = art
         .sprite("SB_In_Game", "MENU_ItemBase_07")
         .map(|(image, _)| ImageNode {
@@ -154,12 +130,20 @@ fn spawn(mut commands: Commands, fonts: Res<GameFonts>, art: Res<MenuArt>) {
     });
 }
 
-/// One held glint per item still lying on the map, let go once it is taken.
-fn glint(sim: NonSend<Sim>, mut fx: ResMut<crate::fxr::FxrPlayer>) {
-    for (i, p) in sim.duel.pickups().iter().enumerate() {
-        let at = Transform::from_translation(Vec3::from_array(p.position));
-        // Negative serials keep clear of the map's entity ids, which other holds use.
-        fx.hold(GLINT, -1 - i as i32, at, sim.duel.pickup_lies(i));
+/// A held glint on each item still lying within [`GLINT_RANGE`] of Wolf, let go once it is
+/// taken or out of range.
+fn glint(sim: NonSend<Sim>, mut fx: ResMut<crate::fxr::FxrPlayer>, mut held: Local<Vec<bool>>) {
+    let wolf = Vec3::from_array(sim.duel.player.body.position);
+    let pickups = sim.duel.pickups();
+    held.resize(pickups.len(), false);
+    for (i, p) in pickups.iter().enumerate() {
+        let at = Vec3::from_array(p.position);
+        let on = sim.duel.pickup_lies(i) && at.distance_squared(wolf) < GLINT_RANGE * GLINT_RANGE;
+        if on || held[i] {
+            let at = Transform::from_translation(at);
+            fx.hold(crate::fxr::GLINTS, GLINT, i as i32, at, on);
+        }
+        held[i] = on;
     }
 }
 
@@ -172,12 +156,11 @@ fn show(
     mut parts: Query<(&mut Visibility, Has<Guide>), Or<(With<Guide>, With<Line>)>>,
     mut texts: Query<(&mut Text, Has<LineName>), Or<(With<LineName>, With<LineCount>)>>,
 ) {
-    let now = time.elapsed_secs();
     let (taken, got) = sim.duel.last_pickup();
+    let mut new = false;
     if taken != book.shown {
         book.shown = taken;
-        let (id, n) = got.and_then(|g| g.goods.first().copied()).unwrap_or((0, 0));
-        if id != 0 {
+        if let Some((id, n)) = got {
             let name = book
                 .names
                 .get(&id)
@@ -192,10 +175,10 @@ fn show(
                     String::new()
                 };
             }
-            book.since = Some(now);
+            new = true;
         }
     }
-    let line_up = book.since.is_some_and(|s| now - s < LINE_SECS);
+    let line_up = crate::combat_hud::step_hold(&mut book.left, new, LINE_SECS, time.delta_secs());
     let near = sim.duel.pickup_in_reach().is_some();
     for (mut v, guide) in &mut parts {
         let on = if guide { near } else { line_up };
@@ -204,5 +187,29 @@ fn show(
         } else {
             Visibility::Hidden
         });
+    }
+}
+
+/// Hides the marker parts of the items taken, whenever one more is taken (and at the start, for
+/// those the kit already holds).
+fn hide_taken(
+    sim: NonSend<Sim>,
+    mut synced: Local<Option<u32>>,
+    taken: Option<ResMut<TakenVisibility>>,
+) {
+    let count = sim.duel.last_pickup().0;
+    let Some(mut taken) = taken else {
+        return;
+    };
+    if *synced == Some(count) {
+        return;
+    }
+    *synced = Some(count);
+    taken.maps.clear();
+    for (i, p) in sim.duel.pickups().iter().enumerate() {
+        if !sim.duel.pickup_lies(i) {
+            let state = taken.maps.entry(p.block.clone()).or_default();
+            state.by_name.insert(p.part.clone(), false);
+        }
     }
 }

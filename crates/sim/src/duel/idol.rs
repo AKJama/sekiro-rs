@@ -67,14 +67,19 @@ impl Duel {
         }
     }
 
-    /// The first idol whose kneeling spot Wolf's feet are at, and how far it is.
+    /// The nearest idol whose kneeling spot Wolf's feet are at, and how far it is.
     pub(super) fn idol_near(&self) -> Option<(usize, f32)> {
         let feet = self.player.body.position;
-        self.idols.spots.iter().enumerate().find_map(|(i, s)| {
-            let [x, y, z] = s.kneel.position;
-            let d = (x - feet[0]).hypot(z - feet[2]);
-            (d < REACH && (y - feet[1]).abs() < REACH_Y).then_some((i, d))
-        })
+        self.idols
+            .spots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                let [x, y, z] = s.kneel.position;
+                let d = (x - feet[0]).hypot(z - feet[2]);
+                (d < REACH && (y - feet[1]).abs() < REACH_Y).then_some((i, d))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
     }
 
     /// The idol Wolf kneels or prays at.
@@ -83,7 +88,7 @@ impl Duel {
     }
 
     /// Standing or crouching, alive, on the ground and in no deathblow or throw.
-    pub(super) fn can_kneel(&self) -> bool {
+    pub(super) fn can_act(&self) -> bool {
         let runtime = &self.player.behavior.runtime;
         let state = runtime.main_state_name();
         (state.starts_with("Stand") || state.starts_with("Crouch"))
@@ -108,10 +113,12 @@ impl Duel {
         {
             self.idols.at = None;
         }
-        match self.action_target().filter(|_| pressed) {
-            Some(ActionTarget::Idol(i)) => self.kneel_at(i),
-            Some(ActionTarget::Pickup(p)) => self.pick_up(p),
-            None => {}
+        if pressed {
+            match self.action_target() {
+                Some(ActionTarget::Idol(i)) => self.kneel_at(i),
+                Some(ActionTarget::Pickup(p)) => self.pick_up(p),
+                None => {}
+            }
         }
         self.idols.at.map(|_| InputFrame {
             camera_yaw: input.camera_yaw,

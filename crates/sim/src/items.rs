@@ -112,11 +112,23 @@ pub struct Reach {
 }
 
 impl Reach {
-    /// The horizontal distance from `at` to the feet when they are inside the cylinder.
-    pub fn distance(&self, at: [f32; 3], feet: [f32; 3]) -> Option<f32> {
+    /// The cylinder of an ActionButtonParam row (`radius`, `height`, `baseHeightOffset`).
+    pub fn from_button(row: &Value) -> Option<Self> {
+        let f = |k: &str| row[k].as_f64().map(|v| v as f32);
+        Some(Self {
+            radius: f("radius")?,
+            height: f("height")?,
+            base: f("baseHeightOffset")?,
+        })
+    }
+
+    /// The horizontal distance from `at` to the feet when a body `tall` metres high from them
+    /// overlaps the cylinder (0 for the feet alone).
+    pub fn distance(&self, at: [f32; 3], feet: [f32; 3], tall: f32) -> Option<f32> {
         let d = (feet[0] - at[0]).hypot(feet[2] - at[2]);
-        let up = feet[1] - at[1];
-        (d < self.radius && up >= self.base && up <= self.base + self.height).then_some(d)
+        let bottom = at[1] + self.base;
+        let top = bottom + self.height;
+        (d <= self.radius && feet[1] <= top && feet[1] + tall >= bottom).then_some(d)
     }
 }
 
@@ -140,17 +152,9 @@ impl ItemData {
             .iter()
             .map(|(id, r)| (*id, r["maxNum"].as_u64().unwrap_or(99) as u32))
             .collect();
-        let f = |r: &Value, k: &str| r[k].as_f64().unwrap_or(0.0) as f32;
         let buttons = rows("ActionButtonParam")?
             .iter()
-            .map(|(id, r)| {
-                let reach = Reach {
-                    radius: f(r, "radius"),
-                    height: f(r, "height"),
-                    base: f(r, "baseHeightOffset"),
-                };
-                (*id, reach)
-            })
+            .filter_map(|(id, r)| Some((*id, Reach::from_button(r)?)))
             .collect();
         Ok(Self { lots, max, buttons })
     }
@@ -166,6 +170,9 @@ impl ItemData {
 pub struct MapPickup {
     /// The Treasure event's name (`Item_宝_02`).
     pub name: String,
+    /// The block and the name of the part it lies at (`o000100_0002`, the item's marker).
+    pub block: String,
+    pub part: String,
     /// Where it lies, in play space (the layout's: FromSoftware x mirrored).
     pub position: [f32; 3],
     pub lot: ItemLot,
@@ -179,10 +186,10 @@ pub fn map_pickups(cache: &Path, block: &str, data: &ItemData) -> Result<Vec<Map
     let path = cache.join(format!("raw/map/mapstudio/{block}.msb"));
     let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let msb = sekiro_formats::msb::parse(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(pickups_of(&msb, data))
+    Ok(pickups_of(&msb, block, data))
 }
 
-fn pickups_of(msb: &sekiro_formats::msb::Msb, data: &ItemData) -> Vec<MapPickup> {
+fn pickups_of(msb: &sekiro_formats::msb::Msb, block: &str, data: &ItemData) -> Vec<MapPickup> {
     let fallback = Reach {
         radius: 1.5,
         height: 2.5,
@@ -205,6 +212,8 @@ fn pickups_of(msb: &sekiro_formats::msb::Msb, data: &ItemData) -> Vec<MapPickup>
             let [x, y, z] = part.position;
             Some(MapPickup {
                 name: t.name.clone(),
+                block: block.to_string(),
+                part: part.name.clone(),
                 position: [-x, y, z],
                 lot: lot.clone(),
                 reach: data.buttons.get(&button).copied().unwrap_or(fallback),
