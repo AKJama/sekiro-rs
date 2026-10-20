@@ -82,10 +82,21 @@ pub const RIDE_ASSIST_ACTION: u8 = FALL_ASSIST_ACTION << 2;
 /// floors 204 and 504 (wood, rows 2 and 5).
 pub const RIDEABLE_SPECIAL: u32 = 8;
 
+/// How long SpEffect 4100 ("Hit material judgment _ Riding object", the riding state
+/// [`RIDEABLE_SPECIAL`] floors give) lasts after the last tick on such a floor: its
+/// SpEffectParam effectEndurance, 0.06 s. A thin map floor poking through a branch, or a tick
+/// over a gap in the trunk's surface, so does not drop the [`RIDE_ASSIST_MOVE`] walls.
+pub const SP_EFFECT_4100_ENDURANCE: f32 = 0.06;
+
+/// True for the material id of a floor that gives the riding state ([`RIDEABLE_SPECIAL`]).
+pub fn rideable(floor_material: Option<u32>) -> bool {
+    floor_material.is_some_and(|m| m / 100 == RIDEABLE_SPECIAL)
+}
+
 /// The walls of `walls` ([`fall_assist_walls`] bits) plus their [`RIDE_ASSIST_MOVE`] and
-/// [`RIDE_ASSIST_ACTION`] twins when the body stands on a rideable object.
-pub fn riding_walls(walls: u8, floor_material: Option<u32>) -> u8 {
-    if floor_material.is_some_and(|m| m / 100 == RIDEABLE_SPECIAL) {
+/// [`RIDE_ASSIST_ACTION`] twins while the body has the riding state (SpEffect 4100).
+pub fn riding_walls(walls: u8, riding: bool) -> u8 {
+    if riding {
         walls | (walls & (FALL_ASSIST_MOVE | FALL_ASSIST_ACTION)) << 2
     } else {
         walls
@@ -311,12 +322,13 @@ mod tests {
         assert_eq!(mask(28), FALL_ASSIST_MOVE);
         assert_eq!(fall_assist_walls(0), FALL_ASSIST_MOVE);
         assert_eq!(fall_assist_walls(1), FALL_ASSIST_ACTION);
+        assert!(rideable(Some(808)) && !rideable(Some(8)) && !rideable(None));
         assert_eq!(
-            riding_walls(FALL_ASSIST_MOVE, Some(808)),
+            riding_walls(FALL_ASSIST_MOVE, true),
             FALL_ASSIST_MOVE | RIDE_ASSIST_MOVE
         );
-        assert_eq!(riding_walls(FALL_ASSIST_MOVE, Some(8)), FALL_ASSIST_MOVE);
-        assert_eq!(riding_walls(0, Some(808)), 0);
+        assert_eq!(riding_walls(FALL_ASSIST_MOVE, false), FALL_ASSIST_MOVE);
+        assert_eq!(riding_walls(0, true), 0);
     }
 
     #[test]

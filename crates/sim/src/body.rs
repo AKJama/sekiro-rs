@@ -215,6 +215,11 @@ pub struct Body {
     pub fall_top: f32,
     /// Height fallen on the last landing (env 224).
     pub last_fall_height: f32,
+    /// Seconds left of the riding state (SpEffect 4100): reset to
+    /// [`crate::hit_filter::SP_EFFECT_4100_ENDURANCE`] on each tick that starts on a rideable
+    /// floor, counted down otherwise. While above 0 the rideable objects' fall-prevention walls
+    /// hold the body ([`crate::hit_filter::riding_walls`]).
+    pub riding: f32,
 }
 
 impl Default for Body {
@@ -228,6 +233,7 @@ impl Default for Body {
             grounded: true,
             fall_top: 0.0,
             last_fall_height: 0.0,
+            riding: 0.0,
         }
     }
 }
@@ -269,15 +275,37 @@ impl Body {
     /// of eight points [`RIM_SUPPORT`] around the feet that is no higher than them and no more
     /// than a step below.
     fn rim_support(&self, ground: &dyn Ground) -> Option<f32> {
+        self.rim_floors(ground).map(|(h, _)| h).reduce(f32::max)
+    }
+
+    /// The floors under the [`RIM_SUPPORT`] points that are no higher than the feet and no
+    /// more than a step below, with each point's `(x, z)`.
+    fn rim_floors<'a>(&self, ground: &'a dyn Ground) -> impl Iterator<Item = (f32, [f32; 2])> + 'a {
         let [x, y, z] = self.position;
         let step = ground.max_step();
         (0..8)
-            .filter_map(|i| {
+            .filter_map(move |i| {
                 let (s, c) = (i as f32 * std::f32::consts::FRAC_PI_4).sin_cos();
-                ground.floor(x + RIM_SUPPORT * c, z + RIM_SUPPORT * s, y + 0.05)
+                let at = [x + RIM_SUPPORT * c, z + RIM_SUPPORT * s];
+                ground.floor(at[0], at[1], y + 0.05).map(|h| (h, at))
             })
-            .filter(|h| y - h < step)
-            .reduce(f32::max)
+            .filter(move |(h, _)| y - h < step)
+    }
+
+    /// True while the floor the body stands on is rideable ([`crate::hit_filter::rideable`]):
+    /// the one under its centre, or, when the centre is over a gap and the rim holds the body
+    /// up ([`Self::rim_support`]), any rim point's. Held by the fall-prevention walls at a
+    /// branch's edge, the centre is often past the branch while the rim still rests on it.
+    fn on_rideable(&self, ground: &dyn Ground) -> bool {
+        let [x, y, z] = self.position;
+        if ground
+            .floor(x, z, y + 0.1)
+            .is_some_and(|h| y - h < ground.max_step())
+        {
+            return crate::hit_filter::rideable(ground.material(x, z, y + 0.1));
+        }
+        self.rim_floors(ground)
+            .any(|(_, [rx, rz])| crate::hit_filter::rideable(ground.material(rx, rz, y + 0.05)))
     }
 
     pub fn step(&mut self, input: &BodyInput, dt: f32, ground: &dyn Ground) {
@@ -325,14 +353,18 @@ impl Body {
             travel[0] += self.velocity[0] * dt;
             travel[1] += self.velocity[2] * dt;
         }
+        self.riding = if self.grounded && self.on_rideable(ground) {
+            crate::hit_filter::SP_EFFECT_4100_ENDURANCE
+        } else {
+            (self.riding - dt).max(0.0)
+        };
         let [mx, mz] = if input.ignore_walls {
             travel
         } else {
-            let [x, y, z] = self.position;
             let walls = if input.fall_assist == 0 {
                 0
             } else {
-                crate::hit_filter::riding_walls(input.fall_assist, ground.material(x, z, y + 0.1))
+                crate::hit_filter::riding_walls(input.fall_assist, self.riding > 0.0)
             };
             ground.slide_assisted(self.position, travel, walls)
         };

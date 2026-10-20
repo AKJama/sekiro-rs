@@ -2083,10 +2083,24 @@ mod tests {
         let y = world
             .floor(from[0], from[1], top)
             .expect("a floor to start on");
+        let (far, body, _) = run_from(world, cache, [from[0], y, from[1]], dir, ticks);
+        (far, body.grounded)
+    }
+
+    /// [`run_along`] from the feet position `from`, returning his body at the end and whether
+    /// he stayed grounded on every tick.
+    fn run_from(
+        world: &std::sync::Arc<sekiro_sim::collision::CollisionWorld>,
+        cache: &Path,
+        from: [f32; 3],
+        dir: [f32; 2],
+        ticks: usize,
+    ) -> (f32, sekiro_sim::body::Body, bool) {
         let mut wolf = sekiro_sim::Character::load_from_cache(cache).unwrap();
         wolf.ground = Box::new(world.clone());
-        wolf.body.position = [from[0], y, from[1]];
+        wolf.body.position = from;
         wolf.settle(1.0 / 60.0, 400);
+        let from = [wolf.body.position[0], wolf.body.position[2]];
         // The stick's forward is the camera's: yaw 0 looks along -Z.
         let input = sekiro_sim::InputFrame {
             move_stick: [0.0, 1.0],
@@ -2094,17 +2108,19 @@ mod tests {
             ..Default::default()
         };
         let mut far = f32::MIN;
+        let mut stayed = true;
         for _ in 0..ticks {
             wolf.tick(&input, 1.0 / 60.0);
             let p = wolf.body.position;
             far = far.max((p[0] - from[0]) * dir[0] + (p[2] - from[1]) * dir[1]);
+            stayed &= wolf.body.grounded;
         }
         println!(
             "{far:.2} m along, grounded {}, state {}",
             wolf.body.grounded,
             wolf.state()
         );
-        (far, wolf.body.grounded)
+        (far, wolf.body, stayed)
     }
 
     /// The play world keeps the fall-prevention walls (#119), on the same shared world the game
@@ -2137,6 +2153,141 @@ mod tests {
         // The trunk's tip; without its wall he is off the side within 0.6 m.
         let (far, grounded) = run_along(&world, &cache, [-140.9, -124.1], -40.0, [-1.0, 0.0], 120);
         assert!(far < 0.5 && grounded, "ran {far:.2} m off the pine");
+    }
+
+    /// Every rideable object with fall-prevention walls in m11_00 ([`RIDE_WALL_GROUP`], the
+    /// Outskirts pines) holds Wolf when he runs off either side of it from its top surface
+    /// (808), and the walls at a pine's root do not hold him on the ground path beside it.
+    #[test]
+    fn play_collision_world_trees_hold_riders() {
+        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let block = ASHINA[0];
+        let path = cache.join("maps").join(block).join("object_collision.bin");
+        if !path.is_file() || !cache.join("raw/chr/c0000.behbnd.d/c0000.hkx").exists() {
+            return;
+        }
+        let blocks = play_blocks(&cache, block).unwrap();
+        let stories = super::super::story::load_blocks(&cache, &blocks).unwrap();
+        let world = std::sync::Arc::new(collision_world(&cache, &blocks, &stories).unwrap());
+        let objects =
+            sekiro_formats::hknp::ObjectCollision::from_bytes(&std::fs::read(path).unwrap())
+                .unwrap();
+        let v = |i: u32| Vec3::from(objects.mesh.vertices[i as usize]);
+        let tri = |t: u32| {
+            let i = &objects.mesh.indices[t as usize * 3..t as usize * 3 + 3];
+            [v(i[0]), v(i[1]), v(i[2])]
+        };
+        // Known gaps, where the wall shape itself leaves an opening beside the tree. Through
+        // o002500_0005's (the grapple pine at start 0) he now walks on to the hillside, which
+        // passes as held, but it is not the walls holding him.
+        let gaps: [(&str, [f32; 2]); 1] = [("o002500_0005", [-0.77, 0.63])];
+        let riders = ride_walls(&blocks[block]);
+        let mut walks = Vec::new();
+        for part in &objects.parts {
+            // A tree's walls are its object's part 1: o002500_0005 has o002501_0005.
+            let wall = part.name.replacen("0_", "1_", 1);
+            if wall == part.name || !riders.contains(wall.as_str()) {
+                continue;
+            }
+            let name = format!("{block}/{}", part.name);
+            let w = objects.parts.iter().find(|p| p.name == wall).unwrap();
+            let (wlo, whi) = (w.first..w.first + w.count)
+                .flat_map(tri)
+                .fold((Vec3::MAX, Vec3::MIN), |(lo, hi), p| (lo.min(p), hi.max(p)));
+            // Upward faces that are the tree's top surface, inside its walls' box.
+            let points: Vec<Vec3> = (part.first..part.first + part.count)
+                .map(tri)
+                .filter(|[a, b, c]| (*b - *a).cross(*c - *a).normalize_or_zero().y.abs() >= 0.7)
+                .map(|[a, b, c]| (a + b + c) / 3.0)
+                .filter(|m| {
+                    world.floor_object(m.x, m.z, m.y + 0.05) == Some(name.as_str())
+                        && world
+                            .floor(m.x, m.z, m.y + 3.0)
+                            .is_some_and(|h| h < m.y + 0.02)
+                        && m.x > wlo.x
+                        && m.x < whi.x
+                        && m.z > wlo.z
+                        && m.z < whi.z
+                        && m.y > wlo.y - 1.0
+                        && m.y < whi.y
+                })
+                .collect();
+            assert!(!points.is_empty(), "{name} has no top surface to start on");
+            // Start at the surface point nearest its middle and run off across its long axis.
+            let mean = points.iter().copied().sum::<Vec3>() / points.len() as f32;
+            let (sxx, sxz, szz) = points.iter().fold((0.0, 0.0, 0.0), |(xx, xz, zz), p| {
+                let d = *p - mean;
+                (xx + d.x * d.x, xz + d.x * d.z, zz + d.z * d.z)
+            });
+            let angle: f32 = 0.5 * f32::atan2(2.0 * sxz, sxx - szz);
+            let (sin, cos) = angle.sin_cos();
+            let start = *points
+                .iter()
+                .min_by(|a, b| a.distance(mean).total_cmp(&b.distance(mean)))
+                .unwrap();
+            assert_eq!(
+                world.floor_material(start.x, start.z, start.y + 0.05),
+                Some(808),
+                "{name} start {start}"
+            );
+            for dir in [[-sin, cos], [sin, -cos]] {
+                walks.push((name.clone(), start, dir));
+            }
+        }
+        assert!(walks.len() >= 50, "only {} walks", walks.len());
+        // Each walk loads its own Wolf, which takes most of the time: share them out.
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
+        let runs: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = walks
+                .chunks(walks.len().div_ceil(threads))
+                .map(|chunk| {
+                    let (world, cache) = (&world, &cache);
+                    scope.spawn(move || {
+                        chunk
+                            .iter()
+                            .map(|(_, start, dir)| {
+                                run_from(world, cache, (*start).into(), *dir, 90)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().unwrap())
+                .collect()
+        });
+        let mut failed = Vec::new();
+        for ((name, start, dir), (far, body, stayed)) in walks.iter().zip(runs) {
+            // Held: never in the air, and still on the tree or on ground level with it
+            // (o002500_0004's trunk runs into the hillside, and he walks along it onto that).
+            let [x, y, z] = body.position;
+            let on_tree = world.floor_object(x, z, y + 0.1) == Some(name.as_str());
+            let held = stayed && (on_tree || y > start.y - 0.5);
+            let gap = gaps.iter().any(|(n, d)| {
+                name.ends_with(n) && (d[0] - dir[0]).abs() < 0.02 && (d[1] - dir[1]).abs() < 0.02
+            });
+            let side = format!("{name} from {start:.1} side ({:.2},{:.2})", dir[0], dir[1]);
+            println!(
+                "{side}: {far:.2} m, {:.2} m down, on the tree {on_tree}, held {held}",
+                start.y - y
+            );
+            if !held && !gap {
+                failed.push(format!("{side} {far:.2} m"));
+            }
+        }
+        assert!(failed.is_empty(), "ran off: {failed:#?}");
+        // The ground path past o002500_0005's root near start 0, where o002501_0005's walls
+        // stand in the ground (material 30 here). He is beside the trunk, not on it, so they
+        // must not hold him: from 1.2 m inside the wall he runs on through it. Taking the
+        // riding state from any rim point (not just when the centre is over a gap) held him
+        // here at 1.05 m.
+        let start = [-135.58, -117.53];
+        let (far, grounded) = run_along(&world, &cache, start, -42.0, [0.84, -0.55], 60);
+        assert!(
+            far > 1.7 && grounded,
+            "held {far:.2} m along by the pine root's ride walls"
+        );
     }
 
     /// #85: the first-visit story switches off h003401 and h003501, the other state of the
