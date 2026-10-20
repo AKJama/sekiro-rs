@@ -166,7 +166,8 @@ pub trait Ground {
     }
 
     /// The highest the feet of a body at `feet` can rise straight up, by at most `rise`, before
-    /// its head meets a ceiling; `None` when nothing stops it that soon. No ceilings by default.
+    /// its head meets a ceiling: below `feet[1] + rise` when `Some`, `None` when nothing stops
+    /// it that soon. No ceilings by default.
     fn ceiling(&self, feet: [f32; 3], rise: f32) -> Option<f32> {
         let _ = (feet, rise);
         None
@@ -329,6 +330,20 @@ impl Body {
             .is_some_and(|(_, m)| crate::hit_filter::rideable(m))
     }
 
+    /// Stops a rise from the feet height `from` to the current one where the head meets a
+    /// ceiling, and the upward speed with it, as the character proxy's contact does; otherwise
+    /// a jump carries the head into a low roof and the fall lands on its underside, which reads
+    /// as a floor (#160).
+    fn stop_rise_at_ceiling(&mut self, from: f32, ground: &dyn Ground) {
+        let rise = self.position[1] - from;
+        if rise > 0.0
+            && let Some(top) = ground.ceiling([self.position[0], from, self.position[2]], rise)
+        {
+            self.position[1] = top.max(from);
+            self.velocity[1] = self.velocity[1].min(0.0);
+        }
+    }
+
     pub fn step(&mut self, input: &BodyInput, dt: f32, ground: &dyn Ground) {
         let mut travel = root_motion_world(input.root_motion, self.yaw.sin_cos());
         self.yaw -= input.root_motion[3];
@@ -411,7 +426,9 @@ impl Body {
                     self.position[2],
                     self.position[1] + ground.max_step(),
                 );
+                let from = self.position[1];
                 self.position[1] = (self.position[1] + input.root_motion[1]).min(water.height);
+                self.stop_rise_at_ceiling(from, ground);
                 if let Some(floor) = floor {
                     self.position[1] = self.position[1].max(floor);
                 }
@@ -422,7 +439,9 @@ impl Body {
         }
 
         if !self.gravity_enabled {
+            let from = self.position[1];
             self.position[1] += input.root_motion[1] + self.velocity[1] * dt;
+            self.stop_rise_at_ceiling(from, ground);
             return;
         }
         let step = ground.max_step();
@@ -456,18 +475,7 @@ impl Body {
                 .abs();
         self.position[1] += self.velocity[1] * dt - 0.5 * gravity * dt * dt;
         self.velocity[1] -= gravity * dt;
-        // A rise stops where the head meets a ceiling and loses its upward speed, as the
-        // character proxy's contact does; otherwise a jump carries the head into a low roof and
-        // the fall lands on its underside, which reads as a floor (#160).
-        let rise = self.position[1] - previous_y;
-        if rise > 0.0
-            && let Some(top) =
-                ground.ceiling([self.position[0], previous_y, self.position[2]], rise)
-            && self.position[1] > top
-        {
-            self.position[1] = top.max(previous_y);
-            self.velocity[1] = self.velocity[1].min(0.0);
-        }
+        self.stop_rise_at_ceiling(previous_y, ground);
         self.fall_top = self.fall_top.max(self.position[1]);
         // Land on the highest floor the feet passed through this tick, or one up to a step
         // above them (a stair tread or ledge the body was carried into while airborne).

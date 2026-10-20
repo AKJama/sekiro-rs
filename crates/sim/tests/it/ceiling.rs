@@ -4,25 +4,29 @@
 //! in it. Skips without the exported maps.
 
 use sekiro_sim::body::{Body, BodyInput};
-use sekiro_sim::collision::CollisionWorld;
+use sekiro_sim::collision::{CollisionWorld, HEAD_TOP, MAX_SLOPE_DEGREES};
 use sekiro_sim::tae::VelocityChange;
 use sekiro_sim::{Buttons, Character, InputFrame};
 
 use crate::movement_helpers::{DT, cache, settle};
 use crate::step_cost::play_world;
 
-/// Top of the body's top sphere above the feet (centre 1.55 m, radius 0.4 m).
-const HEAD_TOP: f32 = 1.95;
-
-/// The floor at `(x, z)` near the shack's floor level and the lowest ceiling over it: a flat
-/// enough face (|normal y| at least cos 60 degrees) above the floor.
-fn floor_and_ceiling(world: &CollisionWorld, x: f32, z: f32) -> (f32, f32) {
-    let floor = world.floor(x, z, -45.5).expect("a floor in the shack");
-    let ceiling = world
+/// The heights of the faces over `(x, z)` flat enough to stand on, which the collision also
+/// takes for ceilings from below.
+fn flat_faces(world: &CollisionWorld, x: f32, z: f32) -> impl Iterator<Item = f32> {
+    let min_ny = MAX_SLOPE_DEGREES.to_radians().cos();
+    world
         .surfaces_at(x, z)
         .into_iter()
-        .filter(|&(h, ny)| ny.abs() >= 0.5 && h > floor + 0.1)
+        .filter(move |&(_, ny)| ny.abs() >= min_ny)
         .map(|(h, _)| h)
+}
+
+/// The floor at `(x, z)` near the shack's floor level and the lowest ceiling over it.
+fn floor_and_ceiling(world: &CollisionWorld, x: f32, z: f32) -> (f32, f32) {
+    let floor = world.floor(x, z, -45.5).expect("a floor in the shack");
+    let ceiling = flat_faces(world, x, z)
+        .filter(|&h| h > floor + 0.1)
         .reduce(f32::min)
         .expect("a ceiling over the shack floor");
     (floor, ceiling)
@@ -120,11 +124,7 @@ fn running_jumps_in_the_shack_stay_under_its_roof() {
                 body.step(&BodyInput::default(), DT, &*world);
             }
             let [ex, ey, ez] = body.position;
-            if world
-                .surfaces_at(ex, ez)
-                .iter()
-                .any(|&(h, ny)| ny.abs() >= 0.5 && h > ey + 0.1 && h < ey + HEAD_TOP - 0.05)
-            {
+            if flat_faces(&world, ex, ez).any(|h| h > ey + 0.1 && h < ey + HEAD_TOP - 0.05) {
                 trapped.push((yaw.to_degrees().round(), horizontal, body.position));
             }
         }

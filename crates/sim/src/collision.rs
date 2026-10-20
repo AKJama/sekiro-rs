@@ -342,6 +342,8 @@ pub const MAX_SLOPE_DEGREES: f32 = 60.0;
 const SPHERES: [f32; 3] = [STEP_HEIGHT + RADIUS, 1.2, 1.55];
 /// The player's physics capsule height (see [`RADIUS`]).
 pub const CAPSULE_HEIGHT: f32 = 1.5;
+/// The top of the body's top collision sphere above the feet: where its head meets a ceiling.
+pub const HEAD_TOP: f32 = SPHERES[SPHERES.len() - 1] + RADIUS;
 /// How close the fall-prevention assist lets a body come to its walls: `FallAssistMinRadius`,
 /// physics module `+0xaec`, 0.16 m from the constructor `FUN_140bbb010` (`+0xae8`,
 /// `FallAssistMaxRadius`, is 0.4). `FUN_140bc68d0` slides the body's move along the walls its
@@ -491,6 +493,13 @@ impl CollisionWorld {
     /// ([`crate::body::deep_water`]).
     fn solid(&self, t: u32) -> bool {
         !crate::body::deep_water(self.materials[t as usize])
+    }
+
+    /// Whether triangle `t` is a solid face flat enough to stand on in `who`'s queries. The
+    /// winding does not say which side is solid (see the module notes), so it is a floor from
+    /// above and a ceiling from below.
+    fn walkable(&self, t: u32, who: u8) -> bool {
+        self.normals[t as usize].y.abs() >= self.min_walk_ny && self.solid(t) && self.live(t, who)
     }
 
     /// Records that the triangles `range` belong to `part` (see `part_of`).
@@ -840,10 +849,7 @@ impl CollisionWorld {
         let cell = self.cells.get(&cell_of(x, z))?;
         let mut best: Option<(f32, u32)> = None;
         for &t in cell {
-            if !self.solid(t)
-                || self.normals[t as usize].y.abs() < self.min_walk_ny
-                || !self.live(t, who)
-            {
+            if !self.walkable(t, who) {
                 continue;
             }
             let [a, b, c] = self.corners(t);
@@ -862,10 +868,12 @@ impl CollisionWorld {
     /// not say which side is solid, see the module notes) above that sphere's centre. The
     /// sphere is tested at its centre line and four lines [`CEILING_SAMPLE`] out, each against
     /// its surface's height there, so a beam or a sloping underside off the centre stops it too.
+    /// When `Some`, it is below `feet.y + rise`.
+    // TODO(#163): this scans whole 4 m cells; a height-banded grid would cut that.
     fn ceiling_for(&self, feet: Vec3, rise: f32, who: u8) -> Option<f32> {
-        let head = SPHERES[SPHERES.len() - 1];
+        let head = HEAD_TOP - RADIUS;
         let centre = feet.y + head;
-        let high = centre + RADIUS + rise;
+        let high = feet.y + HEAD_TOP + rise;
         let s = CEILING_SAMPLE;
         let lift = (RADIUS * RADIUS - s * s).sqrt();
         let samples = [
@@ -874,7 +882,8 @@ impl CollisionWorld {
             (-s, 0.0, lift),
             (0.0, s, lift),
             (0.0, -s, lift),
-        ];
+        ]
+        .map(|(dx, dz, up)| (feet.x + dx, feet.z + dz, up));
         let (x0, z0) = cell_of(feet.x - s, feet.z - s);
         let (x1, z1) = cell_of(feet.x + s, feet.z + s);
         let mut best: Option<f32> = None;
@@ -887,25 +896,29 @@ impl CollisionWorld {
                     let [lo, hi] = self.bounds[t as usize];
                     if hi.y < centre
                         || lo.y > high
-                        || self.normals[t as usize].y.abs() < self.min_walk_ny
-                        || !self.solid(t)
-                        || !self.live(t, who)
+                        || hi.x < feet.x - s
+                        || lo.x > feet.x + s
+                        || hi.z < feet.z - s
+                        || lo.z > feet.z + s
+                        || !self.walkable(t, who)
                     {
                         continue;
                     }
                     let [a, b, c] = self.corners(t);
-                    for (dx, dz, up) in samples {
-                        let (x, z) = (feet.x + dx, feet.z + dz);
-                        // Each sample line is tested only by the cell that holds it.
-                        if cell_of(x, z) != (cx, cz) {
+                    for (x, z, up) in samples {
+                        // Each sample line is tested only by the cell that holds it, and only
+                        // against triangles whose box holds it.
+                        if cell_of(x, z) != (cx, cz) || x < lo.x || x > hi.x || z < lo.z || z > hi.z
+                        {
                             continue;
                         }
                         if let Some(h) = height_on(x, z, a, b, c)
                             && h >= centre
-                            && h - up - head < feet.y + rise
-                            && best.is_none_or(|b| h - up - head < b)
                         {
-                            best = Some(h - up - head);
+                            let top = h - up - head;
+                            if top < feet.y + rise && best.is_none_or(|b| top < b) {
+                                best = Some(top);
+                            }
                         }
                     }
                 }

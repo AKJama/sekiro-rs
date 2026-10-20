@@ -502,6 +502,9 @@ impl Ground for PerchGround<'_> {
             (a, b) => a.or(b),
         }
     }
+    fn ceiling(&self, feet: [f32; 3], rise: f32) -> Option<f32> {
+        self.terrain.ceiling(feet, rise)
+    }
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
         self.terrain.slide(feet, delta)
     }
