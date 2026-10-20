@@ -794,6 +794,7 @@ pub fn run(options: Options) -> Result<()> {
             .chain(),
     );
     crate::menu::install(&mut app);
+    crate::death_screen::install(&mut app);
     if options.enemy_present {
         arena_d_scene::install(&mut app, &cache, options.arena, options.objects)?;
         arena_c_scene::install(&mut app, &cache, options.arena)?;
@@ -2060,6 +2061,7 @@ fn hud(
         },
         poison: f[0].status.poison.fraction(),
         status: status_line(&f[0].status, &sim.last.player.behavior.state_path),
+        respawn_in: sim.duel.respawn_in,
         // Lifted from the chest dummy to above Wolf's head (ours; the effect's own offset is in
         // its undecoded FXR).
         perilous_at: sim

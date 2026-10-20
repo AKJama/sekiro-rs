@@ -20,3 +20,4 @@ postcard.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+ttf-parser = "0.25"
