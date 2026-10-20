@@ -9,11 +9,10 @@
 //! reported clip at the reported time with root motion disabled, crossfading over the blend-in,
 //! and the entity follows the simulated body.
 //!
-//! Controls follow Sekiro's PC defaults where possible: WASD move, mouse look, LMB attack, RMB
-//! guard, Space jump, Shift step (hold to sprint), C crouch, F grapple, Ctrl or MMB prosthetic,
-//! R item, Q lock-on. Gamepad: left stick move, right stick camera, R1 attack, L1 guard, A jump,
-//! B step/sprint, L3 crouch, L2 grapple, R2 prosthetic, X item, R3 lock-on. Esc opens the pause menu;
-//! minus and equals (or `[` and `]`) change the volume (`crate::audio`).
+//! Controls are Sekiro's PC defaults: the keyboard and mouse bindings are the consts beside
+//! [`CROUCH_KEY`] and [`keyboard_input`], the gamepad ones are in `gather_input`, and the menu
+//! keys are `crate::menu::MENU_OK_KEY` and its neighbours. Esc opens the pause menu; minus and
+//! equals (or `[` and `]`) change the volume (`crate::audio`).
 //!
 //! With `--map <id> [--start <n>]` the fight happens on an exported map instead of the floor:
 //! Wolf stands at the player start, the enemy 5 m in front of him, both bodies walk on the
@@ -1195,17 +1194,70 @@ struct MouseCapture {
     grab_click: bool,
 }
 
+/// Sekiro's PC defaults (DefaultKeyAssignParam00, as read by FwLo's RustSekiro) for the play
+/// buttons that are not plain movement; the HUD names them with [`key_label`].
+const CROUCH_KEY: KeyCode = KeyCode::KeyQ;
+const ACTION_KEY: KeyCode = KeyCode::KeyE;
+const LOCK_ON_BUTTON: MouseButton = MouseButton::Middle;
 /// The keyboard keys of the item cluster's buttons (quick item, prosthetic tool), and the labels
 /// the HUD's item boxes show for them.
 const ITEM_KEY: KeyCode = KeyCode::KeyR;
 const PROSTHETIC_KEY: KeyCode = KeyCode::ControlLeft;
-pub(crate) const ITEM_KEY_LABELS: [&str; 2] = ["R", "Ctrl"];
+pub(crate) const ITEM_KEY_LABELS: [&str; 2] = [key_label(ITEM_KEY), key_label(PROSTHETIC_KEY)];
+
+/// What the HUD calls a bound key.
+const fn key_label(key: KeyCode) -> &'static str {
+    match key {
+        KeyCode::KeyQ => "Q",
+        KeyCode::KeyE => "E",
+        KeyCode::KeyR => "R",
+        KeyCode::ControlLeft => "Ctrl",
+        _ => "?",
+    }
+}
+
+/// What the HUD calls a bound mouse button.
+const fn button_label(button: MouseButton) -> &'static str {
+    match button {
+        MouseButton::Left => "LMB",
+        MouseButton::Right => "RMB",
+        MouseButton::Middle => "MMB",
+        _ => "?",
+    }
+}
+
+/// The keyboard and mouse part of a frame's input: the move stick and the buttons, from what
+/// is held.
+fn keyboard_input(
+    key: impl Fn(KeyCode) -> bool,
+    button: impl Fn(MouseButton) -> bool,
+) -> (Vec2, Buttons) {
+    let stick = Vec2::new(
+        (key(KeyCode::KeyD) as i32 - key(KeyCode::KeyA) as i32) as f32,
+        (key(KeyCode::KeyW) as i32 - key(KeyCode::KeyS) as i32) as f32,
+    );
+    let b = Buttons {
+        attack: button(MouseButton::Left),
+        guard: button(MouseButton::Right),
+        jump: key(KeyCode::Space),
+        dodge: key(KeyCode::ShiftLeft) || key(KeyCode::ShiftRight),
+        crouch: key(CROUCH_KEY),
+        grapple: key(KeyCode::KeyF),
+        action: key(ACTION_KEY),
+        prosthetic: key(PROSTHETIC_KEY),
+        item: key(ITEM_KEY),
+        combat_art: false,
+        lock_on: button(LOCK_ON_BUTTON),
+    };
+    (stick, b)
+}
 
 #[allow(clippy::too_many_arguments)]
 fn gather_input(
     fade: Res<cinematic_fade::Fade>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    held: Res<crate::menu::HeldThroughMenu>,
     gamepads: Query<&Gamepad>,
     orbit: Res<Orbit>,
     mut live: ResMut<LiveInput>,
@@ -1240,24 +1292,9 @@ fn gather_input(
         capture.first_click_grabbed = true;
         capture.grab_click = true;
     }
-    let key = |k| keys.pressed(k);
-    let mut stick = Vec2::new(
-        (key(KeyCode::KeyD) as i32 - key(KeyCode::KeyA) as i32) as f32,
-        (key(KeyCode::KeyW) as i32 - key(KeyCode::KeyS) as i32) as f32,
-    );
-    let mut b = Buttons {
-        attack: mouse.pressed(MouseButton::Left) && !capture.grab_click,
-        guard: mouse.pressed(MouseButton::Right),
-        jump: key(KeyCode::Space),
-        dodge: key(KeyCode::ShiftLeft) || key(KeyCode::ShiftRight),
-        crouch: key(KeyCode::KeyC),
-        grapple: key(KeyCode::KeyF),
-        action: key(KeyCode::KeyE),
-        prosthetic: key(PROSTHETIC_KEY) || mouse.pressed(MouseButton::Middle),
-        item: key(ITEM_KEY),
-        combat_art: false,
-        lock_on: key(KeyCode::KeyQ),
-    };
+    // Keys still held from a menu that just closed wait for their release.
+    let (mut stick, mut b) = keyboard_input(|k| held.key(&keys, k), |m| held.button(&mouse, m));
+    b.attack &= !capture.grab_click;
     for pad in &gamepads {
         let s = pad.left_stick();
         if s.length() > 0.2 {
@@ -2137,20 +2174,24 @@ fn hud(
             s.push('\n');
         }
     }
+    let action = key_label(ACTION_KEY);
     match sim.duel.player.behavior.env.action_guide.get() {
-        Some((10, 12)) => s += "E / Y: Hug wall\n",
-        Some((11, 12)) => s += "E / Y: Leave wall\n",
-        Some((20, 12)) => s += "E / Y: Hang\n",
+        Some((10, 12)) => s += &format!("{action} / Y: Hug wall\n"),
+        Some((11, 12)) => s += &format!("{action} / Y: Leave wall\n"),
+        Some((20, 12)) => s += &format!("{action} / Y: Hang\n"),
         Some((21, 12) | (22, 5)) => {
             if sim.duel.player.behavior.env.hang_can_climb {
-                s += "E / Y: Climb up   ";
+                s += &format!("{action} / Y: Climb up   ");
             }
             s += "Shift / B: Drop\n";
         }
         _ => {}
     }
     if sim.duel.player.behavior.env.in_water {
-        s += "C / L3: Dive or descend   Space / A: Rise   Shift / B: Swim kick\n";
+        s += &format!(
+            "{} / L3: Dive or descend   Space / A: Rise   Shift / B: Swim kick\n",
+            key_label(CROUCH_KEY)
+        );
     }
     if sim
         .duel
@@ -2158,11 +2199,14 @@ fn hud(
         .as_ref()
         .is_some_and(|encounter| encounter.bell.available)
     {
-        s += "E / Y: Ring bell\n";
+        s += &format!("{action} / Y: Ring bell\n");
     }
-    s += "WASD move, mouse look, LMB attack, RMB guard, Space jump, Shift step/sprint, C crouch, ";
+    s += &format!(
+        "WASD move, mouse look, LMB attack, RMB guard, Space jump, Shift step/sprint, {} crouch, ",
+        key_label(CROUCH_KEY)
+    );
     if sim.enemy_present || sim.duel.population.is_some() {
-        s += "Q lock-on, ";
+        s += &format!("{} lock-on, ", button_label(LOCK_ON_BUTTON));
     }
     s += "Esc pause, F3 debug text, -/= volume";
     text.0 = s;
@@ -2578,6 +2622,14 @@ mod tests {
     use sekiro_sim::fight::FighterKind;
 
     #[test]
+    fn default_keys_crouch_lock_on_and_use_the_prosthetic() {
+        let held = |k| k == KeyCode::KeyQ || k == KeyCode::ControlLeft;
+        let (_, b) = keyboard_input(held, |m| m == MouseButton::Middle);
+        assert!(b.crouch && b.prosthetic && b.lock_on);
+        assert!(!b.action && !b.item && !b.attack);
+    }
+
+    #[test]
     fn identical_position_endpoints_stay_exact_at_every_render_fraction() {
         for position in [
             Vec3::new(-197.4507, -48.14, 150.72162),
@@ -2715,9 +2767,10 @@ mod tests {
             }
             let text = &app.world().get::<Text>(text_entity).unwrap().0;
             assert!(text.contains("F3 debug text"));
+            assert!(text.contains(&format!("{} crouch", key_label(CROUCH_KEY))));
             assert_eq!(text.contains("refs"), visible);
             assert!(
-                !text.contains("Enemy") && !text.contains("Ashina") && !text.contains("Q lock-on")
+                !text.contains("Enemy") && !text.contains("Ashina") && !text.contains("lock-on")
             );
             let gauges = app.world().resource::<combat_hud::Gauges>();
             assert!(!gauges.enemy_alive && !gauges.boss_bar && !gauges.deathblow);

@@ -6,7 +6,8 @@
 #   negative yaw, down raises the pitch), and again after Esc only once clicked;
 # - every `move` line with the stick held has `err` (travel vs stick, degrees) near 0, apart
 #   from a few steps while Wolf turns after the stick or camera changed;
-# - locked on (Q), D and A circle the soldier and the clip follows the stick (a000_000403/402).
+# - locked on (middle mouse, MMB), D and A circle the soldier and the clip follows the
+#   stick (a000_000403/402).
 # Mouse
 20 -
 30 - 10 0
@@ -63,12 +64,12 @@
 60 -
 # Lock on, strafe right then left, back off, unlock and look
 30 -
-3 Q
+3 MMB
 30 -
 240 D
 120 A
 60 S
 30 -
-3 Q
+3 MMB
 30 -
 60 - 20 0

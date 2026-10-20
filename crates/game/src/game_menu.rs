@@ -398,12 +398,12 @@ fn menu_keys(
 ) {
     let key = |k: &[KeyCode]| keys.any_just_pressed(k.iter().copied());
     let pad = |b| pads.iter().any(|p| p.just_pressed(b));
-    if key(&[KeyCode::KeyX, KeyCode::KeyE]) || pad(GamepadButton::RightTrigger) {
+    if key(&[crate::menu::MENU_NEXT_TAB_KEY]) || pad(GamepadButton::RightTrigger) {
         menu.tab = (menu.tab + 1) % TABS.len();
         menu.index = 0;
         menu.top = 0;
     }
-    if key(&[KeyCode::KeyZ, KeyCode::KeyQ]) || pad(GamepadButton::LeftTrigger) {
+    if key(&[crate::menu::MENU_PREVIOUS_TAB_KEY]) || pad(GamepadButton::LeftTrigger) {
         menu.tab = (menu.tab + TABS.len() - 1) % TABS.len();
         menu.index = 0;
         menu.top = 0;
@@ -421,11 +421,11 @@ fn menu_keys(
             menu.top = 0;
         }
     }
-    if menu.tab == 3 && (key(&[KeyCode::Enter, KeyCode::Space]) || pad(GamepadButton::South)) {
+    if menu.tab == 3 && crate::menu::ok_pressed(&keys, &pads) {
         view.request = Some(menu.index);
     }
-    // B backs out of the menu, as Resume does.
-    if pad(GamepadButton::East) {
+    // Back (Q, B) closes the menu, as Resume and Esc do: it has no nested level.
+    if crate::menu::back_pressed(&keys, &pads) {
         view.request = Some(0);
     }
     // The pause's own arrows, D-pad and stick, plus WASD.

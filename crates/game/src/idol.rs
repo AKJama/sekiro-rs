@@ -249,8 +249,8 @@ fn fade(alpha: f32) -> Color {
     Color::BLACK.with_alpha(alpha)
 }
 
-/// The menu's keys while Wolf prays: up and down pick a row, Enter (or E, A) takes it, Esc
-/// (or B) stands him up.
+/// The menu's keys while Wolf prays: up and down pick a row, OK (Enter, Space, E, A) takes it,
+/// Esc or back (Q, B) stands him up.
 fn menu_keys(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
@@ -268,11 +268,10 @@ fn menu_keys(
     if key(&[KeyCode::ArrowUp, KeyCode::KeyW]) || pad(GamepadButton::DPadUp) {
         row.0 = (row.0 + ROWS.len() - 1) % ROWS.len();
     }
-    if (key(&[KeyCode::Enter, KeyCode::KeyE]) || pad(GamepadButton::South)) && ROWS[row.0].0 == REST
-    {
+    if crate::menu::ok_pressed(&keys, &pads) && ROWS[row.0].0 == REST {
         sim.duel.rest_at_idol();
     }
-    if key(&[KeyCode::Escape, KeyCode::Backspace]) || pad(GamepadButton::East) {
+    if key(&[KeyCode::Escape, KeyCode::Backspace]) || crate::menu::back_pressed(&keys, &pads) {
         sim.duel.leave_idol();
     }
 }
