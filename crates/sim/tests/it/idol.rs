@@ -104,3 +104,62 @@ fn wolf_kneels_rests_stands_and_comes_back_at_the_idol() {
     });
     assert_eq!(duel.player.body.position, spot.checkpoint.position);
 }
+
+#[test]
+fn the_nearer_item_takes_the_press_and_stays_taken_through_a_rest() {
+    let cache = sekiro_sim::cache::root();
+    if !cache.join("anim/c0000/a000_710310.bin").exists()
+        || !cache.join("raw/map/mapstudio/m11_00_00_00.msb").exists()
+    {
+        eprintln!("skipping: cache not extracted");
+        return;
+    }
+    let data = std::sync::Arc::new(sekiro_sim::items::ItemData::load(&cache).unwrap());
+    let mut pellets = sekiro_sim::items::map_pickups(&cache, "m11_00_00_00", &data)
+        .unwrap()
+        .into_iter()
+        .find(|p| p.name == "Item_宝_02")
+        .unwrap();
+    assert_eq!((pellets.lot.id, pellets.lot.flag), (1100020, 51100020));
+    let mut duel = Duel::load(&cache, 30.0).unwrap();
+    duel.enemy_present = false;
+    duel.enemy_active = false;
+    duel.kit.goods.retain(|(id, _)| *id != 3020);
+    run(&mut duel, 1.0, |d| d.player.body.grounded);
+    let start = duel.player.body.position;
+    // The Pellets half a metre off, an idol's kneeling spot a metre off.
+    pellets.position = [start[0] + 0.5, start[1], start[2]];
+    duel.set_pickups(vec![pellets], data);
+    duel.set_idols(vec![IdolSpot {
+        kneel: Placement {
+            position: [start[0] + 1.0, start[1], start[2]],
+            yaw: 1.0,
+        },
+        checkpoint: Placement {
+            position: [start[0] + 1.0, start[1], start[2] + 0.5],
+            yaw: -2.0,
+        },
+    }]);
+    assert_eq!(duel.pickup_in_reach(), Some(0));
+    assert_eq!(duel.idol_in_reach(), None);
+
+    let mut press = InputFrame::default();
+    press.buttons.action = true;
+    duel.step(&press, DT);
+    assert_eq!(duel.kit.count(3020), 2);
+    assert!(duel.kit.taken_flags.contains(&51100020));
+    assert_eq!(duel.idol(), None);
+    // Taken, it leaves the press to the idol; a Rest does not bring it back.
+    duel.step(&InputFrame::default(), DT);
+    duel.step(&press, DT);
+    assert_eq!(duel.idol(), Some(0));
+    let praying = |d: &Duel| d.idol_phase() == Some(IdolPhase::Praying);
+    run(&mut duel, 3.0, praying);
+    duel.rest_at_idol();
+    run(&mut duel, 0.5, |d| {
+        d.idol_phase() == Some(IdolPhase::Resting)
+    });
+    run(&mut duel, 5.0, praying);
+    assert!(!duel.pickup_lies(0));
+    assert_eq!(duel.kit.count(3020), 2);
+}

@@ -3,7 +3,8 @@
 //! The engine only sends their events (`W_StatueAttach*`); c0000.hks moves on from Start and
 //! Rest to the Loop, and from End to standing, by itself.
 //!
-//! The action button at an idol's kneeling spot kneels Wolf there; while he is at it his own
+//! The action button at an idol's kneeling spot kneels Wolf there (unless a map item is nearer,
+//! `super::pickup`); while he is at it his own
 //! input is held. Kneeling refills Vitality and makes the idol the checkpoint: the next respawn
 //! puts Wolf at it. Rest refills him again and brings the map's foes back on the next step.
 //! After FwLo's RustSekiro `src/idol.rs` (Fireguy32's idols): there kneeling leaves the foes
@@ -12,6 +13,7 @@
 //! idol instead of kneeling there first.
 
 use super::Duel;
+use super::pickup::ActionTarget;
 use crate::deathblow::Placement;
 use crate::input::InputFrame;
 
@@ -57,15 +59,27 @@ impl Duel {
     }
 
     /// The idol whose kneeling spot Wolf is at, if he can kneel now (the "Rest" guide).
+    /// An item nearer than the idol takes the press instead ([`Duel::action_target`]).
     pub fn idol_in_reach(&self) -> Option<usize> {
-        if self.idols.at.is_some() || !self.can_kneel() {
-            return None;
+        match self.action_target()? {
+            ActionTarget::Idol(i) => Some(i),
+            ActionTarget::Pickup(_) => None,
         }
+    }
+
+    /// The nearest idol whose kneeling spot Wolf's feet are at, and how far it is.
+    pub(super) fn idol_near(&self) -> Option<(usize, f32)> {
         let feet = self.player.body.position;
-        self.idols.spots.iter().position(|s| {
-            let [x, y, z] = s.kneel.position;
-            (x - feet[0]).hypot(z - feet[2]) < REACH && (y - feet[1]).abs() < REACH_Y
-        })
+        self.idols
+            .spots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                let [x, y, z] = s.kneel.position;
+                let d = (x - feet[0]).hypot(z - feet[2]);
+                (d < REACH && (y - feet[1]).abs() < REACH_Y).then_some((i, d))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
     }
 
     /// The idol Wolf kneels or prays at.
@@ -74,7 +88,7 @@ impl Duel {
     }
 
     /// Standing or crouching, alive, on the ground and in no deathblow or throw.
-    fn can_kneel(&self) -> bool {
+    pub(super) fn can_act(&self) -> bool {
         let runtime = &self.player.behavior.runtime;
         let state = runtime.main_state_name();
         (state.starts_with("Stand") || state.starts_with("Crouch"))
@@ -99,8 +113,12 @@ impl Duel {
         {
             self.idols.at = None;
         }
-        if pressed && let Some(i) = self.idol_in_reach() {
-            self.kneel_at(i);
+        if pressed {
+            match self.action_target() {
+                Some(ActionTarget::Idol(i)) => self.kneel_at(i),
+                Some(ActionTarget::Pickup(p)) => self.pick_up(p),
+                None => {}
+            }
         }
         self.idols.at.map(|_| InputFrame {
             camera_yaw: input.camera_yaw,

@@ -179,6 +179,49 @@ pub fn abs(left: f32, top: f32, width: f32, height: f32) -> Node {
     }
 }
 
+/// The colour of an action guide's text.
+const GUIDE_TEXT: Color = Color::srgb(0.9, 0.87, 0.8);
+
+/// An action guide low in the middle of the screen, "[E] : `label`" (the idol's "Rest", an
+/// item's "Pick Up Item"), hidden, with `marker` on its root.
+pub fn spawn_action_guide(
+    commands: &mut Commands,
+    fonts: &GameFonts,
+    art: &MenuArt,
+    label: &str,
+    marker: impl Bundle,
+) {
+    let text = |t: String| fonts.shadowed(t, 16.5, GUIDE_TEXT);
+    commands
+        .spawn((
+            marker,
+            Node {
+                position_type: PositionType::Absolute,
+                width: percent(100),
+                bottom: percent(5),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                column_gap: px(2),
+                ..default()
+            },
+            Visibility::Hidden,
+        ))
+        .with_children(|r| {
+            match art.sprite("SB_KeyTop", "KG_Key_E") {
+                Some((image, aspect)) => r.spawn((
+                    image,
+                    Node {
+                        height: vh(22.0 / 10.8),
+                        aspect_ratio: Some(aspect),
+                        ..default()
+                    },
+                )),
+                None => r.spawn(text("E".into())),
+            };
+            r.spawn(text(format!(" : {label}")));
+        });
+}
+
 /// A screen root that shows over the world alone.
 #[derive(Component)]
 pub struct Covers;
