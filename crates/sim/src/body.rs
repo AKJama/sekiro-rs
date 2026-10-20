@@ -109,8 +109,14 @@ pub struct WaterSurface {
 
 impl WaterSurface {
     pub fn deep(self) -> bool {
-        matches!(self.material, 22 | 36 | 38)
+        deep_water(self.material)
     }
+}
+
+/// Whether hit material `material` is deep water: a surface bodies stand in, never a floor or
+/// wall ([`crate::collision::CollisionWorld`] leaves its triangles out of both).
+pub const fn deep_water(material: u32) -> bool {
+    matches!(material, 22 | 36 | 38)
 }
 
 /// Something the character can stand on.

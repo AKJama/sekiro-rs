@@ -6,8 +6,7 @@ impl CollisionWorld {
     /// collides with while it is on.
     pub fn append_event_part(&mut self, entity: i32, mesh: &CollisionMesh, who: u8, on: bool) {
         let range = self.append(mesh);
-        self.event_parts
-            .push((entity, range, who, AtomicBool::new(on)));
+        self.add_event_part(entity, range, who, on);
     }
 
     pub fn set_event_part(&self, entity: i32, on: bool) {

@@ -2,21 +2,27 @@
 //! counted in collision work so the tests do not depend on the machine.
 //! Skips without the exported maps.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use sekiro_formats::hknp::CollisionMesh;
 use sekiro_sim::body::{Ground, WaterSurface};
 use sekiro_sim::collision::{CollisionWorld, TriggerContact};
 
-fn cache() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache")
+use crate::arena_c_support::cache;
+
+/// [`build_play_world`], built once for both tests.
+fn play_world() -> Option<Arc<CollisionWorld>> {
+    static WORLD: OnceLock<Option<Arc<CollisionWorld>>> = OnceLock::new();
+    WORLD
+        .get_or_init(|| build_play_world(&cache()).map(Arc::new))
+        .clone()
 }
 
 /// The play world's collision as `crates/game/src/map_world.rs` `collision_world` builds it
 /// (both Ashina blocks, helpers stripped, placed objects), without the story's switches.
-fn play_world(cache: &Path) -> Option<CollisionWorld> {
+fn build_play_world(cache: &Path) -> Option<CollisionWorld> {
     let blocks = ["m11_00_00_00", "m11_01_00_00"];
     if !blocks
         .iter()
@@ -107,7 +113,7 @@ impl Ground for Counted {
 /// other storeys; only those in the body's height band may reach the per-sub-step push-out.
 #[test]
 fn wall_slide_tests_only_the_body_band() {
-    let Some(world) = play_world(&cache()) else {
+    let Some(world) = play_world() else {
         return;
     };
     let [x, y, z] = [-257.0, -45.0, 8.0];
@@ -130,12 +136,13 @@ fn wall_slide_tests_only_the_body_band() {
 #[test]
 fn deathblow_pair_search_is_bounded() {
     use sekiro_sim::{Buttons, InputFrame, arena::yaw_toward, duel::Duel};
-    let cache = cache();
-    let Some(world) = play_world(&cache) else {
+    // The world builds while the duel loads; the duel's result waits for the skip check.
+    let world = std::thread::spawn(play_world);
+    let duel = Duel::load(&cache(), 1.6);
+    let Some(world) = world.join().unwrap() else {
         return;
     };
-    let world = Arc::new(world);
-    let mut duel = Duel::load(&cache, 1.6).unwrap();
+    let mut duel = duel.unwrap();
     let queries = Arc::new(AtomicU64::new(0));
     duel.player.ground = Box::new(Counted {
         inner: Box::new(world.clone()),
@@ -151,7 +158,7 @@ fn deathblow_pair_search_is_bounded() {
     for (c, p, target) in [(&mut duel.player, wolf, foe), (&mut duel.enemy, foe, wolf)] {
         let y = world.floor(p.x, p.z, p.y + 1.0).unwrap_or(p.y);
         c.body.position = [p.x, y, p.z];
-        c.body.yaw = yaw_toward(p, target);
+        c.snap_yaw(yaw_toward(p, target));
         c.body.fall_top = y;
     }
     duel.enemy_active = false;
