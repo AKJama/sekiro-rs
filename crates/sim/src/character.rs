@@ -383,6 +383,12 @@ impl Character {
         }
     }
 
+    /// The player moves with no lock-on and no auto-aim target, so moves run along the stick
+    /// instead of strafing.
+    fn free_movement(&self) -> bool {
+        self.kind == ControlKind::Player && self.attack_target().is_none()
+    }
+
     /// Runs the script and behaviour graph for one step, watching the script's auto-aim
     /// calls (`act(156)` refresh, `act(157)` stop) for the player.
     fn tick_behavior(&mut self, dt: f32) -> TickReport {
@@ -449,8 +455,7 @@ impl Character {
         // movement start. Stops have a zero rate but allow a new move immediately.
         // Keep the explicit turn prohibition (e.g. the sprint quick-turn wind-up).
         let may_turn = !tae.flag(cancel::DISABLE_TURN) && !tae.fixed_rotation;
-        if self.kind != ControlKind::Player
-            || self.attack_target().is_some()
+        if !self.free_movement()
             || !self.body.grounded
             || (moving && !self.free_move_pending)
             || !may_move
@@ -458,6 +463,12 @@ impl Character {
         {
             return;
         }
+        self.turn_body_to_stick();
+    }
+
+    /// The free move start's turn: the body faces the stick at once and the turn becomes the
+    /// lower-body twist, which unwinds so the model turns smoothly.
+    fn turn_body_to_stick(&mut self) {
         let Some(stick) = self.input.stick_world_yaw() else {
             return;
         };
@@ -595,6 +606,7 @@ impl Character {
 
     fn fill_env(&mut self, dt: f32) {
         let authored_airborne = self.authored_air_height() > 0.0;
+        let free_movement = self.free_movement();
         let tae = &self.tae_runtime.frame;
         let behavior = &mut *self.behavior;
         let env = &mut behavior.env;
@@ -679,6 +691,7 @@ impl Character {
         env.vertical_velocity = self.body.velocity[1] * 100.0;
         env.dt = dt;
         env.locked_on = self.lock_target.is_some();
+        env.free_movement = free_movement;
         env.damage = self.pending_damage.take();
         env.damage_motion_disabled = tae.flag(cancel::DISABLE_DAMAGE_MOTION);
     }
@@ -847,6 +860,11 @@ impl Character {
         }
         if let Some(deg) = self.behavior.env.face_turn.take() {
             self.snap_yaw(self.body.yaw - deg.to_radians());
+        }
+        // A free move start the script began off the old facing (held at forward) runs along
+        // the stick, as the idle start does.
+        if self.behavior.env.free_move_turn.take() {
+            self.turn_body_to_stick();
         }
         let lock_angle_released = self.behavior.env.release_lock_angle.take();
 
