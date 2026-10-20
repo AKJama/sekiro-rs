@@ -43,9 +43,18 @@ impl GameFonts {
     }
 
     pub fn ui(&self, px: f32) -> TextFont {
+        self.sized(bevy::text::FontSize::Px(px))
+    }
+
+    /// The UI font `px` high on the game's 1920 x 1080 screen, scaled with the window's height.
+    pub fn stage(&self, px: f32) -> TextFont {
+        self.sized(bevy::text::FontSize::Vh(px / 10.8))
+    }
+
+    fn sized(&self, font_size: bevy::text::FontSize) -> TextFont {
         TextFont {
             font: self.ui.clone().map(FontSource::Handle).unwrap_or_default(),
-            font_size: bevy::text::FontSize::Px(px),
+            font_size,
             ..default()
         }
     }
@@ -82,6 +91,37 @@ pub fn menu_texts(cache: &Path, bank: &str) -> BTreeMap<i32, String> {
         .unwrap_or_default()
 }
 
+/// The menu atlases the screens draw from, loaded once when the app is built.
+#[derive(Resource, Default)]
+pub struct MenuArt(HashMap<&'static str, MenuAtlas>);
+
+impl MenuArt {
+    const ATLASES: [&'static str; 3] = ["SB_TextEffect", "SB_KeyTop", "SB_In_Game"];
+
+    /// Loads the atlases and inserts them, unless an earlier screen already did; call after the
+    /// asset plugins are added and before `Startup`.
+    pub fn insert(app: &mut App) {
+        if app.world().contains_resource::<Self>() {
+            return;
+        }
+        let cache = sekiro_sim::cache::root();
+        let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+        let atlases = MenuAtlas::load_many(&cache, &Self::ATLASES, &mut images);
+        let art = Self::ATLASES
+            .into_iter()
+            .zip(atlases)
+            .filter_map(|(name, atlas)| Some((name, atlas?)))
+            .collect();
+        app.insert_resource(Self(art));
+    }
+
+    /// The sprite `name` of `atlas` (`SB_TextEffect`, `MENU_Death`) as a UI image, with its
+    /// width over height.
+    pub fn sprite(&self, atlas: &str, name: &str) -> Option<(ImageNode, f32)> {
+        self.0.get(atlas)?.sprite(name)
+    }
+}
+
 /// Sprites of one menu atlas (`SB_TextEffect`, `SB_Title`, ...): its texture and regions.
 pub struct MenuAtlas {
     image: Handle<Image>,
@@ -89,34 +129,47 @@ pub struct MenuAtlas {
 }
 
 impl MenuAtlas {
-    /// The atlas `name` from `cache/raw/menu/hi/01_common`, or `None` with a warning.
-    pub fn load(cache: &Path, name: &str, images: &mut Assets<Image>) -> Option<Self> {
+    /// The atlases `names` from `cache/raw/menu/hi/01_common`, in order, `None` (with a
+    /// warning) for one that does not load; the 94 MB texture file is read once.
+    pub fn load_many(
+        cache: &Path,
+        names: &[&str],
+        images: &mut Assets<Image>,
+    ) -> Vec<Option<Self>> {
         let dir = cache.join("raw/menu/hi");
-        let mut load = || -> Result<Self, String> {
-            let layout = std::fs::read(dir.join(format!("01_common.sblytbnd.d/{name}.layout")))
+        let tpf = std::fs::read(dir.join("01_common.tpf")).map_err(|e| e.to_string());
+        let textures = tpf
+            .as_deref()
+            .map_err(Clone::clone)
+            .and_then(|b| sekiro_formats::tpf::parse(b).map_err(|e| e.to_string()));
+        names
+            .iter()
+            .map(|name| {
+                let textures = textures.as_ref().map_err(Clone::clone)?;
+                let layout = std::fs::read(dir.join(format!("01_common.sblytbnd.d/{name}.layout")))
+                    .map_err(|e| e.to_string())?;
+                let atlas =
+                    sekiro_formats::menu_layout::parse(&layout).map_err(|e| e.to_string())?;
+                let texture = textures
+                    .iter()
+                    .find(|t| format!("{}.png", t.name).eq_ignore_ascii_case(&atlas.image))
+                    .ok_or_else(|| format!("no texture {}", atlas.image))?;
+                let image = Image::from_buffer(
+                    texture.dds,
+                    bevy::image::ImageType::Extension("dds"),
+                    bevy::image::CompressedImageFormats::all(),
+                    true,
+                    bevy::image::ImageSampler::linear(),
+                    bevy::asset::RenderAssetUsages::RENDER_WORLD,
+                )
                 .map_err(|e| e.to_string())?;
-            let atlas = sekiro_formats::menu_layout::parse(&layout).map_err(|e| e.to_string())?;
-            let tpf = std::fs::read(dir.join("01_common.tpf")).map_err(|e| e.to_string())?;
-            let textures = sekiro_formats::tpf::parse(&tpf).map_err(|e| e.to_string())?;
-            let texture = textures
-                .iter()
-                .find(|t| format!("{}.png", t.name).eq_ignore_ascii_case(&atlas.image))
-                .ok_or_else(|| format!("no texture {}", atlas.image))?;
-            let image = Image::from_buffer(
-                texture.dds,
-                bevy::image::ImageType::Extension("dds"),
-                bevy::image::CompressedImageFormats::all(),
-                true,
-                bevy::image::ImageSampler::linear(),
-                bevy::asset::RenderAssetUsages::RENDER_WORLD,
-            )
-            .map_err(|e| e.to_string())?;
-            Ok(Self {
-                image: images.add(image),
-                regions: atlas.regions,
+                Ok(Self {
+                    image: images.add(image),
+                    regions: atlas.regions,
+                })
             })
-        };
-        load().inspect_err(|e| warn!("menu atlas {name}: {e}")).ok()
+            .map(|r: Result<Self, String>| r.inspect_err(|e| warn!("menu atlas: {e}")).ok())
+            .collect()
     }
 
     /// The sprite `name` (`MENU_Death`) as a UI image, with its width over height.

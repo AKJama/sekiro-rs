@@ -31,6 +31,7 @@ mod dragon_trees;
 pub mod father_bird;
 #[path = "headless_ape.rs"]
 pub mod headless_ape;
+pub mod idol;
 #[path = "monk_phantoms.rs"]
 pub mod monk_phantoms;
 #[path = "old_dragons.rs"]

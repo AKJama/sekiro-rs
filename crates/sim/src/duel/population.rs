@@ -314,6 +314,26 @@ impl Population {
 }
 
 impl Duel {
+    /// Every foe back at its start, alive and unaware, as after Wolf's death or a rest.
+    pub(super) fn respawn_foes(&mut self, population: &mut Population) {
+        for foe in &mut population.foes {
+            self.swap_screen_player(&mut foe.duel);
+            if let Err(error) = foe.duel.reset() {
+                eprintln!("population {} respawn failed: {error}", foe.part);
+            }
+            self.swap_screen_player(&mut foe.duel);
+            if let Some(ai) = &mut foe.duel.ai {
+                ai.state.patrol.clone_from(&foe.initial_patrol);
+            }
+            foe.clock = 0.0;
+            foe.memory = 0.0;
+            foe.accrued = 0.0;
+            foe.search_left = 0.0;
+            foe.sees = false;
+        }
+        population.locked = None;
+    }
+
     pub fn set_population(&mut self, population: Population) {
         self.events = None;
         self.boss_brain = None;
@@ -335,22 +355,7 @@ impl Duel {
                 if let Err(error) = self.reset() {
                     eprintln!("population Wolf respawn failed: {error}");
                 } else {
-                    for foe in &mut population.foes {
-                        self.swap_screen_player(&mut foe.duel);
-                        if let Err(error) = foe.duel.reset() {
-                            eprintln!("population {} respawn failed: {error}", foe.part);
-                        }
-                        self.swap_screen_player(&mut foe.duel);
-                        if let Some(ai) = &mut foe.duel.ai {
-                            ai.state.patrol.clone_from(&foe.initial_patrol);
-                        }
-                        foe.clock = 0.0;
-                        foe.memory = 0.0;
-                        foe.accrued = 0.0;
-                        foe.search_left = 0.0;
-                        foe.sees = false;
-                    }
-                    population.locked = None;
+                    self.respawn_foes(&mut population);
                     respawned = true;
                 }
             }
