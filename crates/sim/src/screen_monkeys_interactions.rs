@@ -1,15 +1,14 @@
 //! Hall bell interaction geometry from the placed object and installed action parameters.
 
 use crate::{Character, InputFrame};
-use glam::{Mat4, Vec3};
+use glam::Mat4;
 use serde_json::Value;
 use std::path::Path;
 
 pub struct Bell {
     pub point: [f32; 3],
-    pub radius: f32,
-    pub height: f32,
-    pub base_height: f32,
+    /// Its ActionButtonParam cylinder about `point`.
+    pub reach: crate::items::Reach,
     pub player_animation: i32,
     pressed: bool,
     pub activated: bool,
@@ -94,11 +93,7 @@ impl Bell {
         let point = part.matrix().transform_point3(local);
         Ok(Self {
             point: [-point.x, point.y, point.z],
-            radius: button["radius"].as_f64().ok_or("bell radius absent")? as f32,
-            height: button["height"].as_f64().ok_or("bell height absent")? as f32,
-            base_height: button["baseHeightOffset"]
-                .as_f64()
-                .ok_or("bell base height absent")? as f32,
+            reach: crate::items::Reach::from_button(&button).ok_or("bell reach absent")?,
             player_animation: action["playerAnimId"]
                 .as_i64()
                 .ok_or("bell player animation absent")? as i32,
@@ -111,14 +106,10 @@ impl Bell {
     pub fn step(&mut self, player: &Character, input: &InputFrame, player_height: f32) {
         let pressed = input.buttons.action && !self.pressed;
         self.pressed = input.buttons.action;
-        let target = Vec3::from_array(self.point);
-        let feet = Vec3::from_array(player.body.position);
-        let delta = target - feet;
-        let horizontal = Vec3::new(delta.x, 0.0, delta.z).length();
-        let bottom = target.y + self.base_height;
-        let top = bottom + self.height;
-        self.available =
-            horizontal <= self.radius && feet.y <= top && feet.y + player_height >= bottom;
+        self.available = self
+            .reach
+            .distance(self.point, player.body.position, player_height)
+            .is_some();
         self.activated = pressed && self.available;
     }
 }

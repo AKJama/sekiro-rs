@@ -5,6 +5,9 @@
 //! gap: nothing spends from the kit yet (no gourd drinking, shops, skill purchase), and death
 //! does not take its half of the Sen and experience (TentativePlayerParam `MoneyLostRate` /
 //! `SkillPointLostRate` 50).
+//! Map items (`crate::items`) go into the goods with [`Kit::add`], and their taken flags too.
+
+use std::collections::BTreeSet;
 
 /// Experience from skill point n to n + 1 (n = points earned so far, spent or not); past the
 /// table the last step repeats. The exe computes it, not the params: the table is the one the
@@ -72,6 +75,8 @@ pub struct Kit {
     pub rewards: u32,
     /// The gain of the latest of those earns.
     pub last_reward: Reward,
+    /// ItemLotParam `getItemFlagId`s of the map items taken: they stay gone.
+    pub taken_flags: BTreeSet<i32>,
 }
 
 impl Default for Kit {
@@ -130,6 +135,7 @@ impl Default for Kit {
             skills: vec![280],
             rewards: 0,
             last_reward: Reward::default(),
+            taken_flags: BTreeSet::new(),
         }
     }
 }
@@ -144,6 +150,22 @@ impl Kit {
                 .iter()
                 .find(|(i, _)| *i == id)
                 .map_or(0, |(_, n)| *n)
+        }
+    }
+
+    /// Takes `n` of the goods `id` up to `max` carried (EquipParamGoods `maxNum`); Spirit
+    /// Emblems (goods 1000) go onto their count.
+    /// gap: the game sends what is over `max` to the Storage; here it is left behind.
+    pub fn add(&mut self, id: i32, n: u32, max: u32) {
+        if id == crate::items::SPIRIT_EMBLEM {
+            self.spirit_emblems += n.min(max.saturating_sub(self.spirit_emblems));
+            return;
+        }
+        let added = n.min(max.saturating_sub(self.count(id)));
+        match self.goods.iter_mut().find(|(g, _)| *g == id) {
+            Some((_, held)) => *held += added,
+            None if added > 0 => self.goods.push((id, added)),
+            None => {}
         }
     }
 

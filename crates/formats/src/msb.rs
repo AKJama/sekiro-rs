@@ -271,6 +271,21 @@ pub struct Msb {
     pub map_offsets: Vec<MapOffset>,
     pub regions: Vec<MapRegion>,
     pub patrols: Vec<PatrolInfo>,
+    pub treasures: Vec<Treasure>,
+}
+
+/// MSBS type-4 Treasure event: an item lot picked up at a part (SoulsFormats `MSBS.Event.Treasure`).
+#[derive(Debug, Clone)]
+pub struct Treasure {
+    pub name: String,
+    /// Index into the full parts table, or -1.
+    pub part_index: i32,
+    /// ItemLotParam row, or -1.
+    pub item_lot: i32,
+    /// ActionButtonParam row, -1 for the default pick-up button.
+    pub action_button: i32,
+    pub in_chest: bool,
+    pub start_disabled: bool,
 }
 
 /// MSBS type-14 PatrolInfo, in event-list order (EnemyData::walk_route_index).
@@ -460,6 +475,9 @@ pub fn parse(data: &[u8]) -> Result<Msb> {
                     if let Some(offset) = read_map_offset(data, e)? {
                         msb.map_offsets.push(offset);
                     }
+                    if let Some(treasure) = read_treasure(data, e)? {
+                        msb.treasures.push(treasure);
+                    }
                 }
             }
             _ => {}
@@ -518,6 +536,34 @@ fn read_map_offset(data: &[u8], start: usize) -> Result<Option<MapOffset>> {
         entity_id: base.i32()?,
         position: t.vec3()?,
         rotation_y: t.f32()?,
+    }))
+}
+
+fn read_treasure(data: &[u8], start: usize) -> Result<Option<Treasure>> {
+    let mut r = Reader::at(data, start);
+    let name_offset = r.offset64()?;
+    r.skip(4);
+    if r.u32()? != 4 {
+        return Ok(None);
+    }
+    let type_offset = Reader::at(data, start + 0x20).offset64()?;
+    // Type data: 8 unused bytes, part index, 4 unused, item lot, 0x24 bytes of 0xFF, then
+    // ActionButtonID, PickupAnimID (unused here), InChest and StartDisabled.
+    let mut t = Reader::at(data, start + type_offset + 8);
+    let part_index = t.i32()?;
+    t.skip(4);
+    let item_lot = t.i32()?;
+    t.skip(0x24);
+    let action_button = t.i32()?;
+    t.skip(4);
+    let flags = t.bytes(2)?;
+    Ok(Some(Treasure {
+        name: utf16z(data, start + name_offset)?,
+        part_index,
+        item_lot,
+        action_button,
+        in_chest: flags[0] != 0,
+        start_disabled: flags[1] != 0,
     }))
 }
 
@@ -854,5 +900,28 @@ mod env_tests {
             r.size
                 .is_none_or(|s| s.iter().all(|x| x.is_finite() && *x > 0.))
         }));
+    }
+
+    #[test]
+    fn ashina_outskirts_treasures() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../cache/raw/map/mapstudio/m11_00_00_00.msb");
+        if !path.exists() {
+            return;
+        }
+        let msb = super::parse(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(msb.treasures.len(), 73);
+        assert_eq!(
+            msb.treasures.iter().filter(|t| t.start_disabled).count(),
+            16
+        );
+        let pellet = msb
+            .treasures
+            .iter()
+            .find(|t| t.name == "Item_宝_02")
+            .unwrap();
+        assert_eq!((pellet.item_lot, pellet.action_button), (1100020, -1));
+        let part = msb.part_by_index(pellet.part_index).unwrap();
+        assert!((part.position[0] - 146.2).abs() < 0.01);
     }
 }

@@ -219,6 +219,13 @@ pub struct ArenaVisibility {
     pub maps: BTreeMap<String, EventState>,
 }
 
+/// Map items' marker parts taken (`crate::play` pickups): a taken one is hidden, and the
+/// snapshot has no opinion on any other part.
+#[derive(Resource, Default)]
+pub struct TakenVisibility {
+    pub maps: BTreeMap<String, EventState>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MaskContribution {
     pub source_map: String,
@@ -448,6 +455,7 @@ impl Plugin for MapVisibilityPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AuthoredVisibility>()
             .init_resource::<ArenaVisibility>()
+            .init_resource::<TakenVisibility>()
             .init_resource::<VisibilityBlocks>()
             .configure_sets(
                 PostUpdate,
@@ -476,6 +484,7 @@ fn visibility_changed() -> impl SystemCondition<()> {
         resource_changed::<VisibilityBlocks>
             .or_eager(resource_changed::<AuthoredVisibility>)
             .or_eager(resource_changed::<ArenaVisibility>)
+            .or_eager(resource_changed::<TakenVisibility>)
             .or_eager(resource_changed_or_removed::<super::story::MapStory>)
             .or_eager(
                 |parts: Query<(&VisibilityPart, &Visibility), VisibilityChanges>| !parts.is_empty(),
@@ -487,7 +496,7 @@ fn write_visibility(
     mut commands: Commands,
     blocks: Res<VisibilityBlocks>,
     authored: Res<AuthoredVisibility>,
-    arena: Res<ArenaVisibility>,
+    (taken, arena): (Res<TakenVisibility>, Res<ArenaVisibility>),
     story: Option<Res<super::story::MapStory>>,
     mut last_debug: Local<BTreeMap<Entity, Value>>,
     mut parts: Query<(
@@ -509,10 +518,11 @@ fn write_visibility(
     for (entity, part, mut visibility, previous) in &mut parts {
         let default_block = BlockVisibility::default();
         let block = blocks.0.get(&part.map).unwrap_or(&default_block);
-        let event = arena
+        let event = taken
             .maps
             .get(&part.map)
             .and_then(|s| s.enabled(part))
+            .or_else(|| arena.maps.get(&part.map).and_then(|s| s.enabled(part)))
             .or_else(|| authored.maps.get(&part.map).and_then(|s| s.enabled(part)))
             .or_else(|| {
                 story
@@ -629,6 +639,7 @@ mod tests {
         let row = part("MapPiece");
         app.init_resource::<AuthoredVisibility>()
             .init_resource::<ArenaVisibility>()
+            .init_resource::<TakenVisibility>()
             .init_resource::<Runs>()
             .insert_resource(VisibilityBlocks(BTreeMap::from([(
                 row.map.clone(),

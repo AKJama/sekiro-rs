@@ -46,7 +46,6 @@ const KEY_CLOSE: i32 = 110001;
 const TEXT: Color = Color::srgb(0.88, 0.85, 0.78);
 const DIM: Color = Color::srgba(0.75, 0.72, 0.66, 0.85);
 const GREYED: Color = Color::srgba(0.7, 0.68, 0.64, 0.4);
-const GUIDE_TEXT: Color = Color::srgb(0.9, 0.87, 0.8);
 const CURSOR: Color = Color::srgba(0.8, 0.55, 0.3, 0.95);
 
 /// The play world's idols: where Wolf kneels at each (for the sim) and its name.
@@ -167,27 +166,7 @@ fn spawn(mut commands: Commands, fonts: Res<GameFonts>, art: Res<MenuArt>) {
     let text = |t: String, px: f32, color: Color| fonts.shadowed(t, px, color);
 
     // The guide, low in the middle: "[E] : Rest".
-    commands
-        .spawn((
-            Guide,
-            Node {
-                position_type: PositionType::Absolute,
-                width: percent(100),
-                bottom: percent(5),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                column_gap: px(2),
-                ..default()
-            },
-            Visibility::Hidden,
-        ))
-        .with_children(|r| {
-            match key("KG_Key_E", 22.0) {
-                Some(icon) => r.spawn(icon),
-                None => r.spawn(text("E".into(), 16.5, GUIDE_TEXT)),
-            };
-            r.spawn(text(format!(" : {}", event(REST)), 16.5, GUIDE_TEXT));
-        });
+    crate::game_ui::spawn_action_guide(&mut commands, &fonts, &art, &event(REST), Guide);
 
     // The menu: a dark fade on the left with the idol's name, the rows, the help line and the
     // key guide.
