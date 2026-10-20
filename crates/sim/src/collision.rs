@@ -884,9 +884,9 @@ impl CollisionWorld {
                     continue;
                 };
                 for &t in cell {
-                    let [min_y, max_y] = self.heights[t as usize];
-                    if max_y < centre
-                        || min_y > high
+                    let [lo, hi] = self.bounds[t as usize];
+                    if hi.y < centre
+                        || lo.y > high
                         || self.normals[t as usize].y.abs() < self.min_walk_ny
                         || !self.solid(t)
                         || !self.live(t, who)
