@@ -4,7 +4,8 @@
 //!
 //! One line per segment of rendered frames: `<frames> <keys> [<mouse_dx> <mouse_dy>]`, where
 //! keys is a comma list of `W A S D Q E Z X C V Space Shift Esc Enter Up Down Left Right F3 F8
-//! Click` (`Click` is the left mouse button; a key named in consecutive segments stays held) or
+//! Click MMB` (`Click` is the left mouse button, `MMB` the middle one, the game's lock-on; a key
+//! named in consecutive segments stays held) or
 //! `-`, and the mouse moves by the given counts every frame. `#` starts a comment. Frames count
 //! from the first frame the simulation runs. A line `shot <path>` saves a screenshot there when
 //! the replay gets to it, so a run can capture screens that pause the simulation (the in-game
@@ -31,9 +32,17 @@ pub struct Segment {
     /// A screenshot saved where the segment starts (a `shot` line, which has no frames).
     pub shot: Option<std::path::PathBuf>,
     pub keys: Vec<KeyCode>,
-    /// Left mouse button held.
-    pub click: bool,
+    /// Mouse buttons held (`Click` left, `MMB` middle).
+    pub buttons: Vec<MouseButton>,
     pub mouse: Vec2,
+}
+
+fn button(name: &str) -> Option<MouseButton> {
+    match name {
+        "Click" => Some(MouseButton::Left),
+        "MMB" => Some(MouseButton::Middle),
+        _ => None,
+    }
 }
 
 fn key(name: &str) -> Result<KeyCode, String> {
@@ -75,7 +84,7 @@ pub fn parse(text: &str) -> Result<Vec<Segment>, String> {
                 frames: 0,
                 shot: Some(path.trim().into()),
                 keys: Vec::new(),
-                click: false,
+                buttons: Vec::new(),
                 mouse: Vec2::ZERO,
             });
             continue;
@@ -89,10 +98,10 @@ pub fn parse(text: &str) -> Result<Vec<Segment>, String> {
             "-" => Vec::new(),
             list => list.split(',').collect(),
         };
-        let click = names.contains(&"Click");
+        let buttons = names.iter().filter_map(|n| button(n)).collect();
         let keys = names
             .into_iter()
-            .filter(|n| *n != "Click")
+            .filter(|n| button(n).is_none())
             .map(key)
             .collect::<Result<_, _>>()
             .map_err(err)?;
@@ -105,7 +114,7 @@ pub fn parse(text: &str) -> Result<Vec<Segment>, String> {
             frames,
             shot: None,
             keys,
-            click,
+            buttons,
             mouse,
         });
     }
@@ -119,7 +128,7 @@ pub struct InputReplay {
     /// Frames replayed so far.
     pub frame: usize,
     held: Vec<KeyCode>,
-    clicking: bool,
+    held_buttons: Vec<MouseButton>,
     /// Screenshots due and not yet taken: the window takes one a frame.
     shots: Vec<std::path::PathBuf>,
     /// Set by the game once the simulation runs; frames count from there.
@@ -132,7 +141,7 @@ impl InputReplay {
             segments,
             frame: 0,
             held: Vec::new(),
-            clicking: false,
+            held_buttons: Vec::new(),
             shots: Vec::new(),
             running: false,
         }
@@ -200,9 +209,9 @@ pub fn inject(
             .spawn(bevy::render::view::screenshot::Screenshot::primary_window())
             .observe(bevy::render::view::screenshot::save_to_disk(path));
     }
-    let (want, click, mouse) = match replay.segment_at(frame) {
-        Some(s) => (s.keys.clone(), s.click, s.mouse),
-        None => (Vec::new(), false, Vec2::ZERO),
+    let (want, want_buttons, mouse) = match replay.segment_at(frame) {
+        Some(s) => (s.keys.clone(), s.buttons.clone(), s.mouse),
+        None => (Vec::new(), Vec::new(), Vec2::ZERO),
     };
     let message = |key_code: KeyCode, state: ButtonState| KeyboardInput {
         key_code,
@@ -219,18 +228,25 @@ pub fn inject(
         keys.write(message(*k, ButtonState::Pressed));
     }
     replay.held = want;
-    if click != replay.clicking {
-        buttons.write(MouseButtonInput {
-            button: MouseButton::Left,
-            state: if click {
-                ButtonState::Pressed
-            } else {
-                ButtonState::Released
-            },
-            window,
-        });
-        replay.clicking = click;
+    let button = |button: MouseButton, state: ButtonState| MouseButtonInput {
+        button,
+        state,
+        window,
+    };
+    for b in replay
+        .held_buttons
+        .iter()
+        .filter(|b| !want_buttons.contains(b))
+    {
+        buttons.write(button(*b, ButtonState::Released));
     }
+    for b in want_buttons
+        .iter()
+        .filter(|b| !replay.held_buttons.contains(b))
+    {
+        buttons.write(button(*b, ButtonState::Pressed));
+    }
+    replay.held_buttons = want_buttons;
     if mouse != Vec2::ZERO {
         motion.write(MouseMotion { delta: mouse });
     }
@@ -243,10 +259,11 @@ mod tests {
 
     #[test]
     fn parses_keys_clicks_and_mouse() {
-        let s = parse("# x\n10 W,D,Click 3 -1\n5 -\n").unwrap();
+        let s = parse("# x\n10 W,D,Click,MMB 3 -1\n5 -\n").unwrap();
         assert_eq!(s.len(), 2);
         assert_eq!(s[0].keys, vec![KeyCode::KeyW, KeyCode::KeyD]);
-        assert!(s[0].click && !s[1].click);
+        assert_eq!(s[0].buttons, vec![MouseButton::Left, MouseButton::Middle]);
+        assert!(s[1].buttons.is_empty());
         assert_eq!(s[0].mouse, Vec2::new(3.0, -1.0));
         assert_eq!(s[1].mouse, Vec2::ZERO);
         assert_eq!(parse("3 X").unwrap()[0].keys, vec![KeyCode::KeyX]);

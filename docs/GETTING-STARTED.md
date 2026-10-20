@@ -74,7 +74,7 @@ $game = 'target/release/sekiro-rs.exe'
 
 Useful flags: `--progression castle-roof` (Wolf's attack power at that point in the game), `--god` (you cannot die), `--immortal` (you cannot die but posture still breaks), `--hour 0-23` (time of day; arenas default to their story time, evening for the Owl and morning for Genichiro), `--enemy cXXXX` (any character by id).
 
-Controls: WASD move, mouse camera, left mouse attack, right mouse guard and deflect, Space jump, Shift step (hold to sprint), C crouch, Q lock-on, E grab a ledge or hug a wall, F grappling hook, Esc pause menu.
+Controls: WASD move, mouse camera, left mouse attack, right mouse guard and deflect, Space jump, Shift step (hold to sprint), Q crouch, middle mouse lock-on, E grab a ledge or hug a wall, F grappling hook, Esc pause menu.
 A gamepad works too.
 
 ## The boss brain

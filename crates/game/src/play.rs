@@ -9,11 +9,12 @@
 //! reported clip at the reported time with root motion disabled, crossfading over the blend-in,
 //! and the entity follows the simulated body.
 //!
-//! Controls follow Sekiro's PC defaults where possible: WASD move, mouse look, LMB attack, RMB
-//! guard, Space jump, Shift step (hold to sprint), C crouch, F grapple, Ctrl or MMB prosthetic,
-//! R item, Q lock-on. Gamepad: left stick move, right stick camera, R1 attack, L1 guard, A jump,
-//! B step/sprint, L3 crouch, L2 grapple, R2 prosthetic, X item, R3 lock-on. Esc opens the pause menu;
-//! minus and equals (or `[` and `]`) change the volume (`crate::audio`).
+//! Controls are Sekiro's PC defaults (DefaultKeyAssignParam00, as read by FwLo's RustSekiro):
+//! WASD move, mouse look, LMB attack, RMB guard, Space jump, Shift step (hold to sprint), Q
+//! crouch, F grapple, E action, Ctrl prosthetic, R item, middle mouse lock-on. Gamepad: left
+//! stick move, right stick camera, R1 attack, L1 guard, A jump, B step/sprint, L3 crouch, L2
+//! grapple, R2 prosthetic, X item, R3 lock-on. In menus E is OK and Q is back. Esc opens the
+//! pause menu; minus and equals (or `[` and `]`) change the volume (`crate::audio`).
 //!
 //! With `--map <id> [--start <n>]` the fight happens on an exported map instead of the floor:
 //! Wolf stands at the player start, the enemy 5 m in front of him, both bodies walk on the
@@ -1250,13 +1251,13 @@ fn gather_input(
         guard: mouse.pressed(MouseButton::Right),
         jump: key(KeyCode::Space),
         dodge: key(KeyCode::ShiftLeft) || key(KeyCode::ShiftRight),
-        crouch: key(KeyCode::KeyC),
+        crouch: key(KeyCode::KeyQ),
         grapple: key(KeyCode::KeyF),
         action: key(KeyCode::KeyE),
-        prosthetic: key(PROSTHETIC_KEY) || mouse.pressed(MouseButton::Middle),
+        prosthetic: key(PROSTHETIC_KEY),
         item: key(ITEM_KEY),
         combat_art: false,
-        lock_on: key(KeyCode::KeyQ),
+        lock_on: mouse.pressed(MouseButton::Middle),
     };
     for pad in &gamepads {
         let s = pad.left_stick();
@@ -2160,9 +2161,9 @@ fn hud(
     {
         s += "E / Y: Ring bell\n";
     }
-    s += "WASD move, mouse look, LMB attack, RMB guard, Space jump, Shift step/sprint, C crouch, ";
+    s += "WASD move, mouse look, LMB attack, RMB guard, Space jump, Shift step/sprint, Q crouch, ";
     if sim.enemy_present || sim.duel.population.is_some() {
-        s += "Q lock-on, ";
+        s += "MMB lock-on, ";
     }
     s += "Esc pause, F3 debug text, -/= volume";
     text.0 = s;
@@ -2717,7 +2718,9 @@ mod tests {
             assert!(text.contains("F3 debug text"));
             assert_eq!(text.contains("refs"), visible);
             assert!(
-                !text.contains("Enemy") && !text.contains("Ashina") && !text.contains("Q lock-on")
+                !text.contains("Enemy")
+                    && !text.contains("Ashina")
+                    && !text.contains("MMB lock-on")
             );
             let gauges = app.world().resource::<combat_hud::Gauges>();
             assert!(!gauges.enemy_alive && !gauges.boss_bar && !gauges.deathblow);

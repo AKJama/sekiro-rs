@@ -650,7 +650,7 @@ pub fn player_start(dir: &Path, index: usize) -> Result<(Vec3, f32)> {
 /// Adds a map to an app built with `DefaultPlugins`: its pieces, draw-group culling around the
 /// [`MapFocus`] entity, a sun, ambient light, sky colour, fog and far plane on every 3D camera,
 /// and the collision view. The viewer's keys (C collision, G group modes, M markers) are
-/// [`run`]'s own: in play C crouches. A connected world uses the block `stories` already loaded
+/// [`run`]'s own: in play Q crouches. A connected world uses the block `stories` already loaded
 /// (the play world's collision, [`world::collision_world`]) and loads the rest; a map shown
 /// alone uses none.
 pub fn add_map(
