@@ -15,7 +15,7 @@ New-Item -ItemType Directory -Force cache/perf | Out-Null
 
 # Walk (or wait) 300 frames, lock on, then 72 left clicks five frames apart.
 function Write-Replay([string]$path, [string]$walk) {
-    $lines = @('20 -', '1 Click', '10 -', "300 $walk", '1 Q', '20 -')
+    $lines = @('20 -', '1 Click', '10 -', "300 $walk", '1 MMB', '20 -')
     foreach ($i in 1..72) { $lines += '1 Click'; $lines += '4 -' }
     $lines += '30 -'
     Set-Content -Path $path -Value $lines -Encoding ascii

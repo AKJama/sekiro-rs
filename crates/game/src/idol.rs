@@ -249,10 +249,10 @@ fn fade(alpha: f32) -> Color {
     Color::BLACK.with_alpha(alpha)
 }
 
-/// The menu's keys while Wolf prays: up and down pick a row, Enter (or E, A) takes it, Esc
-/// (or Q, B) stands him up.
+/// The menu's keys while Wolf prays: up and down pick a row, OK (Enter, Space, E, A) takes it,
+/// Esc or back (Q, B) stands him up.
 fn menu_keys(
-    mut keys: ResMut<ButtonInput<KeyCode>>,
+    keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
     mut row: ResMut<Row>,
     mut sim: NonSendMut<Sim>,
@@ -260,9 +260,6 @@ fn menu_keys(
     if sim.duel.idol_phase() != Some(IdolPhase::Praying) {
         return;
     }
-    // Q is also crouch: it is taken here so the press that stands Wolf up does not crouch him.
-    let q_back = keys.just_pressed(KeyCode::KeyQ);
-    keys.reset(KeyCode::KeyQ);
     let pad = |b| pads.iter().any(|p| p.just_pressed(b));
     let key = |k: &[KeyCode]| keys.any_just_pressed(k.iter().copied());
     if key(&[KeyCode::ArrowDown, KeyCode::KeyS]) || pad(GamepadButton::DPadDown) {
@@ -271,11 +268,10 @@ fn menu_keys(
     if key(&[KeyCode::ArrowUp, KeyCode::KeyW]) || pad(GamepadButton::DPadUp) {
         row.0 = (row.0 + ROWS.len() - 1) % ROWS.len();
     }
-    if (key(&[KeyCode::Enter, KeyCode::KeyE]) || pad(GamepadButton::South)) && ROWS[row.0].0 == REST
-    {
+    if crate::menu::ok_pressed(&keys, &pads) && ROWS[row.0].0 == REST {
         sim.duel.rest_at_idol();
     }
-    if q_back || key(&[KeyCode::Escape, KeyCode::Backspace]) || pad(GamepadButton::East) {
+    if key(&[KeyCode::Escape, KeyCode::Backspace]) || crate::menu::back_pressed(&keys, &pads) {
         sim.duel.leave_idol();
     }
 }

@@ -389,25 +389,21 @@ pub(super) fn install(app: &mut App, attack: u8) {
 
 /// Tab and category switches, wrapped cursor movement, and the Options actions only.
 fn menu_keys(
-    mut keys: ResMut<ButtonInput<KeyCode>>,
+    keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
     mut menu: ResMut<GameMenu>,
     mut view: ResMut<crate::menu::PauseView>,
     book: Res<Book>,
     sim: NonSend<Sim>,
 ) {
-    // Q is also crouch: it is taken here so the press that closes the menu does not crouch Wolf.
-    let q_back = keys.just_pressed(KeyCode::KeyQ);
-    keys.reset(KeyCode::KeyQ);
     let key = |k: &[KeyCode]| keys.any_just_pressed(k.iter().copied());
     let pad = |b| pads.iter().any(|p| p.just_pressed(b));
-    // The game's menu keys (FwLo's RustSekiro, after the game): X / Z the tab, E OK, Q back.
-    if key(&[KeyCode::KeyX]) || pad(GamepadButton::RightTrigger) {
+    if key(&[crate::menu::MENU_NEXT_TAB_KEY]) || pad(GamepadButton::RightTrigger) {
         menu.tab = (menu.tab + 1) % TABS.len();
         menu.index = 0;
         menu.top = 0;
     }
-    if key(&[KeyCode::KeyZ]) || pad(GamepadButton::LeftTrigger) {
+    if key(&[crate::menu::MENU_PREVIOUS_TAB_KEY]) || pad(GamepadButton::LeftTrigger) {
         menu.tab = (menu.tab + TABS.len() - 1) % TABS.len();
         menu.index = 0;
         menu.top = 0;
@@ -425,13 +421,11 @@ fn menu_keys(
             menu.top = 0;
         }
     }
-    if menu.tab == 3
-        && (key(&[KeyCode::Enter, KeyCode::Space, KeyCode::KeyE]) || pad(GamepadButton::South))
-    {
+    if menu.tab == 3 && crate::menu::ok_pressed(&keys, &pads) {
         view.request = Some(menu.index);
     }
-    // Q and B back out of the menu, as Resume does.
-    if q_back || pad(GamepadButton::East) {
+    // Back (Q, B) closes the menu, as Resume and Esc do: it has no nested level.
+    if crate::menu::back_pressed(&keys, &pads) {
         view.request = Some(0);
     }
     // The pause's own arrows, D-pad and stick, plus WASD.

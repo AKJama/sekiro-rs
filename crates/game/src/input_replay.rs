@@ -32,21 +32,39 @@ pub struct Segment {
     /// A screenshot saved where the segment starts (a `shot` line, which has no frames).
     pub shot: Option<std::path::PathBuf>,
     pub keys: Vec<KeyCode>,
-    /// Mouse buttons held (`Click` left, `MMB` middle).
-    pub buttons: Vec<MouseButton>,
+    pub buttons: MouseButtons,
     pub mouse: Vec2,
 }
 
-fn button(name: &str) -> Option<MouseButton> {
-    match name {
-        "Click" => Some(MouseButton::Left),
-        "MMB" => Some(MouseButton::Middle),
-        _ => None,
+/// The mouse buttons a replay names: `Click` the left one, `MMB` the middle one.
+const MOUSE: [(&str, MouseButton); 2] =
+    [("Click", MouseButton::Left), ("MMB", MouseButton::Middle)];
+
+/// Mouse buttons held in a segment, a bit per entry of [`MOUSE`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MouseButtons(u8);
+
+impl MouseButtons {
+    pub fn iter(self) -> impl Iterator<Item = MouseButton> + Clone {
+        MOUSE
+            .iter()
+            .enumerate()
+            .filter(move |(i, _)| self.0 & (1 << i) != 0)
+            .map(|(_, (_, b))| *b)
     }
 }
 
-fn key(name: &str) -> Result<KeyCode, String> {
-    Ok(match name {
+/// One name in a segment's list.
+enum Input {
+    Key(KeyCode),
+    Mouse(usize),
+}
+
+fn input(name: &str) -> Result<Input, String> {
+    if let Some(i) = MOUSE.iter().position(|(n, _)| *n == name) {
+        return Ok(Input::Mouse(i));
+    }
+    Ok(Input::Key(match name {
         "W" => KeyCode::KeyW,
         "A" => KeyCode::KeyA,
         "S" => KeyCode::KeyS,
@@ -68,7 +86,7 @@ fn key(name: &str) -> Result<KeyCode, String> {
         "F8" => KeyCode::F8,
         "F3" => KeyCode::F3,
         other => return Err(format!("unknown key {other:?}")),
-    })
+    }))
 }
 
 pub fn parse(text: &str) -> Result<Vec<Segment>, String> {
@@ -84,7 +102,7 @@ pub fn parse(text: &str) -> Result<Vec<Segment>, String> {
                 frames: 0,
                 shot: Some(path.trim().into()),
                 keys: Vec::new(),
-                buttons: Vec::new(),
+                buttons: MouseButtons::default(),
                 mouse: Vec2::ZERO,
             });
             continue;
@@ -94,17 +112,16 @@ pub fn parse(text: &str) -> Result<Vec<Segment>, String> {
             return Err(err("expected frames keys [dx dy]".into()));
         }
         let frames = parts[0].parse().map_err(|e| err(format!("{e}")))?;
-        let names: Vec<&str> = match parts[1] {
-            "-" => Vec::new(),
-            list => list.split(',').collect(),
-        };
-        let buttons = names.iter().filter_map(|n| button(n)).collect();
-        let keys = names
-            .into_iter()
-            .filter(|n| button(n).is_none())
-            .map(key)
-            .collect::<Result<_, _>>()
-            .map_err(err)?;
+        let mut keys = Vec::new();
+        let mut buttons = MouseButtons::default();
+        if parts[1] != "-" {
+            for name in parts[1].split(',') {
+                match input(name).map_err(err)? {
+                    Input::Key(k) => keys.push(k),
+                    Input::Mouse(i) => buttons.0 |= 1 << i,
+                }
+            }
+        }
         let num = |s: &str| s.parse::<f32>().map_err(|e| err(format!("{e}")));
         let mouse = match parts.get(2..4) {
             Some([x, y]) => Vec2::new(num(x)?, num(y)?),
@@ -127,8 +144,9 @@ pub struct InputReplay {
     segments: Vec<Segment>,
     /// Frames replayed so far.
     pub frame: usize,
-    held: Vec<KeyCode>,
-    held_buttons: Vec<MouseButton>,
+    /// The segment whose keys and buttons are held now (none before the first and after the
+    /// last).
+    held: Option<usize>,
     /// Screenshots due and not yet taken: the window takes one a frame.
     shots: Vec<std::path::PathBuf>,
     /// Set by the game once the simulation runs; frames count from there.
@@ -140,8 +158,7 @@ impl InputReplay {
         Self {
             segments,
             frame: 0,
-            held: Vec::new(),
-            held_buttons: Vec::new(),
+            held: None,
             shots: Vec::new(),
             running: false,
         }
@@ -155,11 +172,11 @@ impl InputReplay {
         self.frame >= self.total_frames()
     }
 
-    fn segment_at(&self, frame: usize) -> Option<&Segment> {
+    fn segment_at(&self, frame: usize) -> Option<usize> {
         let mut start = 0;
-        for s in &self.segments {
+        for (i, s) in self.segments.iter().enumerate() {
             if frame < start + s.frames {
-                return Some(s);
+                return Some(i);
             }
             start += s.frames;
         }
@@ -209,48 +226,54 @@ pub fn inject(
             .spawn(bevy::render::view::screenshot::Screenshot::primary_window())
             .observe(bevy::render::view::screenshot::save_to_disk(path));
     }
-    let (want, want_buttons, mouse) = match replay.segment_at(frame) {
-        Some(s) => (s.keys.clone(), s.buttons.clone(), s.mouse),
-        None => (Vec::new(), Vec::new(), Vec2::ZERO),
-    };
-    let message = |key_code: KeyCode, state: ButtonState| KeyboardInput {
-        key_code,
-        logical_key: Key::Unidentified(NativeKey::Unidentified),
-        state,
-        text: None,
-        repeat: false,
-        window,
-    };
-    for k in replay.held.iter().filter(|k| !want.contains(k)) {
-        keys.write(message(*k, ButtonState::Released));
-    }
-    for k in want.iter().filter(|k| !replay.held.contains(k)) {
-        keys.write(message(*k, ButtonState::Pressed));
-    }
-    replay.held = want;
-    let button = |button: MouseButton, state: ButtonState| MouseButtonInput {
-        button,
-        state,
-        window,
-    };
-    for b in replay
-        .held_buttons
-        .iter()
-        .filter(|b| !want_buttons.contains(b))
-    {
-        buttons.write(button(*b, ButtonState::Released));
-    }
-    for b in want_buttons
-        .iter()
-        .filter(|b| !replay.held_buttons.contains(b))
-    {
-        buttons.write(button(*b, ButtonState::Pressed));
-    }
-    replay.held_buttons = want_buttons;
+    let now = replay.segment_at(frame);
+    let segment = |i: Option<usize>| i.map(|i| &replay.segments[i]);
+    let (was, want) = (segment(replay.held), segment(now));
+    let none: &[KeyCode] = &[];
+    let was_keys = was.map_or(none, |s| &s.keys).iter().copied();
+    let want_keys = want.map_or(none, |s| &s.keys).iter().copied();
+    held_diff(was_keys, want_keys, |key_code, state| {
+        keys.write(KeyboardInput {
+            key_code,
+            logical_key: Key::Unidentified(NativeKey::Unidentified),
+            state,
+            text: None,
+            repeat: false,
+            window,
+        });
+    });
+    let held_buttons = |s: Option<&Segment>| s.map_or(MouseButtons::default(), |s| s.buttons);
+    held_diff(
+        held_buttons(was).iter(),
+        held_buttons(want).iter(),
+        |button, state| {
+            buttons.write(MouseButtonInput {
+                button,
+                state,
+                window,
+            });
+        },
+    );
+    let mouse = want.map_or(Vec2::ZERO, |s| s.mouse);
+    replay.held = now;
     if mouse != Vec2::ZERO {
         motion.write(MouseMotion { delta: mouse });
     }
     replay.frame += 1;
+}
+
+/// Writes a release for each input held before and not now, then a press for each new one.
+fn held_diff<T: Copy + PartialEq>(
+    was: impl Iterator<Item = T> + Clone,
+    now: impl Iterator<Item = T> + Clone,
+    mut write: impl FnMut(T, ButtonState),
+) {
+    for i in was.clone().filter(|i| !now.clone().any(|n| n == *i)) {
+        write(i, ButtonState::Released);
+    }
+    for i in now.filter(|i| !was.clone().any(|w| w == *i)) {
+        write(i, ButtonState::Pressed);
+    }
 }
 
 #[cfg(test)]
@@ -262,12 +285,21 @@ mod tests {
         let s = parse("# x\n10 W,D,Click,MMB 3 -1\n5 -\n").unwrap();
         assert_eq!(s.len(), 2);
         assert_eq!(s[0].keys, vec![KeyCode::KeyW, KeyCode::KeyD]);
-        assert_eq!(s[0].buttons, vec![MouseButton::Left, MouseButton::Middle]);
-        assert!(s[1].buttons.is_empty());
+        assert_eq!(
+            s[0].buttons.iter().collect::<Vec<_>>(),
+            [MouseButton::Left, MouseButton::Middle]
+        );
+        assert_eq!(s[1].buttons.iter().count(), 0);
         assert_eq!(s[0].mouse, Vec2::new(3.0, -1.0));
         assert_eq!(s[1].mouse, Vec2::ZERO);
         assert_eq!(parse("3 X").unwrap()[0].keys, vec![KeyCode::KeyX]);
         assert!(parse("3 Unknown").is_err());
+        for script in [
+            include_str!("../scripts/held_move_kill.txt"),
+            include_str!("../scripts/input_camera_movement.txt"),
+        ] {
+            parse(script).unwrap();
+        }
         let s = parse(
             "4 -
 shot a.png

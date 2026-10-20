@@ -23,6 +23,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn keys_held_through_a_menu_wait_for_release() {
+        let mut held = Vec::new();
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(MENU_BACK_KEY);
+        track_held(&mut held, &keys, true);
+        // Closed, Q still held: ignored, while a key pressed after closing counts.
+        keys.press(KeyCode::KeyW);
+        track_held(&mut held, &keys, false);
+        assert_eq!(held, [MENU_BACK_KEY]);
+        keys.release(MENU_BACK_KEY);
+        track_held(&mut held, &keys, false);
+        assert!(held.is_empty());
+    }
+
+    #[test]
     fn game_menu_owns_pause_keys_and_requests() {
         let mut state = PanelState::new(false, &[]);
         state.paused = true;
@@ -1036,13 +1051,89 @@ pub fn install(app: &mut App) {
 #[derive(Resource, Default)]
 pub struct Modal(pub bool);
 
+/// The game's menu keys (FwLo's RustSekiro, after DefaultKeyAssignParam00): X / Z switch the
+/// tab, E is OK and Q is back.
+pub const MENU_NEXT_TAB_KEY: KeyCode = KeyCode::KeyX;
+pub const MENU_PREVIOUS_TAB_KEY: KeyCode = KeyCode::KeyZ;
+pub const MENU_OK_KEY: KeyCode = KeyCode::KeyE;
+pub const MENU_BACK_KEY: KeyCode = KeyCode::KeyQ;
+
+/// OK in a menu over the game: Enter, Space or E, or pad A.
+pub fn ok_pressed(keys: &ButtonInput<KeyCode>, pads: &Query<&Gamepad>) -> bool {
+    keys.any_just_pressed([KeyCode::Enter, KeyCode::Space, MENU_OK_KEY])
+        || pads.iter().any(|p| p.just_pressed(GamepadButton::South))
+}
+
+/// Back in a menu over the game: Q, or pad B.
+pub fn back_pressed(keys: &ButtonInput<KeyCode>, pads: &Query<&Gamepad>) -> bool {
+    keys.just_pressed(MENU_BACK_KEY) || pads.iter().any(|p| p.just_pressed(GamepadButton::East))
+}
+
+/// Keys and mouse buttons held while a screen over the game (the pause or game menu, the idol
+/// menu) was open. Play ignores each one until it is released, so a menu press (Q back, E OK,
+/// Space, Enter) that is still held when the screen closes does not reach Wolf.
+#[derive(Resource, Default)]
+pub struct HeldThroughMenu {
+    keys: Vec<KeyCode>,
+    buttons: Vec<MouseButton>,
+    was_open: bool,
+}
+
+impl HeldThroughMenu {
+    pub fn key(&self, keys: &ButtonInput<KeyCode>, key: KeyCode) -> bool {
+        keys.pressed(key) && !self.keys.contains(&key)
+    }
+
+    pub fn button(&self, mouse: &ButtonInput<MouseButton>, button: MouseButton) -> bool {
+        mouse.pressed(button) && !self.buttons.contains(&button)
+    }
+}
+
+/// Forgets released inputs, then while the screen is open (or on the frame it closed) takes
+/// every held one.
+fn track_held<T: Copy + Eq + std::hash::Hash + Send + Sync + 'static>(
+    held: &mut Vec<T>,
+    input: &ButtonInput<T>,
+    open: bool,
+) {
+    held.retain(|i| input.pressed(*i));
+    if open {
+        for i in input.get_pressed() {
+            if !held.contains(i) {
+                held.push(*i);
+            }
+        }
+    }
+}
+
+fn hold_through_menu(
+    state: Res<PanelState>,
+    modal: Option<Res<Modal>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Option<Res<ButtonInput<MouseButton>>>,
+    mut held: ResMut<HeldThroughMenu>,
+) {
+    let open = state.paused || modal.is_some_and(|m| m.0);
+    // The frame a screen closes counts as open: its closing press is still this frame's input.
+    let take = open || held.was_open;
+    let held = &mut *held;
+    track_held(&mut held.keys, &keys, take);
+    if let Some(mouse) = mouse {
+        track_held(&mut held.buttons, &mouse, take);
+    }
+    held.was_open = open;
+}
+
 fn install_input(app: &mut App) {
-    app.add_systems(
+    app.init_resource::<HeldThroughMenu>().add_systems(
         PreUpdate,
-        update
-            .in_set(PauseSystems)
-            .after(bevy::input::InputSystems)
-            .after(bevy::picking::PickingSystems::Last),
+        (
+            update
+                .in_set(PauseSystems)
+                .after(bevy::input::InputSystems)
+                .after(bevy::picking::PickingSystems::Last),
+            hold_through_menu.after(PauseSystems),
+        ),
     );
 }
 pub fn run(args: &[String]) -> anyhow::Result<()> {
