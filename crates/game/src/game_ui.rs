@@ -51,6 +51,24 @@ impl GameFonts {
         self.sized(bevy::text::FontSize::Vh(px / 10.8))
     }
 
+    /// Menu text at `stage` size with the game's soft drop shadow.
+    pub fn shadowed(
+        &self,
+        text: impl Into<String>,
+        px: f32,
+        color: Color,
+    ) -> (Text, TextFont, TextColor, TextShadow) {
+        (
+            Text::new(text),
+            self.stage(px),
+            TextColor(color),
+            TextShadow {
+                offset: Vec2::splat(1.0),
+                color: Color::srgba(0.0, 0.0, 0.0, 0.8),
+            },
+        )
+    }
+
     fn sized(&self, font_size: bevy::text::FontSize) -> TextFont {
         TextFont {
             font: self.ui.clone().map(FontSource::Handle).unwrap_or_default(),
@@ -107,6 +125,12 @@ impl MenuArt {
     /// asset plugins are added and before `Startup`.
     pub fn insert(app: &mut App) {
         Self::add(app, &Self::ATLASES);
+    }
+
+    /// `insert` with more atlases, in the same single read of the texture file; call before
+    /// the screens that only `insert`.
+    pub fn insert_with(app: &mut App, more: &[&'static str]) {
+        Self::add(app, &[&Self::ATLASES[..], more].concat());
     }
 
     /// Adds only atlases not already loaded, reading their shared texture file once.

@@ -164,17 +164,7 @@ fn spawn(mut commands: Commands, fonts: Res<GameFonts>, art: Res<MenuArt>) {
     let events = crate::game_ui::menu_texts(&cache, "イベントテキスト");
     let guides = crate::game_ui::menu_texts(&cache, "NTC_キーガイド");
     let event = |id: i32| events.get(&id).cloned().unwrap_or_default();
-    let text = |t: String, px: f32, color: Color| {
-        (
-            Text::new(t),
-            fonts.stage(px),
-            TextColor(color),
-            TextShadow {
-                offset: Vec2::splat(1.0),
-                color: Color::srgba(0.0, 0.0, 0.0, 0.8),
-            },
-        )
-    };
+    let text = |t: String, px: f32, color: Color| fonts.shadowed(t, px, color);
 
     // The guide, low in the middle: "[E] : Rest".
     commands

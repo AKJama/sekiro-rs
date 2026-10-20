@@ -801,9 +801,10 @@ pub fn run(options: Options) -> Result<()> {
             .chain(),
     );
     crate::menu::install(&mut app);
+    // First of the screens, so its extra menu atlases load with theirs in one read.
+    game_menu::install(&mut app, options.attack_power.value());
     crate::death_screen::install(&mut app);
     idol::install(&mut app, idols);
-    game_menu::install(&mut app, options.attack_power.value());
     if options.enemy_present {
         arena_d_scene::install(&mut app, &cache, options.arena, options.objects)?;
         arena_c_scene::install(&mut app, &cache, options.arena)?;

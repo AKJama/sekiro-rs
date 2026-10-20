@@ -120,6 +120,8 @@ pub struct InputReplay {
     pub frame: usize,
     held: Vec<KeyCode>,
     clicking: bool,
+    /// Screenshots due and not yet taken: the window takes one a frame.
+    shots: Vec<std::path::PathBuf>,
     /// Set by the game once the simulation runs; frames count from there.
     pub running: bool,
 }
@@ -131,6 +133,7 @@ impl InputReplay {
             frame: 0,
             held: Vec::new(),
             clicking: false,
+            shots: Vec::new(),
             running: false,
         }
     }
@@ -189,10 +192,13 @@ pub fn inject(
         return;
     };
     let frame = replay.frame;
-    for path in replay.shots_at(frame) {
+    let due: Vec<_> = replay.shots_at(frame).cloned().collect();
+    replay.shots.extend(due);
+    if !replay.shots.is_empty() {
+        let path = replay.shots.remove(0);
         commands
             .spawn(bevy::render::view::screenshot::Screenshot::primary_window())
-            .observe(bevy::render::view::screenshot::save_to_disk(path.clone()));
+            .observe(bevy::render::view::screenshot::save_to_disk(path));
     }
     let (want, click, mouse) = match replay.segment_at(frame) {
         Some(s) => (s.keys.clone(), s.click, s.mouse),
