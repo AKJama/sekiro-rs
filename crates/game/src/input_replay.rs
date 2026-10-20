@@ -3,9 +3,9 @@
 //! cursor grab, camera orbit, stick building) instead of the simulation-level `--script`.
 //!
 //! One line per segment of rendered frames: `<frames> <keys> [<mouse_dx> <mouse_dy>]`, where
-//! keys is a comma list of `W A S D Q Space Shift C Esc F3 F8 Click` (`Click` is the left mouse
-//! button; a key named in consecutive segments stays held) or `-`, and the mouse moves by the
-//! given counts every frame. `#` starts a comment. Frames count from the first frame the
+//! keys is a comma list of `W A S D Q E Space Shift C Esc Enter Up Down F3 F8 Click` (`Click`
+//! is the left mouse button; a key named in consecutive segments stays held) or `-`, and the
+//! mouse moves by the given counts every frame. `#` starts a comment. Frames count from the first frame the
 //! simulation runs.
 //!
 //! The replay owns the input: real keyboard, mouse button and mouse motion messages are dropped,
@@ -42,7 +42,11 @@ fn key(name: &str) -> Result<KeyCode, String> {
         "C" => KeyCode::KeyC,
         "Space" => KeyCode::Space,
         "Shift" => KeyCode::ShiftLeft,
+        "E" => KeyCode::KeyE,
         "Esc" => KeyCode::Escape,
+        "Enter" => KeyCode::Enter,
+        "Up" => KeyCode::ArrowUp,
+        "Down" => KeyCode::ArrowDown,
         "F8" => KeyCode::F8,
         "F3" => KeyCode::F3,
         other => return Err(format!("unknown key {other:?}")),

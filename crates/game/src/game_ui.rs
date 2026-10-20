@@ -145,30 +145,33 @@ impl MenuAtlas {
         names
             .iter()
             .map(|name| {
-                let textures = textures.as_ref().map_err(Clone::clone)?;
-                let layout = std::fs::read(dir.join(format!("01_common.sblytbnd.d/{name}.layout")))
+                let mut load = || -> Result<Self, String> {
+                    let textures = textures.as_ref().map_err(Clone::clone)?;
+                    let layout =
+                        std::fs::read(dir.join(format!("01_common.sblytbnd.d/{name}.layout")))
+                            .map_err(|e| e.to_string())?;
+                    let atlas =
+                        sekiro_formats::menu_layout::parse(&layout).map_err(|e| e.to_string())?;
+                    let texture = textures
+                        .iter()
+                        .find(|t| format!("{}.png", t.name).eq_ignore_ascii_case(&atlas.image))
+                        .ok_or_else(|| format!("no texture {}", atlas.image))?;
+                    let image = Image::from_buffer(
+                        texture.dds,
+                        bevy::image::ImageType::Extension("dds"),
+                        bevy::image::CompressedImageFormats::all(),
+                        true,
+                        bevy::image::ImageSampler::linear(),
+                        bevy::asset::RenderAssetUsages::RENDER_WORLD,
+                    )
                     .map_err(|e| e.to_string())?;
-                let atlas =
-                    sekiro_formats::menu_layout::parse(&layout).map_err(|e| e.to_string())?;
-                let texture = textures
-                    .iter()
-                    .find(|t| format!("{}.png", t.name).eq_ignore_ascii_case(&atlas.image))
-                    .ok_or_else(|| format!("no texture {}", atlas.image))?;
-                let image = Image::from_buffer(
-                    texture.dds,
-                    bevy::image::ImageType::Extension("dds"),
-                    bevy::image::CompressedImageFormats::all(),
-                    true,
-                    bevy::image::ImageSampler::linear(),
-                    bevy::asset::RenderAssetUsages::RENDER_WORLD,
-                )
-                .map_err(|e| e.to_string())?;
-                Ok(Self {
-                    image: images.add(image),
-                    regions: atlas.regions,
-                })
+                    Ok(Self {
+                        image: images.add(image),
+                        regions: atlas.regions,
+                    })
+                };
+                load().inspect_err(|e| warn!("menu atlas {name}: {e}")).ok()
             })
-            .map(|r: Result<Self, String>| r.inspect_err(|e| warn!("menu atlas: {e}")).ok())
             .collect()
     }
 

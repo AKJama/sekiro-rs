@@ -33,7 +33,8 @@ fn json(path: &Path) -> Result<Value, String> {
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
-fn rows(cache: &Path, table: &str) -> Result<BTreeMap<i32, Value>, String> {
+/// The rows of `params/{table}.json` by id.
+pub fn rows(cache: &Path, table: &str) -> Result<BTreeMap<i32, Value>, String> {
     let value = json(&cache.join(format!("params/{table}.json")))?;
     Ok(value["rows"]
         .as_array()

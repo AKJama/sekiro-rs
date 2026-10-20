@@ -511,10 +511,10 @@ struct Capture {
     ready_frames: u32,
 }
 
-struct Pose {
-    translation: Vec3,
-    rotation: Quat,
-    scale: Vec3,
+pub(crate) struct Pose {
+    pub translation: Vec3,
+    pub rotation: Quat,
+    pub scale: Vec3,
 }
 
 fn vec3(v: &Value) -> Option<Vec3> {
@@ -525,7 +525,8 @@ fn vec3(v: &Value) -> Option<Vec3> {
     ))
 }
 
-fn pose(row: &Value) -> Option<Pose> {
+/// A layout row's translation, rotation and scale.
+pub(crate) fn pose(row: &Value) -> Option<Pose> {
     let r = &row["rotation"];
     Some(Pose {
         translation: vec3(&row["translation"])?,
