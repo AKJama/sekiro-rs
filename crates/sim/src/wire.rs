@@ -68,6 +68,20 @@ impl Search {
         }
     }
 }
+/// Height above the feet the hook search's sight ray starts at (m). Not traced.
+pub const SIGHT_LIFT: f32 = 1.2;
+/// How far short of the hook the sight ray stops (m), so the hook's own mesh does not block
+/// it. Not traced.
+pub const SIGHT_MARGIN: f32 = 0.1;
+
+/// The hook search's sight ray from `chest` (the feet plus [`SIGHT_LIFT`]) to the hook at
+/// `point`: its unit direction and length, for [`CollisionWorld::raycast`].
+pub fn sight_ray(chest: Vec3, point: Vec3) -> (Vec3, f32) {
+    let ray = point - chest;
+    let length = ray.length();
+    (ray / length, (length - SIGHT_MARGIN).max(0.0))
+}
+
 #[derive(Default)]
 pub struct Wire {
     /// Camera downward pitch, radians; headless callers use the body's horizontal view.
@@ -149,6 +163,7 @@ impl Wire {
         self.preview = None;
         let Some(s) = &self.search else { return };
         let origin = Vec3::from(body.position);
+        let chest = origin + Vec3::Y * SIGHT_LIFT;
         let mut best = (true, f32::INFINITY, f32::INFINITY);
         for (index, p) in self.points.iter().enumerate() {
             if self.active.as_ref().is_some_and(|t| t.index == index) {
@@ -175,14 +190,6 @@ impl Wire {
             {
                 continue;
             }
-            let chest = origin + Vec3::Y * 1.2;
-            let ray = point - chest;
-            if self.collision.as_ref().is_some_and(|w| {
-                w.raycast(chest, ray.normalize(), (ray.length() - 0.1).max(0.0))
-                    .is_some()
-            }) {
-                continue;
-            }
             // Preserve selection among usable hooks; preview distant hooks when none can fire.
             // Screen boxes are not reconstructed: rank by view-centre angle, then distance.
             let score = (
@@ -191,6 +198,15 @@ impl Wire {
                 distance,
             );
             if score >= best {
+                continue;
+            }
+            // The sight ray last: only a hook that would win needs it.
+            let (dir, length) = sight_ray(chest, point);
+            if self
+                .collision
+                .as_ref()
+                .is_some_and(|w| w.raycast(chest, dir, length).is_some())
+            {
                 continue;
             }
             best = score;
