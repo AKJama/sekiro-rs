@@ -969,12 +969,17 @@ pub fn install(app: &mut App) {
     install_input(app);
 }
 
+/// The pause menu's input, which takes Esc: screens over the game that use Esc run before it.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MenuKeys;
+
 fn install_input(app: &mut App) {
     app.add_systems(
         PreUpdate,
         update
             .after(bevy::input::InputSystems)
-            .after(bevy::picking::PickingSystems::Last),
+            .after(bevy::picking::PickingSystems::Last)
+            .in_set(MenuKeys),
     );
 }
 pub fn run(args: &[String]) -> anyhow::Result<()> {
