@@ -67,6 +67,78 @@ pub(crate) fn throw_pair_floor_step_shift(
     pair_path_shift(grounds, path, 0.2, false)
 }
 
+/// Furthest the grid part of the local pair search ([`pair_path_shift`]) looks around the wall
+/// projection; the ring along the blocking surface's normal still goes out to the full limit.
+const PAIR_SEARCH_REACH: f32 = 1.0;
+/// How many whole-path checks' worth of ground queries one pair search may spend on candidate
+/// shifts before it gives up and the throw falls back to per-step placement. Each candidate
+/// checks the whole paired path, so an unbounded search at a cramped spot stalled a
+/// deathblow's start for seconds (#156); a check that fails early costs less, so more
+/// candidates than this usually get tried. The wall projection ([`throw_wall_shift`]) and
+/// the clearance direction before the search are not counted.
+const PAIR_SEARCH_CHECKS: usize = 20;
+/// A ceiling on that budget, so a long throw path (each check costs more) still gives up within
+/// a frame or two; a short doorway path needing its 17th candidate spends about 1,700.
+const PAIR_SEARCH_MAX_QUERIES: usize = 4000;
+
+/// A [`Ground`] that counts the floor and wall queries made through it. It forwards only what
+/// [`pair_path_clear`] asks.
+struct Counted<'a> {
+    inner: &'a dyn Ground,
+    queries: &'a std::cell::Cell<usize>,
+}
+
+impl Counted<'_> {
+    fn count(&self) {
+        self.queries.set(self.queries.get() + 1);
+    }
+}
+
+impl Ground for Counted<'_> {
+    fn height(&self, x: f32, z: f32) -> Option<f32> {
+        self.count();
+        self.inner.height(x, z)
+    }
+
+    fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
+        self.count();
+        self.inner.floor(x, z, top)
+    }
+
+    fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
+        self.count();
+        self.inner.slide(feet, delta)
+    }
+
+    fn max_step(&self) -> f32 {
+        self.inner.max_step()
+    }
+}
+
+/// Sub-steps [`pair_path_clear`] samples the footprint at along a horizontal move `delta`.
+fn path_steps(delta: [f32; 2]) -> usize {
+    (delta[0].hypot(delta[1]) / 0.1).ceil().max(1.0) as usize
+}
+
+/// The ground queries one [`pair_path_clear`] of `path` makes when every sample passes, for
+/// a small shift.
+fn path_check_queries(path: &[[[f32; 3]; 2]]) -> usize {
+    (0..2)
+        .map(|i| {
+            let segments = path
+                .windows(2)
+                .map(|w| path_steps([w[1][i][0] - w[0][i][0], w[1][i][2] - w[0][i][2]]));
+            // The shift itself, then each segment: five footprint floors per sample, a floor
+            // and a slide; then a floor and a slide for the end.
+            std::iter::once(1)
+                .chain(segments)
+                .map(|steps| 5 * (steps + 1) + 2)
+                .sum::<usize>()
+                + 2
+        })
+        .sum()
+}
+
 fn pair_path_shift(
     grounds: [&dyn Ground; 2],
     path: &[[[f32; 3]; 2]],
@@ -81,47 +153,53 @@ fn pair_path_shift(
     } else {
         [0.0; 2]
     };
-    if preferred[0].hypot(preferred[1]) <= limit
-        && pair_path_clear(grounds, path, preferred, sweep_motion)
-    {
-        return Some(preferred);
-    }
     // Try the blocking surface's normal first. A wide paired clip at a door can
     // need metres of clearance; probing every direction at every radius stalls play.
-    if limit > 0.2
-        && let Some(direction) = pair_clearance_direction(grounds, path)
-    {
-        for ring in 1..=(limit / 0.1).round() as usize {
+    let normal_rings = (limit / 0.1).round() as usize;
+    let normal = std::iter::once_with(|| {
+        (limit > 0.2)
+            .then(|| pair_clearance_direction(grounds, path))
+            .flatten()
+    })
+    .flatten()
+    .flat_map(move |direction| {
+        (1..=normal_rings).map(move |ring| {
             let radius = ring as f32 * 0.1;
-            let shift = [
+            [
                 preferred[0] + direction[0] * radius,
                 preferred[1] + direction[1] * radius,
-            ];
-            if shift[0].hypot(shift[1]) <= limit
-                && pair_path_clear(grounds, path, shift, sweep_motion)
-            {
-                return Some(shift);
-            }
-        }
-    }
+            ]
+        })
+    });
     // Search locally around the wall projection for supported pair space. This only
     // constrains authored paired placement; ordinary movement may still leave a ledge.
-    for ring in 1..=(limit / 0.1).round() as usize {
-        let radius = ring as f32 * 0.1;
-        for direction in 0..16 {
-            let angle = direction as f32 * std::f32::consts::TAU / 16.0;
-            let shift = [
+    // Small step corrections search a fine grid; a relocation a coarse one within
+    // `PAIR_SEARCH_REACH` (every 0.1 m in 16 directions out to 4 m was 640 path checks).
+    let (spacing, directions) = if limit > 0.2 { (0.25, 8) } else { (0.1, 16) };
+    let grid_rings = (limit.min(PAIR_SEARCH_REACH) / spacing).round() as usize;
+    let grid = (1..=grid_rings).flat_map(move |ring| {
+        let radius = ring as f32 * spacing;
+        (0..directions).map(move |direction| {
+            let angle = direction as f32 * std::f32::consts::TAU / directions as f32;
+            [
                 preferred[0] + radius * angle.sin(),
                 preferred[1] + radius * angle.cos(),
-            ];
-            if shift[0].hypot(shift[1]) <= limit
-                && pair_path_clear(grounds, path, shift, sweep_motion)
-            {
-                return Some(shift);
-            }
-        }
-    }
-    None
+            ]
+        })
+    });
+    let queries = std::cell::Cell::new(0);
+    let budget = (PAIR_SEARCH_CHECKS * path_check_queries(path)).min(PAIR_SEARCH_MAX_QUERIES);
+    let counted = grounds.map(|inner| Counted {
+        inner,
+        queries: &queries,
+    });
+    let counted: [&dyn Ground; 2] = [&counted[0], &counted[1]];
+    std::iter::once(preferred)
+        .chain(normal)
+        .chain(grid)
+        .filter(|shift| shift[0].hypot(shift[1]) <= limit)
+        .take_while(|_| queries.get() < budget)
+        .find(|&shift| pair_path_clear(counted, path, shift, sweep_motion))
 }
 
 fn pair_clearance_direction(grounds: [&dyn Ground; 2], path: &[[[f32; 3]; 2]]) -> Option<[f32; 2]> {
@@ -160,7 +238,7 @@ fn pair_path_clear(
             .enumerate()
         {
             let delta = [to[0] - from[0], to[2] - from[2]];
-            let steps = (delta[0].hypot(delta[1]) / 0.1).ceil().max(1.0) as usize;
+            let steps = path_steps(delta);
             for n in 0..=steps {
                 let t = n as f32 / steps as f32;
                 let p = [from[0] + delta[0] * t, origin[1], from[2] + delta[1] * t];
@@ -270,6 +348,10 @@ pub const CAPSULE_HEIGHT: f32 = 1.5;
 /// sphere cast meets and cuts it where the body would come nearer than this to one.
 pub const FALL_ASSIST_RADIUS: f32 = 0.16;
 const CELL: f32 = 4.0;
+/// `CollisionWorld::part_of` for a triangle in no helper or event part.
+const ORDINARY: u16 = 0;
+/// `CollisionWorld::part_of` bit marking an event part's triangle.
+const EVENT_PART: u16 = 0x8000;
 
 pub struct CollisionWorld {
     vertices: Vec<Vec3>,
@@ -286,9 +368,14 @@ pub struct CollisionWorld {
     /// Map event collision switched by entity: triangle range, who collides with it (as in
     /// `masked`) and whether it is on.
     event_parts: Vec<(i32, std::ops::Range<u32>, u8, AtomicBool)>,
-    /// Helper parts (see [`crate::hit_filter`]): triangle ranges and who collides with them
+    /// Helper parts (see [`crate::hit_filter`]): who collides with each
     /// ([`crate::hit_filter::PLAYER`], `ENEMY`, `CAMERA` bits). Every other triangle is for all.
-    masked: Vec<(std::ops::Range<u32>, u8)>,
+    masked: Vec<u8>,
+    /// Per triangle, the part [`CollisionWorld::live`] asks about: [`ORDINARY`], `1 + i` for
+    /// `masked[i]` or [`EVENT_PART`]` | i` for `event_parts[i]`.
+    part_of: Vec<u16>,
+    /// Per triangle, its lowest and highest corner's height.
+    heights: Vec<[f32; 2]>,
     /// Map action event walls: untouchable triangles whose contact runs a reaction.
     triggers: Vec<TriggerPart>,
     /// Placed objects' triangle ranges ([`CollisionWorld::add_objects`]) and `<block>/<part>`
@@ -385,18 +472,45 @@ impl CollisionWorld {
     /// fall-prevention assist's), a helper one when it holds `who`, an event one while on and
     /// holding `who`, a gate one while on.
     fn live(&self, t: u32, who: u8) -> bool {
-        if let Some((_, mask)) = self.masked.iter().find(|(range, _)| range.contains(&t)) {
-            return mask & who != 0;
+        match self.part_of[t as usize] {
+            ORDINARY => {
+                who & (PLAYER | ENEMY | CAMERA) != 0
+                    && (t < self.gate_from || self.gate_open.load(Ordering::Relaxed))
+            }
+            part if part & EVENT_PART != 0 => {
+                let (_, _, mask, on) = &self.event_parts[usize::from(part & !EVENT_PART)];
+                mask & who != 0 && on.load(Ordering::Relaxed)
+            }
+            part => self.masked[usize::from(part) - 1] & who != 0,
         }
-        if let Some((_, _, mask, on)) = self
-            .event_parts
-            .iter()
-            .find(|(_, range, _, _)| range.contains(&t))
-        {
-            return mask & who != 0 && on.load(Ordering::Relaxed);
-        }
-        who & (PLAYER | ENEMY | CAMERA) != 0
-            && (t < self.gate_from || self.gate_open.load(Ordering::Relaxed))
+    }
+
+    /// Whether triangle `t` is a wall or floor at all: deep water's are neither
+    /// ([`crate::body::deep_water`]).
+    fn solid(&self, t: u32) -> bool {
+        !crate::body::deep_water(self.materials[t as usize])
+    }
+
+    /// Records that the triangles `range` belong to `part` (see `part_of`).
+    fn mark_part(&mut self, range: &std::ops::Range<u32>, part: u16) {
+        self.part_of[range.start as usize..range.end as usize].fill(part);
+    }
+
+    /// Adds an event part over the just appended triangles `range` (see `event_parts`).
+    pub(crate) fn add_event_part(
+        &mut self,
+        entity: i32,
+        range: std::ops::Range<u32>,
+        who: u8,
+        on: bool,
+    ) {
+        let part = u16::try_from(self.event_parts.len())
+            .ok()
+            .filter(|&i| i & EVENT_PART == 0)
+            .expect("too many event parts");
+        self.mark_part(&range, EVENT_PART | part);
+        self.event_parts
+            .push((entity, range, who, AtomicBool::new(on)));
     }
 
     fn build(mesh: &CollisionMesh, gate_start: Option<usize>) -> Self {
@@ -405,6 +519,7 @@ impl CollisionWorld {
         let mut triangles = Vec::with_capacity(mesh.indices.len() / 3);
         let mut normals = Vec::with_capacity(mesh.indices.len() / 3);
         let mut materials = Vec::with_capacity(mesh.indices.len() / 3);
+        let mut heights = Vec::with_capacity(mesh.indices.len() / 3);
         let mut cells: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
         for (source, tri) in mesh.indices.as_chunks::<3>().0.iter().enumerate() {
             if gate_start == Some(source) {
@@ -418,6 +533,7 @@ impl CollisionWorld {
             triangles.push(*tri);
             normals.push(n);
             materials.push(mesh.materials.get(source).copied().unwrap_or(u32::MAX));
+            heights.push([a.y.min(b.y).min(c.y), a.y.max(b.y).max(c.y)]);
             let (x0, z0) = cell_of(a.x.min(b.x).min(c.x), a.z.min(b.z).min(c.z));
             let (x1, z1) = cell_of(a.x.max(b.x).max(c.x), a.z.max(b.z).max(c.z));
             for cx in x0..=x1 {
@@ -427,10 +543,12 @@ impl CollisionWorld {
             }
         }
         Self {
+            part_of: vec![ORDINARY; triangles.len()],
             vertices,
             triangles,
             normals,
             materials,
+            heights,
             cells,
             min_walk_ny: MAX_SLOPE_DEGREES.to_radians().cos(),
             gate_from,
@@ -557,7 +675,12 @@ impl CollisionWorld {
     fn add_masked(&mut self, mask: u8, mesh: &CollisionMesh) -> std::ops::Range<u32> {
         let range = self.append(mesh);
         if mask != PLAYER | ENEMY | CAMERA && !range.is_empty() {
-            self.masked.push((range.clone(), mask));
+            self.masked.push(mask);
+            let part = u16::try_from(self.masked.len())
+                .ok()
+                .filter(|&i| i & EVENT_PART == 0)
+                .expect("too many helper parts");
+            self.mark_part(&range, part);
         }
         range
     }
@@ -594,6 +717,8 @@ impl CollisionWorld {
         );
         self.normals.extend(part.normals);
         self.materials.extend(part.materials);
+        self.heights.extend(part.heights);
+        self.part_of.resize(self.triangles.len(), ORDINARY);
         for (cell, triangles) in part.cells {
             self.cells
                 .entry(cell)
@@ -679,24 +804,6 @@ impl CollisionWorld {
         self.triangles[t as usize].map(|i| self.vertices[i as usize])
     }
 
-    /// Triangles in the cells overlapping a horizontal box, each once.
-    fn gather(&self, min: Vec2, max: Vec2, out: &mut Vec<u32>) {
-        out.clear();
-        let (x0, z0) = cell_of(min.x, min.y);
-        let (x1, z1) = cell_of(max.x, max.y);
-        for cx in x0..=x1 {
-            for cz in z0..=z1 {
-                if let Some(c) = self.cells.get(&(cx, cz)) {
-                    out.extend_from_slice(c);
-                }
-            }
-        }
-        if x0 != x1 || z0 != z1 {
-            out.sort_unstable();
-            out.dedup();
-        }
-    }
-
     /// The highest walkable surface under `(x, z)` whose height is at most `top`.
     pub fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
         self.floor_hit(x, z, top).map(|(h, _)| h)
@@ -730,7 +837,7 @@ impl CollisionWorld {
         let cell = self.cells.get(&cell_of(x, z))?;
         let mut best: Option<(f32, u32)> = None;
         for &t in cell {
-            if matches!(self.materials[t as usize], 22 | 36 | 38)
+            if !self.solid(t)
                 || self.normals[t as usize].y.abs() < self.min_walk_ny
                 || !self.live(t, who)
             {
@@ -825,13 +932,11 @@ impl CollisionWorld {
             let high_y = origin.y.max(end.y);
             let mut best: Option<f32> = None;
             for &t in tris.iter() {
-                if matches!(self.materials[t as usize], 22 | 36 | 38) || !self.live(t, who) {
+                let [min_y, max_y] = self.heights[t as usize];
+                if min_y > high_y || max_y < low_y || !self.solid(t) || !self.live(t, who) {
                     continue;
                 }
                 let [a, b, c] = self.corners(t);
-                if a.y.min(b.y).min(c.y) > high_y || a.y.max(b.y).max(c.y) < low_y {
-                    continue;
-                }
                 if let Some(d) = ray_triangle(origin, dir, a, b, c)
                     && d <= max
                     && best.is_none_or(|b| d < b)
@@ -849,54 +954,111 @@ impl CollisionWorld {
         self.slide_for(feet, delta, PLAYER, 0)
     }
 
+    /// How many triangles a [`CollisionWorld::slide`] of `delta` from `feet` tests the body
+    /// against on each pass: those near the move, solid, and within the body's height band.
+    /// Only for the step-cost test (#145).
+    #[doc(hidden)]
+    pub fn slide_triangle_count(&self, feet: [f32; 3], delta: [f32; 2]) -> usize {
+        let (mut tris, mut walls) = (Vec::new(), Vec::new());
+        self.gather_slide(
+            Vec3::from(feet),
+            Vec2::from(delta),
+            [PLAYER, 0],
+            &mut tris,
+            &mut walls,
+        );
+        tris.len()
+    }
+
+    /// Gathers, each once, the triangles near a slide of `d` from `start` that `who[0]`'s body
+    /// can touch into `body`, and the fall-prevention walls in `who[1]` (none for 0) into
+    /// `walls`. Returns the slide's coarse sub-step count.
+    ///
+    /// `body` keeps only the solid triangles that reach the body's spheres' height band at
+    /// `start`. A slide moves the body only horizontally, so any other triangle is one
+    /// [`CollisionWorld::push_out`] would reject on every pass; hot cells hold thousands of
+    /// them from other storeys (#145). The band is padded so roundoff cannot drop a contact.
+    fn gather_slide(
+        &self,
+        start: Vec3,
+        d: Vec2,
+        [who, assist]: [u8; 2],
+        body: &mut Vec<u32>,
+        walls: &mut Vec<u32>,
+    ) -> usize {
+        let len = d.length();
+        let coarse = ((len / (RADIUS * 0.5)).ceil() as usize).clamp(1, 32);
+        let reach = RADIUS + len / coarse as f32 + 0.05;
+        let min = Vec2::new(start.x.min(start.x + d.x), start.z.min(start.z + d.y)) - reach;
+        let max = Vec2::new(start.x.max(start.x + d.x), start.z.max(start.z + d.y)) + reach;
+        let low = start.y + SPHERES[0] - RADIUS - 0.01;
+        let high = start.y + SPHERES[SPHERES.len() - 1] + RADIUS + 0.01;
+        body.clear();
+        walls.clear();
+        let (x0, z0) = cell_of(min.x, min.y);
+        let (x1, z1) = cell_of(max.x, max.y);
+        for cx in x0..=x1 {
+            for cz in z0..=z1 {
+                let Some(cell) = self.cells.get(&(cx, cz)) else {
+                    continue;
+                };
+                body.extend(cell.iter().copied().filter(|&t| {
+                    let [min_y, max_y] = self.heights[t as usize];
+                    max_y >= low && min_y <= high && self.solid(t) && self.live(t, who)
+                }));
+                // The assist's walls are rare, so only a move near one pays for them.
+                if assist != 0 {
+                    walls.extend(cell.iter().copied().filter(|&t| self.live(t, assist)));
+                }
+            }
+        }
+        if x0 != x1 || z0 != z1 {
+            for tris in [body, walls] {
+                tris.sort_unstable();
+                tris.dedup();
+            }
+        }
+        coarse
+    }
+
     /// [`CollisionWorld::slide`] for `who` that also keeps the body [`FALL_ASSIST_RADIUS`]
     /// from the fall-prevention walls in `assist` ([`crate::hit_filter::FALL_ASSIST_MOVE`],
     /// `FALL_ASSIST_ACTION` bits), which nothing else collides with.
     fn slide_for(&self, feet: [f32; 3], delta: [f32; 2], who: u8, assist: u8) -> [f32; 2] {
+        thread_local! {
+            static SCRATCH: std::cell::RefCell<(Vec<u32>, Vec<u32>)> =
+                const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+        }
         let start = Vec3::from(feet);
         let d = Vec2::from(delta);
         let len = d.length();
-        let mut p = start;
-        let mut tris = Vec::new();
-        let coarse = ((len / (RADIUS * 0.5)).ceil() as usize).clamp(1, 32);
-        let reach = RADIUS + len / coarse as f32 + 0.05;
-        self.gather(
-            Vec2::new(p.x.min(p.x + d.x), p.z.min(p.z + d.y)) - reach,
-            Vec2::new(p.x.max(p.x + d.x), p.z.max(p.z + d.y)) + reach,
-            &mut tris,
-        );
-        // The assist's walls are rare, so only a move near one pays for them.
-        let walls: Vec<u32> = if assist == 0 {
-            Vec::new()
-        } else {
-            tris.iter()
-                .copied()
-                .filter(|&t| self.live(t, assist))
-                .collect()
-        };
-        // Sub-steps of half the smallest clearance, so no wall is stepped across.
-        let steps = if walls.is_empty() {
-            coarse
-        } else {
-            ((len / (FALL_ASSIST_RADIUS * 0.5)).ceil() as usize).clamp(1, 64)
-        };
-        for _ in 0..steps {
-            p.x += d.x / steps as f32;
-            p.z += d.y / steps as f32;
-            for _ in 0..4 {
-                let mut push = self.push_out(p, &tris, who);
-                // The assist's walls last, so they hold where both push.
-                if !walls.is_empty() {
-                    push += self.hold_inside(p + Vec3::new(push.x, 0.0, push.y), &walls);
+        SCRATCH.with_borrow_mut(|(tris, walls)| {
+            let coarse = self.gather_slide(start, d, [who, assist], tris, walls);
+            // Sub-steps of half the smallest clearance, so no wall is stepped across.
+            let steps = if walls.is_empty() {
+                coarse
+            } else {
+                ((len / (FALL_ASSIST_RADIUS * 0.5)).ceil() as usize).clamp(1, 64)
+            };
+            let mut p = start;
+            for _ in 0..steps {
+                p.x += d.x / steps as f32;
+                p.z += d.y / steps as f32;
+                for _ in 0..4 {
+                    let mut push = self.push_out(p, tris);
+                    // The assist's walls last, so they hold where both push.
+                    if !walls.is_empty() {
+                        push += self.hold_inside(p + Vec3::new(push.x, 0.0, push.y), walls);
+                    }
+                    if push == Vec2::ZERO {
+                        break;
+                    }
+                    p.x += push.x;
+                    p.z += push.y;
                 }
-                if push == Vec2::ZERO {
-                    break;
-                }
-                p.x += push.x;
-                p.z += push.y;
             }
-        }
-        [p.x - start.x, p.z - start.z]
+            [p.x - start.x, p.z - start.z]
+        })
     }
 
     /// Horizontal correction that keeps the feet [`FALL_ASSIST_RADIUS`] on the inner side of
@@ -932,16 +1094,14 @@ impl CollisionWorld {
         push
     }
 
-    /// Horizontal correction that takes the body's spheres out of the given triangles.
-    fn push_out(&self, feet: Vec3, tris: &[u32], who: u8) -> Vec2 {
+    /// Horizontal correction that takes the body's spheres out of the given triangles, which
+    /// [`CollisionWorld::gather_slide`] has already limited to the solid ones the body can touch.
+    fn push_out(&self, feet: Vec3, tris: &[u32]) -> Vec2 {
         let mut total = Vec2::ZERO;
         for h in SPHERES {
             let centre = feet + Vec3::Y * h;
             let mut push = Vec2::ZERO;
             for &t in tris {
-                if matches!(self.materials[t as usize], 22 | 36 | 38) || !self.live(t, who) {
-                    continue;
-                }
                 let [a, b, c] = self.corners(t);
                 // The horizontal grid includes stacked floors and walls from other heights.
                 // Exact sphere/AABB rejection preserves the narrow-phase result and avoids

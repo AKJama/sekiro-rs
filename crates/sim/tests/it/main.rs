@@ -72,6 +72,7 @@ mod shura_arena;
 mod silvergrass_arena;
 mod soldier_brain;
 mod sound_events;
+mod step_cost;
 mod super_armour;
 mod swim;
 mod sword_saint;

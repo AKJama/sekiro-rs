@@ -251,6 +251,18 @@ struct EnemyScene {
 }
 
 const STEP_HZ: f64 = 60.0;
+/// Most sim steps one rendered frame may catch up on (#145).
+/// Bevy's default 0.25 s virtual-time cap allows 15, so one slow step snowballs into a stall;
+/// past this the game runs slower instead.
+const MAX_CATCH_UP_STEPS: u32 = 3;
+
+/// Caps virtual time per frame, which is what feeds the fixed sim loop, at
+/// `MAX_CATCH_UP_STEPS` steps.
+fn cap_catch_up(mut time: ResMut<Time<Virtual>>) {
+    time.set_max_delta(Duration::from_secs_f64(
+        f64::from(MAX_CATCH_UP_STEPS) / STEP_HZ,
+    ));
+}
 /// Radians of camera turn per mouse count (0.0035 was reported as far too sensitive).
 const MOUSE_SENSITIVITY: f32 = 0.0012;
 const WOLF: usize = 0;
@@ -665,6 +677,7 @@ pub fn run(options: Options) -> Result<()> {
     .insert_resource(bevy::winit::WinitSettings::continuous())
     .insert_resource(crate::map::upload_budget())
     .insert_resource(Time::<Fixed>::from_hz(STEP_HZ))
+    .add_systems(Startup, cap_catch_up)
     .insert_resource(Libraries(libraries))
     .insert_resource(EnemyScene {
         cache: cache.clone(),
