@@ -16,9 +16,9 @@ use sekiro_sim::kit::Kit;
 
 use super::Sim;
 use crate::game_ui::{self, GameFonts, MenuArt, abs};
+use crate::menu::PAUSE_ROWS;
 
 const TABS: [&str; 4] = ["Equipment", "Inventory", "Skills", "Options"];
-const OPTION_ITEMS: [&str; 3] = ["Resume", "Back to start menu", "Quit"];
 const TEXT: Color = Color::srgb(0.88, 0.85, 0.78);
 const DIM: Color = Color::srgba(0.75, 0.72, 0.66, 0.85);
 const ORANGE: Color = Color::srgb(0.93, 0.6, 0.25);
@@ -26,12 +26,15 @@ const ORANGE: Color = Color::srgb(0.93, 0.6, 0.25);
 const ROWS: usize = 6;
 /// gap: Prayer Necklace attribute levels are not modelled; FwLo's starting level.
 const PLAYER_LEVEL: u32 = 1;
-const ICONS: [&str; 5] = [
+/// The atlases holding item icons: the icon sheets, the memories' 750-756 in SB_Boss, and a
+/// few strays elsewhere (Divine Grass's 15 in SB_TextEffect_02).
+const ICONS: [&str; 6] = [
     "SB_Icon",
     "SB_Icon_02",
     "SB_Icon_03",
     "SB_Icon_04",
     "SB_Boss",
+    "SB_TextEffect_02",
 ];
 const STORIES: [&str; 2] = ["SB_Icon_Skill", "SB_Icon_Skill_02"];
 const INV_CATS: [(&str, &str); 4] = [
@@ -60,8 +63,9 @@ struct GameMenu {
 #[derive(Component)]
 struct GameMenuRoot;
 
-/// The screen and cursor whose drawing is currently built.
-type Place = (usize, usize, usize, [usize; 2]);
+/// The screen, cursor and window shape (width over height, in thousandths) whose drawing is
+/// currently built.
+type Place = (usize, usize, usize, [usize; 2], u32);
 
 /// The game's item names and descriptions, shared by slots, lists and skill categories.
 #[derive(Default)]
@@ -86,13 +90,6 @@ impl ItemTexts {
     /// The lowest id with this English name, as FwLo's key-item rows use.
     fn goods_id(&self, name: &str) -> Option<i32> {
         self.goods_name
-            .iter()
-            .find(|(_, n)| n.as_str() == name)
-            .map(|(id, _)| *id)
-    }
-
-    fn weapon_id(&self, name: &str) -> Option<i32> {
-        self.weapon_name
             .iter()
             .find(|(_, n)| n.as_str() == name)
             .map(|(id, _)| *id)
@@ -192,17 +189,31 @@ struct Book {
     tables: Tables,
     attack: u8,
     guides: BTreeMap<i32, String>,
+    /// Key Items always held: Kusabimaru and the Shinobi Prosthetic (the game keeps
+    /// Kusabimaru's name with the goods, not the weapons).
+    key_items: Vec<i32>,
+    /// The Spirit Emblem's icon, for the status bar.
+    emblem: Option<String>,
 }
 
 impl Book {
     fn load(cache: &Path, attack: u8) -> Self {
         let texts = ItemTexts::load(cache);
         let tables = Tables::load(cache, &texts);
+        let key_items = ["Kusabimaru", "Shinobi Prosthetic"]
+            .into_iter()
+            .filter_map(|name| texts.goods_id(name))
+            .collect();
+        let emblem = texts
+            .goods_id("Spirit Emblem")
+            .and_then(|id| slot_icon(&tables, &Slot::Goods(id, 0)));
         Self {
             texts,
             tables,
             attack,
             guides: game_ui::menu_texts(cache, "NTC_キーガイド"),
+            key_items,
+            emblem,
         }
     }
 }
@@ -247,22 +258,21 @@ fn held_goods(kit: &Kit, tables: &Tables, kind: i64) -> Vec<(i32, u32)> {
     goods
 }
 
-/// Sprite references stay independent of Bevy assets so row data can be checked alone.
-fn any_icon(id: i64) -> Option<String> {
-    Some(format!("item/MENU_ItemIcon_{id:05}"))
-}
-fn sprite(file: &str) -> Option<String> {
-    Some(file.to_string())
-}
-
+/// The item icon's sprite name: names, not Bevy assets, so row data can be checked alone.
+/// Tool upgrades without their own icon show their base's; the gourd's goods row has no icon,
+/// the game draws 151.
 fn slot_icon(tables: &Tables, slot: &Slot) -> Option<String> {
     let id = match slot {
-        Slot::Weapon(id) => tables.weapon_icon.get(id).copied(),
+        Slot::Weapon(id) => tables
+            .weapon_icon
+            .get(id)
+            .or_else(|| tables.weapon_icon.get(&(id / 100 * 100)))
+            .copied(),
         Slot::Goods(3000, _) => Some(151),
         Slot::Goods(id, _) => tables.goods_icon.get(id).copied(),
         Slot::Empty => None,
     }?;
-    any_icon(id)
+    Some(format!("item/MENU_ItemIcon_{id:05}"))
 }
 
 /// Tool upgrade levels share their base's name and description, independently falling back.
@@ -296,15 +306,7 @@ struct Ui<'a> {
 
 impl Ui<'_> {
     fn text(&self, text: &str, px: f32, color: Color) -> (Text, TextFont, TextColor, TextShadow) {
-        (
-            Text::new(text),
-            self.fonts.stage(px),
-            TextColor(color),
-            TextShadow {
-                offset: Vec2::splat(1.0),
-                color: Color::srgba(0.0, 0.0, 0.0, 0.8),
-            },
-        )
+        self.fonts.shadowed(text, px, color)
     }
 
     fn find(&self, file: &str) -> Option<(ImageNode, f32)> {
@@ -320,9 +322,9 @@ impl Ui<'_> {
     }
 
     /// Plates and icons stretch into FwLo's boxes; a missing sprite draws nothing.
-    fn image(&self, file: Option<String>) -> ImageNode {
-        let mut image = file
-            .and_then(|f| self.find(&f))
+    fn image(&self, file: &str) -> ImageNode {
+        let mut image = self
+            .find(file)
             .map(|(i, _)| i)
             .unwrap_or_else(|| ImageNode {
                 color: Color::NONE,
@@ -355,21 +357,12 @@ fn fill_row() -> Node {
     }
 }
 
-/// A list row: icon, name, count, optional value, and equipped mark.
-#[derive(Clone, Default)]
-struct Row {
+/// A list row and its parchment: icon, name and count, then story art, stats and description.
+#[derive(Default)]
+struct Entry {
     icon: Option<String>,
     name: String,
     count: Option<String>,
-    value: Option<String>,
-    equipped: bool,
-}
-
-/// The selected item's parchment: name, icon or story art, stats, and description.
-#[derive(Clone, Default)]
-struct Detail {
-    name: String,
-    icon: Option<String>,
     art: Option<String>,
     stats: Vec<(String, String)>,
     info: String,
@@ -378,20 +371,7 @@ struct Detail {
 /// Installs the display over the existing pause state, with the kit owned by the sim.
 pub(super) fn install(app: &mut App, attack: u8) {
     GameFonts::insert(app);
-    MenuArt::insert(app);
-    MenuArt::add(
-        app,
-        &[
-            "SB_Icon",
-            "SB_Icon_02",
-            "SB_Icon_03",
-            "SB_Icon_04",
-            "SB_Boss",
-            "SB_Icon_Skill",
-            "SB_Icon_Skill_02",
-            "SB_FE",
-        ],
-    );
+    MenuArt::insert_with(app, &[&ICONS[..], &STORIES[..], &["SB_FE"]].concat());
     game_ui::install_cover(app);
     app.insert_resource(Book::load(&sekiro_sim::cache::root(), attack))
         .init_resource::<GameMenu>()
@@ -440,38 +420,31 @@ fn menu_keys(
             menu.top = 0;
         }
     }
-    let kit = &sim.duel.kit;
-    let n = match menu.tab {
-        0 => 10,
-        1 => inventory(menu.cat[0], kit, &book.texts, &book.tables).len(),
-        2 => skills(menu.cat[1], kit, &book.texts, &book.tables).len(),
-        _ => OPTION_ITEMS.len(),
-    }
-    .max(1);
-    if key(&[
-        KeyCode::ArrowRight,
-        KeyCode::KeyD,
-        KeyCode::ArrowDown,
-        KeyCode::KeyS,
-    ]) || pad(GamepadButton::DPadRight)
-        || pad(GamepadButton::DPadDown)
-    {
-        menu.index = (menu.index + 1) % n;
-    }
-    if key(&[
-        KeyCode::ArrowLeft,
-        KeyCode::KeyA,
-        KeyCode::ArrowUp,
-        KeyCode::KeyW,
-    ]) || pad(GamepadButton::DPadLeft)
-        || pad(GamepadButton::DPadUp)
-    {
-        menu.index = (menu.index + n - 1) % n;
-    }
-    menu.top = keep_visible(menu.top, menu.index, n);
     if menu.tab == 3 && (key(&[KeyCode::Enter, KeyCode::Space]) || pad(GamepadButton::South)) {
         view.request = Some(menu.index);
     }
+    // B backs out of the menu, as Resume does.
+    if pad(GamepadButton::East) {
+        view.request = Some(0);
+    }
+    // The pause's own arrows, D-pad and stick, plus WASD.
+    let step = view.movement.x + view.movement.y;
+    let next = step > 0 || key(&[KeyCode::KeyD, KeyCode::KeyS]);
+    let back = step < 0 || key(&[KeyCode::KeyA, KeyCode::KeyW]);
+    if !next && !back {
+        return;
+    }
+    // The rows are counted only when the cursor moves.
+    let kit = &sim.duel.kit;
+    let n = match menu.tab {
+        0 => 10,
+        1 => inventory(menu.cat[0], kit, &book).len(),
+        2 => skills(menu.cat[1], kit, &book).len(),
+        _ => PAUSE_ROWS.len(),
+    }
+    .max(1);
+    menu.index = (menu.index + if next { 1 } else { n - 1 }) % n;
+    menu.top = keep_visible(menu.top, menu.index, n);
 }
 
 /// Rebuilds only for a changed cursor or screen; closing keeps the tab and categories.
@@ -485,15 +458,27 @@ fn show(
     mut built: Local<Option<Place>>,
 ) {
     if !state.paused {
-        for root in &roots {
-            commands.entity(root).despawn();
+        if built.take().is_some() {
+            for root in &roots {
+                commands.entity(root).despawn();
+            }
+            menu.index = 0;
+            menu.top = 0;
         }
-        *built = None;
-        menu.index = 0;
-        menu.top = 0;
         return;
     }
-    let now = (menu.tab, menu.index, menu.top, menu.cat);
+    let aspect = windows
+        .iter()
+        .next()
+        .map_or(16.0 / 9.0, |w| w.width() / w.height().max(1.0));
+    // A resize rebuilds too, for the story art's shape.
+    let now = (
+        menu.tab,
+        menu.index,
+        menu.top,
+        menu.cat,
+        (aspect * 1000.0) as u32,
+    );
     if *built == Some(now) {
         return;
     }
@@ -506,10 +491,7 @@ fn show(
         &Ui {
             art: &art,
             fonts: &fonts,
-            aspect: windows
-                .iter()
-                .next()
-                .map_or(16.0 / 9.0, |w| w.width() / w.height().max(1.0)),
+            aspect,
         },
         &menu,
         &sim.duel.kit,
@@ -538,7 +520,7 @@ fn key_guide(root: &mut ChildSpawnerCommands, ui: &Ui, guides: &BTreeMap<i32, St
                     width: px(30),
                     ..default()
                 },
-                ui.image(sprite(&format!("sb_keytop/{name}"))),
+                ui.image(&format!("sb_keytop/{name}")),
             ));
             let label = guides.get(&id).map(String::as_str).unwrap_or("");
             r.spawn(ui.text(&format!(":{label}{suffix}"), 16.0, DIM));
@@ -562,9 +544,8 @@ fn list_screen(
     root: &mut ChildSpawnerCommands,
     ui: &Ui,
     categories: (&[(&str, &str)], usize),
-    rows: &[Row],
+    entries: &[Entry],
     window: (usize, usize),
-    detail: Option<&Detail>,
 ) {
     let (cats, cat) = categories;
     let (index, top) = window;
@@ -574,69 +555,37 @@ fn list_screen(
         });
     }
     if !cats.is_empty() {
-        root.spawn((
-            abs(5.4, 19.2, 1.4, 4.4),
-            ui.image(sprite("sb_in_game/MENU_Arrow")),
-        ));
-        root.spawn((
-            abs(7.4, 19.8, 1.6, 3.2),
-            ui.image(sprite("sb_keytop/KG_Key_C")),
-        ));
+        root.spawn((abs(5.4, 19.2, 1.4, 4.4), ui.image("sb_in_game/MENU_Arrow")));
+        root.spawn((abs(7.4, 19.8, 1.6, 3.2), ui.image("sb_keytop/KG_Key_C")));
         for (i, (_, icon)) in cats.iter().enumerate() {
             let l = 10.0 + i as f32 * 4.85;
             if i == cat {
                 root.spawn((
                     abs(l - 0.35, 17.7, 3.9, 7.2),
-                    ui.image(sprite("sb_in_game/MENU_Cursor_TB"))
-                        .with_color(ORANGE),
+                    ui.image("sb_in_game/MENU_Cursor_TB").with_color(ORANGE),
                 ));
             }
             root.spawn((
                 abs(l, 18.3, 3.2, 6.0),
-                ui.image(sprite(&format!("sb_in_game/{icon}"))),
+                ui.image(&format!("sb_in_game/{icon}")),
             ));
         }
         let end = 10.0 + cats.len() as f32 * 4.85;
-        root.spawn((
-            abs(end, 19.8, 1.6, 3.2),
-            ui.image(sprite("sb_keytop/KG_Key_V")),
-        ));
-        let mut right = ui.image(sprite("sb_in_game/MENU_Arrow"));
+        root.spawn((abs(end, 19.8, 1.6, 3.2), ui.image("sb_keytop/KG_Key_V")));
+        let mut right = ui.image("sb_in_game/MENU_Arrow");
         right.flip_x = true;
         root.spawn((abs(end + 2.1, 19.2, 1.4, 4.4), right));
     }
-    let start = keep_visible(top, index, rows.len());
-    for (k, (i, row)) in rows.iter().enumerate().skip(start).take(ROWS).enumerate() {
+    for (k, (i, row)) in entries.iter().enumerate().skip(top).take(ROWS).enumerate() {
         let sel = i == index;
         let t = 26.6 + k as f32 * 8.3;
         root.spawn((
             abs(7.4, t, 4.2, 7.4),
-            ui.image(sprite("sb_in_game/MENU_IconBase_02")),
+            ui.image("sb_in_game/MENU_IconBase_02"),
         ))
         .with_children(|b| {
-            b.spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: Val::Percent(6.0),
-                    top: Val::Percent(6.0),
-                    width: Val::Percent(88.0),
-                    height: Val::Percent(88.0),
-                    ..default()
-                },
-                ui.image(row.icon.clone()),
-            ));
-            if row.equipped {
-                b.spawn((
-                    Node {
-                        position_type: PositionType::Absolute,
-                        left: Val::Percent(-6.0),
-                        top: Val::Percent(-6.0),
-                        width: Val::Percent(34.0),
-                        height: Val::Percent(34.0),
-                        ..default()
-                    },
-                    ui.image(sprite("sb_in_game/MENU_Equipped")),
-                ));
+            if let Some(icon) = &row.icon {
+                b.spawn((abs(6.0, 6.0, 88.0, 88.0), ui.image(icon)));
             }
             if let Some(n) = &row.count {
                 b.spawn(Node {
@@ -655,7 +604,7 @@ fn list_screen(
         } else {
             "sb_in_game/MENU_ItemBase_02"
         };
-        root.spawn((abs(12.3, t + 0.6, 36.6, 6.2), ui.image(sprite(plate))))
+        root.spawn((abs(12.3, t + 0.6, 36.6, 6.2), ui.image(plate)))
             .with_children(|b| {
                 b.spawn(Node {
                     padding: UiRect::axes(Val::Percent(4.5), Val::Px(0.0)),
@@ -664,64 +613,41 @@ fn list_screen(
                 })
                 .with_children(|c| {
                     c.spawn(ui.text(&row.name, 17.0, if sel { Color::WHITE } else { TEXT }));
-                    if let Some(v) = &row.value {
-                        c.spawn(Node {
-                            column_gap: Val::Px(14.0),
-                            align_items: AlignItems::Center,
-                            margin: UiRect::right(Val::Percent(4.0)),
-                            ..default()
-                        })
-                        .with_children(|r| {
-                            // A price has the coin; a word ("Owned") stands alone, dimmed.
-                            let price = v.parse::<u32>().is_ok();
-                            if price {
-                                r.spawn((
-                                    Node {
-                                        height: Val::Px(18.0),
-                                        width: Val::Px(18.0),
-                                        ..default()
-                                    },
-                                    ui.image(sprite("sb_fe/MENU_Money")),
-                                ));
-                            }
-                            r.spawn(ui.text(v, 16.0, if price { TEXT } else { DIM }));
-                        });
-                    }
                 });
             });
     }
     // The scroll bar (its thumb the shown share of the list).
-    if rows.len() > ROWS {
+    if entries.len() > ROWS {
         root.spawn((
             abs(50.0, 27.5, 0.9, 47.5),
-            ui.image(sprite("sb_in_game/MENU_Scroll_Base")),
+            ui.image("sb_in_game/MENU_Scroll_Base"),
         ));
-        let share = ROWS as f32 / rows.len() as f32;
+        let share = ROWS as f32 / entries.len() as f32;
         root.spawn((
             abs(
                 50.17,
-                27.5 + 47.5 * start as f32 / rows.len() as f32,
+                27.5 + 47.5 * top as f32 / entries.len() as f32,
                 0.55,
                 47.5 * share,
             ),
-            ui.image(sprite("sb_in_game/MENU_Scroll_Bar")),
+            ui.image("sb_in_game/MENU_Scroll_Bar"),
         ));
     }
-    if let Some(d) = detail {
+    if let Some(d) = entries.get(index) {
         parchment(root, ui, d);
     }
 }
 
 /// The parchment on the right: the name on its black bar, the big icon (items) or the story art
 /// (skills), the stat lines on ink strokes, the text over faint rules.
-fn parchment(root: &mut ChildSpawnerCommands, ui: &Ui, d: &Detail) {
+fn parchment(root: &mut ChildSpawnerCommands, ui: &Ui, d: &Entry) {
     root.spawn((
         abs(55.5, 14.4, 38.0, 62.3),
-        ui.image(sprite("sb_in_game/MENU_WP_Base")),
+        ui.image("sb_in_game/MENU_WP_Base"),
     ));
     root.spawn((
         abs(56.5, 15.6, 36.0, 4.4),
-        ui.image(sprite("sb_in_game/MENU_ItemBase_08"))
+        ui.image("sb_in_game/MENU_ItemBase_08")
             .with_color(Color::srgb(0.25, 0.25, 0.25)),
     ))
     .with_children(|b| {
@@ -737,30 +663,20 @@ fn parchment(root: &mut ChildSpawnerCommands, ui: &Ui, d: &Detail) {
     if let Some(art) = &d.art {
         ui.story(root, art);
         y = 38.0;
-    } else if d.icon.is_some() {
+    } else if let Some(icon) = &d.icon {
         root.spawn((
             abs(81.3, 20.8, 9.4, 16.2),
-            ui.image(sprite("sb_in_game/MENU_IconBase_01")),
+            ui.image("sb_in_game/MENU_IconBase_01"),
         ))
         .with_children(|b| {
-            b.spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: Val::Percent(8.0),
-                    top: Val::Percent(8.0),
-                    width: Val::Percent(84.0),
-                    height: Val::Percent(84.0),
-                    ..default()
-                },
-                ui.image(d.icon.clone()),
-            ));
+            b.spawn((abs(8.0, 8.0, 84.0, 84.0), ui.image(icon)));
         });
         y = 30.0;
     }
     for (label, value) in &d.stats {
         root.spawn((
             abs(57.0, y, 22.5, 3.6),
-            ui.image(sprite("sb_in_game/MENU_ItemBase_08"))
+            ui.image("sb_in_game/MENU_ItemBase_08")
                 .with_color(Color::srgba(0.5, 0.5, 0.5, 0.9)),
         ))
         .with_children(|b| {
@@ -783,6 +699,10 @@ fn parchment(root: &mut ChildSpawnerCommands, ui: &Ui, d: &Detail) {
         y += 4.4;
     }
     y += 1.0;
+    // The text starts below the big icon even with no stat lines beside it (Equipment).
+    if d.art.is_none() && d.icon.is_some() {
+        y = y.max(38.0);
+    }
     // Faint rules under the text lines (the game's ruled parchment).
     let mut r = y + 3.2;
     while r < 75.5 {
@@ -800,15 +720,7 @@ fn parchment(root: &mut ChildSpawnerCommands, ui: &Ui, d: &Detail) {
 /// The status bar along the bottom (all but Options): resurrection nodes over the Vitality bar,
 /// Unseen Aid, Vitality / Attack Power, the skill level and its gauge, Spirit Emblems and Sen.
 /// gap: attribute levels, Unseen Aid and skill experience are not modelled: Wolf's start values.
-fn status_bar(
-    root: &mut ChildSpawnerCommands,
-    ui: &Ui,
-    kit: &Kit,
-    tables: &Tables,
-    texts: &ItemTexts,
-    wolf: (f32, f32),
-    attack: u8,
-) {
+fn status_bar(root: &mut ChildSpawnerCommands, ui: &Ui, kit: &Kit, book: &Book, wolf: (f32, f32)) {
     let plate = Color::srgba(0.06, 0.06, 0.06, 0.78);
     let (t, h) = (79.2, 8.8);
     let (hp, hp_max) = wolf;
@@ -826,12 +738,11 @@ fn status_bar(
                         height: Val::Px(18.0),
                         ..default()
                     },
-                    ui.image(sprite("sb_fe/MENU_Revive_Gauge"))
-                        .with_color(if lit {
-                            Color::WHITE
-                        } else {
-                            Color::srgba(0.4, 0.4, 0.4, 0.6)
-                        }),
+                    ui.image("sb_fe/MENU_Revive_Gauge").with_color(if lit {
+                        Color::WHITE
+                    } else {
+                        Color::srgba(0.4, 0.4, 0.4, 0.6)
+                    }),
                 ));
             }
             b.spawn((
@@ -879,7 +790,7 @@ fn status_bar(
             .with_children(|c| {
                 for (icon, label, value) in [
                     ("MENU_ST_Vitality", "Vitality", PLAYER_LEVEL.to_string()),
-                    ("MENU_ST_Offensive", "Attack Power", attack.to_string()),
+                    ("MENU_ST_Offensive", "Attack Power", book.attack.to_string()),
                 ] {
                     c.spawn(Node {
                         align_items: AlignItems::Center,
@@ -893,7 +804,7 @@ fn status_bar(
                                 height: Val::Px(20.0),
                                 ..default()
                             },
-                            ui.image(sprite(&format!("sb_in_game/{icon}"))),
+                            ui.image(&format!("sb_in_game/{icon}")),
                         ));
                         r.spawn((Node {
                             flex_grow: 1.0,
@@ -912,7 +823,7 @@ fn status_bar(
         .with_children(|b| {
             b.spawn((
                 abs(2.0, 12.0, 11.0, 40.0),
-                ui.image(sprite("sb_fe/MENU_Skill_Lv"))
+                ui.image("sb_fe/MENU_Skill_Lv")
                     .with_color(Color::srgb(0.15, 0.15, 0.15)),
             ))
             .with_children(|d| {
@@ -930,7 +841,7 @@ fn status_bar(
             });
             b.spawn((
                 abs(14.0, 25.0, 60.0, 12.0),
-                ui.image(sprite("sb_in_game/MENU_GaugeFrame")),
+                ui.image("sb_in_game/MENU_GaugeFrame"),
             ));
             b.spawn((Node {
                 position_type: PositionType::Absolute,
@@ -943,10 +854,6 @@ fn status_bar(
                 });
         });
     // Spirit Emblems and Sen.
-    let emblem = texts
-        .goods_id("Spirit Emblem")
-        .and_then(|id| tables.goods_icon.get(&id))
-        .and_then(|i| any_icon(*i));
     root.spawn((abs(80.5, t, 12.8, h), BackgroundColor(plate)))
         .with_children(|b| {
             b.spawn(Node {
@@ -961,8 +868,8 @@ fn status_bar(
             .with_children(|c| {
                 let n = kit.spirit_emblems;
                 for (icon, value) in [
-                    (emblem, format!("{n}/15")),
-                    (sprite("sb_fe/MENU_Money"), kit.sen.to_string()),
+                    (book.emblem.as_deref().unwrap_or(""), format!("{n}/15")),
+                    ("sb_fe/MENU_Money", kit.sen.to_string()),
                 ] {
                     c.spawn(Node {
                         align_items: AlignItems::Center,
@@ -992,146 +899,91 @@ fn status_bar(
         });
 }
 
-/// Inventory's rows and details for a category: Quick Items (the Healing Gourd, the Homeward
-/// Idol), Key Items (Kusabimaru, the Shinobi Prosthetic), Upgrade Materials, Prosthetic
-/// Arm Tools (those fitted). gap: no pickups, so only what Wolf starts with.
-fn inventory(cat: usize, kit: &Kit, texts: &ItemTexts, tables: &Tables) -> Vec<(Row, Detail)> {
-    let goods = |id: i32, count: Option<u32>, stats: Vec<(String, String)>| {
-        let (name, info) = slot_text(texts, &Slot::Goods(id, 0));
-        let icon = if id == 3000 {
-            any_icon(151)
-        } else {
-            tables.goods_icon.get(&id).and_then(|i| any_icon(*i))
-        };
-        (
-            Row {
-                icon: icon.clone(),
-                name: name.clone(),
-                count: count.map(|n| n.to_string()),
-                ..default()
-            },
-            Detail {
-                name,
-                icon,
-                art: None,
-                stats,
-                info,
-            },
-        )
-    };
-    let weapon = |id: i32, stats: Vec<(String, String)>| {
-        let (name, info) = slot_text(texts, &Slot::Weapon(id));
-        let icon = tables
-            .weapon_icon
-            .get(&id)
-            .or_else(|| tables.weapon_icon.get(&(id / 100 * 100)))
-            .and_then(|i| any_icon(*i));
-        (
-            Row {
-                icon: icon.clone(),
-                name: name.clone(),
-                ..default()
-            },
-            Detail {
-                name,
-                icon,
-                art: None,
-                stats,
-                info,
-            },
-        )
+/// Inventory's entries for a category: Quick Items (the Healing Gourd, the Homeward Idol), Key
+/// Items (Kusabimaru, the Shinobi Prosthetic), Upgrade Materials, Prosthetic Arm Tools (those
+/// fitted). gap: no pickups, so only what Wolf starts with.
+fn inventory(cat: usize, kit: &Kit, book: &Book) -> Vec<Entry> {
+    let (texts, tables) = (&book.texts, &book.tables);
+    let entry = |slot: Slot, count: Option<u32>, stats: Vec<(String, String)>| {
+        let (name, info) = slot_text(texts, &slot);
+        Entry {
+            icon: slot_icon(tables, &slot),
+            name,
+            count: count.map(|n| n.to_string()),
+            stats,
+            info,
+            ..default()
+        }
     };
     let held = |n: u32, of: u32| ("Number Held".to_string(), format!("{n}/ {of}"));
     let storage = || ("In Storage".to_string(), "-".to_string());
+    let stocked = |(id, n): (i32, u32)| {
+        entry(
+            Slot::Goods(id, n),
+            Some(n),
+            vec![held(n, tables.max(id)), storage()],
+        )
+    };
     match cat {
         0 => {
-            let g = kit.gourd_charges;
-            let mut v = vec![goods(
-                3000,
+            let g = kit.count(3000);
+            let gourd = entry(
+                Slot::Goods(3000, g),
                 Some(g),
                 vec![("Uses".to_string(), format!("{g}/{g}")), storage()],
-            )];
-            for (id, n) in held_goods(kit, tables, 0) {
-                let max = tables.max(id);
-                v.push(goods(id, Some(n), vec![held(n, max), storage()]));
-            }
-            v
+            );
+            std::iter::once(gourd)
+                .chain(held_goods(kit, tables, 0).into_iter().map(stocked))
+                .collect()
         }
-        1 => {
-            let mut v = Vec::new();
-            if let Some(id) = texts.weapon_id("Kusabimaru") {
-                v.push(weapon(id, vec![held(1, 1), storage()]));
-            }
-            if let Some(id) = texts.goods_id("Shinobi Prosthetic") {
-                v.push(goods(id, None, vec![held(1, 1), storage()]));
-            }
-            for (id, n) in held_goods(kit, tables, 1) {
-                v.push(goods(id, (n > 1).then_some(n), vec![]));
-            }
-            v
-        }
+        1 => book
+            .key_items
+            .iter()
+            .map(|id| entry(Slot::Goods(*id, 1), None, vec![held(1, 1), storage()]))
+            .chain(
+                held_goods(kit, tables, 1)
+                    .into_iter()
+                    .map(|(id, n)| entry(Slot::Goods(id, n), (n > 1).then_some(n), vec![])),
+            )
+            .collect(),
         2 => held_goods(kit, tables, 2)
             .into_iter()
-            .map(|(id, n)| {
-                let max = tables.max(id);
-                goods(id, Some(n), vec![held(n, max), storage()])
-            })
+            .map(stocked)
             .collect(),
         _ => kit
             .prosthetics
             .iter()
-            .map(|id| weapon(*id, vec![]))
+            .map(|id| entry(Slot::Weapon(*id), None, vec![]))
             .collect(),
     }
 }
 
-/// Skills' rows and details for a category: the learned skills (Kit::skills; with
-/// all_skills, all of them), each with its story art (sb_icon_skill
-/// MENU_SkillStory_<iconId>).
-fn skills(cat: usize, kit: &Kit, texts: &ItemTexts, tables: &Tables) -> Vec<(Row, Detail)> {
+/// Skills' entries for a category: the learned skills (Kit::skills; with all_skills, all of
+/// them), each with its story art (sb_icon_skill MENU_SkillStory_<iconId>).
+fn skills(cat: usize, kit: &Kit, book: &Book) -> Vec<Entry> {
+    let tables = &book.tables;
     tables.skills[cat]
         .iter()
         .filter(|s| kit.all_skills || kit.skills.contains(&s.id))
         .map(|s| {
-            let name = texts
-                .weapon_name
-                .get(&s.weapon)
-                .cloned()
-                .unwrap_or_default();
-            let info = texts
-                .weapon_info
-                .get(&s.weapon)
-                .cloned()
-                .unwrap_or_default();
-            let icon_id = tables.weapon_icon.get(&s.weapon).copied();
-            let icon = icon_id.and_then(any_icon);
-            let art = icon_id.and_then(|i| sprite(&format!("story/MENU_SkillStory_{i:05}")));
-            (
-                Row {
-                    icon: icon.clone(),
-                    name: name.clone(),
-                    ..default()
-                },
-                Detail {
-                    name,
-                    icon,
-                    art,
-                    stats: vec![],
-                    info,
-                },
-            )
+            let slot = Slot::Weapon(s.weapon);
+            let (name, info) = slot_text(&book.texts, &slot);
+            Entry {
+                icon: slot_icon(tables, &slot),
+                name,
+                art: tables
+                    .weapon_icon
+                    .get(&s.weapon)
+                    .map(|i| format!("story/MENU_SkillStory_{i:05}")),
+                info,
+                ..default()
+            }
         })
         .collect()
 }
 
-fn equipment(
-    root: &mut ChildSpawnerCommands,
-    ui: &Ui,
-    menu: &GameMenu,
-    kit: &Kit,
-    tables: &Tables,
-    texts: &ItemTexts,
-) {
+fn equipment(root: &mut ChildSpawnerCommands, ui: &Ui, menu: &GameMenu, kit: &Kit, book: &Book) {
+    let (texts, tables) = (&book.texts, &book.tables);
     let all = slots(kit);
     // Section bars.
     for (label, l, t) in [
@@ -1140,19 +992,16 @@ fn equipment(
         ("Quick Items", 6.5, 45.0),
         ("Ninjutsu", 38.5, 45.0),
     ] {
-        root.spawn((
-            abs(l, t, 17.0, 4.5),
-            ui.image(sprite("sb_in_game/MENU_Caption_02")),
-        ))
-        .with_children(|b| {
-            b.spawn(Node {
-                padding: UiRect::left(Val::Percent(6.0)),
-                ..fill_row()
-            })
-            .with_children(|c| {
-                c.spawn(ui.text(label, 17.0, TEXT));
+        root.spawn((abs(l, t, 17.0, 4.5), ui.image("sb_in_game/MENU_Caption_02")))
+            .with_children(|b| {
+                b.spawn(Node {
+                    padding: UiRect::left(Val::Percent(6.0)),
+                    ..fill_row()
+                })
+                .with_children(|c| {
+                    c.spawn(ui.text(label, 17.0, TEXT));
+                });
             });
-        });
     }
     // The slots: (index, left %, top %, size % of height).
     let mut places: Vec<(usize, f32, f32, f32)> = Vec::new();
@@ -1167,51 +1016,31 @@ fn equipment(
     for (i, l, t, size) in places {
         let w = size * 9.0 / 16.0;
         let slot = &all[i];
-        root.spawn((
-            abs(l, t, w, size),
-            ui.image(sprite("sb_in_game/MENU_IconBase_02")),
-        ))
-        .with_children(|s| {
-            // The cursor glows behind the item, not over it.
-            if i == menu.index {
-                s.spawn((
-                    Node {
+        root.spawn((abs(l, t, w, size), ui.image("sb_in_game/MENU_IconBase_02")))
+            .with_children(|s| {
+                // The cursor glows behind the item, not over it.
+                if i == menu.index {
+                    s.spawn((
+                        abs(-8.0, -8.0, 116.0, 116.0),
+                        ui.image("sb_in_game/MENU_Cursor_TB")
+                            .with_color(ORANGE.with_alpha(0.55)),
+                    ));
+                }
+                if let Some(icon) = slot_icon(tables, slot) {
+                    s.spawn((abs(4.0, 4.0, 92.0, 92.0), ui.image(&icon)));
+                }
+                if let Slot::Goods(_, n) = slot {
+                    s.spawn((Node {
                         position_type: PositionType::Absolute,
-                        left: Val::Percent(-8.0),
-                        top: Val::Percent(-8.0),
-                        width: Val::Percent(116.0),
-                        height: Val::Percent(116.0),
+                        right: Val::Percent(6.0),
+                        bottom: Val::Percent(2.0),
                         ..default()
-                    },
-                    ui.image(sprite("sb_in_game/MENU_Cursor_TB"))
-                        .with_color(ORANGE.with_alpha(0.55)),
-                ));
-            }
-            if let Some(icon) = slot_icon(tables, slot) {
-                s.spawn((
-                    Node {
-                        position_type: PositionType::Absolute,
-                        left: Val::Percent(4.0),
-                        top: Val::Percent(4.0),
-                        width: Val::Percent(92.0),
-                        height: Val::Percent(92.0),
-                        ..default()
-                    },
-                    ui.image(Some(icon)),
-                ));
-            }
-            if let Slot::Goods(_, n) = slot {
-                s.spawn((Node {
-                    position_type: PositionType::Absolute,
-                    right: Val::Percent(6.0),
-                    bottom: Val::Percent(2.0),
-                    ..default()
-                },))
-                    .with_children(|c| {
-                        c.spawn(ui.text(&n.to_string(), 16.0, Color::WHITE));
-                    });
-            }
-        });
+                    },))
+                        .with_children(|c| {
+                            c.spawn(ui.text(&n.to_string(), 16.0, Color::WHITE));
+                        });
+                }
+            });
     }
     // The item under the cursor on the parchment.
     let slot = &all[menu.index.min(all.len() - 1)];
@@ -1219,12 +1048,11 @@ fn equipment(
     parchment(
         root,
         ui,
-        &Detail {
+        &Entry {
             name,
             icon: slot_icon(tables, slot),
-            art: None,
-            stats: vec![],
             info,
+            ..default()
         },
     );
 }
@@ -1237,7 +1065,6 @@ fn build(
     book: &Book,
     wolf: (f32, f32),
 ) {
-    let (texts, tables) = (&book.texts, &book.tables);
     commands
         .spawn((
             Node {
@@ -1254,22 +1081,13 @@ fn build(
         .with_children(|root| {
             root.spawn((
                 abs(0.0, 0.0, 100.0, 100.0),
-                ui.image(sprite("sb_in_game/MENU_Base_00")),
+                ui.image("sb_in_game/MENU_Base_00"),
             ));
             // Tabs, with the switch keys and the brush arrows at either end.
-            root.spawn((
-                abs(5.3, 6.0, 1.3, 4.6),
-                ui.image(sprite("sb_in_game/MENU_Arrow")),
-            ));
-            root.spawn((
-                abs(7.3, 6.4, 1.8, 3.4),
-                ui.image(sprite("sb_keytop/KG_Key_Z")),
-            ));
-            root.spawn((
-                abs(90.0, 6.4, 1.8, 3.4),
-                ui.image(sprite("sb_keytop/KG_Key_X")),
-            ));
-            let mut right = ui.image(sprite("sb_in_game/MENU_Arrow"));
+            root.spawn((abs(5.3, 6.0, 1.3, 4.6), ui.image("sb_in_game/MENU_Arrow")));
+            root.spawn((abs(7.3, 6.4, 1.8, 3.4), ui.image("sb_keytop/KG_Key_Z")));
+            root.spawn((abs(90.0, 6.4, 1.8, 3.4), ui.image("sb_keytop/KG_Key_X")));
+            let mut right = ui.image("sb_in_game/MENU_Arrow");
             right.flip_x = true;
             root.spawn((abs(92.4, 6.0, 1.3, 4.6), right));
             for (i, name) in TABS.iter().enumerate() {
@@ -1279,19 +1097,16 @@ fn build(
                 } else {
                     "sb_in_game/MENU_Caption_01"
                 };
-                root.spawn((
-                    abs(11.5 + i as f32 * 19.0, 4.2, 18.0, 9.0),
-                    ui.image(sprite(brush)),
-                ))
-                .with_children(|t| {
-                    t.spawn(Node {
-                        justify_content: JustifyContent::Center,
-                        ..fill_row()
-                    })
-                    .with_children(|c| {
-                        c.spawn(ui.text(name, 18.0, if open { Color::WHITE } else { TEXT }));
+                root.spawn((abs(11.5 + i as f32 * 19.0, 4.2, 18.0, 9.0), ui.image(brush)))
+                    .with_children(|t| {
+                        t.spawn(Node {
+                            justify_content: JustifyContent::Center,
+                            ..fill_row()
+                        })
+                        .with_children(|c| {
+                            c.spawn(ui.text(name, 18.0, if open { Color::WHITE } else { TEXT }));
+                        });
                     });
-                });
             }
             // The rule under the tabs.
             root.spawn((
@@ -1299,55 +1114,43 @@ fn build(
                 BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.35)),
             ));
             match menu.tab {
-                0 => equipment(root, ui, menu, kit, tables, texts),
+                0 => equipment(root, ui, menu, kit, book),
                 1 | 2 => {
                     let k = menu.tab - 1;
                     let (cats, list) = if menu.tab == 1 {
-                        (&INV_CATS, inventory(menu.cat[k], kit, texts, tables))
+                        (&INV_CATS, inventory(menu.cat[k], kit, book))
                     } else {
-                        (&SKILL_CATS, skills(menu.cat[k], kit, texts, tables))
+                        (&SKILL_CATS, skills(menu.cat[k], kit, book))
                     };
-                    let rows: Vec<Row> = list.iter().map(|(r, _)| r.clone()).collect();
-                    let detail = list.get(menu.index).map(|(_, d)| d);
-                    list_screen(
-                        root,
-                        ui,
-                        (cats, menu.cat[k]),
-                        &rows,
-                        (menu.index, menu.top),
-                        detail,
-                    );
+                    list_screen(root, ui, (cats, menu.cat[k]), &list, (menu.index, menu.top));
                 }
                 _ => {
-                    for (i, label) in OPTION_ITEMS.iter().enumerate() {
+                    for (i, label) in PAUSE_ROWS.iter().enumerate() {
                         let sel = i == menu.index;
                         let plate = if sel {
                             "sb_in_game/MENU_Cursor_01"
                         } else {
                             "sb_in_game/MENU_Caption_01"
                         };
-                        root.spawn((
-                            abs(6.8, 18.0 + i as f32 * 7.55, 22.2, 6.4),
-                            ui.image(sprite(plate)),
-                        ))
-                        .with_children(|b| {
-                            b.spawn(Node {
-                                justify_content: JustifyContent::Center,
-                                ..fill_row()
-                            })
-                            .with_children(|c| {
-                                c.spawn(ui.text(
-                                    label,
-                                    17.0,
-                                    if sel { Color::WHITE } else { TEXT },
-                                ));
+                        root.spawn((abs(6.8, 18.0 + i as f32 * 7.55, 22.2, 6.4), ui.image(plate)))
+                            .with_children(|b| {
+                                b.spawn(Node {
+                                    justify_content: JustifyContent::Center,
+                                    ..fill_row()
+                                })
+                                .with_children(|c| {
+                                    c.spawn(ui.text(
+                                        label,
+                                        17.0,
+                                        if sel { Color::WHITE } else { TEXT },
+                                    ));
+                                });
                             });
-                        });
                     }
                 }
             }
             if menu.tab != 3 {
-                status_bar(root, ui, kit, tables, texts, wolf, book.attack);
+                status_bar(root, ui, kit, book, wolf);
             }
             // The key guide: help on the left, the keys on the right.
             let help = match menu.tab {
@@ -1405,14 +1208,15 @@ mod tests {
             return;
         };
         let kit = Kit::default();
-        let quick = inventory(0, &kit, &book.texts, &book.tables);
-        assert_eq!(quick[0].0.name, "Healing Gourd");
-        assert_eq!(quick[0].0.count.as_deref(), Some("3"));
-        let materials = inventory(2, &kit, &book.texts, &book.tables);
+        let quick = inventory(0, &kit, &book);
+        assert_eq!(quick[0].name, "Healing Gourd");
+        assert_eq!(quick[0].count.as_deref(), Some("3"));
+        assert_eq!(inventory(1, &kit, &book)[0].name, "Kusabimaru");
+        let materials = inventory(2, &kit, &book);
         assert!(
             materials
                 .iter()
-                .any(|(r, _)| r.name == "Scrap Iron" && r.count.as_deref() == Some("20"))
+                .any(|r| r.name == "Scrap Iron" && r.count.as_deref() == Some("20"))
         );
     }
 

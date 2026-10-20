@@ -641,6 +641,9 @@ const MAPS: [&str; 10] = [
     "m25_00_00_00",
     "m89_00_00_99",
 ];
+/// The in-game pause rows, in the order `PauseView::request` names them.
+pub const PAUSE_ROWS: [&str; 3] = ["Resume", "Back to start menu", "Quit"];
+
 const LABELS: [&str; 13] = [
     "Mode",
     "Enemy id",
@@ -1002,11 +1005,12 @@ pub fn paused(state: Res<PanelState>) -> bool {
 }
 
 /// Set when another screen (the in-game menu) draws the in-game pause: the panel stays hidden,
-/// its own row keys are off, and `request` takes one of its rows (0 Resume, 1 Back to start menu,
-/// 2 Quit) as if it were picked.
+/// its own row keys are off, `request` takes one of its rows (an index into `PAUSE_ROWS`) as if
+/// it were picked, and `movement` passes on this frame's arrow, D-pad and stick presses.
 #[derive(Resource, Default)]
 pub struct PauseView {
     pub request: Option<usize>,
+    pub movement: IVec2,
 }
 
 /// Optional screens that gate or draw the pause panel.
@@ -1125,7 +1129,11 @@ fn spawn(mut commands: Commands, fonts: Res<crate::game_ui::GameFonts>, state: R
                         ..default()
                     },
                 ));
-                for i in 0..if state.start { LABELS.len() } else { 3 } {
+                for i in 0..if state.start {
+                    LABELS.len()
+                } else {
+                    PAUSE_ROWS.len()
+                } {
                     p.spawn((
                         Button,
                         ActivateOnPress,
@@ -1229,11 +1237,16 @@ fn update(
     if !state.paused {
         if let Some(view) = view.as_mut() {
             view.request = None;
+            view.movement = IVec2::ZERO;
         }
         typing.clear();
         return;
     }
-    let count = if state.start { LABELS.len() } else { 3 };
+    let count = if state.start {
+        LABELS.len()
+    } else {
+        PAUSE_ROWS.len()
+    };
     let mut movement = IVec2::new(
         i32::from(keys.just_pressed(KeyCode::ArrowRight))
             - i32::from(keys.just_pressed(KeyCode::ArrowLeft)),
@@ -1266,6 +1279,9 @@ fn update(
     }
     state.stick = stick;
     if drawn {
+        if let Some(view) = view.as_mut() {
+            view.movement = movement;
+        }
         movement = IVec2::ZERO;
         activate = false;
     }
@@ -1417,7 +1433,7 @@ fn update(
                         )
                     }
                 } else {
-                    ["Resume", "Back to start menu", "Quit"][r.0].into()
+                    PAUSE_ROWS[r.0].into()
                 };
             }
         }
