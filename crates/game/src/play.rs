@@ -62,6 +62,8 @@ mod idol;
 mod live_check;
 #[path = "map_enemies.rs"]
 mod map_enemies;
+#[path = "pickup.rs"]
+mod pickup;
 #[path = "play_gate.rs"]
 mod play_gate;
 pub(crate) use play_gate::PlayGate;
@@ -440,6 +442,7 @@ pub fn run(options: Options) -> Result<()> {
     let mut stories = map::story::MapStory::default();
     let mut start_yaw = 0.0;
     let mut idols = idol::Idols::default();
+    let mut has_pickups = false;
     let mut within = None;
     let mut fog_walls = Vec::new();
     if let Some(spec) = options.arena {
@@ -500,6 +503,9 @@ pub fn run(options: Options) -> Result<()> {
         stage("collision world");
         idols = idol::Idols::load(&cache, &blocks, |x, z, y| world.floor(x, z, y + 1.0));
         duel.set_idols(idols.spots.clone());
+        let (pickups, item_data) = pickup::load(&cache, &blocks);
+        has_pickups = !pickups.is_empty();
+        duel.set_pickups(pickups, item_data);
         let (start, yaw_degrees) = match options.spawn {
             Some([x, y, z, yaw]) => {
                 let y = world.floor(x, z, y + 1.0).unwrap_or(y);
@@ -810,6 +816,7 @@ pub fn run(options: Options) -> Result<()> {
     game_menu::install(&mut app, options.attack_power.value());
     crate::death_screen::install(&mut app);
     idol::install(&mut app, idols);
+    pickup::install(&mut app, has_pickups);
     if options.enemy_present {
         arena_d_scene::install(&mut app, &cache, options.arena, options.objects)?;
         arena_c_scene::install(&mut app, &cache, options.arena)?;
