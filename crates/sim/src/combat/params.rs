@@ -141,7 +141,7 @@ impl AttackProfile {
     }
 }
 
-/// The parts of an NpcParam row that combat reads.
+/// The parts of an NpcParam row that combat reads, and what its defeat pays.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NpcCombat {
     pub id: i32,
@@ -182,6 +182,10 @@ pub struct NpcCombat {
     /// `hitStopType_Defencer`: 1 when this NPC takes the defender's hit stop of attacks that hit
     /// it, else none (code `b9cfb0`; 0 on every NPC row).
     pub hit_stop_type_defender: u8,
+    /// `getSoul`: the Sen its defeat pays.
+    pub get_soul: u32,
+    /// `skillPoint`: the skill experience its defeat pays.
+    pub skill_point: u32,
 }
 
 impl NpcCombat {
@@ -255,6 +259,8 @@ impl NpcCombat {
             ],
             hit_stop_type: row.u8("hitStopType")?,
             hit_stop_type_defender: row.u8("hitStopType_Defencer")?,
+            get_soul: row.int("getSoul")?.max(0) as u32,
+            skill_point: row.int("skillPoint")?.max(0) as u32,
         })
     }
 }

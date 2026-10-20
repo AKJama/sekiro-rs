@@ -751,6 +751,7 @@ pub fn run(options: Options) -> Result<()> {
     .add_systems(Startup, setup.before(map::MapSpawn))
     .init_resource::<play_gate::PlayGate>()
     .add_systems(Startup, play_gate::spawn_screen)
+    .add_systems(Startup, combat_hud::spawn_reward)
     .add_systems(
         Update,
         (play_gate::check_render, play_gate::update)
@@ -793,9 +794,13 @@ pub fn run(options: Options) -> Result<()> {
             crate::brain_overlay::update,
             hud,
             grapple_marker,
-            combat_hud::update,
-            combat_hud::update_status,
-            combat_hud::update_perilous,
+            (
+                combat_hud::update,
+                combat_hud::update_status,
+                combat_hud::update_perilous,
+                combat_hud::update_reward,
+            )
+                .chain(),
             log_camera,
         )
             .chain(),
@@ -2080,6 +2085,9 @@ fn hud(
             .map(|p| Vec3::from_array(p) + Vec3::Y * 0.6),
         perilous_age: sim.perilous_age,
         held,
+        sen: sim.duel.kit.sen,
+        skill_points: sim.duel.kit.skill_points,
+        xp_fill: sim.duel.kit.xp_fill(),
     };
     let Ok(mut text) = text.single_mut() else {
         return;
