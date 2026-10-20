@@ -54,6 +54,8 @@ mod arena_c_scene;
 mod arena_d_scene;
 #[path = "cinematic_fade.rs"]
 pub(crate) mod cinematic_fade;
+#[path = "game_menu.rs"]
+mod game_menu;
 #[path = "idol.rs"]
 mod idol;
 #[path = "live_check.rs"]
@@ -801,6 +803,7 @@ pub fn run(options: Options) -> Result<()> {
     crate::menu::install(&mut app);
     crate::death_screen::install(&mut app);
     idol::install(&mut app, idols);
+    game_menu::install(&mut app, options.attack_power.value());
     if options.enemy_present {
         arena_d_scene::install(&mut app, &cache, options.arena, options.objects)?;
         arena_c_scene::install(&mut app, &cache, options.arena)?;

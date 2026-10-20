@@ -219,6 +219,8 @@ pub struct Duel {
     defender_dying: u8,
     spawn: Option<[Placement; 2]>,
     idols: idol::Idols,
+    /// What Wolf carries: tools, goods, Sen, skills (the in-game menu shows it).
+    pub kit: crate::kit::Kit,
     lock_button: bool,
     attack_button: bool,
     /// The enemy took a hit last step (the AI's damage interrupt).
@@ -796,6 +798,7 @@ impl Duel {
             defender_dying: 0,
             spawn: None,
             idols: idol::Idols::default(),
+            kit: crate::kit::Kit::default(),
             lock_button: false,
             attack_button: false,
             enemy_damaged: false,
