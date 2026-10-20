@@ -51,6 +51,17 @@ fn build_play_world(cache: &Path) -> Option<CollisionWorld> {
     Some(world)
 }
 
+/// The most triangles any of eight slides of `reach` around `feet` tests on each push-out pass.
+fn worst_slide(world: &CollisionWorld, feet: [f32; 3], reach: f32) -> usize {
+    (0..8)
+        .map(|k| {
+            let a = k as f32 * std::f32::consts::FRAC_PI_4;
+            world.slide_triangle_count(feet, [a.sin() * reach, a.cos() * reach])
+        })
+        .max()
+        .unwrap()
+}
+
 /// A Ground that counts the floor and wall queries it forwards.
 struct Counted {
     inner: Box<dyn Ground>,
@@ -118,13 +129,7 @@ fn wall_slide_tests_only_the_body_band() {
     };
     let [x, y, z] = [-257.0, -45.0, 8.0];
     let feet = [x, world.floor(x, z, y + 1.0).unwrap_or(y), z];
-    let tested = (0..8)
-        .map(|k| {
-            let a = k as f32 * std::f32::consts::FRAC_PI_4;
-            world.slide_triangle_count(feet, [a.sin() * 0.13, a.cos() * 0.13])
-        })
-        .max()
-        .unwrap();
+    let tested = worst_slide(&world, feet, 0.13);
     // 7k-18k before the band filter.
     assert!(tested < 2000, "{tested} triangles per push-out pass");
 }
@@ -203,21 +208,20 @@ fn deathblow_pair_search_is_bounded() {
 /// only test the triangles of the cells it crosses that reach its height over each cell.
 #[test]
 fn blocked_hook_rays_test_only_their_band() {
+    use sekiro_sim::wire::{SIGHT_LIFT, Wire, sight_ray};
     let Some(world) = play_world() else {
         return;
     };
-    let points: Vec<sekiro_sim::wire::Point> = serde_json::from_slice(
-        &std::fs::read(cache().join("maps/m11_00_00_00/grapple.json")).unwrap(),
-    )
-    .unwrap();
+    let wire = Wire::load(&cache(), &cache().join("maps/m11_00_00_00")).unwrap();
     let [x, y, z] = [-214.998, -38.577, 13.956];
-    let chest = glam::Vec3::new(x, world.floor(x, z, y + 1.0).unwrap_or(y) + 1.2, z);
+    let feet = glam::Vec3::new(x, world.floor(x, z, y + 1.0).unwrap_or(y), z);
+    let chest = feet + glam::Vec3::Y * SIGHT_LIFT;
     let (mut rays, mut tested) = (0, 0);
-    for q in points.iter().filter_map(|p| p.position) {
-        let ray = glam::Vec3::from(q) - chest;
-        if ray.length() < 25.0 {
+    for point in wire.points.iter().filter_map(|p| p.position) {
+        let (dir, length) = sight_ray(chest, point.into());
+        if length < 25.0 {
             rays += 1;
-            tested += world.ray_triangle_count(chest, ray.normalize(), ray.length() - 0.1);
+            tested += world.ray_triangle_count(chest, dir, length);
         }
     }
     assert!(rays >= 5, "only {rays} hooks near the spot");
@@ -234,22 +238,75 @@ fn blocked_hook_rays_test_only_their_band() {
 /// tested every triangle of its 4 m cells in the body's height band.
 #[test]
 fn wall_contact_slides_test_only_nearby_triangles() {
+    use sekiro_sim::docking::{WALL_PROBE_LIFT, WALL_REACH};
     let Some(world) = play_world() else {
         return;
     };
-    let (feet, lift) = (
-        [-256.25f32, -42.2, 11.43],
-        sekiro_sim::docking::WALL_PROBE_LIFT,
-    );
-    let chest = [feet[0], feet[1] + lift, feet[2]];
-    let tested = (0..8)
-        .map(|k| {
-            let a = k as f32 * std::f32::consts::FRAC_PI_4;
-            let reach = sekiro_sim::docking::WALL_REACH;
-            world.slide_triangle_count(chest, [a.sin() * reach, a.cos() * reach])
+    let [x, y, z] = [-256.25, -42.2, 11.43];
+    let tested = worst_slide(&world, [x, y + WALL_PROBE_LIFT, z], WALL_REACH);
+    // 2,815 before the horizontal cull, 1,417 after.
+    assert!(tested < 2000, "{tested} triangles per push-out pass");
+}
+
+/// The horizontal cull of a slide's triangles (#161) changes no slide: at both #161 spots,
+/// moves of every length a step makes, up to 2 m along each axis into the slanted walls there,
+/// end where they end without it.
+#[test]
+fn slide_cull_keeps_every_contact() {
+    use rayon::prelude::*;
+    let Some(world) = play_world() else {
+        return;
+    };
+    let world: &CollisionWorld = &world;
+    let mut starts = Vec::new();
+    for ([x, y, z], lifts) in [
+        ([-215.0f32, -38.6, 14.0], &[0.0][..]),
+        (
+            [-256.0, -42.2, 11.4],
+            &[0.0, sekiro_sim::docking::WALL_PROBE_LIFT][..],
+        ),
+    ] {
+        for i in -2..=2 {
+            for j in -2..=2 {
+                let (x, z) = (x + i as f32 * 0.25, z + j as f32 * 0.25);
+                let floor = world.floor(x, z, y + 1.0).unwrap_or(y);
+                // Only where a body can stand: one that starts inside a wall is pushed out of
+                // it, as far as the wall is thick and not along the move.
+                starts.extend(
+                    lifts
+                        .iter()
+                        .map(|lift| [x, floor + lift, z])
+                        .filter(|&feet| world.slide_uncull(feet, [0.0, 0.0]) == [0.0, 0.0]),
+                );
+            }
+        }
+    }
+    let moves: Vec<[f32; 2]> = (0..16)
+        .flat_map(|k| {
+            let a = k as f32 * std::f32::consts::PI / 8.0;
+            [0.13, 0.8, 1.4, 2.0].map(|len| [a.sin() * len, a.cos() * len])
         })
-        .max()
-        .unwrap();
-    // 2,815 before the horizontal cull, 525 after.
-    assert!(tested < 1000, "{tested} triangles per push-out pass");
+        .collect();
+    // And bodies pressed against the walls there (slid 2 m eight ways), where a slide starts in
+    // contact.
+    let pressed: Vec<[f32; 3]> = starts
+        .iter()
+        .flat_map(|&feet| {
+            moves.iter().skip(3).step_by(8).map(move |&d| {
+                let [dx, dz] = world.slide(feet, d);
+                [feet[0] + dx, feet[1], feet[2] + dz]
+            })
+        })
+        .collect();
+    starts.extend(pressed);
+    let worst = starts
+        .par_iter()
+        .flat_map_iter(|&feet| {
+            moves.iter().map(move |&d| {
+                let [a, b] = [world.slide(feet, d), world.slide_uncull(feet, d)];
+                (a[0] - b[0]).abs().max((a[1] - b[1]).abs())
+            })
+        })
+        .reduce(|| 0.0, f32::max);
+    assert!(worst <= 1e-5, "the cull moved a slide by {worst} m");
 }

@@ -374,8 +374,8 @@ pub struct CollisionWorld {
     /// Per triangle, the part [`CollisionWorld::live`] asks about: [`ORDINARY`], `1 + i` for
     /// `masked[i]` or [`EVENT_PART`]` | i` for `event_parts[i]`.
     part_of: Vec<u16>,
-    /// Per triangle, its lowest and highest corner's height.
-    heights: Vec<[f32; 2]>,
+    /// Per triangle, the corner-wise minimum and maximum of its corners: its bounding box.
+    bounds: Vec<[Vec3; 2]>,
     /// Map action event walls: untouchable triangles whose contact runs a reaction.
     triggers: Vec<TriggerPart>,
     /// Placed objects' triangle ranges ([`CollisionWorld::add_objects`]) and `<block>/<part>`
@@ -519,7 +519,7 @@ impl CollisionWorld {
         let mut triangles = Vec::with_capacity(mesh.indices.len() / 3);
         let mut normals = Vec::with_capacity(mesh.indices.len() / 3);
         let mut materials = Vec::with_capacity(mesh.indices.len() / 3);
-        let mut heights = Vec::with_capacity(mesh.indices.len() / 3);
+        let mut bounds = Vec::with_capacity(mesh.indices.len() / 3);
         let mut cells: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
         for (source, tri) in mesh.indices.as_chunks::<3>().0.iter().enumerate() {
             if gate_start == Some(source) {
@@ -533,9 +533,10 @@ impl CollisionWorld {
             triangles.push(*tri);
             normals.push(n);
             materials.push(mesh.materials.get(source).copied().unwrap_or(u32::MAX));
-            heights.push([a.y.min(b.y).min(c.y), a.y.max(b.y).max(c.y)]);
-            let (x0, z0) = cell_of(a.x.min(b.x).min(c.x), a.z.min(b.z).min(c.z));
-            let (x1, z1) = cell_of(a.x.max(b.x).max(c.x), a.z.max(b.z).max(c.z));
+            let (lo, hi) = (a.min(b).min(c), a.max(b).max(c));
+            bounds.push([lo, hi]);
+            let (x0, z0) = cell_of(lo.x, lo.z);
+            let (x1, z1) = cell_of(hi.x, hi.z);
             for cx in x0..=x1 {
                 for cz in z0..=z1 {
                     cells.entry((cx, cz)).or_default().push(t);
@@ -548,7 +549,7 @@ impl CollisionWorld {
             triangles,
             normals,
             materials,
-            heights,
+            bounds,
             cells,
             min_walk_ny: MAX_SLOPE_DEGREES.to_radians().cos(),
             gate_from,
@@ -717,7 +718,7 @@ impl CollisionWorld {
         );
         self.normals.extend(part.normals);
         self.materials.extend(part.materials);
-        self.heights.extend(part.heights);
+        self.bounds.extend(part.bounds);
         self.part_of.resize(self.triangles.len(), ORDINARY);
         for (cell, triangles) in part.cells {
             self.cells
@@ -877,7 +878,8 @@ impl CollisionWorld {
         self.ray(origin, dir, max, PLAYER).0
     }
 
-    /// The first hit, and how many triangles the ray was tested against.
+    /// The ray's `(hit, tested)`: the distance to the first hit, and how many triangles the ray
+    /// was tested against.
     fn ray(&self, origin: Vec3, dir: Vec3, max: f32, who: u8) -> (Option<f32>, usize) {
         let end = origin + dir * max;
         if max < 0.0 || !origin.is_finite() || !end.is_finite() {
@@ -888,6 +890,7 @@ impl CollisionWorld {
         // cell: any triangle not yet tested is met further along. Hot cells hold thousands of
         // triangles from other storeys, and gathering, sorting and testing all of them along a
         // sight ray blocked by the next wall cost about 1 ms a ray (#161).
+        // TODO(#163): one shared candidate filter with `gather_slide`'s horizontal cull.
         let (mut x, mut z) = cell_of(origin.x, origin.z);
         let (ex, ez) = cell_of(end.x, end.z);
         let axis = |start: f32, delta: f32, cell: i32| {
@@ -917,18 +920,15 @@ impl CollisionWorld {
             if z == ez {
                 tz = f32::INFINITY;
             }
-            let leave = if last {
-                1.0
-            } else {
-                tx.min(tz).clamp(enter, 1.0)
-            };
+            // 1 in the last cell, where both crossings are infinite.
+            let leave = tx.min(tz).clamp(enter, 1.0);
             if let Some(cell) = self.cells.get(&(x, z)) {
                 let [y0, y1] = [(enter - ALONG).max(0.0), (leave + ALONG).min(1.0)]
                     .map(|t| origin.y + rise * t);
                 let (low_y, high_y) = (y0.min(y1) - PAD, y0.max(y1) + PAD);
                 for &t in cell {
-                    let [min_y, max_y] = self.heights[t as usize];
-                    if min_y > high_y || max_y < low_y || !self.solid(t) || !self.live(t, who) {
+                    let [lo, hi] = self.bounds[t as usize];
+                    if lo.y > high_y || hi.y < low_y || !self.solid(t) || !self.live(t, who) {
                         continue;
                     }
                     tested += 1;
@@ -941,7 +941,9 @@ impl CollisionWorld {
                     }
                 }
             }
-            if last || best.is_some_and(|b| b < leave * max - PAD) {
+            // Any triangle not yet tested lies past `leave`; the margin grows with the ray, as
+            // the crossings add up roundoff cell by cell.
+            if last || best.is_some_and(|b| b < (leave - ALONG) * max - PAD) {
                 break;
             }
             if tx < tz {
@@ -971,7 +973,15 @@ impl CollisionWorld {
     /// Moves a body standing at `feet` by the horizontal `delta`, stopping at walls and
     /// sliding along them. Returns the horizontal displacement actually made.
     pub fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
-        self.slide_for(feet, delta, PLAYER, 0)
+        self.slide_for(feet, delta, PLAYER, 0, true)
+    }
+
+    /// [`CollisionWorld::slide`] without the horizontal cull of [`CollisionWorld::gather_slide`]:
+    /// every triangle of the move's cells in the body's height band. Only for the test that the
+    /// cull changes no slide (#161).
+    #[doc(hidden)]
+    pub fn slide_uncull(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
+        self.slide_for(feet, delta, PLAYER, 0, false)
     }
 
     /// How many triangles a [`CollisionWorld::slide`] of `delta` from `feet` tests the body
@@ -986,6 +996,7 @@ impl CollisionWorld {
             [PLAYER, 0],
             &mut tris,
             &mut walls,
+            true,
         );
         tris.len()
     }
@@ -1000,7 +1011,9 @@ impl CollisionWorld {
     /// them from other storeys (#145). The band is padded so roundoff cannot drop a contact.
     /// It also keeps only those whose horizontal bounds come near the move: the cells reach up
     /// to 4 m past it, and a long probe (`docking::wall_contact`'s eight 0.8 m slides) tested
-    /// about 3k far triangles on each pass, about 20 ms a step (#161).
+    /// about 3k far triangles on each pass, about 20 ms a step (#161). `cull` false skips that
+    /// horizontal cull, for [`CollisionWorld::slide_uncull`].
+    // TODO(#163): one shared candidate filter with `ray`'s per-cell height band.
     fn gather_slide(
         &self,
         start: Vec3,
@@ -1008,6 +1021,7 @@ impl CollisionWorld {
         [who, assist]: [u8; 2],
         body: &mut Vec<u32>,
         walls: &mut Vec<u32>,
+        cull: bool,
     ) -> usize {
         let len = d.length();
         let coarse = ((len / (RADIUS * 0.5)).ceil() as usize).clamp(1, 32);
@@ -1016,9 +1030,13 @@ impl CollisionWorld {
         let max = Vec2::new(start.x.max(start.x + d.x), start.z.max(start.z + d.y)) + reach;
         let low = start.y + SPHERES[0] - RADIUS - 0.01;
         let high = start.y + SPHERES[SPHERES.len() - 1] + RADIUS + 0.01;
-        // The horizontal keep box: the move's reach plus a body radius more, so a push-out that
-        // carries the body a little off the line still meets every triangle it can touch.
-        let (near_min, near_max) = (min - RADIUS, max + RADIUS);
+        // The horizontal keep box: the move's reach plus the move's length and a body radius
+        // more. Push-outs carry the body off the straight line, along a slanted wall for one:
+        // each sub-step's push only undoes what that sub-step pushed into a wall, so together
+        // they drift it by at most about the move's length, plus up to a radius for a body that
+        // starts pressed into a wall. Within that box the body meets every triangle it can touch.
+        let pad = RADIUS + len;
+        let (near_min, near_max) = (min - pad, max + pad);
         body.clear();
         walls.clear();
         let (x0, z0) = cell_of(min.x, min.y);
@@ -1029,16 +1047,16 @@ impl CollisionWorld {
                     continue;
                 };
                 body.extend(cell.iter().copied().filter(|&t| {
-                    let [min_y, max_y] = self.heights[t as usize];
-                    if max_y < low || min_y > high || !self.solid(t) || !self.live(t, who) {
-                        return false;
-                    }
-                    let [a, b, c] = self.corners(t);
-                    let (lo, hi) = (a.min(b).min(c), a.max(b).max(c));
-                    hi.x >= near_min.x
-                        && lo.x <= near_max.x
-                        && hi.z >= near_min.y
-                        && lo.z <= near_max.y
+                    let [lo, hi] = self.bounds[t as usize];
+                    hi.y >= low
+                        && lo.y <= high
+                        && (!cull
+                            || hi.x >= near_min.x
+                                && lo.x <= near_max.x
+                                && hi.z >= near_min.y
+                                && lo.z <= near_max.y)
+                        && self.solid(t)
+                        && self.live(t, who)
                 }));
                 // The assist's walls are rare, so only a move near one pays for them.
                 if assist != 0 {
@@ -1058,7 +1076,15 @@ impl CollisionWorld {
     /// [`CollisionWorld::slide`] for `who` that also keeps the body [`FALL_ASSIST_RADIUS`]
     /// from the fall-prevention walls in `assist` ([`crate::hit_filter::FALL_ASSIST_MOVE`],
     /// `FALL_ASSIST_ACTION` bits), which nothing else collides with.
-    fn slide_for(&self, feet: [f32; 3], delta: [f32; 2], who: u8, assist: u8) -> [f32; 2] {
+    /// `cull` is [`CollisionWorld::gather_slide`]'s.
+    fn slide_for(
+        &self,
+        feet: [f32; 3],
+        delta: [f32; 2],
+        who: u8,
+        assist: u8,
+        cull: bool,
+    ) -> [f32; 2] {
         thread_local! {
             static SCRATCH: std::cell::RefCell<(Vec<u32>, Vec<u32>)> =
                 const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
@@ -1067,7 +1093,7 @@ impl CollisionWorld {
         let d = Vec2::from(delta);
         let len = d.length();
         SCRATCH.with_borrow_mut(|(tris, walls)| {
-            let coarse = self.gather_slide(start, d, [who, assist], tris, walls);
+            let coarse = self.gather_slide(start, d, [who, assist], tris, walls, cull);
             // Sub-steps of half the smallest clearance, so no wall is stepped across.
             let steps = if walls.is_empty() {
                 coarse
@@ -1105,11 +1131,13 @@ impl CollisionWorld {
     fn hold_inside(&self, feet: Vec3, walls: &[u32]) -> Vec2 {
         let mut push = Vec2::ZERO;
         for &t in walls {
-            let [a, b, c] = self.corners(t);
-            if feet.distance_squared(feet.clamp(a.min(b).min(c), a.max(b).max(c)))
-                >= FALL_ASSIST_RADIUS * FALL_ASSIST_RADIUS
-                || feet.distance(closest_on_triangle(feet, a, b, c)) >= FALL_ASSIST_RADIUS
+            let [lo, hi] = self.bounds[t as usize];
+            if feet.distance_squared(feet.clamp(lo, hi)) >= FALL_ASSIST_RADIUS * FALL_ASSIST_RADIUS
             {
+                continue;
+            }
+            let [a, b, c] = self.corners(t);
+            if feet.distance(closest_on_triangle(feet, a, b, c)) >= FALL_ASSIST_RADIUS {
                 continue;
             }
             let n = self.normals[t as usize];
@@ -1136,15 +1164,14 @@ impl CollisionWorld {
             let centre = feet + Vec3::Y * h;
             let mut push = Vec2::ZERO;
             for &t in tris {
-                let [a, b, c] = self.corners(t);
                 // The horizontal grid includes stacked floors and walls from other heights.
                 // Exact sphere/AABB rejection preserves the narrow-phase result and avoids
                 // expensive closest-point tests on geometry this capsule cannot touch.
-                let min = a.min(b).min(c);
-                let max = a.max(b).max(c);
+                let [min, max] = self.bounds[t as usize];
                 if centre.distance_squared(centre.clamp(min, max)) >= RADIUS * RADIUS {
                     continue;
                 }
+                let [a, b, c] = self.corners(t);
                 let q = closest_on_triangle(centre, a, b, c);
                 let away = centre - q;
                 let dist = away.length();
@@ -1228,7 +1255,7 @@ impl Ground for View<'_> {
     }
 
     fn slide_assisted(&self, feet: [f32; 3], delta: [f32; 2], walls: u8) -> [f32; 2] {
-        self.world.slide_for(feet, delta, self.who, walls)
+        self.world.slide_for(feet, delta, self.who, walls, true)
     }
 
     fn max_step(&self) -> f32 {
