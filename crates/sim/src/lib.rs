@@ -38,6 +38,7 @@ pub mod homing;
 pub mod input;
 pub mod isshin;
 pub mod isshin_fire;
+pub mod items;
 pub mod kit;
 pub mod lua_ai;
 pub mod map_effects;

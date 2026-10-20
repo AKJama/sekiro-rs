@@ -36,6 +36,7 @@ pub mod idol;
 pub mod monk_phantoms;
 #[path = "old_dragons.rs"]
 pub mod old_dragons;
+pub mod pickup;
 pub mod population;
 #[path = "screen_monkeys.rs"]
 pub mod screen_monkeys;
@@ -219,6 +220,7 @@ pub struct Duel {
     defender_dying: u8,
     spawn: Option<[Placement; 2]>,
     idols: idol::Idols,
+    pickups: pickup::Pickups,
     /// What Wolf carries: tools, goods, Sen, skills (the in-game menu shows it).
     pub kit: crate::kit::Kit,
     /// The opponent was dead last step, so [`Duel::pay_kill`] pays on the death edge only:
@@ -801,6 +803,7 @@ impl Duel {
             defender_dying: 0,
             spawn: None,
             idols: idol::Idols::default(),
+            pickups: pickup::Pickups::default(),
             kit: crate::kit::Kit::default(),
             was_dead: false,
             lock_button: false,
