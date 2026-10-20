@@ -19,7 +19,7 @@ use sekiro_sim::deathblow::Placement;
 use sekiro_sim::duel::idol::{IdolPhase, IdolSpot};
 
 use super::Sim;
-use crate::game_ui::{GameFonts, MenuArt};
+use crate::game_ui::{GameFonts, MenuArt, abs};
 
 /// How far in front of the idol Wolf kneels, and how much further out a respawn stands him (m).
 const KNEEL: f32 = 0.9;
@@ -125,9 +125,6 @@ struct Label(usize);
 /// The help line, with each row's.
 #[derive(Component)]
 struct HelpLine(Vec<String>);
-/// A screen layer hidden under the idol menu, with the visibility it had.
-#[derive(Component)]
-struct Covered(Visibility);
 
 /// The idol guide and menu; nothing when the play world has no idols.
 pub(super) fn install(app: &mut App, idols: Idols) {
@@ -136,6 +133,7 @@ pub(super) fn install(app: &mut App, idols: Idols) {
     }
     GameFonts::insert(app);
     MenuArt::insert(app);
+    crate::game_ui::install_cover(app);
     app.insert_resource(idols)
         .init_resource::<Row>()
         .init_resource::<crate::menu::Modal>()
@@ -146,11 +144,7 @@ pub(super) fn install(app: &mut App, idols: Idols) {
                 .after(bevy::input::InputSystems)
                 .run_if(crate::menu::active),
         )
-        .add_systems(Update, (show, hold_pause).run_if(crate::menu::active))
-        .add_systems(
-            PostUpdate,
-            cover_layers.before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate),
-        );
+        .add_systems(Update, (show, hold_pause).run_if(crate::menu::active));
 }
 
 fn spawn(mut commands: Commands, fonts: Res<GameFonts>, art: Res<MenuArt>) {
@@ -170,17 +164,7 @@ fn spawn(mut commands: Commands, fonts: Res<GameFonts>, art: Res<MenuArt>) {
     let events = crate::game_ui::menu_texts(&cache, "イベントテキスト");
     let guides = crate::game_ui::menu_texts(&cache, "NTC_キーガイド");
     let event = |id: i32| events.get(&id).cloned().unwrap_or_default();
-    let text = |t: String, px: f32, color: Color| {
-        (
-            Text::new(t),
-            fonts.stage(px),
-            TextColor(color),
-            TextShadow {
-                offset: Vec2::splat(1.0),
-                color: Color::srgba(0.0, 0.0, 0.0, 0.8),
-            },
-        )
-    };
+    let text = |t: String, px: f32, color: Color| fonts.shadowed(t, px, color);
 
     // The guide, low in the middle: "[E] : Rest".
     commands
@@ -217,6 +201,7 @@ fn spawn(mut commands: Commands, fonts: Res<GameFonts>, art: Res<MenuArt>) {
     commands
         .spawn((
             Menu,
+            crate::game_ui::Covers,
             Node {
                 position_type: PositionType::Absolute,
                 width: percent(100),
@@ -279,18 +264,6 @@ fn spawn(mut commands: Commands, fonts: Res<GameFonts>, art: Res<MenuArt>) {
                 }
             });
         });
-}
-
-/// A box at (left, top) of (width, height), all in percent of the screen.
-fn abs(left: f32, top: f32, width: f32, height: f32) -> Node {
-    Node {
-        position_type: PositionType::Absolute,
-        left: percent(left),
-        top: percent(top),
-        width: percent(width),
-        height: percent(height),
-        ..default()
-    }
 }
 
 fn fade(alpha: f32) -> Color {
@@ -388,40 +361,6 @@ fn hold_pause(sim: NonSend<Sim>, mut modal: ResMut<crate::menu::Modal>) {
     let at_idol = sim.duel.idol_phase().is_some();
     if modal.0 != at_idol {
         modal.0 = at_idol;
-    }
-}
-
-/// The idol menu shows over the world alone: every other screen layer (the HUD, the debug
-/// text) is hidden while it is up and gets back the visibility its own systems set after.
-/// After FwLo's RustSekiro `hide_hud_on_title`, from the game's capture.
-#[allow(clippy::type_complexity)]
-fn cover_layers(
-    mut commands: Commands,
-    sim: NonSend<Sim>,
-    mut layers: Query<
-        (Entity, &mut Visibility, Option<&mut Covered>),
-        (With<Node>, Without<ChildOf>, Without<Menu>),
-    >,
-) {
-    let open = menu_open(&sim);
-    for (e, mut v, covered) in &mut layers {
-        match (open, covered) {
-            (true, Some(mut c)) => {
-                if *v != Visibility::Hidden {
-                    c.0 = *v;
-                    *v = Visibility::Hidden;
-                }
-            }
-            (true, None) => {
-                commands.entity(e).insert(Covered(*v));
-                *v = Visibility::Hidden;
-            }
-            (false, Some(c)) => {
-                *v = c.0;
-                commands.entity(e).remove::<Covered>();
-            }
-            (false, None) => {}
-        }
     }
 }
 

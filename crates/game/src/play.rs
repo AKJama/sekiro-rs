@@ -54,6 +54,8 @@ mod arena_c_scene;
 mod arena_d_scene;
 #[path = "cinematic_fade.rs"]
 pub(crate) mod cinematic_fade;
+#[path = "game_menu.rs"]
+mod game_menu;
 #[path = "idol.rs"]
 mod idol;
 #[path = "live_check.rs"]
@@ -799,6 +801,8 @@ pub fn run(options: Options) -> Result<()> {
             .chain(),
     );
     crate::menu::install(&mut app);
+    // First of the screens, so its extra menu atlases load with theirs in one read.
+    game_menu::install(&mut app, options.attack_power.value());
     crate::death_screen::install(&mut app);
     idol::install(&mut app, idols);
     if options.enemy_present {
