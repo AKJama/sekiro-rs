@@ -168,7 +168,8 @@ fn check_free_sideways_after(action: fn(&mut InputFrame), what: &str) {
     let mut failures = Vec::new();
     // Stick held through the action (forward) or released; sideways right after it ends or later.
     for hold in [true, false] {
-        for (action_ticks, x) in [(60, -1.0), (60, 1.0), (120, -1.0), (120, 1.0)] {
+        // Left and right mirror each other, so each wait takes one side.
+        for (action_ticks, x) in [(60, -1.0), (120, 1.0)] {
             reset(&mut wolf);
             let case = format!("{what} hold={hold} wait={action_ticks} x={x}");
             let mut strafed = Vec::new();

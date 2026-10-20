@@ -405,13 +405,14 @@ impl Adapter<'_> {
     /// locked-on strafes (#26, #144). The idle start gets that turn before the script runs, but
     /// a move cancel out of an attack recovery (whose TAE still disables turning) or a landing
     /// straight into a move start seeded a strafe from `MoveAngle` instead.
+    // TODO(#162): with the engine's env answers ported, check whether the move start can turn
+    // before the script runs (so `MoveAngle` is already about 0) and this hold can go.
     fn set_script_variable(&mut self, name: &str, value: f32) {
-        if self.env.free_movement && name == "MoveDirection" && value != 0.0 {
+        let held = self.env.free_movement && name == "MoveDirection" && value != 0.0;
+        if held {
             self.env.free_move_turn.set(true);
-            self.rt.set_variable(name, 0.0);
-        } else {
-            self.rt.set_variable(name, value);
         }
+        self.rt.set_variable(name, if held { 0.0 } else { value });
     }
 
     fn record(&mut self, function: &str, args: Vec<Value>, result: Vec<Value>) {

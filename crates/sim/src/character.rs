@@ -383,6 +383,12 @@ impl Character {
         }
     }
 
+    /// The player moves with no lock-on and no auto-aim target, so moves run along the stick
+    /// instead of strafing.
+    fn free_movement(&self) -> bool {
+        self.kind == ControlKind::Player && self.attack_target().is_none()
+    }
+
     /// Runs the script and behaviour graph for one step, watching the script's auto-aim
     /// calls (`act(156)` refresh, `act(157)` stop) for the player.
     fn tick_behavior(&mut self, dt: f32) -> TickReport {
@@ -449,8 +455,7 @@ impl Character {
         // movement start. Stops have a zero rate but allow a new move immediately.
         // Keep the explicit turn prohibition (e.g. the sprint quick-turn wind-up).
         let may_turn = !tae.flag(cancel::DISABLE_TURN) && !tae.fixed_rotation;
-        if self.kind != ControlKind::Player
-            || self.attack_target().is_some()
+        if !self.free_movement()
             || !self.body.grounded
             || (moving && !self.free_move_pending)
             || !may_move
@@ -601,7 +606,7 @@ impl Character {
 
     fn fill_env(&mut self, dt: f32) {
         let authored_airborne = self.authored_air_height() > 0.0;
-        let free_movement = self.kind == ControlKind::Player && self.attack_target().is_none();
+        let free_movement = self.free_movement();
         let tae = &self.tae_runtime.frame;
         let behavior = &mut *self.behavior;
         let env = &mut behavior.env;
