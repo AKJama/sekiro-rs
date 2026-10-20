@@ -1,6 +1,31 @@
-//! Wolf's start kit from FwLo's RustSekiro `config.toml`.
-//! gap: nothing spends or adds to the kit yet (no gourd drinking, pickups, shops); it is what
-//! the menu shows.
+//! Wolf's start kit from FwLo's RustSekiro `config.toml`, with Sen and skill points at their
+//! new-game zero (CharaInitParam `soul` and `skillLv` are 0 on every default row).
+//! Kills pay their NpcParam `getSoul` Sen and `skillPoint` experience ([`Kit::earn`]); a full
+//! experience gauge is a skill point, the gauge per point from [`xp_to_next`].
+//! gap: nothing spends from the kit yet (no gourd drinking, shops, skill purchase), and death
+//! does not take its half of the Sen and experience (TentativePlayerParam `MoneyLostRate` /
+//! `SkillPointLostRate` 50).
+
+/// Experience from skill point n to n + 1 (n = points earned so far, spent or not); past the
+/// table the last step repeats. The exe computes it, not the params: the table is the one the
+/// Fextralife wiki measured (Skill Points and Experience), as FwLo's RustSekiro
+/// `src/experience.rs` (MIT) ships it.
+const XP_TO_NEXT: [u32; 128] = [
+    500, 514, 528, 542, 557, 572, 587, 602, 618, 634, 650, 666, 682, 698, 715, 732, 749, 766, 784,
+    802, 820, 838, 856, 874, 893, 1093, 1300, 1515, 1738, 1970, 2210, 2458, 2715, 2980, 3254, 3538,
+    3830, 4131, 4442, 4762, 5092, 5431, 5780, 6139, 6507, 6886, 7276, 7675, 8085, 8506, 8938, 9380,
+    9833, 10297, 10773, 11260, 11758, 12268, 12789, 13322, 13868, 14425, 14994, 15576, 16170,
+    16777, 17396, 18028, 18673, 19331, 20002, 20686, 21383, 22094, 22819, 23558, 24310, 25076,
+    25856, 26651, 27460, 28283, 29121, 29973, 30840, 31723, 32620, 33532, 34460, 35403, 36362,
+    37336, 38326, 39332, 40354, 41392, 42446, 43516, 44603, 45707, 46828, 47965, 49119, 50290,
+    51479, 52685, 53908, 55149, 56407, 57683, 58977, 60290, 61620, 62969, 64336, 65722, 67126,
+    68549, 69991, 71452, 72932, 74431, 75949, 77487, 79045, 80622, 82220, 83837,
+];
+
+/// Experience needed from `earned` skill points to the next.
+pub fn xp_to_next(earned: u32) -> u32 {
+    XP_TO_NEXT[(earned as usize).min(XP_TO_NEXT.len() - 1)]
+}
 
 /// What Wolf carries and has learned, independent of the screen that shows it.
 #[derive(Debug, Clone, PartialEq)]
@@ -23,6 +48,10 @@ pub struct Kit {
     pub sen: u32,
     /// Skill points available.
     pub skill_points: u32,
+    /// Skill points earned in all, spent or not: it picks the gauge size ([`xp_to_next`]).
+    pub skill_level: u32,
+    /// Experience toward the next skill point.
+    pub skill_xp: u32,
     /// Whether every skill counts as learned (FwLo's `unlock_all_moves`).
     pub all_skills: bool,
     /// Learned SkillParam ids when `all_skills` is false.
@@ -77,8 +106,10 @@ impl Default for Kit {
                 (9720, 1),
                 (9750, 1),
             ],
-            sen: 3000,
-            skill_points: 14,
+            sen: 0,
+            skill_points: 0,
+            skill_level: 0,
+            skill_xp: 0,
             all_skills: true,
             skills: vec![280],
         }
@@ -97,11 +128,44 @@ impl Kit {
                 .map_or(0, |(_, n)| *n)
         }
     }
+
+    /// A defeated enemy's reward: its experience fills the gauge, each full gauge a skill point
+    /// with the rest carried over. Returns the skill points gained.
+    pub fn earn(&mut self, xp: u32, sen: u32) -> u32 {
+        self.sen = self.sen.saturating_add(sen);
+        self.skill_xp = self.skill_xp.saturating_add(xp);
+        let mut points = 0;
+        while self.skill_xp >= xp_to_next(self.skill_level) {
+            self.skill_xp -= xp_to_next(self.skill_level);
+            self.skill_level += 1;
+            self.skill_points += 1;
+            points += 1;
+        }
+        points
+    }
+
+    /// How full the experience gauge is, 0 to 1.
+    pub fn xp_fill(&self) -> f32 {
+        self.skill_xp as f32 / xp_to_next(self.skill_level) as f32
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_gauges_roll_over_into_skill_points() {
+        let mut kit = Kit::default();
+        assert_eq!(kit.earn(499, 7), 0);
+        assert_eq!(kit.earn(1, 0), 1);
+        assert_eq!((kit.skill_points, kit.skill_level, kit.skill_xp), (1, 1, 0));
+        // 514 + 528 for the next two, 10 over; the gauge grows with the points earned.
+        assert_eq!(kit.earn(514 + 528 + 10, 0), 2);
+        assert_eq!((kit.skill_points, kit.skill_xp, kit.sen), (3, 10, 7));
+        assert_eq!(xp_to_next(25), 1093);
+        assert_eq!(xp_to_next(1000), 83837);
+    }
 
     #[test]
     fn counts_the_gourd_goods_and_missing_items() {

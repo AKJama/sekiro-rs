@@ -338,6 +338,7 @@ impl Duel {
         std::mem::swap(&mut self.helper_events, &mut other.helper_events);
         std::mem::swap(&mut self.attack_button, &mut other.attack_button);
         std::mem::swap(&mut self.lock_button, &mut other.lock_button);
+        std::mem::swap(&mut self.kit, &mut other.kit);
     }
 
     /// Advance an independent opponent with the authoritative Wolf borrowed for this step.

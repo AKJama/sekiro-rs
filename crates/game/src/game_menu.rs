@@ -12,9 +12,10 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use bevy::prelude::*;
-use sekiro_sim::kit::Kit;
+use sekiro_sim::kit::{Kit, xp_to_next};
 
 use super::Sim;
+use crate::combat_hud::SKILL_BLUE;
 use crate::game_ui::{self, GameFonts, MenuArt, abs};
 use crate::menu::PAUSE_ROWS;
 
@@ -719,7 +720,7 @@ fn parchment(root: &mut ChildSpawnerCommands, ui: &Ui, d: &Entry) {
 
 /// The status bar along the bottom (all but Options): resurrection nodes over the Vitality bar,
 /// Unseen Aid, Vitality / Attack Power, the skill level and its gauge, Spirit Emblems and Sen.
-/// gap: attribute levels, Unseen Aid and skill experience are not modelled: Wolf's start values.
+/// gap: attribute levels and Unseen Aid are not modelled: Wolf's start values.
 fn status_bar(root: &mut ChildSpawnerCommands, ui: &Ui, kit: &Kit, book: &Book, wolf: (f32, f32)) {
     let plate = Color::srgba(0.06, 0.06, 0.06, 0.78);
     let (t, h) = (79.2, 8.8);
@@ -832,13 +833,13 @@ fn status_bar(root: &mut ChildSpawnerCommands, ui: &Ui, kit: &Kit, book: &Book, 
                     ..fill_row()
                 })
                 .with_children(|c| {
-                    c.spawn(ui.text(
-                        &kit.skill_points.to_string(),
-                        14.0,
-                        Color::srgb(0.55, 0.85, 0.9),
-                    ));
+                    c.spawn(ui.text(&kit.skill_points.to_string(), 14.0, SKILL_BLUE));
                 });
             });
+            b.spawn((
+                abs(14.6, 33.0, 58.8 * kit.xp_fill().clamp(0.0, 1.0), 4.0),
+                BackgroundColor(SKILL_BLUE),
+            ));
             b.spawn((
                 abs(14.0, 25.0, 60.0, 12.0),
                 ui.image("sb_in_game/MENU_GaugeFrame"),
@@ -850,7 +851,8 @@ fn status_bar(root: &mut ChildSpawnerCommands, ui: &Ui, kit: &Kit, book: &Book, 
                 ..default()
             },))
                 .with_children(|c| {
-                    c.spawn(ui.text("to next Skill Point  -", 14.0, Color::srgb(0.55, 0.85, 0.9)));
+                    let left = xp_to_next(kit.skill_level) - kit.skill_xp;
+                    c.spawn(ui.text(&format!("to next Skill Point  {left}"), 14.0, SKILL_BLUE));
                 });
         });
     // Spirit Emblems and Sen.

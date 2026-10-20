@@ -8,7 +8,9 @@
 //! item cluster (quick item and prosthetic tool) sits at the bottom right. Above Wolf's
 //! vitality, a purple bar shows poison build-up and a line names the status effects on him
 //! (poisoned, recovery sealed, ...) with the seconds left. A red 危 marks a perilous attack's
-//! warning on Wolf (see [`update_perilous`]).
+//! warning on Wolf (see [`update_perilous`]). Over the item cluster, Wolf's skill points with
+//! the experience gauge and his Sen show for a few seconds after they change (a kill's reward),
+//! as the game shows them there (see [`update_reward`]).
 //!
 //! Layout, colours and timings adapted from Fireguy32's RustSekiro fork (MIT), commit d11ef65,
 //! which measured them from captures of the game's HUD. The game's own HUD sprites (SB_FE,
@@ -19,6 +21,7 @@ use sekiro_sim::deathblow::MAX_BAR_MARKS;
 
 use crate::brain_overlay::{PANEL_INSET, PANEL_WIDTH};
 use crate::change::set;
+use crate::game_ui::{GameFonts, MenuArt};
 
 /// Logical HUD viewport, shared by projected HUD elements when the camera is unavailable.
 pub(crate) fn viewport_size(camera: Option<&Camera>) -> Vec2 {
@@ -66,6 +69,12 @@ pub struct Gauges {
     pub perilous_age: Option<f32>,
     /// The item cluster's buttons held this frame: quick item, then prosthetic tool.
     pub held: [bool; 2],
+    /// Wolf's Sen (`Kit::sen`).
+    pub sen: u32,
+    /// Wolf's unspent skill points (`Kit::skill_points`).
+    pub skill_points: u32,
+    /// How full the experience gauge to the next skill point is (`Kit::xp_fill`).
+    pub xp_fill: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -531,6 +540,143 @@ pub fn spawn(commands: &mut Commands) {
             .with_children(|b| {
                 b.spawn(text(key, 13.0));
             });
+    }
+}
+
+/// The skill points, experience gauge and Sen over the item cluster.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub enum RewardPart {
+    Panel,
+    SkillPoints,
+    XpFill,
+    Sen,
+}
+
+/// The skill-point blue of the experience gauge and its count (the menu's status bar too).
+pub(crate) const SKILL_BLUE: Color = Color::srgb(0.55, 0.85, 0.9);
+/// Seconds the reward panel stays after the Sen or experience last changed.
+const REWARD_SHOWN: f32 = 4.0;
+
+/// Spawns the reward panel, hidden (call once at startup, after the game fonts and menu art).
+pub fn spawn_reward(mut commands: Commands, fonts: Res<GameFonts>, art: Res<MenuArt>) {
+    commands
+        .spawn((
+            RewardPart::Panel,
+            Node {
+                position_type: PositionType::Absolute,
+                right: percent(9.5),
+                top: percent(75.6),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::FlexEnd,
+                row_gap: Val::Vh(0.5),
+                ..default()
+            },
+            Visibility::Hidden,
+        ))
+        .with_children(|p| {
+            p.spawn(Node {
+                align_items: AlignItems::Center,
+                column_gap: Val::Vh(0.8),
+                ..default()
+            })
+            .with_children(|r| {
+                r.spawn((
+                    RewardPart::SkillPoints,
+                    fonts.shadowed("0", 16.0, SKILL_BLUE),
+                ));
+                r.spawn((
+                    Node {
+                        width: Val::Vw(8.0),
+                        height: Val::Vh(0.7),
+                        border: UiRect::all(px(1)),
+                        ..default()
+                    },
+                    BackgroundColor(FRAME),
+                    BorderColor::all(EDGE),
+                ))
+                .with_children(|b| {
+                    b.spawn((
+                        RewardPart::XpFill,
+                        Node {
+                            width: percent(0),
+                            height: percent(100),
+                            ..default()
+                        },
+                        BackgroundColor(SKILL_BLUE),
+                    ));
+                });
+            });
+            p.spawn(Node {
+                align_items: AlignItems::Center,
+                column_gap: Val::Vh(0.6),
+                ..default()
+            })
+            .with_children(|r| {
+                if let Some((mut coin, _)) = art.sprite("SB_FE", "MENU_Money") {
+                    coin.image_mode = bevy::ui::widget::NodeImageMode::Stretch;
+                    r.spawn((
+                        Node {
+                            width: Val::Vh(2.3),
+                            height: Val::Vh(2.3),
+                            ..default()
+                        },
+                        coin,
+                    ));
+                }
+                r.spawn((
+                    RewardPart::Sen,
+                    fonts.shadowed("0", 19.0, Color::srgb(0.92, 0.88, 0.8)),
+                ));
+            });
+        });
+}
+
+/// The Sen, skill points and gauge (its bits) last seen, and the seconds the panel has left.
+#[derive(Default)]
+pub struct RewardShown {
+    last: Option<(u32, u32, u32)>,
+    left: f32,
+}
+
+/// Fills the reward panel and shows it for [`REWARD_SHOWN`] seconds after Wolf's Sen, skill
+/// points or experience change.
+pub fn update_reward(
+    gauges: Res<Gauges>,
+    time: Res<Time>,
+    mut shown: Local<RewardShown>,
+    mut parts: Query<(
+        &RewardPart,
+        &mut Node,
+        Option<&mut Text>,
+        Option<&mut Visibility>,
+    )>,
+) {
+    let now = (gauges.sen, gauges.skill_points, gauges.xp_fill.to_bits());
+    if shown.last.is_some_and(|l| l != now) {
+        shown.left = REWARD_SHOWN;
+    }
+    shown.last = Some(now);
+    shown.left = (shown.left - time.delta_secs()).max(0.0);
+    for (part, mut node, text, visibility) in &mut parts {
+        let value = match part {
+            RewardPart::Panel => {
+                show(visibility, shown.left > 0.0);
+                continue;
+            }
+            RewardPart::XpFill => {
+                let fill = percent(gauges.xp_fill.clamp(0.0, 1.0) * 100.0);
+                set(&mut node, |n| &mut n.width, fill);
+                continue;
+            }
+            RewardPart::SkillPoints => gauges.skill_points,
+            RewardPart::Sen => gauges.sen,
+        };
+        if let Some(mut t) = text {
+            let value = value.to_string();
+            if t.0 != value {
+                t.0 = value;
+            }
+        }
     }
 }
 
