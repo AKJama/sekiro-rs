@@ -13,7 +13,7 @@ use sekiro_sim::collision::{CollisionWorld, TriggerContact};
 use crate::arena_c_support::cache;
 
 /// [`build_play_world`], built once for both tests.
-fn play_world() -> Option<Arc<CollisionWorld>> {
+pub(crate) fn play_world() -> Option<Arc<CollisionWorld>> {
     static WORLD: OnceLock<Option<Arc<CollisionWorld>>> = OnceLock::new();
     WORLD
         .get_or_init(|| build_play_world(&cache()).map(Arc::new))
@@ -98,6 +98,10 @@ impl Ground for Counted {
     fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
         self.count();
         self.inner.floor(x, z, top)
+    }
+    fn ceiling(&self, feet: [f32; 3], rise: f32) -> Option<f32> {
+        self.count();
+        self.inner.ceiling(feet, rise)
     }
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
         self.count();

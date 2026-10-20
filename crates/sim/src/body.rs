@@ -165,6 +165,13 @@ pub trait Ground {
         self.height(x, z)
     }
 
+    /// The highest the feet of a body at `feet` can rise straight up, by at most `rise`, before
+    /// its head meets a ceiling; `None` when nothing stops it that soon. No ceilings by default.
+    fn ceiling(&self, feet: [f32; 3], rise: f32) -> Option<f32> {
+        let _ = (feet, rise);
+        None
+    }
+
     /// The horizontal displacement a body at `feet` actually makes when it tries to move by
     /// `delta` (walls stop it and it slides along them). Unobstructed by default.
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
@@ -449,6 +456,18 @@ impl Body {
                 .abs();
         self.position[1] += self.velocity[1] * dt - 0.5 * gravity * dt * dt;
         self.velocity[1] -= gravity * dt;
+        // A rise stops where the head meets a ceiling and loses its upward speed, as the
+        // character proxy's contact does; otherwise a jump carries the head into a low roof and
+        // the fall lands on its underside, which reads as a floor (#160).
+        let rise = self.position[1] - previous_y;
+        if rise > 0.0
+            && let Some(top) =
+                ground.ceiling([self.position[0], previous_y, self.position[2]], rise)
+            && self.position[1] > top
+        {
+            self.position[1] = top.max(previous_y);
+            self.velocity[1] = self.velocity[1].min(0.0);
+        }
         self.fall_top = self.fall_top.max(self.position[1]);
         // Land on the highest floor the feet passed through this tick, or one up to a step
         // above them (a stair tread or ledge the body was carried into while airborne).

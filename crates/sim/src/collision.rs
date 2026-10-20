@@ -348,6 +348,8 @@ pub const CAPSULE_HEIGHT: f32 = 1.5;
 /// sphere cast meets and cuts it where the body would come nearer than this to one.
 pub const FALL_ASSIST_RADIUS: f32 = 0.16;
 const CELL: f32 = 4.0;
+/// How far off the top sphere's centre line [`CollisionWorld::ceiling_for`] also looks up.
+const CEILING_SAMPLE: f32 = 0.25;
 /// `CollisionWorld::part_of` for a triangle in no helper or event part.
 const ORDINARY: u16 = 0;
 /// `CollisionWorld::part_of` bit marking an event part's triangle.
@@ -855,6 +857,63 @@ impl CollisionWorld {
         best
     }
 
+    /// The highest the feet of `who`'s body at `feet` can rise by at most `rise` before its top
+    /// sphere meets a ceiling over it: any surface flat enough to be a floor (the winding does
+    /// not say which side is solid, see the module notes) above that sphere's centre. The
+    /// sphere is tested at its centre line and four lines [`CEILING_SAMPLE`] out, each against
+    /// its surface's height there, so a beam or a sloping underside off the centre stops it too.
+    fn ceiling_for(&self, feet: Vec3, rise: f32, who: u8) -> Option<f32> {
+        let head = SPHERES[SPHERES.len() - 1];
+        let centre = feet.y + head;
+        let high = centre + RADIUS + rise;
+        let s = CEILING_SAMPLE;
+        let lift = (RADIUS * RADIUS - s * s).sqrt();
+        let samples = [
+            (0.0, 0.0, RADIUS),
+            (s, 0.0, lift),
+            (-s, 0.0, lift),
+            (0.0, s, lift),
+            (0.0, -s, lift),
+        ];
+        let (x0, z0) = cell_of(feet.x - s, feet.z - s);
+        let (x1, z1) = cell_of(feet.x + s, feet.z + s);
+        let mut best: Option<f32> = None;
+        for cx in x0..=x1 {
+            for cz in z0..=z1 {
+                let Some(cell) = self.cells.get(&(cx, cz)) else {
+                    continue;
+                };
+                for &t in cell {
+                    let [min_y, max_y] = self.heights[t as usize];
+                    if max_y < centre
+                        || min_y > high
+                        || self.normals[t as usize].y.abs() < self.min_walk_ny
+                        || !self.solid(t)
+                        || !self.live(t, who)
+                    {
+                        continue;
+                    }
+                    let [a, b, c] = self.corners(t);
+                    for (dx, dz, up) in samples {
+                        let (x, z) = (feet.x + dx, feet.z + dz);
+                        // Each sample line is tested only by the cell that holds it.
+                        if cell_of(x, z) != (cx, cz) {
+                            continue;
+                        }
+                        if let Some(h) = height_on(x, z, a, b, c)
+                            && h >= centre
+                            && h - up - head < feet.y + rise
+                            && best.is_none_or(|b| h - up - head < b)
+                        {
+                            best = Some(h - up - head);
+                        }
+                    }
+                }
+            }
+        }
+        best
+    }
+
     /// Every surface the vertical line through `(x, z)` crosses: (height, normal y), highest
     /// first. For debugging and tests.
     pub fn surfaces_at(&self, x: f32, z: f32) -> Vec<(f32, f32)> {
@@ -1250,6 +1309,10 @@ impl Ground for View<'_> {
         self.floor_triangle(x, z, top).map(|(h, _)| h)
     }
 
+    fn ceiling(&self, feet: [f32; 3], rise: f32) -> Option<f32> {
+        self.world.ceiling_for(feet.into(), rise, self.who)
+    }
+
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
         self.slide_assisted(feet, delta, 0)
     }
@@ -1325,6 +1388,10 @@ macro_rules! ground_via_view {
                 self.$view().floor(x, z, top)
             }
 
+            fn ceiling(&self, feet: [f32; 3], rise: f32) -> Option<f32> {
+                self.$view().ceiling(feet, rise)
+            }
+
             fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
                 self.$view().slide(feet, delta)
             }
@@ -1398,6 +1465,10 @@ impl<T: Ground + ?Sized> Ground for std::sync::Arc<T> {
 
     fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
         (**self).floor(x, z, top)
+    }
+
+    fn ceiling(&self, feet: [f32; 3], rise: f32) -> Option<f32> {
+        (**self).ceiling(feet, rise)
     }
 
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
