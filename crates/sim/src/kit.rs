@@ -23,8 +23,19 @@ const XP_TO_NEXT: [u32; 128] = [
 ];
 
 /// Experience needed from `earned` skill points to the next.
-pub fn xp_to_next(earned: u32) -> u32 {
+fn xp_to_next(earned: u32) -> u32 {
     XP_TO_NEXT[(earned as usize).min(XP_TO_NEXT.len() - 1)]
+}
+
+/// One defeat's gain, as [`Kit::earn`] recorded it.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Reward {
+    /// Experience gained.
+    pub xp: u32,
+    /// Sen gained.
+    pub sen: u32,
+    /// Skill points gained.
+    pub points: u32,
 }
 
 /// What Wolf carries and has learned, independent of the screen that shows it.
@@ -49,6 +60,7 @@ pub struct Kit {
     /// Skill points available.
     pub skill_points: u32,
     /// Skill points earned in all, spent or not: it picks the gauge size ([`xp_to_next`]).
+    /// It equals the points earned, so it differs from `skill_points` once skills are bought.
     pub skill_level: u32,
     /// Experience toward the next skill point.
     pub skill_xp: u32,
@@ -56,6 +68,10 @@ pub struct Kit {
     pub all_skills: bool,
     /// Learned SkillParam ids when `all_skills` is false.
     pub skills: Vec<i32>,
+    /// Earns that gained anything, so a screen can tell a new reward from later spending.
+    pub rewards: u32,
+    /// The gain of the latest of those earns.
+    pub last_reward: Reward,
 }
 
 impl Default for Kit {
@@ -112,6 +128,8 @@ impl Default for Kit {
             skill_xp: 0,
             all_skills: true,
             skills: vec![280],
+            rewards: 0,
+            last_reward: Reward::default(),
         }
     }
 }
@@ -131,22 +149,37 @@ impl Kit {
 
     /// A defeated enemy's reward: its experience fills the gauge, each full gauge a skill point
     /// with the rest carried over. Returns the skill points gained.
+    /// Records the gain in `rewards` and `last_reward`.
     pub fn earn(&mut self, xp: u32, sen: u32) -> u32 {
+        let before = self.skill_points;
         self.sen = self.sen.saturating_add(sen);
         self.skill_xp = self.skill_xp.saturating_add(xp);
-        let mut points = 0;
-        while self.skill_xp >= xp_to_next(self.skill_level) {
-            self.skill_xp -= xp_to_next(self.skill_level);
+        while self.skill_xp >= self.xp_needed() {
+            self.skill_xp -= self.xp_needed();
             self.skill_level += 1;
             self.skill_points += 1;
-            points += 1;
+        }
+        let points = self.skill_points - before;
+        if xp > 0 || sen > 0 {
+            self.rewards += 1;
+            self.last_reward = Reward { xp, sen, points };
         }
         points
     }
 
+    /// The experience gauge's size at the current skill level.
+    fn xp_needed(&self) -> u32 {
+        xp_to_next(self.skill_level)
+    }
+
+    /// Experience still needed for the next skill point.
+    pub fn xp_left(&self) -> u32 {
+        self.xp_needed().saturating_sub(self.skill_xp)
+    }
+
     /// How full the experience gauge is, 0 to 1.
     pub fn xp_fill(&self) -> f32 {
-        self.skill_xp as f32 / xp_to_next(self.skill_level) as f32
+        (self.skill_xp as f32 / self.xp_needed() as f32).clamp(0.0, 1.0)
     }
 }
 
@@ -163,6 +196,10 @@ mod tests {
         // 514 + 528 for the next two, 10 over; the gauge grows with the points earned.
         assert_eq!(kit.earn(514 + 528 + 10, 0), 2);
         assert_eq!((kit.skill_points, kit.skill_xp, kit.sen), (3, 10, 7));
+        assert_eq!(
+            (kit.rewards, kit.last_reward.xp, kit.last_reward.points),
+            (3, 1052, 2)
+        );
         assert_eq!(xp_to_next(25), 1093);
         assert_eq!(xp_to_next(1000), 83837);
     }

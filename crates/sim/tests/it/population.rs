@@ -262,4 +262,22 @@ fn a_dead_map_soldier_pays_its_npc_param_into_wolfs_kit_once() {
         (wolf.kit.skill_xp - start.skill_xp, wolf.kit.sen - start.sen),
         (21, 11)
     );
+    // Stood up again (as a rest does) and killed again, it pays a second time.
+    fn soldier(wolf: &mut Duel) -> &mut sekiro_sim::combat::hp::Vitality {
+        &mut wolf.population.as_mut().unwrap().foes[0]
+            .duel
+            .rules
+            .fighters[1]
+            .vitality
+    }
+    for hp in [soldier(&mut wolf).max_hp.max(1), 0] {
+        soldier(&mut wolf).hp = hp;
+        for _ in 0..5 {
+            wolf.step(&InputFrame::default(), 1.0 / 60.0);
+        }
+    }
+    assert_eq!(
+        (wolf.kit.skill_xp - start.skill_xp, wolf.kit.sen - start.sen),
+        (42, 22)
+    );
 }
