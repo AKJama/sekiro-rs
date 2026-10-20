@@ -1,8 +1,8 @@
 //! Sculptor's Idols (#128): near one, the game's "Rest" guide (イベントテキスト 15000120) shows
-//! with its key; E (or Y on a pad) kneels Wolf there (`Duel::kneel_at_idol`, which also makes it
-//! the checkpoint), and once he prays the idol menu opens: the idol's name (BonfireWarpParam
-//! `msgId` in NTC_メニューテキスト), the game's rows with their help lines, Rest working and the
-//! rest greyed, and the key guide. Esc (or B) stands him up.
+//! with its key; the action button (E, or Y on a pad) kneels Wolf there (`Duel::idol_input`,
+//! which also makes it the checkpoint), and once he prays the idol menu opens: the idol's name
+//! (BonfireWarpParam `msgId` in NTC_メニューテキスト), the game's rows with their help lines,
+//! Rest working and the rest greyed, and the key guide. Esc (or B) stands him up.
 //!
 //! The idols are the play world's objects whose entity is a BonfireWarpParam `bonfireEntityId`
 //! (o005000, o115040), facing their front (the object's -Z). Layout, sizes and colours from
@@ -14,18 +14,16 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use bevy::prelude::*;
+use sekiro_sim::arena::yaw_toward;
 use sekiro_sim::deathblow::Placement;
-use sekiro_sim::duel::idol::IdolPhase;
+use sekiro_sim::duel::idol::{IdolPhase, IdolSpot};
 
-use super::{LiveInput, Sim};
+use super::Sim;
 use crate::game_ui::{GameFonts, MenuArt};
 
 /// How far in front of the idol Wolf kneels, and how much further out a respawn stands him (m).
 const KNEEL: f32 = 0.9;
 const RESPAWN: f32 = 0.4;
-/// How near the kneeling spot the guide shows (m across, m up or down).
-const REACH: f32 = 1.3;
-const REACH_Y: f32 = 0.6;
 /// イベントテキスト: "Rest" (the guide and the first row), and the menu's rows in the game's
 /// order (each one's help line is its id + 100000) with whether they work here.
 const REST: i32 = 15000120;
@@ -51,18 +49,12 @@ const GREYED: Color = Color::srgba(0.7, 0.68, 0.64, 0.4);
 const GUIDE_TEXT: Color = Color::srgb(0.9, 0.87, 0.8);
 const CURSOR: Color = Color::srgba(0.8, 0.55, 0.3, 0.95);
 
-/// One idol of the play world.
-#[derive(Debug, Clone)]
-pub(super) struct Idol {
-    pub name: String,
-    /// Where Wolf kneels, facing it.
-    pub kneel: Placement,
-    /// Where a respawn stands him, facing away.
-    pub checkpoint: Placement,
-}
-
+/// The play world's idols: where Wolf kneels at each (for the sim) and its name.
 #[derive(Resource, Default)]
-pub(super) struct Idols(pub Vec<Idol>);
+pub(super) struct Idols {
+    pub spots: Vec<IdolSpot>,
+    names: Vec<String>,
+}
 
 impl Idols {
     /// The idols in the play blocks' `layouts`, standing on `floor(x, z, near_y)`.
@@ -72,64 +64,53 @@ impl Idols {
         floor: impl Fn(f32, f32, f32) -> Option<f32>,
     ) -> Self {
         let names = crate::game_ui::menu_texts(cache, "NTC_メニューテキスト");
-        let warps: HashMap<i64, i64> = std::fs::read(cache.join("params/BonfireWarpParam.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-            .and_then(|j| {
-                let rows = j["rows"].as_array()?.iter();
-                Some(
-                    rows.filter_map(|r| {
-                        Some((r["bonfireEntityId"].as_i64()?, r["msgId"].as_i64()?))
-                    })
-                    .collect(),
-                )
-            })
-            .unwrap_or_default();
-        let f = |v: &serde_json::Value, i: usize| v[i].as_f64().unwrap_or(0.0) as f32;
-        let mut idols = Vec::new();
+        let warps: HashMap<i64, i64> = sekiro_sim::registry::rows(cache, "BonfireWarpParam")
+            .inspect_err(|e| warn!("idols: {e}"))
+            .unwrap_or_default()
+            .values()
+            .filter_map(|r| Some((r["bonfireEntityId"].as_i64()?, r["msgId"].as_i64()?)))
+            .collect();
+        let mut idols = Self::default();
         for layout in layouts.values() {
             for o in layout["objects"].as_array().into_iter().flatten() {
                 let Some(msg) = o["entity_id"].as_i64().and_then(|e| warps.get(&e)) else {
                     continue;
                 };
-                let (t, r) = (&o["translation"], &o["rotation"]);
-                let base = Vec3::new(f(t, 0), f(t, 1), f(t, 2));
-                let rot = Quat::from_xyzw(f(r, 0), f(r, 1), f(r, 2), f(r, 3)).normalize();
-                let out = (rot * Vec3::NEG_Z).with_y(0.0).normalize_or(Vec3::Z);
-                let at = |d: f32, yaw: f32| {
-                    let p = base + out * d;
-                    Placement {
-                        position: [p.x, floor(p.x, p.z, base.y).unwrap_or(base.y), p.z],
-                        yaw,
-                    }
+                let Some(pose) = crate::map::pose(o) else {
+                    continue;
                 };
-                idols.push(Idol {
-                    name: names.get(&(*msg as i32)).cloned().unwrap_or_default(),
-                    kneel: at(KNEEL, f32::atan2(out.x, out.z)),
-                    checkpoint: at(KNEEL + RESPAWN, f32::atan2(-out.x, -out.z)),
+                let base = pose.translation;
+                let out = (pose.rotation.normalize() * Vec3::NEG_Z)
+                    .with_y(0.0)
+                    .normalize_or(Vec3::Z);
+                let at = |d: f32| {
+                    let p = base + out * d;
+                    p.with_y(floor(p.x, p.z, base.y).unwrap_or(base.y))
+                };
+                let (kneel, checkpoint) = (at(KNEEL), at(KNEEL + RESPAWN));
+                let yaw = yaw_toward(kneel, base);
+                idols.spots.push(IdolSpot {
+                    kneel: Placement {
+                        position: kneel.to_array(),
+                        yaw,
+                    },
+                    checkpoint: Placement {
+                        position: checkpoint.to_array(),
+                        yaw: yaw + std::f32::consts::PI,
+                    },
                 });
+                idols
+                    .names
+                    .push(names.get(&(*msg as i32)).cloned().unwrap_or_default());
             }
         }
-        Self(idols)
-    }
-
-    /// The idol whose kneeling spot Wolf's feet are at.
-    fn near(&self, feet: [f32; 3]) -> Option<usize> {
-        self.0.iter().position(|i| {
-            let [x, y, z] = i.kneel.position;
-            (x - feet[0]).hypot(z - feet[2]) < REACH && (y - feet[1]).abs() < REACH_Y
-        })
+        idols
     }
 }
 
-/// The idol Wolf was sent to kneel at (from the press until he stands again) and the row picked.
+/// The row picked in the idol menu.
 #[derive(Resource, Default)]
-struct Seat {
-    idol: Option<usize>,
-    /// The kneel has started (the phase lags the press by a step).
-    knelt: bool,
-    row: usize,
-}
+struct Row(usize);
 
 #[derive(Component)]
 struct Guide;
@@ -144,26 +125,31 @@ struct Label(usize);
 /// The help line, with each row's.
 #[derive(Component)]
 struct HelpLine(Vec<String>);
+/// A screen layer hidden under the idol menu, with the visibility it had.
+#[derive(Component)]
+struct Covered(Visibility);
 
+/// The idol guide and menu; nothing when the play world has no idols.
 pub(super) fn install(app: &mut App, idols: Idols) {
+    if idols.spots.is_empty() {
+        return;
+    }
     GameFonts::insert(app);
     MenuArt::insert(app);
     app.insert_resource(idols)
-        .init_resource::<Seat>()
+        .init_resource::<Row>()
+        .init_resource::<crate::menu::Modal>()
         .add_systems(Startup, spawn)
         .add_systems(
             PreUpdate,
             menu_keys
                 .after(bevy::input::InputSystems)
-                .before(crate::menu::MenuKeys)
                 .run_if(crate::menu::active),
         )
+        .add_systems(Update, (show, hold_pause).run_if(crate::menu::active))
         .add_systems(
-            Update,
-            (kneel, show)
-                .chain()
-                .after(super::gather_input)
-                .run_if(crate::menu::active),
+            PostUpdate,
+            cover_layers.before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate),
         );
 }
 
@@ -221,6 +207,13 @@ fn spawn(mut commands: Commands, fonts: Res<GameFonts>, art: Res<MenuArt>) {
 
     // The menu: a dark fade on the left with the idol's name, the rows, the help line and the
     // key guide.
+    let cursor = art
+        .sprite("SB_In_Game", "MENU_Cursor_03")
+        .map(|(image, _)| ImageNode {
+            image_mode: bevy::ui::widget::NodeImageMode::Stretch,
+            ..image.with_color(CURSOR)
+        })
+        .unwrap_or_default();
     commands
         .spawn((
             Menu,
@@ -235,13 +228,12 @@ fn spawn(mut commands: Commands, fonts: Res<GameFonts>, art: Res<MenuArt>) {
         ))
         .with_children(|root| {
             root.spawn((abs(0.0, 0.0, 33.0, 100.0), BackgroundColor(fade(0.93))));
-            for k in 0..10 {
-                let a = 0.93 * (1.0 - (k as f32 + 1.0) / 11.0);
-                root.spawn((
-                    abs(33.0 + k as f32, 0.0, 1.0, 100.0),
-                    BackgroundColor(fade(a)),
-                ));
-            }
+            root.spawn((
+                abs(33.0, 0.0, 10.0, 100.0),
+                BackgroundGradient(vec![
+                    LinearGradient::to_right(vec![fade(0.93).into(), fade(0.0).into()]).into(),
+                ]),
+            ));
             root.spawn(abs(5.9, 7.6, 30.0, 5.0))
                 .with_child((Place, text(String::new(), 21.0, Color::WHITE)));
             root.spawn((
@@ -250,17 +242,14 @@ fn spawn(mut commands: Commands, fonts: Res<GameFonts>, art: Res<MenuArt>) {
             ));
             for (i, (id, _)) in ROWS.iter().enumerate() {
                 let t = 14.6 + i as f32 * 5.6;
-                let cursor = art
-                    .sprite("SB_In_Game", "MENU_Cursor_03")
-                    .map(|(image, _)| image.with_color(CURSOR))
-                    .unwrap_or_default();
-                root.spawn((Cursor(i), abs(4.0, t, 30.0, 4.8), cursor));
+                let row = abs(4.0, t, 30.0, 4.8);
+                root.spawn((Cursor(i), row.clone(), cursor.clone()));
                 root.spawn((
                     Node {
                         align_items: AlignItems::Center,
                         // 6.5 % of the row.
                         padding: UiRect::left(percent(6.5 * 0.3)),
-                        ..abs(4.0, t, 30.0, 4.8)
+                        ..row
                     },
                     children![(Label(i), text(event(*id), 17.0, TEXT))],
                 ));
@@ -308,132 +297,131 @@ fn fade(alpha: f32) -> Color {
     Color::BLACK.with_alpha(alpha)
 }
 
-/// E (Y) at an idol kneels Wolf; while he is at one, his own input is held.
-fn kneel(
+/// The menu's keys while Wolf prays: up and down pick a row, Enter (or E, A) takes it, Esc
+/// (or B) stands him up.
+fn menu_keys(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
-    idols: Res<Idols>,
-    mut seat: ResMut<Seat>,
-    mut sim: NonSendMut<Sim>,
-    mut live: ResMut<LiveInput>,
-) {
-    let phase = sim.duel.idol_phase();
-    // Off the idol once he stood up, or something else took him (a hit, death).
-    if seat.idol.is_some() {
-        if phase.is_some() {
-            seat.knelt = true;
-        } else if seat.knelt {
-            *seat = Seat::default();
-        }
-    }
-    let pressed = keys.just_pressed(KeyCode::KeyE)
-        || pads.iter().any(|p| p.just_pressed(GamepadButton::North));
-    if seat.idol.is_none()
-        && pressed
-        && let Some(i) = idols.near(sim.duel.player.body.position)
-        && sim
-            .duel
-            .kneel_at_idol(idols.0[i].kneel, idols.0[i].checkpoint)
-    {
-        *seat = Seat {
-            idol: Some(i),
-            ..default()
-        };
-    }
-    if seat.idol.is_some() {
-        live.frame = sekiro_sim::InputFrame {
-            camera_yaw: live.frame.camera_yaw,
-            ..default()
-        };
-    }
-}
-
-/// The menu's keys while Wolf prays: up and down pick a row, Enter (or E, A) takes it, Esc
-/// (or B) stands him up. They run before the pause menu, which would take Esc.
-fn menu_keys(
-    mut keys: ResMut<ButtonInput<KeyCode>>,
-    pads: Query<&Gamepad>,
-    mut seat: ResMut<Seat>,
+    mut row: ResMut<Row>,
     mut sim: NonSendMut<Sim>,
 ) {
-    if seat.idol.is_none() || sim.duel.idol_phase() != Some(IdolPhase::Praying) {
+    if sim.duel.idol_phase() != Some(IdolPhase::Praying) {
         return;
     }
     let pad = |b| pads.iter().any(|p| p.just_pressed(b));
     let key = |k: &[KeyCode]| keys.any_just_pressed(k.iter().copied());
     if key(&[KeyCode::ArrowDown, KeyCode::KeyS]) || pad(GamepadButton::DPadDown) {
-        seat.row = (seat.row + 1) % ROWS.len();
+        row.0 = (row.0 + 1) % ROWS.len();
     }
     if key(&[KeyCode::ArrowUp, KeyCode::KeyW]) || pad(GamepadButton::DPadUp) {
-        seat.row = (seat.row + ROWS.len() - 1) % ROWS.len();
+        row.0 = (row.0 + ROWS.len() - 1) % ROWS.len();
     }
-    if (key(&[KeyCode::Enter, KeyCode::KeyE]) || pad(GamepadButton::South))
-        && ROWS[seat.row].0 == REST
+    if (key(&[KeyCode::Enter, KeyCode::KeyE]) || pad(GamepadButton::South)) && ROWS[row.0].0 == REST
     {
         sim.duel.rest_at_idol();
     }
     if key(&[KeyCode::Escape, KeyCode::Backspace]) || pad(GamepadButton::East) {
         sim.duel.leave_idol();
     }
-    // Not for the pause menu or the next kneel.
-    for k in [KeyCode::Escape, KeyCode::Enter, KeyCode::KeyE] {
-        keys.clear_just_pressed(k);
-    }
 }
 
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+/// The idol menu is up while Wolf prays and through a rest.
+fn menu_open(sim: &Sim) -> bool {
+    matches!(
+        sim.duel.idol_phase(),
+        Some(IdolPhase::Praying | IdolPhase::Resting)
+    )
+}
+
+/// The guide near an idol and the menu while Wolf prays.
+#[allow(clippy::type_complexity)]
 fn show(
     sim: NonSend<Sim>,
-    seat: Res<Seat>,
+    row: Res<Row>,
     idols: Res<Idols>,
-    mut guide: Query<&mut Visibility, (With<Guide>, Without<Menu>)>,
-    mut menu: Query<&mut Visibility, (With<Menu>, Without<Guide>, Without<Cursor>)>,
-    mut cursors: Query<(&Cursor, &mut Visibility), (Without<Guide>, Without<Menu>)>,
+    mut shown_for: Local<Option<(usize, usize)>>,
+    mut parts: Query<
+        (&mut Visibility, Has<Guide>, Option<&Cursor>),
+        Or<(With<Guide>, With<Menu>, With<Cursor>)>,
+    >,
     mut labels: Query<(&Label, &mut TextColor)>,
-    mut place: Query<&mut Text, (With<Place>, Without<HelpLine>)>,
-    mut help: Query<(&HelpLine, &mut Text), Without<Place>>,
+    mut texts: Query<(&mut Text, Option<&HelpLine>), Or<(With<Place>, With<HelpLine>)>>,
 ) {
-    let alive = !sim.duel.rules.fighters[0].dead();
-    let near = seat.idol.is_none() && alive && idols.near(sim.duel.player.body.position).is_some();
-    for mut v in &mut guide {
-        v.set_if_neq(shown(near));
-    }
-    let open = seat.idol.is_some() && sim.duel.idol_phase() == Some(IdolPhase::Praying);
-    for mut v in &mut menu {
-        v.set_if_neq(shown(open));
-    }
-    if !open {
-        return;
-    }
-    let idol = seat.idol.and_then(|i| idols.0.get(i));
-    for mut t in &mut place {
-        t.set_if_neq(Text::new(idol.map_or("", |i| &i.name)));
-    }
-    for (c, mut v) in &mut cursors {
-        v.set_if_neq(if c.0 == seat.row {
+    let near = sim.duel.idol_in_reach().is_some();
+    let open = menu_open(&sim);
+    for (mut v, guide, cursor) in &mut parts {
+        let on = match (guide, cursor) {
+            (true, _) => near,
+            (_, Some(c)) => c.0 == row.0,
+            _ => open,
+        };
+        v.set_if_neq(if on {
             Visibility::Inherited
         } else {
             Visibility::Hidden
         });
     }
+    // The texts change only with the idol and the row.
+    let now = sim.duel.idol().filter(|_| open).map(|i| (i, row.0));
+    if now.is_none() || *shown_for == now {
+        return;
+    }
+    *shown_for = now;
+    let (idol, row) = now.unwrap();
     for (l, mut color) in &mut labels {
-        let c = match (ROWS[l.0].1, l.0 == seat.row) {
+        color.0 = match (ROWS[l.0].1, l.0 == row) {
             (false, _) => GREYED,
             (true, true) => Color::WHITE,
             (true, false) => TEXT,
         };
-        color.set_if_neq(TextColor(c));
     }
-    for (lines, mut t) in &mut help {
-        t.set_if_neq(Text::new(lines.0[seat.row].clone()));
+    for (mut t, help) in &mut texts {
+        t.0 = match help {
+            Some(lines) => lines.0[row].clone(),
+            None => idols.names.get(idol).cloned().unwrap_or_default(),
+        };
     }
 }
 
-fn shown(on: bool) -> Visibility {
-    if on {
-        Visibility::Inherited
-    } else {
-        Visibility::Hidden
+/// The pause menu stays shut while Wolf is at an idol, since Esc stands him up.
+fn hold_pause(sim: NonSend<Sim>, mut modal: ResMut<crate::menu::Modal>) {
+    let at_idol = sim.duel.idol_phase().is_some();
+    if modal.0 != at_idol {
+        modal.0 = at_idol;
+    }
+}
+
+/// The idol menu shows over the world alone: every other screen layer (the HUD, the debug
+/// text) is hidden while it is up and gets back the visibility its own systems set after.
+/// After FwLo's RustSekiro `hide_hud_on_title`, from the game's capture.
+#[allow(clippy::type_complexity)]
+fn cover_layers(
+    mut commands: Commands,
+    sim: NonSend<Sim>,
+    mut layers: Query<
+        (Entity, &mut Visibility, Option<&mut Covered>),
+        (With<Node>, Without<ChildOf>, Without<Menu>),
+    >,
+) {
+    let open = menu_open(&sim);
+    for (e, mut v, covered) in &mut layers {
+        match (open, covered) {
+            (true, Some(mut c)) => {
+                if *v != Visibility::Hidden {
+                    c.0 = *v;
+                    *v = Visibility::Hidden;
+                }
+            }
+            (true, None) => {
+                commands.entity(e).insert(Covered(*v));
+                *v = Visibility::Hidden;
+            }
+            (false, Some(c)) => {
+                *v = c.0;
+                commands.entity(e).remove::<Covered>();
+            }
+            (false, None) => {}
+        }
     }
 }
 
@@ -453,24 +441,22 @@ mod tests {
             serde_json::from_slice(&layout).unwrap(),
         )]);
         let idols = Idols::load(&cache, &layouts, |_, _, y| Some(y));
-        let names: Vec<_> = idols.0.iter().map(|i| i.name.as_str()).collect();
-        assert_eq!(idols.0.len(), 8, "{names:?}");
-        assert!(names.contains(&"Ashina Castle Gate"), "{names:?}");
-        assert!(names.iter().all(|n| !n.is_empty()), "{names:?}");
-        for i in &idols.0 {
-            let [kx, _, kz] = i.kneel.position;
-            let [cx, _, cz] = i.checkpoint.position;
-            // Kneeling he faces the idol; the respawn stands him further out, facing away.
-            let facing = Vec2::new(-i.kneel.yaw.sin(), -i.kneel.yaw.cos());
-            let out = Vec2::new(cx - kx, cz - kz);
+        assert_eq!(idols.spots.len(), 8, "{:?}", idols.names);
+        assert!(idols.names.iter().any(|n| n == "Ashina Castle Gate"));
+        assert!(
+            idols.names.iter().all(|n| !n.is_empty()),
+            "{:?}",
+            idols.names
+        );
+        for s in &idols.spots {
+            let kneel = Vec3::from_array(s.kneel.position);
+            let out = Vec3::from_array(s.checkpoint.position) - kneel;
             assert!((out.length() - RESPAWN).abs() < 1e-3);
-            assert!(facing.dot(out.normalize()) < -0.999, "{i:?}");
-            assert!((i.checkpoint.yaw - i.kneel.yaw).abs() - std::f32::consts::PI < 1e-3);
-            assert_eq!(
-                idols.near(i.kneel.position).map(|n| &idols.0[n].name),
-                Some(&i.name)
-            );
+            // Kneeling he faces the idol; the respawn stands him further out, facing away.
+            let facing = sekiro_sim::arena::forward(s.kneel.yaw);
+            assert!(facing.dot(out.normalize()) < -0.999, "{s:?}");
+            let away = sekiro_sim::arena::forward(s.checkpoint.yaw);
+            assert!(away.dot(out.normalize()) > 0.999, "{s:?}");
         }
-        assert_eq!(idols.near([0.0, 1000.0, 0.0]), None);
     }
 }

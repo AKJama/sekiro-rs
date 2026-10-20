@@ -360,6 +360,10 @@ impl Duel {
                 }
             }
         }
+        // A rest at an idol.
+        if std::mem::take(&mut self.idols.revive) {
+            self.respawn_foes(&mut population);
+        }
         let wolf = glam::Vec3::from_array(self.player.body.position);
         let distance =
             |foe: &Foe| glam::Vec3::from_array(foe.duel.enemy.body.position).distance_squared(wolf);

@@ -497,6 +497,7 @@ pub fn run(options: Options) -> Result<()> {
         let world = Arc::new(map::world::collision_world(&cache, &blocks, &stories)?);
         stage("collision world");
         idols = idol::Idols::load(&cache, &blocks, |x, z, y| world.floor(x, z, y + 1.0));
+        duel.set_idols(idols.spots.clone());
         let (start, yaw_degrees) = match options.spawn {
             Some([x, y, z, yaw]) => {
                 let y = world.floor(x, z, y + 1.0).unwrap_or(y);
