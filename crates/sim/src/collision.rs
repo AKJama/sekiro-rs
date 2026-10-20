@@ -793,7 +793,7 @@ impl CollisionWorld {
     /// Distance along `dir` (unit length) to the first triangle the camera ray stops at within
     /// `max`: [`CollisionWorld::raycast`] with the camera's helper parts instead of the player's.
     pub fn camera_raycast(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<f32> {
-        self.ray(origin, dir, max, CAMERA)
+        self.ray(origin, dir, max, CAMERA).0
     }
 
     pub fn triangle_count(&self) -> usize {
@@ -874,78 +874,98 @@ impl CollisionWorld {
 
     /// Distance along `dir` (unit length) to the first triangle within `max`.
     pub fn raycast(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<f32> {
-        self.ray(origin, dir, max, PLAYER)
+        self.ray(origin, dir, max, PLAYER).0
     }
 
-    fn ray(&self, origin: Vec3, dir: Vec3, max: f32, who: u8) -> Option<f32> {
+    /// The first hit, and how many triangles the ray was tested against.
+    fn ray(&self, origin: Vec3, dir: Vec3, max: f32, who: u8) -> (Option<f32>, usize) {
         let end = origin + dir * max;
         if max < 0.0 || !origin.is_finite() || !end.is_finite() {
-            return None;
+            return (None, 0);
         }
-        thread_local! { static TRIS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) }; }
-        TRIS.with_borrow_mut(|tris| {
-            tris.clear();
-            // Traverse the cells the ray actually crosses, rather than sorting every triangle
-            // in its horizontal bounding rectangle (especially costly on diagonal sight rays).
-            let (mut x, mut z) = cell_of(origin.x, origin.z);
-            let (ex, ez) = cell_of(end.x, end.z);
-            let axis = |start: f32, delta: f32, cell: i32| {
-                if delta == 0.0 {
-                    return (0, f32::INFINITY, f32::INFINITY);
-                }
-                let step = if delta > 0.0 { 1 } else { -1 };
-                let boundary = (cell as f32 + if step > 0 { 1.0 } else { 0.0 }) * CELL;
-                (step, (boundary - start) / delta, CELL / delta.abs())
+        // Walk the cells the ray crosses in order, testing in each only the triangles that reach
+        // the ray's height over that cell, and stop once the nearest hit lies before the next
+        // cell: any triangle not yet tested is met further along. Hot cells hold thousands of
+        // triangles from other storeys, and gathering, sorting and testing all of them along a
+        // sight ray blocked by the next wall cost about 1 ms a ray (#161).
+        let (mut x, mut z) = cell_of(origin.x, origin.z);
+        let (ex, ez) = cell_of(end.x, end.z);
+        let axis = |start: f32, delta: f32, cell: i32| {
+            if delta == 0.0 {
+                return (0, f32::INFINITY, f32::INFINITY);
+            }
+            let step = if delta > 0.0 { 1 } else { -1 };
+            let boundary = (cell as f32 + if step > 0 { 1.0 } else { 0.0 }) * CELL;
+            (step, (boundary - start) / delta, CELL / delta.abs())
+        };
+        // Cell crossings as fractions of the whole ray.
+        let (sx, mut tx, dx) = axis(origin.x, end.x - origin.x, x);
+        let (sz, mut tz, dz) = axis(origin.z, end.z - origin.z, z);
+        // Roundoff margins: along the ray (as a fraction of it) and in height and distance (m).
+        const ALONG: f32 = 1e-4;
+        const PAD: f32 = 1e-3;
+        let rise = end.y - origin.y;
+        let mut enter = 0.0f32;
+        let mut best: Option<f32> = None;
+        let mut tested = 0;
+        for _ in 0..(u64::from(x.abs_diff(ex)) + u64::from(z.abs_diff(ez)) + 1) {
+            let last = (x, z) == (ex, ez);
+            // Roundoff must not step an axis beyond the endpoint's cell.
+            if x == ex {
+                tx = f32::INFINITY;
+            }
+            if z == ez {
+                tz = f32::INFINITY;
+            }
+            let leave = if last {
+                1.0
+            } else {
+                tx.min(tz).clamp(enter, 1.0)
             };
-            let (sx, mut tx, dx) = axis(origin.x, end.x - origin.x, x);
-            let (sz, mut tz, dz) = axis(origin.z, end.z - origin.z, z);
-            for _ in 0..(u64::from(x.abs_diff(ex)) + u64::from(z.abs_diff(ez)) + 1) {
-                if let Some(cell) = self.cells.get(&(x, z)) {
-                    tris.extend_from_slice(cell);
-                }
-                if (x, z) == (ex, ez) {
-                    break;
-                }
-                // Roundoff must not step an axis beyond the endpoint's cell.
-                if x == ex {
-                    tx = f32::INFINITY;
-                }
-                if z == ez {
-                    tz = f32::INFINITY;
-                }
-                if tx < tz {
-                    x += sx;
-                    tx += dx;
-                } else if tz < tx {
-                    z += sz;
-                    tz += dz;
-                } else {
-                    x += sx;
-                    z += sz;
-                    tx += dx;
-                    tz += dz;
+            if let Some(cell) = self.cells.get(&(x, z)) {
+                let [y0, y1] = [(enter - ALONG).max(0.0), (leave + ALONG).min(1.0)]
+                    .map(|t| origin.y + rise * t);
+                let (low_y, high_y) = (y0.min(y1) - PAD, y0.max(y1) + PAD);
+                for &t in cell {
+                    let [min_y, max_y] = self.heights[t as usize];
+                    if min_y > high_y || max_y < low_y || !self.solid(t) || !self.live(t, who) {
+                        continue;
+                    }
+                    tested += 1;
+                    let [a, b, c] = self.corners(t);
+                    if let Some(d) = ray_triangle(origin, dir, a, b, c)
+                        && d <= max
+                        && best.is_none_or(|b| d < b)
+                    {
+                        best = Some(d);
+                    }
                 }
             }
-            tris.sort_unstable();
-            tris.dedup();
-            let low_y = origin.y.min(end.y);
-            let high_y = origin.y.max(end.y);
-            let mut best: Option<f32> = None;
-            for &t in tris.iter() {
-                let [min_y, max_y] = self.heights[t as usize];
-                if min_y > high_y || max_y < low_y || !self.solid(t) || !self.live(t, who) {
-                    continue;
-                }
-                let [a, b, c] = self.corners(t);
-                if let Some(d) = ray_triangle(origin, dir, a, b, c)
-                    && d <= max
-                    && best.is_none_or(|b| d < b)
-                {
-                    best = Some(d);
-                }
+            if last || best.is_some_and(|b| b < leave * max - PAD) {
+                break;
             }
-            best
-        })
+            if tx < tz {
+                x += sx;
+                tx += dx;
+            } else if tz < tx {
+                z += sz;
+                tz += dz;
+            } else {
+                x += sx;
+                z += sz;
+                tx += dx;
+                tz += dz;
+            }
+            enter = leave;
+        }
+        (best, tested)
+    }
+
+    /// How many triangles a [`CollisionWorld::raycast`] tests the ray against. Only for the
+    /// step-cost test (#161).
+    #[doc(hidden)]
+    pub fn ray_triangle_count(&self, origin: Vec3, dir: Vec3, max: f32) -> usize {
+        self.ray(origin, dir, max, PLAYER).1
     }
 
     /// Moves a body standing at `feet` by the horizontal `delta`, stopping at walls and
@@ -978,6 +998,9 @@ impl CollisionWorld {
     /// `start`. A slide moves the body only horizontally, so any other triangle is one
     /// [`CollisionWorld::push_out`] would reject on every pass; hot cells hold thousands of
     /// them from other storeys (#145). The band is padded so roundoff cannot drop a contact.
+    /// It also keeps only those whose horizontal bounds come near the move: the cells reach up
+    /// to 4 m past it, and a long probe (`docking::wall_contact`'s eight 0.8 m slides) tested
+    /// about 3k far triangles on each pass, about 20 ms a step (#161).
     fn gather_slide(
         &self,
         start: Vec3,
@@ -993,6 +1016,9 @@ impl CollisionWorld {
         let max = Vec2::new(start.x.max(start.x + d.x), start.z.max(start.z + d.y)) + reach;
         let low = start.y + SPHERES[0] - RADIUS - 0.01;
         let high = start.y + SPHERES[SPHERES.len() - 1] + RADIUS + 0.01;
+        // The horizontal keep box: the move's reach plus a body radius more, so a push-out that
+        // carries the body a little off the line still meets every triangle it can touch.
+        let (near_min, near_max) = (min - RADIUS, max + RADIUS);
         body.clear();
         walls.clear();
         let (x0, z0) = cell_of(min.x, min.y);
@@ -1004,7 +1030,15 @@ impl CollisionWorld {
                 };
                 body.extend(cell.iter().copied().filter(|&t| {
                     let [min_y, max_y] = self.heights[t as usize];
-                    max_y >= low && min_y <= high && self.solid(t) && self.live(t, who)
+                    if max_y < low || min_y > high || !self.solid(t) || !self.live(t, who) {
+                        return false;
+                    }
+                    let [a, b, c] = self.corners(t);
+                    let (lo, hi) = (a.min(b).min(c), a.max(b).max(c));
+                    hi.x >= near_min.x
+                        && lo.x <= near_max.x
+                        && hi.z >= near_min.y
+                        && lo.z <= near_max.y
                 }));
                 // The assist's walls are rare, so only a move near one pays for them.
                 if assist != 0 {
@@ -1574,6 +1608,11 @@ mod tests {
                 -Vec3::X + Vec3::Z,
                 -Vec3::X - Vec3::Z,
                 -Vec3::Y,
+                // Sloped rays meet the floors and risers in a later cell than they start in,
+                // which each cell's height band must keep.
+                Vec3::new(0.4, -0.15, -1.0),
+                Vec3::new(-1.0, -0.1, 0.3),
+                Vec3::new(0.7, 0.05, -0.6),
             ] {
                 let dir = direction.normalize();
                 for max in [0.1, 25.0] {

@@ -1,5 +1,5 @@
-//! Sim step cost at the m11_00 spots where the live game's fixed step slowed down (#145, #156),
-//! counted in collision work so the tests do not depend on the machine.
+//! Sim step cost at the m11_00 spots where the live game's fixed step slowed down (#145, #156,
+//! #161), counted in collision work so the tests do not depend on the machine.
 //! Skips without the exported maps.
 
 use std::path::Path;
@@ -196,4 +196,60 @@ fn deathblow_pair_search_is_bounded() {
     assert!(started, "the deathblow never started");
     // 93,722 before the bounded search, about 10,500 after (most of them the wall projection).
     assert!(worst < 20_000, "{worst} ground queries in one throw step");
+}
+
+/// Where Wolf stood idle against a wall and the step took about 12 ms (#161): the hook search
+/// casts a sight ray to each grapple point in view, and every one is blocked here. A ray may
+/// only test the triangles of the cells it crosses that reach its height over each cell.
+#[test]
+fn blocked_hook_rays_test_only_their_band() {
+    let Some(world) = play_world() else {
+        return;
+    };
+    let points: Vec<sekiro_sim::wire::Point> = serde_json::from_slice(
+        &std::fs::read(cache().join("maps/m11_00_00_00/grapple.json")).unwrap(),
+    )
+    .unwrap();
+    let [x, y, z] = [-214.998, -38.577, 13.956];
+    let chest = glam::Vec3::new(x, world.floor(x, z, y + 1.0).unwrap_or(y) + 1.2, z);
+    let (mut rays, mut tested) = (0, 0);
+    for q in points.iter().filter_map(|p| p.position) {
+        let ray = glam::Vec3::from(q) - chest;
+        if ray.length() < 25.0 {
+            rays += 1;
+            tested += world.ray_triangle_count(chest, ray.normalize(), ray.length() - 0.1);
+        }
+    }
+    assert!(rays >= 5, "only {rays} hooks near the spot");
+    // 168,198 for these 9 rays before (after gathering and sorting 284,900 cell entries),
+    // 26,750 after.
+    assert!(
+        tested < 60_000,
+        "{tested} triangles tested by {rays} hook rays"
+    );
+}
+
+/// The wall jump's air kick into the ceiling at about (-256.25, -42.2, 11.43) took up to 30 ms
+/// a step (#161): `docking::wall_contact` probes eight 0.8 m slides from the chest, and each
+/// tested every triangle of its 4 m cells in the body's height band.
+#[test]
+fn wall_contact_slides_test_only_nearby_triangles() {
+    let Some(world) = play_world() else {
+        return;
+    };
+    let (feet, lift) = (
+        [-256.25f32, -42.2, 11.43],
+        sekiro_sim::docking::WALL_PROBE_LIFT,
+    );
+    let chest = [feet[0], feet[1] + lift, feet[2]];
+    let tested = (0..8)
+        .map(|k| {
+            let a = k as f32 * std::f32::consts::FRAC_PI_4;
+            let reach = sekiro_sim::docking::WALL_REACH;
+            world.slide_triangle_count(chest, [a.sin() * reach, a.cos() * reach])
+        })
+        .max()
+        .unwrap();
+    // 2,815 before the horizontal cull, 525 after.
+    assert!(tested < 1000, "{tested} triangles per push-out pass");
 }

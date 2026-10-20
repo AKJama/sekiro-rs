@@ -175,14 +175,6 @@ impl Wire {
             {
                 continue;
             }
-            let chest = origin + Vec3::Y * 1.2;
-            let ray = point - chest;
-            if self.collision.as_ref().is_some_and(|w| {
-                w.raycast(chest, ray.normalize(), (ray.length() - 0.1).max(0.0))
-                    .is_some()
-            }) {
-                continue;
-            }
             // Preserve selection among usable hooks; preview distant hooks when none can fire.
             // Screen boxes are not reconstructed: rank by view-centre angle, then distance.
             let score = (
@@ -191,6 +183,15 @@ impl Wire {
                 distance,
             );
             if score >= best {
+                continue;
+            }
+            // The sight ray last: only a hook that would win needs it.
+            let chest = origin + Vec3::Y * 1.2;
+            let ray = point - chest;
+            if self.collision.as_ref().is_some_and(|w| {
+                w.raycast(chest, ray.normalize(), (ray.length() - 0.1).max(0.0))
+                    .is_some()
+            }) {
                 continue;
             }
             best = score;
