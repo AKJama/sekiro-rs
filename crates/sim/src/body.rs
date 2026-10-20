@@ -187,6 +187,12 @@ pub trait Ground {
         let _ = (x, z, top);
         None
     }
+
+    /// [`Ground::floor`] and the [`Ground::material`] of that same surface, from one query, so
+    /// the two cannot disagree.
+    fn floor_with_material(&self, x: f32, z: f32, top: f32) -> Option<(f32, Option<u32>)> {
+        self.floor(x, z, top).map(|h| (h, self.material(x, z, top)))
+    }
 }
 
 /// An infinite flat plane.
@@ -216,9 +222,9 @@ pub struct Body {
     /// Height fallen on the last landing (env 224).
     pub last_fall_height: f32,
     /// Seconds left of the riding state (SpEffect 4100): reset to
-    /// [`crate::hit_filter::SP_EFFECT_4100_ENDURANCE`] on each tick that starts on a rideable
-    /// floor, counted down otherwise. While above 0 the rideable objects' fall-prevention walls
-    /// hold the body ([`crate::hit_filter::riding_walls`]).
+    /// [`crate::hit_filter::SP_EFFECT_4100_ENDURANCE`] on each fall-assisted tick that starts
+    /// on a rideable floor, counted down otherwise. While above 0 the rideable objects'
+    /// fall-prevention walls hold the body ([`crate::hit_filter::riding_walls`]).
     pub riding: f32,
 }
 
@@ -279,33 +285,35 @@ impl Body {
     }
 
     /// The floors under the [`RIM_SUPPORT`] points that are no higher than the feet and no
-    /// more than a step below, with each point's `(x, z)`.
-    fn rim_floors<'a>(&self, ground: &'a dyn Ground) -> impl Iterator<Item = (f32, [f32; 2])> + 'a {
+    /// more than a step below, each with its material ([`Ground::floor_with_material`]).
+    fn rim_floors<'a>(
+        &self,
+        ground: &'a dyn Ground,
+    ) -> impl Iterator<Item = (f32, Option<u32>)> + 'a {
         let [x, y, z] = self.position;
         let step = ground.max_step();
         (0..8)
             .filter_map(move |i| {
                 let (s, c) = (i as f32 * std::f32::consts::FRAC_PI_4).sin_cos();
-                let at = [x + RIM_SUPPORT * c, z + RIM_SUPPORT * s];
-                ground.floor(at[0], at[1], y + 0.05).map(|h| (h, at))
+                ground.floor_with_material(x + RIM_SUPPORT * c, z + RIM_SUPPORT * s, y + 0.05)
             })
             .filter(move |(h, _)| y - h < step)
     }
 
-    /// True while the floor the body stands on is rideable ([`crate::hit_filter::rideable`]):
-    /// the one under its centre, or, when the centre is over a gap and the rim holds the body
-    /// up ([`Self::rim_support`]), any rim point's. Held by the fall-prevention walls at a
+    /// True while the surface holding the body up is rideable ([`crate::hit_filter::rideable`]):
+    /// the floor under its centre when that is within a step, otherwise the highest rim floor,
+    /// the one [`Self::rim_support`] stands it on. Held by the fall-prevention walls at a
     /// branch's edge, the centre is often past the branch while the rim still rests on it.
     fn on_rideable(&self, ground: &dyn Ground) -> bool {
         let [x, y, z] = self.position;
-        if ground
-            .floor(x, z, y + 0.1)
-            .is_some_and(|h| y - h < ground.max_step())
-        {
-            return crate::hit_filter::rideable(ground.material(x, z, y + 0.1));
-        }
-        self.rim_floors(ground)
-            .any(|(_, [rx, rz])| crate::hit_filter::rideable(ground.material(rx, rz, y + 0.05)))
+        ground
+            .floor_with_material(x, z, y + 0.1)
+            .filter(|(h, _)| y - h < ground.max_step())
+            .or_else(|| {
+                self.rim_floors(ground)
+                    .reduce(|best, p| if p.0 > best.0 { p } else { best })
+            })
+            .is_some_and(|(_, m)| crate::hit_filter::rideable(m))
     }
 
     pub fn step(&mut self, input: &BodyInput, dt: f32, ground: &dyn Ground) {
@@ -353,7 +361,9 @@ impl Body {
             travel[0] += self.velocity[0] * dt;
             travel[1] += self.velocity[2] * dt;
         }
-        self.riding = if self.grounded && self.on_rideable(ground) {
+        // Only an assisted slide reads the riding state, so only its ticks look for it.
+        let assisted = input.fall_assist != 0 && !input.ignore_walls;
+        self.riding = if assisted && self.grounded && self.on_rideable(ground) {
             crate::hit_filter::SP_EFFECT_4100_ENDURANCE
         } else {
             (self.riding - dt).max(0.0)
@@ -361,11 +371,7 @@ impl Body {
         let [mx, mz] = if input.ignore_walls {
             travel
         } else {
-            let walls = if input.fall_assist == 0 {
-                0
-            } else {
-                crate::hit_filter::riding_walls(input.fall_assist, self.riding > 0.0)
-            };
+            let walls = crate::hit_filter::riding_walls(input.fall_assist, self.riding > 0.0);
             ground.slide_assisted(self.position, travel, walls)
         };
         self.position[0] += mx;

@@ -714,6 +714,11 @@ impl CollisionWorld {
 
     fn floor_material_for(&self, x: f32, z: f32, top: f32, who: u8) -> Option<u32> {
         let (_, t) = self.floor_triangle(x, z, top, who)?;
+        self.triangle_material(t)
+    }
+
+    /// Triangle `t`'s hit material, when known.
+    fn triangle_material(&self, t: u32) -> Option<u32> {
         self.materials
             .get(t as usize)
             .copied()
@@ -1021,17 +1026,7 @@ impl Ground for View<'_> {
     }
 
     fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
-        // Feet are not a point: look a few centimetres around too, so seams between triangles
-        // do not drop the body.
-        const R: f32 = 0.08;
-        [(0.0, 0.0), (R, 0.0), (-R, 0.0), (0.0, R), (0.0, -R)]
-            .into_iter()
-            .filter_map(|(dx, dz)| {
-                self.world
-                    .floor_triangle(x + dx, z + dz, top, self.who)
-                    .map(|(h, _)| h)
-            })
-            .reduce(f32::max)
+        self.floor_triangle(x, z, top).map(|(h, _)| h)
     }
 
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
@@ -1047,15 +1042,37 @@ impl Ground for View<'_> {
     }
 
     fn material(&self, x: f32, z: f32, top: f32) -> Option<u32> {
-        if let Some(water) = self.water_surface(x, z, top)
-            && water.deep()
-            && self
-                .floor(x, z, top)
-                .is_none_or(|floor| floor < water.height)
-        {
-            return Some(water.material);
-        }
-        self.world.floor_material_for(x, z, top, self.who)
+        self.deep_water_over(x, z, top, self.floor(x, z, top))
+            .or_else(|| self.world.floor_material_for(x, z, top, self.who))
+    }
+
+    fn floor_with_material(&self, x: f32, z: f32, top: f32) -> Option<(f32, Option<u32>)> {
+        let (h, t) = self.floor_triangle(x, z, top)?;
+        let material = self
+            .deep_water_over(x, z, top, Some(h))
+            .or_else(|| self.world.triangle_material(t));
+        Some((h, material))
+    }
+}
+
+impl View<'_> {
+    /// The highest walkable surface under the feet at `(x, z)` no higher than `top`: height and
+    /// triangle. Feet are not a point: it looks a few centimetres around too, so seams between
+    /// triangles do not drop the body.
+    fn floor_triangle(&self, x: f32, z: f32, top: f32) -> Option<(f32, u32)> {
+        const R: f32 = 0.08;
+        [(0.0, 0.0), (R, 0.0), (-R, 0.0), (0.0, R), (0.0, -R)]
+            .into_iter()
+            .filter_map(|(dx, dz)| self.world.floor_triangle(x + dx, z + dz, top, self.who))
+            .reduce(|best, hit| if hit.0 > best.0 { hit } else { best })
+    }
+
+    /// The material of deep water over the floor `floor` at `(x, z)`: the body stands in that
+    /// water rather than on the floor.
+    fn deep_water_over(&self, x: f32, z: f32, top: f32, floor: Option<f32>) -> Option<u32> {
+        self.water_surface(x, z, top)
+            .filter(|water| water.deep() && floor.is_none_or(|floor| floor < water.height))
+            .map(|water| water.material)
     }
 }
 
@@ -1101,6 +1118,10 @@ macro_rules! ground_via_view {
 
             fn material(&self, x: f32, z: f32, top: f32) -> Option<u32> {
                 self.$view().material(x, z, top)
+            }
+
+            fn floor_with_material(&self, x: f32, z: f32, top: f32) -> Option<(f32, Option<u32>)> {
+                self.$view().floor_with_material(x, z, top)
             }
         }
     };
@@ -1172,6 +1193,10 @@ impl<T: Ground + ?Sized> Ground for std::sync::Arc<T> {
 
     fn material(&self, x: f32, z: f32, top: f32) -> Option<u32> {
         (**self).material(x, z, top)
+    }
+
+    fn floor_with_material(&self, x: f32, z: f32, top: f32) -> Option<(f32, Option<u32>)> {
+        (**self).floor_with_material(x, z, top)
     }
 }
 

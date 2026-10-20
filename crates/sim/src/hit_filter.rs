@@ -88,16 +88,81 @@ pub const RIDEABLE_SPECIAL: u32 = 8;
 /// over a gap in the trunk's surface, so does not drop the [`RIDE_ASSIST_MOVE`] walls.
 pub const SP_EFFECT_4100_ENDURANCE: f32 = 0.06;
 
+/// The riding state's SpEffect, which [`RIDE_WALL_EVENT`] waits on.
+pub const RIDING_SP_EFFECT: i32 = 4100;
+
+/// Common event that switches its entity group argument's objects on while Wolf has
+/// [`RIDING_SP_EFFECT`] and off again when he loses it (m11_00 starts it for group 1106200,
+/// the Outskirts trees' fall-prevention walls).
+pub const RIDE_WALL_EVENT: i64 = 20_005_560;
+
+/// The entity groups `map_file` starts [`RIDE_WALL_EVENT`] for, after checking in
+/// `common_func` that the event waits on [`RIDING_SP_EFFECT`] (`IfCharacterHasSpeffect`, 4[5],
+/// whose SpEffect id is the word at byte 8).
+pub fn ride_wall_groups(
+    map_file: &sekiro_formats::emevd::Emevd,
+    common_func: &sekiro_formats::emevd::Emevd,
+) -> Result<Vec<u32>, String> {
+    let event = common_func
+        .event(RIDE_WALL_EVENT)
+        .ok_or(format!("common_func.emevd has no event {RIDE_WALL_EVENT}"))?;
+    let speffects: Vec<i32> = event
+        .instructions
+        .iter()
+        .filter(|i| i.code() == (4, 5))
+        .filter_map(|i| i.i32_at(8))
+        .collect();
+    if speffects.is_empty() || speffects.iter().any(|&s| s != RIDING_SP_EFFECT) {
+        return Err(format!(
+            "event {RIDE_WALL_EVENT} waits on SpEffects {speffects:?}, not {RIDING_SP_EFFECT}"
+        ));
+    }
+    map_file
+        .starts_of(RIDE_WALL_EVENT)
+        .iter()
+        .filter(|s| s.common)
+        .map(|s| {
+            s.arg_i32(0)
+                .map(|g| g as u32)
+                .ok_or(format!("event {}: no group argument", s.from_event))
+        })
+        .collect()
+}
+
+/// [`ride_wall_groups`] from `cache/raw/event/<map>.emevd` and `common_func.emevd`.
+pub fn load_ride_wall_groups(cache: &std::path::Path, map: &str) -> Result<Vec<u32>, String> {
+    let read = |name: &str| -> Result<sekiro_formats::emevd::Emevd, String> {
+        let path = cache.join(format!("raw/event/{name}.emevd"));
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        sekiro_formats::emevd::Emevd::parse(&bytes).map_err(|e| e.to_string())
+    };
+    ride_wall_groups(&read(map)?, &read("common_func")?)
+}
+
 /// True for the material id of a floor that gives the riding state ([`RIDEABLE_SPECIAL`]).
 pub fn rideable(floor_material: Option<u32>) -> bool {
     floor_material.is_some_and(|m| m / 100 == RIDEABLE_SPECIAL)
+}
+
+/// The ride twins of the fall-prevention bits in `who` ([`FALL_ASSIST_MOVE`] to
+/// [`RIDE_ASSIST_MOVE`], [`FALL_ASSIST_ACTION`] to [`RIDE_ASSIST_ACTION`]); every other bit maps
+/// to 0, so a part that is no fall-prevention wall gets no ride mask.
+pub fn ride_mask(who: u8) -> u8 {
+    let mut out = 0;
+    if who & FALL_ASSIST_MOVE != 0 {
+        out |= RIDE_ASSIST_MOVE;
+    }
+    if who & FALL_ASSIST_ACTION != 0 {
+        out |= RIDE_ASSIST_ACTION;
+    }
+    out
 }
 
 /// The walls of `walls` ([`fall_assist_walls`] bits) plus their [`RIDE_ASSIST_MOVE`] and
 /// [`RIDE_ASSIST_ACTION`] twins while the body has the riding state (SpEffect 4100).
 pub fn riding_walls(walls: u8, riding: bool) -> u8 {
     if riding {
-        walls | (walls & (FALL_ASSIST_MOVE | FALL_ASSIST_ACTION)) << 2
+        walls | ride_mask(walls)
     } else {
         walls
     }
@@ -329,6 +394,8 @@ mod tests {
         );
         assert_eq!(riding_walls(FALL_ASSIST_MOVE, false), FALL_ASSIST_MOVE);
         assert_eq!(riding_walls(0, true), 0);
+        assert_eq!(ride_mask(FALL_ASSIST_ACTION), RIDE_ASSIST_ACTION);
+        assert_eq!(ride_mask(7), 0);
     }
 
     #[test]
@@ -346,6 +413,24 @@ mod tests {
         for t in [4, 5, 8, 9, 10] {
             assert_eq!(object_mask(t), 0, "{t}");
         }
+    }
+
+    /// m11_00 starts common event 20005560 for the Outskirts trees' fall-prevention walls
+    /// alone, and m11_01 (the castle) for none (skipped without `cache/raw/event`).
+    #[test]
+    fn ride_wall_groups_come_from_the_map_events() {
+        let cache = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        if !cache.join("raw/event/common_func.emevd").is_file() {
+            return;
+        }
+        assert_eq!(
+            load_ride_wall_groups(&cache, "m11_00_00_00").unwrap(),
+            [1_106_200]
+        );
+        assert_eq!(
+            load_ride_wall_groups(&cache, "m11_01_00_00").unwrap(),
+            Vec::<u32>::new()
+        );
     }
 
     #[test]
