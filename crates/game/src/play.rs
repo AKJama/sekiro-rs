@@ -54,6 +54,8 @@ mod arena_c_scene;
 mod arena_d_scene;
 #[path = "cinematic_fade.rs"]
 pub(crate) mod cinematic_fade;
+#[path = "idol.rs"]
+mod idol;
 #[path = "live_check.rs"]
 mod live_check;
 #[path = "map_enemies.rs"]
@@ -435,6 +437,7 @@ pub fn run(options: Options) -> Result<()> {
     let mut on_map = None;
     let mut stories = map::story::MapStory::default();
     let mut start_yaw = 0.0;
+    let mut idols = idol::Idols::default();
     let mut within = None;
     let mut fog_walls = Vec::new();
     if let Some(spec) = options.arena {
@@ -493,6 +496,8 @@ pub fn run(options: Options) -> Result<()> {
         }
         let world = Arc::new(map::world::collision_world(&cache, &blocks, &stories)?);
         stage("collision world");
+        idols = idol::Idols::load(&cache, &blocks, |x, z, y| world.floor(x, z, y + 1.0));
+        duel.set_idols(idols.spots.clone());
         let (start, yaw_degrees) = match options.spawn {
             Some([x, y, z, yaw]) => {
                 let y = world.floor(x, z, y + 1.0).unwrap_or(y);
@@ -795,6 +800,7 @@ pub fn run(options: Options) -> Result<()> {
     );
     crate::menu::install(&mut app);
     crate::death_screen::install(&mut app);
+    idol::install(&mut app, idols);
     if options.enemy_present {
         arena_d_scene::install(&mut app, &cache, options.arena, options.objects)?;
         arena_c_scene::install(&mut app, &cache, options.arena)?;

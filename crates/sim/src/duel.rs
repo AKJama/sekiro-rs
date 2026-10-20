@@ -31,6 +31,7 @@ mod dragon_trees;
 pub mod father_bird;
 #[path = "headless_ape.rs"]
 pub mod headless_ape;
+pub mod idol;
 #[path = "monk_phantoms.rs"]
 pub mod monk_phantoms;
 #[path = "old_dragons.rs"]
@@ -217,6 +218,7 @@ pub struct Duel {
     /// Steps since the deathblow switched the enemy to its death animation (0: not yet).
     defender_dying: u8,
     spawn: Option<[Placement; 2]>,
+    idols: idol::Idols,
     lock_button: bool,
     attack_button: bool,
     /// The enemy took a hit last step (the AI's damage interrupt).
@@ -793,6 +795,7 @@ impl Duel {
             spec,
             defender_dying: 0,
             spawn: None,
+            idols: idol::Idols::default(),
             lock_button: false,
             attack_button: false,
             enemy_damaged: false,
@@ -1081,6 +1084,7 @@ impl Duel {
         player.wire.collision = self.player.wire.collision.take();
         std::mem::swap(&mut enemy.ground, &mut self.enemy.ground);
         if let Some([p, e]) = self.spawn {
+            let p = self.idols.checkpoint.unwrap_or(p);
             player.body.position = p.position;
             player.snap_yaw(p.yaw);
             enemy.body.position = e.position;
@@ -3185,6 +3189,8 @@ impl Duel {
     }
 
     pub fn step(&mut self, input: &InputFrame, dt: f32) -> DuelReport {
+        let held = self.idol_input(input);
+        let input = held.as_ref().unwrap_or(input);
         if self.population.is_some() {
             return self.step_population(input, dt);
         }

@@ -969,6 +969,11 @@ pub fn install(app: &mut App) {
     install_input(app);
 }
 
+/// Set while a screen over the game takes Esc itself (the idol menu): the pause menu does not
+/// open then.
+#[derive(Resource, Default)]
+pub struct Modal(pub bool);
+
 fn install_input(app: &mut App) {
     app.add_systems(
         PreUpdate,
@@ -1107,6 +1112,7 @@ fn update(
     mut exit: MessageWriter<AppExit>,
     mut time: ResMut<Time<Virtual>>,
     gate: Option<Res<crate::play::PlayGate>>,
+    modal: Option<Res<Modal>>,
 ) {
     state.frame += 1;
     let actions: Vec<_> = state
@@ -1116,7 +1122,9 @@ fn update(
         .map(|(_, a)| a.clone())
         .collect();
     let mut activate = keys.just_pressed(KeyCode::Enter);
+    let modal = !state.paused && modal.is_some_and(|m| m.0);
     if !state.start
+        && !modal
         && (keys.just_pressed(KeyCode::Escape)
             || actions.iter().any(|a| a == "pause")
             || pads.iter().any(|p| p.just_pressed(GamepadButton::Start)))

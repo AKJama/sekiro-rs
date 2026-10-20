@@ -11,7 +11,7 @@
 use bevy::prelude::*;
 
 use crate::combat_hud::Gauges;
-use crate::game_ui::{GameFonts, MenuAtlas};
+use crate::game_ui::{GameFonts, MenuArt};
 
 /// Seconds: the mark's fade in, its turn from white to red, the darkening behind it (to
 /// `SHADE`), the fade to black before the restart, and the black lifting after it.
@@ -35,13 +35,13 @@ struct Caption;
 
 pub fn install(app: &mut App) {
     GameFonts::insert(app);
+    MenuArt::insert(app);
     app.add_systems(Startup, spawn).add_systems(Update, update);
 }
 
-fn spawn(mut commands: Commands, fonts: Res<GameFonts>, mut images: ResMut<Assets<Image>>) {
+fn spawn(mut commands: Commands, fonts: Res<GameFonts>, art: Res<MenuArt>) {
     let cache = sekiro_sim::cache::root();
-    let mark = MenuAtlas::load(&cache, "SB_TextEffect", &mut images)
-        .and_then(|atlas| atlas.sprite("MENU_Death"));
+    let mark = art.sprite("SB_TextEffect", "MENU_Death");
     let caption = crate::game_ui::menu_texts(&cache, "イベントテキスト")
         .remove(&CAPTION_TEXT)
         .unwrap_or_else(|| "DEATH".into());
