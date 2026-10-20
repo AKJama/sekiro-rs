@@ -40,8 +40,12 @@ const PARTICLE_CAP: usize = 8000;
 const EFFECT_STOP: f32 = 20.0;
 const EFFECT_DROP: f32 = 30.0;
 /// Who asked: `(actor, effect id, dummy)` for TAE events, `(2, id, serial)` for bullets,
-/// `(3, id, n)` for hits.
+/// `(3, id, n)` for hits, `(HELD, id, serial)` and `(GLINTS, id, item)` for
+/// [`FxrPlayer::hold`], `(5, id, serial)` for map effects.
 type Key = (usize, i32, i32);
+/// [`FxrPlayer::hold`] namespaces: map entities (fog walls), and the map items' glints.
+pub const HELD: usize = 4;
+pub const GLINTS: usize = 6;
 
 /// A plugin-supplied bridge keeps the simulation private to the play module.
 pub fn plugin(cache: PathBuf, bridge: impl Fn(&mut App) + Send + Sync + 'static) -> impl Plugin {
@@ -288,8 +292,6 @@ impl FxrPlayer {
         });
     }
 
-    /// Holds a map effect (a boss fog wall) at `at` while `on`, and lets it fade out once it is
-    /// off. `serial` tells apart effects with the same id; the effect does not time out.
     pub(crate) fn live_counts(&self) -> (usize, usize, usize) {
         (
             self.effects.len(),
@@ -310,8 +312,11 @@ impl FxrPlayer {
             .sum();
     }
 
-    pub fn hold(&mut self, id: i32, serial: i32, at: Transform, on: bool) {
-        let key = (4, id, serial);
+    /// Holds a map effect (a boss fog wall) at `at` while `on`, and lets it fade out once it is
+    /// off. `namespace` and `serial` tell apart effects with the same id; the effect does not
+    /// time out.
+    pub fn hold(&mut self, namespace: usize, id: i32, serial: i32, at: Transform, on: bool) {
+        let key = (namespace, id, serial);
         let held = self
             .effects
             .iter_mut()
@@ -1681,7 +1686,13 @@ fn render(
             collect(root, &mut frame);
         }
     }
-    frame.lights.sort_by(|a, b| b.2.total_cmp(&a.2));
+    // The 16 nearest the camera (many alike, such as item glints, would tie on brightness).
+    let eye = frame.cam.translation();
+    frame.lights.sort_by(|a, b| {
+        a.0.distance_squared(eye)
+            .total_cmp(&b.0.distance_squared(eye))
+            .then(b.2.total_cmp(&a.2))
+    });
     frame.lights.truncate(16);
     while lights.len() > frame.lights.len() {
         commands.entity(lights.pop().unwrap()).despawn();

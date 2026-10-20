@@ -164,6 +164,7 @@ fn hold_fog_walls(sim: NonSend<Sim>, walls: Res<FogWalls>, mut fx: ResMut<crate:
             (place.rotation * Vec3::Y).to_array(),
         );
         fx.hold(
+            crate::fxr::HELD,
             place.wall.sfx,
             place.wall.object_entity,
             at,

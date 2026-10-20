@@ -191,7 +191,7 @@ fn folding_screen_monkeys_independent_lua_following_and_bell() {
     let bell = &duel.screen_monkeys.as_ref().unwrap().bell;
     duel.player.body.position = [
         bell.point[0],
-        bell.point[1] + bell.base_height,
+        bell.point[1] + bell.reach.base,
         bell.point[2],
     ];
     let green_spot = sekiro_sim::events::warp_point(&cache, 20, 0, 2_002_553).unwrap();

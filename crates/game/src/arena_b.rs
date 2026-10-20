@@ -126,7 +126,13 @@ fn effects(scene: Res<Scene>, effects: Res<Effects>, mut fx: ResMut<crate::fxr::
         let at = Transform::from_translation(effect.position.into()).with_rotation(
             Quat::from_rotation_y(ry) * Quat::from_rotation_z(rz) * Quat::from_rotation_x(rx),
         );
-        fx.hold(effect.effect, effect.entity, at, on && !disabled);
+        fx.hold(
+            crate::fxr::HELD,
+            effect.effect,
+            effect.entity,
+            at,
+            on && !disabled,
+        );
     }
 }
 

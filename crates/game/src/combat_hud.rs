@@ -201,7 +201,7 @@ fn step_trail(trail: &mut (f32, f32), f: f32, dt: f32) {
 
 /// Steps a display hold: `duration` while `on` (a posture gauge's damage, a new reward), then
 /// counting down. Returns whether it still shows.
-fn step_hold(hold: &mut f32, on: bool, duration: f32, dt: f32) -> bool {
+pub(crate) fn step_hold(hold: &mut f32, on: bool, duration: f32, dt: f32) -> bool {
     *hold = if on { duration } else { (*hold - dt).max(0.0) };
     *hold > 0.0
 }
