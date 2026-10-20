@@ -489,6 +489,9 @@ impl Ground for PerchGround<'_> {
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
         self.terrain.slide(feet, delta)
     }
+    fn slide_assisted(&self, feet: [f32; 3], delta: [f32; 2], walls: u8) -> [f32; 2] {
+        self.terrain.slide_assisted(feet, delta, walls)
+    }
     fn max_step(&self) -> f32 {
         self.terrain.max_step()
     }

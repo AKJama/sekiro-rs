@@ -443,15 +443,27 @@ pub(crate) fn collision_world(
     world.add_helpers(&helpers);
     for block in layouts.keys() {
         // Objects the story has switched off (`DeactivateObject`) have no collision either.
+        // The fall-prevention walls of the groups the block's events hand to common event
+        // 20005560 are on only while Wolf has SpEffect 4100 (stands on a rideable object),
+        // whatever the story says: they hold only riders (#119).
         let story = story.maps.get(block);
+        let groups =
+            sekiro_sim::hit_filter::load_ride_wall_groups(cache, block).unwrap_or_else(|e| {
+                eprintln!("collision: {block}: no ride wall groups: {e}");
+                Vec::new()
+            });
+        let riders = ride_walls(&layouts[block], &groups);
         let mut switched_off = 0;
         let (parts, triangles) = world
-            .add_block_objects(&cache.join("maps").join(block), block, |part| {
+            .add_block_objects(&cache.join("maps").join(block), block, |part, who| {
+                if riders.contains(part.name.as_str()) {
+                    return sekiro_sim::hit_filter::ride_mask(who);
+                }
                 let on = story
                     .and_then(|s| s.part(&part.name))
                     .is_none_or(|p| p.enabled);
                 switched_off += usize::from(!on);
-                on
+                if on { who } else { 0 }
             })
             .map_err(anyhow::Error::msg)?;
         if parts > 0 {
@@ -462,6 +474,23 @@ pub(crate) fn collision_world(
         }
     }
     Ok(world)
+}
+
+/// Names of a block's objects in any of `groups`, the entity groups whose fall-prevention
+/// walls common event 20005560 switches on while Wolf has SpEffect 4100
+/// ([`sekiro_sim::hit_filter::ride_wall_groups`], [`sekiro_sim::hit_filter::RIDE_ASSIST_MOVE`]).
+fn ride_walls<'a>(layout: &'a Value, groups: &[u32]) -> BTreeSet<&'a str> {
+    layout["objects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|row| {
+            groups8(&row["entity_group_ids"])
+                .iter()
+                .any(|g| *g != 0 && groups.contains(g))
+        })
+        .filter_map(|row| row["name"].as_str())
+        .collect()
 }
 
 impl MapWorld {
@@ -2008,36 +2037,304 @@ mod tests {
         assert_eq!(world.selected, ledge_part);
     }
 
+    /// The play world around the Outskirts start (`play_blocks`, the stories and
+    /// `collision_world`), as the game builds it.
+    struct PlayWorld {
+        cache: std::path::PathBuf,
+        blocks: BTreeMap<String, Value>,
+        stories: super::super::story::MapStory,
+        world: std::sync::Arc<sekiro_sim::collision::CollisionWorld>,
+    }
+
+    /// [`PlayWorld`], built once and shared by the tests; `None` without the cache.
+    fn play_world() -> Option<&'static PlayWorld> {
+        static WORLD: std::sync::OnceLock<Option<PlayWorld>> = std::sync::OnceLock::new();
+        WORLD
+            .get_or_init(|| {
+                let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+                if !cache
+                    .join("maps/m11_00_00_00/object_collision.bin")
+                    .is_file()
+                {
+                    return None;
+                }
+                let t = std::time::Instant::now();
+                let blocks = play_blocks(&cache, ASHINA[0]).unwrap();
+                let stories = super::super::story::load_blocks(&cache, &blocks).unwrap();
+                let world = collision_world(&cache, &blocks, &stories).unwrap();
+                println!(
+                    "collision world built in {:.0} ms",
+                    t.elapsed().as_secs_f64() * 1e3
+                );
+                Some(PlayWorld {
+                    cache,
+                    blocks,
+                    stories,
+                    world: std::sync::Arc::new(world),
+                })
+            })
+            .as_ref()
+    }
+
+    /// [`play_world`] when the cache also has Wolf to run on it.
+    fn wolf_world() -> Option<&'static PlayWorld> {
+        play_world().filter(|p| p.cache.join("raw/chr/c0000.behbnd.d/c0000.hkx").exists())
+    }
+
     /// The play world's collision (`collision_world`, objects included and the story's switched
     /// off ones left out) holds Wolf on the grapple pine over the Outskirts start ravine, at the
     /// trunk's tip the sim data test (`crates/sim/tests/it/object_collision.rs`) starts from.
     #[test]
     fn play_collision_world_stands_on_the_grapple_pine() {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
-        if !cache
-            .join("maps/m11_00_00_00/object_collision.bin")
-            .is_file()
-        {
+        let Some(play) = play_world() else {
             return;
-        }
-        let t = std::time::Instant::now();
-        let blocks = play_blocks(&cache, ASHINA[0]).unwrap();
-        let stories = super::super::story::load_blocks(&cache, &blocks).unwrap();
-        let world = collision_world(&cache, &blocks, &stories).unwrap();
-        println!(
-            "collision world built in {:.0} ms",
-            t.elapsed().as_secs_f64() * 1e3
-        );
+        };
         // Both blocks have a story to leave switched-off objects out with.
+        let stories = &play.stories;
         assert!(stories.maps.contains_key(ASHINA[0]) && stories.maps.contains_key(ASHINA[1]));
         let (x, z) = (-140.9, -124.1);
-        let floor = world
+        let floor = play
+            .world
             .floor(x, z, -40.0)
             .expect("a floor at the trunk's tip");
         assert!((floor + 44.1).abs() < 0.3, "tip floor at {floor}");
         assert_eq!(
-            world.floor_object(x, z, -40.0),
+            play.world.floor_object(x, z, -40.0),
             Some("m11_00_00_00/o002500_0005")
+        );
+    }
+
+    /// Where a run of Wolf's ended.
+    struct Run {
+        /// How far along the run's direction he got at most, from where he settled.
+        far: f32,
+        /// His feet at the end.
+        end: [f32; 3],
+        /// Whether he stayed grounded on every tick.
+        stayed: bool,
+    }
+
+    /// Runs Wolf from `from` (x, z), on the floor below `top`, along the unit `dir` for `ticks`.
+    fn run_along(play: &PlayWorld, from: [f32; 2], top: f32, dir: [f32; 2], ticks: usize) -> Run {
+        let y = play
+            .world
+            .floor(from[0], from[1], top)
+            .expect("a floor to start on");
+        run_from(play, [from[0], y, from[1]], dir, ticks)
+    }
+
+    /// [`run_along`] from the feet position `from`.
+    fn run_from(play: &PlayWorld, from: [f32; 3], dir: [f32; 2], ticks: usize) -> Run {
+        let mut wolf = sekiro_sim::Character::load_from_cache(&play.cache).unwrap();
+        wolf.ground = Box::new(play.world.clone());
+        wolf.body.position = from;
+        wolf.settle(1.0 / 60.0, 400);
+        let origin = wolf.body.position;
+        // The stick's forward is the camera's.
+        let input = sekiro_sim::InputFrame {
+            move_stick: [0.0, 1.0],
+            camera_yaw: sekiro_sim::arena::yaw_toward(Vec3::ZERO, Vec3::new(dir[0], 0.0, dir[1])),
+            ..Default::default()
+        };
+        let mut far = f32::MIN;
+        let mut stayed = true;
+        for _ in 0..ticks {
+            wolf.tick(&input, 1.0 / 60.0);
+            let p = wolf.body.position;
+            far = far.max((p[0] - origin[0]) * dir[0] + (p[2] - origin[2]) * dir[1]);
+            stayed &= wolf.body.grounded;
+        }
+        println!(
+            "{far:.2} m along, stayed grounded {stayed}, state {}",
+            wolf.state()
+        );
+        Run {
+            far,
+            end: wolf.body.position,
+            stayed,
+        }
+    }
+
+    /// The play world keeps the fall-prevention walls (#119), on the same shared world the game
+    /// hands Wolf: running at the cliff top east of start 2 (`crates/sim/tests/it/edge_hold.rs`)
+    /// holds him at the map's filter-28 wall, and running off the side of the grapple pine holds
+    /// him at its collisionType 6 part, which holds only a body standing on the trunk's rideable
+    /// material (808).
+    #[test]
+    fn play_collision_world_holds_wolf_at_edges() {
+        let Some(play) = wolf_world() else {
+            return;
+        };
+        // 4 m inside the cliff's wall line.
+        let (edge, out) = ([-126.8f32, 28.06f32], [0.43f32, 0.90f32]);
+        let from = [edge[0] - out[0] * 4.0, edge[1] - out[1] * 4.0];
+        let run = run_along(play, from, -24.0, out, 180);
+        assert!(
+            run.far < 4.0 && run.stayed,
+            "ran {:.2} m past the cliff's wall",
+            run.far - 4.0
+        );
+        // The trunk's tip; without its wall he is off the side within 0.6 m.
+        let run = run_along(play, [-140.9, -124.1], -40.0, [-1.0, 0.0], 120);
+        assert!(
+            run.far < 0.5 && run.stayed,
+            "ran {:.2} m off the pine",
+            run.far
+        );
+    }
+
+    /// Every rideable object with fall-prevention walls in m11_00 (the groups its events hand
+    /// common event 20005560, the Outskirts pines) holds Wolf when he runs off either side of it
+    /// from its top surface (808). A tree's walls are the object placed with it, at the same
+    /// translation: o002500_0005 has o002501_0005.
+    #[test]
+    fn play_collision_world_trees_hold_riders() {
+        let Some(play) = wolf_world() else {
+            return;
+        };
+        let world = &play.world;
+        let block = ASHINA[0];
+        let path = play
+            .cache
+            .join("maps")
+            .join(block)
+            .join("object_collision.bin");
+        let objects =
+            sekiro_formats::hknp::ObjectCollision::from_bytes(&std::fs::read(path).unwrap())
+                .unwrap();
+        let v = |i: u32| Vec3::from(objects.mesh.vertices[i as usize]);
+        let tri = |t: u32| {
+            let i = &objects.mesh.indices[t as usize * 3..t as usize * 3 + 3];
+            [v(i[0]), v(i[1]), v(i[2])]
+        };
+        let part = |name: &str| objects.parts.iter().find(|p| p.name == name);
+        // Known gaps, where the wall shape itself leaves an opening beside the tree: the part
+        // and the side, matched by direction. Through o002500_0005's (the grapple pine at
+        // start 0) he now walks on to the hillside, which passes as held, but it is not the
+        // walls holding him.
+        let gaps: [(&str, [f32; 2]); 1] = [("o002500_0005", [-0.77, 0.63])];
+        let groups = sekiro_sim::hit_filter::load_ride_wall_groups(&play.cache, block).unwrap();
+        let layout = &play.blocks[block];
+        let riders = ride_walls(layout, &groups);
+        let rows = layout["objects"].as_array().unwrap();
+        let mut walks = Vec::new();
+        for row in rows {
+            let Some(wall) = row["name"].as_str().filter(|n| riders.contains(n)) else {
+                continue;
+            };
+            let Some(w) = part(wall) else {
+                continue;
+            };
+            let tree = rows
+                .iter()
+                .filter(|r| r["translation"] == row["translation"])
+                .filter_map(|r| r["name"].as_str())
+                .filter(|n| !riders.contains(n))
+                .find_map(part);
+            let Some(tree) = tree else {
+                continue;
+            };
+            let name = format!("{block}/{}", tree.name);
+            let (wlo, whi) = (w.first..w.first + w.count)
+                .flat_map(tri)
+                .fold((Vec3::MAX, Vec3::MIN), |(lo, hi), p| (lo.min(p), hi.max(p)));
+            // Upward faces that are the tree's top surface, inside its walls' box.
+            let points: Vec<Vec3> = (tree.first..tree.first + tree.count)
+                .map(tri)
+                .filter(|[a, b, c]| (*b - *a).cross(*c - *a).normalize_or_zero().y.abs() >= 0.7)
+                .map(|[a, b, c]| (a + b + c) / 3.0)
+                .filter(|m| {
+                    world.floor_object(m.x, m.z, m.y + 0.05) == Some(name.as_str())
+                        && world
+                            .floor(m.x, m.z, m.y + 3.0)
+                            .is_some_and(|h| h < m.y + 0.02)
+                        && m.x > wlo.x
+                        && m.x < whi.x
+                        && m.z > wlo.z
+                        && m.z < whi.z
+                        && m.y > wlo.y - 1.0
+                        && m.y < whi.y
+                })
+                .collect();
+            assert!(!points.is_empty(), "{name} has no top surface to start on");
+            // Start at the surface point nearest its middle and run off across its long axis.
+            let mean = points.iter().copied().sum::<Vec3>() / points.len() as f32;
+            let (sxx, sxz, szz) = points.iter().fold((0.0, 0.0, 0.0), |(xx, xz, zz), p| {
+                let d = *p - mean;
+                (xx + d.x * d.x, xz + d.x * d.z, zz + d.z * d.z)
+            });
+            let angle: f32 = 0.5 * f32::atan2(2.0 * sxz, sxx - szz);
+            let (sin, cos) = angle.sin_cos();
+            let start = *points
+                .iter()
+                .min_by(|a, b| a.distance(mean).total_cmp(&b.distance(mean)))
+                .unwrap();
+            assert_eq!(
+                world.floor_material(start.x, start.z, start.y + 0.05),
+                Some(808),
+                "{name} start {start}"
+            );
+            for dir in [[-sin, cos], [sin, -cos]] {
+                let gap = gaps
+                    .iter()
+                    .any(|(n, d)| tree.name == *n && dir[0] * d[0] + dir[1] * d[1] > 0.9);
+                walks.push((name.clone(), start, dir, gap));
+            }
+        }
+        assert!(walks.len() >= 50, "only {} walks", walks.len());
+        // Each walk loads its own Wolf, which takes most of the time: share them out.
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
+        let runs: Vec<Run> = std::thread::scope(|scope| {
+            let handles: Vec<_> = walks
+                .chunks(walks.len().div_ceil(threads))
+                .map(|chunk| {
+                    scope.spawn(move || {
+                        chunk
+                            .iter()
+                            .map(|(_, start, dir, _)| run_from(play, (*start).into(), *dir, 90))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().unwrap())
+                .collect()
+        });
+        let mut failed = Vec::new();
+        for ((name, start, dir, gap), run) in walks.iter().zip(runs) {
+            // Held: never in the air, and still on the tree or on ground level with it
+            // (o002500_0004's trunk runs into the hillside, and he walks along it onto that).
+            let [x, y, z] = run.end;
+            let on_tree = world.floor_object(x, z, y + 0.1) == Some(name.as_str());
+            let held = run.stayed && (on_tree || y > start.y - 0.5);
+            let side = format!("{name} from {start:.1} side ({:.2},{:.2})", dir[0], dir[1]);
+            println!(
+                "{side}: {:.2} m, {:.2} m down, on the tree {on_tree}, held {held}",
+                run.far,
+                start.y - y
+            );
+            if !held && !gap {
+                failed.push(format!("{side} {:.2} m", run.far));
+            }
+        }
+        assert!(failed.is_empty(), "ran off: {failed:#?}");
+    }
+
+    /// The ground path past o002500_0005's root near start 0, where o002501_0005's walls stand
+    /// in the ground (material 30 here). Wolf is beside the trunk, not on it, so they must not
+    /// hold him: from 1.2 m inside the wall he runs on through it. Taking the riding state from
+    /// any rim point (not just when the centre is over a gap) held him here at 1.05 m.
+    #[test]
+    fn play_collision_world_pine_root_walls_let_the_ground_path_through() {
+        let Some(play) = wolf_world() else {
+            return;
+        };
+        let run = run_along(play, [-135.58, -117.53], -42.0, [0.84, -0.55], 60);
+        assert!(
+            run.far > 1.7 && run.stayed,
+            "held {:.2} m along by the pine root's ride walls",
+            run.far
         );
     }
 

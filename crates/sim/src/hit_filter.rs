@@ -13,8 +13,8 @@
 //!
 //! The exported `collision.bin` holds every part's triangles; [`strip_helpers`] takes the ones
 //! the player does not collide with out of it (in place, so the triangle ranges recorded in
-//! `layout.json` stay valid) and returns the enemy and camera parts and the contact triggers
-//! for [`crate::collision::CollisionWorld::add_helpers`]. Enemies and bosses use
+//! `layout.json` stay valid) and returns the enemy, camera and fall-prevention parts and the
+//! contact triggers for [`crate::collision::CollisionWorld::add_helpers`]. Enemies and bosses use
 //! [`crate::collision::EnemyGround`]: they also stand on water surfaces and stop at
 //! enemy-only walls.
 
@@ -64,13 +64,132 @@ const CAMERA_GROUPS: [u8; 6] = [24, 39, 40, 41, 46, 108];
 pub const PLAYER: u8 = 1;
 pub const ENEMY: u8 = 2;
 pub const CAMERA: u8 = 4;
+/// The fall-prevention assist walls (落下防止アシストヒット): group 92 for ground movement and
+/// ground actions, group 93 for ground actions only. No capsule collides with them; the
+/// assist's sphere casts do (groups 94 and 96 meet 92, 95 and 96 meet 93), and only while the
+/// player script asks for the assist ([`fall_assist_walls`]).
+pub const FALL_ASSIST_MOVE: u8 = 8;
+pub const FALL_ASSIST_ACTION: u8 = 16;
+/// [`FALL_ASSIST_MOVE`] and [`FALL_ASSIST_ACTION`] walls that are on only while the body stands
+/// on an object that can be ridden ([`RIDEABLE_SPECIAL`]). The story switches these off (m11_00
+/// group 1106200), and common event 20005560 switches them on while Wolf has SpEffect 4100,
+/// which HitMaterialSpecialSettingParam 8 ("objects that can be ridden") gives him.
+pub const RIDE_ASSIST_MOVE: u8 = FALL_ASSIST_MOVE << 2;
+pub const RIDE_ASSIST_ACTION: u8 = FALL_ASSIST_ACTION << 2;
+/// HitMaterialSpecialSettingParam row of "objects that can be ridden" (乗れるオブジェ), the one
+/// that gives SpEffect 4100. A collision triangle's material id is its special setting times
+/// 100 plus its HitMtrlParam row: the rideable pines' trunks are 808 (tree, row 8), and wood
+/// floors 204 and 504 (wood, rows 2 and 5).
+pub const RIDEABLE_SPECIAL: u32 = 8;
 
-/// [`PLAYER`], [`ENEMY`] and [`CAMERA`] bits for a Havok collision group.
+/// How long SpEffect 4100 ("Hit material judgment _ Riding object", the riding state
+/// [`RIDEABLE_SPECIAL`] floors give) lasts after the last tick on such a floor: its
+/// SpEffectParam effectEndurance, 0.06 s. A thin map floor poking through a branch, or a tick
+/// over a gap in the trunk's surface, so does not drop the [`RIDE_ASSIST_MOVE`] walls.
+pub const SP_EFFECT_4100_ENDURANCE: f32 = 0.06;
+
+/// The riding state's SpEffect, which [`RIDE_WALL_EVENT`] waits on.
+pub const RIDING_SP_EFFECT: i32 = 4100;
+
+/// Common event that switches its entity group argument's objects on while Wolf has
+/// [`RIDING_SP_EFFECT`] and off again when he loses it (m11_00 starts it for group 1106200,
+/// the Outskirts trees' fall-prevention walls).
+pub const RIDE_WALL_EVENT: i64 = 20_005_560;
+
+/// The entity groups `map_file` starts [`RIDE_WALL_EVENT`] for, after checking in
+/// `common_func` that the event waits on [`RIDING_SP_EFFECT`] (`IfCharacterHasSpeffect`, 4[5],
+/// whose SpEffect id is the word at byte 8).
+pub fn ride_wall_groups(
+    map_file: &sekiro_formats::emevd::Emevd,
+    common_func: &sekiro_formats::emevd::Emevd,
+) -> Result<Vec<u32>, String> {
+    let event = common_func
+        .event(RIDE_WALL_EVENT)
+        .ok_or(format!("common_func.emevd has no event {RIDE_WALL_EVENT}"))?;
+    let speffects: Vec<i32> = event
+        .instructions
+        .iter()
+        .filter(|i| i.code() == (4, 5))
+        .filter_map(|i| i.i32_at(8))
+        .collect();
+    if speffects.is_empty() || speffects.iter().any(|&s| s != RIDING_SP_EFFECT) {
+        return Err(format!(
+            "event {RIDE_WALL_EVENT} waits on SpEffects {speffects:?}, not {RIDING_SP_EFFECT}"
+        ));
+    }
+    map_file
+        .starts_of(RIDE_WALL_EVENT)
+        .iter()
+        .filter(|s| s.common)
+        .map(|s| {
+            s.arg_i32(0)
+                .map(|g| g as u32)
+                .ok_or(format!("event {}: no group argument", s.from_event))
+        })
+        .collect()
+}
+
+/// [`ride_wall_groups`] from `cache/raw/event/<map>.emevd` and `common_func.emevd`.
+pub fn load_ride_wall_groups(cache: &std::path::Path, map: &str) -> Result<Vec<u32>, String> {
+    let read = |name: &str| -> Result<sekiro_formats::emevd::Emevd, String> {
+        let path = cache.join(format!("raw/event/{name}.emevd"));
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        sekiro_formats::emevd::Emevd::parse(&bytes).map_err(|e| e.to_string())
+    };
+    ride_wall_groups(&read(map)?, &read("common_func")?)
+}
+
+/// True for the material id of a floor that gives the riding state ([`RIDEABLE_SPECIAL`]).
+pub fn rideable(floor_material: Option<u32>) -> bool {
+    floor_material.is_some_and(|m| m / 100 == RIDEABLE_SPECIAL)
+}
+
+/// The ride twins of the fall-prevention bits in `who` ([`FALL_ASSIST_MOVE`] to
+/// [`RIDE_ASSIST_MOVE`], [`FALL_ASSIST_ACTION`] to [`RIDE_ASSIST_ACTION`]); every other bit maps
+/// to 0, so a part that is no fall-prevention wall gets no ride mask.
+pub fn ride_mask(who: u8) -> u8 {
+    let mut out = 0;
+    if who & FALL_ASSIST_MOVE != 0 {
+        out |= RIDE_ASSIST_MOVE;
+    }
+    if who & FALL_ASSIST_ACTION != 0 {
+        out |= RIDE_ASSIST_ACTION;
+    }
+    out
+}
+
+/// The walls of `walls` ([`fall_assist_walls`] bits) plus their [`RIDE_ASSIST_MOVE`] and
+/// [`RIDE_ASSIST_ACTION`] twins while the body has the riding state (SpEffect 4100).
+pub fn riding_walls(walls: u8, riding: bool) -> u8 {
+    if riding {
+        walls | ride_mask(walls)
+    } else {
+        walls
+    }
+}
+
+/// The fall-prevention walls the assist tests for HKS `act(3016, arg)`. The script
+/// (`_UpdateFallProtection`) sends arg 0 in states whose `ENABLE_FALL_PROTECT_WALL_STRONG` is
+/// set (standing, walking, running, dodges, landings) and arg 1 where
+/// `ENABLE_FALL_PROTECT_WALL_WEAK` is set (ground actions), every frame. `FUN_140bc6800` picks
+/// the sphere cast's group from the two request bits: bit 0 alone casts with group 94, bit 1
+/// alone with 95, both with 96.
+pub fn fall_assist_walls(arg: i32) -> u8 {
+    match arg {
+        0 => FALL_ASSIST_MOVE,
+        1 => FALL_ASSIST_ACTION,
+        _ => 0,
+    }
+}
+
+/// [`PLAYER`], [`ENEMY`], [`CAMERA`] and fall-prevention bits for a Havok collision group.
 pub fn group_mask(group: u8) -> u8 {
     [
         (&PLAYER_GROUPS[..], PLAYER),
         (&ENEMY_GROUPS[..], ENEMY),
         (&CAMERA_GROUPS[..], CAMERA),
+        (&[92][..], FALL_ASSIST_MOVE),
+        (&[93][..], FALL_ASSIST_ACTION),
     ]
     .into_iter()
     .filter(|(groups, _)| groups.contains(&group))
@@ -127,8 +246,8 @@ pub fn object_group(collision_type: u8) -> u8 {
 /// [`PLAYER`], [`ENEMY`] and [`CAMERA`] bits for an object's static bodies ([`group_mask`] of
 /// its [`object_group`]): the player (`FUN_1409325c0` for group 1) and enemies
 /// (`FUN_140932480` for group 2) collide with the object groups 24 to 27, the camera ray
-/// (group 48) with 24, the camera-only map hit 41 and 108. Groups 32, 47, 51, 67, 92 and 93
-/// hold none of them.
+/// (group 48) with 24, the camera-only map hit 41 and 108. Groups 32, 47, 51 and 67 hold none
+/// of them; 92 and 93 are fall-prevention walls ([`FALL_ASSIST_MOVE`], [`FALL_ASSIST_ACTION`]).
 pub fn object_mask(collision_type: u8) -> u8 {
     group_mask(object_group(collision_type))
 }
@@ -136,7 +255,8 @@ pub fn object_mask(collision_type: u8) -> u8 {
 /// The helper triangles taken out of the player's collision.
 #[derive(Debug, Default, Clone)]
 pub struct HelperCollision {
-    /// Parts only enemies or the camera collide with, by [`mask`] (hit filters 9, 11, 16 and 19).
+    /// Parts only enemies, the camera or the fall-prevention assist collide with, by [`mask`]
+    /// (hit filters 9, 11, 16, 19 and 28).
     pub parts: BTreeMap<u8, CollisionMesh>,
     /// Map action event walls by hit filter, each with its part names.
     pub triggers: Vec<Trigger>,
@@ -264,6 +384,18 @@ mod tests {
         assert_eq!(mask(8), PLAYER | ENEMY | CAMERA);
         assert_eq!(mask(16), ENEMY | CAMERA);
         assert_eq!(mask(15), 0);
+        assert_eq!(mask(28), FALL_ASSIST_MOVE);
+        assert_eq!(fall_assist_walls(0), FALL_ASSIST_MOVE);
+        assert_eq!(fall_assist_walls(1), FALL_ASSIST_ACTION);
+        assert!(rideable(Some(808)) && !rideable(Some(8)) && !rideable(None));
+        assert_eq!(
+            riding_walls(FALL_ASSIST_MOVE, true),
+            FALL_ASSIST_MOVE | RIDE_ASSIST_MOVE
+        );
+        assert_eq!(riding_walls(FALL_ASSIST_MOVE, false), FALL_ASSIST_MOVE);
+        assert_eq!(riding_walls(0, true), 0);
+        assert_eq!(ride_mask(FALL_ASSIST_ACTION), RIDE_ASSIST_ACTION);
+        assert_eq!(ride_mask(7), 0);
     }
 
     #[test]
@@ -276,9 +408,29 @@ mod tests {
         assert_eq!(object_mask(2), PLAYER | ENEMY);
         assert_eq!(object_mask(3), CAMERA);
         assert_eq!(object_mask(7), CAMERA);
-        for t in [4, 5, 6, 8, 9, 10, 11] {
+        assert_eq!(object_mask(6), FALL_ASSIST_MOVE);
+        assert_eq!(object_mask(11), FALL_ASSIST_ACTION);
+        for t in [4, 5, 8, 9, 10] {
             assert_eq!(object_mask(t), 0, "{t}");
         }
+    }
+
+    /// m11_00 starts common event 20005560 for the Outskirts trees' fall-prevention walls
+    /// alone, and m11_01 (the castle) for none (skipped without `cache/raw/event`).
+    #[test]
+    fn ride_wall_groups_come_from_the_map_events() {
+        let cache = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        if !cache.join("raw/event/common_func.emevd").is_file() {
+            return;
+        }
+        assert_eq!(
+            load_ride_wall_groups(&cache, "m11_00_00_00").unwrap(),
+            [1_106_200]
+        );
+        assert_eq!(
+            load_ride_wall_groups(&cache, "m11_01_00_00").unwrap(),
+            Vec::<u32>::new()
+        );
     }
 
     #[test]

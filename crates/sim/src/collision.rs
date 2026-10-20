@@ -264,6 +264,11 @@ pub const MAX_SLOPE_DEGREES: f32 = 60.0;
 const SPHERES: [f32; 3] = [STEP_HEIGHT + RADIUS, 1.2, 1.55];
 /// The player's physics capsule height (see [`RADIUS`]).
 pub const CAPSULE_HEIGHT: f32 = 1.5;
+/// How close the fall-prevention assist lets a body come to its walls: `FallAssistMinRadius`,
+/// physics module `+0xaec`, 0.16 m from the constructor `FUN_140bbb010` (`+0xae8`,
+/// `FallAssistMaxRadius`, is 0.4). `FUN_140bc68d0` slides the body's move along the walls its
+/// sphere cast meets and cuts it where the body would come nearer than this to one.
+pub const FALL_ASSIST_RADIUS: f32 = 0.16;
 const CELL: f32 = 4.0;
 
 pub struct CollisionWorld {
@@ -376,8 +381,9 @@ impl CollisionWorld {
         self.gate_open.load(Ordering::Relaxed)
     }
 
-    /// Whether triangle `t` takes part in `who`'s queries: every ordinary one, a helper one
-    /// when it holds `who`, an event one while on and holding `who`, a gate one while on.
+    /// Whether triangle `t` takes part in `who`'s queries: every ordinary one (except for the
+    /// fall-prevention assist's), a helper one when it holds `who`, an event one while on and
+    /// holding `who`, a gate one while on.
     fn live(&self, t: u32, who: u8) -> bool {
         if let Some((_, mask)) = self.masked.iter().find(|(range, _)| range.contains(&t)) {
             return mask & who != 0;
@@ -389,7 +395,8 @@ impl CollisionWorld {
         {
             return mask & who != 0 && on.load(Ordering::Relaxed);
         }
-        t < self.gate_from || self.gate_open.load(Ordering::Relaxed)
+        who & (PLAYER | ENEMY | CAMERA) != 0
+            && (t < self.gate_from || self.gate_open.load(Ordering::Relaxed))
     }
 
     fn build(mesh: &CollisionMesh, gate_start: Option<usize>) -> Self {
@@ -468,23 +475,24 @@ impl CollisionWorld {
         }
     }
 
-    /// Adds the collision of a block's placed objects (`object_collision.bin`) that `enabled`
-    /// keeps, for those [`crate::hit_filter::object_mask`] says collide with them: objects
-    /// everyone collides with as ordinary triangles, the rest as helpers of their mask. Each
-    /// mask's objects join the grid as one mesh, and each object is recorded by its triangles in
-    /// it as `<block>/<part>`, since part names repeat across blocks. Returns the parts and
-    /// triangles added.
+    /// Adds the collision of a block's placed objects (`object_collision.bin`), each with the
+    /// mask `mask` gives it from its part and [`crate::hit_filter::object_mask`] (0 leaves it
+    /// out): objects everyone collides with as ordinary triangles, the rest as helpers of their
+    /// mask. Each mask's objects join the grid as one mesh, and each object is recorded by its
+    /// triangles in it as `<block>/<part>`, since part names repeat across blocks. Returns the
+    /// parts and triangles added.
     pub fn add_objects(
         &mut self,
         block: &str,
         objects: &ObjectCollision,
-        mut enabled: impl FnMut(&ObjectCollisionPart) -> bool,
+        mut mask: impl FnMut(&ObjectCollisionPart, u8) -> u8,
     ) -> (usize, usize) {
         let mut by_mask: std::collections::BTreeMap<u8, Vec<&ObjectCollisionPart>> =
             Default::default();
         for part in &objects.parts {
             let who = crate::hit_filter::object_mask(part.collision_type);
-            if who != 0 && enabled(part) {
+            let who = if who == 0 { 0 } else { mask(part, who) };
+            if who != 0 {
                 by_mask.entry(who).or_default().push(part);
             }
         }
@@ -533,7 +541,7 @@ impl CollisionWorld {
         &mut self,
         dir: &Path,
         block: &str,
-        enabled: impl FnMut(&ObjectCollisionPart) -> bool,
+        mask: impl FnMut(&ObjectCollisionPart, u8) -> u8,
     ) -> Result<(usize, usize), String> {
         let path = dir.join("object_collision.bin");
         if !path.is_file() {
@@ -541,7 +549,7 @@ impl CollisionWorld {
         }
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let objects = ObjectCollision::from_bytes(&bytes).map_err(|e| e.to_string())?;
-        Ok(self.add_objects(block, &objects, enabled))
+        Ok(self.add_objects(block, &objects, mask))
     }
 
     /// Appends a mesh only those `mask` holds collide with ([`crate::hit_filter::PLAYER`],
@@ -706,6 +714,11 @@ impl CollisionWorld {
 
     fn floor_material_for(&self, x: f32, z: f32, top: f32, who: u8) -> Option<u32> {
         let (_, t) = self.floor_triangle(x, z, top, who)?;
+        self.triangle_material(t)
+    }
+
+    /// Triangle `t`'s hit material, when known.
+    fn triangle_material(&self, t: u32) -> Option<u32> {
         self.materials
             .get(t as usize)
             .copied()
@@ -833,27 +846,49 @@ impl CollisionWorld {
     /// Moves a body standing at `feet` by the horizontal `delta`, stopping at walls and
     /// sliding along them. Returns the horizontal displacement actually made.
     pub fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
-        self.slide_for(feet, delta, PLAYER)
+        self.slide_for(feet, delta, PLAYER, 0)
     }
 
-    fn slide_for(&self, feet: [f32; 3], delta: [f32; 2], who: u8) -> [f32; 2] {
+    /// [`CollisionWorld::slide`] for `who` that also keeps the body [`FALL_ASSIST_RADIUS`]
+    /// from the fall-prevention walls in `assist` ([`crate::hit_filter::FALL_ASSIST_MOVE`],
+    /// `FALL_ASSIST_ACTION` bits), which nothing else collides with.
+    fn slide_for(&self, feet: [f32; 3], delta: [f32; 2], who: u8, assist: u8) -> [f32; 2] {
         let start = Vec3::from(feet);
         let d = Vec2::from(delta);
         let len = d.length();
-        let steps = ((len / (RADIUS * 0.5)).ceil() as usize).clamp(1, 32);
         let mut p = start;
         let mut tris = Vec::new();
-        let reach = RADIUS + len / steps as f32 + 0.05;
+        let coarse = ((len / (RADIUS * 0.5)).ceil() as usize).clamp(1, 32);
+        let reach = RADIUS + len / coarse as f32 + 0.05;
         self.gather(
             Vec2::new(p.x.min(p.x + d.x), p.z.min(p.z + d.y)) - reach,
             Vec2::new(p.x.max(p.x + d.x), p.z.max(p.z + d.y)) + reach,
             &mut tris,
         );
+        // The assist's walls are rare, so only a move near one pays for them.
+        let walls: Vec<u32> = if assist == 0 {
+            Vec::new()
+        } else {
+            tris.iter()
+                .copied()
+                .filter(|&t| self.live(t, assist))
+                .collect()
+        };
+        // Sub-steps of half the smallest clearance, so no wall is stepped across.
+        let steps = if walls.is_empty() {
+            coarse
+        } else {
+            ((len / (FALL_ASSIST_RADIUS * 0.5)).ceil() as usize).clamp(1, 64)
+        };
         for _ in 0..steps {
             p.x += d.x / steps as f32;
             p.z += d.y / steps as f32;
             for _ in 0..4 {
-                let push = self.push_out(p, &tris, who);
+                let mut push = self.push_out(p, &tris, who);
+                // The assist's walls last, so they hold where both push.
+                if !walls.is_empty() {
+                    push += self.hold_inside(p + Vec3::new(push.x, 0.0, push.y), &walls);
+                }
                 if push == Vec2::ZERO {
                     break;
                 }
@@ -862,6 +897,39 @@ impl CollisionWorld {
             }
         }
         [p.x - start.x, p.z - start.z]
+    }
+
+    /// Horizontal correction that keeps the feet [`FALL_ASSIST_RADIUS`] on the inner side of
+    /// the fall-prevention wall triangles `walls` they are near. The walls are tested at the feet (the
+    /// height the exe tests at is not traced); the map's walls are bands from the floor at the
+    /// edge to about 1 m above it. They are one-sided: `FUN_140bc68d0` cuts a move only along a
+    /// hit triangle's face normal and only while the body is behind that face, so they keep a
+    /// body in and let one outside walk in. The export's mirror into Bevy space reverses the
+    /// winding, so the inner side is the one the Bevy-space normal points to.
+    fn hold_inside(&self, feet: Vec3, walls: &[u32]) -> Vec2 {
+        let mut push = Vec2::ZERO;
+        for &t in walls {
+            let [a, b, c] = self.corners(t);
+            if feet.distance_squared(feet.clamp(a.min(b).min(c), a.max(b).max(c)))
+                >= FALL_ASSIST_RADIUS * FALL_ASSIST_RADIUS
+                || feet.distance(closest_on_triangle(feet, a, b, c)) >= FALL_ASSIST_RADIUS
+            {
+                continue;
+            }
+            let n = self.normals[t as usize];
+            let flat = Vec2::new(n.x, n.z);
+            let inside = n.dot(feet - a);
+            // Outside the wall, or a face too flat to push sideways from.
+            if inside < 0.0 || flat.length_squared() < 0.09 {
+                continue;
+            }
+            let dir = flat.normalize();
+            let depth = (FALL_ASSIST_RADIUS - inside) / flat.length();
+            if depth > push.dot(dir) {
+                push += dir * (depth - push.dot(dir));
+            }
+        }
+        push
     }
 
     /// Horizontal correction that takes the body's spheres out of the given triangles.
@@ -958,21 +1026,15 @@ impl Ground for View<'_> {
     }
 
     fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
-        // Feet are not a point: look a few centimetres around too, so seams between triangles
-        // do not drop the body.
-        const R: f32 = 0.08;
-        [(0.0, 0.0), (R, 0.0), (-R, 0.0), (0.0, R), (0.0, -R)]
-            .into_iter()
-            .filter_map(|(dx, dz)| {
-                self.world
-                    .floor_triangle(x + dx, z + dz, top, self.who)
-                    .map(|(h, _)| h)
-            })
-            .reduce(f32::max)
+        self.floor_triangle(x, z, top).map(|(h, _)| h)
     }
 
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
-        self.world.slide_for(feet, delta, self.who)
+        self.slide_assisted(feet, delta, 0)
+    }
+
+    fn slide_assisted(&self, feet: [f32; 3], delta: [f32; 2], walls: u8) -> [f32; 2] {
+        self.world.slide_for(feet, delta, self.who, walls)
     }
 
     fn max_step(&self) -> f32 {
@@ -980,15 +1042,37 @@ impl Ground for View<'_> {
     }
 
     fn material(&self, x: f32, z: f32, top: f32) -> Option<u32> {
-        if let Some(water) = self.water_surface(x, z, top)
-            && water.deep()
-            && self
-                .floor(x, z, top)
-                .is_none_or(|floor| floor < water.height)
-        {
-            return Some(water.material);
-        }
-        self.world.floor_material_for(x, z, top, self.who)
+        self.deep_water_over(x, z, top, self.floor(x, z, top))
+            .or_else(|| self.world.floor_material_for(x, z, top, self.who))
+    }
+
+    fn floor_with_material(&self, x: f32, z: f32, top: f32) -> Option<(f32, Option<u32>)> {
+        let (h, t) = self.floor_triangle(x, z, top)?;
+        let material = self
+            .deep_water_over(x, z, top, Some(h))
+            .or_else(|| self.world.triangle_material(t));
+        Some((h, material))
+    }
+}
+
+impl View<'_> {
+    /// The highest walkable surface under the feet at `(x, z)` no higher than `top`: height and
+    /// triangle. Feet are not a point: it looks a few centimetres around too, so seams between
+    /// triangles do not drop the body.
+    fn floor_triangle(&self, x: f32, z: f32, top: f32) -> Option<(f32, u32)> {
+        const R: f32 = 0.08;
+        [(0.0, 0.0), (R, 0.0), (-R, 0.0), (0.0, R), (0.0, -R)]
+            .into_iter()
+            .filter_map(|(dx, dz)| self.world.floor_triangle(x + dx, z + dz, top, self.who))
+            .reduce(|best, hit| if hit.0 > best.0 { hit } else { best })
+    }
+
+    /// The material of deep water over the floor `floor` at `(x, z)`: the body stands in that
+    /// water rather than on the floor.
+    fn deep_water_over(&self, x: f32, z: f32, top: f32, floor: Option<f32>) -> Option<u32> {
+        self.water_surface(x, z, top)
+            .filter(|water| water.deep() && floor.is_none_or(|floor| floor < water.height))
+            .map(|water| water.material)
     }
 }
 
@@ -1024,12 +1108,20 @@ macro_rules! ground_via_view {
                 self.$view().slide(feet, delta)
             }
 
+            fn slide_assisted(&self, feet: [f32; 3], delta: [f32; 2], walls: u8) -> [f32; 2] {
+                self.$view().slide_assisted(feet, delta, walls)
+            }
+
             fn max_step(&self) -> f32 {
                 self.$view().max_step()
             }
 
             fn material(&self, x: f32, z: f32, top: f32) -> Option<u32> {
                 self.$view().material(x, z, top)
+            }
+
+            fn floor_with_material(&self, x: f32, z: f32, top: f32) -> Option<(f32, Option<u32>)> {
+                self.$view().floor_with_material(x, z, top)
             }
         }
     };
@@ -1091,12 +1183,20 @@ impl<T: Ground + ?Sized> Ground for std::sync::Arc<T> {
         (**self).slide(feet, delta)
     }
 
+    fn slide_assisted(&self, feet: [f32; 3], delta: [f32; 2], walls: u8) -> [f32; 2] {
+        (**self).slide_assisted(feet, delta, walls)
+    }
+
     fn max_step(&self) -> f32 {
         (**self).max_step()
     }
 
     fn material(&self, x: f32, z: f32, top: f32) -> Option<u32> {
         (**self).material(x, z, top)
+    }
+
+    fn floor_with_material(&self, x: f32, z: f32, top: f32) -> Option<(f32, Option<u32>)> {
+        (**self).floor_with_material(x, z, top)
     }
 }
 

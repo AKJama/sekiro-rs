@@ -35,7 +35,7 @@ fn load(id: &str) -> Option<(PathBuf, ObjectCollision)> {
 fn world(dir: &std::path::Path) -> CollisionWorld {
     let mut world = CollisionWorld::load_map(dir).unwrap();
     world
-        .add_block_objects(dir, "m11_00_00_00", |_| true)
+        .add_block_objects(dir, "m11_00_00_00", |_, who| who)
         .unwrap();
     world
 }
