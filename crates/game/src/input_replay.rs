@@ -3,10 +3,12 @@
 //! cursor grab, camera orbit, stick building) instead of the simulation-level `--script`.
 //!
 //! One line per segment of rendered frames: `<frames> <keys> [<mouse_dx> <mouse_dy>]`, where
-//! keys is a comma list of `W A S D Q E Space Shift C Esc Enter Up Down F3 F8 Click` (`Click`
-//! is the left mouse button; a key named in consecutive segments stays held) or `-`, and the
-//! mouse moves by the given counts every frame. `#` starts a comment. Frames count from the first frame the
-//! simulation runs.
+//! keys is a comma list of `W A S D Q E Z X C V Space Shift Esc Enter Up Down Left Right F3 F8
+//! Click` (`Click` is the left mouse button; a key named in consecutive segments stays held) or
+//! `-`, and the mouse moves by the given counts every frame. `#` starts a comment. Frames count
+//! from the first frame the simulation runs. A line `shot <path>` saves a screenshot there when
+//! the replay gets to it, so a run can capture screens that pause the simulation (the in-game
+//! menu), which `--shots` (counted in simulation steps) cannot.
 //!
 //! The replay owns the input: real keyboard, mouse button and mouse motion messages are dropped,
 //! so someone using the machine meanwhile does not disturb the run. The run starts with the
@@ -26,6 +28,8 @@ use bevy::window::PrimaryWindow;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Segment {
     pub frames: usize,
+    /// A screenshot saved where the segment starts (a `shot` line, which has no frames).
+    pub shot: Option<std::path::PathBuf>,
     pub keys: Vec<KeyCode>,
     /// Left mouse button held.
     pub click: bool,
@@ -40,6 +44,9 @@ fn key(name: &str) -> Result<KeyCode, String> {
         "D" => KeyCode::KeyD,
         "Q" => KeyCode::KeyQ,
         "C" => KeyCode::KeyC,
+        "Z" => KeyCode::KeyZ,
+        "X" => KeyCode::KeyX,
+        "V" => KeyCode::KeyV,
         "Space" => KeyCode::Space,
         "Shift" => KeyCode::ShiftLeft,
         "E" => KeyCode::KeyE,
@@ -47,6 +54,8 @@ fn key(name: &str) -> Result<KeyCode, String> {
         "Enter" => KeyCode::Enter,
         "Up" => KeyCode::ArrowUp,
         "Down" => KeyCode::ArrowDown,
+        "Left" => KeyCode::ArrowLeft,
+        "Right" => KeyCode::ArrowRight,
         "F8" => KeyCode::F8,
         "F3" => KeyCode::F3,
         other => return Err(format!("unknown key {other:?}")),
@@ -61,6 +70,16 @@ pub fn parse(text: &str) -> Result<Vec<Segment>, String> {
             continue;
         }
         let err = |e: String| format!("line {}: {e}", n + 1);
+        if let Some(path) = line.strip_prefix("shot ") {
+            out.push(Segment {
+                frames: 0,
+                shot: Some(path.trim().into()),
+                keys: Vec::new(),
+                click: false,
+                mouse: Vec2::ZERO,
+            });
+            continue;
+        }
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() != 2 && parts.len() != 4 {
             return Err(err("expected frames keys [dx dy]".into()));
@@ -84,6 +103,7 @@ pub fn parse(text: &str) -> Result<Vec<Segment>, String> {
         };
         out.push(Segment {
             frames,
+            shot: None,
             keys,
             click,
             mouse,
@@ -133,12 +153,26 @@ impl InputReplay {
         }
         None
     }
+
+    /// The screenshots due at `frame`.
+    fn shots_at(&self, frame: usize) -> impl Iterator<Item = &std::path::PathBuf> {
+        self.segments
+            .iter()
+            .scan(0, |start, s| {
+                let at = *start;
+                *start += s.frames;
+                Some((at, s))
+            })
+            .filter(move |(at, _)| *at == frame)
+            .filter_map(|(_, s)| s.shot.as_ref())
+    }
 }
 
 /// Drops the real input of this frame and writes the replayed key and button changes and mouse
 /// motion instead. Runs before Bevy's input systems, so `ButtonInput` and
 /// `AccumulatedMouseMotion` see them this frame.
 pub fn inject(
+    mut commands: Commands,
     mut replay: ResMut<InputReplay>,
     window: Query<Entity, With<PrimaryWindow>>,
     mut keys: ResMut<Messages<KeyboardInput>>,
@@ -155,6 +189,11 @@ pub fn inject(
         return;
     };
     let frame = replay.frame;
+    for path in replay.shots_at(frame) {
+        commands
+            .spawn(bevy::render::view::screenshot::Screenshot::primary_window())
+            .observe(bevy::render::view::screenshot::save_to_disk(path.clone()));
+    }
     let (want, click, mouse) = match replay.segment_at(frame) {
         Some(s) => (s.keys.clone(), s.click, s.mouse),
         None => (Vec::new(), false, Vec2::ZERO),
@@ -204,6 +243,18 @@ mod tests {
         assert!(s[0].click && !s[1].click);
         assert_eq!(s[0].mouse, Vec2::new(3.0, -1.0));
         assert_eq!(s[1].mouse, Vec2::ZERO);
-        assert!(parse("3 X").is_err());
+        assert_eq!(parse("3 X").unwrap()[0].keys, vec![KeyCode::KeyX]);
+        assert!(parse("3 Unknown").is_err());
+        let s = parse(
+            "4 -
+shot a.png
+2 X
+",
+        )
+        .unwrap();
+        let replay = InputReplay::new(s);
+        assert_eq!(replay.total_frames(), 6);
+        assert_eq!(replay.shots_at(4).count(), 1);
+        assert_eq!(replay.shots_at(3).count(), 0);
     }
 }

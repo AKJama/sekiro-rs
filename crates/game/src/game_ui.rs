@@ -80,7 +80,12 @@ fn font_bytes(cache: &Path, name: &str, fallbacks: &[&str]) -> Option<Vec<u8>> {
 /// A menu text bank (`イベントテキスト` and kin, `cache/raw/msg/engus/menu.msgbnd.d`), empty
 /// when it is missing.
 pub fn menu_texts(cache: &Path, bank: &str) -> BTreeMap<i32, String> {
-    let path = cache.join(format!("raw/msg/engus/menu.msgbnd.d/{bank}.fmg"));
+    texts(cache, "menu", bank)
+}
+
+/// A text bank from `raw/msg/engus/{bnd}.msgbnd.d`, empty when missing.
+pub fn texts(cache: &Path, bnd: &str, bank: &str) -> BTreeMap<i32, String> {
+    let path = cache.join(format!("raw/msg/engus/{bnd}.msgbnd.d/{bank}.fmg"));
     std::fs::read(&path)
         .ok()
         .and_then(|b| {
@@ -101,24 +106,108 @@ impl MenuArt {
     /// Loads the atlases and inserts them, unless an earlier screen already did; call after the
     /// asset plugins are added and before `Startup`.
     pub fn insert(app: &mut App) {
-        if app.world().contains_resource::<Self>() {
+        Self::add(app, &Self::ATLASES);
+    }
+
+    /// Adds only atlases not already loaded, reading their shared texture file once.
+    pub fn add(app: &mut App, names: &[&'static str]) {
+        app.init_resource::<Self>();
+        let names: Vec<_> = names
+            .iter()
+            .copied()
+            .filter(|n| !app.world().resource::<Self>().0.contains_key(n))
+            .collect();
+        if names.is_empty() {
             return;
         }
         let cache = sekiro_sim::cache::root();
         let mut images = app.world_mut().resource_mut::<Assets<Image>>();
-        let atlases = MenuAtlas::load_many(&cache, &Self::ATLASES, &mut images);
-        let art = Self::ATLASES
+        let atlases = MenuAtlas::load_many(&cache, &names, &mut images);
+        let art = names
             .into_iter()
             .zip(atlases)
             .filter_map(|(name, atlas)| Some((name, atlas?)))
-            .collect();
-        app.insert_resource(Self(art));
+            .collect::<Vec<_>>();
+        app.world_mut().resource_mut::<Self>().0.extend(art);
     }
 
     /// The sprite `name` of `atlas` (`SB_TextEffect`, `MENU_Death`) as a UI image, with its
     /// width over height.
     pub fn sprite(&self, atlas: &str, name: &str) -> Option<(ImageNode, f32)> {
         self.0.get(atlas)?.sprite(name)
+    }
+
+    /// The first atlas in order containing this sprite, with its width over height.
+    pub fn find(&self, atlases: &[&str], name: &str) -> Option<(ImageNode, f32)> {
+        atlases.iter().find_map(|a| self.sprite(a, name))
+    }
+}
+
+/// A box at (left, top) of (width, height), all in percent of the screen.
+pub fn abs(left: f32, top: f32, width: f32, height: f32) -> Node {
+    Node {
+        position_type: PositionType::Absolute,
+        left: percent(left),
+        top: percent(top),
+        width: percent(width),
+        height: percent(height),
+        ..default()
+    }
+}
+
+/// A screen root that shows over the world alone.
+#[derive(Component)]
+pub struct Covers;
+
+/// A screen layer hidden under a covering screen, with the visibility it had.
+#[derive(Component)]
+pub struct Covered(Visibility);
+
+#[derive(Resource)]
+struct CoverInstalled;
+
+/// Installs the shared cover once, before visibility propagates to UI children.
+pub fn install_cover(app: &mut App) {
+    if app.world().contains_resource::<CoverInstalled>() {
+        return;
+    }
+    app.insert_resource(CoverInstalled).add_systems(
+        PostUpdate,
+        cover_layers.before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate),
+    );
+}
+
+/// The menu shows over the world alone: every other screen layer (the HUD, the debug
+/// text) is hidden while it is up and gets back the visibility its own systems set after.
+/// After FwLo's RustSekiro `hide_hud_on_title`, from the game's capture.
+#[allow(clippy::type_complexity)]
+pub fn cover_layers(
+    mut commands: Commands,
+    covers: Query<&Visibility, (With<Node>, Without<ChildOf>, With<Covers>)>,
+    mut layers: Query<
+        (Entity, &mut Visibility, Option<&mut Covered>),
+        (With<Node>, Without<ChildOf>, Without<Covers>),
+    >,
+) {
+    let open = covers.iter().any(|v| *v != Visibility::Hidden);
+    for (e, mut v, covered) in &mut layers {
+        match (open, covered) {
+            (true, Some(mut c)) => {
+                if *v != Visibility::Hidden {
+                    c.0 = *v;
+                    *v = Visibility::Hidden;
+                }
+            }
+            (true, None) => {
+                commands.entity(e).insert(Covered(*v));
+                *v = Visibility::Hidden;
+            }
+            (false, Some(c)) => {
+                *v = c.0;
+                commands.entity(e).remove::<Covered>();
+            }
+            (false, None) => {}
+        }
     }
 }
 

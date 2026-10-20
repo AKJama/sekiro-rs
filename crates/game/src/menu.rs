@@ -21,6 +21,41 @@ pub fn relaunch() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn game_menu_owns_pause_keys_and_requests() {
+        let mut state = PanelState::new(false, &[]);
+        state.paused = true;
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ArrowDown);
+        keys.press(KeyCode::Enter);
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<KeyboardInput>()
+            .insert_resource(keys)
+            .insert_resource(state)
+            .init_resource::<PauseView>()
+            .add_systems(Update, update);
+        let panel = app.world_mut().spawn((Panel, Visibility::Visible)).id();
+        app.update();
+        let state = app.world().resource::<PanelState>();
+        assert!(state.paused, "Enter belongs to the game menu");
+        assert_eq!(state.selected, 0, "its keys cannot move the hidden panel");
+        assert_eq!(
+            app.world().get::<Visibility>(panel),
+            Some(&Visibility::Hidden)
+        );
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        app.world_mut().resource_mut::<PauseView>().request = Some(0);
+        app.update();
+        assert!(!app.world().resource::<PanelState>().paused);
+        assert!(!app.world().resource::<Time<Virtual>>().is_paused());
+        assert!(app.world().resource::<PauseView>().request.is_none());
+    }
+
     #[test]
     fn presentation_flags_survive_play_and_return_to_menu() {
         let args = ["--uncapped", "--present-mode", "immediate"].map(String::from);
@@ -961,6 +996,29 @@ fn activate_row(event: On<Activate>, rows: Query<&Row>, mut state: ResMut<PanelS
 pub fn active(state: Res<PanelState>) -> bool {
     !state.paused
 }
+
+pub fn paused(state: Res<PanelState>) -> bool {
+    state.paused && !state.start
+}
+
+/// Set when another screen (the in-game menu) draws the in-game pause: the panel stays hidden,
+/// its own row keys are off, and `request` takes one of its rows (0 Resume, 1 Back to start menu,
+/// 2 Quit) as if it were picked.
+#[derive(Resource, Default)]
+pub struct PauseView {
+    pub request: Option<usize>,
+}
+
+/// Optional screens that gate or draw the pause panel.
+type PauseScreens<'w> = (
+    Option<Res<'w, crate::play::PlayGate>>,
+    Option<Res<'w, Modal>>,
+    Option<ResMut<'w, PauseView>>,
+);
+
+/// The pause state is settled before screens read it and handle their own keys.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PauseSystems;
 pub fn install(app: &mut App) {
     let args: Vec<_> = std::env::args().collect();
     crate::game_ui::GameFonts::insert(app);
@@ -978,6 +1036,7 @@ fn install_input(app: &mut App) {
     app.add_systems(
         PreUpdate,
         update
+            .in_set(PauseSystems)
             .after(bevy::input::InputSystems)
             .after(bevy::picking::PickingSystems::Last),
     );
@@ -1111,8 +1170,7 @@ fn update(
     mut cursors: Query<&mut CursorOptions>,
     mut exit: MessageWriter<AppExit>,
     mut time: ResMut<Time<Virtual>>,
-    gate: Option<Res<crate::play::PlayGate>>,
-    modal: Option<Res<Modal>>,
+    (gate, modal, mut view): PauseScreens,
 ) {
     state.frame += 1;
     let actions: Vec<_> = state
@@ -1122,6 +1180,7 @@ fn update(
         .map(|(_, a)| a.clone())
         .collect();
     let mut activate = keys.just_pressed(KeyCode::Enter);
+    let drawn = !state.start && view.is_some();
     let modal = !state.paused && modal.is_some_and(|m| m.0);
     if !state.start
         && !modal
@@ -1150,7 +1209,7 @@ fn update(
         }
     }
     for mut p in &mut panels {
-        *p = if state.paused {
+        *p = if state.paused && !drawn {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -1168,6 +1227,9 @@ fn update(
     }
     let pressed_rows = std::mem::take(&mut state.activations);
     if !state.paused {
+        if let Some(view) = view.as_mut() {
+            view.request = None;
+        }
         typing.clear();
         return;
     }
@@ -1203,6 +1265,10 @@ fn update(
         movement += stick;
     }
     state.stick = stick;
+    if drawn {
+        movement = IVec2::ZERO;
+        activate = false;
+    }
     for a in &actions {
         if let Some(setting) = a.strip_prefix("set:")
             && let Some((row, value)) = setting.split_once(':')
@@ -1227,6 +1293,10 @@ fn update(
             }
             _ => {}
         }
+    }
+    if drawn && let Some(row) = view.as_mut().and_then(|v| v.request.take()) {
+        state.selected = row;
+        activate = true;
     }
     if state.start && state.choices.explore() {
         let shortcuts = [
@@ -1302,7 +1372,7 @@ fn update(
             continue;
         }
         // Button activation includes label hits and a press/release in the same frame.
-        if pressed_rows.contains(&r.0) {
+        if !drawn && pressed_rows.contains(&r.0) {
             state.selected = r.0;
             if state.start && r.0 < count - 1 {
                 let cache = state.cache.clone();
