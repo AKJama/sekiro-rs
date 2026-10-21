@@ -168,21 +168,24 @@ impl MapEdge {
     }
 }
 
-/// How far short of a hang stop still counts as at the ledge's end ([`hang_span`]).
+/// How far short of a hang stop still counts as at the ledge's end ([`span`]).
 const END_EPSILON: f32 = 0.01;
 
-/// The hang point nearest `position` along the ledge through edge `index`. Past a shared
-/// corner it moves once onto the chain's next edge; it stops in from the ledge's real ends
-/// only, by [`HANG_END_MARGIN`] or less on a short edge, so a short lone edge holds at its
-/// midpoint. Returns the edge, the point on it and the end bits in edge order (1 at the start,
-/// 2 at the end, 3 both on a short lone edge). [`END_EPSILON`] covers the hang stop clips'
-/// root drift back off the stop (2 to 7 mm in the foot-hold set), which would otherwise clear
-/// the bit and restart the shimmy.
-fn hang_span(
+/// The docking point nearest `position` along the ledge or wall through edge `index`. Past a
+/// shared corner it moves once onto the chain's next edge; it stops in from the chain's real
+/// ends only, by `stop` or less on a short edge, so a short lone edge holds at its midpoint.
+/// Returns the edge, the point on it and the end bits in edge order (1 at the start, 2 at the
+/// end, 3 both on a short lone edge), set within `zone` of the stop. Hangs stop
+/// [`HANG_END_MARGIN`] in, with [`END_EPSILON`] for the hang stop clips' root drift back off
+/// the stop (2 to 7 mm in the foot-hold set), which would otherwise clear the bit and restart
+/// the shimmy; cover runs to the end itself and marks the last [`END_MARGIN`].
+fn span(
     edges: &[MapEdge],
     links: &[[Option<usize>; 2]],
     index: usize,
     position: Vec3,
+    stop: f32,
+    zone: f32,
 ) -> (usize, Vec3, u8) {
     let link = |i: usize| links.get(i).copied().unwrap_or_default();
     let mut index = index;
@@ -202,14 +205,24 @@ fn hang_span(
     let (at_start, at_end) = (prev.is_none(), next.is_none());
     let length = edges[index].horizontal().length();
     let ends = u8::from(at_start) + u8::from(at_end);
-    let margin = HANG_END_MARGIN.min(length / f32::from(ends.max(1)));
+    let margin = stop.min(length / f32::from(ends.max(1)));
     let low = if at_start { margin } else { 0.0 };
     let high = if at_end { length - margin } else { length };
     let distance = (s * length).clamp(low, high.max(low));
     let t = if length > 0.0 { distance / length } else { 0.5 };
-    let bits = u8::from(at_start && distance <= margin + END_EPSILON)
-        | (u8::from(at_end && length - distance <= margin + END_EPSILON) << 1);
+    let bits = u8::from(at_start && distance <= margin + zone)
+        | (u8::from(at_end && length - distance <= margin + zone) << 1);
     (index, edges[index].at(t), bits)
+}
+
+/// [`span`] for a hang: stops [`HANG_END_MARGIN`] in from the ledge's ends.
+fn hang_span(
+    edges: &[MapEdge],
+    links: &[[Option<usize>; 2]],
+    index: usize,
+    position: Vec3,
+) -> (usize, Vec3, u8) {
+    span(edges, links, index, position, HANG_END_MARGIN, END_EPSILON)
 }
 
 /// The outward normal on chain edge `to` after moving on from `from`: on the same side of the
@@ -223,24 +236,38 @@ fn chain_outward(edges: &[MapEdge], from: usize, to: usize, outward: Vec3) -> Ve
     edges[to].side().map_or(outward, |side| side * sign)
 }
 
-/// The sharpest turn, in degrees, between two hang edges that still join into one ledge. The
+/// The sharpest turn, in degrees, between two edges that still join into one ledge or wall. The
 /// joints in m11_00's hang chains split cleanly into under 30 and 75 to 105 degrees, and the
 /// real game has dedicated hang corner moves for the sharp ones (env 3048/3049 outer,
 /// 3059/3060 inner; docs/MOBILITY.md), so a sharp joint is a ledge end, not a slide round.
 const MAX_JOINT_TURN: f32 = 30.0;
 
-/// The chain neighbours of every edge: `[prev, next]`, the hang edge joined at its start and
-/// at its end. A join needs both to be hang edges of the same part, chain and variation, one's
-/// end on the other's start (the extractor stores a chain end to start, one way round) and a
-/// turn of at most [`MAX_JOINT_TURN`].
+/// Which edges can join into one ledge or wall: hang edges of the same part, chain and
+/// variation (the variation picks the hang clip set), or cover edges of the same part across
+/// chains and variations. A cover wall is split into chains where its variation changes, as
+/// m11_00's snake pit wall (`h013600`) runs chain 2 (variation 0), 3 (10, the narrow ledge)
+/// and 4 (0) end to start on shared vertices, and Wolf hugs it in one run (#147); the docked
+/// edge's own variation still sets env 3017.
+fn join_key(edge: &MapEdge) -> Option<(&str, u8, u32, u8)> {
+    let part = edge.source_part.as_str();
+    if is_hang(edge) {
+        Some((part, edge.kind, edge.chain, edge.variation))
+    } else if edge.kind == 3 {
+        Some((part, edge.kind, 0, 0))
+    } else {
+        None
+    }
+}
+
+/// The chain neighbours of every edge: `[prev, next]`, the edge joined at its start and at its
+/// end. A join needs both edges to share a [`join_key`], one's end on the other's start (the
+/// extractor stores a chain end to start, one way round) and a turn of at most
+/// [`MAX_JOINT_TURN`].
 fn chain_links(edges: &[MapEdge]) -> Vec<[Option<usize>; 2]> {
-    let mut groups: std::collections::HashMap<(&str, u32, u8), Vec<usize>> = Default::default();
+    let mut groups: std::collections::HashMap<(&str, u8, u32, u8), Vec<usize>> = Default::default();
     for (i, edge) in edges.iter().enumerate() {
-        if is_hang(edge) {
-            groups
-                .entry((edge.source_part.as_str(), edge.chain, edge.variation))
-                .or_default()
-                .push(i);
+        if let Some(key) = join_key(edge) {
+            groups.entry(key).or_default().push(i);
         }
     }
     let min_cos = MAX_JOINT_TURN.to_radians().cos();
@@ -319,7 +346,7 @@ pub struct Docking {
     /// Skip the airborne edge scan: the script is not asking for an air hang (act 3028).
     pub skip_air_search: bool,
     climb_start: Option<Vec3>,
-    /// Each edge's hang chain neighbours ([`chain_links`]), built from `edges`; call
+    /// Each edge's chain neighbours ([`chain_links`]), built from `edges`; call
     /// [`Docking::rebuild_links`] after changing them.
     links: Vec<[Option<usize>; 2]>,
 }
@@ -334,7 +361,7 @@ impl Docking {
         docking
     }
 
-    /// Rejoin the hang edges into ledges after `edges` was set or changed.
+    /// Rejoin the edges into ledges and walls after `edges` was set or changed.
     pub fn rebuild_links(&mut self) {
         self.links = chain_links(&self.edges);
     }
@@ -344,23 +371,28 @@ impl Docking {
     }
 
     fn cover_target(&self, index: usize, position: Vec3, ground: &dyn Ground) -> Option<Target> {
-        let edge = &self.edges[index];
-        if edge.kind != 3 || !matches!(edge.variation, 0..=3 | 10..=13) {
+        if self.edges[index].kind != 3 {
             return None;
         }
-        let (point, t) = edge.closest(position);
+        let (index, point, bits) = span(&self.edges, &self.links, index, position, 0.0, END_MARGIN);
+        let edge = &self.edges[index];
+        if !matches!(edge.variation, 0..=3 | 10..=13) {
+            return None;
+        }
+        // One end at most, the start first: cover never reports both.
+        let bits = if bits & 1 != 0 { 1 } else { bits };
         let side = edge.side()?;
+        // The floor is read at the wall's foot, under the edge: on a narrow ledge (the snake
+        // pit's, #147) there is a drop under the docked feet.
+        let y = ground.floor(point.x, point.z, position.y + TOP_TOLERANCE)?;
+        if (point.y - y).abs() > COVER_HEIGHT_TOLERANCE || (position.y - y).abs() > TOP_TOLERANCE {
+            return None;
+        }
         for outward in [side, -side] {
             if (position - point).dot(outward) < 0.0 {
                 continue;
             }
             let feet = point + outward * DOCKING_TRANSLATION_OFFSET_COVER;
-            let y = ground.floor(feet.x, feet.z, position.y + TOP_TOLERANCE)?;
-            if (point.y - y).abs() > COVER_HEIGHT_TOLERANCE
-                || (position.y - y).abs() > TOP_TOLERANCE
-            {
-                continue;
-            }
             let clearance = ground.slide([feet.x, y, feet.z], [0.0; 2]);
             if clearance[0].hypot(clearance[1]) > COVER_BLOCK_TOLERANCE {
                 continue;
@@ -372,15 +404,6 @@ impl Docking {
             {
                 continue;
             }
-            let length = edge.horizontal().length();
-            // One end at most, the start first: cover never reports both.
-            let bits = if t * length < END_MARGIN {
-                1
-            } else if (1.0 - t) * length < END_MARGIN {
-                2
-            } else {
-                0
-            };
             return Some(Target {
                 edge: index,
                 point,
@@ -444,11 +467,11 @@ impl Docking {
             let edge = &self.edges[target.edge];
             let tangent = (Vec3::from(edge.end) - Vec3::from(edge.start)).normalize();
             let stick = Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
+            // Past the edge's end [`span`] carries the step onto the wall's next edge.
             let next = target.point + tangent * root_distance * stick.dot(tangent).signum();
-            let (point, _) = edge.closest(next);
             if let Some(updated) = self.cover_target(
                 target.edge,
-                Vec3::new(point.x, target.floor.y, point.z)
+                Vec3::new(next.x, target.floor.y, next.z)
                     + target.outward * DOCKING_TRANSLATION_OFFSET_COVER,
                 ground,
             ) {
