@@ -4,7 +4,6 @@
 use sekiro_sim::duel::{Duel, DuelReport};
 use sekiro_sim::hits::HitResult;
 use sekiro_sim::{Buttons, InputFrame};
-use std::path::PathBuf;
 
 const DT: f32 = 1.0 / 60.0;
 
@@ -151,7 +150,7 @@ fn load() -> Option<Duel> {
 }
 
 fn load_at(distance: f32) -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("raw/chr/c1010.behbnd.d/c9997.hkx").exists() {
         eprintln!("skipping: cache not extracted");
         return None;
@@ -521,7 +520,7 @@ fn blocking_on_an_empty_posture_breaks_wolfs_guard() {
 
 #[test]
 fn soldier_fights_with_its_own_ai() {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("raw/script/aicommon.luabnd.d").exists() {
         return;
     }

@@ -2,24 +2,39 @@ use sekiro_formats::hknp::CollisionMesh;
 use sekiro_sim::body::{Body, BodyInput, Ground};
 use sekiro_sim::collision::CollisionWorld;
 use sekiro_sim::duel::Duel;
+use sekiro_sim::hit_filter::HelperCollision;
 use sekiro_sim::{Buttons, InputFrame};
 use std::path::PathBuf;
 
+/// A quad over `x0..x1` and `-10..10` at height `y`.
+fn quad(mesh: &mut CollisionMesh, x0: f32, x1: f32, y: f32, material: u32) {
+    let base = mesh.vertices.len() as u32;
+    mesh.vertices
+        .extend([[x0, y, -10.0], [x1, y, -10.0], [x1, y, 10.0], [x0, y, 10.0]]);
+    mesh.indices
+        .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    mesh.materials.extend([material; 2]);
+}
+
+/// A pool: an underwater floor 8 m down, a swim hit's dive plane over half of it and walkable
+/// shallow water over the rest.
 fn pool() -> CollisionWorld {
-    let mut mesh = CollisionMesh::default();
-    for (x0, x1, y, material) in [
-        (-10.0, 10.0, -8.0, 45),
-        (-10.0, 2.0, 0.0, 22),
-        (2.0, 10.0, 0.0, 21),
-    ] {
-        let base = mesh.vertices.len() as u32;
-        mesh.vertices
-            .extend([[x0, y, -10.0], [x1, y, -10.0], [x1, y, 10.0], [x0, y, 10.0]]);
-        mesh.indices
-            .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
-        mesh.materials.extend([material; 2]);
-    }
-    CollisionWorld::from_mesh(&mesh)
+    let mut ground = CollisionMesh::default();
+    quad(&mut ground, -10.0, 10.0, -8.0, 45);
+    quad(&mut ground, 2.0, 10.0, 0.0, 21);
+    let mut swim = CollisionMesh::default();
+    quad(&mut swim, -10.0, 2.0, 0.0, 22);
+    with_swim(&ground, swim)
+}
+
+/// The world of `ground` with `swim` as its swim hit (hit filter 27).
+fn with_swim(ground: &CollisionMesh, swim: CollisionMesh) -> CollisionWorld {
+    let mut world = CollisionWorld::from_mesh(ground);
+    world.add_helpers(&HelperCollision {
+        swim,
+        ..Default::default()
+    });
+    world
 }
 
 #[test]
@@ -54,19 +69,20 @@ fn water_material_role(material: u32, row: u32) {
         indices: vec![0, 1, 2],
         materials: vec![material],
     };
-    let world = CollisionWorld::from_mesh(&mesh);
+    let deep = matches!(row, 22 | 36 | 38);
+    // In a swim hit (hit filter 27) deep water is the plane bodies swim at, not a floor.
+    let world = with_swim(&CollisionMesh::default(), mesh.clone());
     let water = world.water_surface(0.0, 0.0, 1.0);
     assert_eq!(water.is_some(), row < 45, "{material}");
-    assert_eq!(
-        water.is_some_and(|w| w.deep()),
-        matches!(row, 22 | 36 | 38),
-        "{material}"
-    );
-    assert_eq!(
-        world.floor(0.0, 0.0, 1.0).is_none(),
-        matches!(row, 22 | 36 | 38),
-        "{material}"
-    );
+    assert_eq!(water.is_some_and(|w| w.deep()), deep, "{material}");
+    assert_eq!(world.floor(0.0, 0.0, 1.0).is_none(), deep, "{material}");
+    // Anywhere else it is ground like any other material: the capsule meets the map's group 39
+    // whatever the material (#189), and only shallow water is a surface.
+    let world = CollisionWorld::from_mesh(&mesh);
+    let water = world.water_surface(0.0, 0.0, 1.0);
+    assert_eq!(water.is_some(), row < 45 && !deep, "{material}");
+    assert_eq!(world.floor(0.0, 0.0, 1.0), Some(0.0), "{material}");
+    assert_eq!(world.material(0.0, 0.0, 1.0), Some(material), "{material}");
 }
 
 #[test]
@@ -275,5 +291,25 @@ fn water_long_stiff_and_material_fall_death() {
         if !lethal {
             assert!(long_stiff, "height {height}");
         }
+    }
+}
+
+/// #189 review: `l`'s ordinary shore `h004200` on m25 carries the deep material (row 22) where
+/// `h` has sand, and the swim hit `h021500` lies 1.3 m under it. The exe swims only on swim-hit
+/// contact (env 3025), so the shore stays dry ground and Wolf stands on it.
+#[test]
+fn deep_material_on_ordinary_shore_is_dry_ground() {
+    let dir = cache().join("maps/m25_00_00_00");
+    if !dir.join(sekiro_sim::lo_collision::LOW_FILE).is_file() {
+        eprintln!("skipping: m25 has no collision_lo.bin in {dir:?}");
+        return;
+    }
+    let world = CollisionWorld::load_map(&dir).unwrap();
+    let (x, z) = (116.0, 408.1);
+    let floor = world.floor(x, z, 105.5).expect("the shore is a floor");
+    assert!((floor - 104.89).abs() < 0.05, "{floor}");
+    assert_eq!(world.material(x, z, 105.5).map(|m| m % 100), Some(22));
+    if let Some(water) = world.water_surface(x, z, 105.5) {
+        assert!(water.height < floor, "{water:?} over the shore at {floor}");
     }
 }

@@ -3,13 +3,11 @@ use bevy::asset::RenderAssetUsages;
 use bevy::math::Vec3;
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
 use sekiro_formats::{flver, tpf};
-use std::path::Path;
 
 #[test]
 fn packed_blends_do_not_displace_texture_uvs() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
-        "../../cache/raw/map/m11_00_00_00/m11_00_00_00_000003.mapbnd.d/m11_00_00_00_000003.flver",
-    );
+    let path = sekiro_sim::cache::root()
+        .join("raw/map/m11_00_00_00/m11_00_00_00_000003.mapbnd.d/m11_00_00_00_000003.flver");
     if !path.is_file() {
         return;
     }
@@ -27,9 +25,8 @@ fn packed_blends_do_not_displace_texture_uvs() {
             blend.iter().map(|b| b[0]).max().unwrap()
         );
     }
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
-        "../../cache/raw/map/m17_00_00_00/m17_00_00_00_000064.mapbnd.d/m17_00_00_00_000064.flver",
-    );
+    let path = sekiro_sim::cache::root()
+        .join("raw/map/m17_00_00_00/m17_00_00_00_000064.mapbnd.d/m17_00_00_00_000064.flver");
     if path.is_file() {
         let model = flver::parse(&std::fs::read(path).unwrap()).unwrap();
         let mesh = &model.meshes[0];
@@ -88,7 +85,7 @@ fn packed_blends_do_not_displace_texture_uvs() {
 
 #[test]
 fn hirata_cubes_live_in_second_container() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/raw/map/m10_00_00_00");
+    let dir = sekiro_sim::cache::root().join("raw/map/m10_00_00_00");
     let path = dir.join("m10_00_00_00_envmap_00_second.tpf");
     if !path.is_file() {
         return;

@@ -2686,7 +2686,7 @@ mod tests {
 
     #[test]
     fn no_enemy_rejects_lock_and_contacts_without_restarting_wolf() {
-        let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let mut duel = Duel::load(&cache, 4.).unwrap();
         duel.use_simple_ai();
         let start = duel.player.body.position;
@@ -2740,7 +2740,7 @@ mod tests {
 
     #[test]
     fn explore_hud_hides_enemy_and_debug_text_but_f3_toggles_player_details() {
-        let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let mut duel = Duel::load(&cache, 4.).unwrap();
         duel.use_simple_ai();
         vacant_enemy_slot(&mut duel);
@@ -2813,7 +2813,7 @@ mod tests {
 
     #[test]
     fn enemy_head_follows_the_head_bone_over_the_root() {
-        let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let Ok(mut lib) = AnimLibrary::load(&cache, "c1010") else {
             eprintln!("skipping: cache not extracted");
             return;
@@ -2835,7 +2835,7 @@ mod tests {
 
     #[test]
     fn castle_restart_restores_phase_one_story_lighting() {
-        let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let arena = ArenaSpec::by_name("genichiro").unwrap();
         let phase = arena.enemy_spec();
         let mut duel = Duel::load_with(&cache, 6., phase).unwrap();
@@ -2880,7 +2880,7 @@ mod tests {
     /// full hit stop types (his own are 0, as the Owl's), so Wolf's slash freezes both.
     #[test]
     fn drawn_clip_time_holds_through_hit_stop() {
-        let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         if !cache.join("raw/chr/c1010.behbnd.d/c9997.hkx").exists() {
             eprintln!("skipping: cache not extracted");
             return;

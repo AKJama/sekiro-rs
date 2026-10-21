@@ -445,7 +445,7 @@ mod tests {
             bounds_distance(Vec3::new(10., 0., 0.), &pose, -Vec3::ONE, Vec3::ONE),
             0.
         );
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         if cache.join("params/LodParam.json").exists() {
             let table = LodTable::load(&cache, 6).unwrap();
             assert_eq!(table.map_piece(255).unwrap().boundary, [30., 60.]);

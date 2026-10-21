@@ -4819,7 +4819,7 @@ mod tests {
                 None
             }
         }
-        let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = crate::cache::root();
         if !cache.join("anim/c1010/tae.json").exists() {
             eprintln!("skipping real-data local chooser: soldier not extracted");
             return;

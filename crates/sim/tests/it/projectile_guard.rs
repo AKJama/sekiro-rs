@@ -1,5 +1,4 @@
 //! Real TAE launches, bullet flight and Wolf's installed guard scripts.
-use std::path::PathBuf;
 
 use sekiro_sim::{
     Buttons, InputFrame, brain::BrainKind, duel::Duel, enemy::EnemySpec, registry::Registry,
@@ -8,7 +7,7 @@ use sekiro_sim::{
 const DT: f32 = 1.0 / 60.0;
 
 fn projectile_guard(chr: &str, act: i32, atk_id: i32, deflect: bool, posture: i32) {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join(format!("anim/{chr}/skeleton.bin")).exists() {
         eprintln!("skipping: {chr} is not extracted");
         return;

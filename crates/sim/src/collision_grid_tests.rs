@@ -19,7 +19,13 @@ impl<'a> Cells<'a> {
     fn new(world: &'a CollisionWorld) -> Self {
         let mut cells: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
         for (t, &[lo, hi]) in world.bounds.iter().enumerate() {
-            let floor = files_as_floor(world.normals[t], world.materials[t], world.min_walk_ny);
+            let swim = world.in_swim_hit(t as u32);
+            let floor = files_as_floor(
+                world.normals[t],
+                world.materials[t],
+                world.min_walk_ny,
+                swim,
+            );
             for cell in filed_cells(lo, hi, floor) {
                 cells.entry(cell).or_default().push(t as u32);
             }
@@ -289,7 +295,12 @@ fn banded_grid_reads_what_a_brute_force_scan_keeps() {
             let brute = here
                 .iter()
                 .copied()
-                .filter(|&t| water_material(world.materials[t as usize]) && world.live(t, who))
+                .filter(|&t| {
+                    // Shallow water anywhere, deep water only as a swim hit's plane.
+                    let m = world.materials[t as usize];
+                    let deep_dry = crate::body::deep_water(m) && !world.in_swim_hit(t);
+                    water_material(m) && !deep_dry && world.live(t, who)
+                })
                 .filter_map(|t| {
                     let [a, b, c] = world.corners(t);
                     let height = height_on(x, z, a, b, c).filter(|&h| h <= y)?;

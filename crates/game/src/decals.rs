@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn deathblow_bursts_obey_budget_and_respawn_clears_stains_for_twenty_fights() {
-        let cache = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let duel = sekiro_sim::duel::Duel::load_with(
             &cache,
             6.,

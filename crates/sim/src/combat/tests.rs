@@ -1,6 +1,5 @@
 //! Combat rules against the player's own params in `cache/`. Skips when `cache/` is missing.
 
-use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use sekiro_formats::param::ParamSet;
@@ -28,9 +27,9 @@ use super::recovery::{
 fn set() -> Option<&'static ParamSet> {
     static SET: OnceLock<Option<ParamSet>> = OnceLock::new();
     SET.get_or_init(|| {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let dir = root.join("cache/raw/param/gameparam/gameparam.parambnd.d");
-        let defs = root.join("cache/refs/paramdex/Defs");
+        let cache = crate::cache::root();
+        let dir = cache.join("raw/param/gameparam/gameparam.parambnd.d");
+        let defs = cache.join("refs/paramdex/Defs");
         if !dir.is_dir() || !defs.is_dir() {
             eprintln!("skipping: cache/ not extracted");
             return None;

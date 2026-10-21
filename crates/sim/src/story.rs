@@ -107,8 +107,7 @@ mod tests {
         assert_eq!(StoryTime::from_variant(3).map(StoryTime::hour), Some(18.0));
 
         use sekiro_formats::emevd::Emevd;
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../cache/raw/event/common.emevd");
+        let path = crate::cache::root().join("raw/event/common.emevd");
         let Ok(bytes) = std::fs::read(path) else {
             return;
         };

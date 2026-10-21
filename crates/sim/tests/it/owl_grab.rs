@@ -17,7 +17,7 @@ const COLLAPSE: i32 = 3040;
 const SEE_THROUGH: i32 = 3041;
 
 fn cache() -> Option<PathBuf> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     let ok = cache.join("anim/c5060/tae.json").is_file()
         && cache.join("anim/c0000/a221_600110.bin").is_file()
         && cache.join("raw/script/m11_01_00_00.luabnd.d").is_dir();

@@ -530,7 +530,7 @@ mod tests {
     /// scene path + pose matcher found, for every placed piece and object row.
     #[test]
     fn msb_part_tags_bind_the_parts_scene_and_pose_matching_found() {
-        let maps = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/maps");
+        let maps = sekiro_sim::cache::root().join("maps");
         for id in ["m11_00_00_00", "m11_01_00_00"] {
             let read = |name: &str| {
                 let bytes = std::fs::read(maps.join(id).join(name)).ok()?;

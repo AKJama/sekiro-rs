@@ -4,7 +4,6 @@
 //! been exported.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use glam::Vec3;
 use sekiro_formats::hknp::CollisionMesh;
@@ -13,9 +12,7 @@ use sekiro_sim::collision::CollisionWorld;
 use sekiro_sim::hit_filter;
 
 fn load(id: &str) -> Option<(serde_json::Value, CollisionMesh)> {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../cache/maps")
-        .join(id);
+    let dir = sekiro_sim::cache::root().join("maps").join(id);
     if !dir.join("collision.bin").is_file() {
         eprintln!("skipping: {} not exported", dir.display());
         return None;
@@ -84,15 +81,22 @@ fn check(
         triangles,
         "{id}: triangle indices kept"
     );
+    // The swim hits leave the walkable mesh too: the player meets them as water.
     let removed: BTreeMap<u8, usize> = expected
         .iter()
-        .filter(|e| !e.3 && e.2 > 0)
+        .filter(|e| (!e.3 || e.0 == hit_filter::SWIM_FILTER) && e.2 > 0)
         .map(|e| (e.0, e.2))
         .collect();
     assert_eq!(
         helpers.removed, removed,
-        "{id}: triangles kept off the player"
+        "{id}: triangles out of the walkable mesh"
     );
+    let swim: usize = expected
+        .iter()
+        .filter(|e| e.0 == hit_filter::SWIM_FILTER)
+        .map(|e| e.2)
+        .sum();
+    assert_eq!(helpers.swim.triangle_count(), swim, "{id}: swim hits");
     // Enemy and camera helpers stay, held by those that collide with them.
     let mut kept: BTreeMap<u8, usize> = BTreeMap::new();
     for e in expected
@@ -161,4 +165,60 @@ fn outskirts_helpers_are_not_floors() {
 #[test]
 fn castle_helpers_are_not_floors() {
     check("m11_01_00_00", &CASTLE);
+}
+
+/// #189 review: on `l` the helpers keep their masks as on `h`. Castle's camera-only `h900900`
+/// (hit filter 9, 52,877 `l` triangles) and Outskirts' wall-hug slabs (hit filter 25) are no
+/// floor in the play world ([`CollisionWorld::load_map`]), while the whole `l` mesh as one
+/// solid would stand Wolf on them.
+#[test]
+fn low_resolution_helpers_are_not_floors() {
+    for (id, filter) in [("m11_01_00_00", 9u64), ("m11_00_00_00", 25)] {
+        let dir = sekiro_sim::cache::root().join("maps").join(id);
+        let Some(low) = sekiro_sim::lo_collision::read_low(&dir).unwrap() else {
+            eprintln!("skipping {id}: no collision_lo.bin");
+            continue;
+        };
+        let layout: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("layout.json")).unwrap()).unwrap();
+        let rows = sekiro_sim::lo_collision::low_rows(&layout, &low);
+        let world = CollisionWorld::load_map(&dir).unwrap();
+        let whole = CollisionWorld::from_mesh(&low.mesh);
+        // The walkable mesh alone: a helper lying flush on real ground is no failure.
+        let ground = sekiro_sim::lo_collision::block_collision(&dir, &layout, |_| false).unwrap();
+        let ground = CollisionWorld::from_mesh(&ground.mesh);
+        let mesh = &low.mesh;
+        let (mut tops, mut on_helper, mut on_whole) = (0usize, 0usize, 0usize);
+        for row in rows["collisions"].as_array().unwrap() {
+            if row["hit_filter_id"].as_u64() != Some(filter) {
+                continue;
+            }
+            let first = row["triangles"][0].as_u64().unwrap() as usize;
+            let count = row["triangles"][1].as_u64().unwrap() as usize;
+            for t in (first..first + count).step_by((count / 400).max(1)) {
+                let [a, b, c] =
+                    [0, 1, 2].map(|k| Vec3::from(mesh.vertices[mesh.indices[3 * t + k] as usize]));
+                let n = (b - a).cross(c - a).normalize_or_zero();
+                if n.y.abs() < 0.8 {
+                    continue;
+                }
+                let p = (a + b + c) / 3.0;
+                let on = |w: &CollisionWorld| {
+                    Ground::floor(w, p.x, p.z, p.y + 0.001).is_some_and(|y| (y - p.y).abs() < 2e-3)
+                };
+                if on(&ground) {
+                    continue;
+                }
+                tops += 1;
+                on_helper += usize::from(on(&world));
+                on_whole += usize::from(on(&whole));
+            }
+        }
+        eprintln!(
+            "{id} filter {filter}: {tops} flat triangles, {on_whole} floors whole, {on_helper} in play"
+        );
+        assert!(tops > 0, "{id}: no flat filter-{filter} triangle");
+        assert!(on_whole * 10 > tops * 9, "{id}: {on_whole} of {tops}");
+        assert_eq!(on_helper, 0, "{id}: filter {filter} stands Wolf");
+    }
 }

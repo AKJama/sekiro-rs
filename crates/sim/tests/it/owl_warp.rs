@@ -4,8 +4,6 @@
 //! `--force-act`). Values are the data's (`docs/OWL.md`, "Warp and vanish"). Skips when
 //! `cache/` lacks him.
 
-use std::path::PathBuf;
-
 use sekiro_sim::duel::Duel;
 use sekiro_sim::enemy::EnemySpec;
 use sekiro_sim::hits::can_be_hit;
@@ -14,7 +12,7 @@ use sekiro_sim::{Buttons, InputFrame};
 const DT: f32 = 1.0 / 60.0;
 
 fn load(distance: f32, act: i32) -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c5060/tae.json").exists()
         || !cache.join("raw/script/m11_01_00_00.luabnd.d").is_dir()
     {

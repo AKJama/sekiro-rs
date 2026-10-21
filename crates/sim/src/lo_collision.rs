@@ -15,8 +15,9 @@
 //! ([`crate::arenas_a::remove_hidden_collision`]), helper stripping
 //! ([`crate::hit_filter::strip_helpers`]) and the arenas' steps read as they read
 //! `collision.bin`'s. A block exported before `collision_lo.bin` existed falls back to
-//! `collision.bin`, with a log line saying how to re-export it. The `h` mesh stays for drawing
-//! (the collision wireframe, draw-group selection) and the render sweeps.
+//! `collision.bin`, with one log line per block (`h`'s swim hits carry no water, so it has no
+//! swim planes). The draw-group selection reads `l` too (`crates/game/src/map_world.rs`); the
+//! `h` mesh stays for drawing (the collision wireframe) and the render sweeps.
 
 use std::path::Path;
 
@@ -28,15 +29,6 @@ pub const HIGH_FILE: &str = "collision.bin";
 /// The low-resolution `l` collision of a map folder ([`PartCollision`]).
 pub const LOW_FILE: &str = "collision_lo.bin";
 
-/// Which binder a block's character collision came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Resolution {
-    /// `collision_lo.bin`, as the exe.
-    Low,
-    /// `collision.bin`: the block has no `collision_lo.bin` yet.
-    High,
-}
-
 /// A block's character collision ([`read`]).
 #[derive(Debug, Clone)]
 pub struct BlockMesh {
@@ -44,7 +36,6 @@ pub struct BlockMesh {
     /// `{"collisions": [...]}`: the layout's collision rows with `triangles` addressing
     /// [`BlockMesh::mesh`]. A part without a model in the binder gets an empty range.
     pub rows: Value,
-    pub resolution: Resolution,
 }
 
 /// The block name of a map folder (`cache/maps/<block>`), for logs.
@@ -60,12 +51,32 @@ fn read_file(path: &Path) -> Result<Option<Vec<u8>>, String> {
     }
 }
 
-/// Logs that `dir`'s block has no `collision_lo.bin`, so characters use `collision.bin`.
+/// Logs, once per block, that `dir`'s block has no `collision_lo.bin`, so characters use
+/// `collision.bin`. It suggests the re-export only when the cache has the raw `l` binder
+/// (`cache/raw/map/<block>/l<tail>.hkxbhd`) to export from.
 fn log_fallback(dir: &Path) {
+    static LOGGED: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+    let mut logged = LOGGED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if logged.iter().any(|d| d == dir) {
+        return;
+    }
+    logged.push(dir.to_path_buf());
     let block = block_of(dir);
+    let binder = block.get(1..).and_then(|tail| {
+        let raw = dir.parent()?.parent()?.join("raw/map").join(block);
+        Some(raw.join(format!("l{tail}.hkxbhd")))
+    });
+    let hint = match binder {
+        Some(binder) if binder.is_file() => {
+            format!("re-export with `sekiro-extract map {block} --lo-collision`")
+        }
+        _ => format!("the cache has no raw `l` binder for {block} to export it from"),
+    };
     eprintln!(
         "collision: {block}: no {LOW_FILE}, characters and the camera use the high-resolution \
-         {HIGH_FILE} (re-export with `sekiro-extract map {block} --lo-collision`)"
+         {HIGH_FILE}, whose swim hits carry no water ({hint})"
     );
 }
 
@@ -114,7 +125,6 @@ pub fn read(dir: &Path, layout: &Value) -> Result<BlockMesh, String> {
         return Ok(BlockMesh {
             mesh: low.mesh,
             rows,
-            resolution: Resolution::Low,
         });
     }
     log_fallback(dir);
@@ -123,25 +133,7 @@ pub fn read(dir: &Path, layout: &Value) -> Result<BlockMesh, String> {
     Ok(BlockMesh {
         mesh: CollisionMesh::from_bytes(&bytes).map_err(|e| format!("{}: {e}", path.display()))?,
         rows: serde_json::json!({ "collisions": layout["collisions"].clone() }),
-        resolution: Resolution::High,
     })
-}
-
-/// The mesh a collision file stands for: for a map folder's `collision.bin`, the block's
-/// character collision (its `collision_lo.bin` when exported, every part whole), else the file
-/// itself.
-pub fn read_mesh(path: &Path) -> Result<(CollisionMesh, Resolution), String> {
-    if path.file_name().is_some_and(|n| n == HIGH_FILE)
-        && let Some(dir) = path.parent()
-    {
-        if let Some(low) = read_low(dir)? {
-            return Ok((low.mesh, Resolution::Low));
-        }
-        log_fallback(dir);
-    }
-    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mesh = CollisionMesh::from_bytes(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok((mesh, Resolution::High))
 }
 
 /// One block's collision as characters collide with it ([`block_collision`]).
@@ -153,7 +145,6 @@ pub struct BlockCollision {
     pub helpers: crate::hit_filter::HelperCollision,
     /// Collision parts `switched_off` named.
     pub story_off: usize,
-    pub resolution: Option<Resolution>,
 }
 
 /// The map folder `dir`'s character collision ([`read`]) with the parts `switched_off` names
@@ -164,11 +155,7 @@ pub fn block_collision(
     layout: &Value,
     switched_off: impl Fn(&str) -> bool,
 ) -> Result<BlockCollision, String> {
-    let BlockMesh {
-        mut mesh,
-        rows,
-        resolution,
-    } = read(dir, layout)?;
+    let BlockMesh { mut mesh, rows } = read(dir, layout)?;
     // Before the helpers, so a switched-off helper part does not come back as one.
     let story_off = crate::arenas_a::remove_hidden_collision(&mut mesh, &rows, switched_off);
     let helpers = crate::hit_filter::strip_helpers(&mut mesh, &rows);
@@ -176,7 +163,6 @@ pub fn block_collision(
         mesh,
         helpers,
         story_off,
-        resolution: Some(resolution),
     })
 }
 

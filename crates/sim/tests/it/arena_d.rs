@@ -1,7 +1,5 @@
 //! Installed-data staging checks shared by the three group-d arenas.
 
-use std::path::PathBuf;
-
 use sekiro_sim::InputFrame;
 use sekiro_sim::arena::{Arena, ArenaSpec};
 use sekiro_sim::body::Ground;
@@ -9,7 +7,7 @@ use sekiro_sim::duel::Duel;
 use sekiro_sim::events::EventLog;
 
 pub fn stage(name: &str, entity: i32, walls: usize) -> Option<(Arena, Duel)> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     let spec = ArenaSpec::by_name(name).unwrap();
     if !cache
         .join(format!("maps/{}/collision.bin", spec.map))

@@ -378,7 +378,7 @@ mod tests {
     /// sparks, one that lands on flesh plays the hit effect, and every id is an installed effect.
     #[test]
     fn clash_effects_come_from_the_installed_tables() {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = crate::cache::root();
         if !cache
             .join("raw/param/gameparam/gameparam.parambnd.d")
             .is_dir()

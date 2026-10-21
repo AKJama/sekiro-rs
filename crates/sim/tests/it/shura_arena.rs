@@ -28,7 +28,7 @@ fn shura_arena_changes_from_emma_to_isshin_and_burns_the_roof() {
     assert_eq!(scripts.cast_scene.enabled.get(&1117550), Some(&false));
     assert_eq!(scripts.cast_scene.enabled.get(&1117551), Some(&true));
     assert_eq!(scripts.cast_scene.lighting, Some(4));
-    let cache = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     let warp = sekiro_sim::events::warp_point(&cache, 11, 1, 1112812).unwrap();
     assert!(
         arena

@@ -404,6 +404,9 @@ impl Docking {
             // Under the docked feet, always. The snake pit's narrow ledge (variation 10, #147)
             // has no character floor there, only the wall-hug slab (`h900100`, hit filter 25),
             // so the hug floor is the real one and no stand-in at the wall's foot is needed (#189).
+            // Once the hug ends the slab holds him no more, as in the exe: he rests on the
+            // ledge's lip where it is under his capsule and drops where `l` has no ledge
+            // (docs/HIT-FILTERS.md, `snake_pit_hug_exit_rests_on_the_lip`).
             let Some(y) = floor(feet) else {
                 continue;
             };

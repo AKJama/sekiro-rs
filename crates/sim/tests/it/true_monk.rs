@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use sekiro_sim::Buttons;
 use sekiro_sim::{
     InputFrame,
@@ -11,7 +9,7 @@ use sekiro_sim::{
 const DT: f32 = 1.0 / 60.0;
 
 fn load() -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     for path in [
         "anim/c5000/tae.json",
         "anim/c0000/tae.json",
@@ -122,7 +120,7 @@ fn true_monk_deathblows_drive_all_three_phases() {
             }
             duel.enemy_active = true;
             if mark == 3 {
-                let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+                let cache = sekiro_sim::cache::root();
                 let spot = sekiro_sim::events::warp_point(&cache, 25, 0, 2_502_856).unwrap();
                 duel.player.body.position = spot.position;
                 duel.player.body.yaw = spot.yaw;

@@ -423,9 +423,8 @@ pub(crate) fn collision_world(
     let mut story_off = 0;
     for (block, layout) in layouts {
         let dir = cache.join("maps").join(block);
-        if dir.join(sekiro_sim::lo_collision::HIGH_FILE).is_file()
-            || dir.join(sekiro_sim::lo_collision::LOW_FILE).is_file()
-        {
+        // A block exports `collision_lo.bin` beside `collision.bin`, never alone.
+        if dir.join(sekiro_sim::lo_collision::HIGH_FILE).is_file() {
             let story = story.maps.get(block);
             let part = sekiro_sim::lo_collision::block_collision(&dir, layout, |n| {
                 story.is_some_and(|s| s.switched_off(n))
@@ -516,11 +515,30 @@ impl MapWorld {
         let mut blocks = BTreeMap::new();
         for (id, json) in neighbourhood(cache)? {
             let dir = cache.join("maps").join(&id);
-            let collision = if dir.join("collision.bin").is_file() {
-                CollisionMesh::from_bytes(&std::fs::read(dir.join("collision.bin"))?)?
-            } else {
-                CollisionMesh::default()
-            };
+            // The draw groups follow the part the player's capsule stands on, so the parts are
+            // read from the `l` mesh it collides with (#189), each part's range from
+            // `collision_lo.bin`; a block without one falls back to `collision.bin` and the
+            // layout's ranges ([`sekiro_sim::lo_collision::read`]).
+            let (collision, low_ranges) =
+                match sekiro_sim::lo_collision::read_low(&dir).map_err(anyhow::Error::msg)? {
+                    Some(low) => {
+                        let ranges: BTreeMap<String, (usize, usize)> = low
+                            .parts
+                            .iter()
+                            .map(|p| (p.name.clone(), (p.first as usize, p.count as usize)))
+                            .collect();
+                        (low.mesh, Some(ranges))
+                    }
+                    None => {
+                        let high = dir.join(sekiro_sim::lo_collision::HIGH_FILE);
+                        let mesh = if high.is_file() {
+                            CollisionMesh::from_bytes(&std::fs::read(high)?)?
+                        } else {
+                            CollisionMesh::default()
+                        };
+                        (mesh, None)
+                    }
+                };
             let mut collisions = Vec::new();
             for row in json["parts"]
                 .as_array()
@@ -528,11 +546,22 @@ impl MapWorld {
                 .flatten()
                 .filter(|r| r["kind"] == "Collision")
             {
-                let Some(range) = row["triangles"].as_array() else {
-                    continue;
+                let (first, count) = match &low_ranges {
+                    // A part with no `l` model is met by no character (an empty range).
+                    Some(ranges) => row["name"]
+                        .as_str()
+                        .and_then(|n| ranges.get(n))
+                        .copied()
+                        .unwrap_or((0, 0)),
+                    None => {
+                        let Some(range) = row["triangles"].as_array() else {
+                            continue;
+                        };
+                        let first = range.first().and_then(Value::as_u64).unwrap_or(0) as usize;
+                        let count = range.get(1).and_then(Value::as_u64).unwrap_or(0) as usize;
+                        (first, count)
+                    }
                 };
-                let first = range.first().and_then(Value::as_u64).unwrap_or(0) as usize;
-                let count = range.get(1).and_then(Value::as_u64).unwrap_or(0) as usize;
                 let Some(indices) = collision.indices.get(first * 3..(first + count) * 3) else {
                     anyhow::bail!("{id}: collision triangle range is invalid");
                 };
@@ -1805,7 +1834,7 @@ mod tests {
 
     #[test]
     fn installed_neighbourhood_keeps_blocks_and_baked_transforms() {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         if !cache.join("maps/m11_01_00_00/layout.json").is_file() {
             return;
         }
@@ -1938,12 +1967,14 @@ mod tests {
     /// teleport re-arms the spawn probe even in the air.
     #[test]
     fn standing_part_survives_the_branch_and_follows_teleports() {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         if !cache.join("maps/m11_01_00_00/layout.json").is_file() {
             return;
         }
         let mut world = MapWorld::load(&cache, ASHINA[0], "maps/m11_00_00_00/").unwrap();
-        let ledge = Vec3::new(-132.5, -44.6, -124.0);
+        // On the ledge's part `h023300` 6 m north of where `h` has its lip at (-132.5, -44.6,
+        // -124.0): `l`'s hull there is a slope too steep to stand on (#189).
+        let ledge = Vec3::new(-136.5, -42.54, -118.0);
         // Both ends of the branch: the user's perch and the one the live check's grapple
         // reaches from the ledge.
         let perches = [
@@ -1974,9 +2005,15 @@ mod tests {
 
         // The viewer's camera probe over the ravine finds only zero-demand helper walls.
         world.demand(&[perches[0]], None);
-        assert_eq!(
-            world.selected,
-            Some((ASHINA[0].to_string(), "h900000".to_string()))
+        // `l`'s hulls of the two walls overlap differently from `h`'s, so either may be first.
+        assert!(
+            world
+                .selected
+                .as_ref()
+                .is_some_and(|(block, part)| block == ASHINA[0]
+                    && ["h900000", "h900001"].contains(&part.as_str())),
+            "{:?}",
+            world.selected
         );
         assert_eq!(world.blocks[ASHINA[0]].normal, [0; 8]);
 
@@ -2069,7 +2106,7 @@ mod tests {
         static WORLD: std::sync::OnceLock<Option<PlayWorld>> = std::sync::OnceLock::new();
         WORLD
             .get_or_init(|| {
-                let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+                let cache = sekiro_sim::cache::root();
                 if !cache
                     .join("maps/m11_00_00_00/object_collision.bin")
                     .is_file()
@@ -2361,7 +2398,7 @@ mod tests {
     /// 6 m above the ground there. Left in, Wolf ran into them and stood on them in mid-air.
     #[test]
     fn story_switched_off_collision_parts_hold_no_one() {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         if !cache.join("maps/m11_00_00_00/collision.bin").is_file() {
             return;
         }

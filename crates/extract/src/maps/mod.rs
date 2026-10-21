@@ -168,6 +168,9 @@ struct PartBinder {
     file: &'static str,
     /// What the log calls it.
     label: &'static str,
+    /// Whether the file stands for every part or none: a model that fails to decode fails the
+    /// export rather than leaving its parts out.
+    whole: bool,
     decode: fn(&[u8], Option<&Compendium>) -> sekiro_formats::Result<HitDecode>,
 }
 
@@ -180,6 +183,7 @@ const FALL_ASSIST: PartBinder = PartBinder {
     prefix: "f",
     file: "fall_assist.bin",
     label: "fall assist",
+    whole: false,
     decode: hknp::decode_extern,
 };
 
@@ -187,18 +191,23 @@ const FALL_ASSIST: PartBinder = PartBinder {
 /// compressed meshes as `collision.bin`'s `h` binder with about a seventh of the triangles.
 /// The exe gives an ordinary part's `l` body group 39 or 40, which the player, enemies and the
 /// camera collide with, and its `h` body group 38, which none of them do (docs/HIT-FILTERS.md,
-/// #189).
+/// #189). Whole: a part left out of it would be a hole in the floor characters walk on, so a
+/// model that fails to decode leaves no `collision_lo.bin` written and characters on the
+/// block's `collision.bin`.
 const LO_COLLISION: PartBinder = PartBinder {
     prefix: "l",
     file: "collision_lo.bin",
     label: "low-resolution collision",
+    whole: true,
     decode: hknp::decode,
 };
 
 /// Writes `binder`'s cache file: each MSB collision part's model from the map's binder, placed
 /// by the part like `collision.bin`, with the part's triangle range. A model the binder has no
-/// file for adds nothing, and its parts are listed in the log. A map without the binder has
-/// none, so an old file is removed. The file is written whole or not at all.
+/// file for adds nothing, and its parts are listed in the log. A model that fails to decode
+/// is left out with a warning, or, for a [`PartBinder::whole`] binder, fails the export and
+/// leaves the last file as it was. A map without the binder has none, so an old file is
+/// removed. The file is written whole or not at all.
 fn write_part_binder(
     raw: &Path,
     out: &Path,
@@ -211,6 +220,7 @@ fn write_part_binder(
         prefix,
         file,
         label,
+        whole,
         decode,
     } = *binder;
     let path = out.join(file);
@@ -227,6 +237,15 @@ fn write_part_binder(
         }
         return Ok(());
     };
+    if whole && !hits.failed.is_empty() {
+        anyhow::bail!(
+            "{} of {} models failed to decode ({}), so {} was not written: characters keep the              last one, or {id}'s collision.bin without one",
+            hits.failed.len(),
+            hits.models,
+            hits.failed.join(", "),
+            path.display()
+        );
+    }
     let placed: BTreeSet<&str> = hits.ranges.iter().map(|(n, _)| n.as_str()).collect();
     let without: Vec<&str> = msb
         .parts
@@ -257,7 +276,7 @@ fn write_part_binder(
         collision.parts.len(),
         hits.parts,
         hits.models,
-        hits.failed,
+        hits.failed.len(),
         hits.stats.bodies,
         hits.stats.other_shapes,
         hits.stats.convex_skipped,
@@ -279,15 +298,15 @@ struct PlacedHits {
     ranges: Vec<(String, [usize; 2])>,
     /// The MSB's collision parts.
     parts: usize,
-    /// The distinct models those parts use, and how many of them failed to decode.
+    /// The distinct models those parts use, and those of them that failed to decode.
     models: usize,
-    failed: usize,
+    failed: Vec<String>,
     stats: hknp::DecodeStats,
 }
 
 /// Reads map `id`'s hit binder `<prefix><tail>.hkxbhd` / `.hkxbdt` from `raw` (`h` and `l` for
-/// the high- and low-resolution hit collision, `f` for the fall-prevention assist walls), decodes the file of each MSB
-/// collision part's model with `decode` in parallel, and places each part's collision like any
+/// the high- and low-resolution hit collision, `f` for the fall-prevention assist walls),
+/// decodes the file of each MSB collision part's model with `decode` in parallel, and places each part's collision like any
 /// other part ([`extend_placed`]). A model whose file fails to decode is warned about and its
 /// parts left out; one the binder has no file for is left out silently. `None` when the map has
 /// no such binder (its `.hkxbhd` is not there); any other read error is an error.
@@ -343,7 +362,7 @@ fn place_hit_binder(
         .collect();
     let mut by_model = HashMap::new();
     let mut stats = hknp::DecodeStats::default();
-    let mut failed = 0;
+    let mut failed = Vec::new();
     for (model, r) in decoded {
         match r {
             Ok((m, s)) => {
@@ -351,8 +370,8 @@ fn place_hit_binder(
                 by_model.insert(model, m);
             }
             Err(e) => {
-                failed += 1;
                 eprintln!("  warning: {prefix}{tail}.hkxbhd: {e:#}");
+                failed.push(model);
             }
         }
     }
@@ -913,7 +932,7 @@ fn export_collision(
         "{} collision parts, {} models, {} failed, {} bodies, {} sections, {} primitives ({} quads, {} convex skipped), {} triangles without material, {} distinct materials, furthest player start {:.2} m from a collision vertex",
         parts,
         models,
-        failed,
+        failed.len(),
         total.bodies,
         total.sections,
         total.primitives,

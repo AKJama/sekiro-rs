@@ -115,7 +115,7 @@ fn divine_dragon_old_dragons_sword_replay_reaches_native_handover() {
 }
 
 fn cache() -> Option<PathBuf> {
-    let cache = crate::movement_helpers::cache()?;
+    let cache = sekiro_sim::cache::root();
     for path in [
         "anim/c5200/tae.json",
         "anim/c5300/tae.json",

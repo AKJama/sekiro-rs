@@ -9,10 +9,9 @@
 //! Skips when `cache/` has not been extracted.
 
 use sekiro_sim::{Buttons, InputFrame, PlayerCharacter, demo};
-use std::path::PathBuf;
 
 fn load() -> Option<PlayerCharacter> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("raw/chr/c0000.behbnd.d/c0000.hkx").exists() {
         eprintln!("skipping: cache not extracted");
         return None;

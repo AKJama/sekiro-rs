@@ -567,7 +567,7 @@ mod tests {
     /// shoulders still face where they did.
     #[test]
     fn walk_twist_turns_the_hips_and_keeps_the_shoulders() {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let Ok(lib) = AnimLibrary::load(&cache, "c0000") else {
             eprintln!("skipping: c0000 animations are not extracted");
             return;

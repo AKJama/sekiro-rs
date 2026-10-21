@@ -13,13 +13,12 @@ pub const PROFILE: &str = r#"
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
 
     use crate::lighting_selection::select;
 
     #[test]
     fn palace_and_dragon_defeat_keep_native_environment_and_arena_states() {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let map = "m25_00_00_00";
         let palace = select(&cache, map, None, None).unwrap();
         let defeated = select(&cache, map, Some("dragon-defeated"), None).unwrap();

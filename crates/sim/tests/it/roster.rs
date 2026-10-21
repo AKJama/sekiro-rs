@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use sekiro_sim::duel::Duel;
 use sekiro_sim::registry::Registry;
 
@@ -7,7 +5,7 @@ use sekiro_sim::registry::Registry;
 #[test]
 #[ignore = "slow: builds a Duel for every placed character (about a minute)"]
 fn placed_roster_load_smoke() {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("params/NpcParam.json").exists() {
         eprintln!("skipping roster smoke: cache not extracted");
         return;
@@ -59,7 +57,7 @@ fn placed_roster_load_smoke() {
 /// The characters the project is built around, plus the registry's name resolution.
 #[test]
 fn key_characters_load_and_resolve() {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("params/NpcParam.json").exists() {
         eprintln!("skipping roster: cache not extracted");
         return;
@@ -84,7 +82,7 @@ fn key_characters_load_and_resolve() {
 
 #[test]
 fn animation_set_selects_grouped_clips_and_tae() {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c5400/skeleton.bin").exists() {
         return;
     }

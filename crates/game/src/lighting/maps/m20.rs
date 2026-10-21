@@ -20,13 +20,13 @@ pub const PROFILE: &str = r#"
 mod tests {
     use crate::{lighting::LightSet, lighting_selection};
     use sekiro_formats::{emedf, gparam, msb};
-    use std::{collections::BTreeSet, path::Path};
+    use std::collections::BTreeSet;
 
     #[test]
     fn senpou_native_illusion_region_round_trip() {
         use sekiro_formats::reader::{Reader, utf16z};
         use sekiro_sim::events::{EventEntry, EventScripts};
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let map = "m20_00_00_00";
         let bytes = std::fs::read(cache.join(format!("raw/map/mapstudio/{map}.msb"))).unwrap();
         let mut table = 0x10;
@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn senpou_installed_story_lighting() {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let map = "m20_00_00_00";
         let layout =
             msb::parse(&std::fs::read(cache.join(format!("raw/map/mapstudio/{map}.msb"))).unwrap())

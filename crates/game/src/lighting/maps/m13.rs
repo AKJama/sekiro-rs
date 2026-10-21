@@ -17,12 +17,12 @@ pub const PROFILE: &str = r#"
 mod tests {
     use crate::{lighting::LightSet, lighting_selection};
     use sekiro_formats::{emedf, gparam, msb};
-    use std::{collections::BTreeSet, path::Path};
+    use std::collections::BTreeSet;
 
     /// Exercise the installed events and authored rows, rather than a synthetic profile.
     #[test]
     fn dungeon_installed_story_lighting() {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let map = "m13_00_00_00";
         let layout =
             msb::parse(&std::fs::read(cache.join(format!("raw/map/mapstudio/{map}.msb"))).unwrap())

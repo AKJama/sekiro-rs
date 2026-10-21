@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 
 use sekiro_sim::arena::{Arena, ArenaSpec};
 use sekiro_sim::duel::Duel;
@@ -9,7 +8,7 @@ use sekiro_sim::{Buttons, InputFrame};
 const DT: f32 = 1.0 / 60.0;
 
 fn fight() -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     for path in [
         "anim/c7400/skeleton.bin",
         "anim/c0000/skeleton.bin",
@@ -74,7 +73,7 @@ fn emma_ai_region_query_tracks_wolf_crossing_an_msb_boundary() {
     use sekiro_sim::lua_ai::lua50::{Host, Value, Vm};
     use sekiro_sim::lua_ai::runtime::ai_obj;
     let Some(mut duel) = fight() else { return };
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     // Find a real volume containing the staged roof start, rather than inventing a boundary.
     let point = duel.player.body.position;
     let region = (1112000..1113000)

@@ -476,7 +476,7 @@ impl Arena {
         // The collision characters and the camera meet, as in explore mode
         // ([`crate::lo_collision`]): `rows` are the layout's collision rows with their triangle
         // ranges in that mesh, so every step below takes a part's own triangles out of it.
-        let crate::lo_collision::BlockMesh { mut mesh, rows, .. } =
+        let crate::lo_collision::BlockMesh { mut mesh, rows } =
             crate::lo_collision::read(&dir, &json)?;
         // These steps collapse triangles in place, so every triangle range in `rows` stays
         // valid until the fog walls' split below. The helpers go last: disabled, event and
@@ -490,6 +490,14 @@ impl Arena {
             for helper in helpers.meshes_mut() {
                 *helper = crop(helper, layout.center(), spec.radius);
             }
+            // An event wall stays whole if any of it reaches the arena: `l`'s are a few large
+            // triangles, and cropped to those that reach, the Owl roof's lost the side a fall
+            // from the roof's edge passes through (#189).
+            helpers.triggers.retain(|t| {
+                !crop(&t.mesh, layout.center(), spec.radius)
+                    .indices
+                    .is_empty()
+            });
         }
         let mut gate = CollisionMesh::default();
         for place in &fog_walls {

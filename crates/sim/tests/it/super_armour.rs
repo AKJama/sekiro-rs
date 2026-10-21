@@ -1,9 +1,8 @@
 //! Installed-data interruption regressions using the shipped NPC scripts and graphs.
 use sekiro_sim::{InputFrame, duel::Duel, enemy::EnemySpec, hits::HitEvent};
-use std::path::PathBuf;
 const DT: f32 = 1.0 / 60.0;
 fn load(chr: &str, row: i32) -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join(format!("anim/{chr}/skeleton.bin")).exists() {
         return None;
     }

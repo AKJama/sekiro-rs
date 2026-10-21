@@ -11,7 +11,7 @@ use sekiro_sim::{Buttons, InputFrame};
 const DT: f32 = 1.0 / 60.0;
 
 fn cache() -> Option<PathBuf> {
-    let c = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let c = sekiro_sim::cache::root();
     if !c.join("anim/c5060/tae.json").exists()
         || !c.join("raw/chr/c1010.behbnd.d/c9997.hkx").exists()
     {

@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use sekiro_sim::arena::{Arena, ArenaSpec};
 use sekiro_sim::body::Ground;
 use sekiro_sim::duel::Duel;
@@ -39,7 +37,7 @@ impl EventHost for Host {
 }
 
 pub(super) fn stage(name: &str) -> Option<(Arena, EventScripts, Host)> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     let spec = ArenaSpec::by_name(name).unwrap();
     if !cache
         .join(format!("maps/{}/collision.bin", spec.map))

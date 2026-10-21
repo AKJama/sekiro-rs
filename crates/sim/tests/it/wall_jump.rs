@@ -40,7 +40,7 @@ fn cliff_edges() -> Docking {
     }])
 }
 fn cache() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache")
+    sekiro_sim::cache::root()
 }
 fn press(buttons: Buttons) -> InputFrame {
     InputFrame {

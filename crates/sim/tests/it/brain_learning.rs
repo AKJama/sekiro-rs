@@ -1,12 +1,11 @@
 //! Headless real-data reproduction of the jump/thrust and its learning signal.
-use std::path::PathBuf;
 
 use sekiro_sim::brain::{LuaBrain, tally::Side};
 use sekiro_sim::{Buttons, InputFrame, duel::Duel, registry::Registry};
 
 #[test]
 fn genichiro_mikiri_replay_attributes_the_thrust_and_jump_callback() {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c7100/skeleton.bin").exists() {
         eprintln!("skipping: Genichiro is not extracted");
         return;

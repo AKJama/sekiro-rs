@@ -36,7 +36,7 @@ fn demon_arena_starts_at_night_waits_for_wolf_and_runs_mark_and_defeat_events() 
     // The staged row keeps the fight flag for a flat duel; the arena removes it (`Arena::place`).
     assert!(scripts.flag(11_105_901));
     scripts.flags.remove(&11_105_901);
-    let cache = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     let warp = sekiro_sim::events::warp_point(&cache, 11, 0, 1102957).unwrap();
     assert!(
         arena

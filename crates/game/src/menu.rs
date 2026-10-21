@@ -150,7 +150,7 @@ mod tests {
         for args in [&mut menu, &mut cli] {
             args.extend([
                 "--cache".into(),
-                root.join("cache").to_string_lossy().into_owned(),
+                sekiro_sim::cache::root().to_string_lossy().into_owned(),
             ]);
         }
         let a = crate::play_options_with(&menu, &root.join("logs/datasets")).unwrap();
@@ -298,7 +298,7 @@ mod tests {
                 "--play".into(),
                 flag.into(),
                 "--cache".into(),
-                root.join("cache").to_string_lossy().into_owned(),
+                sekiro_sim::cache::root().to_string_lossy().into_owned(),
             ];
             let options = crate::play_options_with(&args, &root.join("logs/datasets")).unwrap();
             assert_eq!(
@@ -310,7 +310,7 @@ mod tests {
     }
     #[test]
     fn explore_options_cover_every_extracted_map_with_first_visit_defaults() {
-        let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         for id in MAPS {
             let Ok(dir) = crate::map::map_dir(&cache, id) else {
                 continue;
@@ -341,7 +341,7 @@ mod tests {
     }
     #[test]
     fn map_changes_reset_start_and_start_selection_wraps_authored_points() {
-        let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let mut choices = Choices::default();
         for id in MAPS {
             let Ok(dir) = crate::map::map_dir(&cache, id) else {
@@ -380,7 +380,7 @@ mod tests {
     }
     #[test]
     fn explore_keyboard_shortcuts_and_navigation_use_live_menu_system() {
-        let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let mut legacy = Choices::default();
         legacy.values[3] = "m11_01".into();
         let args = vec![

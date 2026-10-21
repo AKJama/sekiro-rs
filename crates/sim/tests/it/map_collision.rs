@@ -8,7 +8,7 @@ use sekiro_sim::body::{Body, BodyInput, Ground};
 use sekiro_sim::collision::CollisionWorld;
 
 fn map_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache/maps/m11_00_00_00")
+    sekiro_sim::cache::root().join("maps/m11_00_00_00")
 }
 
 #[test]
@@ -19,7 +19,7 @@ fn player_starts_stand_on_the_map() {
         return;
     }
     let t = Instant::now();
-    let world = CollisionWorld::load(&dir.join("collision.bin")).unwrap();
+    let world = CollisionWorld::load_map(&dir).unwrap();
     eprintln!(
         "{} triangles indexed in {:.2} s",
         world.triangle_count(),
@@ -65,7 +65,7 @@ fn probe_point() {
         return;
     };
     let v: Vec<f32> = arg.split(',').map(|s| s.trim().parse().unwrap()).collect();
-    let world = CollisionWorld::load(&map_dir().join("collision.bin")).unwrap();
+    let world = CollisionWorld::load_map(&map_dir()).unwrap();
     for (h, ny) in world.surfaces_at(v[0], v[1]) {
         eprintln!("surface at {h:.3}, normal y {ny:.3}");
     }
@@ -78,7 +78,7 @@ fn probe_walk() {
         return;
     };
     let v: Vec<f32> = arg.split(',').map(|s| s.trim().parse().unwrap()).collect();
-    let world = CollisionWorld::load(&map_dir().join("collision.bin")).unwrap();
+    let world = CollisionWorld::load_map(&map_dir()).unwrap();
     let mut b = Body {
         position: [v[0], v[1], v[2]],
         ..Body::default()
@@ -111,7 +111,7 @@ fn probe_ledges() {
         return;
     };
     let v: Vec<f32> = arg.split(',').map(|s| s.trim().parse().unwrap()).collect();
-    let world = CollisionWorld::load(&map_dir().join("collision.bin")).unwrap();
+    let world = CollisionWorld::load_map(&map_dir()).unwrap();
     let top = v[1] + 3.0;
     // Highest flat (within about 18 degrees) surface under the point.
     let flat = |x: f32, z: f32| {
@@ -209,7 +209,7 @@ fn castle_gate_route_never_sinks_below_the_floor() {
         eprintln!("skipping: {} not exported", dir.display());
         return;
     }
-    let world = CollisionWorld::load(&dir.join("collision.bin")).unwrap();
+    let world = CollisionWorld::load_map(&dir).unwrap();
     let up = [
         [-197.45, -48.16, 150.72],
         [-190.77, -47.98, 146.37],
@@ -257,8 +257,10 @@ fn wolf_walks_through_the_broken_wall_past_the_gate_path_idol() {
     assert!((end[1] + 29.29).abs() < 0.1, "on the far floor: {end:?}");
     let back = [end, [-181.8, -29.2, 24.6], [-181.0, -29.075, 26.6]];
     let end = walk_route(&world, &back, 0.08);
+    // `l`'s hull of the wall's foot (h004810) stands 0.14 m above `h`'s planks here, and Wolf
+    // walks on `l` as in the exe (#189).
     assert!(
-        (end[1] + 29.075).abs() < 0.1,
+        (end[1] + 29.075).abs() < 0.2,
         "back at the idol side: {end:?}"
     );
 }

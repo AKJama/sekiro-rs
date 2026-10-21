@@ -22,7 +22,7 @@ fn synthetic() -> Docking {
     }])
 }
 fn cache() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache")
+    sekiro_sim::cache::root()
 }
 
 fn press(buttons: Buttons) -> InputFrame {
@@ -124,7 +124,7 @@ fn researched_edge_has_upper_floor_and_outward_drop() {
         return;
     }
     let docking = Docking::load(&dir.join("edges.json")).unwrap();
-    let world = sekiro_sim::collision::CollisionWorld::load(&dir.join("collision.bin")).unwrap();
+    let world = sekiro_sim::collision::CollisionWorld::load_map(&dir).unwrap();
     let mut found = false;
     for (i, edge) in docking
         .edges
@@ -241,16 +241,18 @@ fn castle_start_two_route() {
     for script_name in ["m11_01_ledge_hang.txt", "m11_01_ledge_shimmy.txt"] {
         let mut duel = Duel::load(&cache(), 4.0).unwrap();
         duel.enemy_active = false;
-        let world =
-            sekiro_sim::collision::CollisionWorld::load(&dir.join("collision.bin")).unwrap();
+        let world = sekiro_sim::collision::CollisionWorld::load_map(&dir).unwrap();
         let y = world.floor(83.307, 243.649, 31.0).unwrap();
         duel.player.ground = Box::new(world);
         duel.player.docking = Docking::load(&dir.join("edges.json")).unwrap();
         duel.player.body.position = [83.307, y, 243.649];
         duel.player.body.yaw = 133.216f32.to_radians();
-        let script =
-            std::fs::read_to_string(cache().join("../crates/game/scripts").join(script_name))
-                .unwrap();
+        let script = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../game/scripts")
+                .join(script_name),
+        )
+        .unwrap();
         let frames = sekiro_sim::input::parse_action_script(&script).unwrap();
         let mut entered = false;
         let mut idle = false;
@@ -493,7 +495,7 @@ fn snake_pit_shimmy_runs_the_whole_ledge() {
     if !dir.join("edges.json").exists() || !dir.join("collision.bin").exists() {
         return;
     }
-    let world = sekiro_sim::collision::CollisionWorld::load(&dir.join("collision.bin")).unwrap();
+    let world = sekiro_sim::collision::CollisionWorld::load_map(&dir).unwrap();
     let docking = Docking::load(&dir.join("edges.json")).unwrap();
     let ledge: Vec<usize> = (0..docking.edges.len())
         .filter(|&i| {

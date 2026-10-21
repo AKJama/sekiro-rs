@@ -761,8 +761,7 @@ mod tests {
 
     #[test]
     fn fall_queries_expose_centimetres_to_hks() {
-        let hkx = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../cache/raw/chr/c1010.behbnd.d/c9997.hkx");
+        let hkx = crate::cache::root().join("raw/chr/c1010.behbnd.d/c9997.hkx");
         let Ok(data) = std::fs::read(hkx) else {
             return;
         };
@@ -796,8 +795,7 @@ mod tests {
     /// `act(110)` raises the recovery-disabled flag; nothing else does. Skips without `cache/`.
     #[test]
     fn act_110_disables_posture_recovery() {
-        let hkx = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../cache/raw/chr/c1010.behbnd.d/c9997.hkx");
+        let hkx = crate::cache::root().join("raw/chr/c1010.behbnd.d/c9997.hkx");
         let Ok(data) = std::fs::read(&hkx) else {
             eprintln!("skipping: cache not extracted");
             return;

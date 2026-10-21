@@ -3,7 +3,6 @@
 //! (`sekiro-extract unpack`, then `anims c5060`).
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use sekiro_sim::duel::{Duel, DuelReport};
 use sekiro_sim::enemy::EnemySpec;
@@ -13,7 +12,7 @@ use sekiro_sim::{Buttons, InputFrame};
 const DT: f32 = 1.0 / 60.0;
 
 fn load(distance: f32) -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c5060/tae.json").exists()
         || !cache.join("raw/script/m11_01_00_00.luabnd.d").is_dir()
     {

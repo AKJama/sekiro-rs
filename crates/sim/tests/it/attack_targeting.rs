@@ -11,7 +11,7 @@ use std::path::PathBuf;
 const DT: f32 = 1.0 / 60.0;
 
 fn cache() -> Option<PathBuf> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("raw/chr/c1010.behbnd.d/c9997.hkx").exists() {
         eprintln!("skipping: cache not extracted");
         return None;

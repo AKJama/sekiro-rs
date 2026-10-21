@@ -13,7 +13,7 @@ use sekiro_sim::{Buttons, InputFrame};
 const DT: f32 = 1.0 / 60.0;
 
 fn cache() -> Option<PathBuf> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     let ok = cache.join("anim/c0000/a200_510000.bin").is_file()
         && cache.join("anim/c0000/a221_510000.bin").is_file()
         && cache.join("params/CameraSetParam.json").is_file();

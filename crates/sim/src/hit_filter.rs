@@ -14,7 +14,7 @@
 //! A block's character collision ([`crate::lo_collision`]) holds every part's triangles;
 //! [`strip_helpers`] takes the ones the player does not collide with out of it (in place, so the
 //! triangle ranges of its layout rows stay valid) and returns the enemy, camera, fall-prevention
-//! and wall-hug parts and the contact triggers for
+//! and wall-hug parts, the swim hits and the contact triggers for
 //! [`crate::collision::CollisionWorld::add_helpers`]. Enemies and bosses use
 //! [`crate::collision::EnemyGround`]: they also stand on water surfaces and stop at
 //! enemy-only walls.
@@ -73,6 +73,13 @@ pub const CAMERA: u8 = 4;
 /// `h900100` is the slab under the narrow ledge of wall `h013600`, which has no floor of its own
 /// there in `l` (#189).
 pub const WALL_HUG: u8 = 128;
+/// Hit filter of the swim hit (水泳当たり, group 91): the plane under a swimming body. env 3025,
+/// "is touching the swim hit" (`re/ext/meow_env.txt`), is what the player script swims by, and
+/// touching one runs `FUN_1409ee830` (`FUN_1409edf20`'s case 27), which flags the character
+/// (`chr+0x1a11` bit 7, `chr+0x1a15` bit 4). So deep water is the swim hits' deep-water
+/// triangles, not every triangle with that material: an ordinary part's are ground (group 39 is
+/// solid whatever the material), and in `l` many shore and pool-bed triangles carry it (#189).
+pub const SWIM_FILTER: u8 = 27;
 /// The fall-prevention assist walls (落下防止アシストヒット): group 92 for ground movement and
 /// ground actions, group 93 for ground actions only. No capsule collides with them; the
 /// assist's sphere casts do (groups 94 and 96 meet 92, 95 and 96 meet 93), and only while the
@@ -191,7 +198,8 @@ pub fn fall_assist_walls(arg: i32) -> u8 {
     }
 }
 
-/// [`PLAYER`], [`ENEMY`], [`CAMERA`] and fall-prevention bits for a Havok collision group.
+/// [`PLAYER`], [`ENEMY`], [`CAMERA`], fall-prevention and [`WALL_HUG`] bits for a Havok
+/// collision group.
 pub fn group_mask(group: u8) -> u8 {
     [
         (&PLAYER_GROUPS[..], PLAYER),
@@ -266,9 +274,12 @@ pub fn object_mask(collision_type: u8) -> u8 {
 /// The helper triangles taken out of the player's collision.
 #[derive(Debug, Default, Clone)]
 pub struct HelperCollision {
-    /// Parts only enemies, the camera or the fall-prevention assist collide with, by [`mask`]
-    /// (hit filters 9, 11, 16, 19 and 28).
+    /// Parts only enemies, the camera, the fall-prevention assist or a wall-hugging body
+    /// collide with, by [`mask`] (hit filters 9, 11, 16, 19, 25 and 28).
     pub parts: BTreeMap<u8, CollisionMesh>,
+    /// The swim hits ([`SWIM_FILTER`]): the player and enemies collide with them like ordinary
+    /// collision, except that their deep-water triangles are the water planes bodies swim at.
+    pub swim: CollisionMesh,
     /// Map action event walls by hit filter, each with its part names.
     pub triggers: Vec<Trigger>,
     /// Triangles removed per hit filter, for logs and tests.
@@ -283,11 +294,13 @@ pub struct Trigger {
 }
 
 impl HelperCollision {
-    /// Every helper mesh, for cropping them with the rest of an arena's collision.
+    /// Every helper mesh bodies collide with, for cropping them with the rest of an arena's
+    /// collision. Not the event walls ([`HelperCollision::triggers`]), which an arena keeps or
+    /// drops whole ([`crate::arena`]).
     pub fn meshes_mut(&mut self) -> impl Iterator<Item = &mut CollisionMesh> {
         self.parts
             .values_mut()
-            .chain(self.triggers.iter_mut().map(|t| &mut t.mesh))
+            .chain(std::iter::once(&mut self.swim))
     }
 
     /// Appends another block's helpers.
@@ -295,6 +308,7 @@ impl HelperCollision {
         for (mask, mesh) in other.parts {
             self.parts.entry(mask).or_default().extend(&mesh);
         }
+        self.swim.extend(&other.swim);
         self.triggers.extend(other.triggers);
         for (filter, count) in other.removed {
             *self.removed.entry(filter).or_default() += count;
@@ -310,8 +324,8 @@ pub fn row_filter(row: &Value) -> Option<u8> {
         .and_then(|f| u8::try_from(f).ok())
 }
 
-/// Takes the triangles of every collision part the player does not collide with out of
-/// `mesh`, a map's exported `collision.bin` read with its `layout`. Removed triangles collapse
+/// Takes the triangles of every collision part the player does not collide with, and of the swim
+/// hits, out of `mesh`, a block's collision read with its `layout` rows. Removed triangles collapse
 /// to a point, which [`crate::collision::CollisionWorld`] skips, so every triangle index in the
 /// layout still addresses the same triangle. Triangles outside every part stay, and ones an
 /// earlier step already collapsed (hidden or disabled parts) are not taken.
@@ -322,7 +336,8 @@ pub fn strip_helpers(mesh: &mut CollisionMesh, layout: &Value) -> HelperCollisio
         let Some(filter) = row_filter(row) else {
             continue;
         };
-        if player_collides(filter) {
+        let swim = filter == SWIM_FILTER;
+        if player_collides(filter) && !swim {
             continue;
         }
         let (Some(first), Some(count)) = (
@@ -352,7 +367,9 @@ pub fn strip_helpers(mesh: &mut CollisionMesh, layout: &Value) -> HelperCollisio
             continue;
         }
         let who = mask(filter);
-        if who != 0 {
+        if swim {
+            out.swim.extend(&part);
+        } else if who != 0 {
             out.parts.entry(who).or_default().extend(&part);
         } else if is_event_wall(filter) {
             out.triggers.push(Trigger {
@@ -432,7 +449,7 @@ mod tests {
     /// alone, and m11_01 (the castle) for none (skipped without `cache/raw/event`).
     #[test]
     fn ride_wall_groups_come_from_the_map_events() {
-        let cache = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = crate::cache::root();
         if !cache.join("raw/event/common_func.emevd").is_file() {
             return;
         }

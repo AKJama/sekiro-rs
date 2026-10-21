@@ -256,6 +256,9 @@ pub struct Duel {
     last_safe: Option<([f32; 3], f32)>,
     /// Seconds into the fall return's model fade, after Wolf touched a filter-15 event wall.
     fall_return_fade: Option<f32>,
+    /// The filter-15 wall that started that fade, whose [`HelperEvent`] gets the return; walls
+    /// passed during the fade are only recorded.
+    fall_return_part: Option<String>,
     /// Event wall parts Wolf is in contact with, so one contact is recorded once.
     touching: Vec<String>,
     /// Wolf's contacts with map action event walls (see [`crate::hit_filter`]), oldest first.
@@ -822,6 +825,7 @@ impl Duel {
             fall_materials: load_fall_materials(cache),
             last_safe: None,
             fall_return_fade: None,
+            fall_return_part: None,
             touching: Vec::new(),
             helper_events: Vec::new(),
             boss_brain: None,
@@ -1149,6 +1153,7 @@ impl Duel {
         self.respawn_in = None;
         // A fall return cut short by death must not move the respawned Wolf.
         self.fall_return_fade = None;
+        self.fall_return_part = None;
         self.touching.clear();
         self.defender_dying = 0;
         self.last_throw_def_clip = None;
@@ -2945,6 +2950,7 @@ impl Duel {
             );
             if fall_return {
                 self.fall_return_fade = Some(0.0);
+                self.fall_return_part = Some(contact.part.clone());
             }
             self.touching.push(contact.part.clone());
             self.helper_events.push(HelperEvent {
@@ -2984,9 +2990,12 @@ impl Duel {
                 .last_safe
                 .or_else(|| self.spawn.map(|s| (s[0].position, s[0].yaw)))
                 .unwrap_or((b.position, b.yaw));
+            let started = self.fall_return_part.take();
             if self.fall_return_fade.take().is_some()
                 && let Some(event) = self.helper_events.iter_mut().rev().find(|e| {
-                    e.hit_filter == crate::hit_filter::FALL_RETURN_FILTER && e.returned_to.is_none()
+                    e.hit_filter == crate::hit_filter::FALL_RETURN_FILTER
+                        && e.returned_to.is_none()
+                        && started.as_ref().is_none_or(|part| *part == e.part)
                 })
             {
                 event.returned_to = Some(position);

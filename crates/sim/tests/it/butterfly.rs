@@ -1,5 +1,4 @@
 //! Real-data Butterfly combat and event hand-over, without external controllers.
-use std::path::PathBuf;
 
 use sekiro_sim::arena::{Arena, ArenaSpec};
 use sekiro_sim::duel::Duel;
@@ -137,7 +136,7 @@ fn load() -> Option<Duel> {
 }
 
 fn enter_second_phase(duel: &mut Duel) {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     // Wolf has to enter the map's actual gate region before Lua can request the descent.
     duel.player.body.position = sekiro_sim::events::warp_point(&cache, 10, 0, 1002830)
         .unwrap()
@@ -175,7 +174,7 @@ fn enter_second_phase(duel: &mut Duel) {
 }
 
 fn load_phase(selection: &str) -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     for path in [
         "anim/c5090/tae.json",
         "anim/c1500/tae.json",

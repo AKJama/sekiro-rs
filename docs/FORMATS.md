@@ -323,6 +323,8 @@ Map textures live in `map/mXX/mXX_000N.tpfbhd`, one TPF per texture; `other/mapt
 - The exe gives an ordinary part's `h` body Havok group 38 and its `l` body group 39 or 40; characters and the camera collide only with 39 and 40, so they walk on `l` (`docs/HIT-FILTERS.md`).
   The `h` mesh is what projectile rays, foot IK, ragdolls and debris meet.
 - `sekiro-extract map <id> --lo-collision` (and every full `map` export) writes the `l` binder, placed per MSB collision part like `collision.bin`, to `collision_lo.bin` (#189).
+  It is written whole or not at all: a model that fails to decode fails the `l` export with the models named, and the last `collision_lo.bin` (or, without one, `collision.bin`) stays in use.
+  All nine exported maps decode with no failures.
   `l` has no unset materials: `h` has 116,158 triangles with material `u32::MAX` across the nine exported maps, `l` none.
   In both binders a material id carries the special setting: it is `special * 100 + row`, so `l`'s 721, 722 and 735 are HitMtrlParam rows 21, 22 and 35 (water) with special setting 7, which `h` never uses in these maps.
   The simulation takes the row with `% 100` (`body::hit_mtrl_row`) for fall death, footsteps and water.
@@ -414,8 +416,11 @@ C toggles the collision wireframe, G cycles draw-group modes, M toggles enemy (r
 Code: `crates/sim/src/collision.rs` (`CollisionWorld`), the `Ground` trait in `crates/sim/src/body.rs`, `crates/game/src/play.rs`.
 
 - Characters and the camera collide with `collision_lo.bin` (`crates/sim/src/lo_collision.rs`), with the layout's part ranges re-ranged into it for the story's part removal and the helpers.
-  A block exported before it existed falls back to `collision.bin`, with a log line naming the `--lo-collision` re-export.
-  The `h` mesh stays for drawing: the collision wireframe, draw-group selection and the render sweeps.
+  A block exported before it existed falls back to `collision.bin`, with one log line per block that names the `--lo-collision` re-export when the cache has the raw `l` binder to export it from.
+  `h`'s swim hits carry no water material, so such a block has no swim planes.
+  The draw groups follow the part the player stands on, so the game's map world (`MapWorld::load`) reads the parts from `l` too, each part's range from `collision_lo.bin`, and from `collision.bin` only for a block without one.
+  The `h` mesh stays for drawing: the collision wireframe and the render sweeps.
+  `CollisionWorld::load` reads a collision file as it is, every triangle solid for everyone; a map as characters meet it is `CollisionWorld::load_map`.
 - The collision is bucketed in a 4 m grid on the horizontal plane (2.3 million triangles index in 0.2 s).
 - Floors: the highest surface within 50 degrees of level under the feet, no higher than a step (0.5 m) above them, sampled at the centre and four points 8 cm around it so seams between triangles do not drop the body.
   Tests use `|normal.y|` and a vertical line, so the inconsistent winding of the collision (and the X mirror) does not matter.

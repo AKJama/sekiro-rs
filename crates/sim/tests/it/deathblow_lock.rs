@@ -1,5 +1,4 @@
 //! End-user deathblow reproductions using the extracted Owl and castle roof.
-use std::path::PathBuf;
 
 use glam::Vec3;
 use sekiro_sim::arena::{Arena, ArenaSpec, yaw_toward};
@@ -11,7 +10,7 @@ use sekiro_sim::{Buttons, InputFrame};
 const DT: f32 = 1.0 / 60.0;
 
 fn load(map: bool) -> Option<(Duel, Option<Arena>)> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c5060/tae.json").is_file()
         || !cache.join("raw/script/m11_01_00_00.luabnd.d").is_dir()
         || (map && !cache.join("maps/m11_01_00_00/collision.bin").is_file())

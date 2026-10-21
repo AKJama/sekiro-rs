@@ -158,11 +158,6 @@ pub struct PartRange {
     pub count: u32,
 }
 
-/// `fall_assist.bin` ([`PartCollision`]).
-pub type FallAssistCollision = PartCollision;
-/// One collision part's walls in a [`FallAssistCollision`].
-pub type FallAssistPart = PartRange;
-
 impl PartCollision {
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         postcard::to_stdvec(self).map_err(|e| crate::Error::Format(e.to_string()))

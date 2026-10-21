@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use sekiro_sim::{
     Buttons, InputFrame,
     arena::{Arena, ArenaSpec},
@@ -10,7 +8,7 @@ use sekiro_sim::{
 const DT: f32 = 1.0 / 60.0;
 
 fn load() -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     for path in [
         "anim/c5000/tae.json",
         "anim/c0000/tae.json",

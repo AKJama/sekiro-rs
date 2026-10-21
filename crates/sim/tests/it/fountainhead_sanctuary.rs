@@ -9,7 +9,7 @@ fn arena_d_fountainhead_sanctuary() {
         arena.spec.story_time(&duel.spec),
         sekiro_sim::story::StoryTime::Afternoon
     );
-    let cache = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     let dragon = sekiro_sim::enemy::EnemySpec::from_cache(&cache, "c5200:52000000").unwrap();
     assert_eq!(
         arena.spec.story_time(&dragon),

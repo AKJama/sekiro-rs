@@ -76,7 +76,7 @@ First traced for the grapple pine in draft PR #33 (#17); the map-wall part is ap
 What the simulation does:
 
 - `hit_filter::mask` gives filter 28 the `FALL_ASSIST_MOVE` bit and `object_mask` gives types 6 and 11 `FALL_ASSIST_MOVE` and `FALL_ASSIST_ACTION`; they join the world as helpers no capsule, ray or floor query sees.
-- `sekiro-extract map <block> --fall-assist` (and every full `map` export) writes the `f` binder's walls, placed, to `maps/<block>/fall_assist.bin` (`hknp::FallAssistCollision`, one triangle range per collision part).
+- `sekiro-extract map <block> --fall-assist` (and every full `map` export) writes the `f` binder's walls, placed, to `maps/<block>/fall_assist.bin` (`hknp::PartCollision`, one triangle range per collision part).
   `CollisionWorld::load_map` and the game's `collision_world` add them as `FALL_ASSIST_MOVE` helpers, skipping parts the story switches off; arenas do not load them yet.
   A block without the binder has no walls, so the export removes an old `fall_assist.bin`; a failed write is a warning that leaves the rest of the export and the last good file whole.
   The game asks for a re-export only for a block whose binder is in `cache/raw` but whose `fall_assist.bin` is missing.
