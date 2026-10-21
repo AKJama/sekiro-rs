@@ -206,6 +206,24 @@ The XML layout gives sprite rectangles, without movie animation instructions, so
 MENU_Wire_01 frames the ready MENU_Wire_Marker disc; non-rideable targets show the ring with MENU_Wire_Cursor instead.
 The approximately 49 px outer diameter at 1440p and dot size are fitted to the supplied retail captures; the native FE movie's reveal curve, glow and transition timing remain approximations.
 
+## Grapple target search, issue #178
+
+The hook search follows the exe's `WireActionTargetMng` rule (see [MOBILITY.md](MOBILITY.md#46-how-the-game-picks-the-hook-issue-178)): camera back filter (75 degrees, 135 locked on), distance bands with each variation's extension added to both the usable and the shown distance, 0.8 m front plane, view box, survivors sorted usable first then nearest the screen centre with the sight ray cast down that order until one is clear, and soft lock.
+These parts are approximations:
+
+- `WireVariationParam` recognition angles are not applied, and `wire::Variation` does not read them: the game measures them against each edge's own direction, and `grapple.json` does not carry it.
+  Most rows allow 90 or 180 degrees, so this mostly matters for the kite row 41 (90 up, 50 down, 30 left, 10 right) and rows 50200 to 50202.
+  Reading them back needs the edge direction in the extracted points first.
+- The hook is a point, not the game's 4 cm edge segment, so closest points and ranking use that point.
+- The obstacle ray is our chest ray from 1.2 m above the feet; the exe's ray (0x140efba50) was not traced in detail.
+- `RaycastElevationDeg` is taken as 0, its value when the config is not set; the elevation therefore does not tilt the check ray.
+- The soft lock holds only a usable (Ready) hook; a hook that drops to Distant is searched for again, our reading of the "re-search when leaving the action range" switch.
+- The search's camera is the simulation's own reconstruction of the follow camera, not the exe's camera matrix (character +0x1190).
+  It orbits a focus `CameraDirector::focus_height` above Wolf's feet at `CameraDirector::distance`, at the step's `InputFrame::camera_yaw` and `camera_pitch`, pulled in front of walls by the same camera ray and margins as the camera on screen (`camera::wall_pulled_distance`).
+  The camera on screen differs from it in two ways the simulation leaves out so that runs replay the same at any frame rate: its focus chases Wolf at the LockCamParam chase rates and is drawn between steps (overstep interpolation), and in deathblows it chases Wolf's camera dummy (TAE 151).
+  The difference grows with Wolf's speed, since the focus on screen lags him, and is largest in deathblows; standing still the two cameras agree.
+  The camera's yaw and pitch are themselves the orbit's last-frame values, as for the movement stick.
+
 ## Goods Storage and restock, issue #186
 
 Goods over their EquipParamGoods `maxNum` go to the Storage only on `isDeposit` 1 rows, up to `maxRepositoryNum`; the rest is lost, as for the Healing Gourd and most key items.

@@ -754,7 +754,12 @@ impl Character {
         self.behavior
             .runtime
             .set_variable("ContactWallAngle", wall.unwrap_or(0.0));
-        self.wire.search(&self.body, frame.camera_yaw);
+        self.wire.search(
+            &self.body,
+            frame.camera_yaw,
+            frame.camera_pitch,
+            self.lock_target.is_some(),
+        );
         self.behavior.env.wire_candidate = self.wire.can_fire();
         let wire_target = if frame.buttons.grapple {
             self.wire.candidate.as_ref()

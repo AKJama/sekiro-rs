@@ -115,7 +115,7 @@ fn divine_dragon_old_dragons_sword_replay_reaches_native_handover() {
 }
 
 fn cache() -> Option<PathBuf> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = crate::movement_helpers::cache()?;
     for path in [
         "anim/c5200/tae.json",
         "anim/c5300/tae.json",
@@ -170,9 +170,13 @@ fn divine_dragon_retry_runs_its_lua_and_authored_bullets() {
             .and_then(|p| p.position)
         {
             wire_points += 1;
-            let v =
-                glam::Vec3::from_array(point) - glam::Vec3::from_array(duel.player.body.position);
+            // Aim the camera at the tree's hook as a player does: turned to it and pitched so
+            // it sits at the centre of the screen (the search only sees hooks in view).
+            let focus = glam::Vec3::from_array(duel.player.body.position)
+                + glam::Vec3::Y * duel.player.wire.rig.focus_height;
+            let v = glam::Vec3::from_array(point) - focus;
             input.camera_yaw = (-v.x).atan2(-v.z);
+            input.camera_pitch = -v.y.atan2(v.x.hypot(v.z));
             input.buttons.grapple = tick % 40 < 3;
         }
         input.buttons.attack = duel.player.tae_frame().sp_effects.contains(&9495);

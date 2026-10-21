@@ -796,6 +796,7 @@ pub(super) fn take_mark_with_ai(duel: &mut Duel, enemy_active: bool) {
             // Follow the boss after contact stops Wolf rather than shoving the pair.
             move_stick: [0.0, if !broke && !started { 0.3 } else { 0.0 }],
             camera_yaw: duel.player.yaw_to(duel.enemy.body.position),
+            camera_pitch: 0.0,
             buttons: sekiro_sim::Buttons {
                 attack: if broke {
                     !started && i % 10 == 0

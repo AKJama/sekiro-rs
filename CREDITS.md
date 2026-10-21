@@ -36,6 +36,7 @@ From [FFwLo/RustSekiro](https://github.com/FFwLo/RustSekiro), under the MIT lice
 - Map shaders and materials: layered shader families, samplers, material constants and vertex blending.
 - Combat and camera: deathblow camera, perilous HUD, sweep and kick-off rules, Mikiri, parry posture and throw selection.
 - Effects: FXR runtime, particle batching, blood, decals, distortion and point lights.
+- Grappling: the camera-view hook search with its soft lock (RustSekiro commit 292655ca24e4438a959770a86b97baedf9584382, `grapple_target`), with the box checked against our own exe trace.
 - Cloth: simulation solver, collisions, deformation and the traced bend-stiffness formula.
 - Character materials: texture interpretation and cutouts, adapted into exported glTF metallic-roughness textures.
 

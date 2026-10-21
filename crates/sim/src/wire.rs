@@ -4,7 +4,7 @@ use crate::{
     collision::CollisionWorld,
     input::angle_diff,
 };
-use glam::Vec3;
+use glam::{EulerRot, Quat, Vec3};
 use serde::Deserialize;
 use std::{collections::HashMap, path::Path};
 
@@ -21,17 +21,25 @@ pub struct Search {
     pub action_distance_near: f32,
     pub action_distance_far: f32,
     pub find_distance_far: f32,
+    /// The view box hooks must project into: metres above and below the camera's axis and to
+    /// each side of it, at [`VIEW_BOX_DEPTH`] in front of the camera.
+    pub filtering_distance_height_upper: f32,
+    pub filtering_distance_height_lower: f32,
+    pub filtering_distance_width: f32,
+    /// The narrower box a marked hook stays marked in (its soft lock).
+    pub softlock_distance_height_upper: f32,
+    pub softlock_distance_height_lower: f32,
+    pub softlock_distance_width: f32,
 }
+/// The `WireVariationParam` fields the runtime uses. Its `recognitionAngle*` limits are not
+/// read: the game tests them against each edge's own direction, which `grapple.json` does not
+/// carry (docs/FIDELITY.md, "Grapple target search").
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Variation {
     pub id: u32,
     pub target_marker_type: u8,
     pub extend_wire_action_distance: f32,
-    pub recognition_angle_up: f32,
-    pub recognition_angle_down: f32,
-    pub recognition_angle_left: f32,
-    pub recognition_angle_right: f32,
     pub chr_physics_homing_id_offset: u32,
 }
 #[derive(Debug, Clone)]
@@ -50,24 +58,91 @@ pub enum MarkerState {
     Ready,
 }
 impl Search {
+    /// The marker state of a hook `distance` metres from Wolf whose variation extends the
+    /// wire's reach by `extension`: the game adds the extension to both the usable and the
+    /// shown distance (docs/MOBILITY.md section 4.6), so a kite row with 30 m is usable to 45 m
+    /// and shown to 55 m.
     pub fn marker_state(&self, distance: f32, extension: f32) -> MarkerState {
-        if !distance.is_finite()
-            || distance < self.action_distance_near
-            || distance > self.find_distance_far
-        {
+        let action_far = self.action_distance_far + extension;
+        let find_far = self.find_distance_far + extension;
+        if !distance.is_finite() || distance < self.action_distance_near || distance > find_far {
             return MarkerState::Hidden;
         }
-        let action_far = self.action_distance_far + extension;
         if distance <= action_far {
             MarkerState::Ready
         } else {
             MarkerState::Distant {
-                fill: ((self.find_distance_far - distance) / (self.find_distance_far - action_far))
-                    .clamp(0.0, 1.0),
+                fill: ((find_far - distance) / (find_far - action_far)).clamp(0.0, 1.0),
             }
         }
     }
 }
+/// The search's check ray starts this far in front of the camera (m); a hook must lie beyond
+/// the plane through that start (`WireActionTargetMng`, 1.6.0.0 0x14328917c).
+pub const CHECK_RAY_START: f32 = 0.8;
+/// How far beyond [`CHECK_RAY_START`] the view box sits (m): the manager's default view
+/// filtering distance (field +0xb4, debug menu built at 0x140efccc0).
+pub const VIEW_FILTER_DISTANCE: f32 = 15.0;
+/// The view box's distance in front of the camera (m).
+pub const VIEW_BOX_DEPTH: f32 = CHECK_RAY_START + VIEW_FILTER_DISTANCE;
+/// The player back filter (degrees): a hook more than 180 minus this from the camera's
+/// horizontal look direction, seen from Wolf, is skipped (field +0x148, 105 by default).
+pub const BACK_FILTER_ANGLE: f32 = 105.0;
+/// [`BACK_FILTER_ANGLE`] while locked on (field +0x14c): hooks up to 135 degrees from the
+/// camera's look direction, seen from Wolf, pass.
+pub const BACK_FILTER_ANGLE_LOCKED: f32 = 45.0;
+
+/// The camera the hook search looks through.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WireCamera {
+    pub position: Vec3,
+    /// Unit look direction.
+    pub forward: Vec3,
+}
+impl WireCamera {
+    /// The orbit camera at `distance` behind `focus`, turned to `yaw` (looking along
+    /// `rotate_y(yaw) * -Z`) and pitched down by `pitch` radians.
+    pub fn orbit(focus: Vec3, yaw: f32, pitch: f32, distance: f32) -> Self {
+        let forward = Quat::from_euler(EulerRot::YXZ, yaw, -pitch, 0.0) * Vec3::NEG_Z;
+        Self {
+            position: focus - forward * distance,
+            forward,
+        }
+    }
+    /// The camera's up axis: square to its look direction, with right along the horizon.
+    pub fn up(&self) -> Option<Vec3> {
+        let right = self.forward.cross(Vec3::Y).try_normalize()?;
+        Some(right.cross(self.forward))
+    }
+    /// Where `point` sits in this camera's view: (right, up, depth), with right taken along
+    /// the horizon as the game's view box is.
+    fn view(&self, point: Vec3) -> Option<(f32, f32, f32)> {
+        let up = self.up()?;
+        let right = self.forward.cross(up);
+        let d = point - self.position;
+        Some((d.dot(right), d.dot(up), d.dot(self.forward)))
+    }
+}
+
+/// The follow camera's rig as the simulation knows it: how high above Wolf's feet it looks and
+/// how far back it sits before walls pull it in. The duel copies the camera director's values
+/// in each step, so the hook search, the camera on screen and replays all use the same ones.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CameraRig {
+    pub focus_height: f32,
+    pub distance: f32,
+}
+impl Default for CameraRig {
+    /// LockCamParam row 0's defaults: 4.5 m from a focus 1.5 m above the feet.
+    fn default() -> Self {
+        let p = crate::camera::CameraParams::default();
+        Self {
+            focus_height: p.chr_org_offset_y,
+            distance: p.cam_dist,
+        }
+    }
+}
+
 /// Height above the feet the hook search's sight ray starts at (m). Not traced.
 pub const SIGHT_LIFT: f32 = 1.2;
 /// How far short of the hook the sight ray stops (m), so the hook's own mesh does not block
@@ -84,8 +159,9 @@ pub fn sight_ray(chest: Vec3, point: Vec3) -> (Vec3, f32) {
 
 #[derive(Default)]
 pub struct Wire {
-    /// Camera downward pitch, radians; headless callers use the body's horizontal view.
-    pub view_pitch: f32,
+    /// The follow camera's rig the hook search builds its camera from (see
+    /// [`Self::search_camera`]).
+    pub rig: CameraRig,
     pub points: Vec<Point>,
     pub search: Option<Search>,
     pub variations: HashMap<u32, Variation>,
@@ -158,63 +234,125 @@ impl Wire {
             ..Self::default()
         })
     }
-    pub fn search(&mut self, body: &Body, camera_yaw: f32) {
+    /// The camera the hook search looks through: the follow camera orbiting [`Self::rig`]'s
+    /// focus above Wolf's feet at the step's camera yaw and pitch (radians, down positive),
+    /// pulled in front of walls as the camera on screen is. It is built from the step's input
+    /// and the simulation's own state only, so runs replay the same at any frame rate.
+    pub fn search_camera(&self, body: &Body, camera_yaw: f32, camera_pitch: f32) -> WireCamera {
+        let focus = Vec3::from(body.position) + Vec3::Y * self.rig.focus_height;
+        let full = WireCamera::orbit(focus, camera_yaw, camera_pitch, self.rig.distance);
+        let distance = self.collision.as_ref().map_or(self.rig.distance, |w| {
+            crate::camera::wall_pulled_distance(w, focus, -full.forward, self.rig.distance)
+        });
+        WireCamera::orbit(focus, camera_yaw, camera_pitch, distance)
+    }
+
+    /// The game's hook search (`WireActionTargetMng`, docs/MOBILITY.md section 4.6): only
+    /// hooks in front of the camera and inside its view box are seen, the one nearest the
+    /// centre of the screen is marked, and the marked hook is the one the wire fires at.
+    /// `camera_yaw` and `camera_pitch` are the step's camera ([`crate::InputFrame`]);
+    /// `locked_on` widens the back filter as the game does while locked on.
+    pub fn search(&mut self, body: &Body, camera_yaw: f32, camera_pitch: f32, locked_on: bool) {
+        let held = self
+            .preview
+            .as_ref()
+            .filter(|t| t.state == MarkerState::Ready)
+            .map(|t| t.index);
         self.candidate = None;
         self.preview = None;
         let Some(s) = &self.search else { return };
+        let camera = self.search_camera(body, camera_yaw, camera_pitch);
         let origin = Vec3::from(body.position);
         let chest = origin + Vec3::Y * SIGHT_LIFT;
-        let mut best = (true, f32::INFINITY, f32::INFINITY);
-        for (index, p) in self.points.iter().enumerate() {
-            if self.active.as_ref().is_some_and(|t| t.index == index) {
-                continue;
-            }
-            let Some(v) = self.variations.get(&p.variation) else {
-                continue;
-            };
-            let Some(position) = p.position else { continue };
-            let point = Vec3::from(position);
+        let look = Vec3::new(camera.forward.x, 0.0, camera.forward.z).normalize_or_zero();
+        let back_angle = if locked_on {
+            BACK_FILTER_ANGLE_LOCKED
+        } else {
+            BACK_FILTER_ANGLE
+        };
+        let back_cos = (180.0 - back_angle).to_radians().cos();
+        // A hook the camera can see inside a box (half width, above, below; metres at
+        // VIEW_BOX_DEPTH): its state and its distance from the screen centre, as tangents of
+        // the view angles, which rank as the game's screen distance does.
+        let seen = |index: usize, (width, upper, lower): (f32, f32, f32)| {
+            let p = self.points.get(index)?;
+            let v = self.variations.get(&p.variation)?;
+            let point = Vec3::from(p.position?);
             let delta = point - origin;
-            let distance = delta.length();
-            let state = s.marker_state(distance, v.extend_wire_action_distance);
+            let state = s.marker_state(delta.length(), v.extend_wire_action_distance);
             if state == MarkerState::Hidden {
-                continue;
+                return None;
             }
-            let yaw = (-delta.x).atan2(-delta.z);
-            let horizontal = angle_diff(yaw, camera_yaw).to_degrees();
-            let vertical = (delta.y.atan2(delta.x.hypot(delta.z)) + self.view_pitch).to_degrees();
-            if horizontal > v.recognition_angle_left
-                || -horizontal > v.recognition_angle_right
-                || vertical > v.recognition_angle_up
-                || -vertical > v.recognition_angle_down
+            // The player back filter: horizontally, from Wolf, within 75 degrees (135 locked
+            // on) of the camera's look direction; skipped straight above or below Wolf.
+            if Vec3::new(delta.x, 0.0, delta.z)
+                .try_normalize()
+                .is_some_and(|flat| flat.dot(look) < back_cos)
             {
-                continue;
+                return None;
             }
-            // Preserve selection among usable hooks; preview distant hooks when none can fire.
-            // Screen boxes are not reconstructed: rank by view-centre angle, then distance.
-            let score = (
-                state != MarkerState::Ready,
-                horizontal.hypot(vertical),
-                distance,
-            );
-            if score >= best {
-                continue;
+            // In front of the check ray's start and inside the box.
+            let (x, y, z) = camera.view(point)?;
+            if z <= CHECK_RAY_START {
+                return None;
             }
-            // The sight ray last: only a hook that would win needs it.
+            let (x, y) = (x / z, y / z);
+            if x.abs() > width / VIEW_BOX_DEPTH
+                || y > upper / VIEW_BOX_DEPTH
+                || -y > lower / VIEW_BOX_DEPTH
+            {
+                return None;
+            }
+            Some((state, x.hypot(y), point, v))
+        };
+        let clear = |point: Vec3| {
             let (dir, length) = sight_ray(chest, point);
-            if self
+            !self
                 .collision
                 .as_ref()
                 .is_some_and(|w| w.raycast(chest, dir, length).is_some())
-            {
-                continue;
-            }
-            best = score;
+        };
+        // The soft lock: a marked, usable hook stays marked while it stays usable, unblocked
+        // and inside the narrower soft-lock box, even when another hook is nearer the centre.
+        let softlock = (
+            s.softlock_distance_width,
+            s.softlock_distance_height_upper,
+            s.softlock_distance_height_lower,
+        );
+        let mut chosen = held
+            .filter(|&i| self.active.as_ref().is_none_or(|t| t.index != i))
+            .and_then(|i| seen(i, softlock).map(|hook| (i, hook)))
+            .filter(|(_, (state, _, point, _))| *state == MarkerState::Ready && clear(*point));
+        if chosen.is_none() {
+            let filter = (
+                s.filtering_distance_width,
+                s.filtering_distance_height_upper,
+                s.filtering_distance_height_lower,
+            );
+            let mut seen_hooks: Vec<_> = (0..self.points.len())
+                .filter(|&i| self.active.as_ref().is_none_or(|t| t.index != i))
+                .filter_map(|i| seen(i, filter).map(|hook| (i, hook)))
+                .collect();
+            // Usable hooks first, then nearest the screen centre (comparator 0x140efeb60), then
+            // nearest Wolf; the first in that order with a clear sight ray is marked, so rays
+            // are cast only until one is clear, as the game does.
+            seen_hooks.sort_by(|(_, (a, ac, ap, _)), (_, (b, bc, bp, _))| {
+                (*a != MarkerState::Ready)
+                    .cmp(&(*b != MarkerState::Ready))
+                    .then(ac.total_cmp(bc))
+                    .then(ap.distance(origin).total_cmp(&bp.distance(origin)))
+            });
+            chosen = seen_hooks
+                .into_iter()
+                .find(|(_, (_, _, point, _))| clear(*point));
+        }
+        if let Some((index, (state, _, point, v))) = chosen {
             let offset = self
                 .offsets
                 .get(&(300000000 + v.chr_physics_homing_id_offset))
                 .copied()
                 .unwrap_or_default();
+            let delta = point - origin;
             let forward = Vec3::new(delta.x, 0.0, delta.z).normalize_or_zero();
             let right = Vec3::new(-forward.z, 0.0, forward.x);
             self.preview = Some(Target {
@@ -225,6 +363,7 @@ impl Wire {
                 rideable: v.target_marker_type == 0,
             });
         }
+        // The marker and the pull are one selection: only the marked hook can be fired at.
         self.candidate = self
             .preview
             .as_ref()

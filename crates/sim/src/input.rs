@@ -80,6 +80,9 @@ pub struct InputFrame {
     pub move_stick: [f32; 2],
     /// Camera yaw in radians: the camera looks along `rotate_y(camera_yaw) * -Z`.
     pub camera_yaw: f32,
+    /// Camera pitch in radians, down positive (0 looks level): with `camera_yaw`, the orbit the
+    /// hook search looks through (`wire::Wire::search_camera`).
+    pub camera_pitch: f32,
     pub buttons: Buttons,
 }
 

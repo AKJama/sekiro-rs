@@ -41,6 +41,7 @@ fn jump(wolf: &mut Character, move_stick: [f32; 2], camera_yaw: f32, ticks: u32)
         let input = InputFrame {
             move_stick,
             camera_yaw,
+            camera_pitch: 0.0,
             buttons: Buttons {
                 jump: i < 3,
                 ..Buttons::default()

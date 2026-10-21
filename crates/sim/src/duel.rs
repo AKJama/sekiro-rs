@@ -3203,6 +3203,15 @@ impl Duel {
     }
 
     pub fn step(&mut self, input: &InputFrame, dt: f32) -> DuelReport {
+        // The hook search looks through the follow camera as the director left it last step,
+        // as the camera on screen does. A duel sharing the player's frame (a cast actor) does
+        // not own the camera, so it leaves the rig alone.
+        if !self.shared_player_frame {
+            self.player.wire.rig = crate::wire::CameraRig {
+                focus_height: self.camera_director.focus_height,
+                distance: self.camera_director.distance,
+            };
+        }
         let held = self.idol_input(input, dt);
         let input = held.as_ref().unwrap_or(input);
         if self.population.is_some() {
