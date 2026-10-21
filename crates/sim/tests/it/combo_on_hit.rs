@@ -1,7 +1,6 @@
 //! Reproduction of Wolf restarting his first slash on contact with a passive Owl.
 
 use std::fmt::Write;
-use std::path::PathBuf;
 
 use sekiro_sim::duel::Duel;
 use sekiro_sim::enemy::EnemySpec;
@@ -27,7 +26,7 @@ struct Run {
 }
 
 fn run(distance: f32) -> Option<Run> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c5060/tae.json").exists()
         || !cache.join("raw/script/m11_01_00_00.luabnd.d").is_dir()
     {
@@ -214,7 +213,7 @@ fn combo_on_owl_timing_matches_air() {
 /// 200250 from the guard reactions) and so his chance to deflect.
 #[test]
 fn owl_blocks_mashed_slashes_with_guard_reactions() {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c5060/tae.json").exists()
         || !cache.join("raw/script/m11_01_00_00.luabnd.d").is_dir()
     {
@@ -296,7 +295,7 @@ fn owl_blocks_mashed_slashes_with_guard_reactions() {
 
 #[test]
 fn soldier_guards_mashed_slashes() {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c1010/tae.json").exists() {
         return;
     }

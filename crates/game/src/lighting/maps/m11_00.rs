@@ -22,11 +22,11 @@ mod tests {
     use crate::lighting::LightSet;
     use crate::lighting_selection::{RegionSelection, select};
     use sekiro_formats::{gparam, msb};
-    use std::{collections::BTreeSet, path::Path};
+    use std::collections::BTreeSet;
 
     #[test]
     fn installed_outskirts_states_regions_and_arenas() {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let layout =
             msb::parse(&std::fs::read(cache.join("raw/map/mapstudio/m11_00_00_00.msb")).unwrap())
                 .unwrap();

@@ -65,7 +65,7 @@ fn single_phase_deathblow_and_player_death_record_opposite_winners() {
 }
 
 fn load(distance: f32) -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c1010/tae.json").exists()
         || !cache.join("raw/script/m11_00_00_00.luabnd.d").is_dir()
     {

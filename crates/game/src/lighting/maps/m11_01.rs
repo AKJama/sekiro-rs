@@ -23,12 +23,12 @@ pub const PROFILE: &str = r#"
 mod tests {
     use crate::{lighting::LightSet, lighting_selection};
     use sekiro_formats::{emedf, gparam, msb};
-    use std::{collections::BTreeSet, path::Path};
+    use std::collections::BTreeSet;
 
     /// Snow deposits belong to the native roof, while tatami's static facet excludes snow.
     #[test]
     fn genichiro_settled_snow_selection() {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let arena = sekiro_sim::arena::ArenaSpec::by_name("genichiro").unwrap();
         let selected = lighting_selection::select(&cache, arena.map, None, Some(arena)).unwrap();
         assert_eq!(
@@ -127,7 +127,7 @@ mod tests {
     /// Validate native Castle event selection and inspect the actual renderer conversion.
     #[test]
     fn castle_installed_story_lighting() {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let map = "m11_01_00_00";
         let layout =
             msb::parse(&std::fs::read(cache.join(format!("raw/map/mapstudio/{map}.msb"))).unwrap())

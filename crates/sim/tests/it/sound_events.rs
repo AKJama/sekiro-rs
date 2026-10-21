@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use sekiro_sim::tae::{TaeDb, TaeKind, sound_name};
 
 fn cache() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache")
+    sekiro_sim::cache::root()
 }
 
 fn known_events() -> HashSet<String> {

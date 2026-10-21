@@ -9,8 +9,7 @@ use sekiro_sim::{
 use std::path::PathBuf;
 
 fn cache() -> PathBuf {
-    crate::movement_helpers::cache()
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache"))
+    sekiro_sim::cache::root()
 }
 fn synthetic(distance: f32) -> Wire {
     let mut wire = Wire::default();
@@ -338,7 +337,7 @@ fn castle_shachi_clear_approach_and_blocked_original_spawn() {
     ] {
         let mut duel = Duel::load(&cache(), 4.0).unwrap();
         duel.enemy_active = false;
-        duel.player.ground = Box::new(CollisionWorld::load(&dir.join("collision.bin")).unwrap());
+        duel.player.ground = Box::new(CollisionWorld::load_map(&dir).unwrap());
         duel.player.wire = Wire::load(&cache(), &dir).unwrap();
         duel.player.body = Body {
             position,
@@ -529,7 +528,7 @@ fn castle_roof_chain_route() {
     let Some(mut duel) = synthetic_duel() else {
         return;
     };
-    duel.player.ground = Box::new(CollisionWorld::load(&dir.join("collision.bin")).unwrap());
+    duel.player.ground = Box::new(CollisionWorld::load_map(&dir).unwrap());
     duel.player.wire = Wire::load(&cache(), &dir).unwrap();
     duel.player.body = Body {
         position: [104.03038, 53.234768, 254.9751],

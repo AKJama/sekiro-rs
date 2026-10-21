@@ -710,7 +710,7 @@ mod tests {
     use super::*;
 
     fn sky_app() -> App {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let id = "m11_01_00_00";
         let initial = crate::lighting_selection::select(&cache, id, None, None).unwrap();
         let story =
@@ -815,7 +815,7 @@ mod tests {
     #[test]
     fn event_sky_keeps_its_native_painted_horizon_companion() {
         let mut app = sky_app();
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let json: Value = serde_json::from_slice(
             &std::fs::read(cache.join("maps/m89_00_00_99/sky.json")).unwrap(),
         )
@@ -867,7 +867,7 @@ mod tests {
     fn native_group_mapping_keeps_all_exported_domes() {
         let app = sky_app();
         let library = app.world().resource::<Library>();
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let msb = sekiro_formats::msb::parse(
             &std::fs::read(cache.join("raw/map/mapstudio/m89_00_00_99.msb")).unwrap(),
         )
@@ -977,7 +977,7 @@ mod tests {
     #[test]
     fn native_common_event_and_msb_agree_on_selected_groups() {
         use sekiro_formats::{emevd::Emevd, msb};
-        let raw = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/raw");
+        let raw = sekiro_sim::cache::root().join("raw");
         let Ok(bytes) = std::fs::read(raw.join("event/common.emevd")) else {
             return;
         };
@@ -1028,7 +1028,7 @@ mod tests {
     }
     #[test]
     fn library_meshes_and_material_inputs_are_valid() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/maps/m89_00_00_99");
+        let dir = sekiro_sim::cache::root().join("maps/m89_00_00_99");
         let Ok(bytes) = std::fs::read(dir.join("sky.json")) else {
             return;
         };

@@ -5,8 +5,6 @@
 //! his AI then picks its phase-2 acts; only the second deathblow ends the fight. Skips when
 //! `cache/` lacks the Owl or the event script.
 
-use std::path::PathBuf;
-
 use sekiro_sim::duel::{Duel, DuelReport};
 use sekiro_sim::enemy::EnemySpec;
 use sekiro_sim::lua_ai::AiEvent;
@@ -24,7 +22,7 @@ const PHASE_2_SEEN: i32 = 11_110_860;
 const DEFEATED: i32 = 9308;
 
 fn load(distance: f32) -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c5060/tae.json").exists()
         || !cache.join("raw/script/m11_01_00_00.luabnd.d").is_dir()
         || !cache.join("raw/event/m11_01_00_00.emevd").is_file()

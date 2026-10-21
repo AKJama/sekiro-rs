@@ -16,11 +16,11 @@ mod tests {
     use crate::lighting::{LightSet, fog::GameFog};
     use crate::lighting_selection::{RegionSelection, select};
     use sekiro_formats::{emedf, emevd::Emevd, gparam, msb};
-    use std::{collections::BTreeSet, path::Path};
+    use std::collections::BTreeSet;
 
     #[test]
     fn hirata_installed_memory_states_regions_and_arenas() {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let map = "m10_00_00_00";
         let events =
             Emevd::parse(&std::fs::read(cache.join(format!("raw/event/{map}.emevd"))).unwrap())

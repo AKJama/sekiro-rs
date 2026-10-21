@@ -20,11 +20,11 @@ mod tests {
     use super::super::{RegionSelection, select};
     use crate::lighting::{LightSet, fog::GameFog};
     use sekiro_formats::{gparam, msb};
-    use std::{collections::BTreeSet, path::Path};
+    use std::collections::BTreeSet;
 
     #[test]
     fn depths_installed_story_and_region_lighting() {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let events = sekiro_formats::emevd::Emevd::parse(
             &std::fs::read(cache.join("raw/event/m15_00_00_00.emevd")).unwrap(),
         )

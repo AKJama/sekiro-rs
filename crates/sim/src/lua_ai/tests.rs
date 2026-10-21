@@ -10,7 +10,7 @@ use super::runtime::AiEvent;
 use super::{AiActor, AiBrain, AiWorld, ThinkParams};
 
 fn cache() -> Option<PathBuf> {
-    let c = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let c = crate::cache::root();
     c.join("raw/script/aicommon.luabnd.d").is_dir().then_some(c)
 }
 

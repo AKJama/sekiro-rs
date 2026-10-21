@@ -5,7 +5,6 @@
 //! before an attack. Skips when `cache/` lacks him.
 
 use std::cell::RefCell;
-use std::path::PathBuf;
 use std::rc::Rc;
 
 use sekiro_sim::InputFrame;
@@ -144,7 +143,7 @@ fn slow_call_serializes_post_review() {
 }
 
 fn load(distance: f32) -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c1010/tae.json").exists()
         || !cache.join("raw/script/m11_00_00_00.luabnd.d").is_dir()
     {

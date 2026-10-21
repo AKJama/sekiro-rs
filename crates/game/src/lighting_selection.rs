@@ -655,7 +655,7 @@ fn tick_map_events(
 mod tests {
     use super::*;
     fn cache() -> std::path::PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache")
+        sekiro_sim::cache::root()
     }
     #[test]
     fn reference_progression_uses_installed_boss_and_clock_events() {

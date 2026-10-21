@@ -2,13 +2,12 @@
 //! take off (as in the game). Skips when `cache/` has not been extracted.
 
 use sekiro_sim::{Buttons, Character, InputFrame};
-use std::path::PathBuf;
 
 const DT: f32 = 1.0 / 60.0;
 
 #[test]
 fn running_jump_takes_off_with_the_stick_held() {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("raw/chr/c0000.behbnd.d/c0000.hkx").exists() {
         return;
     }

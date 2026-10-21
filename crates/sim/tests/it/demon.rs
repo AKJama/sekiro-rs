@@ -16,7 +16,7 @@ use sekiro_sim::{Buttons, InputFrame};
 const DT: f32 = 1.0 / 60.0;
 
 fn cache() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache")
+    sekiro_sim::cache::root()
 }
 
 fn load() -> Option<(Arena, Duel)> {

@@ -325,9 +325,12 @@ pub fn tae_cues(actor: usize, ch: &Character, armour: [i32; 2]) -> Vec<SoundCue>
         return Vec::new();
     }
     let [x, y, z] = ch.body.position;
+    // The HitMtrlParam row, without the material's special setting: a rideable tree trunk (808)
+    // sounds as wood (8).
     let floor = ch
         .ground
         .material(x, z, y + 0.5)
+        .and_then(crate::body::hit_mtrl_row)
         .unwrap_or(DEFAULT_FLOOR_MATERIAL);
     sounds
         .iter()

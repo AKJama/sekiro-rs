@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn hanging_blind_fades_without_adding_decoration_to_camera_collision() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/maps/m11_01_00_00");
+        let dir = sekiro_sim::cache::root().join("maps/m11_01_00_00");
         let mut fade = CameraFade::load(&dir, true);
         let wood = fade.material("m0 blind | M[Translucency]_e");
         assert_eq!(wood.x, 1.);
@@ -137,8 +137,7 @@ mod tests {
             let coverage = (distance * wood.z - wood.y).clamp(0., 1.);
             assert!((coverage - expected).abs() < 1e-5);
         }
-        let world =
-            sekiro_sim::collision::CollisionWorld::load(&dir.join("collision.bin")).unwrap();
+        let world = sekiro_sim::collision::CollisionWorld::load_map(&dir).unwrap();
         let focus = Vec3::new(
             102.35,
             world.floor(102.35, 239.8, 55.).unwrap() + 1.5,

@@ -1,9 +1,8 @@
 use sekiro_sim::{map_effects, world_events};
-use std::path::PathBuf;
 
 #[test]
 fn installed_map_effects_resolve_model_parameters_and_story_commands() {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("maps/m11_00_00_00/layout.json").exists() {
         return;
     }

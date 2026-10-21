@@ -5,7 +5,6 @@ use sekiro_sim::{
     duel::Duel,
     lua_ai::AiEvent,
 };
-use std::path::PathBuf;
 const DT: f32 = 1.0 / 60.0;
 
 fn approach(d: &mut Duel, p: [f32; 3], distance: f32) {
@@ -20,7 +19,7 @@ fn approach(d: &mut Duel, p: [f32; 3], distance: f32) {
 }
 
 fn load() -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     for path in [
         "anim/c5100/tae.json",
         "anim/c0000/tae.json",
@@ -174,7 +173,7 @@ fn headless_ape_both_lua_runtimes_attack_wolf() {
             .any(|(h, _)| h.attacker == 1);
     }
     // Isolate contact behavior on the main placement's open helper floor after the entrance.
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     let arena = Arena::load(&cache, ArenaSpec::by_name("apes-burrow").unwrap(), false).unwrap();
     let p = arena.layout.boss.position.to_array();
     d.headless_ape.as_mut().unwrap().duel.enemy.body.position = p;

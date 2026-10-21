@@ -473,28 +473,38 @@ impl Arena {
             }
             _ => Vec::new(),
         };
-        let path = dir.join("collision.bin");
-        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let mut mesh = CollisionMesh::from_bytes(&bytes).map_err(|e| e.to_string())?;
-        // These steps collapse triangles in place, so every triangle range in the layout stays
+        // The collision characters and the camera meet, as in explore mode
+        // ([`crate::lo_collision`]): `rows` are the layout's collision rows with their triangle
+        // ranges in that mesh, so every step below takes a part's own triangles out of it.
+        let crate::lo_collision::BlockMesh { mut mesh, rows } =
+            crate::lo_collision::read(&dir, &json)?;
+        // These steps collapse triangles in place, so every triangle range in `rows` stays
         // valid until the fog walls' split below. The helpers go last: disabled, event and
         // hidden parts are already gone and do not come back as helpers.
-        crate::arena_c::filter_collision(spec, &json, &mut mesh);
-        let event_collision = crate::arena_c::take_event_collision(spec, &json, &mut mesh);
+        crate::arena_c::filter_collision(spec, &rows, &mut mesh);
+        let event_collision = crate::arena_c::take_event_collision(spec, &rows, &mut mesh);
         let hidden = crate::arenas_a::hidden_parts(cache, spec)?;
-        crate::arenas_a::remove_hidden_collision(&mut mesh, &json, |n| hidden.contains(n));
-        let mut helpers = crate::hit_filter::strip_helpers(&mut mesh, &json);
+        crate::arenas_a::remove_hidden_collision(&mut mesh, &rows, |n| hidden.contains(n));
+        let mut helpers = crate::hit_filter::strip_helpers(&mut mesh, &rows);
         if !full_map {
             for helper in helpers.meshes_mut() {
                 *helper = crop(helper, layout.center(), spec.radius);
             }
+            // An event wall stays whole if any of it reaches the arena: `l`'s are a few large
+            // triangles, and cropped to those that reach, the Owl roof's lost the side a fall
+            // from the roof's edge passes through (#189).
+            helpers.triggers.retain(|t| {
+                !crop(&t.mesh, layout.center(), spec.radius)
+                    .indices
+                    .is_empty()
+            });
         }
         let mut gate = CollisionMesh::default();
         for place in &fog_walls {
             if let Some(range) = place
                 .wall
                 .collision_entity
-                .and_then(|entity| collision_range(&json, entity))
+                .and_then(|entity| collision_range(&rows, entity))
             {
                 let (rest, part) = split_triangles(&mesh, range);
                 mesh = rest;

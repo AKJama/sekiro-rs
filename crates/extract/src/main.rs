@@ -89,6 +89,13 @@ enum Command {
         /// Needs the game folder for Oodle (read only).
         #[arg(long, conflicts_with_all = ["summary", "layout_only", "models", "object_collision"])]
         fall_assist: bool,
+        /// Rewrite only the low-resolution hit collision characters and the camera collide
+        /// with (`collision_lo.bin`) from cache/raw. Needs the game folder for Oodle (read only).
+        #[arg(
+            long,
+            conflicts_with_all = ["summary", "layout_only", "models", "object_collision", "fall_assist"]
+        )]
+        lo_collision: bool,
     },
     /// Decode FSB5 sound banks in cache/raw/sound to WAV in cache/sound/<bank>/ with an
     /// events.json per bank. Needs the Vorbis headers from tools/sound/vorbis_setups.py.
@@ -116,9 +123,12 @@ fn main() -> Result<()> {
             models,
             object_collision,
             fall_assist,
+            lo_collision,
         } => {
             return if *summary {
                 maps::summary(&cli.cache, id)
+            } else if *lo_collision {
+                maps::export_lo_collision(&cli.game, &cli.cache, id)
             } else if *fall_assist {
                 maps::export_fall_assist(&cli.game, &cli.cache, id)
             } else if *object_collision {

@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, path::PathBuf};
+use std::collections::BTreeSet;
 
 use sekiro_sim::{
     InputFrame,
@@ -10,7 +10,7 @@ use sekiro_sim::{
 const DT: f32 = 1.0 / 60.0;
 
 fn load(name: &str) -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     for path in [
         "anim/c5060/tae.json",
         "anim/c5070/tae.json",
@@ -240,7 +240,7 @@ fn both_marks(name: &str, defeat: i32) {
 fn owl_father_thrust_uses_native_mikiri_pair() {
     for name in ["hirata-father", "hirata-inner-father"] {
         let Some(arena_duel) = load(name) else { return };
-        let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         // Isolate the authored attack and counter on flat ground; arena combat is tested above.
         let mut duel = Duel::load_with(&cache, 2.0, arena_duel.spec.clone()).unwrap();
         duel.enemy_active = false;

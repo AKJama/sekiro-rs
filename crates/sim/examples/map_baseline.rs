@@ -22,7 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for id in ids {
         let dir = root.join(&id);
         let layout: Value = serde_json::from_slice(&std::fs::read(dir.join("layout.json"))?)?;
-        let world = CollisionWorld::load(&dir.join("collision.bin"))?;
+        let world = CollisionWorld::load_map(&dir)?;
         let mut starts = Vec::new();
         for (index, p) in layout["players"]
             .as_array()

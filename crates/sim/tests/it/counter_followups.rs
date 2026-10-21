@@ -1,12 +1,11 @@
 //! Scripted real-data counter contacts and their follow-up deathblows.
-use std::path::PathBuf;
 
 use sekiro_sim::{Buttons, InputFrame, duel::Duel, enemy::EnemySpec};
 
 const DT: f32 = 1.0 / 60.0;
 
 fn load(name: &str, distance: f32) -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c7100/tae.json").is_file()
         || !cache.join("anim/c5060/tae.json").is_file()
         || !cache.join("anim/c1010/tae.json").is_file()

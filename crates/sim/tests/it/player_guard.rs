@@ -3,10 +3,9 @@
 
 use sekiro_sim::PlayerBehavior;
 use sekiro_sim::scenario::{self, Guard};
-use std::path::PathBuf;
 
 fn load() -> Option<PlayerBehavior> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("raw/chr/c0000.behbnd.d/c0000.hkx").exists() {
         eprintln!("skipping: cache not extracted");
         return None;

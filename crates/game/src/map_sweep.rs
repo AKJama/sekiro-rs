@@ -278,7 +278,12 @@ fn collision_reference(
     let mut indices = Vec::new();
     let mut materials = Vec::new();
     for (i, tri) in mesh.indices.as_chunks::<3>().0.iter().enumerate() {
-        if keep[i] && !matches!(mesh.materials.get(i), Some(22 | 36 | 38)) {
+        if keep[i]
+            && !mesh
+                .materials
+                .get(i)
+                .is_some_and(|&m| sekiro_sim::body::deep_water(m))
+        {
             indices.extend_from_slice(tri);
             materials.push(mesh.materials.get(i).copied().unwrap_or(u32::MAX));
         }
@@ -534,7 +539,12 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
             .0
             .iter()
             .enumerate()
-            .filter(|(i, _)| !matches!(mesh.materials.get(*i), Some(22 | 36 | 38)))
+            .filter(|(i, _)| {
+                !mesh
+                    .materials
+                    .get(*i)
+                    .is_some_and(|&m| sekiro_sim::body::deep_water(m))
+            })
             .flat_map(|(_, t)| *t)
             .collect(),
     ));

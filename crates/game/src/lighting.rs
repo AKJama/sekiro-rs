@@ -1600,8 +1600,7 @@ mod probe_tests {
 
     #[test]
     fn cached_volume_upload_matches_native_axes_and_cube_array_layout() {
-        let dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/maps/m11_01_00_00");
+        let dir = sekiro_sim::cache::root().join("maps/m11_01_00_00");
         if !dir.join("env/giiv0_02_w.rgba8").exists() {
             return;
         }
@@ -1692,7 +1691,7 @@ mod probe_tests {
     }
     #[test]
     fn outskirts_map_pieces_use_row_zero_without_local_light() {
-        let cache = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/raw");
+        let cache = sekiro_sim::cache::root().join("raw");
         let (Ok(msb), Ok(gparam)) = (
             std::fs::read(cache.join("map/mapstudio/m11_00_00_00.msb")),
             std::fs::read(cache.join("param/drawparam/m11_00_0000.gparam")),
@@ -2021,8 +2020,7 @@ mod probe_tests {
     #[test]
     fn extracted_hdr_cube_loads_as_six_layers() {
         use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../cache/maps/m11_00_00_00/env");
+        let dir = sekiro_sim::cache::root().join("maps/m11_00_00_00/env");
         for (file, size, levels) in [("gilm0_02.dds", 128, 8), ("gilm0_02_diffuse.dds", 16, 1)] {
             let path = dir.join(file);
             if !path.exists() {

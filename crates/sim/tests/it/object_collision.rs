@@ -13,9 +13,7 @@ use sekiro_sim::collision::CollisionWorld;
 use sekiro_sim::hit_filter;
 
 fn load(id: &str) -> Option<(PathBuf, ObjectCollision)> {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../cache/maps")
-        .join(id);
+    let dir = sekiro_sim::cache::root().join("maps").join(id);
     if !dir.join("object_collision.bin").is_file() || !dir.join("collision.bin").is_file() {
         eprintln!(
             "skipping: {} has no exported object collision",

@@ -912,7 +912,7 @@ mod tests {
 
     #[test]
     fn installed_layouts_keep_zero_parts_and_connections_auditable() {
-        let cache = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         for (map, count, connections, fallbacks) in
             [("m11_00_00_00", 166, 98, 1), ("m11_01_00_00", 221, 298, 0)]
         {

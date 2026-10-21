@@ -40,6 +40,7 @@ pub mod isshin;
 pub mod isshin_fire;
 pub mod items;
 pub mod kit;
+pub mod lo_collision;
 pub mod lua_ai;
 pub mod map_effects;
 pub mod motion;

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 const DT: f32 = 1.0 / 60.0;
 
 fn cache() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache")
+    sekiro_sim::cache::root()
 }
 
 fn duel() -> Option<Duel> {
@@ -117,11 +117,18 @@ fn lethal_landing_routes_falling_death_and_respawns() {
 
 #[test]
 fn landing_uses_material_threshold_and_disable_flag() {
+    // A material id is its special setting times 100 plus the HitMtrlParam row the thresholds
+    // are read by: the `l` binder's deep water is 722 (#189).
     for (material, height, dies) in [
         (1, 39.99, false),
         (22, 60.0, false),
         (22, 80.0, true),
         (40, 100.0, false),
+        (101, 39.99, false),
+        (101, 40.0, true),
+        (722, 60.0, false),
+        (722, 80.0, true),
+        (440, 100.0, false),
     ] {
         let Some(mut d) = duel() else {
             return;

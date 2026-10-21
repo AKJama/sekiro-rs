@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 fn cache() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache")
+    sekiro_sim::cache::root()
 }
 
 #[test]

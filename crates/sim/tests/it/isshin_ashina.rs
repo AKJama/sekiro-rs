@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 
 use sekiro_sim::arena::{Arena, ArenaSpec};
 use sekiro_sim::duel::Duel;
@@ -10,7 +9,7 @@ use sekiro_sim::{Buttons, InputFrame};
 const DT: f32 = 1.0 / 60.0;
 
 fn fight() -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     for path in [
         "anim/c5400/skeleton.bin",
         "maps/m11_01_00_00/collision.bin",
@@ -160,7 +159,7 @@ fn isshin_ashina_lua_fights_both_marks_and_finishes_from_map_messages() {
 #[test]
 fn isshin_ashina_fire_windup_fires_from_the_maps_original_points() {
     let Some(mut duel) = fight() else { return };
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     duel.enemy_active = false;
     for _ in 0..180 {
         duel.enemy_active = false;

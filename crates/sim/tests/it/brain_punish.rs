@@ -2,11 +2,10 @@
 use rayon::prelude::*;
 use sekiro_sim::brain::{BossActions, ScriptedBrain, moves};
 use sekiro_sim::{InputFrame, duel::Duel, enemy::EnemySpec};
-use std::path::PathBuf;
 
 #[test]
 fn real_break_recovery_and_boss_punish_sheets() {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c7100/tae.json").exists() || !cache.join("anim/c5060/tae.json").exists() {
         eprintln!("skipping: real Genichiro/Owl fixtures are not extracted");
         return;

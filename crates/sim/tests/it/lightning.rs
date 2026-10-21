@@ -1,8 +1,7 @@
 use sekiro_sim::{Buttons, InputFrame, brain::BrainKind, duel::Duel, registry::Registry};
-use std::path::PathBuf;
 
 fn tomoe() -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c7110/skeleton.bin").exists() {
         return None;
     }

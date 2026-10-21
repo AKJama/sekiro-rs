@@ -6,7 +6,7 @@ use sekiro_formats::anim::{AnimClip, Skeleton};
 use sekiro_sim::deathblow::{DummyFrame, Placement, Situation, ThrowTable, ThrowTimes, select};
 
 fn cache() -> Option<PathBuf> {
-    let c = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let c = sekiro_sim::cache::root();
     c.join("raw/param").exists().then_some(c)
 }
 

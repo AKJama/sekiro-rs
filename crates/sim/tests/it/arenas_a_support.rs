@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use sekiro_sim::arena::{Arena, ArenaSpec, boss_events};
 use sekiro_sim::body::Ground;
 use sekiro_sim::events::{EventCommand, EventHost, EventScripts};
@@ -27,7 +25,7 @@ impl EventHost for StandingBoss {
 }
 
 pub(super) fn check(name: &str, entity: i32, fog_flags: Option<(i32, i32)>) {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     let spec = ArenaSpec::by_name(name).unwrap();
     if !cache
         .join(format!("maps/{}/collision.bin", spec.map))

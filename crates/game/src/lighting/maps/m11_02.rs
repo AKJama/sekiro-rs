@@ -23,12 +23,11 @@ pub const PROFILE: &str = r#"
 #[cfg(test)]
 mod tests {
     use crate::lighting_selection::select;
-    use std::path::Path;
 
     #[test]
     #[ignore = "slow: inspect installed Reservoir environment containers and bank references"]
     fn reservoir_native_environment_census() {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/raw");
+        let cache = sekiro_sim::cache::root().join("raw");
         for variant in 0..6 {
             let path = cache.join(format!(
                 "map/m11_02_00_00/m11_02_00_00_envmap_{variant:02}.tpf"
@@ -61,7 +60,7 @@ mod tests {
 
     #[test]
     fn reservoir_installed_story_and_region_inputs() {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let map = "m11_02_00_00";
         let msb = sekiro_formats::msb::parse(
             &std::fs::read(cache.join(format!("raw/map/mapstudio/{map}.msb"))).unwrap(),

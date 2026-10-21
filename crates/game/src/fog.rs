@@ -132,8 +132,8 @@ mod tests {
         assert_eq!(fog.density.x, 0.003);
         assert_eq!(fog.slices, Vec4::new(1., 32., 0., 0.));
         for map in ["m11_00", "m11_01"] {
-            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join(format!("../../cache/raw/param/drawparam/{map}_0000.gparam"));
+            let path =
+                sekiro_sim::cache::root().join(format!("raw/param/drawparam/{map}_0000.gparam"));
             if !path.is_file() {
                 continue;
             }
@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn installed_fog_banks_and_enabled_authored_densities() {
-        let cache = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         if !cache
             .join("raw/param/drawparam/m15_00_0000.gparam")
             .is_file()
@@ -376,8 +376,7 @@ mod tests {
 
     #[test]
     fn native_sky_profile_intersections_match_the_authored_triangles() {
-        let dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/maps/m89_00_00_99");
+        let dir = sekiro_sim::cache::root().join("maps/m89_00_00_99");
         let Ok(bytes) = std::fs::read(dir.join("sky.json")) else {
             return;
         };
@@ -651,8 +650,7 @@ mod tests {
 
     #[test]
     fn castle_upload_uses_real_hour_rows_and_separate_directional_colours() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../cache/raw/param/drawparam/m11_01_0000.gparam");
+        let path = sekiro_sim::cache::root().join("raw/param/drawparam/m11_01_0000.gparam");
         let Ok(bytes) = std::fs::read(path) else {
             return;
         };

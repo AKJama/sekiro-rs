@@ -57,8 +57,7 @@ impl Glb {
 
 #[test]
 fn exported_tangents_match_mikktspace() {
-    let dir =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache/maps/m11_00_00_00/models");
+    let dir = sekiro_sim::cache::root().join("maps/m11_00_00_00/models");
     let Ok(entries) = std::fs::read_dir(&dir) else {
         eprintln!("skipping: {} not exported", dir.display());
         return;

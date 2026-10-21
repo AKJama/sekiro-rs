@@ -4,7 +4,6 @@
 //! (`sekiro-extract anims c5060`) is not extracted.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::time::Instant;
 
 use sekiro_sim::InputFrame;
@@ -15,7 +14,7 @@ use sekiro_sim::lua_ai::AiEvent;
 const DT: f32 = 1.0 / 60.0;
 
 fn load() -> Option<(Arena, Duel)> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     let spec = ArenaSpec::by_name("owl").unwrap();
     if !cache
         .join("maps")
@@ -108,9 +107,10 @@ fn owl_fights_on_the_castle_roof() {
 }
 
 /// Off the roof's edge Wolf falls through the event walls under the castle (`h900011`, hit
-/// filter 13, at y = -8.6, where he used to land and die, then `h900010`, filter 15, at
-/// y = -23.6), and the filter-15 wall's fall return puts him back where he last stood, alive
-/// (`docs/HIT-FILTERS.md`).
+/// filter 13, where he used to land and die, first), and the first filter-15 wall's fall return
+/// (`h900010`) puts him back where he last stood, alive (`docs/HIT-FILTERS.md`). On `l` (#189)
+/// the walls are tilted planes, not `h`'s flat sheets at y = -8.6 and -23.6: under this point
+/// he passes `h900011` at y = 2.5, `h900001` (13) at -1.8 and `h900010` at -2.2.
 #[test]
 fn a_fall_off_the_roof_returns_wolf_to_his_start() {
     let Some((arena, mut duel)) = load() else {
@@ -138,10 +138,16 @@ fn a_fall_off_the_roof_returns_wolf_to_his_start() {
         .map(|e| (e.part.as_str(), e.hit_filter))
         .collect();
     assert!(
-        back && parts.starts_with(&[("h900011", 13), ("h900010", 15)]),
+        back && parts.first() == Some(&("h900011", 13)),
         "back {back}, contacts {parts:?}, lowest {lowest}: {:?}",
         duel.player.body.position
     );
-    assert!(lowest < -23.6, "{lowest}");
-    assert_eq!(duel.helper_events[1].returned_to, Some(start));
+    let fall_return = duel
+        .helper_events
+        .iter()
+        .find(|e| e.hit_filter == 15)
+        .unwrap_or_else(|| panic!("no filter-15 contact: {parts:?}"));
+    assert_eq!(fall_return.part, "h900010", "{parts:?}");
+    assert!(lowest < fall_return.point[1], "{lowest}");
+    assert_eq!(fall_return.returned_to, Some(start));
 }

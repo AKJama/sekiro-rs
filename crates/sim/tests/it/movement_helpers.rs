@@ -16,12 +16,10 @@ pub const RUN_FROM_SPRINT_START: &str = "a000_000450";
 pub const RUN_FROM_SPRINT_LOOP: &str = "a000_000460";
 const DIRECTIONAL_CLIP_BASES: [u32; 5] = [100, 200, 400, 500, 600];
 
-/// The extracted data: `SEKIRO_CACHE` when it is set (a clone can use the main checkout's
-/// cache), else the repo's `cache/`. `None` without Wolf's behaviour.
+/// The extracted data ([`sekiro_sim::cache::root`]: `SEKIRO_CACHE` when it is set, so a clone
+/// can use the main checkout's cache, else the repo's `cache/`). `None` without Wolf's behaviour.
 pub fn cache() -> Option<PathBuf> {
-    let path = std::env::var_os("SEKIRO_CACHE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache"));
+    let path = sekiro_sim::cache::root();
     path.join("raw/chr/c0000.behbnd.d/c0000.hkx")
         .is_file()
         .then_some(path)

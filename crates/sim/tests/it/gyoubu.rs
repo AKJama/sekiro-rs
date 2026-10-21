@@ -5,12 +5,12 @@ use sekiro_sim::{
     duel::Duel,
     lua_ai::AiEvent,
 };
-use std::{collections::BTreeSet, path::PathBuf};
+use std::collections::BTreeSet;
 
 const DT: f32 = 1.0 / 60.0;
 
 fn load() -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     for file in [
         "anim/c5080/skeleton.bin",
         "anim/c5080/tae.json",

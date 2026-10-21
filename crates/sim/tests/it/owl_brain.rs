@@ -2,8 +2,6 @@
 //! the tally counts what happened, a slow controller falls back to his Lua AI without freezing,
 //! and his reflexes keep working while a plan runs. Skips when `cache/` lacks him.
 
-use std::path::PathBuf;
-
 use sekiro_sim::brain::observation::observe;
 use sekiro_sim::brain::{LuaBrain, Plan, ScriptedBrain, Side};
 use sekiro_sim::duel::Duel;
@@ -15,7 +13,7 @@ const DT: f32 = 1.0 / 60.0;
 
 #[test]
 fn wolf_victory_uses_encounter_defeat_for_owl_and_father_variants() {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c5060/tae.json").exists()
         || !cache.join("anim/c5070/tae.json").exists()
         || !cache
@@ -67,7 +65,7 @@ fn wolf_victory_uses_encounter_defeat_for_owl_and_father_variants() {
 }
 
 fn load(distance: f32) -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c5060/tae.json").exists()
         || !cache.join("raw/script/m11_01_00_00.luabnd.d").is_dir()
     {

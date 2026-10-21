@@ -2,11 +2,10 @@ use sekiro_sim::duel::Duel;
 use sekiro_sim::enemy::EnemySpec;
 use sekiro_sim::progression::AttackPower;
 use sekiro_sim::{Buttons, InputFrame};
-use std::path::PathBuf;
 
 #[test]
 fn slash_damage_by_attack_power() {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c5060/tae.json").exists() {
         eprintln!("skipping: cache not extracted");
         return;
@@ -81,7 +80,7 @@ fn slash_damage_by_attack_power() {
 
 #[test]
 fn every_attack_power_uses_the_extracted_growth_effect() {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c5060/tae.json").exists() {
         return;
     }

@@ -36,7 +36,7 @@ impl Who {
 }
 
 fn load(who: Who, distance: f32) -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     let (tae, bundle, spec) = match who {
         Who::Soldier => (
             "anim/c1010/tae.json",

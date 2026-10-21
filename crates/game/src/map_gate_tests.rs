@@ -120,7 +120,7 @@ fn exe_targets<'a>(pattern: [u8; 4], inventory: &[&'a str]) -> Vec<&'a str> {
 fn map_data_gate() {
     let started = std::time::Instant::now();
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let cache = root.join("../../cache");
+    let cache = sekiro_sim::cache::root();
     let inventory: Vec<_> = MAPS
         .iter()
         .filter(|id| cache.join(format!("maps/{id}/layout.json")).is_file())

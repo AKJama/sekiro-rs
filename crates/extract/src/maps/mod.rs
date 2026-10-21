@@ -10,7 +10,10 @@
 //! - `object_collision.bin`: the static collision placed objects carry in their objbnds
 //!   (`sekiro_formats::hknp::ObjectCollision` in postcard, `docs/OBJECT-COLLISION.md`),
 //! - `fall_assist.bin`: the fall-prevention assist walls (`f*` binder) per collision part
-//!   (`sekiro_formats::hknp::FallAssistCollision` in postcard, `docs/OBJECT-COLLISION.md`).
+//!   (`sekiro_formats::hknp::PartCollision` in postcard, `docs/OBJECT-COLLISION.md`),
+//! - `collision_lo.bin`: the low-resolution hit collision (`l*` binder) per collision part, the
+//!   one characters and the camera collide with (`sekiro_formats::hknp::PartCollision` in
+//!   postcard, `docs/HIT-FILTERS.md`).
 //!
 //! Every position and transform is mirrored across X like the model export (docs/FORMATS.md).
 
@@ -129,66 +132,160 @@ pub fn export_fall_assist(game: &Path, cache: &Path, id: &str) -> Result<()> {
     let oodle = Oodle::load(game).context("the fall-assist export needs the game's Oodle DLL")?;
     let out = cache.join("maps").join(id);
     std::fs::create_dir_all(&out)?;
-    write_fall_assist(&cache.join("raw"), &out, id, &read_msb(cache, id)?, oodle)
+    write_part_binder(
+        &cache.join("raw"),
+        &out,
+        id,
+        &read_msb(cache, id)?,
+        oodle,
+        &FALL_ASSIST,
+    )
 }
 
-/// Writes `fall_assist.bin`: the fall-prevention assist walls of the `f<map>.hkxbhd` binder
-/// (the exe mounts it as `faHKXBHD` next to the `hi` and `lo` hit binders and loads it as
-/// `m_fallAssistantHitFileCap`), one extern mesh file per collision model, placed by each MSB
-/// collision part like `collision.bin`. A map without the binder has no walls, so an old
-/// `fall_assist.bin` is removed. The file is written whole or not at all.
-fn write_fall_assist(
+/// Rewrite only `collision_lo.bin` from the MSB and the map's `l` hit binder in cache/raw.
+/// Needs the game folder for Oodle (read only).
+pub fn export_lo_collision(game: &Path, cache: &Path, id: &str) -> Result<()> {
+    let oodle = Oodle::load(game)
+        .context("the low-resolution collision export needs the game's Oodle DLL")?;
+    let out = cache.join("maps").join(id);
+    std::fs::create_dir_all(&out)?;
+    write_part_binder(
+        &cache.join("raw"),
+        &out,
+        id,
+        &read_msb(cache, id)?,
+        oodle,
+        &LO_COLLISION,
+    )
+}
+
+/// A hit binder [`write_part_binder`] places per collision part into its own cache file
+/// (`sekiro_formats::hknp::PartCollision`).
+struct PartBinder {
+    /// The binder's prefix: `map/<id>/<prefix><id without its m>.hkxbhd`.
+    prefix: &'static str,
+    /// The file in `cache/maps/<id>/`.
+    file: &'static str,
+    /// What the log calls it.
+    label: &'static str,
+    /// Whether the file stands for every part or none: a model that fails to decode fails the
+    /// export rather than leaving its parts out.
+    whole: bool,
+    decode: fn(&[u8], Option<&Compendium>) -> sekiro_formats::Result<HitDecode>,
+}
+
+type HitDecode = (hknp::CollisionMesh, hknp::DecodeStats);
+
+/// The fall-prevention assist walls (`f<map>.hkxbhd`): the exe mounts the binder as `faHKXBHD`
+/// next to the `hi` and `lo` hit binders and loads it as `m_fallAssistantHitFileCap`, one
+/// extern mesh file per collision model (docs/OBJECT-COLLISION.md).
+const FALL_ASSIST: PartBinder = PartBinder {
+    prefix: "f",
+    file: "fall_assist.bin",
+    label: "fall assist",
+    whole: false,
+    decode: hknp::decode_extern,
+};
+
+/// The low-resolution hit collision (`l<map>.hkxbhd`, the exe's `loHKXBHD`): the same
+/// compressed meshes as `collision.bin`'s `h` binder with about a seventh of the triangles.
+/// The exe gives an ordinary part's `l` body group 39 or 40, which the player, enemies and the
+/// camera collide with, and its `h` body group 38, which none of them do (docs/HIT-FILTERS.md,
+/// #189). Whole: a part left out of it would be a hole in the floor characters walk on, so a
+/// model that fails to decode leaves no `collision_lo.bin` written and characters on the
+/// block's `collision.bin`.
+const LO_COLLISION: PartBinder = PartBinder {
+    prefix: "l",
+    file: "collision_lo.bin",
+    label: "low-resolution collision",
+    whole: true,
+    decode: hknp::decode,
+};
+
+/// Writes `binder`'s cache file: each MSB collision part's model from the map's binder, placed
+/// by the part like `collision.bin`, with the part's triangle range. A model the binder has no
+/// file for adds nothing, and its parts are listed in the log. A model that fails to decode
+/// is left out with a warning, or, for a [`PartBinder::whole`] binder, fails the export and
+/// leaves the last file as it was. A map without the binder has none, so an old file is
+/// removed. The file is written whole or not at all.
+fn write_part_binder(
     raw: &Path,
     out: &Path,
     id: &str,
     msb: &msb::Msb,
     oodle: &'static Oodle,
+    binder: &PartBinder,
 ) -> Result<()> {
-    let path = out.join("fall_assist.bin");
-    let decode =
-        |data: &[u8], compendium: Option<&Compendium>| Ok(hknp::decode_extern(data, compendium)?);
-    let Some(hits) = place_hit_binder(raw, id, msb, oodle, "f", decode)? else {
-        let binder = format!("f{}.hkxbhd", &id[1..]);
-        // A file from an older export would hold walls the map's data no longer has.
+    let PartBinder {
+        prefix,
+        file,
+        label,
+        whole,
+        decode,
+    } = *binder;
+    let path = out.join(file);
+    let decode = |data: &[u8], compendium: Option<&Compendium>| Ok(decode(data, compendium)?);
+    let Some(hits) = place_hit_binder(raw, id, msb, oodle, prefix, decode)? else {
+        let binder = format!("{prefix}{}.hkxbhd", &id[1..]);
+        // A file from an older export would hold collision the map's data no longer has.
         match std::fs::remove_file(&path) {
-            Ok(()) => eprintln!(
-                "  fall assist: no {binder}, removed the old {}",
-                path.display()
-            ),
+            Ok(()) => eprintln!("  {label}: no {binder}, removed the old {}", path.display()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                eprintln!("  fall assist: no {binder}, skipped");
+                eprintln!("  {label}: no {binder}, skipped");
             }
             Err(e) => return Err(e).with_context(|| format!("removing {}", path.display())),
         }
         return Ok(());
     };
-    // A model the binder has no file for adds no walls: its parts are left out.
-    let walls = hknp::FallAssistCollision {
+    if whole && !hits.failed.is_empty() {
+        anyhow::bail!(
+            "{} of {} models failed to decode ({}), so {} was not written: characters keep the              last one, or {id}'s collision.bin without one",
+            hits.failed.len(),
+            hits.models,
+            hits.failed.join(", "),
+            path.display()
+        );
+    }
+    let placed: BTreeSet<&str> = hits.ranges.iter().map(|(n, _)| n.as_str()).collect();
+    let without: Vec<&str> = msb
+        .parts
+        .iter()
+        .filter(|p| p.kind == msb::PartKind::Collision && !placed.contains(p.name.as_str()))
+        .map(|p| p.name.as_str())
+        .collect();
+    let collision = hknp::PartCollision {
         parts: hits
             .ranges
-            .into_iter()
+            .iter()
             .filter(|(_, [_, count])| *count > 0)
-            .map(|(name, [first, count])| hknp::FallAssistPart {
-                name,
-                first: first as u32,
-                count: count as u32,
+            .map(|(name, [first, count])| hknp::PartRange {
+                name: name.clone(),
+                first: *first as u32,
+                count: *count as u32,
             })
             .collect(),
         mesh: hits.mesh,
     };
-    let partial = out.join("fall_assist.bin.partial");
-    std::fs::write(&partial, walls.to_bytes()?)
+    let partial = out.join(format!("{file}.partial"));
+    std::fs::write(&partial, collision.to_bytes()?)
         .with_context(|| format!("writing {}", partial.display()))?;
     std::fs::rename(&partial, &path).with_context(|| format!("writing {}", path.display()))?;
     eprintln!(
-        "  fall assist: {} triangles over {} of {} collision parts ({} models, {} failed, {} extern-mesh bodies, {} bodies of other shapes skipped)",
-        walls.mesh.triangle_count(),
-        walls.parts.len(),
+        "  {label}: {} triangles over {} of {} collision parts ({} models, {} failed, {} bodies, {} bodies of other shapes skipped, {} empty primitive slots); {} parts without a model in the binder{}",
+        collision.mesh.triangle_count(),
+        collision.parts.len(),
         hits.parts,
         hits.models,
-        hits.failed,
+        hits.failed.len(),
         hits.stats.bodies,
         hits.stats.other_shapes,
+        hits.stats.convex_skipped,
+        without.len(),
+        if without.len() <= 16 {
+            format!(": {without:?}")
+        } else {
+            String::new()
+        },
     );
     Ok(())
 }
@@ -201,15 +298,15 @@ struct PlacedHits {
     ranges: Vec<(String, [usize; 2])>,
     /// The MSB's collision parts.
     parts: usize,
-    /// The distinct models those parts use, and how many of them failed to decode.
+    /// The distinct models those parts use, and those of them that failed to decode.
     models: usize,
-    failed: usize,
+    failed: Vec<String>,
     stats: hknp::DecodeStats,
 }
 
-/// Reads map `id`'s hit binder `<prefix><tail>.hkxbhd` / `.hkxbdt` from `raw` (`h` for the
-/// hit collision, `f` for the fall-prevention assist walls), decodes the file of each MSB
-/// collision part's model with `decode` in parallel, and places each part's collision like any
+/// Reads map `id`'s hit binder `<prefix><tail>.hkxbhd` / `.hkxbdt` from `raw` (`h` and `l` for
+/// the high- and low-resolution hit collision, `f` for the fall-prevention assist walls),
+/// decodes the file of each MSB collision part's model with `decode` in parallel, and places each part's collision like any
 /// other part ([`extend_placed`]). A model whose file fails to decode is warned about and its
 /// parts left out; one the binder has no file for is left out silently. `None` when the map has
 /// no such binder (its `.hkxbhd` is not there); any other read error is an error.
@@ -265,7 +362,7 @@ fn place_hit_binder(
         .collect();
     let mut by_model = HashMap::new();
     let mut stats = hknp::DecodeStats::default();
-    let mut failed = 0;
+    let mut failed = Vec::new();
     for (model, r) in decoded {
         match r {
             Ok((m, s)) => {
@@ -273,8 +370,8 @@ fn place_hit_binder(
                 by_model.insert(model, m);
             }
             Err(e) => {
-                failed += 1;
                 eprintln!("  warning: {prefix}{tail}.hkxbhd: {e:#}");
+                failed.push(model);
             }
         }
     }
@@ -711,10 +808,12 @@ pub fn export(game: &Path, cache: &Path, id: &str, selected_models: &[String]) -
         collision.vertices.len()
     );
     object_collision::export(cache, id, &msb)?;
-    // The walls are an extra: a failure is warned about and leaves the rest of the export (and
-    // the last good `fall_assist.bin`) whole.
-    if let Err(e) = write_fall_assist(&raw, &out, id, &msb, oodle) {
-        eprintln!("  warning: fall assist: {e:#}");
+    // These are extras: a failure is warned about and leaves the rest of the export (and the
+    // last good file) whole. Without `collision_lo.bin` characters fall back to `collision.bin`.
+    for binder in [&FALL_ASSIST, &LO_COLLISION] {
+        if let Err(e) = write_part_binder(&raw, &out, id, &msb, oodle, binder) {
+            eprintln!("  warning: {}: {e:#}", binder.label);
+        }
     }
 
     let mut layout = json!({
@@ -833,7 +932,7 @@ fn export_collision(
         "{} collision parts, {} models, {} failed, {} bodies, {} sections, {} primitives ({} quads, {} convex skipped), {} triangles without material, {} distinct materials, furthest player start {:.2} m from a collision vertex",
         parts,
         models,
-        failed,
+        failed.len(),
         total.bodies,
         total.sections,
         total.primitives,

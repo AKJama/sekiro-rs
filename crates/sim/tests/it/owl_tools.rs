@@ -4,7 +4,6 @@
 //! "Tools"). Skips when `cache/` lacks him.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 
 use sekiro_sim::brain::BrainKind;
 use sekiro_sim::bullets::BulletLook;
@@ -19,7 +18,7 @@ const POISONED: i32 = 9050;
 const RECOVERY_SEALED: i32 = 3506090;
 
 fn load(distance: f32, act: i32) -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c5060/tae.json").exists()
         || !cache.join("raw/script/m11_01_00_00.luabnd.d").is_dir()
     {

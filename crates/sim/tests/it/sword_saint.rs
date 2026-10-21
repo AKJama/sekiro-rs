@@ -1,5 +1,5 @@
 //! Real silvergrass Lua combat, mark consumption and map-script phase boundaries.
-use std::{collections::BTreeSet, path::PathBuf};
+use std::collections::BTreeSet;
 
 use sekiro_sim::{
     Buttons, InputFrame,
@@ -11,7 +11,7 @@ use sekiro_sim::{
 const DT: f32 = 1.0 / 60.0;
 
 fn fight(name: &str) -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     for path in [
         "anim/c5400/skeleton.bin",
         "anim/c7110/skeleton.bin",
@@ -87,7 +87,7 @@ fn take_mark(duel: &mut Duel) {
     }
     // Short paired-throw fixture on the arena floor, using real Wolf sword input.
     // Only posture is reduced; no HP, marks, effects or event flags are injected.
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     let p = sekiro_sim::events::warp_point(&cache, 11, 2, 1122800)
         .unwrap()
         .position;
@@ -269,7 +269,7 @@ fn spear(duel: &mut Duel) {
 }
 
 fn close_pair(duel: &mut Duel, distance: f32) {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     let p = sekiro_sim::events::warp_point(&cache, 11, 2, 1122800)
         .unwrap()
         .position;

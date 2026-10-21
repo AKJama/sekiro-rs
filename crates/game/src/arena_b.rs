@@ -180,7 +180,7 @@ mod tests {
 
     #[test]
     fn lighting_clock_preserves_environment_until_its_own_event_and_restart() {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let id = "m11_01_00_00";
         let initial = crate::lighting_selection::select(&cache, id, None, None).unwrap();
         let selection =
@@ -383,7 +383,7 @@ mod tests {
 
     #[test]
     fn restart_releases_held_map_effects_for_twenty_fights() {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let placed = sekiro_sim::arena_b::map_effects(&cache, "m11_01_00_00").unwrap();
         let mut app = App::new();
         app.insert_resource(Scene::default())

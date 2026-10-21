@@ -17,12 +17,12 @@ pub const PROFILE: &str = r#"
 mod tests {
     use crate::{lighting::LightSet, lighting::fog::GameFog, lighting_selection};
     use sekiro_formats::{emedf, gparam, msb, tpf};
-    use std::{collections::BTreeSet, path::Path};
+    use std::collections::BTreeSet;
 
     /// Compare actual event execution and renderer inputs with the installed map data.
     #[test]
     fn valley_installed_story_lighting() {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_sim::cache::root();
         let map = "m17_00_00_00";
         let layout =
             msb::parse(&std::fs::read(cache.join(format!("raw/map/mapstudio/{map}.msb"))).unwrap())

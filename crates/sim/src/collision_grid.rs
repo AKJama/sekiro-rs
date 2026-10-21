@@ -51,9 +51,10 @@ pub(super) fn bands_of(lo: f32, hi: f32) -> (i32, i32) {
 /// and more (m25 has 168k such cell entries).
 pub(super) const TALL_BANDS: i32 = 8;
 
-/// Whether hit material `m` is a water surface's ([`super::View::water_surface`]).
+/// Whether hit material `m` is a water surface's ([`super::View::water_surface`],
+/// [`crate::body::water`]).
 pub(super) fn water_material(m: u32) -> bool {
-    matches!(m, 20..=24 | 35..=38)
+    crate::body::water(m)
 }
 
 /// The parts of a band: the triangles whose first band (in the lists' scan order) this is,

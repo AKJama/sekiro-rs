@@ -1,11 +1,10 @@
 //! Audit the installed blend data without changing simulation timing.
 use sekiro_formats::hkb::{NodeKind, parse};
 use sekiro_sim::tae::TaeDb;
-use std::path::PathBuf;
 
 #[test]
 fn installed_transition_effects_and_tae_blends() {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     for (chr, graph_name) in [
         ("c0000", "c0000"),
         ("c5060", "c9997"),

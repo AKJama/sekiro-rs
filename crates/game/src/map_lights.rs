@@ -268,7 +268,7 @@ mod tests {
     use super::*;
     #[test]
     fn installed_banks_keep_spot_types_and_apply_only_ancillary_offsets() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/maps");
+        let root = sekiro_sim::cache::root().join("maps");
         if !root.join("m11_00_00_00/lights.json").exists() {
             return;
         }

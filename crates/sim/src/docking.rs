@@ -31,8 +31,9 @@ pub const OUTWARD_PROBE: f32 = 0.6;
 pub const MIN_DROP: f32 = 0.5;
 pub const SIDE_TOLERANCE: f32 = 0.1;
 pub const CLIMB_FALLBACK_DURATION: f32 = 0.833;
-// Placeholder edge-frame interpretation of DockingTranslationOffset_Cover.
-// FwLo's MIT docking notes report (0, 0, 0.7); the native frame sign is unknown.
+// DockingTranslationOffset_Cover is (0, 0, 0.7) in c0000.hkx's behavior graph variable initial
+// values (FwLo's MIT docking notes): the docked root stands 0.7 m out from the wall. Only its
+// sign in the edge's frame (out from the wall, away from the face) is assumed.
 pub const DOCKING_TRANSLATION_OFFSET_COVER: f32 = 0.7;
 pub const COVER_HEIGHT_TOLERANCE: f32 = 0.8;
 pub const COVER_WALL_PROBE: f32 = 1.0;
@@ -385,10 +386,11 @@ impl Docking {
         // One end at most, the start first: cover never reports both.
         let bits = if bits & 1 != 0 { 1 } else { bits };
         let side = edge.side()?;
-        // A floor at the wall's height and Wolf's.
+        // A floor at the wall's height and Wolf's, as a wall-hugging body stands: on the
+        // wall-hug parts too ([`crate::hit_filter::WALL_HUG`]).
         let floor = |p: Vec3| {
             ground
-                .floor(p.x, p.z, position.y + TOP_TOLERANCE)
+                .hug_floor(p.x, p.z, position.y + TOP_TOLERANCE)
                 .filter(|&y| {
                     (point.y - y).abs() <= COVER_HEIGHT_TOLERANCE
                         && (position.y - y).abs() <= TOP_TOLERANCE
@@ -399,13 +401,13 @@ impl Docking {
                 continue;
             }
             let feet = point + outward * DOCKING_TRANSLATION_OFFSET_COVER;
-            // Under the docked feet; on the narrow-ledge variations, where the snake pit's ledge
-            // (variation 10, #147) puts them out over a drop, at the wall's foot under the edge.
-            let Some(y) = floor(feet).or_else(|| {
-                matches!(edge.variation, 10..=13)
-                    .then(|| floor(point))
-                    .flatten()
-            }) else {
+            // Under the docked feet, always. The snake pit's narrow ledge (variation 10, #147)
+            // has no character floor there, only the wall-hug slab (`h900100`, hit filter 25),
+            // so the hug floor is the real one and no stand-in at the wall's foot is needed (#189).
+            // Once the hug ends the slab holds him no more, as in the exe: he rests on the
+            // ledge's lip where it is under his capsule and drops where `l` has no ledge
+            // (docs/HIT-FILTERS.md, `snake_pit_hug_exit_rests_on_the_lip`).
+            let Some(y) = floor(feet) else {
                 continue;
             };
             let clearance = ground.slide([feet.x, y, feet.z], [0.0; 2]);

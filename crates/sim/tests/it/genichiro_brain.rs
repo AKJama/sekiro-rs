@@ -1,5 +1,4 @@
 //! Offline castle Genichiro planning, real clips, arrows and isolated memory.
-use std::path::PathBuf;
 
 use sekiro_sim::brain::{BossActions, BrainKind, GENICHIRO, LuaBrain, Plan, ScriptedBrain};
 use sekiro_sim::{InputFrame, duel::Duel, lua_ai::AiEvent, registry::Registry};
@@ -155,7 +154,7 @@ fn genichiro_plan_sets_obey_the_six_second_attack_rule() {
 }
 
 fn load(distance: f32) -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c7100/skeleton.bin").exists() {
         eprintln!("skipping: Genichiro is not extracted");
         return None;

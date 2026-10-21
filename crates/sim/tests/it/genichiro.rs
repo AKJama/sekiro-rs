@@ -1,10 +1,8 @@
-use std::path::PathBuf;
-
 use sekiro_sim::{Buttons, InputFrame, duel::Duel, lua_ai::AiEvent, registry::Registry};
 
 #[test]
 fn castle_genichiro_attacks_idle_wolf() {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c7100/skeleton.bin").exists() {
         return;
     }
@@ -52,7 +50,7 @@ fn castle_genichiro_attacks_idle_wolf() {
 
 #[test]
 fn castle_genichiro_loses_two_marks_and_reaches_map_handover() {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c7100/skeleton.bin").exists() {
         return;
     }
@@ -184,7 +182,7 @@ fn take_mark(duel: &mut Duel) {
 
 #[test]
 fn castle_genichiro_arrows_use_the_shared_bullet_runtime() {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c7100/skeleton.bin").exists() {
         return;
     }

@@ -139,7 +139,7 @@ mod tests {
         world.set_gate(false);
         assert!(walk(&world) > 3.9);
 
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = crate::cache::root();
         if !cache.join("raw/event/m11_01_00_00.emevd").is_file() {
             return;
         }

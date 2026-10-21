@@ -6,12 +6,11 @@ use sekiro_sim::{
     enemy::EnemySpec,
     lua_ai::AiEvent,
 };
-use std::path::PathBuf;
 
 const DT: f32 = 1.0 / 60.0;
 
 fn load() -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     for path in [
         "anim/c5100/tae.json",
         "anim/c0000/tae.json",
@@ -248,7 +247,7 @@ fn guardian_ape_first_deathblow_reaches_headless_revival() {
 
 #[test]
 fn guardian_ape_sword_guard_deflect_and_dung_shot() {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c5100/tae.json").is_file() {
         return;
     }
@@ -303,7 +302,7 @@ fn guardian_ape_sword_guard_deflect_and_dung_shot() {
 
 #[test]
 fn guardian_ape_scream_builds_terror_and_kills_only_in_range() {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c5100/tae.json").is_file() {
         return;
     }
@@ -342,7 +341,7 @@ fn guardian_ape_scream_builds_terror_and_kills_only_in_range() {
 
 #[test]
 fn guardian_ape_headless_sweep_can_be_jump_countered() {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_sim::cache::root();
     if !cache.join("anim/c5100/tae.json").is_file() {
         return;
     }
