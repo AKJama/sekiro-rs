@@ -63,16 +63,20 @@ impl Idols {
         floor: impl Fn(f32, f32, f32) -> Option<f32>,
     ) -> Self {
         let names = crate::game_ui::menu_texts(cache, "NTC_メニューテキスト");
-        let warps: HashMap<i64, i64> = sekiro_sim::registry::rows(cache, "BonfireWarpParam")
+        // Each idol's name and the flag its lighting sets.
+        let warps: HashMap<i64, (i64, i64)> = sekiro_sim::registry::rows(cache, "BonfireWarpParam")
             .inspect_err(|e| warn!("idols: {e}"))
             .unwrap_or_default()
             .values()
-            .filter_map(|r| Some((r["bonfireEntityId"].as_i64()?, r["msgId"].as_i64()?)))
+            .filter_map(|r| {
+                let warp = (r["msgId"].as_i64()?, r["eventflagId"].as_i64()?);
+                Some((r["bonfireEntityId"].as_i64()?, warp))
+            })
             .collect();
         let mut idols = Self::default();
         for layout in layouts.values() {
             for o in layout["objects"].as_array().into_iter().flatten() {
-                let Some(msg) = o["entity_id"].as_i64().and_then(|e| warps.get(&e)) else {
+                let Some((msg, flag)) = o["entity_id"].as_i64().and_then(|e| warps.get(&e)) else {
                     continue;
                 };
                 let Some(pose) = crate::map::pose(o) else {
@@ -97,6 +101,7 @@ impl Idols {
                         position: checkpoint.to_array(),
                         yaw: yaw + std::f32::consts::PI,
                     },
+                    flag: *flag as i32,
                 });
                 idols
                     .names
@@ -133,6 +138,7 @@ pub(super) fn install(app: &mut App, idols: Idols) {
     GameFonts::insert(app);
     MenuArt::insert(app);
     crate::game_ui::install_cover(app);
+    super::idol_found::install(app);
     app.insert_resource(idols)
         .init_resource::<Row>()
         .init_resource::<crate::menu::Modal>()
@@ -249,15 +255,16 @@ fn fade(alpha: f32) -> Color {
     Color::BLACK.with_alpha(alpha)
 }
 
-/// The menu's keys while Wolf prays: up and down pick a row, OK (Enter, Space, E, A) takes it,
-/// Esc or back (Q, B) stands him up.
+/// The menu's keys while Wolf prays and no banner plays: up and down pick a row, OK (Enter,
+/// Space, E, A) takes it, Esc or back (Q, B) stands him up.
 fn menu_keys(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
     mut row: ResMut<Row>,
+    banner: Res<super::idol_found::Playing>,
     mut sim: NonSendMut<Sim>,
 ) {
-    if sim.duel.idol_phase() != Some(IdolPhase::Praying) {
+    if sim.duel.idol_phase() != Some(IdolPhase::Praying) || banner.on() {
         return;
     }
     let pad = |b| pads.iter().any(|p| p.just_pressed(b));
@@ -284,12 +291,13 @@ fn menu_open(sim: &Sim) -> bool {
     )
 }
 
-/// The guide near an idol and the menu while Wolf prays.
-#[allow(clippy::type_complexity)]
+/// The guide near an idol and the menu while Wolf prays, once a first light's banner is over.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn show(
     sim: NonSend<Sim>,
     row: Res<Row>,
     idols: Res<Idols>,
+    banner: Res<super::idol_found::Playing>,
     mut shown_for: Local<Option<(usize, usize)>>,
     mut parts: Query<
         (&mut Visibility, Has<Guide>, Option<&Cursor>),
@@ -299,7 +307,7 @@ fn show(
     mut texts: Query<(&mut Text, Option<&HelpLine>), Or<(With<Place>, With<HelpLine>)>>,
 ) {
     let near = sim.duel.idol_in_reach().is_some();
-    let open = menu_open(&sim);
+    let open = menu_open(&sim) && !banner.on();
     for (mut v, guide, cursor) in &mut parts {
         let on = match (guide, cursor) {
             (true, _) => near,
@@ -365,6 +373,10 @@ mod tests {
             "{:?}",
             idols.names
         );
+        // Each is lit by its own flag, so lighting one leaves the others unfound.
+        let flags: std::collections::BTreeSet<_> = idols.spots.iter().map(|s| s.flag).collect();
+        assert_eq!(flags.len(), idols.spots.len());
+        assert!(!flags.contains(&0));
         for s in &idols.spots {
             let kneel = Vec3::from_array(s.kneel.position);
             let out = Vec3::from_array(s.checkpoint.position) - kneel;

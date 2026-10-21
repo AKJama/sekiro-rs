@@ -50,9 +50,11 @@ fn wolf_kneels_rests_stands_and_comes_back_at_the_idol() {
             position: [start[0] + 1.0, start[1], start[2] + 0.5],
             yaw: -2.0,
         },
+        flag: 11100000,
     };
     duel.set_idols(vec![spot]);
     assert_eq!(duel.idol_in_reach(), Some(0));
+    assert!(!duel.idol_lit(0));
 
     // The action press kneels him at the spot with full Vitality; holding it does nothing more.
     duel.rules.fighters[0].vitality.hp = 10;
@@ -65,6 +67,10 @@ fn wolf_kneels_rests_stands_and_comes_back_at_the_idol() {
     assert!((x - spot.kneel.position[0]).hypot(z - spot.kneel.position[2]) < 0.05);
     let max = duel.rules.fighters[0].vitality.max_hp;
     assert_eq!(duel.rules.fighters[0].vitality.hp, max);
+    // The first kneel lights the idol and cues its "found" banner, once.
+    assert!(duel.idol_lit(0));
+    assert_eq!(duel.take_idol_found(), Some(0));
+    assert_eq!(duel.take_idol_found(), None);
 
     let praying = |d: &Duel| d.idol_phase() == Some(IdolPhase::Praying);
     // His own input is held while he is at the idol: the stick does not walk him away.
@@ -103,6 +109,13 @@ fn wolf_kneels_rests_stands_and_comes_back_at_the_idol() {
         d.respawn_in.is_none() && !d.rules.fighters[0].dead()
     });
     assert_eq!(duel.player.body.position, spot.checkpoint.position);
+
+    // It stays lit through the respawn: kneeling there again cues no banner.
+    assert!(duel.idol_lit(0));
+    run(&mut duel, 2.0, |d| d.idol_in_reach() == Some(0));
+    duel.step(&press, DT);
+    assert_eq!(duel.idol(), Some(0));
+    assert_eq!(duel.take_idol_found(), None);
 }
 
 #[test]
@@ -139,6 +152,7 @@ fn the_nearer_item_takes_the_press_and_stays_taken_through_a_rest() {
             position: [start[0] + 1.0, start[1], start[2] + 0.5],
             yaw: -2.0,
         },
+        flag: 11100000,
     }]);
     assert_eq!(duel.pickup_in_reach(), Some(0));
     assert_eq!(duel.idol_in_reach(), None);

@@ -11,6 +11,12 @@
 //! alone and only Rest revives them.
 //! gap: no Healing Gourd or resurrection yet to refill, and the respawn stands Wolf up at the
 //! idol instead of kneeling there first.
+//!
+//! The first kneel at an idol lights it (#152): its BonfireWarpParam `eventflagId` goes into the
+//! lit flags, which a respawn keeps, and the screen is told once that it was found
+//! ([`Duel::take_idol_found`], the game's "SCULPTOR'S IDOL FOUND" banner).
+
+use std::collections::BTreeSet;
 
 use super::Duel;
 use super::pickup::ActionTarget;
@@ -38,6 +44,8 @@ pub struct IdolSpot {
     pub kneel: Placement,
     /// Where a respawn stands him, facing away.
     pub checkpoint: Placement,
+    /// Its BonfireWarpParam `eventflagId`, on once it is lit.
+    pub flag: i32,
 }
 
 /// The play world's idols and Wolf's place at them.
@@ -51,6 +59,10 @@ pub(super) struct Idols {
     action_held: bool,
     /// Rest was taken: the foes come back on the next population step.
     pub(super) revive: bool,
+    /// The lit idols' flags.
+    lit: BTreeSet<i32>,
+    /// The idol lit last, until the screen takes it.
+    found: Option<usize>,
 }
 
 impl Duel {
@@ -143,6 +155,22 @@ impl Duel {
         self.rules.fighters[0].reset();
         self.idols.at = Some(i);
         self.idols.checkpoint = Some(spot.checkpoint);
+        if self.idols.lit.insert(spot.flag) {
+            self.idols.found = Some(i);
+        }
+    }
+
+    /// Whether idol `i` is lit (Wolf knelt at it once).
+    pub fn idol_lit(&self, i: usize) -> bool {
+        self.idols
+            .spots
+            .get(i)
+            .is_some_and(|s| self.idols.lit.contains(&s.flag))
+    }
+
+    /// The idol lit since the last call, once: the cue for the "idol found" banner.
+    pub fn take_idol_found(&mut self) -> Option<usize> {
+        self.idols.found.take()
     }
 
     /// Rests at the idol Wolf prays at: Vitality refilled, and the map's foes back.

@@ -57,6 +57,8 @@ pub(crate) mod cinematic_fade;
 mod game_menu;
 #[path = "idol.rs"]
 mod idol;
+#[path = "idol_found.rs"]
+mod idol_found;
 #[path = "live_check.rs"]
 mod live_check;
 #[path = "map_enemies.rs"]
