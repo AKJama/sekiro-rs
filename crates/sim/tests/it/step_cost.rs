@@ -8,7 +8,7 @@ use std::sync::{Arc, OnceLock};
 
 use sekiro_formats::hknp::CollisionMesh;
 use sekiro_sim::body::{Ground, WaterSurface};
-use sekiro_sim::collision::{CollisionWorld, TriggerContact};
+use sekiro_sim::collision::{CollisionWorld, TriggerContact, triangle_visits};
 
 use crate::arena_c_support::cache;
 
@@ -49,6 +49,13 @@ fn build_play_world(cache: &Path) -> Option<CollisionWorld> {
             .unwrap();
     }
     Some(world)
+}
+
+/// What `f` returns, and how many grid entries its collision queries looked at (#163).
+fn visits<R>(f: impl FnOnce() -> R) -> (R, u64) {
+    let before = triangle_visits();
+    let r = f();
+    (r, triangle_visits() - before)
 }
 
 /// The most triangles any of eight slides of `reach` around `feet` tests on each push-out pass.
@@ -125,7 +132,8 @@ impl Ground for Counted {
 }
 
 /// At the worst wall spot of #145 a slide's 4 m cells hold about 18k triangles, nearly all on
-/// other storeys; only those in the body's height band may reach the per-sub-step push-out.
+/// other storeys; only those in the body's height band may reach the per-sub-step push-out,
+/// and the grid hands the queries only the bands they reach (#163).
 #[test]
 fn wall_slide_tests_only_the_body_band() {
     let Some(world) = play_world() else {
@@ -133,9 +141,17 @@ fn wall_slide_tests_only_the_body_band() {
     };
     let [x, y, z] = [-257.0, -45.0, 8.0];
     let feet = [x, world.floor(x, z, y + 1.0).unwrap_or(y), z];
-    let tested = worst_slide(&world, feet, 0.13);
+    let (tested, slides) = visits(|| worst_slide(&world, feet, 0.13));
     // 7k-18k before the band filter.
     assert!(tested < 2000, "{tested} triangles per push-out pass");
+    // 112,136 over the whole cells, 9,280 by band.
+    assert!(
+        slides < 20_000,
+        "the eight slides looked at {slides} grid entries"
+    );
+    // A body's floor: 34,564 over the whole cell, 2,192 by band and 2 m square.
+    let (_, floor) = visits(|| Ground::floor(&*world, feet[0], feet[2], feet[1] + 0.5));
+    assert!(floor < 5_000, "a floor looked at {floor} grid entries");
 }
 
 /// A rising head's ceiling sweep tests only the flat faces in its height band whose boxes reach
@@ -195,22 +211,24 @@ fn deathblow_pair_search_is_bounded() {
     }
     duel.enemy_active = false;
     duel.god = true;
-    let (mut started, mut broke, mut thrown, mut worst) = (false, false, 0, 0);
+    let (mut started, mut broke, mut thrown, mut worst, mut most) = (false, false, 0, 0, 0);
     for step in 0..900 {
         if !broke {
             duel.rules.fighters[1].posture.remaining = 1;
         }
         queries.store(0, Ordering::Relaxed);
-        let r = duel.step(
-            &InputFrame {
-                buttons: Buttons {
-                    attack: !started && step % if broke { 10 } else { 40 } == 0,
+        let (r, seen) = visits(|| {
+            duel.step(
+                &InputFrame {
+                    buttons: Buttons {
+                        attack: !started && step % if broke { 10 } else { 40 } == 0,
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
-                ..Default::default()
-            },
-            1.0 / 60.0,
-        );
+                1.0 / 60.0,
+            )
+        });
         broke |= r
             .hits
             .iter()
@@ -218,6 +236,7 @@ fn deathblow_pair_search_is_bounded() {
         started |= r.deathblow.started.is_some();
         if started {
             worst = worst.max(queries.load(Ordering::Relaxed));
+            most = most.max(seen);
             // The start and the first steps of paired travel; the rest repeats them.
             thrown += 1;
             if thrown > 30 {
@@ -228,6 +247,9 @@ fn deathblow_pair_search_is_bounded() {
     assert!(started, "the deathblow never started");
     // 93,722 before the bounded search, about 10,500 after (most of them the wall projection).
     assert!(worst < 20_000, "{worst} ground queries in one throw step");
+    // 124.6M with the wall projection unbounded over whole cells, 12.7M once it shares the
+    // search's budget and the grid is banded (#163).
+    assert!(most < 25_000_000, "{most} grid entries in one throw step");
 }
 
 /// Where Wolf stood idle against a wall and the step took about 12 ms (#161): the hook search
