@@ -1094,7 +1094,7 @@ fn status_bar(root: &mut ChildSpawnerCommands, ui: &Ui, kit: &Kit, book: &Book, 
 
 /// Inventory's entries for a category: Quick Items (the Healing Gourd, the Homeward Idol), Key
 /// Items (Kusabimaru, the Shinobi Prosthetic), Upgrade Materials, Prosthetic Arm Tools (those
-/// fitted). gap: no pickups, so only what Wolf starts with.
+/// fitted). Counts and the Storage come from the kit, so picked-up items show here.
 fn inventory(cat: usize, kit: &Kit, book: &Book) -> Vec<Entry> {
     let (texts, tables) = (&book.texts, &book.tables);
     let entry = |slot: Slot, count: Option<u32>, stats: Vec<(String, String)>| {
@@ -1113,12 +1113,20 @@ fn inventory(cat: usize, kit: &Kit, book: &Book) -> Vec<Entry> {
         }
     };
     let held = |n: u32, of: u32| ("Number Held".to_string(), format!("{n}/ {of}"));
-    let storage = || ("In Storage".to_string(), "-".to_string());
+    let storage = |id: i32| {
+        let n = kit.stored(id);
+        let n = if n > 0 {
+            n.to_string()
+        } else {
+            "-".to_string()
+        };
+        ("In Storage".to_string(), n)
+    };
     let stocked = |(id, n): (i32, u32)| {
         entry(
             Slot::Goods(id, n),
             Some(n),
-            vec![held(n, tables.max(id)), storage()],
+            vec![held(n, tables.max(id)), storage(id)],
         )
     };
     match cat {
@@ -1127,7 +1135,7 @@ fn inventory(cat: usize, kit: &Kit, book: &Book) -> Vec<Entry> {
             let gourd = entry(
                 Slot::Goods(HEALING_GOURD, g),
                 Some(g),
-                vec![("Uses".to_string(), format!("{g}/{g}")), storage()],
+                vec![("Uses".to_string(), format!("{g}/{g}")), storage(3000)],
             );
             std::iter::once(gourd)
                 .chain(held_goods(kit, tables, 0).into_iter().map(stocked))
@@ -1136,7 +1144,7 @@ fn inventory(cat: usize, kit: &Kit, book: &Book) -> Vec<Entry> {
         1 => book
             .key_items
             .iter()
-            .map(|id| entry(Slot::Goods(*id, 1), None, vec![held(1, 1), storage()]))
+            .map(|id| entry(Slot::Goods(*id, 1), None, vec![held(1, 1), storage(*id)]))
             .chain(
                 held_goods(kit, tables, 1)
                     .into_iter()
@@ -1438,6 +1446,35 @@ mod tests {
                 .iter()
                 .any(|r| r.name == "Scrap Iron" && r.count.as_deref() == Some("20"))
         );
+    }
+
+    #[test]
+    fn picked_up_goods_change_what_the_inventory_lists() {
+        let Some(book) = book() else {
+            return;
+        };
+        let mut kit = Kit::default();
+        // What pick_up does with the lots of #150: 2 Pellets (3020) with 3 of 3 held, and Scrap
+        // Iron (6000) with room to carry.
+        for (id, n) in [(3020, 2), (6000, 2)] {
+            kit.add(id, n, book.tables.max(id));
+        }
+        let row = |cat, name: &str| {
+            inventory(cat, &kit, &book)
+                .into_iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("{name} is not listed"))
+        };
+        let pellets = row(0, "Pellet");
+        assert_eq!(pellets.count.as_deref(), Some("3"));
+        assert!(
+            pellets
+                .stats
+                .contains(&("In Storage".to_string(), "2".to_string())),
+            "{:?}",
+            pellets.stats
+        );
+        assert_eq!(row(2, "Scrap Iron").count.as_deref(), Some("22"));
     }
 
     #[test]

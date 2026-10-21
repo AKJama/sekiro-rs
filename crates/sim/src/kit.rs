@@ -5,9 +5,11 @@
 //! gap: only [`Kit::use_goods`] spends (its effect unmodelled; no shops or skills), and death
 //! does not take its half of the Sen and experience (TentativePlayerParam `MoneyLostRate` /
 //! `SkillPointLostRate` 50).
-//! Map items (`crate::items`) go into the goods with [`Kit::add`], and their taken flags too.
+//! Map items (`crate::items`) go into the goods with [`Kit::add`], and their taken flags too;
+//! what is over the carry limit goes to the Storage (`storage`).
+//! gap: Rest does not restock the carried goods from the Storage yet.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Experience from skill point n to n + 1 (n = points earned so far, spent or not); past the
 /// table the last step repeats. The exe computes it, not the params: the table is the one the
@@ -58,6 +60,9 @@ pub struct Kit {
     pub quick_items: [i32; 5],
     /// Goods held besides the gourd and emblems: EquipParamGoods id and count.
     pub goods: Vec<(i32, u32)>,
+    /// Goods sent to the Storage for being over the carry limit, Spirit Emblems (goods 1000)
+    /// included: EquipParamGoods id and count.
+    pub storage: BTreeMap<i32, u32>,
     /// Sen carried.
     pub sen: u32,
     /// Skill points available.
@@ -127,6 +132,7 @@ impl Default for Kit {
                 (9720, 1),
                 (9750, 1),
             ],
+            storage: BTreeMap::new(),
             sen: 0,
             skill_points: 0,
             skill_level: 0,
@@ -153,19 +159,29 @@ impl Kit {
         }
     }
 
-    /// Takes `n` of the goods `id` up to `max` carried (EquipParamGoods `maxNum`); Spirit
-    /// Emblems (goods 1000) go onto their count.
-    /// gap: the game sends what is over `max` to the Storage; here it is left behind.
+    /// The number of this goods id in the Storage (zero when absent).
+    pub fn stored(&self, id: i32) -> u32 {
+        self.storage.get(&id).copied().unwrap_or(0)
+    }
+
+    /// Takes `n` of the goods `id` up to `max` carried (EquipParamGoods `maxNum`), the rest to
+    /// the Storage; Spirit Emblems (goods 1000) go onto their count.
     pub fn add(&mut self, id: i32, n: u32, max: u32) {
-        if id == crate::items::SPIRIT_EMBLEM {
-            self.spirit_emblems += n.min(max.saturating_sub(self.spirit_emblems));
-            return;
-        }
-        let added = n.min(max.saturating_sub(self.count(id)));
-        match self.goods.iter_mut().find(|(g, _)| *g == id) {
-            Some((_, held)) => *held += added,
-            None if added > 0 => self.goods.push((id, added)),
-            None => {}
+        let added = if id == crate::items::SPIRIT_EMBLEM {
+            let added = n.min(max.saturating_sub(self.spirit_emblems));
+            self.spirit_emblems += added;
+            added
+        } else {
+            let added = n.min(max.saturating_sub(self.count(id)));
+            match self.goods.iter_mut().find(|(g, _)| *g == id) {
+                Some((_, held)) => *held += added,
+                None if added > 0 => self.goods.push((id, added)),
+                None => {}
+            }
+            added
+        };
+        if n > added {
+            *self.storage.entry(id).or_default() += n - added;
         }
     }
 
@@ -269,5 +285,20 @@ mod tests {
         assert_eq!(kit.count(3040), 0);
         assert!(!kit.use_goods(3040), "none left");
         assert!(!kit.use_goods(1), "never held");
+    }
+
+    #[test]
+    fn goods_over_the_carry_limit_go_to_the_storage() {
+        let mut kit = Kit::default();
+        // Pellets (3020) are at their limit of 3: both go to the Storage.
+        kit.add(3020, 2, 3);
+        assert_eq!((kit.count(3020), kit.stored(3020)), (3, 2));
+        // Room for one of two Spirit Emblems.
+        kit.spirit_emblems = 14;
+        kit.add(crate::items::SPIRIT_EMBLEM, 2, 15);
+        assert_eq!((kit.spirit_emblems, kit.stored(1000)), (15, 1));
+        // A goods not held is carried, with nothing stored.
+        kit.add(7, 2, 99);
+        assert_eq!((kit.count(7), kit.stored(7)), (2, 0));
     }
 }
