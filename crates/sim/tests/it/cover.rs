@@ -15,16 +15,14 @@ impl Ground for Wall {
     }
 }
 fn synthetic(variation: u8) -> Docking {
-    let mut docking = Docking::default();
-    docking.edges.push(MapEdge {
+    Docking::new(vec![MapEdge {
         kind: 3,
         variation,
         start: [-2.0, 0.4, 0.0],
         end: [2.0, 0.4, 0.0],
         source_part: "wall".into(),
         chain: 1,
-    });
-    docking
+    }])
 }
 #[test]
 fn cover_search_facing_variations_and_slide_clamps() {
@@ -430,4 +428,68 @@ fn cover_obstacle_queries_distinguish_each_end() {
     // The +X end is the right one, facing the wall.
     assert!(!docking.cover_blocked(target, &Corner, true));
     assert!(docking.cover_blocked(target, &Corner, false));
+}
+
+/// The wall hug in m11_00's foggy snake pit (#147): wall `h013600` is chain 2 (variation 0)
+/// joined end to start to chain 3 (variation 10), a ledge too narrow for a floor under the
+/// docked feet. From both spots the playtest docked at, Wolf hugs back to chain 2's corner and
+/// on across the joint onto chain 3, where he used to stop at the joint or at once.
+#[test]
+fn snake_pit_wall_hug_crosses_the_chain_joint() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache/maps/m11_00_00_00");
+    let Some(world) = crate::step_cost::play_world() else {
+        return;
+    };
+    if !dir.join("edges.json").exists() {
+        return;
+    }
+    let world = &*world;
+    let mut docking = Docking::load(&dir.join("edges.json")).unwrap();
+    let wall = |docking: &Docking, chain: u32| -> Vec<usize> {
+        (0..docking.edges.len())
+            .filter(|&i| {
+                let e = &docking.edges[i];
+                e.source_part == "h013600" && e.kind == 3 && e.chain == chain
+            })
+            .collect()
+    };
+    let (corner, narrow) = (wall(&docking, 2)[2], wall(&docking, 3)[0]);
+    let run = |e: &MapEdge| Vec3::from(e.end) - Vec3::from(e.start);
+    for entry in [[-3.5467, -141.634, 5.6632], [-2.2022, -141.610, 8.1418]] {
+        // Toward chain 2's start the hug stops at the sharp corner; the other way it runs on.
+        for (sign, edge, past) in [(-1.0f32, corner, 0.0f32), (1.0, narrow, 0.5)] {
+            let mut body = Body {
+                position: entry,
+                yaw: (-run(&docking.edges[corner]).z).atan2(run(&docking.edges[corner]).x),
+                ..Body::default()
+            };
+            docking.active = None;
+            docking.search(&body, world);
+            assert!(
+                docking
+                    .candidate
+                    .as_ref()
+                    .is_some_and(|t| docking.is_cover(t)),
+                "no cover at {entry:?}: {:?}",
+                docking.candidate
+            );
+            assert!(docking.cover_step(&mut body, Some("a000_218103"), None, 0.0, world));
+            let d = run(&docking.edges[corner]) * sign;
+            let stick = (-d.x).atan2(-d.z);
+            for _ in 0..300 {
+                docking.cover_step(&mut body, Some("a000_021203"), Some(stick), 0.05, world);
+            }
+            let target = docking.active.clone().unwrap();
+            let e = &docking.edges[edge];
+            let along = (target.point - Vec3::from(e.start)).dot(run(e)) / run(e).length_squared();
+            assert!(
+                target.edge == edge && along >= past - 1e-3,
+                "from {entry:?} sign {sign}: stopped at {target:?}, {along} along edge {}",
+                target.edge
+            );
+            if sign < 0.0 {
+                assert_ne!(target.end, 0, "no end at the corner: {target:?}");
+            }
+        }
+    }
 }

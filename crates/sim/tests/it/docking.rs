@@ -12,16 +12,14 @@ impl Ground for Step {
     }
 }
 fn synthetic() -> Docking {
-    let mut docking = Docking::default();
-    docking.edges = vec![MapEdge {
+    Docking::new(vec![MapEdge {
         kind: 2,
         variation: 0,
         start: [-2.0, 0.0, 0.0],
         end: [2.0, 0.0, 0.0],
         source_part: "synthetic".into(),
         chain: 0,
-    }];
-    docking
+    }])
 }
 fn cache() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache")
@@ -39,7 +37,7 @@ fn closest_reach_facing_and_ends() {
     let mut docking = synthetic();
     assert_eq!(
         docking.edges[0].closest(Vec3::new(4.0, 9.0, 2.0)),
-        (Vec3::new(2.0, 0.0, 0.0), 1.0)
+        Vec3::new(2.0, 0.0, 0.0)
     );
     let mut body = Body {
         position: [0.0, 0.0, 0.4],
@@ -61,7 +59,7 @@ fn closest_reach_facing_and_ends() {
     assert!(docking.candidate.is_none());
     body.position = [1.99, 0.0, 0.4];
     docking.search(&body, &Step);
-    assert_eq!(docking.candidate.unwrap().end, 2);
+    assert_eq!(docking.candidate.unwrap().end, 1);
 }
 
 #[test]
@@ -73,8 +71,8 @@ fn short_ledge_allows_hanging_at_its_midpoint() {
         .target(0, Vec3::new(0.15, 0.0, 0.4), &Step)
         .expect("a short edge still supports hanging");
     assert_eq!(target.point, Vec3::ZERO);
-    assert!(docking.hang_blocked(&target, true));
-    assert!(docking.hang_blocked(&target, false));
+    assert!(target.end_blocked(true));
+    assert!(target.end_blocked(false));
     let mut body = Body::default();
     docking.active = Some(target);
     for motion in [-1.0, 1.0] {
@@ -83,7 +81,8 @@ fn short_ledge_allows_hanging_at_its_midpoint() {
             Some("a000_020202"),
             0.0,
             None,
-            [motion, 0.0, 0.0, 0.0]
+            [motion, 0.0, 0.0, 0.0],
+            &Step,
         ));
         assert_eq!(docking.active.as_ref().unwrap().point, Vec3::ZERO);
     }
@@ -99,21 +98,21 @@ fn hang_travel_updates_endpoint_flags_with_reversed_edges() {
         }
         docking.active = docking.target(0, Vec3::new(0.0, 0.0, 0.4), &Step);
         let mut body = Body::default();
-        for (motion, end) in [
-            (100.0, if reversed { 1 } else { 2 }),
-            (-100.0, if reversed { 2 } else { 1 }),
-        ] {
+        // Facing the wall (outward -Z), +X is Wolf's left: the end bits follow his sides,
+        // not the edge's stored order.
+        for (motion, end) in [(100.0, 1), (-100.0, 2)] {
             assert!(docking.step(
                 &mut body,
                 Some("a000_020202"),
                 0.0,
                 None,
-                [motion, 0.0, 0.0, 0.0]
+                [motion, 0.0, 0.0, 0.0],
+                &Step,
             ));
             let target = docking.active.as_ref().unwrap();
             assert_eq!(target.end, end);
-            assert_eq!(docking.hang_blocked(target, true), motion > 0.0);
-            assert_eq!(docking.hang_blocked(target, false), motion < 0.0);
+            assert_eq!(target.end_blocked(true), motion > 0.0);
+            assert_eq!(target.end_blocked(false), motion < 0.0);
         }
     }
 }
@@ -407,5 +406,173 @@ fn shimmy_both_ways_stops_at_ends_and_can_climb_or_drop() {
         } else {
             assert!(duel.player.body.position[1] < initial.y - 1.0);
         }
+    }
+}
+
+/// [`synthetic`]'s ledge with a second edge joined on at its end (2, 0, 0), stored end to
+/// start like the extractor's chains, turning by `turn` degrees toward the floor side (+Z).
+fn two_edge_ledge(turn: f32) -> (Docking, Vec3) {
+    let mut docking = synthetic();
+    let dir = Vec3::new(turn.to_radians().cos(), 0.0, turn.to_radians().sin());
+    let start = Vec3::new(2.0, 0.0, 0.0);
+    docking.edges.push(MapEdge {
+        start: start.to_array(),
+        end: (start + dir * 3.0).to_array(),
+        ..docking.edges[0].clone()
+    });
+    docking.rebuild_links();
+    docking.active = docking.target(0, Vec3::new(0.0, 0.0, 0.4), &Step);
+    (docking, dir)
+}
+
+/// Shimmy `ticks` hang steps of `motion` metres along the wall; the target after the last.
+fn shimmy(docking: &mut Docking, motion: f32, ticks: usize) -> sekiro_sim::docking::Target {
+    let mut body = Body::default();
+    for _ in 0..ticks {
+        assert!(docking.step(
+            &mut body,
+            Some("a000_020202"),
+            0.0,
+            None,
+            [motion, 0.0, 0.0, 0.0],
+            &Step,
+        ));
+    }
+    docking.active.clone().unwrap()
+}
+
+/// A ledge is a chain of edges (#147): the shimmy goes on over a gentle joint onto the next
+/// edge, keeps to the same side of the ledge, and stops only near the chain's own ends.
+#[test]
+fn hang_travel_follows_the_edge_chain_round_a_corner() {
+    let (mut docking, dir) = two_edge_ledge(15.0);
+    // Facing the wall (outward -Z), Wolf's left is +X, toward the joint.
+    let target = shimmy(&mut docking, 0.1, 60);
+    assert_eq!(target.edge, 1, "{target:?}");
+    let outward = Vec3::new(dir.z, 0.0, -dir.x);
+    assert!(target.outward.distance(outward) < 1e-4, "{target:?}");
+    assert_eq!(target.end, 1, "at the ledge's left end: {target:?}");
+    let far = Vec3::new(2.0, 0.0, 0.0) + dir * (3.0 - HANG_END_MARGIN);
+    assert!(target.point.distance(far) < 1e-4, "{target:?}");
+    assert!(target.end_blocked(true) && !target.end_blocked(false));
+    // Back over the joint to the first edge's free end, the ledge's right end.
+    let target = shimmy(&mut docking, -0.1, 80);
+    assert_eq!(target.edge, 0, "{target:?}");
+    assert!(target.outward.distance(-Vec3::Z) < 1e-4, "{target:?}");
+    assert_eq!(target.end, 2);
+    assert!(
+        target
+            .point
+            .distance(Vec3::new(-2.0 + HANG_END_MARGIN, 0.0, 0.0))
+            < 1e-4
+    );
+}
+
+/// A sharp joint is a ledge end: the real game turns it with its hang corner moves, so the
+/// shimmy stops [`HANG_END_MARGIN`] short of a 90 degree corner, blocked on that side.
+#[test]
+fn hang_travel_stops_at_a_sharp_corner() {
+    let (mut docking, _) = two_edge_ledge(90.0);
+    let target = shimmy(&mut docking, 0.1, 60);
+    assert_eq!(target.edge, 0, "{target:?}");
+    assert!(target.outward.distance(-Vec3::Z) < 1e-4, "{target:?}");
+    assert_eq!(target.end, 1, "{target:?}");
+    assert!(
+        target
+            .point
+            .distance(Vec3::new(2.0 - HANG_END_MARGIN, 0.0, 0.0))
+            < 1e-4
+    );
+}
+
+/// The wall in m11_00's foggy pit (#147): one foot-hold ledge of seven edges (h013500 chain
+/// 1). Hung from its second edge, Wolf shimmies to both of the ledge's ends, not each edge's.
+#[test]
+fn snake_pit_shimmy_runs_the_whole_ledge() {
+    let dir = cache().join("maps/m11_00_00_00");
+    if !dir.join("edges.json").exists() || !dir.join("collision.bin").exists() {
+        return;
+    }
+    let world = sekiro_sim::collision::CollisionWorld::load(&dir.join("collision.bin")).unwrap();
+    let docking = Docking::load(&dir.join("edges.json")).unwrap();
+    let ledge: Vec<usize> = (0..docking.edges.len())
+        .filter(|&i| {
+            let e = &docking.edges[i];
+            e.source_part == "h013500" && e.chain == 1 && e.kind == 2
+        })
+        .collect();
+    assert_eq!(ledge.len(), 7);
+    let start = ledge[1];
+    let e = &docking.edges[start];
+    let mid = (Vec3::from(e.start) + Vec3::from(e.end)) * 0.5;
+    let target = docking.target(start, mid, &world).unwrap();
+    let mut duel = Duel::load(&cache(), 4.0).unwrap();
+    duel.enemy_active = false;
+    duel.player.body.position = target.floor.to_array();
+    duel.player.body.yaw = (-target.outward.x).atan2(-target.outward.z);
+    duel.player.ground = Box::new(world);
+    duel.player.docking = docking;
+    let dt = 1.0 / 60.0;
+    for _ in 0..30 {
+        duel.step(&InputFrame::default(), dt);
+    }
+    let action = press(Buttons {
+        action: true,
+        ..Buttons::default()
+    });
+    let r = duel.step(&action, dt);
+    assert!(
+        r.player
+            .behavior
+            .events
+            .iter()
+            .any(|e| e == "W_StandToHangFootHold1"),
+        "{:?}",
+        r.player.behavior.events
+    );
+    for _ in 0..90 {
+        duel.step(&InputFrame::default(), dt);
+    }
+    // Docking left (stick -1) runs toward the chain's first edge's start, right to the last's end.
+    let edges = &duel.player.docking.edges;
+    let ends = [
+        (-1.0, ledge[0], Vec3::from(edges[ledge[0]].start)),
+        (1.0, ledge[6], Vec3::from(edges[ledge[6]].end)),
+    ];
+    for (side, edge, end) in ends {
+        let target = (0..900)
+            .find_map(|_| {
+                let yaw = duel.player.docking.active.as_ref().unwrap().yaw();
+                let moving = InputFrame {
+                    move_stick: [side, 0.0],
+                    camera_yaw: yaw,
+                    ..InputFrame::default()
+                };
+                let r = duel.step(&moving, dt);
+                let t = duel.player.docking.active.clone().expect("still hanging");
+                (r.player.animation.as_deref() == Some("a000_020010") && t.end != 0).then_some(t)
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "side {side}: never settled at an end: {:?}",
+                    duel.player.docking.active
+                )
+            });
+        assert_eq!(target.edge, edge, "side {side}: stopped short: {target:?}");
+        let gap = Vec3::new(target.point.x - end.x, 0.0, target.point.z - end.z).length();
+        assert!(
+            (gap - HANG_END_MARGIN).abs() < 0.02,
+            "side {side}: {gap} m from the ledge's end"
+        );
+        // The outward carried along the chain is the face the floor probe finds there.
+        let probed = duel
+            .player
+            .docking
+            .target(edge, target.point, duel.player.ground.as_ref())
+            .expect("a hang face at the ledge's end");
+        assert!(
+            target.outward.distance(probed.outward) < 1e-3,
+            "side {side}: {target:?} vs {probed:?}"
+        );
     }
 }
