@@ -212,3 +212,49 @@ fn a_jump_flush_against_a_wall_rises_past_its_top() {
         "peaked at {peak}, {free} by a taller wall"
     );
 }
+
+/// Wolf jumps up the rock wall of the gully by m11_00's start 0 (about (-132, -38, -106)),
+/// pressed against it under the ledge he means to catch: each jump rises as high as a free one
+/// (2.13 m, as before #170). The wall's uneven rock juts lips over his head sphere's shoulder,
+/// up to 0.4 m off its centre line, and stopping at those held these jumps to 0.5 to 1.2 m.
+#[test]
+fn jumps_up_the_gully_rock_wall_rise_past_its_lips() {
+    let (Some(world), Some(cache)) = (play_world(), cache()) else {
+        return;
+    };
+    let mut low = Vec::new();
+    for (x, z, yaw) in [
+        (-132.83, -105.78, 191.25f32),
+        (-130.98, -106.23, 202.5),
+        (-131.83, -105.89, 213.75),
+    ] {
+        let floor = world.floor(x, z, -37.0).expect("the gully floor");
+        let mut wolf = Character::load_from_cache(&cache).unwrap();
+        wolf.ground = Box::new(world.clone());
+        wolf.body.position = [x, floor, z];
+        settle(&mut wolf);
+        wolf.snap_yaw(yaw.to_radians());
+        let mut peak = f32::MIN;
+        for i in 0..90 {
+            let input = InputFrame {
+                move_stick: [0.0, 1.0],
+                camera_yaw: yaw.to_radians(),
+                buttons: Buttons {
+                    jump: (0..3).contains(&i),
+                    ..Buttons::default()
+                },
+            };
+            let report = wolf.tick(&input, DT);
+            assert!(
+                report.behavior.script_errors.is_empty(),
+                "{:?}",
+                report.behavior.script_errors
+            );
+            peak = peak.max(report.position[1]);
+        }
+        if peak - floor < 2.0 {
+            low.push((x, z, peak - floor));
+        }
+    }
+    assert!(low.is_empty(), "stopped low on the wall: {low:?}");
+}

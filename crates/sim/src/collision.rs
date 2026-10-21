@@ -355,6 +355,13 @@ const CELL: f32 = 4.0;
 /// [`RADIUS`] from it, give or take roundoff, so the wall's top edge passes a hair inside the
 /// rim; skipping such a face lets the sphere overlap it by at most this.
 const CEILING_GRAZE: f32 = 1e-3;
+/// How far from the head sphere's centre line, seen from above, the point where it first meets
+/// a face may be for that face to stop a rise ([`CollisionWorld::ceiling_for`]): within about
+/// 39 degrees of the sphere's top. Further out the face only meets its shoulder, the wall slide
+/// pushes it off, and stopping there blocked most jumps up m11_00's rock walls under their
+/// ledge lips; the gate fence's cap beam (#170) meets it 0.23 m out. 0.25 m is where the
+/// sampled test before #170 looked, which those walls were climbed with.
+const CEILING_REACH: f32 = 0.25;
 /// `CollisionWorld::part_of` for a triangle in no helper or event part.
 const ORDINARY: u16 = 0;
 /// `CollisionWorld::part_of` bit marking an event part's triangle.
@@ -873,7 +880,9 @@ impl CollisionWorld {
     /// edge over the rim or a sloping underside stops it where it first touches (#170). Only a
     /// face the sphere rises into counts: not one it is already in at the start, nor one that
     /// reaches no more than [`CEILING_GRAZE`] inside its rim, such as the top edge of a wall the
-    /// body is pressed against. When `Some`, it is below `feet.y + rise`.
+    /// body is pressed against, nor one it first meets more than [`CEILING_REACH`] off its
+    /// centre line, such as a rock lip over the wall it is jumping up. When `Some`, it is below
+    /// `feet.y + rise`.
     // TODO(#163): this scans whole 4 m cells; a height-banded grid would cut that.
     fn ceiling_for(&self, feet: Vec3, rise: f32, who: u8) -> Option<f32> {
         let centre = feet + Vec3::Y * (HEAD_TOP - RADIUS);
@@ -917,8 +926,9 @@ impl CollisionWorld {
     /// How far the sphere of [`RADIUS`] at `centre` rises, less than `rise`, before it first
     /// touches triangle `t`: the least rise at which it meets the face's interior, one of its
     /// edges or one of its corners, 0 if it touches it already. `None` when it does not touch it
-    /// within `rise`, when it is already more than [`CEILING_GRAZE`] into it, or when the face
-    /// reaches no further than that inside its rim, seen from above.
+    /// within `rise`, when it is already more than [`CEILING_GRAZE`] into it, when the face
+    /// reaches no further than that inside its rim, seen from above, or when the touch is more
+    /// than [`CEILING_REACH`] off its centre line.
     fn rise_into(&self, t: u32, centre: Vec3, rise: f32) -> Option<f32> {
         let [a, b, c] = self.corners(t);
         let line = centre.with_y(0.0);
@@ -973,13 +983,19 @@ impl CollisionWorld {
         if first >= rise {
             return None;
         }
-        if first < 0.0 {
-            // Already touching: within the graze it stops the rise now; deeper, the body is in
-            // the face already (a slope it walked under), and rising carries it out.
-            let q = closest_on_triangle(centre, a, b, c);
-            return (q.distance_squared(centre) >= reach * reach).then_some(0.0);
+        let at = centre + Vec3::Y * first.max(0.0);
+        let q = closest_on_triangle(at, a, b, c);
+        // Already touching: within the graze it stops the rise now; deeper, the body is in the
+        // face already (a slope it walked under), and rising carries it out.
+        if first < 0.0 && q.distance_squared(at) < reach * reach {
+            return None;
         }
-        Some(first)
+        // Off the top of the sphere it meets the face with its shoulder, as a jump up an uneven
+        // wall meets each rock lip it is pressed against: the slide pushes it off that.
+        if q.y <= at.y || (q - at).with_y(0.0).length_squared() > CEILING_REACH * CEILING_REACH {
+            return None;
+        }
+        Some(first.max(0.0))
     }
 
     /// How many triangles a [`CollisionWorld::ceiling_for`] of `rise` from `feet` sweeps the
@@ -1831,8 +1847,9 @@ mod tests {
         assert_eq!(world.floor_material(9.0, 0.0, 2.0), None);
     }
 
-    /// A beam 0.25 m above the head, whose edge is 0.3 m out, over the head sphere's rim, stops
-    /// the rise where the rim meets that edge (#170).
+    /// A beam 0.25 m above the head, whose edge is 0.2 m out, inside the head sphere's rim but
+    /// clear of its centre line, stops the rise where the sphere meets that edge (#170); 0.3 m
+    /// out, past [`CEILING_REACH`], it only meets the sphere's shoulder and does not.
     #[test]
     fn a_beam_edge_over_the_head_rim_stops_the_rise() {
         let y = HEAD_TOP + 0.25;
@@ -1840,23 +1857,25 @@ mod tests {
         m.vertices.extend_from_slice(&[
             [-2.0, y, -2.0],
             [2.0, y, -2.0],
-            [2.0, y, -0.3],
-            [-2.0, y, -0.3],
+            [2.0, y, -0.2],
+            [-2.0, y, -0.2],
         ]);
         m.indices.extend([0, 1, 2, 0, 2, 3]);
         m.materials.extend([0, 0]);
         let world = CollisionWorld::from_mesh(&m);
         let top = world.ceiling_for(Vec3::ZERO, 1.0, PLAYER);
-        let want = y - (RADIUS * RADIUS - 0.3 * 0.3).sqrt() - (HEAD_TOP - RADIUS);
+        let want = y - (RADIUS * RADIUS - 0.2 * 0.2).sqrt() - (HEAD_TOP - RADIUS);
         assert!(
             top.is_some_and(|t| (t - want).abs() < 1e-4),
             "{top:?}, want {want}"
         );
-        // Clear of the rim, nothing stops it.
-        assert_eq!(
-            world.ceiling_for(Vec3::new(0.0, 0.0, 0.11), 1.0, PLAYER),
-            None
-        );
+        for z in [0.1, 0.21] {
+            assert_eq!(
+                world.ceiling_for(Vec3::new(0.0, 0.0, z), 1.0, PLAYER),
+                None,
+                "{z}"
+            );
+        }
     }
 
     /// A world of the given quads, each two triangles.
@@ -1895,8 +1914,8 @@ mod tests {
     }
 
     /// The top of a wall the slide leaves the body pressed against, its edge at the head
-    /// sphere's rim, does not stop a jump up past it (ledge grabs and wall jumps); 0.1 m nearer,
-    /// it does.
+    /// sphere's rim, does not stop a jump up past it (ledge grabs and wall jumps); within
+    /// [`CEILING_REACH`] of the centre line, it does.
     #[test]
     fn a_wall_top_at_the_rim_does_not_stop_the_rise() {
         let y = 2.0;
@@ -1928,7 +1947,7 @@ mod tests {
         }
         assert!(
             world
-                .ceiling_for(Vec3::new(0.3, 0.0, 0.3), 1.0, PLAYER)
+                .ceiling_for(Vec3::new(0.3, 0.0, 0.2), 1.0, PLAYER)
                 .is_some()
         );
     }
