@@ -867,8 +867,11 @@ impl CollisionWorld {
     /// sphere meets a ceiling over it: any surface flat enough to be a floor (the winding does
     /// not say which side is solid, see the module notes) above that sphere's centre. The
     /// sphere is tested at its centre line and four lines [`CEILING_SAMPLE`] out, each against
-    /// its surface's height there, so a beam or a sloping underside off the centre stops it too.
-    /// When `Some`, it is below `feet.y + rise`.
+    /// its surface's height there, so a beam or a sloping underside off the centre stops it too,
+    /// and at each surface's point nearest the centre line, so an edge anywhere over the sphere
+    /// stops it: a beam's edge over the rim, where no sample line meets it, let the head rise
+    /// into it, and the slide then shoved the body sideways out of it, through a wall behind
+    /// (#170). When `Some`, it is below `feet.y + rise`.
     // TODO(#163): this scans whole 4 m cells; a height-banded grid would cut that.
     fn ceiling_for(&self, feet: Vec3, rise: f32, who: u8) -> Option<f32> {
         let head = HEAD_TOP - RADIUS;
@@ -884,8 +887,10 @@ impl CollisionWorld {
             (0.0, -s, lift),
         ]
         .map(|(dx, dz, up)| (feet.x + dx, feet.z + dz, up));
-        let (x0, z0) = cell_of(feet.x - s, feet.z - s);
-        let (x1, z1) = cell_of(feet.x + s, feet.z + s);
+        let line = Vec3::new(feet.x, 0.0, feet.z);
+        let r = RADIUS;
+        let (x0, z0) = cell_of(feet.x - r, feet.z - r);
+        let (x1, z1) = cell_of(feet.x + r, feet.z + r);
         let mut best: Option<f32> = None;
         for cx in x0..=x1 {
             for cz in z0..=z1 {
@@ -896,15 +901,29 @@ impl CollisionWorld {
                     let [lo, hi] = self.bounds[t as usize];
                     if hi.y < centre
                         || lo.y > high
-                        || hi.x < feet.x - s
-                        || lo.x > feet.x + s
-                        || hi.z < feet.z - s
-                        || lo.z > feet.z + s
+                        || hi.x < feet.x - r
+                        || lo.x > feet.x + r
+                        || hi.z < feet.z - r
+                        || lo.z > feet.z + r
                         || !self.walkable(t, who)
                     {
                         continue;
                     }
                     let [a, b, c] = self.corners(t);
+                    // The face's point nearest the centre line, seen from above, tested by the
+                    // cell that holds it: the sphere meets the face's height there when its
+                    // centre is that far below it.
+                    let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z);
+                    let q = closest_on_triangle(line, flat(a), flat(b), flat(c));
+                    let d2 = q.distance_squared(line);
+                    if d2 < r * r && cell_of(q.x, q.z) == (cx, cz) {
+                        let n = self.normals[t as usize];
+                        let h = a.y - (n.x * (q.x - a.x) + n.z * (q.z - a.z)) / n.y;
+                        let top = h - (r * r - d2).sqrt() - head;
+                        if h >= centre && top < feet.y + rise && best.is_none_or(|b| top < b) {
+                            best = Some(top);
+                        }
+                    }
                     for (x, z, up) in samples {
                         // Each sample line is tested only by the cell that holds it, and only
                         // against triangles whose box holds it.
@@ -1766,5 +1785,34 @@ mod tests {
         assert_eq!(world.floor_material(0.0, 0.0, 0.5), Some(1));
         assert_eq!(Ground::material(&world, 0.0, 0.0, 0.5), Some(1));
         assert_eq!(world.floor_material(9.0, 0.0, 2.0), None);
+    }
+
+    /// A beam 0.25 m above the head, whose edge is 0.3 m out, over the head sphere's rim but
+    /// past every [`CEILING_SAMPLE`] line, still stops the rise where the rim meets that edge
+    /// (#170).
+    #[test]
+    fn a_beam_edge_over_the_head_rim_stops_the_rise() {
+        let y = HEAD_TOP + 0.25;
+        let mut m = CollisionMesh::default();
+        m.vertices.extend_from_slice(&[
+            [-2.0, y, -2.0],
+            [2.0, y, -2.0],
+            [2.0, y, -0.3],
+            [-2.0, y, -0.3],
+        ]);
+        m.indices.extend([0, 1, 2, 0, 2, 3]);
+        m.materials.extend([0, 0]);
+        let world = CollisionWorld::from_mesh(&m);
+        let top = world.ceiling_for(Vec3::ZERO, 1.0, PLAYER);
+        let want = y - (RADIUS * RADIUS - 0.3 * 0.3).sqrt() - (HEAD_TOP - RADIUS);
+        assert!(
+            top.is_some_and(|t| (t - want).abs() < 1e-4),
+            "{top:?}, want {want}"
+        );
+        // Clear of the rim, nothing stops it.
+        assert_eq!(
+            world.ceiling_for(Vec3::new(0.0, 0.0, 0.11), 1.0, PLAYER),
+            None
+        );
     }
 }
