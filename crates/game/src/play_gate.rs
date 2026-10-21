@@ -32,6 +32,19 @@ pub(crate) struct PlayGate {
     /// not move before play).
     near: Option<Vec<Entity>>,
     last_log: Option<Instant>,
+    /// The fullest bar shown so far, so the bar never goes back. Each load (a map change
+    /// relaunches the process) starts with a fresh gate.
+    shown: f32,
+}
+
+/// `done` of `total` as a fraction from 0 to 1, for the loading bar; 1 when there is nothing to
+/// do.
+pub(crate) fn fraction(done: usize, total: usize) -> f32 {
+    if total == 0 {
+        1.0
+    } else {
+        done.min(total) as f32 / total as f32
+    }
 }
 
 /// What the GPU still waits for before the world is drawable.
@@ -142,8 +155,8 @@ struct Steps {
     /// Resident pipeline warmup ([`crate::pipeline_warmup::PipelineWarmup::progress`]).
     warmup: f32,
     rigs: bool,
-    /// No render pipeline is compiling, counted only once the map is ready so the start of the
-    /// warmup's compiles does not move the bar back.
+    /// No render pipeline is compiling, counted only once the map is ready: before the warmup
+    /// queues its compiles nothing is compiling either, and the bar must not count that.
     compiled: bool,
     settle: f32,
 }
@@ -304,6 +317,9 @@ pub(super) fn update(
     } else {
         1.0
     };
+    // The steps can dip (a late plan adds merges, a late compile starts), but the bar only rises.
+    let progress = progress.max(gate.shown);
+    gate.shown = progress;
     let width = percent(progress * 100.0);
     for mut bar in &mut bars {
         if bar.width != width {

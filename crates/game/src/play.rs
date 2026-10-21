@@ -65,7 +65,7 @@ mod map_enemies;
 mod pickup;
 #[path = "play_gate.rs"]
 mod play_gate;
-pub(crate) use play_gate::PlayGate;
+pub(crate) use play_gate::{PlayGate, fraction};
 #[path = "grapple_hud.rs"]
 mod grapple_hud;
 #[path = "rope.rs"]

@@ -21,7 +21,7 @@ use bevy::prelude::*;
 use bevy::render::erased_render_asset::ErasedRenderAssets;
 use bevy::render::mesh::RenderMesh;
 use bevy::render::render_asset::RenderAssets;
-use bevy::render::render_resource::{CachedRenderPipelineId, PipelineCache};
+use bevy::render::render_resource::{CachedPipelineState, CachedRenderPipelineId, PipelineCache};
 use bevy::render::{Render, RenderApp, RenderSystems};
 
 #[path = "warm_entities.rs"]
@@ -31,7 +31,7 @@ mod entities;
 pub(crate) struct PipelineWarmup {
     loaded: Arc<AtomicBool>,
     ready: Arc<AtomicBool>,
-    /// How far through, in thousandths; it only rises.
+    /// How far through, from 0 to 1, as the bits of an `f32`.
     progress: Arc<AtomicU32>,
 }
 
@@ -46,7 +46,7 @@ impl PipelineWarmup {
         if self.ready() {
             1.0
         } else {
-            self.progress.load(Ordering::Acquire) as f32 / 1000.0
+            f32::from_bits(self.progress.load(Ordering::Acquire))
         }
     }
 }
@@ -104,6 +104,8 @@ struct WarmCache {
     /// Variants found when the warmup started.
     variants: usize,
     queued: usize,
+    /// Queued compiles still compiling, so the bar counts only the warmup's own.
+    pending: Vec<CachedRenderPipelineId>,
     entities_started: Option<Instant>,
     gpu_timed_out: bool,
     entities_ready: bool,
@@ -252,15 +254,19 @@ fn warm_pipelines<M: Material>(world: &mut World, mut state: Local<WarmCache>) {
             &work.properties,
         );
         // Incompatible layout/material combinations are not renderable and need no pipeline.
-        if specialized.is_some_and(|result| result.is_ok()) {
+        if let Some(Ok(id)) = specialized {
             state.queued += 1;
+            state.pending.push(id);
         }
     }
-    let waiting = world
-        .resource::<PipelineCache>()
-        .waiting_pipelines()
-        .count();
-    let compiling = waiting > 0;
+    let cache = world.resource::<PipelineCache>();
+    let compiling = cache.waiting_pipelines().next().is_some();
+    state.pending.retain(|&id| {
+        matches!(
+            cache.get_render_pipeline_state(id),
+            CachedPipelineState::Queued | CachedPipelineState::Creating(_)
+        )
+    });
     if !state.gpu_timed_out
         && (compiling || !state.work.is_empty())
         && state.started.unwrap().elapsed() >= GPU_COMPILE_LIMIT
@@ -294,11 +300,9 @@ fn warm_pipelines<M: Material>(world: &mut World, mut state: Local<WarmCache>) {
             entities::progress(world)
         },
         state.queued,
-        waiting,
+        state.pending.len(),
     );
-    warmup
-        .progress
-        .fetch_max((progress * 1000.0) as u32, Ordering::AcqRel);
+    warmup.progress.store(progress.to_bits(), Ordering::Release);
     if state.work.is_empty() && state.entities_ready && (!compiling || state.gpu_timed_out) {
         info!(
             "map pipeline warmup complete: {} compatible layout/pass variants",
@@ -311,8 +315,9 @@ fn warm_pipelines<M: Material>(world: &mut World, mut state: Local<WarmCache>) {
 
 /// The warmup's progress from 0 to 1: a fifth for queueing the `variants` layout variants
 /// (`left` still to queue), a fifth for the resident `entities` fraction and three fifths for
-/// the `queued` compiles, of which at most `waiting` are still compiling. Compiles count only
-/// once every variant is queued, so a short gap between requests does not read as done.
+/// the `queued` compiles, of which `waiting` are still compiling. Compiles count only once every
+/// variant is queued: before that, the few queued so far finishing would read as done, and the
+/// bar never goes back to correct it.
 fn stage_progress(
     variants: usize,
     left: usize,
@@ -320,13 +325,7 @@ fn stage_progress(
     queued: usize,
     waiting: usize,
 ) -> f32 {
-    let fraction = |done: usize, total: usize| {
-        if total == 0 {
-            1.0
-        } else {
-            done.min(total) as f32 / total as f32
-        }
-    };
+    use crate::play::fraction;
     let queueing = fraction(variants.saturating_sub(left), variants);
     let compiled = if left == 0 {
         fraction(queued.saturating_sub(waiting), queued)
@@ -408,4 +407,35 @@ fn pass_key(
         key |= MeshPipelineKey::HAS_PREVIOUS_SKIN;
     }
     key
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stage_progress;
+
+    #[test]
+    fn warmup_progress_rises_through_a_load() {
+        // 40 variants queued 16 a frame, compiles finishing as they go, then the entities.
+        // (left to queue, entities, queued, still compiling)
+        let frames = [
+            (40, 0.0, 0, 0),
+            (24, 0.0, 16, 0),
+            (8, 0.0, 30, 12),
+            (0, 0.0, 38, 30),
+            (0, 0.3, 38, 12),
+            (0, 0.8, 38, 0),
+            (0, 1.0, 38, 0),
+        ];
+        let bars: Vec<f32> = frames
+            .iter()
+            .map(|&(left, entities, queued, waiting)| {
+                stage_progress(40, left, entities, queued, waiting)
+            })
+            .collect();
+        assert_eq!(bars[0], 0.0, "{bars:?}");
+        assert!(bars.windows(2).all(|w| w[1] >= w[0]), "{bars:?}");
+        assert!((bars[bars.len() - 1] - 1.0).abs() < 1e-6, "{bars:?}");
+        // Every compile queued so far has finished, but variants are still queueing.
+        assert!((bars[1] - 0.2 * 16.0 / 40.0).abs() < 1e-6, "{bars:?}");
+    }
 }

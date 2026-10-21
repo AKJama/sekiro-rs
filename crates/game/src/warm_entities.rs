@@ -79,11 +79,10 @@ pub(super) fn cancel(world: &mut World) {
 /// The fraction of resident placements warmed, 0 before the entity warmup starts.
 pub(super) fn progress(world: &World) -> f32 {
     let queue = world.resource::<Queue>();
-    let total = queue.completed + queue.work.len();
-    if !queue.started || total == 0 {
-        0.0
+    if queue.started {
+        crate::play::fraction(queue.completed, queue.completed + queue.work.len())
     } else {
-        queue.completed as f32 / total as f32
+        0.0
     }
 }
 

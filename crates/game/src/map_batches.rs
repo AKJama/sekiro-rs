@@ -56,10 +56,14 @@ struct Job {
     task: Task<Option<Mesh>>,
 }
 
-/// Main-thread time per frame for installing finished merges. Each install is a few tens of
-/// microseconds; the earlier cap of 4 installs a frame spread the 1418 merges of m11_00 over
-/// about 6 s at the end of loading (#171), while this installs them in a few frames.
+/// Main-thread time per frame for installing finished merges while loading. Each install is a few
+/// tens of microseconds; a cap of 4 installs a frame spread the 1418 merges of m11_00 over about
+/// 6 s at the end of loading (#171), while this installs them in a few frames.
 const APPLY_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
+/// Installs per frame once play has started, when LOD levels and blocks still spawn and plan
+/// merges: each install also uploads a merged mesh, so a time budget alone could upload dozens
+/// in one gameplay frame.
+const PLAY_APPLY_CAP: usize = 4;
 
 #[derive(Component)]
 struct BatchMember(usize);
@@ -71,7 +75,8 @@ struct Planned;
 pub(crate) struct StaticBatches {
     started: bool,
     jobs: Vec<Job>,
-    /// Merge jobs planned so far, for the loading bar.
+    /// Merge jobs planned so far, for the loading bar. Never reset: a map change relaunches the
+    /// process, so each load starts from a fresh resource.
     planned: usize,
     batches: HashMap<usize, Batch>,
     next_batch: usize,
@@ -90,10 +95,8 @@ impl StaticBatches {
     pub(crate) fn progress(&self) -> f32 {
         if !self.started {
             0.0
-        } else if self.planned == 0 {
-            1.0
         } else {
-            1.0 - self.jobs.len().min(self.planned) as f32 / self.planned as f32
+            crate::play::fraction(self.planned - self.jobs.len(), self.planned)
         }
     }
 }
@@ -195,14 +198,26 @@ fn update(world: &mut World) {
         state.planned += jobs.len();
         state.jobs.extend(jobs);
     }
+    // Behind the loading screen, install as many as fit the time budget; in play, a few a frame.
+    let loading = world
+        .get_resource::<crate::play::PlayGate>()
+        .is_some_and(|gate| !gate.open());
     let applying = std::time::Instant::now();
+    let mut completed = 0;
     let mut i = 0;
-    while i < state.jobs.len() && applying.elapsed() < APPLY_BUDGET {
+    while i < state.jobs.len()
+        && if loading {
+            applying.elapsed() < APPLY_BUDGET
+        } else {
+            completed < PLAY_APPLY_CAP
+        }
+    {
         let Some(mesh) = block_on(poll_once(&mut state.jobs[i].task)) else {
             i += 1;
             continue;
         };
         let job = state.jobs.swap_remove(i);
+        completed += 1;
         let Some(mut mesh) = mesh else {
             continue;
         };
