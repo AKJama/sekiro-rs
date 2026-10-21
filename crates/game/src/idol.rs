@@ -16,10 +16,10 @@ use std::path::Path;
 use bevy::prelude::*;
 use sekiro_sim::arena::yaw_toward;
 use sekiro_sim::deathblow::Placement;
-use sekiro_sim::duel::idol::{IdolPhase, IdolSpot};
+use sekiro_sim::duel::idol::{IdolPhase, IdolSpot, LitKey};
 
 use super::Sim;
-use crate::game_ui::{GameFonts, MenuArt, abs};
+use crate::game_ui::{GameFonts, MenuArt, abs, stage};
 
 /// How far in front of the idol Wolf kneels, and how much further out a respawn stands him (m).
 const KNEEL: f32 = 0.9;
@@ -63,20 +63,23 @@ impl Idols {
         floor: impl Fn(f32, f32, f32) -> Option<f32>,
     ) -> Self {
         let names = crate::game_ui::menu_texts(cache, "NTC_メニューテキスト");
-        // Each idol's name and the flag its lighting sets.
-        let warps: HashMap<i64, (i64, i64)> = sekiro_sim::registry::rows(cache, "BonfireWarpParam")
+        let rows = sekiro_sim::registry::rows(cache, "BonfireWarpParam")
             .inspect_err(|e| warn!("idols: {e}"))
-            .unwrap_or_default()
-            .values()
-            .filter_map(|r| {
-                let warp = (r["msgId"].as_i64()?, r["eventflagId"].as_i64()?);
-                Some((r["bonfireEntityId"].as_i64()?, warp))
-            })
-            .collect();
+            .unwrap_or_default();
+        Self::place(&warps(rows.values()), &names, layouts, floor)
+    }
+
+    /// The objects of `layouts` that are idols of `warps`, named from `names`.
+    fn place(
+        warps: &HashMap<i32, (i32, LitKey)>,
+        names: &BTreeMap<i32, String>,
+        layouts: &BTreeMap<String, serde_json::Value>,
+        floor: impl Fn(f32, f32, f32) -> Option<f32>,
+    ) -> Self {
         let mut idols = Self::default();
         for layout in layouts.values() {
             for o in layout["objects"].as_array().into_iter().flatten() {
-                let Some((msg, flag)) = o["entity_id"].as_i64().and_then(|e| warps.get(&e)) else {
+                let Some((msg, lit)) = int(&o["entity_id"]).and_then(|e| warps.get(&e)) else {
                     continue;
                 };
                 let Some(pose) = crate::map::pose(o) else {
@@ -101,15 +104,34 @@ impl Idols {
                         position: checkpoint.to_array(),
                         yaw: yaw + std::f32::consts::PI,
                     },
-                    flag: *flag as i32,
+                    lit: *lit,
                 });
                 idols
                     .names
-                    .push(names.get(&(*msg as i32)).cloned().unwrap_or_default());
+                    .push(names.get(msg).cloned().unwrap_or_default());
             }
         }
         idols
     }
+}
+
+/// BonfireWarpParam `rows` by their bonfire entity: the idol's name and what marks it lit, its
+/// `eventflagId`, or the entity itself when the flag is missing or 0.
+fn warps<'a>(rows: impl IntoIterator<Item = &'a serde_json::Value>) -> HashMap<i32, (i32, LitKey)> {
+    rows.into_iter()
+        .filter_map(|r| {
+            let entity = int(&r["bonfireEntityId"])?;
+            let lit = int(&r["eventflagId"])
+                .filter(|&f| f != 0)
+                .map_or(LitKey::Entity(entity), LitKey::Flag);
+            Some((entity, (int(&r["msgId"])?, lit)))
+        })
+        .collect()
+}
+
+/// A JSON integer that fits an `i32`.
+fn int(v: &serde_json::Value) -> Option<i32> {
+    i32::try_from(v.as_i64()?).ok()
 }
 
 /// The row picked in the idol menu.
@@ -138,11 +160,17 @@ pub(super) fn install(app: &mut App, idols: Idols) {
     GameFonts::insert(app);
     MenuArt::insert(app);
     crate::game_ui::install_cover(app);
-    super::idol_found::install(app);
+    let events = crate::game_ui::menu_texts(&sekiro_sim::cache::root(), "イベントテキスト");
+    super::idol_found::install(app, &events);
     app.insert_resource(idols)
         .init_resource::<Row>()
         .init_resource::<crate::menu::Modal>()
-        .add_systems(Startup, spawn)
+        .add_systems(
+            Startup,
+            move |commands: Commands, fonts: Res<GameFonts>, art: Res<MenuArt>| {
+                spawn(commands, fonts, art, &events)
+            },
+        )
         .add_systems(
             PreUpdate,
             menu_keys
@@ -152,21 +180,26 @@ pub(super) fn install(app: &mut App, idols: Idols) {
         .add_systems(Update, (show, hold_pause).run_if(crate::menu::active));
 }
 
-fn spawn(mut commands: Commands, fonts: Res<GameFonts>, art: Res<MenuArt>) {
+/// The guide and the menu, hidden, with their texts from `events` (イベントテキスト).
+fn spawn(
+    mut commands: Commands,
+    fonts: Res<GameFonts>,
+    art: Res<MenuArt>,
+    events: &BTreeMap<i32, String>,
+) {
     let cache = sekiro_sim::cache::root();
     let key = |name: &str, height: f32| {
         art.sprite("SB_KeyTop", name).map(|(image, aspect)| {
             (
                 image,
                 Node {
-                    height: vh(height / 10.8),
+                    height: stage(height),
                     aspect_ratio: Some(aspect),
                     ..default()
                 },
             )
         })
     };
-    let events = crate::game_ui::menu_texts(&cache, "イベントテキスト");
     let guides = crate::game_ui::menu_texts(&cache, "NTC_キーガイド");
     let event = |id: i32| events.get(&id).cloned().unwrap_or_default();
     let text = |t: String, px: f32, color: Color| fonts.shadowed(t, px, color);
@@ -255,16 +288,15 @@ fn fade(alpha: f32) -> Color {
     Color::BLACK.with_alpha(alpha)
 }
 
-/// The menu's keys while Wolf prays and no banner plays: up and down pick a row, OK (Enter,
-/// Space, E, A) takes it, Esc or back (Q, B) stands him up.
+/// The menu's keys while Wolf prays (not while a first light's banner plays): up and down pick
+/// a row, OK (Enter, Space, E, A) takes it, Esc or back (Q, B) stands him up.
 fn menu_keys(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
     mut row: ResMut<Row>,
-    banner: Res<super::idol_found::Playing>,
     mut sim: NonSendMut<Sim>,
 ) {
-    if sim.duel.idol_phase() != Some(IdolPhase::Praying) || banner.on() {
+    if sim.duel.idol_phase() != Some(IdolPhase::Praying) {
         return;
     }
     let pad = |b| pads.iter().any(|p| p.just_pressed(b));
@@ -291,13 +323,12 @@ fn menu_open(sim: &Sim) -> bool {
     )
 }
 
-/// The guide near an idol and the menu while Wolf prays, once a first light's banner is over.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+/// The guide near an idol and the menu while Wolf prays.
+#[allow(clippy::type_complexity)]
 fn show(
     sim: NonSend<Sim>,
     row: Res<Row>,
     idols: Res<Idols>,
-    banner: Res<super::idol_found::Playing>,
     mut shown_for: Local<Option<(usize, usize)>>,
     mut parts: Query<
         (&mut Visibility, Has<Guide>, Option<&Cursor>),
@@ -307,7 +338,7 @@ fn show(
     mut texts: Query<(&mut Text, Option<&HelpLine>), Or<(With<Place>, With<HelpLine>)>>,
 ) {
     let near = sim.duel.idol_in_reach().is_some();
-    let open = menu_open(&sim) && !banner.on();
+    let open = menu_open(&sim);
     for (mut v, guide, cursor) in &mut parts {
         let on = match (guide, cursor) {
             (true, _) => near,
@@ -374,9 +405,12 @@ mod tests {
             idols.names
         );
         // Each is lit by its own flag, so lighting one leaves the others unfound.
-        let flags: std::collections::BTreeSet<_> = idols.spots.iter().map(|s| s.flag).collect();
-        assert_eq!(flags.len(), idols.spots.len());
-        assert!(!flags.contains(&0));
+        let lit: std::collections::BTreeSet<_> = idols.spots.iter().map(|s| s.lit).collect();
+        assert_eq!(lit.len(), idols.spots.len());
+        assert!(
+            lit.iter().all(|k| matches!(k, LitKey::Flag(f) if *f != 0)),
+            "{lit:?}"
+        );
         for s in &idols.spots {
             let kneel = Vec3::from_array(s.kneel.position);
             let out = Vec3::from_array(s.checkpoint.position) - kneel;
@@ -387,5 +421,40 @@ mod tests {
             let away = sekiro_sim::arena::forward(s.checkpoint.yaw);
             assert!(away.dot(out.normalize()) > 0.999, "{s:?}");
         }
+    }
+
+    #[test]
+    fn idols_without_a_flag_are_placed_and_lit_apart() {
+        // One idol's flag is 0, another's is missing: both stand, each lit by its entity.
+        let rows = [
+            serde_json::json!({"bonfireEntityId": 1100950, "msgId": 7, "eventflagId": 0}),
+            serde_json::json!({"bonfireEntityId": 1100951, "msgId": 8}),
+            serde_json::json!({"bonfireEntityId": 1100952, "msgId": 9, "eventflagId": 11100001}),
+        ];
+        let object = |entity: i32, x: f32| {
+            serde_json::json!({
+                "entity_id": entity,
+                "translation": [x, 0.0, 0.0],
+                "rotation": [0.0, 0.0, 0.0, 1.0],
+            })
+        };
+        let layouts = BTreeMap::from([(
+            "m00".to_string(),
+            serde_json::json!({"objects": [
+                object(1100950, 0.0),
+                object(1100951, 10.0),
+                object(1100952, 20.0),
+            ]}),
+        )]);
+        let idols = Idols::place(&warps(&rows), &BTreeMap::new(), &layouts, |_, _, y| Some(y));
+        let lit: Vec<_> = idols.spots.iter().map(|s| s.lit).collect();
+        assert_eq!(
+            lit,
+            [
+                LitKey::Entity(1100950),
+                LitKey::Entity(1100951),
+                LitKey::Flag(11100001)
+            ]
+        );
     }
 }

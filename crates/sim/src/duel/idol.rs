@@ -12,9 +12,10 @@
 //! gap: no Healing Gourd or resurrection yet to refill, and the respawn stands Wolf up at the
 //! idol instead of kneeling there first.
 //!
-//! The first kneel at an idol lights it (#152): its BonfireWarpParam `eventflagId` goes into the
-//! lit flags, which a respawn keeps, and the screen is told once that it was found
-//! ([`Duel::take_idol_found`], the game's "SCULPTOR'S IDOL FOUND" banner).
+//! The first kneel at an idol lights it (#152): its [`LitKey`] goes into the lit set, which a
+//! respawn keeps, and Wolf stays at the idol in [`IdolPhase::Lighting`] while the game's
+//! "SCULPTOR'S IDOL FOUND" banner plays ([`LIGHTING_SECS`]); only then does he pray and the
+//! idol menu open. Kneeling at a lit idol goes straight to the prayer.
 
 use std::collections::BTreeSet;
 
@@ -27,10 +28,18 @@ use crate::input::InputFrame;
 const REACH: f32 = 1.3;
 const REACH_Y: f32 = 0.6;
 
+/// How long lighting an idol holds Wolf before he prays (s): the `BonfireLit` clip of the text
+/// effects in `menu/01_000_FE.gfx` (the "SCULPTOR'S IDOL FOUND" banner), played at 60 frames a
+/// second from its `Normal` label on frame 1 to its last frame, 197.
+pub const LIGHTING_SECS: f32 = (197.0 - 1.0) / 60.0;
+
 /// Where Wolf is at an idol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdolPhase {
     Kneeling,
+    /// The first kneel at an unlit idol, while its "found" banner plays ([`LIGHTING_SECS`]):
+    /// he kneels, then prays, held and with the menu shut.
+    Lighting,
     /// The prayer loop: the idol menu is open.
     Praying,
     Resting,
@@ -44,8 +53,16 @@ pub struct IdolSpot {
     pub kneel: Placement,
     /// Where a respawn stands him, facing away.
     pub checkpoint: Placement,
-    /// Its BonfireWarpParam `eventflagId`, on once it is lit.
-    pub flag: i32,
+    /// What marks it lit.
+    pub lit: LitKey,
+}
+
+/// What marks an idol lit: its BonfireWarpParam `eventflagId`, or its bonfire entity id when it
+/// has no flag, so no two idols share one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LitKey {
+    Flag(i32),
+    Entity(i32),
 }
 
 /// The play world's idols and Wolf's place at them.
@@ -59,15 +76,18 @@ pub(super) struct Idols {
     action_held: bool,
     /// Rest was taken: the foes come back on the next population step.
     pub(super) revive: bool,
-    /// The lit idols' flags.
-    lit: BTreeSet<i32>,
-    /// The idol lit last, until the screen takes it.
-    found: Option<usize>,
+    /// The lit idols.
+    lit: BTreeSet<LitKey>,
+    /// Seconds since Wolf lit the idol he is at, while its banner plays.
+    lighting: Option<f32>,
 }
 
 impl Duel {
     pub fn set_idols(&mut self, spots: Vec<IdolSpot>) {
         self.idols.spots = spots;
+        // `at` indexes the old spots; the lit set is keyed by idol, not index, and stays.
+        self.idols.at = None;
+        self.idols.lighting = None;
     }
 
     /// The idol whose kneeling spot Wolf is at, if he can kneel now (the "Rest" guide).
@@ -114,9 +134,14 @@ impl Duel {
 
     /// Kneels Wolf on the action press at an idol and holds his input while he is at one: the
     /// frame the step uses instead of `input`, if any.
-    pub(super) fn idol_input(&mut self, input: &InputFrame) -> Option<InputFrame> {
+    pub(super) fn idol_input(&mut self, input: &InputFrame, dt: f32) -> Option<InputFrame> {
         let pressed = input.buttons.action && !self.idols.action_held;
         self.idols.action_held = input.buttons.action;
+        self.idols.lighting = self
+            .idols
+            .lighting
+            .map(|t| t + dt)
+            .filter(|t| *t < LIGHTING_SECS);
         // Off the idol once he stood up, something else took him (a hit, death), or the kneel
         // event was never taken.
         if self.idols.at.is_some()
@@ -124,6 +149,7 @@ impl Duel {
             && !self.player.behavior.runtime.has_pending_events()
         {
             self.idols.at = None;
+            self.idols.lighting = None;
         }
         if pressed {
             match self.action_target() {
@@ -155,22 +181,15 @@ impl Duel {
         self.rules.fighters[0].reset();
         self.idols.at = Some(i);
         self.idols.checkpoint = Some(spot.checkpoint);
-        if self.idols.lit.insert(spot.flag) {
-            self.idols.found = Some(i);
-        }
+        self.idols.lighting = self.idols.lit.insert(spot.lit).then_some(0.0);
     }
 
-    /// Whether idol `i` is lit (Wolf knelt at it once).
-    pub fn idol_lit(&self, i: usize) -> bool {
+    /// Seconds since Wolf lit the idol he is at, while he is [`IdolPhase::Lighting`]: the
+    /// banner's clock.
+    pub fn idol_lighting(&self) -> Option<f32> {
         self.idols
-            .spots
-            .get(i)
-            .is_some_and(|s| self.idols.lit.contains(&s.flag))
-    }
-
-    /// The idol lit since the last call, once: the cue for the "idol found" banner.
-    pub fn take_idol_found(&mut self) -> Option<usize> {
-        self.idols.found.take()
+            .lighting
+            .filter(|_| self.idol_phase() == Some(IdolPhase::Lighting))
     }
 
     /// Rests at the idol Wolf prays at: Vitality refilled, and the map's foes back.
@@ -202,12 +221,15 @@ impl Duel {
 
     /// Where Wolf is at an idol, `None` when he is not at one.
     pub fn idol_phase(&self) -> Option<IdolPhase> {
-        match self.player.behavior.runtime.main_state_name() {
-            "StatueAttachStart" => Some(IdolPhase::Kneeling),
-            "StatueAttachLoop" => Some(IdolPhase::Praying),
-            "StatueAttachRest" => Some(IdolPhase::Resting),
-            "StatueAttachEnd" => Some(IdolPhase::Leaving),
-            _ => None,
-        }
+        let phase = match self.player.behavior.runtime.main_state_name() {
+            "StatueAttachStart" => IdolPhase::Kneeling,
+            "StatueAttachLoop" => IdolPhase::Praying,
+            "StatueAttachRest" => IdolPhase::Resting,
+            "StatueAttachEnd" => IdolPhase::Leaving,
+            _ => return None,
+        };
+        let lighting = self.idols.lighting.is_some()
+            && matches!(phase, IdolPhase::Kneeling | IdolPhase::Praying);
+        Some(if lighting { IdolPhase::Lighting } else { phase })
     }
 }

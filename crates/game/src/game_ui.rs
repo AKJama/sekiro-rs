@@ -78,6 +78,11 @@ impl GameFonts {
     }
 }
 
+/// `px` pixels of the game's 1920 x 1080 screen, scaled with the window's height.
+pub fn stage(px: f32) -> Val {
+    vh(px / 10.8)
+}
+
 /// The game's font `name` (`cache/raw/font/<name>/font.gfx`) as TrueType, else the first of
 /// the Windows `fallbacks` found.
 fn font_bytes(cache: &Path, name: &str, fallbacks: &[&str]) -> Option<Vec<u8>> {
@@ -211,7 +216,7 @@ pub fn spawn_action_guide(
                 Some((image, aspect)) => r.spawn((
                     image,
                     Node {
-                        height: vh(22.0 / 10.8),
+                        height: stage(22.0),
                         aspect_ratio: Some(aspect),
                         ..default()
                     },

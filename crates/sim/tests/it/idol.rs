@@ -1,6 +1,6 @@
 use sekiro_sim::InputFrame;
 use sekiro_sim::deathblow::Placement;
-use sekiro_sim::duel::idol::{IdolPhase, IdolSpot};
+use sekiro_sim::duel::idol::{IdolPhase, IdolSpot, LIGHTING_SECS, LitKey};
 use sekiro_sim::duel::{Duel, RESPAWN_DELAY};
 
 const DT: f32 = 1.0 / 60.0;
@@ -50,11 +50,10 @@ fn wolf_kneels_rests_stands_and_comes_back_at_the_idol() {
             position: [start[0] + 1.0, start[1], start[2] + 0.5],
             yaw: -2.0,
         },
-        flag: 11100000,
+        lit: LitKey::Flag(11100000),
     };
     duel.set_idols(vec![spot]);
     assert_eq!(duel.idol_in_reach(), Some(0));
-    assert!(!duel.idol_lit(0));
 
     // The action press kneels him at the spot with full Vitality; holding it does nothing more.
     duel.rules.fighters[0].vitality.hp = 10;
@@ -67,17 +66,25 @@ fn wolf_kneels_rests_stands_and_comes_back_at_the_idol() {
     assert!((x - spot.kneel.position[0]).hypot(z - spot.kneel.position[2]) < 0.05);
     let max = duel.rules.fighters[0].vitality.max_hp;
     assert_eq!(duel.rules.fighters[0].vitality.hp, max);
-    // The first kneel lights the idol and cues its "found" banner, once.
-    assert!(duel.idol_lit(0));
-    assert_eq!(duel.take_idol_found(), Some(0));
-    assert_eq!(duel.take_idol_found(), None);
+    // The first kneel lights the idol: Wolf stays held while its "found" banner plays, and
+    // the menu's Rest and Esc do nothing until it is over.
+    assert_eq!(duel.idol_phase(), Some(IdolPhase::Lighting));
+    assert_eq!(duel.idol_lighting(), Some(0.0));
+    duel.rest_at_idol();
+    duel.leave_idol();
 
     let praying = |d: &Duel| d.idol_phase() == Some(IdolPhase::Praying);
     // His own input is held while he is at the idol: the stick does not walk him away.
     let mut walk = press;
     walk.move_stick = [0.0, 1.0];
-    let seen = run_with(&mut duel, &walk, 3.0, praying);
-    assert_eq!(seen, [Some(IdolPhase::Kneeling), Some(IdolPhase::Praying)]);
+    // The banner's whole clip, to the frame.
+    for _ in 0..(LIGHTING_SECS / DT) as usize - 2 {
+        duel.step(&walk, DT);
+        assert_eq!(duel.idol_phase(), Some(IdolPhase::Lighting));
+    }
+    let seen = run_with(&mut duel, &walk, 4.0 * DT, praying);
+    assert_eq!(seen, [Some(IdolPhase::Lighting), Some(IdolPhase::Praying)]);
+    assert_eq!(duel.idol_lighting(), None);
     let [x, _, z] = duel.player.body.position;
     assert!((x - spot.kneel.position[0]).hypot(z - spot.kneel.position[2]) < 0.05);
     duel.rules.fighters[0].vitality.hp = 10;
@@ -110,12 +117,12 @@ fn wolf_kneels_rests_stands_and_comes_back_at_the_idol() {
     });
     assert_eq!(duel.player.body.position, spot.checkpoint.position);
 
-    // It stays lit through the respawn: kneeling there again cues no banner.
-    assert!(duel.idol_lit(0));
+    // It stays lit through the respawn: kneeling there again goes straight to the prayer.
     run(&mut duel, 2.0, |d| d.idol_in_reach() == Some(0));
     duel.step(&press, DT);
     assert_eq!(duel.idol(), Some(0));
-    assert_eq!(duel.take_idol_found(), None);
+    let seen = run(&mut duel, 3.0, praying);
+    assert_eq!(seen, [Some(IdolPhase::Kneeling), Some(IdolPhase::Praying)]);
 }
 
 #[test]
@@ -152,7 +159,7 @@ fn the_nearer_item_takes_the_press_and_stays_taken_through_a_rest() {
             position: [start[0] + 1.0, start[1], start[2] + 0.5],
             yaw: -2.0,
         },
-        flag: 11100000,
+        lit: LitKey::Flag(11100000),
     }]);
     assert_eq!(duel.pickup_in_reach(), Some(0));
     assert_eq!(duel.idol_in_reach(), None);
@@ -168,7 +175,7 @@ fn the_nearer_item_takes_the_press_and_stays_taken_through_a_rest() {
     duel.step(&press, DT);
     assert_eq!(duel.idol(), Some(0));
     let praying = |d: &Duel| d.idol_phase() == Some(IdolPhase::Praying);
-    run(&mut duel, 3.0, praying);
+    run(&mut duel, 5.0, praying);
     duel.rest_at_idol();
     run(&mut duel, 0.5, |d| {
         d.idol_phase() == Some(IdolPhase::Resting)
