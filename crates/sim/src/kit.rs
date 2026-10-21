@@ -2,7 +2,7 @@
 //! new-game zero (CharaInitParam `soul` and `skillLv` are 0 on every default row).
 //! Kills pay their NpcParam `getSoul` Sen and `skillPoint` experience ([`Kit::earn`]); a full
 //! experience gauge is a skill point, the gauge per point from [`xp_to_next`].
-//! gap: nothing spends from the kit yet (no gourd drinking, shops, skill purchase), and death
+//! gap: only [`Kit::use_goods`] spends (its effect unmodelled; no shops or skills), and death
 //! does not take its half of the Sen and experience (TentativePlayerParam `MoneyLostRate` /
 //! `SkillPointLostRate` 50).
 //! Map items (`crate::items`) go into the goods with [`Kit::add`], and their taken flags too.
@@ -143,7 +143,7 @@ impl Default for Kit {
 impl Kit {
     /// The gourd's charges, or the number of this goods id held (zero when absent).
     pub fn count(&self, id: i32) -> u32 {
-        if id == 3000 {
+        if id == crate::items::HEALING_GOURD {
             self.gourd_charges
         } else {
             self.goods
@@ -208,19 +208,26 @@ impl Kit {
     /// gap: only the count drops; the item's effect (its SpEffect and use animation) is not
     /// modelled yet.
     pub fn use_goods(&mut self, id: i32) -> bool {
-        let held = if id == 3000 {
-            &mut self.gourd_charges
-        } else {
-            match self.goods.iter_mut().find(|(g, _)| *g == id) {
-                Some((_, n)) => n,
-                None => return false,
+        match self.held_mut(id) {
+            Some(held) if *held > 0 => {
+                *held -= 1;
+                true
             }
-        };
-        if *held == 0 {
-            return false;
+            _ => false,
         }
-        *held -= 1;
-        true
+    }
+
+    /// Where the count of `id` is kept, as [`Kit::count`] reads it: the gourd's charges or its
+    /// goods entry (None when absent).
+    fn held_mut(&mut self, id: i32) -> Option<&mut u32> {
+        if id == crate::items::HEALING_GOURD {
+            Some(&mut self.gourd_charges)
+        } else {
+            self.goods
+                .iter_mut()
+                .find(|(g, _)| *g == id)
+                .map(|(_, n)| n)
+        }
     }
 }
 
@@ -251,5 +258,16 @@ mod tests {
         assert_eq!(kit.count(3000), 3);
         assert_eq!(kit.count(3020), 3);
         assert_eq!(kit.count(1), 0);
+    }
+
+    #[test]
+    fn using_goods_takes_one_until_none_is_left() {
+        let mut kit = Kit::default();
+        assert!(kit.use_goods(crate::items::HEALING_GOURD));
+        assert_eq!(kit.gourd_charges, 2);
+        assert!(kit.use_goods(3040));
+        assert_eq!(kit.count(3040), 0);
+        assert!(!kit.use_goods(3040), "none left");
+        assert!(!kit.use_goods(1), "never held");
     }
 }

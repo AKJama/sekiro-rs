@@ -18,6 +18,41 @@ pub fn relaunch() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A primary mouse click on `entity` through picking's press and release events, as if the
+/// pointer hit `hit`, for tests with no window or picking backend.
+#[cfg(test)]
+pub(crate) fn test_click(world: &mut World, entity: Entity, hit: Entity) {
+    use bevy::camera::{ManualTextureViewHandle, NormalizedRenderTarget};
+    use bevy::picking::{
+        backend::HitData,
+        events::{Pointer, PointerPress, PointerRelease},
+        pointer::{Location, PointerButton, PointerId},
+    };
+    // Pointer event traversal also queries Window, including in a windowless test.
+    world.register_component::<Window>();
+    let pointer = Pointer::new(
+        PointerId::Mouse,
+        Location {
+            target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(5)),
+            position: Vec2::ZERO,
+        },
+    );
+    let hit = HitData::new(hit, 0., None, None);
+    world.trigger(PointerPress {
+        entity,
+        pointer: pointer.clone(),
+        button: PointerButton::Primary,
+        hit: hit.clone(),
+        count: 1,
+    });
+    world.trigger(PointerRelease {
+        entity,
+        pointer,
+        button: PointerButton::Primary,
+        hit,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,12 +605,6 @@ mod tests {
 
     #[test]
     fn label_and_row_clicks_survive_release_before_menu_update() {
-        use bevy::camera::{ManualTextureViewHandle, NormalizedRenderTarget};
-        use bevy::picking::{
-            backend::HitData,
-            events::{Pointer, PointerPress, PointerRelease},
-            pointer::{Location, PointerButton, PointerId},
-        };
         for start in [true, false] {
             for label in [true, false] {
                 let mut state = PanelState::new(start, &[]);
@@ -589,8 +618,6 @@ mod tests {
                     .insert_resource(state)
                     .add_systems(Startup, spawn);
                 install_input(&mut app);
-                // Pointer event traversal also queries Window, including in a windowless test.
-                app.world_mut().register_component::<Window>();
                 app.update();
                 let index = if start { 4 } else { 0 };
                 let (row, child) = app
@@ -600,27 +627,7 @@ mod tests {
                     .find_map(|(e, r, children)| (r.0 == index).then_some((e, children[0])))
                     .unwrap();
                 let entity = if label { child } else { row };
-                let pointer = Pointer::new(
-                    PointerId::Mouse,
-                    Location {
-                        target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(5)),
-                        position: Vec2::ZERO,
-                    },
-                );
-                let hit = HitData::new(row, 0., None, None);
-                app.world_mut().trigger(PointerPress {
-                    entity,
-                    pointer: pointer.clone(),
-                    button: PointerButton::Primary,
-                    hit: hit.clone(),
-                    count: 1,
-                });
-                app.world_mut().trigger(PointerRelease {
-                    entity,
-                    pointer,
-                    button: PointerButton::Primary,
-                    hit,
-                });
+                test_click(app.world_mut(), entity, row);
                 app.update();
                 let state = app.world().resource::<PanelState>();
                 if start {
