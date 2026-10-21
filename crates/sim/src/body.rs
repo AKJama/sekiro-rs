@@ -14,7 +14,7 @@ use crate::tae::VelocityChange;
 use glam::Vec2;
 
 /// Mirror source X and rotate horizontal root motion by the facing's (sin yaw, cos yaw).
-pub(crate) fn root_motion_world(root_motion: [f32; 4], (sin, cos): (f32, f32)) -> [f32; 2] {
+pub fn root_motion_world(root_motion: [f32; 4], (sin, cos): (f32, f32)) -> [f32; 2] {
     let [rx, _, rz, _] = root_motion;
     [-cos * rx + sin * rz, sin * rx + cos * rz]
 }

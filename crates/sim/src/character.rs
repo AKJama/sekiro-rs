@@ -821,10 +821,17 @@ impl Character {
         behavior
             .runtime
             .set_variable("CoverStartEdgeAngle", dock.map_or(0.0, |t| t.angle));
+        // Measured in the docking frame, which faces the wall (`Target::right`): in cover,
+        // Wolf's back is to the wall, so his own left is the script's right.
+        let docking_yaw = self
+            .docking
+            .active
+            .as_ref()
+            .map_or(self.body.yaw, |t| t.yaw());
         let docking_angle = self
             .input
             .stick_world_yaw()
-            .map_or(0.0, |yaw| -angle_diff(yaw, self.body.yaw).to_degrees());
+            .map_or(0.0, |yaw| -angle_diff(yaw, docking_yaw).to_degrees());
         behavior
             .runtime
             .set_variable("DockingStickAngle", docking_angle);
@@ -832,7 +839,7 @@ impl Character {
         if env.cover_active
             && docking_idle
             && self.input.stick_world_yaw().is_some()
-            && docking_angle.abs() < crate::docking::COVER_AWAY_ANGLE
+            && crate::docking::cover_stick_away(docking_angle)
         {
             env.requested.insert(crate::input::arm::ACTION);
         }
