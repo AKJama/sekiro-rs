@@ -40,10 +40,10 @@ use bevy::world_serialization::{WorldInstance, WorldInstanceSpawner};
 use serde_json::Value;
 
 #[path = "map_story.rs"]
-pub(crate) mod story;
+pub mod story;
 
 #[path = "map_visibility.rs"]
-pub(crate) mod visibility;
+pub mod visibility;
 
 #[path = "map_lod.rs"]
 pub(crate) mod lod;
@@ -60,7 +60,7 @@ pub(crate) mod sky;
 #[path = "map_sweep.rs"]
 pub(crate) mod sweep;
 #[path = "map_world.rs"]
-pub(crate) mod world;
+pub mod world;
 
 #[path = "map_lights.rs"]
 mod local_lights;
@@ -69,7 +69,7 @@ use local_lights::{LocalLights, update_local_lights};
 #[path = "map_capture.rs"]
 mod capture;
 #[path = "capture_ready.rs"]
-pub(crate) mod ready;
+pub mod ready;
 
 use crate::lighting::{
     MapLighting, MapProbes, ProbeRegion, ShadowSettings, apply_lighting, apply_probes, spawn_lights,
@@ -1137,7 +1137,7 @@ const SKY: Color = Color::srgb(0.62, 0.68, 0.74);
 /// then reports the window as not responding).
 pub(crate) const UPLOAD_BYTES_PER_FRAME: usize = 96 << 20;
 
-pub(crate) fn upload_budget() -> bevy::render::render_asset::RenderAssetBytesPerFrame {
+pub fn upload_budget() -> bevy::render::render_asset::RenderAssetBytesPerFrame {
     bevy::render::render_asset::RenderAssetBytesPerFrame::new(UPLOAD_BYTES_PER_FRAME)
 }
 
@@ -1157,7 +1157,7 @@ pub(crate) fn texture_sampler() -> bevy::image::ImageSamplerDescriptor {
     }
 }
 
-pub(crate) fn layered_gltf_plugin() -> bevy::gltf::GltfPlugin {
+pub fn layered_gltf_plugin() -> bevy::gltf::GltfPlugin {
     bevy::gltf::GltfPlugin {
         default_sampler: texture_sampler(),
         ..default()

@@ -30,7 +30,7 @@ pub(crate) struct ArenaMap;
 #[derive(Component)]
 pub(crate) struct AuthoredNoShadow;
 
-pub(crate) fn enabled(id: &str) -> bool {
+pub fn enabled(id: &str) -> bool {
     ASHINA.contains(&id)
 }
 
@@ -388,13 +388,13 @@ fn neighbourhood(cache: &Path) -> Result<BTreeMap<String, Value>> {
 
 /// Whether `id` plays as the connected world of its neighbouring blocks rather than alone
 /// (`--no-connected-blocks`).
-pub(crate) fn connects(id: &str) -> bool {
+pub fn connects(id: &str) -> bool {
     enabled(id) && !std::env::args().any(|a| a == "--no-connected-blocks")
 }
 
 /// The blocks the play world's collision holds for `id`, with their layouts: the connected
 /// neighbourhood when `id` [`connects`], else `id` alone.
-pub(crate) fn play_blocks(cache: &Path, id: &str) -> Result<BTreeMap<String, Value>> {
+pub fn play_blocks(cache: &Path, id: &str) -> Result<BTreeMap<String, Value>> {
     if connects(id) {
         neighbourhood(cache)
     } else {
@@ -491,7 +491,7 @@ pub(crate) fn foot_ik_ground(
 /// Collision parts and placed objects the block's `story` switches off are left out.
 /// Helper parts the player does not collide with (`sekiro_sim::hit_filter`) leave the
 /// walkable mesh and join the world as camera-only triangles or event walls.
-pub(crate) fn collision_world(
+pub fn collision_world(
     cache: &Path,
     layouts: &BTreeMap<String, Value>,
     story: &super::story::MapStory,

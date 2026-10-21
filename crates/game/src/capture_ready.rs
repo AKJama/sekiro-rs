@@ -336,7 +336,7 @@ pub(crate) fn pending_uploads(world: &World) -> (usize, usize) {
     (images, world.resource::<LateMeshes>().loading())
 }
 
-pub(crate) fn install(app: &mut App) {
+pub fn install(app: &mut App) {
     if app.world().contains_resource::<Pipelines>() {
         return;
     }

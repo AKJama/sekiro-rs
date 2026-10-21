@@ -6,6 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+# The shaders import `sekiro_rs::...` (embedded under the crate name), so the library keeps it.
+name = "sekiro_rs"
+path = "src/lib.rs"
+
 [[bin]]
 name = "sekiro-rs"
 path = "src/main.rs"
