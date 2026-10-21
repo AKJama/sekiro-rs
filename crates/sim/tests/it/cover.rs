@@ -15,16 +15,14 @@ impl Ground for Wall {
     }
 }
 fn synthetic(variation: u8) -> Docking {
-    let mut docking = Docking::default();
-    docking.edges.push(MapEdge {
+    Docking::new(vec![MapEdge {
         kind: 3,
         variation,
         start: [-2.0, 0.4, 0.0],
         end: [2.0, 0.4, 0.0],
         source_part: "wall".into(),
         chain: 1,
-    });
-    docking
+    }])
 }
 #[test]
 fn cover_search_facing_variations_and_slide_clamps() {

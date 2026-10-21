@@ -802,10 +802,7 @@ impl Character {
                     self.docking.cover_blocked(t, self.ground.as_ref(), false),
                 ]
             } else {
-                [
-                    self.docking.hang_blocked(t, true),
-                    self.docking.hang_blocked(t, false),
-                ]
+                [t.end_blocked(true), t.end_blocked(false)]
             }
         });
         env.docking_variation = dock.map_or(0, |t| self.docking.edges[t.edge].variation);
@@ -1182,6 +1179,7 @@ impl Character {
             main.as_ref().map_or(0.0, |c| c.time),
             root_progress,
             root_motion,
+            self.ground.as_ref(),
         ) {
             if body_input.water_mode.is_some() || self.wire.perch.is_none() {
                 self.body.step(&body_input, dt, self.ground.as_ref());

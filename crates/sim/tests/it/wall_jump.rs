@@ -30,16 +30,14 @@ impl Ground for Cliff {
     }
 }
 fn cliff_edges() -> Docking {
-    let mut docking = Docking::default();
-    docking.edges = vec![MapEdge {
+    Docking::new(vec![MapEdge {
         kind: 2,
         variation: 0,
         start: [-3.0, LIP, 0.0],
         end: [3.0, LIP, 0.0],
         source_part: "cliff".into(),
         chain: 0,
-    }];
-    docking
+    }])
 }
 fn cache() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache")
