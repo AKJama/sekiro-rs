@@ -5,7 +5,7 @@ impl CollisionWorld {
     /// Adds an event part that `who` ([`crate::hit_filter::mask`] bits of its hit filter)
     /// collides with while it is on.
     pub fn append_event_part(&mut self, entity: i32, mesh: &CollisionMesh, who: u8, on: bool) {
-        let range = self.append(mesh);
+        let range = self.append(mesh, who);
         self.add_event_part(entity, range, who, on);
     }
 

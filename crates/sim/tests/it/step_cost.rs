@@ -2,53 +2,31 @@
 //! #161), counted in collision work so the tests do not depend on the machine.
 //! Skips without the exported maps.
 
-use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use sekiro_formats::hknp::CollisionMesh;
 use sekiro_sim::body::{Ground, WaterSurface};
-use sekiro_sim::collision::{CollisionWorld, TriggerContact};
+use sekiro_sim::collision::{CollisionWorld, TriggerContact, triangle_visits};
 
-use crate::arena_c_support::cache;
+use crate::movement_helpers::cache;
 
-/// [`build_play_world`], built once for both tests.
+/// The play world's collision ([`CollisionWorld::load_blocks`]: both Ashina blocks as
+/// `crates/game/src/map_world.rs` `collision_world` builds them, without the story's switches),
+/// built once for all the tests.
 pub(crate) fn play_world() -> Option<Arc<CollisionWorld>> {
     static WORLD: OnceLock<Option<Arc<CollisionWorld>>> = OnceLock::new();
     WORLD
-        .get_or_init(|| build_play_world(&cache()).map(Arc::new))
+        .get_or_init(|| {
+            CollisionWorld::load_blocks(&cache()?, &["m11_00_00_00", "m11_01_00_00"]).map(Arc::new)
+        })
         .clone()
 }
 
-/// The play world's collision as `crates/game/src/map_world.rs` `collision_world` builds it
-/// (both Ashina blocks, helpers stripped, placed objects), without the story's switches.
-fn build_play_world(cache: &Path) -> Option<CollisionWorld> {
-    let blocks = ["m11_00_00_00", "m11_01_00_00"];
-    if !blocks
-        .iter()
-        .all(|b| cache.join("maps").join(b).join("collision.bin").is_file())
-    {
-        return None;
-    }
-    let mut mesh = CollisionMesh::default();
-    let mut helpers = sekiro_sim::hit_filter::HelperCollision::default();
-    for b in blocks {
-        let dir = cache.join("maps").join(b);
-        let mut part =
-            CollisionMesh::from_bytes(&std::fs::read(dir.join("collision.bin")).unwrap()).unwrap();
-        let layout: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(dir.join("layout.json")).unwrap()).unwrap();
-        helpers.extend(sekiro_sim::hit_filter::strip_helpers(&mut part, &layout));
-        mesh.extend(&part);
-    }
-    let mut world = CollisionWorld::from_mesh(&mesh);
-    world.add_helpers(&helpers);
-    for b in blocks {
-        world
-            .add_block_objects(&cache.join("maps").join(b), b, |_, who| who)
-            .unwrap();
-    }
-    Some(world)
+/// What `f` returns, and how many grid entries its collision queries looked at (#163).
+fn visits<R>(f: impl FnOnce() -> R) -> (R, u64) {
+    let before = triangle_visits();
+    let r = f();
+    (r, triangle_visits() - before)
 }
 
 /// The most triangles any of eight slides of `reach` around `feet` tests on each push-out pass.
@@ -124,8 +102,9 @@ impl Ground for Counted {
     }
 }
 
-/// At the worst wall spot of #145 a slide's 4 m cells hold about 18k triangles, nearly all on
-/// other storeys; only those in the body's height band may reach the per-sub-step push-out.
+/// At the worst wall spot of #145 a slide's 4 m cells held about 18k triangles, nearly all on
+/// other storeys; only those in the body's height band may reach the per-sub-step push-out,
+/// and the grid hands the queries only the bands they reach (#163).
 #[test]
 fn wall_slide_tests_only_the_body_band() {
     let Some(world) = play_world() else {
@@ -133,9 +112,18 @@ fn wall_slide_tests_only_the_body_band() {
     };
     let [x, y, z] = [-257.0, -45.0, 8.0];
     let feet = [x, world.floor(x, z, y + 1.0).unwrap_or(y), z];
-    let tested = worst_slide(&world, feet, 0.13);
+    let (tested, slides) = visits(|| worst_slide(&world, feet, 0.13));
     // 7k-18k before the band filter.
     assert!(tested < 2000, "{tested} triangles per push-out pass");
+    // 112,136 over the whole 4 m cells, about 9,300 by band, 5,568 by band in 2 m cells.
+    assert!(
+        slides < 20_000,
+        "the eight slides looked at {slides} grid entries"
+    );
+    // A body's floor: 34,564 over the whole 4 m cell, 2,192 by band and 2 m square, 1,345 in
+    // the floors of its 2 m cell.
+    let (_, floor) = visits(|| Ground::floor(&*world, feet[0], feet[2], feet[1] + 0.5));
+    assert!(floor < 5_000, "a floor looked at {floor} grid entries");
 }
 
 /// A rising head's ceiling sweep tests only the flat faces in its height band whose boxes reach
@@ -156,7 +144,7 @@ fn ceiling_sweeps_test_only_nearby_faces() {
         .expect("the cap beam over the fence");
     for feet in [wall, [x, beam - 0.1, z]] {
         let tested = world.ceiling_triangle_count(feet, 0.2);
-        // 30 and 32.
+        // 27 and 26.
         assert!(tested < 100, "{tested} triangles at {feet:?}");
     }
 }
@@ -170,7 +158,10 @@ fn deathblow_pair_search_is_bounded() {
     use sekiro_sim::{Buttons, InputFrame, arena::yaw_toward, duel::Duel};
     // The world builds while the duel loads; the duel's result waits for the skip check.
     let world = std::thread::spawn(play_world);
-    let duel = Duel::load(&cache(), 1.6);
+    let Some(cache) = cache() else {
+        return;
+    };
+    let duel = Duel::load(&cache, 1.6);
     let Some(world) = world.join().unwrap() else {
         return;
     };
@@ -195,22 +186,24 @@ fn deathblow_pair_search_is_bounded() {
     }
     duel.enemy_active = false;
     duel.god = true;
-    let (mut started, mut broke, mut thrown, mut worst) = (false, false, 0, 0);
+    let (mut started, mut broke, mut thrown, mut worst, mut most) = (false, false, 0, 0, 0);
     for step in 0..900 {
         if !broke {
             duel.rules.fighters[1].posture.remaining = 1;
         }
         queries.store(0, Ordering::Relaxed);
-        let r = duel.step(
-            &InputFrame {
-                buttons: Buttons {
-                    attack: !started && step % if broke { 10 } else { 40 } == 0,
+        let (r, seen) = visits(|| {
+            duel.step(
+                &InputFrame {
+                    buttons: Buttons {
+                        attack: !started && step % if broke { 10 } else { 40 } == 0,
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
-                ..Default::default()
-            },
-            1.0 / 60.0,
-        );
+                1.0 / 60.0,
+            )
+        });
         broke |= r
             .hits
             .iter()
@@ -218,6 +211,7 @@ fn deathblow_pair_search_is_bounded() {
         started |= r.deathblow.started.is_some();
         if started {
             worst = worst.max(queries.load(Ordering::Relaxed));
+            most = most.max(seen);
             // The start and the first steps of paired travel; the rest repeats them.
             thrown += 1;
             if thrown > 30 {
@@ -228,6 +222,10 @@ fn deathblow_pair_search_is_bounded() {
     assert!(started, "the deathblow never started");
     // 93,722 before the bounded search, about 10,500 after (most of them the wall projection).
     assert!(worst < 20_000, "{worst} ground queries in one throw step");
+    // 124.6M with the wall projection unbounded over whole cells, 12.9M once it shares the
+    // search's budget and the grid is banded (#163), 2,714,098 in 2 m cells with the floors
+    // apart.
+    assert!(most < 3_000_000, "{most} grid entries in one throw step");
 }
 
 /// Where Wolf stood idle against a wall and the step took about 12 ms (#161): the hook search
@@ -239,7 +237,8 @@ fn blocked_hook_rays_test_only_their_band() {
     let Some(world) = play_world() else {
         return;
     };
-    let wire = Wire::load(&cache(), &cache().join("maps/m11_00_00_00")).unwrap();
+    let cache = cache().expect("the play world loaded from it");
+    let wire = Wire::load(&cache, &cache.join("maps/m11_00_00_00")).unwrap();
     let [x, y, z] = [-214.998, -38.577, 13.956];
     let feet = glam::Vec3::new(x, world.floor(x, z, y + 1.0).unwrap_or(y), z);
     let chest = feet + glam::Vec3::Y * SIGHT_LIFT;
@@ -253,7 +252,7 @@ fn blocked_hook_rays_test_only_their_band() {
     }
     assert!(rays >= 5, "only {rays} hooks near the spot");
     // 168,198 for these 9 rays before (after gathering and sorting 284,900 cell entries),
-    // 26,750 after.
+    // 26,750 by band in 4 m cells, 6,594 in 2 m cells.
     assert!(
         tested < 60_000,
         "{tested} triangles tested by {rays} hook rays"
@@ -271,7 +270,7 @@ fn wall_contact_slides_test_only_nearby_triangles() {
     };
     let [x, y, z] = [-256.25, -42.2, 11.43];
     let tested = worst_slide(&world, [x, y + WALL_PROBE_LIFT, z], WALL_REACH);
-    // 2,815 before the horizontal cull, 1,417 after.
+    // 2,815 before the horizontal cull, about 1,100 after in 4 m cells, 787 in 2 m cells.
     assert!(tested < 2000, "{tested} triangles per push-out pass");
 }
 

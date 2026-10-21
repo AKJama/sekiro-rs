@@ -102,11 +102,12 @@ fn castle_deathblow_open_floor() {
 }
 
 fn castle_case(case: &str) {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
-    if !cache.join("maps/m11_01_00_00/collision.bin").exists() {
+    let Some(cache) = crate::movement_helpers::cache()
+        .filter(|cache| cache.join("maps/m11_01_00_00/collision.bin").exists())
+    else {
         eprintln!("skipping: castle map not extracted");
         return;
-    }
+    };
     let spec = ArenaSpec::by_name("genichiro").unwrap();
     let arena = Arena::load(&cache, spec, false).unwrap();
     let mut duel = Duel::load_with(&cache, 1.6, spec.enemy_spec()).unwrap();

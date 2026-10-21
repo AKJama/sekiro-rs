@@ -14,5 +14,10 @@ glam.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+[features]
+# Counts the grid entries queries visit (`collision::triangle_visits`), for the step cost tests.
+visit-count = []
+
 [dev-dependencies]
 rayon.workspace = true
+sekiro-sim = { path = ".", features = ["visit-count"] }

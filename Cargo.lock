@@ -5304,6 +5304,7 @@ dependencies = [
  "rayon",
  "sekiro-formats",
  "sekiro-hks",
+ "sekiro-sim",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
