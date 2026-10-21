@@ -9,7 +9,8 @@ use sekiro_sim::{
 use std::path::PathBuf;
 
 fn cache() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache")
+    crate::movement_helpers::cache()
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache"))
 }
 fn synthetic(distance: f32) -> Wire {
     let mut wire = Wire::default();
@@ -23,6 +24,12 @@ fn synthetic(distance: f32) -> Wire {
         action_distance_near: 3.0,
         action_distance_far: 15.0,
         find_distance_far: 25.0,
+        filtering_distance_height_upper: 10.2,
+        filtering_distance_height_lower: 10.2,
+        filtering_distance_width: 14.3,
+        softlock_distance_height_upper: 10.2,
+        softlock_distance_height_lower: 10.2,
+        softlock_distance_width: 7.15,
     });
     wire.variations.insert(
         1,
@@ -695,4 +702,99 @@ fn perch_support_ends_outside_point_six_metres() {
     assert_eq!(ground.floor(0.59, 0.0, 6.0), Some(5.0));
     assert_eq!(ground.floor(0.61, 0.0, 6.0), Some(0.0));
     assert_eq!(ground.floor(0.0, 0.0, 4.0), Some(0.0));
+}
+
+/// A Ready hook for the view tests, with the given variation.
+fn hook(position: [f32; 3], variation: u32) -> Point {
+    Point {
+        position: Some(position),
+        variation,
+        model: "synthetic".into(),
+        source_part: format!("hook {position:?}"),
+    }
+}
+
+/// Issue #178: the game's search only looks through the camera (`WireActionTargetMng`), so a
+/// hook behind the camera or off the side of the screen is never marked, and so never pulled
+/// to, whatever its WireVariationParam recognition angles allow.
+#[test]
+fn hooks_behind_the_camera_or_off_screen_are_never_marked() {
+    // Wolf's feet at the origin; the headless camera looks down -Z from behind him.
+    let body = Body::default();
+    let mut wire = synthetic(12.0);
+    // Most WireVariationParam rows allow 180 degrees left and right (row 3 is one).
+    let mut wide = wire.variations[&1].clone();
+    (
+        wide.id,
+        wide.recognition_angle_left,
+        wide.recognition_angle_right,
+    ) = (3, 180.0, 180.0);
+    wire.variations.insert(3, wide);
+    let behind = hook([0.0, 2.0, 10.0], 3);
+    // In front of the camera but 84 degrees to Wolf's right: off the screen.
+    let side = hook([10.0, 0.0, -1.0], 1);
+    for (name, point) in [("behind the camera", &behind), ("off screen", &side)] {
+        wire.points = vec![point.clone()];
+        wire.preview = None;
+        wire.search(&body, 0.0);
+        assert!(wire.preview.is_none(), "a hook {name} must not be marked");
+        assert!(!wire.can_fire(), "a hook {name} must not be pulled to");
+    }
+    // With an on-screen hook too, it is the one marked and the one pulled to.
+    wire.points = vec![behind, side, hook([0.0, 4.0, -12.0], 1)];
+    wire.preview = None;
+    wire.search(&body, 0.0);
+    assert_eq!(wire.preview.as_ref().map(|t| t.index), Some(2));
+    assert_eq!(wire.candidate.as_ref().map(|t| t.index), Some(2));
+    // Turning the camera round marks the hook that was behind it.
+    wire.preview = None;
+    wire.search(&body, std::f32::consts::PI);
+    assert_eq!(wire.preview.as_ref().map(|t| t.index), Some(0));
+    assert_eq!(wire.candidate.as_ref().map(|t| t.index), Some(0));
+}
+
+/// The marked hook keeps its mark while it stays inside the soft-lock box (7.15 m to each side
+/// at 15.8 m), even with another hook nearer the screen centre, and loses it outside.
+#[test]
+fn marked_hook_keeps_its_soft_lock_inside_the_narrower_box() {
+    let body = Body::default();
+    let mut wire = synthetic(12.0);
+    wire.points = vec![hook([2.5, 2.0, -12.0], 1)];
+    wire.search(&body, 0.0);
+    assert_eq!(wire.candidate.as_ref().map(|t| t.index), Some(0));
+    // A hook straight ahead appears; the marked one is 6 m right, 16.5 m from the camera.
+    wire.points[0].position = Some([6.0, 2.0, -12.0]);
+    wire.points.push(hook([0.0, 2.0, -12.0], 1));
+    wire.search(&body, 0.0);
+    assert_eq!(wire.preview.as_ref().map(|t| t.index), Some(0));
+    assert_eq!(wire.candidate.as_ref().map(|t| t.index), Some(0));
+    // 9 m right leaves the soft-lock box (still inside the view box): the centred hook wins.
+    wire.points[0].position = Some([9.0, 2.0, -12.0]);
+    wire.search(&body, 0.0);
+    assert_eq!(wire.preview.as_ref().map(|t| t.index), Some(1));
+    assert_eq!(wire.candidate.as_ref().map(|t| t.index), Some(1));
+}
+
+/// Ashina Outskirts, on the low ground south of the ravine north of start 0 (the live check's
+/// trunk spawn): the rideable pine `o002500_0005` is marked when the camera faces it, and not
+/// when the camera looks east with the pine about 65 degrees to its right, off the screen (the
+/// old search marked and fired at it there).
+#[test]
+fn outskirts_pine_is_marked_only_when_the_camera_faces_it() {
+    let dir = cache().join("maps/m11_00_00_00");
+    if !dir.join("grapple.json").exists() {
+        return;
+    }
+    let mut wire = Wire::load(&cache(), &dir).unwrap();
+    wire.view_pitch = 0.25;
+    let body = Body {
+        position: [-140.0, -50.73, -132.0],
+        ..Body::default()
+    };
+    wire.search(&body, (-90f32).to_radians());
+    assert!(wire.preview.is_none() && !wire.can_fire());
+    wire.search(&body, 180f32.to_radians());
+    let marked = wire.preview.as_ref().expect("the pine ahead is marked");
+    assert_eq!(wire.points[marked.index].source_part, "o002500_0005");
+    assert_eq!(wire.candidate.as_ref().map(|t| t.index), Some(marked.index));
 }

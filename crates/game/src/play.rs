@@ -1403,6 +1403,7 @@ fn simulate(
     mut sounds: ResMut<crate::audio::SoundLibrary>,
     mut cues: MessageWriter<crate::audio::SoundCue>,
     replay: Option<ResMut<crate::input_replay::InputReplay>>,
+    cameras: Query<&GlobalTransform, With<FollowCamera>>,
 ) {
     // Hold the simulation behind the loading screen until the whole map has loaded, is drawable
     // and frames have settled (play_gate.rs; its stable-frame wait also covers the one-off
@@ -1478,6 +1479,14 @@ fn simulate(
         sim.duel.enemy_active = false;
     }
     sim.duel.player.wire.view_pitch = orbit.pitch;
+    // The hook search looks through the camera on screen (the last frame's, like the stick).
+    sim.duel.player.wire.camera = cameras.single().ok().map(|t| {
+        let t = t.compute_transform();
+        sekiro_sim::wire::WireCamera {
+            position: t.translation,
+            forward: t.forward().into(),
+        }
+    });
     let cinematic_applied = sim.duel.cinematic.as_ref().is_some_and(|c| c.applied);
     let mut report = sim.duel.step(&frame, dt);
     if std::env::var_os("PF_RESPAWN_PROBE").is_some() && sim.step % 60 == 30 {

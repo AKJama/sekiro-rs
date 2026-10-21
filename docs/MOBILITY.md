@@ -204,6 +204,37 @@ The 120 dedicated points on m11_01 are the 79 `o003610` and 26 `o003600` Shachi 
 - Missing: region-triggered wire-set changes, authored object disablement, native wire kinematics, hook attachment, and complete edge-end semantics for kinds 1 to 3.
   The MSB loader now reads environment-probe regions for visuals, but traversal region/event logic remains unavailable.
 
+### 4.6 How the game picks the hook (issue #178)
+
+Traced in Ghidra on the Steam 1.6.0.0 exe, 2026-10-21; addresses are image addresses.
+The search lives in `WireActionTargetMng` (constructor 0x140ef94e0, debug menu 0x140efccc0).
+Its per-frame update 0x140efaf80 copies the `WirePointSearchParam` row into the manager and calls the search 0x140efd8e0 [V].
+
+- **Camera only.** The search reads the player camera's matrix (character +0x1190) and builds a check ray from it [V].
+  The ray starts 0.8 m in front of the camera (constant at 0x14328917c) and runs along the camera's forward axis for the pass's far distance [V: 0x140efb2c0, 0x140efb560].
+  The forward axis is tilted up by the config `Game.Player.WireAction.RaycastElevationDeg`, whose getter (0x1419fdc40) returns 0 when the config is not set [I].
+- **Player back filter.** For each kind-1 edge, the horizontal angle between Wolf-to-edge and the check ray's direction must be at most 75 degrees [V: 0x140eeda30; the manager stores 105 at +0x148, the angle between edge-to-Wolf and the ray, and 45 at +0x14c while locked on].
+  The test is skipped when the edge is straight above or below Wolf [V].
+- **Distance bands.** 3D distance from Wolf: under `actionDistanceNear` is ignored, up to `actionDistanceFar` plus the variation's `extendWireActionDistance` is usable (Ready), up to `findDistanceFar` plus the extension is shown but not usable (Distant) [V: 0x140eeda30, 0x140efd8e0].
+- **In front of the camera.** The closest points between the check-ray segment and the edge must have a ray parameter above 0: the hook lies beyond the plane 0.8 m in front of the camera [V: 0x140efb6f0 with the segment-segment closest-point routine 0x141a54680].
+- **View box.** With view filtering on (+0x134, on by default) the hook, projected to the screen, must fall inside a box 15.8 m in front of the camera (0.8 m plus the 15 m view filtering distance at +0xb4) [V: 0x140efbc60].
+  The box reaches `filteringDistanceWidth` (14.3 m) to each side along the horizon, and `filteringDistanceHeightUpper` and `Lower` (10.2 m) up and down along the camera's up axis [V].
+  So in view space a hook needs |x / depth| at most 14.3 / 15.8 and y / depth between -10.2 / 15.8 and 10.2 / 15.8.
+  The width is a half-extent on each side, not the whole width.
+- **Ranking.** Survivors are sorted by the screen distance between the projected hook and the projected check ray, with x scaled by the aspect ratio, so by the angle from the screen centre [V: comparator 0x140efeb60].
+  The first one in that order whose obstacle raycast (0x140efba50) is clear is marked [V].
+- **Ready before Distant.** Under a manager flag (bit 29, purpose unknown [?]) the search runs two passes, the usable band first and the shown-only band second; otherwise one pass over both bands [V].
+  We always prefer usable hooks, which is the two-pass behaviour.
+- **Soft lock.** While the marked hook still passes the back filter, the narrower soft-lock box (`softlockDistanceWidth` 7.15 m, heights 10.2 m), the distance bands and the raycast, it stays marked and no new search runs [V: 0x140efd8e0; soft lock +0x136 and re-search on leaving the action range +0x138 are both on by default].
+- **Recognition angles.** `WireVariationParam.recognitionAngle*` are tested against the edge's own direction, not the camera; 180 means no limit [V: 0x140eeda30].
+  FwLo's RustSekiro reads them the same way.
+- **Marker and pull.** The search keeps one target; the HUD marker and the wire both use it [V: the state 1 Ready or 2 Distant is stored with the single target].
+
+The runtime follows this in `crates/sim/src/wire.rs`: the camera on screen (or, headless, the default orbit camera 4.5 m behind a focus 1.5 m above Wolf's feet), the back filter, the 0.8 m front plane, the view box, the ranking, Ready before Distant, and the soft lock for a usable hook.
+The hook the HUD marks (`preview`) is the only one the wire can fire at (`candidate`).
+FwLo's `grapple_target` (RustSekiro `src/map.rs`, commit 292655c) has the same camera-plane, nearest-to-centre and soft-lock structure; his box takes the width as the whole width.
+What is not reproduced is listed in [FIDELITY.md](FIDELITY.md#grapple-target-search-issue-178).
+
 ## 5. Air control, falling, fall death and respawn
 
 ### 5.1 Fall-control table (from FwLo)
@@ -499,6 +530,7 @@ The runtime reads WirePointSearchParam row 0's actual near/far/find fields and W
 Grounded candidates use camera yaw and pitch, a chest ray to the authored point, and a placeholder ranking of smallest angular distance from view centre followed by distance.
 Headless callers default to the body's horizontal view.
 The engine's screen-space filtering/soft-lock boxes and region-driven wire-set changes are not reconstructed.
+Issue #178 later replaced the angle ranking with the exe's camera view box, back filter and soft lock (section 4.6).
 The LOS ray ignores only the last 0.1 m at the anchor, as a placeholder allowance for its own surface.
 Env 3000 exposes a selected target; env 3003 retains the step-1 cm/s answer.
 Act 3018 tracks the wire action flag, cleared on release; act 3023 pre-evaluates the requested clip's wire interval as a travel-window fallback, and act 3035 marks the wire preference.

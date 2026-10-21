@@ -206,6 +206,21 @@ The XML layout gives sprite rectangles, without movie animation instructions, so
 MENU_Wire_01 frames the ready MENU_Wire_Marker disc; non-rideable targets show the ring with MENU_Wire_Cursor instead.
 The approximately 49 px outer diameter at 1440p and dot size are fitted to the supplied retail captures; the native FE movie's reveal curve, glow and transition timing remain approximations.
 
+## Grapple target search, issue #178
+
+The hook search follows the exe's `WireActionTargetMng` rule (see [MOBILITY.md](MOBILITY.md#46-how-the-game-picks-the-hook-issue-178)): camera back filter, 0.8 m front plane, view box, nearest to the screen centre, usable hooks first, soft lock.
+These parts are approximations:
+
+- `WireVariationParam` recognition angles are not applied: the game measures them against each edge's own direction, and `grapple.json` does not carry it.
+  Most rows allow 90 or 180 degrees, so this mostly matters for the kite row 41 (90 up, 50 down, 30 left, 10 right) and rows 50200 to 50202.
+- The hook is a point, not the game's 4 cm edge segment, so closest points and ranking use that point.
+- The obstacle ray is our chest ray from 1.2 m above the feet; the exe's ray (0x140efba50) was not traced in detail.
+- `RaycastElevationDeg` is taken as 0, its value when the config is not set; the elevation therefore does not tilt the check ray.
+- The soft lock holds only a usable (Ready) hook; a hook that drops to Distant is searched for again, our reading of the "re-search when leaving the action range" switch.
+- The extension is added to the usable band only, not to the find distance.
+- The locked-on back filter angle (45 degrees) is not used.
+- Headless runs, which have no camera, use the default orbit camera (LockCamParam row 0: 4.5 m from a focus 1.5 m above the feet) at the frame's camera yaw and `view_pitch`; the game passes its camera on screen.
+
 ## Goods Storage and restock, issue #186
 
 Goods over their EquipParamGoods `maxNum` go to the Storage only on `isDeposit` 1 rows, up to `maxRepositoryNum`; the rest is lost, as for the Healing Gourd and most key items.
