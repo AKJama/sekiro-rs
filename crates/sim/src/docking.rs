@@ -67,6 +67,11 @@ fn is_hang(edge: &MapEdge) -> bool {
     edge.kind == 2 && edge.variation <= 1
 }
 
+/// Cover edges Wolf docks to: kind 3, variations 0 to 3 and 10 to 13.
+fn is_cover_edge(edge: &MapEdge) -> bool {
+    edge.kind == 3 && matches!(edge.variation, 0..=3 | 10..=13)
+}
+
 /// Held hang poses: idle, shimmy start, loop and stop (plain and foothold sets).
 pub(crate) fn is_hang_clip(name: &str) -> bool {
     name.starts_with("a000_020")
@@ -162,9 +167,8 @@ impl MapEdge {
         Vec3::new(-d.z, 0.0, d.x).try_normalize()
     }
 
-    pub fn closest(&self, position: Vec3) -> (Vec3, f32) {
-        let t = self.along(position).clamp(0.0, 1.0);
-        (self.at(t), t)
+    pub fn closest(&self, position: Vec3) -> Vec3 {
+        self.at(self.along(position).clamp(0.0, 1.0))
     }
 }
 
@@ -243,16 +247,17 @@ fn chain_outward(edges: &[MapEdge], from: usize, to: usize, outward: Vec3) -> Ve
 const MAX_JOINT_TURN: f32 = 30.0;
 
 /// Which edges can join into one ledge or wall: hang edges of the same part, chain and
-/// variation (the variation picks the hang clip set), or cover edges of the same part across
-/// chains and variations. A cover wall is split into chains where its variation changes, as
-/// m11_00's snake pit wall (`h013600`) runs chain 2 (variation 0), 3 (10, the narrow ledge)
+/// variation (the variation picks the hang clip set), or dockable cover edges of the same part
+/// across chains and variations. A cover wall is split into chains where its variation changes,
+/// as m11_00's snake pit wall (`h013600`) runs chain 2 (variation 0), 3 (10, the narrow ledge)
 /// and 4 (0) end to start on shared vertices, and Wolf hugs it in one run (#147); the docked
-/// edge's own variation still sets env 3017.
+/// edge's own variation still sets env 3017. A cover edge Wolf cannot dock to joins nothing, so
+/// the wall ends where it starts.
 fn join_key(edge: &MapEdge) -> Option<(&str, u8, u32, u8)> {
     let part = edge.source_part.as_str();
     if is_hang(edge) {
         Some((part, edge.kind, edge.chain, edge.variation))
-    } else if edge.kind == 3 {
+    } else if is_cover_edge(edge) {
         Some((part, edge.kind, 0, 0))
     } else {
         None
@@ -371,28 +376,38 @@ impl Docking {
     }
 
     fn cover_target(&self, index: usize, position: Vec3, ground: &dyn Ground) -> Option<Target> {
-        if self.edges[index].kind != 3 {
+        // Joined neighbours are dockable too ([`join_key`]), so wherever [`span`] moves on to is.
+        if !is_cover_edge(&self.edges[index]) {
             return None;
         }
         let (index, point, bits) = span(&self.edges, &self.links, index, position, 0.0, END_MARGIN);
         let edge = &self.edges[index];
-        if !matches!(edge.variation, 0..=3 | 10..=13) {
-            return None;
-        }
         // One end at most, the start first: cover never reports both.
         let bits = if bits & 1 != 0 { 1 } else { bits };
         let side = edge.side()?;
-        // The floor is read at the wall's foot, under the edge: on a narrow ledge (the snake
-        // pit's, #147) there is a drop under the docked feet.
-        let y = ground.floor(point.x, point.z, position.y + TOP_TOLERANCE)?;
-        if (point.y - y).abs() > COVER_HEIGHT_TOLERANCE || (position.y - y).abs() > TOP_TOLERANCE {
-            return None;
-        }
+        // A floor at the wall's height and Wolf's.
+        let floor = |p: Vec3| {
+            ground
+                .floor(p.x, p.z, position.y + TOP_TOLERANCE)
+                .filter(|&y| {
+                    (point.y - y).abs() <= COVER_HEIGHT_TOLERANCE
+                        && (position.y - y).abs() <= TOP_TOLERANCE
+                })
+        };
         for outward in [side, -side] {
             if (position - point).dot(outward) < 0.0 {
                 continue;
             }
             let feet = point + outward * DOCKING_TRANSLATION_OFFSET_COVER;
+            // Under the docked feet; on the narrow-ledge variations, where the snake pit's ledge
+            // (variation 10, #147) puts them out over a drop, at the wall's foot under the edge.
+            let Some(y) = floor(feet).or_else(|| {
+                matches!(edge.variation, 10..=13)
+                    .then(|| floor(point))
+                    .flatten()
+            }) else {
+                continue;
+            };
             let clearance = ground.slide([feet.x, y, feet.z], [0.0; 2]);
             if clearance[0].hypot(clearance[1]) > COVER_BLOCK_TOLERANCE {
                 continue;
@@ -534,7 +549,7 @@ impl Docking {
         for i in 0..self.edges.len() {
             let edge = &self.edges[i];
             if edge.kind == 3 {
-                let (point, _) = edge.closest(p);
+                let point = edge.closest(p);
                 let distance = Vec3::new(p.x - point.x, 0.0, p.z - point.z).length();
                 if distance <= nearest
                     && let Some(mut target) = self.cover_target(i, p, ground)
@@ -550,8 +565,9 @@ impl Docking {
             if !is_hang(edge) {
                 continue;
             }
-            let (point, _) = edge.closest(p);
+            let point = edge.closest(p);
             let offset = p - point;
+
             if offset.x.hypot(offset.z) > nearest
                 || (offset.y.abs() > TOP_TOLERANCE
                     && (offset.y + HAND_HEIGHT).abs() > TOP_TOLERANCE)

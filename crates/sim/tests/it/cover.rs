@@ -437,10 +437,13 @@ fn cover_obstacle_queries_distinguish_each_end() {
 #[test]
 fn snake_pit_wall_hug_crosses_the_chain_joint() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache/maps/m11_00_00_00");
-    if !dir.join("edges.json").exists() || !dir.join("layout.json").exists() {
+    let Some(world) = crate::step_cost::play_world() else {
+        return;
+    };
+    if !dir.join("edges.json").exists() {
         return;
     }
-    let world = sekiro_sim::collision::CollisionWorld::load_map(&dir).unwrap();
+    let world = &*world;
     let mut docking = Docking::load(&dir.join("edges.json")).unwrap();
     let wall = |docking: &Docking, chain: u32| -> Vec<usize> {
         (0..docking.edges.len())
@@ -461,7 +464,7 @@ fn snake_pit_wall_hug_crosses_the_chain_joint() {
                 ..Body::default()
             };
             docking.active = None;
-            docking.search(&body, &world);
+            docking.search(&body, world);
             assert!(
                 docking
                     .candidate
@@ -470,11 +473,11 @@ fn snake_pit_wall_hug_crosses_the_chain_joint() {
                 "no cover at {entry:?}: {:?}",
                 docking.candidate
             );
-            assert!(docking.cover_step(&mut body, Some("a000_218103"), None, 0.0, &world));
+            assert!(docking.cover_step(&mut body, Some("a000_218103"), None, 0.0, world));
             let d = run(&docking.edges[corner]) * sign;
             let stick = (-d.x).atan2(-d.z);
             for _ in 0..300 {
-                docking.cover_step(&mut body, Some("a000_021203"), Some(stick), 0.05, &world);
+                docking.cover_step(&mut body, Some("a000_021203"), Some(stick), 0.05, world);
             }
             let target = docking.active.clone().unwrap();
             let e = &docking.edges[edge];

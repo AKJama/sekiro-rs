@@ -37,7 +37,7 @@ fn closest_reach_facing_and_ends() {
     let mut docking = synthetic();
     assert_eq!(
         docking.edges[0].closest(Vec3::new(4.0, 9.0, 2.0)),
-        (Vec3::new(2.0, 0.0, 0.0), 1.0)
+        Vec3::new(2.0, 0.0, 0.0)
     );
     let mut body = Body {
         position: [0.0, 0.0, 0.4],
