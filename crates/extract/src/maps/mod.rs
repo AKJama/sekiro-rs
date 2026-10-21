@@ -8,7 +8,9 @@
 //! - `collision.bin`: the hit collision (`h*` binder) as one triangle mesh in Bevy space
 //!   (`sekiro_formats::hknp::CollisionMesh` in postcard),
 //! - `object_collision.bin`: the static collision placed objects carry in their objbnds
-//!   (`sekiro_formats::hknp::ObjectCollision` in postcard, `docs/OBJECT-COLLISION.md`).
+//!   (`sekiro_formats::hknp::ObjectCollision` in postcard, `docs/OBJECT-COLLISION.md`),
+//! - `fall_assist.bin`: the fall-prevention assist walls (`f*` binder) per collision part
+//!   (`sekiro_formats::hknp::FallAssistCollision` in postcard, `docs/OBJECT-COLLISION.md`).
 //!
 //! Every position and transform is mirrored across X like the model export (docs/FORMATS.md).
 
@@ -119,6 +121,183 @@ fn read_msb(cache: &Path, id: &str) -> Result<msb::Msb> {
 /// Rewrite only `object_collision.bin` from the MSB and the unpacked object binders.
 pub fn export_object_collision(cache: &Path, id: &str) -> Result<()> {
     object_collision::export(cache, id, &read_msb(cache, id)?)
+}
+
+/// Rewrite only `fall_assist.bin` from the MSB and the map's `f` hit binder in cache/raw.
+/// Needs the game folder for Oodle (read only).
+pub fn export_fall_assist(game: &Path, cache: &Path, id: &str) -> Result<()> {
+    let oodle = Oodle::load(game).context("the fall-assist export needs the game's Oodle DLL")?;
+    let out = cache.join("maps").join(id);
+    std::fs::create_dir_all(&out)?;
+    write_fall_assist(&cache.join("raw"), &out, id, &read_msb(cache, id)?, oodle)
+}
+
+/// Writes `fall_assist.bin`: the fall-prevention assist walls of the `f<map>.hkxbhd` binder
+/// (the exe mounts it as `faHKXBHD` next to the `hi` and `lo` hit binders and loads it as
+/// `m_fallAssistantHitFileCap`), one extern mesh file per collision model, placed by each MSB
+/// collision part like `collision.bin`. A map without the binder has no walls, so an old
+/// `fall_assist.bin` is removed. The file is written whole or not at all.
+fn write_fall_assist(
+    raw: &Path,
+    out: &Path,
+    id: &str,
+    msb: &msb::Msb,
+    oodle: &'static Oodle,
+) -> Result<()> {
+    let path = out.join("fall_assist.bin");
+    let decode =
+        |data: &[u8], compendium: Option<&Compendium>| Ok(hknp::decode_extern(data, compendium)?);
+    let Some(hits) = place_hit_binder(raw, id, msb, oodle, "f", decode)? else {
+        let binder = format!("f{}.hkxbhd", &id[1..]);
+        // A file from an older export would hold walls the map's data no longer has.
+        match std::fs::remove_file(&path) {
+            Ok(()) => eprintln!(
+                "  fall assist: no {binder}, removed the old {}",
+                path.display()
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("  fall assist: no {binder}, skipped");
+            }
+            Err(e) => return Err(e).with_context(|| format!("removing {}", path.display())),
+        }
+        return Ok(());
+    };
+    // A model the binder has no file for adds no walls: its parts are left out.
+    let walls = hknp::FallAssistCollision {
+        parts: hits
+            .ranges
+            .into_iter()
+            .filter(|(_, [_, count])| *count > 0)
+            .map(|(name, [first, count])| hknp::FallAssistPart {
+                name,
+                first: first as u32,
+                count: count as u32,
+            })
+            .collect(),
+        mesh: hits.mesh,
+    };
+    let partial = out.join("fall_assist.bin.partial");
+    std::fs::write(&partial, walls.to_bytes()?)
+        .with_context(|| format!("writing {}", partial.display()))?;
+    std::fs::rename(&partial, &path).with_context(|| format!("writing {}", path.display()))?;
+    eprintln!(
+        "  fall assist: {} triangles over {} of {} collision parts ({} models, {} failed, {} extern-mesh bodies, {} bodies of other shapes skipped)",
+        walls.mesh.triangle_count(),
+        walls.parts.len(),
+        hits.parts,
+        hits.models,
+        hits.failed,
+        hits.stats.bodies,
+        hits.stats.other_shapes,
+    );
+    Ok(())
+}
+
+/// One of a map's hit binders placed by the MSB's collision parts ([`place_hit_binder`]).
+struct PlacedHits {
+    /// Every placed part's collision, in Bevy space.
+    mesh: hknp::CollisionMesh,
+    /// Each placed part's name and `[first triangle, triangle count]` in `mesh`, in MSB order.
+    ranges: Vec<(String, [usize; 2])>,
+    /// The MSB's collision parts.
+    parts: usize,
+    /// The distinct models those parts use, and how many of them failed to decode.
+    models: usize,
+    failed: usize,
+    stats: hknp::DecodeStats,
+}
+
+/// Reads map `id`'s hit binder `<prefix><tail>.hkxbhd` / `.hkxbdt` from `raw` (`h` for the
+/// hit collision, `f` for the fall-prevention assist walls), decodes the file of each MSB
+/// collision part's model with `decode` in parallel, and places each part's collision like any
+/// other part ([`extend_placed`]). A model whose file fails to decode is warned about and its
+/// parts left out; one the binder has no file for is left out silently. `None` when the map has
+/// no such binder (its `.hkxbhd` is not there); any other read error is an error.
+fn place_hit_binder(
+    raw: &Path,
+    id: &str,
+    msb: &msb::Msb,
+    oodle: &'static Oodle,
+    prefix: &str,
+    decode: impl Fn(&[u8], Option<&Compendium>) -> Result<(hknp::CollisionMesh, hknp::DecodeStats)>
+    + Sync,
+) -> Result<Option<PlacedHits>> {
+    let tail = &id[1..];
+    let dir = raw.join(format!("map/{id}"));
+    let path = |ext: &str| dir.join(format!("{prefix}{tail}.{ext}"));
+    let bhd = match std::fs::read(path("hkxbhd")) {
+        Ok(bhd) => bhd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path("hkxbhd").display())),
+    };
+    let bdt = std::fs::read(path("hkxbdt"))
+        .with_context(|| format!("reading {}", path("hkxbdt").display()))?;
+    let files = bxf4::parse(&bhd, &bdt)?;
+    let compendium = match files.iter().find(|f| f.file_name().contains("compendium")) {
+        Some(f) => Some(Compendium::parse(&f.contents(Some(oodle))?)?),
+        None => None,
+    };
+    let by_name: HashMap<String, &bxf4::BxfFile> = files
+        .iter()
+        .map(|f| (f.file_name().to_ascii_lowercase(), f))
+        .collect();
+    let parts: Vec<&msb::Part> = msb
+        .parts
+        .iter()
+        .filter(|p| p.kind == msb::PartKind::Collision)
+        .collect();
+    let wanted: BTreeSet<String> = parts
+        .iter()
+        .filter_map(|p| msb.model(p).map(|m| m.name.clone()))
+        .collect();
+    let decoded: Vec<(String, Result<(hknp::CollisionMesh, hknp::DecodeStats)>)> = wanted
+        .par_iter()
+        .filter_map(|model| {
+            let digits = model.trim_start_matches('h');
+            let f = by_name.get(&format!("{prefix}{tail}_{digits}.hkx.dcx"))?;
+            let r = f
+                .contents(Some(oodle))
+                .map_err(anyhow::Error::from)
+                .and_then(|data| decode(&data, compendium.as_ref()))
+                .with_context(|| format!("decoding {}", f.name));
+            Some((model.clone(), r))
+        })
+        .collect();
+    let mut by_model = HashMap::new();
+    let mut stats = hknp::DecodeStats::default();
+    let mut failed = 0;
+    for (model, r) in decoded {
+        match r {
+            Ok((m, s)) => {
+                stats += &s;
+                by_model.insert(model, m);
+            }
+            Err(e) => {
+                failed += 1;
+                eprintln!("  warning: {prefix}{tail}.hkxbhd: {e:#}");
+            }
+        }
+    }
+    let mut mesh = hknp::CollisionMesh::default();
+    let mut ranges = Vec::new();
+    for p in &parts {
+        let Some(model) = msb.model(p).and_then(|m| by_model.get(&m.name)) else {
+            continue;
+        };
+        ranges.push((
+            p.name.clone(),
+            [mesh.triangle_count(), model.triangle_count()],
+        ));
+        extend_placed(&mut mesh, model, p);
+    }
+    Ok(Some(PlacedHits {
+        mesh,
+        ranges,
+        parts: parts.len(),
+        models: wanted.len(),
+        failed,
+        stats,
+    }))
 }
 
 /// Upgrade placement metadata without changing geometry, textures or collision.
@@ -532,6 +711,11 @@ pub fn export(game: &Path, cache: &Path, id: &str, selected_models: &[String]) -
         collision.vertices.len()
     );
     object_collision::export(cache, id, &msb)?;
+    // The walls are an extra: a failure is warned about and leaves the rest of the export (and
+    // the last good `fall_assist.bin`) whole.
+    if let Err(e) = write_fall_assist(&raw, &out, id, &msb, oodle) {
+        eprintln!("  warning: fall assist: {e:#}");
+    }
 
     let mut layout = json!({
         "id": id,
@@ -618,73 +802,17 @@ fn export_collision(
     msb: &msb::Msb,
     oodle: &'static Oodle,
 ) -> Result<(hknp::CollisionMesh, HashMap<String, [usize; 2]>, String)> {
-    let tail = &id[1..];
-    let dir = raw.join(format!("map/{id}"));
-    let bhd = std::fs::read(dir.join(format!("h{tail}.hkxbhd")))?;
-    let bdt = std::fs::read(dir.join(format!("h{tail}.hkxbdt")))?;
-    let files = bxf4::parse(&bhd, &bdt)?;
-    let compendium = match files.iter().find(|f| f.file_name().contains("compendium")) {
-        Some(f) => Some(Compendium::parse(&f.contents(Some(oodle))?)?),
-        None => None,
-    };
-    let by_name: HashMap<String, &bxf4::BxfFile> = files
-        .iter()
-        .map(|f| (f.file_name().to_ascii_lowercase(), f))
-        .collect();
-    let parts: Vec<&msb::Part> = msb
-        .parts
-        .iter()
-        .filter(|p| p.kind == msb::PartKind::Collision)
-        .collect();
-    let wanted: BTreeSet<String> = parts
-        .iter()
-        .filter_map(|p| msb.model(p).map(|m| m.name.clone()))
-        .collect();
-    let decoded: Vec<(String, Result<(hknp::CollisionMesh, hknp::DecodeStats)>)> = wanted
-        .par_iter()
-        .filter_map(|model| {
-            let digits = model.trim_start_matches('h');
-            let f = by_name.get(&format!("h{tail}_{digits}.hkx.dcx"))?;
-            let r = (|| {
-                let data = f.contents(Some(oodle))?;
-                hknp::decode(&data, compendium.as_ref())
-                    .with_context(|| format!("decoding {}", f.name))
-            })();
-            Some((model.clone(), r))
-        })
-        .collect();
-    let mut by_model = HashMap::new();
-    let mut total = hknp::DecodeStats::default();
-    let mut errors = 0;
-    for (model, r) in decoded {
-        match r {
-            Ok((m, s)) => {
-                total.bodies += s.bodies;
-                total.sections += s.sections;
-                total.primitives += s.primitives;
-                total.quads += s.quads;
-                total.convex_skipped += s.convex_skipped;
-                total.unmatched_material += s.unmatched_material;
-                by_model.insert(model, m);
-            }
-            Err(e) => {
-                errors += 1;
-                eprintln!("  warning: collision: {e:#}");
-            }
-        }
-    }
-    let mut mesh = hknp::CollisionMesh::default();
-    let mut ranges = HashMap::new();
-    for p in &parts {
-        let Some(model) = msb.model(p).and_then(|m| by_model.get(&m.name)) else {
-            continue;
-        };
-        ranges.insert(
-            p.name.clone(),
-            [mesh.triangle_count(), model.triangle_count()],
-        );
-        extend_placed(&mut mesh, model, p);
-    }
+    let decode = |data: &[u8], compendium: Option<&Compendium>| Ok(hknp::decode(data, compendium)?);
+    let PlacedHits {
+        mesh,
+        ranges,
+        parts,
+        models,
+        failed,
+        stats: total,
+    } = place_hit_binder(raw, id, msb, oodle, "h", decode)?
+        .with_context(|| format!("map {id} has no h{}.hkxbhd", &id[1..]))?;
+    let ranges: HashMap<String, [usize; 2]> = ranges.into_iter().collect();
 
     // Validation: every player start should stand on collision.
     let verts: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from(*v)).collect();
@@ -703,9 +831,9 @@ fn export_collision(
     let materials: BTreeSet<u32> = mesh.materials.iter().copied().collect();
     let note = format!(
         "{} collision parts, {} models, {} failed, {} bodies, {} sections, {} primitives ({} quads, {} convex skipped), {} triangles without material, {} distinct materials, furthest player start {:.2} m from a collision vertex",
-        parts.len(),
-        wanted.len(),
-        errors,
+        parts,
+        models,
+        failed,
         total.bodies,
         total.sections,
         total.primitives,

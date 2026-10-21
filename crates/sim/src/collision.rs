@@ -22,7 +22,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use glam::{Vec2, Vec3};
-use sekiro_formats::hknp::{CollisionMesh, ObjectCollision, ObjectCollisionPart};
+use sekiro_formats::hknp::{
+    CollisionMesh, FallAssistCollision, ObjectCollision, ObjectCollisionPart,
+};
 
 use crate::body::{Ground, WaterSurface};
 use crate::hit_filter::{CAMERA, ENEMY, PLAYER};
@@ -426,6 +428,54 @@ fn face_normal(a: Vec3, b: Vec3, c: Vec3) -> Option<Vec3> {
     (n.length_squared() >= 1e-12).then(|| n.normalize())
 }
 
+/// Copies one part of a mesh of parts (an object's or fall-assist walls'): `source`'s triangles
+/// `first..first + count` into `mesh`, each source vertex once (`slot` maps a source vertex to
+/// its index in `mesh`, `u32::MAX` for none yet). Triangles too thin to collide with are left
+/// out here as the grid would, so a caller's ranges count what it keeps. A part or vertex
+/// outside `source` is an error, not a panic or a silent gap.
+fn copy_part(
+    source: &CollisionMesh,
+    first: u32,
+    count: u32,
+    slot: &mut [u32],
+    mesh: &mut CollisionMesh,
+) -> Result<(), String> {
+    let (first, count) = (first as usize, count as usize);
+    let tris = first
+        .checked_add(count)
+        .and_then(|end| source.indices.get(first * 3..end * 3))
+        .ok_or_else(|| {
+            format!(
+                "triangles {first}..{} outside the mesh's {}",
+                first.saturating_add(count),
+                source.indices.len() / 3
+            )
+        })?;
+    for (t, tri) in (first..).zip(tris.as_chunks::<3>().0) {
+        let corners = tri.map(|i| source.vertices.get(i as usize));
+        let [Some(a), Some(b), Some(c)] = corners else {
+            return Err(format!(
+                "triangle {t}'s vertices {tri:?} outside the mesh's {}",
+                source.vertices.len()
+            ));
+        };
+        if face_normal(Vec3::from(*a), Vec3::from(*b), Vec3::from(*c)).is_none() {
+            continue;
+        }
+        for &i in tri {
+            let i = i as usize;
+            if slot[i] == u32::MAX {
+                slot[i] = mesh.vertices.len() as u32;
+                mesh.vertices.push(source.vertices[i]);
+            }
+            mesh.indices.push(slot[i]);
+        }
+        mesh.materials
+            .push(source.materials.get(t).copied().unwrap_or(u32::MAX));
+    }
+    Ok(())
+}
+
 fn cell_of(x: f32, z: f32) -> (i32, i32) {
     ((x / CELL).floor() as i32, (z / CELL).floor() as i32)
 }
@@ -462,7 +512,49 @@ impl CollisionWorld {
         };
         let mut world = Self::from_mesh(&mesh);
         world.add_helpers(&helpers);
+        world.add_map_fall_assist(dir, |_| true)?;
         Ok(world)
+    }
+
+    /// Adds the fall-prevention assist walls of the collision parts `keep` names
+    /// ([`FallAssistCollision`], the map's `f` hit binder) as [`crate::hit_filter::FALL_ASSIST_MOVE`]
+    /// walls: only the assist sees them, while the player script asks for it (`act(3016, 0)`),
+    /// so they hold Wolf at every edge while he stands, walks or runs and let a sprint or a jump
+    /// go over (docs/OBJECT-COLLISION.md, #149). Returns the triangles added.
+    pub fn add_fall_assist(
+        &mut self,
+        walls: &FallAssistCollision,
+        keep: impl Fn(&str) -> bool,
+    ) -> Result<usize, String> {
+        let source = &walls.mesh;
+        let mut mesh = CollisionMesh::default();
+        // Only the kept parts' vertices, so a part left out leaves none behind.
+        let mut slot = vec![u32::MAX; source.vertices.len()];
+        for part in walls.parts.iter().filter(|p| keep(&p.name)) {
+            copy_part(source, part.first, part.count, &mut slot, &mut mesh)
+                .map_err(|e| format!("fall-assist part {}: {e}", part.name))?;
+        }
+        let range = self.add_masked(crate::hit_filter::FALL_ASSIST_MOVE, &mesh);
+        Ok(range.len())
+    }
+
+    /// [`CollisionWorld::add_fall_assist`] with the `fall_assist.bin` in the map folder `dir`:
+    /// the triangles added, or `None` when the folder has none (the map was exported without
+    /// them: re-export it with `sekiro-extract map <id> --fall-assist`).
+    pub fn add_map_fall_assist(
+        &mut self,
+        dir: &Path,
+        keep: impl Fn(&str) -> bool,
+    ) -> Result<Option<usize>, String> {
+        let path = dir.join("fall_assist.bin");
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        let walls = FallAssistCollision::from_bytes(&bytes)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        self.add_fall_assist(&walls, keep).map(Some)
     }
 
     pub fn from_mesh(mesh: &CollisionMesh) -> Self {
@@ -631,7 +723,7 @@ impl CollisionWorld {
         block: &str,
         objects: &ObjectCollision,
         mut mask: impl FnMut(&ObjectCollisionPart, u8) -> u8,
-    ) -> (usize, usize) {
+    ) -> Result<(usize, usize), String> {
         let mut by_mask: std::collections::BTreeMap<u8, Vec<&ObjectCollisionPart>> =
             Default::default();
         for part in &objects.parts {
@@ -651,23 +743,8 @@ impl CollisionWorld {
             let mut ranges = Vec::with_capacity(group.len());
             for part in group {
                 let start = mesh.triangle_count() as u32;
-                for t in part.first as usize..(part.first + part.count) as usize {
-                    let tri = &source.indices[t * 3..t * 3 + 3];
-                    let [a, b, c] = [0, 1, 2].map(|k| Vec3::from(source.vertices[tri[k] as usize]));
-                    // Left out here as the grid would, so the ranges count what it keeps.
-                    if face_normal(a, b, c).is_none() {
-                        continue;
-                    }
-                    for &i in tri {
-                        if slot[i as usize] == u32::MAX {
-                            slot[i as usize] = mesh.vertices.len() as u32;
-                            mesh.vertices.push(source.vertices[i as usize]);
-                        }
-                        mesh.indices.push(slot[i as usize]);
-                    }
-                    mesh.materials
-                        .push(source.materials.get(t).copied().unwrap_or(u32::MAX));
-                }
+                copy_part(source, part.first, part.count, &mut slot, &mut mesh)
+                    .map_err(|e| format!("{block}/{}: {e}", part.name))?;
                 ranges.push((start..mesh.triangle_count() as u32, &part.name));
             }
             let range = self.add_masked(who, &mesh);
@@ -677,7 +754,7 @@ impl CollisionWorld {
                 parts += 1;
             }
         }
-        (parts, self.triangles.len() - first)
+        Ok((parts, self.triangles.len() - first))
     }
 
     /// [`CollisionWorld::add_objects`] with a block's `object_collision.bin` in its map folder
@@ -694,7 +771,7 @@ impl CollisionWorld {
         }
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let objects = ObjectCollision::from_bytes(&bytes).map_err(|e| e.to_string())?;
-        Ok(self.add_objects(block, &objects, mask))
+        self.add_objects(block, &objects, mask)
     }
 
     /// Appends a mesh only those `mask` holds collide with ([`crate::hit_filter::PLAYER`],
@@ -1158,6 +1235,28 @@ impl CollisionWorld {
         tris.len()
     }
 
+    /// What an assisted slide ([`Ground::slide_assisted`]) of `delta` from `feet` with the
+    /// fall-prevention walls `assist` tests: its sub-steps, and the body triangles and walls it
+    /// tests on each push-out pass. Only for the step-cost test (#149).
+    #[doc(hidden)]
+    pub fn assisted_slide_cost(&self, feet: [f32; 3], delta: [f32; 2], assist: u8) -> [usize; 3] {
+        let (mut tris, mut walls) = (Vec::new(), Vec::new());
+        let d = Vec2::from(delta);
+        let coarse = self.gather_slide(
+            Vec3::from(feet),
+            d,
+            [PLAYER, assist],
+            &mut tris,
+            &mut walls,
+            true,
+        );
+        [
+            slide_steps(coarse, d.length(), walls.is_empty()),
+            tris.len(),
+            walls.len(),
+        ]
+    }
+
     /// Gathers, each once, the triangles near a slide of `d` from `start` that `who[0]`'s body
     /// can touch into `body`, and the fall-prevention walls in `who[1]` (none for 0) into
     /// `walls`. Returns the slide's coarse sub-step count.
@@ -1187,6 +1286,7 @@ impl CollisionWorld {
         let max = Vec2::new(start.x.max(start.x + d.x), start.z.max(start.z + d.y)) + reach;
         let low = start.y + SPHERES[0] - RADIUS - 0.01;
         let high = start.y + HEAD_TOP + 0.01;
+        let (feet_low, feet_high) = (start.y - FALL_ASSIST_RADIUS, start.y + FALL_ASSIST_RADIUS);
 
         // The horizontal keep box: the move's reach plus the move's length and a body radius
         // more. Push-outs carry the body off the straight line, along a slanted wall for one:
@@ -1216,9 +1316,24 @@ impl CollisionWorld {
                         && self.solid(t)
                         && self.live(t, who)
                 }));
-                // The assist's walls are rare, so only a move near one pays for them.
+                // The assist's walls: only those `hold_inside` can reach. It tests them at the
+                // feet, which a slide moves only sideways, so a wall whose box is
+                // FALL_ASSIST_RADIUS or more above or below the feet never holds; nor does one
+                // outside the keep box. A wall gathered at all makes the slide take fine
+                // sub-steps (`slide_steps`), and m11_00's `f` binder puts walls in a quarter of
+                // the occupied cells (up to 248 a cell), mostly bands of other storeys.
                 if assist != 0 {
-                    walls.extend(cell.iter().copied().filter(|&t| self.live(t, assist)));
+                    walls.extend(cell.iter().copied().filter(|&t| {
+                        let [lo, hi] = self.bounds[t as usize];
+                        hi.y > feet_low
+                            && lo.y < feet_high
+                            && (!cull
+                                || hi.x >= near_min.x
+                                    && lo.x <= near_max.x
+                                    && hi.z >= near_min.y
+                                    && lo.z <= near_max.y)
+                            && self.live(t, assist)
+                    }));
                 }
             }
         }
@@ -1252,12 +1367,7 @@ impl CollisionWorld {
         let len = d.length();
         SCRATCH.with_borrow_mut(|(tris, walls)| {
             let coarse = self.gather_slide(start, d, [who, assist], tris, walls, cull);
-            // Sub-steps of half the smallest clearance, so no wall is stepped across.
-            let steps = if walls.is_empty() {
-                coarse
-            } else {
-                ((len / (FALL_ASSIST_RADIUS * 0.5)).ceil() as usize).clamp(1, 64)
-            };
+            let steps = slide_steps(coarse, len, walls.is_empty());
             let mut p = start;
             for _ in 0..steps {
                 p.x += d.x / steps as f32;
@@ -1605,6 +1715,17 @@ fn height_on(x: f32, z: f32, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
         return None;
     }
     Some(l1 * a.y + l2 * b.y + l3 * c.y)
+}
+
+/// The sub-steps of a slide of length `len` whose coarse count is `coarse`: with
+/// fall-prevention walls near it, sub-steps of half the smallest clearance instead, so no wall
+/// is stepped across.
+fn slide_steps(coarse: usize, len: f32, no_walls: bool) -> usize {
+    if no_walls {
+        coarse
+    } else {
+        ((len / (FALL_ASSIST_RADIUS * 0.5)).ceil() as usize).clamp(1, 64)
+    }
 }
 
 /// Möller-Trumbore, both faces.
@@ -1964,5 +2085,38 @@ mod tests {
                 .ceiling_for(Vec3::new(0.3, 0.0, 0.2), 1.0, PLAYER)
                 .is_some()
         );
+    }
+
+    /// A fall-assist part whose triangles or vertices lie outside the mesh is an error naming
+    /// it, not a panic or a silent gap; the parts `keep` leaves out add nothing.
+    #[test]
+    fn fall_assist_parts_outside_the_mesh_are_errors() {
+        let mut mesh = CollisionMesh::default();
+        mesh.vertices
+            .extend([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
+        mesh.indices.extend([0, 1, 2, 0, 1, 7]);
+        mesh.materials.extend([0, 0]);
+        let part = |name: &str, first, count| sekiro_formats::hknp::FallAssistPart {
+            name: name.into(),
+            first,
+            count,
+        };
+        let walls = FallAssistCollision {
+            parts: vec![
+                part("good", 0, 1),
+                part("bad vertex", 1, 1),
+                part("past the end", 1, 5),
+            ],
+            mesh,
+        };
+        let add = |keep: &str| {
+            CollisionWorld::from_mesh(&CollisionMesh::default())
+                .add_fall_assist(&walls, |n| n == keep)
+        };
+        assert_eq!(add("good"), Ok(1));
+        assert_eq!(add("none"), Ok(0));
+        for bad in ["bad vertex", "past the end"] {
+            assert!(add(bad).is_err_and(|e| e.contains(bad)), "{bad}");
+        }
     }
 }
