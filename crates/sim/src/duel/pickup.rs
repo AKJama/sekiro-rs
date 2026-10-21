@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use super::Duel;
-use crate::items::{ItemData, MapPickup};
+use crate::items::{GoodsRule, ItemData, MapPickup};
 
 /// The play world's map items, by a stable index (later drops append).
 #[derive(Debug, Default)]
@@ -20,6 +20,7 @@ pub(super) struct Pickups {
     spots: Vec<MapPickup>,
     /// Per pickup: taken already.
     taken: Vec<bool>,
+    /// The goods params: what a pickup carries and stores, and what Rest restocks.
     data: Arc<ItemData>,
     /// Pickups taken so far, so a screen can tell a new one; it also seeds the draw.
     count: u32,
@@ -43,6 +44,19 @@ impl Duel {
             .collect();
         self.pickups.spots = spots;
         self.pickups.data = data;
+    }
+
+    /// The carry and Storage rule of the goods `id`, from the params [`Duel::set_pickups`] gave
+    /// ([`GoodsRule::UNKNOWN`] without them).
+    pub fn goods_rule(&self, id: i32) -> GoodsRule {
+        self.pickups.data.rule(id)
+    }
+
+    /// Rest at an idol or a respawn after death: the gourd refilled and the carried goods
+    /// topped up from the Storage ([`crate::kit::Kit::restock`], #186).
+    pub(super) fn restock_kit(&mut self) {
+        let data = &self.pickups.data;
+        self.kit.restock(|id| data.rule(id));
     }
 
     pub fn pickups(&self) -> &[MapPickup] {
@@ -103,7 +117,7 @@ impl Duel {
         let got = lot.roll(0.0, r);
         if let Some((id, n)) = got {
             // The line names the lot's count even when some is over the carry limit.
-            self.kit.add(id, n, self.pickups.data.max(id));
+            self.kit.add(id, n, self.goods_rule(id));
         }
         if lot.flag > 0 {
             self.kit.taken_flags.insert(lot.flag);

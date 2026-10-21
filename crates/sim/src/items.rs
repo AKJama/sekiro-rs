@@ -9,7 +9,8 @@
 //! gap: event-controlled treasures (their part has an entity id the map's event script switches
 //! on, such as the dialogue rewards and the paired Gourd Seed / Divine Grass), chests
 //! (`InChest`), start-disabled treasures, the first-time item dialog and a pickup animation.
-//! Goods over the carry limit go to the kit's Storage (`Kit::add`).
+//! Goods over the carry limit go to the kit's Storage (`Kit::add`), as each goods' EquipParamGoods
+//! row allows ([`GoodsRule`]), and Rest restocks them from it (`Kit::restock`).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -134,12 +135,62 @@ impl Reach {
     }
 }
 
+/// What an EquipParamGoods row says about carrying a goods and keeping it in the Storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GoodsRule {
+    /// `maxNum`: how many Wolf carries.
+    pub carry: u32,
+    /// `maxRepositoryNum` when `isDeposit` is 1, else 0: how many the Storage keeps (the
+    /// Healing Gourds, the Homeward Idol and most key items have none, so their extra is lost).
+    pub store: u32,
+    /// `autoReplenishType` set: Rest and a respawn top the carried count up from the Storage
+    /// ([`crate::kit::Kit::restock`]). The field is 0 or 2; 2 is on the consumables, materials
+    /// and the Spirit Emblem, on 44 key items (the Memories 5200-5322, the Sakes 9100-9105, the
+    /// carp feeds 9180-9182 and the Treasure Carp Scales 10000) and on 21 isDeposit-0 rows such
+    /// as the Healing Gourd 3000. Only isDeposit-1 rows ever reach the Storage, so those 21
+    /// never restock from it.
+    pub restock: bool,
+}
+
+impl GoodsRule {
+    /// The rule of a goods with no EquipParamGoods row (or no params loaded): carried up to 99
+    /// as before, but neither stored nor restocked, so nothing appears from nowhere.
+    pub const UNKNOWN: Self = Self {
+        carry: 99,
+        store: 0,
+        restock: false,
+    };
+
+    /// A stored, restocking consumable with this carry limit: a 9999 Storage (the
+    /// `maxRepositoryNum` of most consumables), topped up from it on Rest.
+    pub const fn consumable(carry: u32) -> Self {
+        Self {
+            carry,
+            store: 9999,
+            restock: true,
+        }
+    }
+
+    fn from_row(row: &Value) -> Self {
+        let int = |k: &str| row[k].as_i64().unwrap_or(0);
+        Self {
+            carry: row["maxNum"].as_u64().unwrap_or(99) as u32,
+            store: if int("isDeposit") == 1 {
+                int("maxRepositoryNum").max(0) as u32
+            } else {
+                0
+            },
+            restock: int("autoReplenishType") != 0,
+        }
+    }
+}
+
 /// The params the pickups read, once.
 #[derive(Debug, Clone, Default)]
 pub struct ItemData {
     pub lots: BTreeMap<i32, ItemLot>,
-    /// EquipParamGoods `maxNum`: how many Wolf carries.
-    pub max: BTreeMap<i32, u32>,
+    /// Each EquipParamGoods row's carry and Storage rule.
+    pub goods: BTreeMap<i32, GoodsRule>,
     pub buttons: BTreeMap<i32, Reach>,
 }
 
@@ -150,20 +201,28 @@ impl ItemData {
             .iter()
             .map(|(id, r)| (*id, ItemLot::from_row(*id, r)))
             .collect();
-        let max = rows("EquipParamGoods")?
+        let goods = rows("EquipParamGoods")?
             .iter()
-            .map(|(id, r)| (*id, r["maxNum"].as_u64().unwrap_or(99) as u32))
+            .map(|(id, r)| (*id, GoodsRule::from_row(r)))
             .collect();
         let buttons = rows("ActionButtonParam")?
             .iter()
             .filter_map(|(id, r)| Some((*id, Reach::from_button(r)?)))
             .collect();
-        Ok(Self { lots, max, buttons })
+        Ok(Self {
+            lots,
+            goods,
+            buttons,
+        })
     }
 
-    /// How many of `goods` Wolf can carry (99 for an unknown row).
-    pub fn max(&self, goods: i32) -> u32 {
-        self.max.get(&goods).copied().unwrap_or(99)
+    /// The carry and Storage rule of `goods` ([`GoodsRule::UNKNOWN`] for a missing row, or when
+    /// the params failed to load and this is the empty default).
+    pub fn rule(&self, goods: i32) -> GoodsRule {
+        self.goods
+            .get(&goods)
+            .copied()
+            .unwrap_or(GoodsRule::UNKNOWN)
     }
 }
 

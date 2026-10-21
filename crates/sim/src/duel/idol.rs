@@ -6,11 +6,13 @@
 //! The action button at an idol's kneeling spot kneels Wolf there (unless a map item is nearer,
 //! `super::pickup`); while he is at it his own
 //! input is held. Kneeling refills Vitality and makes the idol the checkpoint: the next respawn
-//! puts Wolf at it. Rest refills him again and brings the map's foes back on the next step.
+//! puts Wolf at it. Rest refills him again, refills the Healing Gourd and restocks the carried
+//! goods from the Storage (`Kit::restock`, #186; a respawn after death does too) and brings the
+//! map's foes back on the next step.
 //! After FwLo's RustSekiro `src/idol.rs` (Fireguy32's idols): there kneeling leaves the foes
 //! alone and only Rest revives them.
-//! gap: no Healing Gourd or resurrection yet to refill, and the respawn stands Wolf up at the
-//! idol instead of kneeling there first.
+//! gap: no resurrection yet to refill, and the respawn stands Wolf up at the idol instead of
+//! kneeling there first.
 //!
 //! The first kneel at an idol lights it (#152): its [`LitKey`] goes into the lit set, which a
 //! respawn keeps, and Wolf stays at the idol in [`IdolPhase::Lighting`] while the game's
@@ -192,7 +194,8 @@ impl Duel {
             .filter(|_| self.idol_phase() == Some(IdolPhase::Lighting))
     }
 
-    /// Rests at the idol Wolf prays at: Vitality refilled, and the map's foes back.
+    /// Rests at the idol Wolf prays at: Vitality and the gourd refilled, the carried goods
+    /// restocked from the Storage, and the map's foes back.
     pub fn rest_at_idol(&mut self) {
         if self.praying()
             && self
@@ -202,6 +205,7 @@ impl Duel {
                 .fire_event("W_StatueAttachRest")
         {
             self.rules.fighters[0].reset();
+            self.restock_kit();
             self.idols.revive = self.population.is_some();
         }
     }

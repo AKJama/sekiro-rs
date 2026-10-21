@@ -13,10 +13,11 @@
 //! keeps their texts in the goods banks).
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, ActivateOnPress, Button, observe};
-use sekiro_sim::items::HEALING_GOURD;
+use sekiro_sim::items::{HEALING_GOURD, ItemData};
 use sekiro_sim::kit::Kit;
 
 use super::Sim;
@@ -139,11 +140,10 @@ struct Skill {
     weapon: i32,
 }
 
-/// The goods fields needed to order held goods and show their capacity.
+/// The goods fields needed to order held goods (their carry limit is the sim's, `Book::items`).
 struct Goods {
     kind: i64,
     sort: i64,
-    max: u32,
     /// `isConsume`: using it takes one (not the Homeward Idol).
     consume: bool,
 }
@@ -209,16 +209,11 @@ impl Tables {
                 Goods {
                     kind: row["goodsType"].as_i64().unwrap_or(-1),
                     sort: row["sortId"].as_i64().unwrap_or(0),
-                    max: row["maxNum"].as_u64().unwrap_or(99) as u32,
                     consume: row["isConsume"].as_i64() == Some(1),
                 },
             );
         }
         tables
-    }
-
-    fn max(&self, id: i32) -> u32 {
-        self.goods.get(&id).map_or(99, |g| g.max)
     }
 }
 
@@ -227,6 +222,8 @@ impl Tables {
 struct Book {
     texts: ItemTexts,
     tables: Tables,
+    /// The sim's item params (the same `Arc` its pickups read): the goods' carry limits.
+    items: Arc<ItemData>,
     attack: u8,
     guides: BTreeMap<i32, String>,
     /// Key Items always held: Kusabimaru and the Shinobi Prosthetic (the game keeps
@@ -237,7 +234,7 @@ struct Book {
 }
 
 impl Book {
-    fn load(cache: &Path, attack: u8) -> Self {
+    fn load(cache: &Path, attack: u8, items: Arc<ItemData>) -> Self {
         let texts = ItemTexts::load(cache);
         let tables = Tables::load(cache, &texts);
         let key_items = ["Kusabimaru", "Shinobi Prosthetic"]
@@ -250,6 +247,7 @@ impl Book {
         Self {
             texts,
             tables,
+            items,
             attack,
             guides: game_ui::menu_texts(cache, "NTC_キーガイド"),
             key_items,
@@ -449,12 +447,13 @@ struct Entry {
     usable: Option<i32>,
 }
 
-/// Installs the display over the existing pause state, with the kit owned by the sim.
-pub(super) fn install(app: &mut App, attack: u8) {
+/// Installs the display over the existing pause state, with the kit and its item params
+/// (`items`) owned by the sim.
+pub(super) fn install(app: &mut App, attack: u8, items: Arc<ItemData>) {
     GameFonts::insert(app);
     MenuArt::insert_with(app, &[&ICONS[..], &STORIES[..], &["SB_FE"]].concat());
     game_ui::install_cover(app);
-    app.insert_resource(Book::load(&sekiro_sim::cache::root(), attack))
+    app.insert_resource(Book::load(&sekiro_sim::cache::root(), attack, items))
         .init_resource::<GameMenu>()
         .init_resource::<Clicks>()
         .init_resource::<crate::menu::PauseView>()
@@ -1112,40 +1111,20 @@ fn inventory(cat: usize, kit: &Kit, book: &Book) -> Vec<Entry> {
             ..default()
         }
     };
-    let held = |n: u32, of: u32| ("Number Held".to_string(), format!("{n}/ {of}"));
-    let storage = |id: i32| {
-        let n = match kit.stored(id) {
-            0 => "-".into(),
-            n => n.to_string(),
-        };
-        ("In Storage".to_string(), n)
-    };
-    let stocked = |(id, n): (i32, u32)| {
-        entry(
-            Slot::Goods(id, n),
-            Some(n),
-            vec![held(n, tables.max(id)), storage(id)],
-        )
-    };
+    let stocked =
+        |(id, n): (i32, u32)| entry(Slot::Goods(id, n), Some(n), goods_stats(id, n, kit, book));
     match cat {
-        0 => {
-            let g = kit.count(HEALING_GOURD);
-            let gourd = entry(
-                Slot::Goods(HEALING_GOURD, g),
-                Some(g),
-                vec![
-                    ("Uses".to_string(), format!("{g}/{g}")),
-                    storage(HEALING_GOURD),
-                ],
-            );
-            std::iter::once(gourd)
-                .chain(held_goods(kit, tables, 0).into_iter().map(stocked))
-                .collect()
-        }
+        0 => std::iter::once((HEALING_GOURD, kit.count(HEALING_GOURD)))
+            .chain(held_goods(kit, tables, 0))
+            .map(stocked)
+            .collect(),
         1 => book
             .key_items
             .iter()
-            .map(|id| entry(Slot::Goods(*id, 1), None, vec![held(1, 1), storage(*id)]))
+            .map(|id| {
+                let held = ("Number Held".to_string(), "1/ 1".to_string());
+                entry(Slot::Goods(*id, 1), None, vec![held, in_storage(kit, *id)])
+            })
             .chain(
                 held_goods(kit, tables, 1)
                     .into_iter()
@@ -1162,6 +1141,27 @@ fn inventory(cat: usize, kit: &Kit, book: &Book) -> Vec<Entry> {
             .map(|id| entry(Slot::Weapon(*id), None, vec![]))
             .collect(),
     }
+}
+
+/// A held goods' stat lines on the parchment, in Inventory and Equipment alike: the gourd's
+/// uses of its maximum or the number held of the carry limit, then the number in the Storage.
+fn goods_stats(id: i32, n: u32, kit: &Kit, book: &Book) -> Vec<(String, String)> {
+    let held = if id == HEALING_GOURD {
+        ("Uses".to_string(), format!("{n}/{}", kit.gourd_max))
+    } else {
+        let carry = book.items.rule(id).carry;
+        ("Number Held".to_string(), format!("{n}/ {carry}"))
+    };
+    vec![held, in_storage(kit, id)]
+}
+
+/// The "In Storage" stat line: the Storage's count of `id`, "-" for none.
+fn in_storage(kit: &Kit, id: i32) -> (String, String) {
+    let n = match kit.stored(id) {
+        0 => "-".into(),
+        n => n.to_string(),
+    };
+    ("In Storage".to_string(), n)
 }
 
 /// Skills' entries for a category: the learned skills (Kit::skills; with all_skills, all of
@@ -1194,7 +1194,7 @@ fn learned<'a>(cat: usize, kit: &'a Kit, book: &'a Book) -> impl Iterator<Item =
 }
 
 fn equipment(root: &mut ChildSpawnerCommands, ui: &Ui, menu: &GameMenu, kit: &Kit, book: &Book) {
-    let (texts, tables) = (&book.texts, &book.tables);
+    let tables = &book.tables;
     let all = slots(kit);
     // Section bars.
     for (label, l, t) in [
@@ -1256,17 +1256,23 @@ fn equipment(root: &mut ChildSpawnerCommands, ui: &Ui, menu: &GameMenu, kit: &Ki
     }
     // The item under the cursor on the parchment.
     let slot = &all[menu.index.min(all.len() - 1)];
-    let (name, info) = slot_text(texts, slot);
-    parchment(
-        root,
-        ui,
-        &Entry {
-            name,
-            icon: slot_icon(tables, slot),
-            info,
-            ..default()
+    parchment(root, ui, &slot_entry(slot, kit, book));
+}
+
+/// An Equipment slot's parchment: its name, icon and text, and a quick item's number held and
+/// in the Storage, as Inventory shows them (#186: a Pellet picked up over the limit shows here).
+fn slot_entry(slot: &Slot, kit: &Kit, book: &Book) -> Entry {
+    let (name, info) = slot_text(&book.texts, slot);
+    Entry {
+        name,
+        icon: slot_icon(&book.tables, slot),
+        info,
+        stats: match slot {
+            Slot::Goods(id, n) => goods_stats(*id, *n, kit, book),
+            _ => Vec::new(),
         },
-    );
+        ..default()
+    }
 }
 
 fn build(
@@ -1405,7 +1411,8 @@ mod tests {
             eprintln!("skipping: cache not extracted");
             return None;
         }
-        Some(Book::load(&cache, 1))
+        let items = ItemData::load(&cache).ok()?;
+        Some(Book::load(&cache, 1, Arc::new(items)))
     }
 
     #[test]
@@ -1458,24 +1465,36 @@ mod tests {
         // What pick_up does with the lots of #150: 2 Pellets (3020) with 3 of 3 held, and Scrap
         // Iron (6000) with room to carry.
         for (id, n) in [(3020, 2), (6000, 2)] {
-            kit.add(id, n, book.tables.max(id));
+            kit.add(id, n, book.items.rule(id));
         }
+        // A gourd use drunk: its line keeps the maximum (#184).
+        assert!(kit.use_goods(HEALING_GOURD));
         let row = |cat, name: &str| {
             inventory(cat, &kit, &book)
                 .into_iter()
                 .find(|r| r.name == name)
                 .unwrap_or_else(|| panic!("{name} is not listed"))
         };
+        let stored = ("In Storage".to_string(), "2".to_string());
         let pellets = row(0, "Pellet");
         assert_eq!(pellets.count.as_deref(), Some("3"));
-        assert!(
-            pellets
-                .stats
-                .contains(&("In Storage".to_string(), "2".to_string())),
-            "{:?}",
-            pellets.stats
+        assert_eq!(
+            pellets.stats,
+            [("Number Held".into(), "3/ 3".into()), stored.clone()]
         );
+        let gourd = &row(0, "Healing Gourd").stats[0];
+        assert_eq!(gourd, &("Uses".to_string(), "2/3".to_string()));
         assert_eq!(row(2, "Scrap Iron").count.as_deref(), Some("22"));
+        // #186: the menu opens on Equipment, where the Pellets are a quick item; their parchment
+        // there showed no stat lines, so the Storage's 2 never appeared.
+        let slots = slots(&kit);
+        let quick = slots
+            .iter()
+            .find(|s| matches!(s, Slot::Goods(3020, _)))
+            .unwrap();
+        let equipped = slot_entry(quick, &kit, &book);
+        assert_eq!(equipped.name, "Pellet");
+        assert!(equipped.stats.contains(&stored), "{:?}", equipped.stats);
     }
 
     #[test]
