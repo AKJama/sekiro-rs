@@ -3200,7 +3200,7 @@ impl Duel {
     }
 
     pub fn step(&mut self, input: &InputFrame, dt: f32) -> DuelReport {
-        let held = self.idol_input(input);
+        let held = self.idol_input(input, dt);
         let input = held.as_ref().unwrap_or(input);
         if self.population.is_some() {
             return self.step_population(input, dt);
