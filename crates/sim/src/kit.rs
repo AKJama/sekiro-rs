@@ -5,9 +5,12 @@
 //! gap: only [`Kit::use_goods`] spends (its effect unmodelled; no shops or skills), and death
 //! does not take its half of the Sen and experience (TentativePlayerParam `MoneyLostRate` /
 //! `SkillPointLostRate` 50).
-//! Map items (`crate::items`) go into the goods with [`Kit::add`], and their taken flags too.
+//! Map items (`crate::items`) go into the kit with [`Kit::add`], and their taken flags too;
+//! what is over the carry limit goes to the Storage (`storage`). The gourd's charges, the Spirit
+//! Emblems and the other goods are counted, added and used through one place ([`Kit::held`]).
+//! gap: Rest does not restock the carried goods from the Storage yet.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Experience from skill point n to n + 1 (n = points earned so far, spent or not); past the
 /// table the last step repeats. The exe computes it, not the params: the table is the one the
@@ -58,6 +61,9 @@ pub struct Kit {
     pub quick_items: [i32; 5],
     /// Goods held besides the gourd and emblems: EquipParamGoods id and count.
     pub goods: Vec<(i32, u32)>,
+    /// Goods sent to the Storage for being over the carry limit, Spirit Emblems (goods 1000)
+    /// included: EquipParamGoods id and count.
+    pub storage: BTreeMap<i32, u32>,
     /// Sen carried.
     pub sen: u32,
     /// Skill points available.
@@ -127,6 +133,7 @@ impl Default for Kit {
                 (9720, 1),
                 (9750, 1),
             ],
+            storage: BTreeMap::new(),
             sen: 0,
             skill_points: 0,
             skill_level: 0,
@@ -141,31 +148,30 @@ impl Default for Kit {
 }
 
 impl Kit {
-    /// The gourd's charges, or the number of this goods id held (zero when absent).
+    /// The number of this goods id held: the gourd's charges, the Spirit Emblems or a goods
+    /// entry (zero when absent).
     pub fn count(&self, id: i32) -> u32 {
-        if id == crate::items::HEALING_GOURD {
-            self.gourd_charges
-        } else {
-            self.goods
-                .iter()
-                .find(|(i, _)| *i == id)
-                .map_or(0, |(_, n)| *n)
-        }
+        self.held(id).unwrap_or(0)
     }
 
-    /// Takes `n` of the goods `id` up to `max` carried (EquipParamGoods `maxNum`); Spirit
-    /// Emblems (goods 1000) go onto their count.
-    /// gap: the game sends what is over `max` to the Storage; here it is left behind.
+    /// The number of this goods id in the Storage (zero when absent).
+    pub fn stored(&self, id: i32) -> u32 {
+        self.storage.get(&id).copied().unwrap_or(0)
+    }
+
+    /// Takes `n` of the goods `id` up to `max` carried (EquipParamGoods `maxNum`), the rest to
+    /// the Storage. The gourd (goods 3000) fills its charges and Spirit Emblems (goods 1000)
+    /// their count, as [`Kit::held`] keeps them.
     pub fn add(&mut self, id: i32, n: u32, max: u32) {
-        if id == crate::items::SPIRIT_EMBLEM {
-            self.spirit_emblems += n.min(max.saturating_sub(self.spirit_emblems));
-            return;
-        }
         let added = n.min(max.saturating_sub(self.count(id)));
-        match self.goods.iter_mut().find(|(g, _)| *g == id) {
-            Some((_, held)) => *held += added,
-            None if added > 0 => self.goods.push((id, added)),
-            None => {}
+        if added > 0 {
+            match self.held_mut(id) {
+                Some(held) => *held += added,
+                None => self.goods.push((id, added)),
+            }
+        }
+        if n > added {
+            *self.storage.entry(id).or_default() += n - added;
         }
     }
 
@@ -217,16 +223,27 @@ impl Kit {
         }
     }
 
-    /// Where the count of `id` is kept, as [`Kit::count`] reads it: the gourd's charges or its
-    /// goods entry (None when absent).
+    /// The count of `id` where it is kept: the gourd's charges, the Spirit Emblems or its
+    /// goods entry (None when absent). The one place those three are told apart, with
+    /// [`Kit::held_mut`].
+    fn held(&self, id: i32) -> Option<u32> {
+        match id {
+            crate::items::HEALING_GOURD => Some(self.gourd_charges),
+            crate::items::SPIRIT_EMBLEM => Some(self.spirit_emblems),
+            _ => self.goods.iter().find(|(g, _)| *g == id).map(|(_, n)| *n),
+        }
+    }
+
+    /// [`Kit::held`]'s count, to change it.
     fn held_mut(&mut self, id: i32) -> Option<&mut u32> {
-        if id == crate::items::HEALING_GOURD {
-            Some(&mut self.gourd_charges)
-        } else {
-            self.goods
+        match id {
+            crate::items::HEALING_GOURD => Some(&mut self.gourd_charges),
+            crate::items::SPIRIT_EMBLEM => Some(&mut self.spirit_emblems),
+            _ => self
+                .goods
                 .iter_mut()
                 .find(|(g, _)| *g == id)
-                .map(|(_, n)| n)
+                .map(|(_, n)| n),
         }
     }
 }
@@ -253,9 +270,10 @@ mod tests {
     }
 
     #[test]
-    fn counts_the_gourd_goods_and_missing_items() {
+    fn counts_the_gourd_emblems_goods_and_missing_items() {
         let kit = Kit::default();
-        assert_eq!(kit.count(3000), 3);
+        assert_eq!(kit.count(crate::items::HEALING_GOURD), 3);
+        assert_eq!(kit.count(crate::items::SPIRIT_EMBLEM), 15);
         assert_eq!(kit.count(3020), 3);
         assert_eq!(kit.count(1), 0);
     }
@@ -269,5 +287,35 @@ mod tests {
         assert_eq!(kit.count(3040), 0);
         assert!(!kit.use_goods(3040), "none left");
         assert!(!kit.use_goods(1), "never held");
+    }
+
+    #[test]
+    fn goods_over_the_carry_limit_go_to_the_storage() {
+        let mut kit = Kit::default();
+        // Pellets (3020) are at their limit of 3: both go to the Storage.
+        kit.add(3020, 2, 3);
+        assert_eq!((kit.count(3020), kit.stored(3020)), (3, 2));
+        // Room for one of two Spirit Emblems.
+        kit.spirit_emblems = 14;
+        kit.add(crate::items::SPIRIT_EMBLEM, 2, 15);
+        assert_eq!((kit.spirit_emblems, kit.stored(1000)), (15, 1));
+        // A goods not held is carried, with nothing stored.
+        kit.add(7, 2, 99);
+        assert_eq!((kit.count(7), kit.stored(7)), (2, 0));
+        // Nothing carried at a limit of 0: no empty goods entry.
+        kit.add(8, 1, 0);
+        assert_eq!((kit.count(8), kit.stored(8)), (0, 1));
+        assert!(kit.goods.iter().all(|(g, _)| *g != 8));
+    }
+
+    #[test]
+    fn adding_the_gourd_fills_its_charges_not_a_goods_entry() {
+        let mut kit = Kit::default();
+        let gourd = crate::items::HEALING_GOURD;
+        kit.gourd_charges = 1;
+        // Room for two of three charges at a limit of 3; the third goes to the Storage.
+        kit.add(gourd, 3, 3);
+        assert_eq!((kit.gourd_charges, kit.stored(gourd)), (3, 1));
+        assert!(kit.goods.iter().all(|(g, _)| *g != gourd));
     }
 }

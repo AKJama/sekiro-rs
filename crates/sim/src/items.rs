@@ -8,8 +8,8 @@
 //! goods only, `enableLuck` entries weighted up by the item drop rate.
 //! gap: event-controlled treasures (their part has an entity id the map's event script switches
 //! on, such as the dialogue rewards and the paired Gourd Seed / Divine Grass), chests
-//! (`InChest`), start-disabled treasures, the first-time item dialog, a pickup animation and
-//! the Storage the game sends goods over the carry limit to.
+//! (`InChest`), start-disabled treasures, the first-time item dialog and a pickup animation.
+//! Goods over the carry limit go to the kit's Storage (`Kit::add`).
 
 use std::collections::BTreeMap;
 use std::path::Path;
