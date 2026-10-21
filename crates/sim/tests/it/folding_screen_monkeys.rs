@@ -30,6 +30,7 @@ fn folding_screen_monkeys_hidden_target_is_playable_from_arena_start() {
         let report = duel.step(
             &InputFrame {
                 camera_yaw,
+                camera_pitch: 0.0,
                 move_stick: if tick < 270 { [0.0, 0.6] } else { [0.0, 0.0] },
                 buttons: Buttons {
                     attack: (30..270).contains(&tick) && (tick - 30) % 8 == 0,

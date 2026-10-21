@@ -1334,6 +1334,7 @@ fn gather_input(
     live.frame = InputFrame {
         move_stick: [stick.x, stick.y],
         camera_yaw: orbit.yaw,
+        camera_pitch: orbit.pitch,
         buttons: b,
     };
 }
@@ -1403,7 +1404,6 @@ fn simulate(
     mut sounds: ResMut<crate::audio::SoundLibrary>,
     mut cues: MessageWriter<crate::audio::SoundCue>,
     replay: Option<ResMut<crate::input_replay::InputReplay>>,
-    cameras: Query<&GlobalTransform, With<FollowCamera>>,
 ) {
     // Hold the simulation behind the loading screen until the whole map has loaded, is drawable
     // and frames have settled (play_gate.rs; its stable-frame wait also covers the one-off
@@ -1448,18 +1448,26 @@ fn simulate(
     let route = script_ended
         .then(|| sim.route.steer(Vec2::new(feet[0], feet[2])))
         .flatten();
+    // The step's camera is the orbit's yaw and pitch (the last frame's, as on screen): the hook
+    // search builds its camera from them and the simulation's own body and camera director, so
+    // it does not depend on frame timing.
     let mut frame = match (&sim.script, route) {
         // The route's stick direction is already in world space.
-        (_, Some(f)) => f,
+        (_, Some(f)) => InputFrame {
+            camera_pitch: orbit.pitch,
+            ..f
+        },
         (Some(frames), None) => {
             // Scripted sticks are camera-relative to the current orbit, like a player's.
             let mut f = frames.get(sim.step).copied().unwrap_or_default();
             f.camera_yaw += orbit.yaw;
+            f.camera_pitch += orbit.pitch;
             f
         }
         // The stick is relative to the camera on screen now (the orbit of the last frame).
         (None, None) => InputFrame {
             camera_yaw: orbit.yaw,
+            camera_pitch: orbit.pitch,
             ..live.frame
         },
     };
@@ -1478,15 +1486,6 @@ fn simulate(
     if sim.passive {
         sim.duel.enemy_active = false;
     }
-    sim.duel.player.wire.view_pitch = orbit.pitch;
-    // The hook search looks through the camera on screen (the last frame's, like the stick).
-    sim.duel.player.wire.camera = cameras.single().ok().map(|t| {
-        let t = t.compute_transform();
-        sekiro_sim::wire::WireCamera {
-            position: t.translation,
-            forward: t.forward().into(),
-        }
-    });
     let cinematic_applied = sim.duel.cinematic.as_ref().is_some_and(|c| c.applied);
     let mut report = sim.duel.step(&frame, dt);
     if std::env::var_os("PF_RESPAWN_PROBE").is_some() && sim.step % 60 == 30 {
@@ -2012,13 +2011,10 @@ fn follow_camera(
     let target = orbit.focus;
     let rot = Quat::from_euler(EulerRot::YXZ, orbit.yaw, -orbit.pitch, 0.0);
     let back = rot * Vec3::Z;
-    let mut distance = orbit.distance;
-    // Pull the camera in front of walls between it and Wolf.
-    if let Some(c) = collision
-        && let Some(hit) = c.0.camera_raycast(target, back, orbit.distance + 0.3)
-    {
-        distance = (hit - 0.3).clamp(0.4, orbit.distance);
-    }
+    // Pull the camera in front of walls between it and Wolf (as the hook search's camera is).
+    let distance = collision.map_or(orbit.distance, |c| {
+        sekiro_sim::camera::wall_pulled_distance(&c.0, target, back, orbit.distance)
+    });
     let eye = target + back * distance;
     *tf = Transform::from_translation(eye).looking_at(target, Vec3::Y);
 }

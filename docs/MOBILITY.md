@@ -230,7 +230,8 @@ Its per-frame update 0x140efaf80 copies the `WirePointSearchParam` row into the 
   FwLo's RustSekiro reads them the same way.
 - **Marker and pull.** The search keeps one target; the HUD marker and the wire both use it [V: the state 1 Ready or 2 Distant is stored with the single target].
 
-The runtime follows this in `crates/sim/src/wire.rs`: the camera on screen (or, headless, the default orbit camera 4.5 m behind a focus 1.5 m above Wolf's feet), the back filter, the 0.8 m front plane, the view box, the ranking, Ready before Distant, and the soft lock for a usable hook.
+The runtime follows this in `crates/sim/src/wire.rs`: the back filter (75 degrees, 135 locked on), the distance bands with the extension on both, the 0.8 m front plane, the view box, the ranking with the sight ray cast down the sorted survivors until one is clear, Ready before Distant, and the soft lock for a usable hook.
+Its camera is built inside the simulation, so scripted and replayed runs pick the same hook at any frame rate: the follow camera orbiting a focus `CameraDirector::focus_height` (1.5 m by default) above Wolf's feet at `CameraDirector::distance` (4.5 m by default), turned to the step's `InputFrame::camera_yaw` and `camera_pitch`, and pulled in front of walls as the camera on screen is.
 The hook the HUD marks (`preview`) is the only one the wire can fire at (`candidate`).
 FwLo's `grapple_target` (RustSekiro `src/map.rs`, commit 292655c) has the same camera-plane, nearest-to-centre and soft-lock structure; his box takes the width as the whole width.
 What is not reproduced is listed in [FIDELITY.md](FIDELITY.md#grapple-target-search-issue-178).
@@ -510,8 +511,8 @@ Game unit tests pass; the full game suite retains the permitted pre-existing `ma
 
 ### Step 3. Grappling hook
 
-- Files: `crates/formats/src/edge.rs` (shared with step 2), `crates/extract/src/maps/mod.rs` (write grapple points: object transform applied to the object edge, variation, model, placed name), `crates/sim/src/` new `wire.rs` (target search with `WirePointSearchParam`, recognition angles from `WireVariationParam`, travel), `crates/sim/src/tae.rs` (decode 900 to 905 and 921, hook visibility 715), `crates/sim/src/body.rs` (fall type 2, travel velocity), `crates/sim/src/player.rs` (env 3000, 3003, act 3018, 3023, 3035), `crates/game/src/` (a target marker for `targetMarkerType`, hook model on dummy 144, optional rope line).
-- Reads: object edge files, MSB object parts, `WireVariationParam`, `WirePointSearchParam` row 0 (3 to 15 m act, 25 m find), `ChrPhysicsHomingParam 300000000 + offset`, velocity rows 1100 to 1102, TAE of 202000 to 202710.
+- Files: `crates/formats/src/edge.rs` (shared with step 2), `crates/extract/src/maps/mod.rs` (write grapple points: object transform applied to the object edge, variation, model, placed name), `crates/sim/src/` new `wire.rs` (target search with `WirePointSearchParam` through the camera's view box, section 4.6, and travel), `crates/sim/src/tae.rs` (decode 900 to 905 and 921, hook visibility 715), `crates/sim/src/body.rs` (fall type 2, travel velocity), `crates/sim/src/player.rs` (env 3000, 3003, act 3018, 3023, 3035), `crates/game/src/` (a target marker for `targetMarkerType`, hook model on dummy 144, optional rope line).
+- Reads: object edge files, MSB object parts, `WireVariationParam`, `WirePointSearchParam` row 0 (3 to 15 m act, 25 m find, each plus the variation's `extendWireActionDistance`), `ChrPhysicsHomingParam 300000000 + offset`, velocity rows 1100 to 1102, TAE of 202000 to 202710.
 - Unknown or risky: how the engine picks the search row and wire set (section 4.3); travel kinematics (what TAE 900 and 901 actually drive; the homing parameters need a fit to FwLo-style recordings); the `fallCorrectionGuaranteeArrival` 1 vs 2 difference; the screen-space filter box (needs the camera); target selection and soft lock; landing on rideable vs non-rideable points (variation 20 homes to an offset below and beyond the point); event-disabled objects; `GetWireMoveStartIndex` inputs.
   Ship in two slices: (a) ground shot to a rideable Shachi with a scaled root-motion arrival, (b) air shot and chained hook.
 - Scripted test: `--arena owl --passive --god --spawn 103.5,54.0,243.6,139,0 --script crates/game/scripts/grapple_shachi.txt --shots ... --exit` (castle top, map within 60 m).
@@ -526,11 +527,10 @@ The shared edge exporter writes `grapple.json` using the same mirrored part matr
 The two m11 maps were re-extracted: castle has 172 grapple objects / 224 points; outskirts has 237 objects / 360 points plus four unplaced collision records.
 The raw/MSB census and extracted census have regression tests.
 `o003610_0014` transforms to (97.10218, 52.843166, 250.97510), with collision floor 52.54494, 0.29823 m below.
-The runtime reads WirePointSearchParam row 0's actual near/far/find fields and WireVariationParam angles, extension, marker type and homing id offset.
-Grounded candidates use camera yaw and pitch, a chest ray to the authored point, and a placeholder ranking of smallest angular distance from view centre followed by distance.
-Headless callers default to the body's horizontal view.
-The engine's screen-space filtering/soft-lock boxes and region-driven wire-set changes are not reconstructed.
-Issue #178 later replaced the angle ranking with the exe's camera view box, back filter and soft lock (section 4.6).
+The runtime reads WirePointSearchParam row 0's near/far/find distances and its filtering and soft-lock boxes, and WireVariationParam's extension, marker type and homing id offset.
+Since issue #178 the search is the exe's (section 4.6): the camera's back filter, view box, front plane and soft lock, survivors ranked by the angle from the screen centre, and a chest ray to the authored point.
+The camera is the follow camera rebuilt in the simulation from the step's `InputFrame::camera_yaw` and `camera_pitch` (level when a caller gives no pitch).
+WireVariationParam's recognition angles are not applied (see [FIDELITY.md](FIDELITY.md#grapple-target-search-issue-178)), and region-driven wire-set changes are not reconstructed.
 The LOS ray ignores only the last 0.1 m at the anchor, as a placeholder allowance for its own surface.
 Env 3000 exposes a selected target; env 3003 retains the step-1 cm/s answer.
 Act 3018 tracks the wire action flag, cleared on release; act 3023 pre-evaluates the requested clip's wire interval as a travel-window fallback, and act 3035 marks the wire preference.
@@ -558,7 +558,7 @@ Env 3000 is true before step 30; that press fires W_GroundWireShoot / 202000.
 Step 61 enters GroundWireMoveStart / 202012, and step 90 reaches the anchor exactly: 0.5 s travel and 1.0 s after the press.
 LandWireMove / 202035 follows, and the final body position is (97.10218, 52.56432, 250.97510), 0.27885 m from the anchor, grounded.
 The deterministic roof test also verifies yaw -41 at the original spawn and the obstructed yaw-139 original spawn.
-Turning away on the clear roof can select another nearby point whose recognition angles allow it; it must not be treated as a universal negative case.
+Turning away on the clear roof can select another nearby point that is then in the camera's view; it must not be treated as a universal negative case.
 Logs and reviewed before/mid/after captures are under `target/alt/mobility/grapple-*`.
 The captures show the ornament, airborne movement and arrival on the roof, though the native hook model and rope remain absent.
 Validation passes with `CARGO_TARGET_DIR=target/alt` and four jobs: formatting, workspace/all-target Clippy with `-D warnings`, all requested release sim/formats/extract tests (418 passed, two existing ignored) and the release game build.

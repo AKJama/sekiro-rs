@@ -199,6 +199,29 @@ pub fn chase(rate: f32, dt: f32) -> f32 {
     1.0 - (1.0 - rate).powf(dt * 30.0)
 }
 
+/// How far in front of a wall the follow camera stops (m), and the closest it comes to its
+/// focus. Not traced.
+pub const CAMERA_WALL_MARGIN: f32 = 0.3;
+pub const CAMERA_MIN_DISTANCE: f32 = 0.4;
+
+/// The follow camera's distance from `focus` along `back` (unit, focus to camera), pulled in
+/// front of walls between them: `distance` when nothing is in the way. Shared by the camera on
+/// screen and the hook search's camera (`wire.rs`), so both stand in the same place.
+pub fn wall_pulled_distance(
+    world: &crate::collision::CollisionWorld,
+    focus: Vec3,
+    back: Vec3,
+    distance: f32,
+) -> f32 {
+    world
+        .camera_raycast(focus, back, distance + CAMERA_WALL_MARGIN)
+        .map_or(distance, |hit| {
+            (hit - CAMERA_WALL_MARGIN)
+                .min(distance)
+                .max(CAMERA_MIN_DISTANCE.min(distance))
+        })
+}
+
 /// Matches the facing convention of Character::yaw_to.
 pub fn lock_target_yaw(focus: Vec3, target: Vec3) -> f32 {
     let delta = target - focus;

@@ -137,6 +137,7 @@ fn stepping_forward_away_from_an_unlocked_thrust_does_not_counter() {
         let r = d.step(
             &InputFrame {
                 camera_yaw: std::f32::consts::PI,
+                camera_pitch: 0.0,
                 move_stick: if i == 35 { [0.0, 1.0] } else { [0.0; 2] },
                 buttons: Buttons {
                     dodge: i == 35,

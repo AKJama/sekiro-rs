@@ -37,10 +37,6 @@ fn synthetic(distance: f32) -> Wire {
             id: 1,
             target_marker_type: 0,
             extend_wire_action_distance: 0.0,
-            recognition_angle_up: 90.0,
-            recognition_angle_down: 90.0,
-            recognition_angle_left: 90.0,
-            recognition_angle_right: 90.0,
             chr_physics_homing_id_offset: 0,
         },
     );
@@ -58,7 +54,7 @@ fn ranges_angles_and_ranking() {
         (26.0, false),
     ] {
         let mut wire = synthetic(distance);
-        wire.search(&body, 0.0);
+        wire.search(&body, 0.0, 0.0, false);
         assert_eq!(wire.preview.is_some(), selected);
         assert_eq!(wire.can_fire(), (3.0..=15.0).contains(&distance));
         if let Some(target) = &wire.preview {
@@ -69,12 +65,12 @@ fn ranges_angles_and_ranking() {
         }
     }
     let mut wire = synthetic(10.0);
-    wire.search(&body, std::f32::consts::PI);
+    wire.search(&body, std::f32::consts::PI, 0.0, false);
     assert!(wire.candidate.is_none());
     let mut off_centre = wire.points[0].clone();
     off_centre.position = Some([1.0, 0.0, -5.0]);
     wire.points.insert(0, off_centre);
-    wire.search(&body, 0.0);
+    wire.search(&body, 0.0, 0.0, false);
     assert_eq!(wire.candidate.unwrap().index, 1);
     // A distant, more centred preview must not steal a usable hook (including wire chains).
     let mut wire = synthetic(10.0);
@@ -82,7 +78,7 @@ fn ranges_angles_and_ranking() {
     let mut distant = wire.points[0].clone();
     distant.position = Some([0.0, 8.0, -20.0]);
     wire.points.push(distant);
-    wire.search(&body, 0.0);
+    wire.search(&body, 0.0, 0.0, false);
     assert_eq!(wire.preview.as_ref().unwrap().index, 0);
     assert_eq!(
         wire.candidate.as_ref().unwrap().state,
@@ -104,9 +100,32 @@ fn marker_distance_boundaries_and_variation_extension() {
     ] {
         assert_eq!(search.marker_state(distance, 0.0), state);
     }
+    // The extension reaches both bands: usable to 15 plus it, shown to 25 plus it.
     assert_eq!(search.marker_state(20.0, 5.0), Ready);
-    assert_eq!(search.marker_state(22.5, 5.0), Distant { fill: 0.5 });
+    assert_eq!(search.marker_state(25.0, 5.0), Distant { fill: 0.5 });
+    assert_eq!(search.marker_state(30.0, 5.0), Distant { fill: 0.0 });
+    assert_eq!(search.marker_state(30.01, 5.0), Hidden);
     assert_eq!(search.marker_state(25.0, 10.0), Ready);
+    // The kite rows (WireVariationParam 40, 41 and 70201 extend by 30 m): usable to 45 m.
+    assert_eq!(search.marker_state(45.0, 30.0), Ready);
+    assert_eq!(search.marker_state(50.0, 30.0), Distant { fill: 0.5 });
+    assert_eq!(search.marker_state(55.01, 30.0), Hidden);
+    // Row 70200 extends by 15 m.
+    assert_eq!(search.marker_state(30.0, 15.0), Ready);
+    assert_eq!(search.marker_state(35.0, 15.0), Distant { fill: 0.5 });
+}
+/// A kite hook 40 m ahead (extension 30) is marked usable through the search, not only by
+/// `marker_state`.
+#[test]
+fn kite_hook_is_usable_at_forty_metres() {
+    let mut wire = synthetic(40.0);
+    wire.points[0].position = Some([0.0, 8.0, -40.0]);
+    wire.variations
+        .get_mut(&1)
+        .unwrap()
+        .extend_wire_action_distance = 30.0;
+    wire.search(&Body::default(), 0.0, 0.0, false);
+    assert!(wire.can_fire());
 }
 #[test]
 fn extracted_counts_transform_and_collision() {
@@ -217,7 +236,7 @@ fn line_of_sight_blocks_wall() {
         indices: vec![0, 1, 2],
         ..CollisionMesh::default()
     }));
-    wire.search(&Body::default(), 0.0);
+    wire.search(&Body::default(), 0.0, 0.0, false);
     assert!(wire.candidate.is_none());
 }
 
@@ -226,7 +245,7 @@ fn obstruction_during_travel_releases_wire() {
     use sekiro_formats::hknp::CollisionMesh;
     let mut wire = synthetic(10.0);
     let mut body = Body::default();
-    wire.search(&body, 0.0);
+    wire.search(&body, 0.0, 0.0, false);
     assert!(wire.step(
         &mut body,
         Some("a000_202000"),
@@ -261,7 +280,7 @@ fn nonrideable_offset_and_release() {
     variation.chr_physics_homing_id_offset = 20;
     wire.offsets.insert(300000020, Vec3::new(0.0, -2.5, 7.5));
     let mut body = Body::default();
-    wire.search(&body, 0.0);
+    wire.search(&body, 0.0, 0.0, false);
     assert_eq!(
         wire.candidate.as_ref().unwrap().arrival,
         Vec3::new(0.0, -2.5, -17.5)
@@ -308,7 +327,7 @@ fn castle_shachi_clear_approach_and_blocked_original_spawn() {
         yaw: 139f32.to_radians(),
         ..Body::default()
     };
-    wire.search(&body, body.yaw);
+    wire.search(&body, body.yaw, 0.0, false);
     assert!(
         wire.candidate.is_none(),
         "original balcony spawn must not grapple through collision"
@@ -321,7 +340,6 @@ fn castle_shachi_clear_approach_and_blocked_original_spawn() {
         duel.enemy_active = false;
         duel.player.ground = Box::new(CollisionWorld::load(&dir.join("collision.bin")).unwrap());
         duel.player.wire = Wire::load(&cache(), &dir).unwrap();
-        duel.player.wire.view_pitch = 0.25;
         duel.player.body = Body {
             position,
             yaw: yaw.to_radians(),
@@ -337,6 +355,7 @@ fn castle_shachi_clear_approach_and_blocked_original_spawn() {
         let anchor = Vec3::new(97.10218, 52.843166, 250.9751);
         for (tick, mut frame) in script.into_iter().enumerate() {
             frame.camera_yaw = yaw.to_radians();
+            frame.camera_pitch = 0.25;
             let report = duel.step(&frame, 1.0 / 60.0);
             shot |= report
                 .player
@@ -368,7 +387,7 @@ fn solved_arc_arrives_ten_metres_away_five_up_at_point_eight_three() {
     let mut wire = synthetic(10.0);
     wire.points[0].position = Some([0.0, 5.0, -10.0]);
     let mut body = Body::default();
-    wire.search(&body, 0.0);
+    wire.search(&body, 0.0, 0.0, false);
     wire.step(
         &mut body,
         Some("a000_202000"),
@@ -512,7 +531,6 @@ fn castle_roof_chain_route() {
     };
     duel.player.ground = Box::new(CollisionWorld::load(&dir.join("collision.bin")).unwrap());
     duel.player.wire = Wire::load(&cache(), &dir).unwrap();
-    duel.player.wire.view_pitch = 0.25;
     duel.player.body = Body {
         position: [104.03038, 53.234768, 254.9751],
         yaw: 60f32.to_radians(),
@@ -525,6 +543,7 @@ fn castle_roof_chain_route() {
     let mut chain = false;
     for (tick, mut frame) in script.into_iter().enumerate() {
         frame.camera_yaw = 60f32.to_radians();
+        frame.camera_pitch = 0.25;
         let r = duel.step(&frame, 1.0 / 60.0);
         chain |= r
             .player
@@ -716,39 +735,31 @@ fn hook(position: [f32; 3], variation: u32) -> Point {
 
 /// Issue #178: the game's search only looks through the camera (`WireActionTargetMng`), so a
 /// hook behind the camera or off the side of the screen is never marked, and so never pulled
-/// to, whatever its WireVariationParam recognition angles allow.
+/// to (the old search let WireVariationParam recognition angles of 180 degrees through).
 #[test]
 fn hooks_behind_the_camera_or_off_screen_are_never_marked() {
-    // Wolf's feet at the origin; the headless camera looks down -Z from behind him.
+    // Wolf's feet at the origin; the camera looks down -Z from behind him.
     let body = Body::default();
     let mut wire = synthetic(12.0);
-    // Most WireVariationParam rows allow 180 degrees left and right (row 3 is one).
-    let mut wide = wire.variations[&1].clone();
-    (
-        wide.id,
-        wide.recognition_angle_left,
-        wide.recognition_angle_right,
-    ) = (3, 180.0, 180.0);
-    wire.variations.insert(3, wide);
-    let behind = hook([0.0, 2.0, 10.0], 3);
+    let behind = hook([0.0, 2.0, 10.0], 1);
     // In front of the camera but 84 degrees to Wolf's right: off the screen.
     let side = hook([10.0, 0.0, -1.0], 1);
     for (name, point) in [("behind the camera", &behind), ("off screen", &side)] {
         wire.points = vec![point.clone()];
         wire.preview = None;
-        wire.search(&body, 0.0);
+        wire.search(&body, 0.0, 0.0, false);
         assert!(wire.preview.is_none(), "a hook {name} must not be marked");
         assert!(!wire.can_fire(), "a hook {name} must not be pulled to");
     }
     // With an on-screen hook too, it is the one marked and the one pulled to.
     wire.points = vec![behind, side, hook([0.0, 4.0, -12.0], 1)];
     wire.preview = None;
-    wire.search(&body, 0.0);
+    wire.search(&body, 0.0, 0.0, false);
     assert_eq!(wire.preview.as_ref().map(|t| t.index), Some(2));
     assert_eq!(wire.candidate.as_ref().map(|t| t.index), Some(2));
     // Turning the camera round marks the hook that was behind it.
     wire.preview = None;
-    wire.search(&body, std::f32::consts::PI);
+    wire.search(&body, std::f32::consts::PI, 0.0, false);
     assert_eq!(wire.preview.as_ref().map(|t| t.index), Some(0));
     assert_eq!(wire.candidate.as_ref().map(|t| t.index), Some(0));
 }
@@ -760,17 +771,17 @@ fn marked_hook_keeps_its_soft_lock_inside_the_narrower_box() {
     let body = Body::default();
     let mut wire = synthetic(12.0);
     wire.points = vec![hook([2.5, 2.0, -12.0], 1)];
-    wire.search(&body, 0.0);
+    wire.search(&body, 0.0, 0.0, false);
     assert_eq!(wire.candidate.as_ref().map(|t| t.index), Some(0));
     // A hook straight ahead appears; the marked one is 6 m right, 16.5 m from the camera.
     wire.points[0].position = Some([6.0, 2.0, -12.0]);
     wire.points.push(hook([0.0, 2.0, -12.0], 1));
-    wire.search(&body, 0.0);
+    wire.search(&body, 0.0, 0.0, false);
     assert_eq!(wire.preview.as_ref().map(|t| t.index), Some(0));
     assert_eq!(wire.candidate.as_ref().map(|t| t.index), Some(0));
     // 9 m right leaves the soft-lock box (still inside the view box): the centred hook wins.
     wire.points[0].position = Some([9.0, 2.0, -12.0]);
-    wire.search(&body, 0.0);
+    wire.search(&body, 0.0, 0.0, false);
     assert_eq!(wire.preview.as_ref().map(|t| t.index), Some(1));
     assert_eq!(wire.candidate.as_ref().map(|t| t.index), Some(1));
 }
@@ -786,15 +797,119 @@ fn outskirts_pine_is_marked_only_when_the_camera_faces_it() {
         return;
     }
     let mut wire = Wire::load(&cache(), &dir).unwrap();
-    wire.view_pitch = 0.25;
     let body = Body {
         position: [-140.0, -50.73, -132.0],
         ..Body::default()
     };
-    wire.search(&body, (-90f32).to_radians());
+    wire.search(&body, (-90f32).to_radians(), 0.25, false);
     assert!(wire.preview.is_none() && !wire.can_fire());
-    wire.search(&body, 180f32.to_radians());
+    wire.search(&body, 180f32.to_radians(), 0.25, false);
     let marked = wire.preview.as_ref().expect("the pine ahead is marked");
     assert_eq!(wire.points[marked.index].source_part, "o002500_0005");
     assert_eq!(wire.candidate.as_ref().map(|t| t.index), Some(marked.index));
+}
+
+/// Whether `point` passes the search's player back filter: horizontally, from Wolf at the
+/// origin, within `limit` degrees of the camera's look direction (yaw 0 looks down -Z).
+fn passes_back_filter(point: Vec3, limit: f32) -> bool {
+    Vec3::new(point.x, 0.0, point.z)
+        .normalize()
+        .dot(Vec3::NEG_Z)
+        .acos()
+        .to_degrees()
+        < limit
+}
+
+/// The view box's sides: a usable, unblocked hook the back filter lets through, but 46.8
+/// degrees right of the camera's axis (the box's 14.3 m at 15.8 m is 42.1), is not marked.
+#[test]
+fn hook_past_the_view_box_width_is_not_marked() {
+    let point = Vec3::new(8.0, 1.5, -3.0);
+    assert!(passes_back_filter(point, 75.0));
+    let mut wire = synthetic(12.0);
+    wire.points = vec![hook(point.to_array(), 1)];
+    wire.search(&Body::default(), 0.0, 0.0, false);
+    assert!(wire.preview.is_none() && !wire.can_fire());
+    // Straight ahead at the same distance from the camera it is marked.
+    wire.points = vec![hook([0.0, 1.5, -3.0], 1)];
+    wire.search(&Body::default(), 0.0, 0.0, false);
+    assert!(wire.can_fire());
+}
+
+/// The view box's top: a hook straight ahead of Wolf but 39 degrees above the camera's axis
+/// (the box's 10.2 m at 15.8 m is 32.8) is not marked.
+#[test]
+fn hook_above_the_view_box_is_not_marked() {
+    let point = Vec3::new(0.0, 10.0, -6.0);
+    assert!(passes_back_filter(point, 75.0));
+    let mut wire = synthetic(12.0);
+    wire.points = vec![hook(point.to_array(), 1)];
+    wire.search(&Body::default(), 0.0, 0.0, false);
+    assert!(wire.preview.is_none() && !wire.can_fire());
+    // Pitching the camera up to it marks it.
+    wire.search(&Body::default(), 0.0, -0.4, false);
+    assert!(wire.can_fire());
+}
+
+/// The check ray's start: a hook inside the view box's angles and just ahead of Wolf, but only
+/// 0.7 m in front of a camera looking almost straight down at him, is not marked.
+#[test]
+fn hook_before_the_check_ray_start_is_not_marked() {
+    let body = Body::default();
+    let mut wire = synthetic(12.0);
+    let pitch = 85f32.to_radians();
+    let camera = wire.search_camera(&body, 0.0, pitch);
+    let up = camera.up().unwrap();
+    // 0.7 m along the camera's axis, then up the screen until 5 cm ahead of Wolf's feet.
+    let on_axis = camera.position + camera.forward * 0.7;
+    let rise = (-0.05 - on_axis.z) / up.z;
+    let point = on_axis + up * rise;
+    assert!((point - camera.position).dot(camera.forward) < sekiro_sim::wire::CHECK_RAY_START);
+    assert!(rise / 0.7 < 10.2 / 15.8, "inside the box's angles");
+    assert!(passes_back_filter(point, 75.0));
+    assert!(point.length() > 3.0, "usable");
+    wire.points = vec![hook(point.to_array(), 1)];
+    wire.search(&body, 0.0, pitch, false);
+    assert!(wire.preview.is_none() && !wire.can_fire());
+}
+
+/// Locked on, the back filter lets hooks up to 135 degrees from the camera's look direction
+/// through (field +0x14c, 45): a hook 127 degrees round, still on screen, is marked only then.
+#[test]
+fn locked_on_back_filter_reaches_one_hundred_and_thirty_five_degrees() {
+    let point = Vec3::new(2.4, 3.0, 1.8);
+    assert!(!passes_back_filter(point, 75.0) && passes_back_filter(point, 135.0));
+    let mut wire = synthetic(12.0);
+    wire.points = vec![hook(point.to_array(), 1)];
+    wire.search(&Body::default(), 0.0, 0.0, false);
+    assert!(wire.preview.is_none());
+    wire.search(&Body::default(), 0.0, 0.0, true);
+    assert!(wire.can_fire());
+}
+
+/// The search's camera is built from the step's yaw and pitch and the simulation's body and
+/// rig, pulled in front of a wall behind Wolf as the camera on screen is.
+#[test]
+fn search_camera_follows_the_rig_and_is_pulled_in_by_walls() {
+    use sekiro_formats::hknp::CollisionMesh;
+    let body = Body::default();
+    let mut wire = synthetic(12.0);
+    let camera = wire.search_camera(&body, 0.0, 0.0);
+    assert!(camera.position.distance(Vec3::new(0.0, 1.5, 4.5)) < 1e-5);
+    wire.rig.distance = 3.0;
+    wire.rig.focus_height = 1.2;
+    let camera = wire.search_camera(&body, 0.0, 0.0);
+    assert!(camera.position.distance(Vec3::new(0.0, 1.2, 3.0)) < 1e-5);
+    // A wall 2 m behind Wolf: the camera stops 0.3 m in front of it.
+    wire.collision = Some(CollisionWorld::from_mesh(&CollisionMesh {
+        vertices: vec![[-50.0, -50.0, 2.0], [50.0, -50.0, 2.0], [0.0, 50.0, 2.0]],
+        indices: vec![0, 1, 2],
+        ..CollisionMesh::default()
+    }));
+    let camera = wire.search_camera(&body, 0.0, 0.0);
+    assert!(
+        (camera.position.z - 1.7).abs() < 1e-4,
+        "{:?}",
+        camera.position
+    );
 }

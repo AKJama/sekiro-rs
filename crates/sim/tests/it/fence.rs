@@ -56,6 +56,7 @@ fn running_jumps_at_the_gate_fence_stay_on_the_gate_side() {
             let input = InputFrame {
                 move_stick: [0.0, 1.0],
                 camera_yaw: yaw.to_radians(),
+                camera_pitch: 0.0,
                 buttons: Buttons {
                     dodge: i > 5,
                     jump: (40..43).contains(&i),

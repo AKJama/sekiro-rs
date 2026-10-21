@@ -1,6 +1,7 @@
 //! Scripted input: a tiny text format for repeatable play sessions, and a built-in demo.
 //!
-//! One line per segment: `<frames> <stick_x> <stick_y> <buttons> [camera_yaw_degrees]`.
+//! One line per segment: `<frames> <stick_x> <stick_y> <buttons> [camera_yaw_degrees
+//! [camera_pitch_degrees]]`, the pitch down positive.
 //! Buttons are a comma list of `attack, guard, jump, dodge, crouch, grapple, prosthetic, item,
 //! combat_art, lock_on`, or `-` for none. `#` starts a comment.
 
@@ -82,14 +83,18 @@ pub fn parse(text: &str) -> Result<Vec<InputFrame>, String> {
         let frames = parts[0]
             .parse::<usize>()
             .map_err(|e| format!("line {}: {e}", n + 1))?;
-        let frame = InputFrame {
-            move_stick: [num(parts[1])?, num(parts[2])?],
-            camera_yaw: parts
-                .get(4)
+        let degrees = |i: usize| -> Result<f32, String> {
+            Ok(parts
+                .get(i)
                 .map(|s| num(s))
                 .transpose()?
                 .unwrap_or(0.0)
-                .to_radians(),
+                .to_radians())
+        };
+        let frame = InputFrame {
+            move_stick: [num(parts[1])?, num(parts[2])?],
+            camera_yaw: degrees(4)?,
+            camera_pitch: degrees(5)?,
             buttons: parse_buttons(parts[3]).map_err(|e| format!("line {}: {e}", n + 1))?,
         };
         out.extend(std::iter::repeat_n(frame, frames));
@@ -105,5 +110,11 @@ mod tests {
         assert!(frames.len() > 600);
         assert!(frames[30].move_stick[1] == 1.0);
         assert!(super::parse("3 0 0 kick").is_err());
+        let aimed = super::parse("1 0 0 - 90 30").unwrap()[0];
+        assert!((aimed.camera_yaw - 90f32.to_radians()).abs() < 1e-6);
+        assert!((aimed.camera_pitch - 30f32.to_radians()).abs() < 1e-6);
+        let aimed = super::parse("1 0 0 - 90 30").unwrap()[0];
+        assert!((aimed.camera_yaw - 90f32.to_radians()).abs() < 1e-6);
+        assert!((aimed.camera_pitch - 30f32.to_radians()).abs() < 1e-6);
     }
 }
