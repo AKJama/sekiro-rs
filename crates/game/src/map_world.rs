@@ -447,6 +447,22 @@ pub(crate) fn collision_world(
         // 20005560 are on only while Wolf has SpEffect 4100 (stands on a rideable object),
         // whatever the story says: they hold only riders (#119).
         let story = story.maps.get(block);
+        // The fall-prevention assist walls of the block's collision parts, those of parts the
+        // story switches off left out with them (#149).
+        let walls = world
+            .add_map_fall_assist(&cache.join("maps").join(block), |n| {
+                story.is_none_or(|s| !s.switched_off(n))
+            })
+            .map_err(anyhow::Error::msg)?;
+        // Only a block whose `f` binder was unpacked but never exported is missing walls; one
+        // without the binder has none, nor do parts the story has switched off.
+        let binder = cache.join(format!("raw/map/{block}/f{}.hkxbhd", &block[1..]));
+        if walls.is_none() && binder.is_file() {
+            eprintln!(
+                "collision: {block}: no fall-assist walls (re-export with `sekiro-extract map \
+                 {block} --fall-assist`)"
+            );
+        }
         let groups =
             sekiro_sim::hit_filter::load_ride_wall_groups(cache, block).unwrap_or_else(|e| {
                 eprintln!("collision: {block}: no ride wall groups: {e}");

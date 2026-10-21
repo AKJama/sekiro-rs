@@ -50,20 +50,39 @@ First traced for the grapple pine in draft PR #33 (#17); the map-wall part is ap
 - The walls are map parts with hit filter 28 (`h900400`, `h900410` in the Outskirts; every exported map has some) and objects of collisionType 6 and 11.
   In m11_00 `h900400` is 1400 triangles, bands about 1 m tall from the floor at the edge, spread over the Outskirts' cliff tops and ledges; 743 of its wall triangles have a drop of more than 2 m on their outer side.
   There are none within 130 m of start 0.
+- Most of the walls are in a third hit binder per map block, `map/<block>/f<tail>.hkxbhd` and `.hkxbdt` beside the `h` (hi) and `l` (lo) binders (#149).
+  The exe names the set `%cREMOUNT %chiHKXBHD %cloHKXBHD %cfaHKXBHD %cWALLBHD` and waits on `m_fallAssistantHitFileCap->IsReady()`; the `.wall` files (`WALLBHD`) are another, undecoded format.
+  Each file `f<tail>_<model>.hkx.dcx` (Kraken, so Oodle is needed) holds one `hknpExternMeshShape` whose `hknpDefaultExternMeshShapeGeometry` is a plain `hkGeometry` (vertices and triangles), named after the collision model of an MSB collision part and placed with that part's transform.
+  m11_00 has 156 such files: 63,160 triangles over 141 placed collision parts, bands about 0.9 m tall at roof, wall and cliff edges, including the roofs and cliffs around start 0.
+  The files carry no group: in m11_00 (1254 bodies) and m11_01 (1511) every body's `collisionFilterInfo`, `materialId` and `userData` are 0 and every triangle's material is -1, so the exe gives the walls their group when it loads them.
+  It does so as group 93, not 92: a `lo` collision instance (flag bit 1 at `+0x12`, the one whose compendium is `l<tail>.compendium`) also loads a second file through `FUN_1409bb9a0` (`FUN_1409bbcf0`), which the exe research reads as the `f` binder's, and `FUN_1409bc320` gives that second body the filter 0x5d (93), while the instance's own body gets its part's group (`FUN_1409b58b0`), 92 for the filter-28 parts.
+  In the matrix 93 meets 95, 96, 113 and 114 but not plain movement, so the `f` walls hold only bodies whose assist cast is in group 95 or 96.
+  Yet walking, which sends only the strong request, is held at the `f` bands in the game (the user confirmed it, including the roof and cliffs by start 0 where there is no filter-28 part), so the strong request's cast must reach group 93 too, that is group 96 (or 95), and the mapping below (strong to 92, weak to 93) is the part that is wrong, not the walls.
+  The act's handler and the filter `FUN_140bc68d0` casts with are still not traced, so the simulation keeps the behaviour the user verified: the `f` walls are `FALL_ASSIST_MOVE` walls, held by the strong request, as filter 28 is.
+  Open question (#149): which cast group each of `act(3016, 0)` and `act(3016, 1)` uses; once traced, the `f` walls become group 93 and the requests the casts that meet it, which also settles whether enemies (weak only) are held by the `f` bands.
+- The bands cross every edge the map collision ends at, rideable objects included.
+  `h023300`'s band runs along the root of the grapple pine over the start ravine (`o002500_0005`, at about (-135.7, -42.5, -118.1)), facing the platform, and nothing in the data lets a walk through it: SpEffect 4100 (riding) has no behaviour ref, and neither HitMaterialSpecialSettingParam nor HitMtrlParam has a fall-assist field.
+  So walking from the platform onto the trunk is held at the root, as in the game; a sprint or a jump goes over, and walking from the trunk onto the platform passes the one-sided band.
+  Likewise the start 3 terrace's 11 m drop to the moat holds a walk, so the castle gate route sprints off it.
 - The player script asks for the assist every frame: `_UpdateFallProtection` (`c0000_transition.lua`, called from the `Update` in `c0000.lua`) sends `act(3016, 0)` in states whose `ENABLE_FALL_PROTECT_WALL_STRONG` flag is set and `act(3016, 1)` where `ENABLE_FALL_PROTECT_WALL_WEAK` is set (`g_paramHkbState` in `c0000_cmsg.lua`).
   Of 1310 states, 770 set both, 90 only the strong one (walk and run loops, idle, item and sub-weapon moves, crouch moves) and 450 neither: every jump, fall, wire, hang, cover, swim, dive and event state, and `SPRINT_LOOP`.
   It skips the request in cover, hang, wire fall, cling, swim, dive and aged-fall styles, in the wire-ready states, and while SpEffect behaviour ref 6 (`TAE_DISABLE_FALL_PROTECT`) is on; refs 11 and 12 switch off the strong and weak request.
 - `FUN_140bc6800` reads the two request bits: bit 0 alone casts with group 94, bit 1 alone with 95, both with 96.
-  So `act(3016, 0)` is taken as group 92 and `act(3016, 1)` as group 93; the act's own handler is not traced.
+  So `act(3016, 0)` is taken as group 92 and `act(3016, 1)` as group 93; the act's own handler is not traced, and the `f` walls' group 93 (above) says this mapping is incomplete.
 - `FUN_140bc68d0` casts the body along its move with that filter and cuts the move so the body stays `FallAssistMinRadius` (0.16 m, physics module `+0xaec`, constructor `FUN_140bbb010`) from a wall it heads into; a wall the body is in front of is skipped, so the walls keep a body in and let one outside walk in.
 - NPCs share `FallPreventionAssist` (`c9997.lua`), which sends only `act(3016, 1)`: enemies are held by group 93 walls (collisionType 11 objects) and not by the map's group 92 cliff walls.
-- Sprinting: `SPRINT_LOOP` sends no request, while the step and sprint-start states before it do, so a sprint into a wall is held until the loop starts (0.62 s in `edge_hold.rs`; the user saw half a second to 1.5 s in the real game, #86, #32).
+- Sprinting: `SPRINT_LOOP` sends no request, while the step and sprint-start states before it do, so a sprint into a wall is held until the loop starts (0.3 to 1 s at the cliff east of start 2 and the roof and cliff by start 0 in `edge_hold.rs`; the user saw half a second to 1.5 s in the real game, #86, #32).
 
 What the simulation does:
 
 - `hit_filter::mask` gives filter 28 the `FALL_ASSIST_MOVE` bit and `object_mask` gives types 6 and 11 `FALL_ASSIST_MOVE` and `FALL_ASSIST_ACTION`; they join the world as helpers no capsule, ray or floor query sees.
+- `sekiro-extract map <block> --fall-assist` (and every full `map` export) writes the `f` binder's walls, placed, to `maps/<block>/fall_assist.bin` (`hknp::FallAssistCollision`, one triangle range per collision part).
+  `CollisionWorld::load_map` and the game's `collision_world` add them as `FALL_ASSIST_MOVE` helpers, skipping parts the story switches off; arenas do not load them yet.
+  A block without the binder has no walls, so the export removes an old `fall_assist.bin`; a failed write is a warning that leaves the rest of the export and the last good file whole.
+  The game asks for a re-export only for a block whose binder is in `cache/raw` but whose `fall_assist.bin` is missing.
 - The behaviour adapter records `act(3016, arg)` per tick (`PlayerEnv::fall_assist`, cleared before each script update) for Wolf and NPCs alike, and `BodyInput::fall_assist` hands the bits to `Body::step`, which moves through `Ground::slide_assisted`.
 - `CollisionWorld::slide_for` then also keeps the feet `FALL_ASSIST_RADIUS` (0.16 m) on the inner side of those walls (`hold_inside`), in sub-steps of 0.08 m so none is stepped across.
+  A slide gathers only the walls within `FALL_ASSIST_RADIUS` of the feet's height and in the slide's reach: m11_00's bands fill a quarter of the occupied cells, up to 248 a cell and mostly at other storeys, and gathering them all (up to 276 a slide) made every slide near them take the fine sub-steps and test every wall.
 - The walls often stand up to 0.2 m past the floor's end, where the game's 0.4 m capsule still rests on the lip.
   A grounded body now stays on a floor its capsule rim reaches (`Body::rim_support`: eight points 0.35 m out, `RADIUS * sin 60`, the walkable slope limit), so it is held rather than dropped short of the wall.
 

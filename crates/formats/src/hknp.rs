@@ -78,10 +78,23 @@ pub struct DecodeStats {
     pub convex_skipped: usize,
     /// Triangles whose shape key had no material entry.
     pub unmatched_material: usize,
-    /// Bodies [`decode_bodies`] skipped for their shape type.
+    /// Bodies [`decode_bodies`] or [`decode_extern`] skipped for their shape type.
     pub other_shapes: usize,
     /// Dynamic bodies [`decode_bodies`] left out.
     pub dynamic: usize,
+}
+
+impl std::ops::AddAssign<&DecodeStats> for DecodeStats {
+    fn add_assign(&mut self, other: &DecodeStats) {
+        self.bodies += other.bodies;
+        self.sections += other.sections;
+        self.primitives += other.primitives;
+        self.quads += other.quads;
+        self.convex_skipped += other.convex_skipped;
+        self.unmatched_material += other.unmatched_material;
+        self.other_shapes += other.other_shapes;
+        self.dynamic += other.dynamic;
+    }
 }
 
 /// The collision of a map's placed objects (`cache/maps/<id>/object_collision.bin`, postcard):
@@ -108,6 +121,34 @@ pub struct ObjectCollisionPart {
 }
 
 impl ObjectCollision {
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        postcard::to_stdvec(self).map_err(|e| crate::Error::Format(e.to_string()))
+    }
+
+    pub fn from_bytes(data: &[u8]) -> Result<Self> {
+        postcard::from_bytes(data).map_err(|e| crate::Error::Format(e.to_string()))
+    }
+}
+
+/// A map's fall-prevention assist walls (`cache/maps/<id>/fall_assist.bin`, postcard): the
+/// `f<map>.hkxbhd` binder's mesh for each MSB collision part, placed like `collision.bin`, in
+/// Bevy space. Only the assist's sphere casts meet them (docs/OBJECT-COLLISION.md).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct FallAssistCollision {
+    pub parts: Vec<FallAssistPart>,
+    pub mesh: CollisionMesh,
+}
+
+/// One collision part's walls in [`FallAssistCollision::mesh`]: `count` triangles from `first`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct FallAssistPart {
+    /// MSB collision part name, the key of its row in `layout.json`'s `collisions`.
+    pub name: String,
+    pub first: u32,
+    pub count: u32,
+}
+
+impl FallAssistCollision {
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         postcard::to_stdvec(self).map_err(|e| crate::Error::Format(e.to_string()))
     }
@@ -175,6 +216,64 @@ pub fn decode_bodies(
         stats.bodies += 1;
     }
     Ok((mesh, stats))
+}
+
+/// Decodes every extern-mesh body (`hknpExternMeshShape` over an `hkGeometry`) in a tagfile as
+/// one mesh. The map's fall-prevention assist binder (`f<map>.hkxbhd`, docs/OBJECT-COLLISION.md)
+/// holds its walls this way, one file per collision model. Bodies of other shapes are skipped
+/// and counted. The walls carry no hit filter group: in m11_00's and m11_01's binders every
+/// body's `collisionFilterInfo`, `materialId` and `userData` are 0 and every triangle's
+/// material is -1 (kept as `u32::MAX`), so the exe gives them their group when it loads them
+/// (93, docs/OBJECT-COLLISION.md).
+pub fn decode_extern(
+    data: &[u8],
+    compendium: Option<&Compendium>,
+) -> Result<(CollisionMesh, DecodeStats)> {
+    let file = TagFile::parse(data, compendium)?;
+    let mut mesh = CollisionMesh::default();
+    let mut stats = DecodeStats::default();
+    for (body, shape) in shaped_bodies(&file)? {
+        if !shape.is_a("hknpExternMeshShape") {
+            stats.other_shapes += 1;
+            continue;
+        }
+        let Some(geometry) = shape.get("geometry")?.deref()? else {
+            continue;
+        };
+        let Some(geometry) = geometry.get("geometry")?.deref()? else {
+            continue;
+        };
+        let part = decode_geometry(geometry)?;
+        stats.primitives += part.triangle_count();
+        extend_placed(&mut mesh, body, &part)?;
+        stats.bodies += 1;
+    }
+    Ok((mesh, stats))
+}
+
+/// An `hkGeometry`: vertices as four floats each, triangles as `a`, `b`, `c` and `material`.
+fn decode_geometry(geometry: Value<'_>) -> Result<CollisionMesh> {
+    let mut part = CollisionMesh::default();
+    for v in geometry.get("vertices")?.elements()? {
+        match v.floats()?[..] {
+            [x, y, z, ..] => part.vertices.push([x, y, z]),
+            _ => return bail("geometry vertex has fewer than three floats"),
+        }
+    }
+    for t in geometry.get("triangles")?.elements()? {
+        let corner = |name: &str| -> Result<u32> {
+            let i = t.get(name)?.int()?;
+            match u32::try_from(i) {
+                Ok(i) if (i as usize) < part.vertices.len() => Ok(i),
+                _ => bail(format!("geometry triangle corner {i} out of range")),
+            }
+        };
+        part.indices
+            .extend([corner("a")?, corner("b")?, corner("c")?]);
+        part.materials
+            .push(u32::try_from(t.get("material")?.int()?).unwrap_or(u32::MAX));
+    }
+    Ok(part)
 }
 
 /// Each `bodyCinfo` of the file's physics systems that has a shape, with that shape.
