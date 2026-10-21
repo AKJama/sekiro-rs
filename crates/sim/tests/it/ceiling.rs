@@ -33,6 +33,31 @@ fn floor_and_ceiling(world: &CollisionWorld, x: f32, z: f32) -> (f32, f32) {
     (floor, ceiling)
 }
 
+/// Wolf jumps (jump held 3 ticks) with the stick at `move_stick` for `camera_yaw` and runs
+/// `ticks` ticks: the highest his feet rose, and whether he left the ground.
+fn jump(wolf: &mut Character, move_stick: [f32; 2], camera_yaw: f32, ticks: u32) -> (f32, bool) {
+    let (mut peak, mut airborne) = (f32::MIN, false);
+    for i in 0..ticks {
+        let input = InputFrame {
+            move_stick,
+            camera_yaw,
+            buttons: Buttons {
+                jump: i < 3,
+                ..Buttons::default()
+            },
+        };
+        let report = wolf.tick(&input, DT);
+        assert!(
+            report.behavior.script_errors.is_empty(),
+            "{:?}",
+            report.behavior.script_errors
+        );
+        airborne |= !report.grounded;
+        peak = peak.max(report.position[1]);
+    }
+    (peak, airborne)
+}
+
 /// Wolf's own standing jump where the shack's ceiling is 3.13 m over the floor, under the 3.93 m
 /// a free jump's head reaches: his head stops under it and he lands back on the floor (before,
 /// he rose into the roof and landed in it, 2.38 m up).
@@ -52,24 +77,7 @@ fn standing_jump_under_the_shack_ceiling_lands_on_the_floor() {
     wolf.ground = Box::new(world.clone());
     wolf.body.position = [x, floor, z];
     settle(&mut wolf);
-    let (mut peak, mut airborne) = (f32::MIN, false);
-    for i in 0..150 {
-        let input = InputFrame {
-            buttons: Buttons {
-                jump: (0..3).contains(&i),
-                ..Buttons::default()
-            },
-            ..InputFrame::default()
-        };
-        let report = wolf.tick(&input, DT);
-        assert!(
-            report.behavior.script_errors.is_empty(),
-            "{:?}",
-            report.behavior.script_errors
-        );
-        airborne |= !report.grounded;
-        peak = peak.max(report.position[1]);
-    }
+    let (peak, airborne) = jump(&mut wolf, [0.0, 0.0], 0.0, 150);
     assert!(airborne, "never jumped");
     assert!(
         peak + HEAD_TOP <= ceiling + 0.01,
@@ -234,24 +242,7 @@ fn jumps_up_the_gully_rock_wall_rise_past_its_lips() {
         wolf.body.position = [x, floor, z];
         settle(&mut wolf);
         wolf.snap_yaw(yaw.to_radians());
-        let mut peak = f32::MIN;
-        for i in 0..90 {
-            let input = InputFrame {
-                move_stick: [0.0, 1.0],
-                camera_yaw: yaw.to_radians(),
-                buttons: Buttons {
-                    jump: (0..3).contains(&i),
-                    ..Buttons::default()
-                },
-            };
-            let report = wolf.tick(&input, DT);
-            assert!(
-                report.behavior.script_errors.is_empty(),
-                "{:?}",
-                report.behavior.script_errors
-            );
-            peak = peak.max(report.position[1]);
-        }
+        let (peak, _) = jump(&mut wolf, [0.0, 1.0], yaw.to_radians(), 90);
         if peak - floor < 2.0 {
             low.push((x, z, peak - floor));
         }

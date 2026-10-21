@@ -355,13 +355,14 @@ const CELL: f32 = 4.0;
 /// [`RADIUS`] from it, give or take roundoff, so the wall's top edge passes a hair inside the
 /// rim; skipping such a face lets the sphere overlap it by at most this.
 const CEILING_GRAZE: f32 = 1e-3;
-/// How far from the head sphere's centre line, seen from above, the point where it first meets
-/// a face may be for that face to stop a rise ([`CollisionWorld::ceiling_for`]): within about
-/// 39 degrees of the sphere's top. Further out the face only meets its shoulder, the wall slide
-/// pushes it off, and stopping there blocked most jumps up m11_00's rock walls under their
-/// ledge lips; the gate fence's cap beam (#170) meets it 0.23 m out. 0.25 m is where the
-/// sampled test before #170 looked, which those walls were climbed with.
-const CEILING_REACH: f32 = 0.25;
+/// The least upward part of the direction from the head sphere's centre to where it first meets
+/// a face for that face to stop a rise ([`CollisionWorld::ceiling_for`]): the cosine of 39
+/// degrees, so the touch is within 0.25 m of the centre line seen from above at [`RADIUS`]
+/// 0.4. Further out the face only meets the sphere's shoulder, the wall slide pushes it off,
+/// and stopping there blocked most jumps up m11_00's rock walls under their ledge lips; the gate
+/// fence's cap beam (#170) meets it 0.23 m out. 0.25 m is where the sampled test before #170
+/// looked, which those walls were climbed with.
+const CEILING_UP: f32 = 0.78;
 /// `CollisionWorld::part_of` for a triangle in no helper or event part.
 const ORDINARY: u16 = 0;
 /// `CollisionWorld::part_of` bit marking an event part's triangle.
@@ -880,8 +881,8 @@ impl CollisionWorld {
     /// edge over the rim or a sloping underside stops it where it first touches (#170). Only a
     /// face the sphere rises into counts: not one it is already in at the start, nor one that
     /// reaches no more than [`CEILING_GRAZE`] inside its rim, such as the top edge of a wall the
-    /// body is pressed against, nor one it first meets more than [`CEILING_REACH`] off its
-    /// centre line, such as a rock lip over the wall it is jumping up. When `Some`, it is below
+    /// body is pressed against, nor one it first meets lower on the sphere than [`CEILING_UP`]
+    /// allows, such as a rock lip over the wall it is jumping up. When `Some`, it is below
     /// `feet.y + rise`.
     // TODO(#163): this scans whole 4 m cells; a height-banded grid would cut that.
     fn ceiling_for(&self, feet: Vec3, rise: f32, who: u8) -> Option<f32> {
@@ -897,12 +898,12 @@ impl CollisionWorld {
 
     /// The triangles [`CollisionWorld::ceiling_for`] sweeps the head sphere against, each once:
     /// faces flat enough to be a ceiling, reaching from above the sphere's centre to below its
-    /// top after `rise`, whose boxes come within the sphere's rim of its centre line.
+    /// top after `rise`, whose boxes come within [`ceiling_reach`] of its centre line.
     fn ceiling_candidates(&self, feet: Vec3, rise: f32, who: u8) -> impl Iterator<Item = u32> {
         let centre = feet.y + HEAD_TOP - RADIUS;
         let high = feet.y + HEAD_TOP + rise;
         let line = Vec2::new(feet.x, feet.z);
-        let reach = RADIUS - CEILING_GRAZE;
+        let reach = ceiling_reach();
         let (min, max) = (line - RADIUS, line + RADIUS);
         let (x0, z0) = cell_of(min.x, min.y);
         let (x1, z1) = cell_of(max.x, max.y);
@@ -926,13 +927,13 @@ impl CollisionWorld {
     /// How far the sphere of [`RADIUS`] at `centre` rises, less than `rise`, before it first
     /// touches triangle `t`: the least rise at which it meets the face's interior, one of its
     /// edges or one of its corners, 0 if it touches it already. `None` when it does not touch it
-    /// within `rise`, when it is already more than [`CEILING_GRAZE`] into it, when the face
-    /// reaches no further than that inside its rim, seen from above, or when the touch is more
-    /// than [`CEILING_REACH`] off its centre line.
+    /// within `rise`, when it is already more than [`CEILING_GRAZE`] into it, or when the touch
+    /// is lower on the sphere than [`CEILING_UP`] allows (which a face reaching no further than
+    /// [`ceiling_reach`] from its centre line, seen from above, always is).
     fn rise_into(&self, t: u32, centre: Vec3, rise: f32) -> Option<f32> {
         let [a, b, c] = self.corners(t);
         let line = centre.with_y(0.0);
-        let reach = RADIUS - CEILING_GRAZE;
+        let reach = ceiling_reach();
         let q = closest_on_triangle(line, a.with_y(0.0), b.with_y(0.0), c.with_y(0.0));
         if q.distance_squared(line) >= reach * reach {
             return None;
@@ -983,19 +984,20 @@ impl CollisionWorld {
         if first >= rise {
             return None;
         }
-        let at = centre + Vec3::Y * first.max(0.0);
+        let touching = first < 0.0;
+        let first = first.max(0.0);
+        let at = centre + Vec3::Y * first;
         let q = closest_on_triangle(at, a, b, c);
+        let to = q - at;
         // Already touching: within the graze it stops the rise now; deeper, the body is in the
         // face already (a slope it walked under), and rising carries it out.
-        if first < 0.0 && q.distance_squared(at) < reach * reach {
+        let graze = RADIUS - CEILING_GRAZE;
+        if touching && to.length_squared() < graze * graze {
             return None;
         }
         // Off the top of the sphere it meets the face with its shoulder, as a jump up an uneven
         // wall meets each rock lip it is pressed against: the slide pushes it off that.
-        if q.y <= at.y || (q - at).with_y(0.0).length_squared() > CEILING_REACH * CEILING_REACH {
-            return None;
-        }
-        Some(first.max(0.0))
+        (to.y >= CEILING_UP * to.length()).then_some(first)
     }
 
     /// How many triangles a [`CollisionWorld::ceiling_for`] of `rise` from `feet` sweeps the
@@ -1625,6 +1627,12 @@ pub fn ray_triangle(o: Vec3, d: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> 
     (t >= 0.0).then_some(t)
 }
 
+/// The furthest off the head sphere's centre line, seen from above, a touch that stops a rise
+/// can be: where [`CEILING_UP`] puts it on the sphere's surface.
+fn ceiling_reach() -> f32 {
+    RADIUS * (1.0 - CEILING_UP * CEILING_UP).sqrt()
+}
+
 /// Closest point on triangle `abc` to `p` (Ericson, Real-Time Collision Detection 5.1.5).
 fn closest_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
     let ab = b - a;
@@ -1849,7 +1857,7 @@ mod tests {
 
     /// A beam 0.25 m above the head, whose edge is 0.2 m out, inside the head sphere's rim but
     /// clear of its centre line, stops the rise where the sphere meets that edge (#170); 0.3 m
-    /// out, past [`CEILING_REACH`], it only meets the sphere's shoulder and does not.
+    /// out, past [`ceiling_reach`], it only meets the sphere's shoulder and does not.
     #[test]
     fn a_beam_edge_over_the_head_rim_stops_the_rise() {
         let y = HEAD_TOP + 0.25;
@@ -1915,7 +1923,8 @@ mod tests {
 
     /// The top of a wall the slide leaves the body pressed against, its edge at the head
     /// sphere's rim, does not stop a jump up past it (ledge grabs and wall jumps); within
-    /// [`CEILING_REACH`] of the centre line, it does.
+    /// [`ceiling_reach`] of the centre line, it does.
+
     #[test]
     fn a_wall_top_at_the_rim_does_not_stop_the_rise() {
         let y = 2.0;
