@@ -144,15 +144,31 @@ pub struct Target {
     pub point: Vec3,
     pub outward: Vec3,
     pub floor: Vec3,
-    /// Cover: 1 left, 2 right. Hang: 1 start, 2 end, 3 both on short edges.
+    /// Cover: 1 left, 2 right, in the docking frame ([`Target::right`]). Hang: 1 start, 2 end,
+    /// 3 both on short edges.
     pub end: u8,
     pub angle: f32,
 }
 
+/// Right in the docking frame, which faces the wall (`-outward`) for hang and cover alike.
+fn docking_right(outward: Vec3) -> Vec3 {
+    Vec3::new(outward.z, 0.0, -outward.x)
+}
+
 impl Target {
+    /// Right in the docking frame, which faces the wall ([`Target::yaw`]) for hang and cover
+    /// alike: Wolf's own right while hanging, but his own left in cover, where his back is to
+    /// the wall. The script's sides (env 3011 end, env 3051/3052 blocked, `DockingStickAngle`)
+    /// are all in this frame. The clips show it: CoverMoveL (a000_021402) moves the root to
+    /// source -X and HangMoveL (a000_020202) to source +X, so the cover "left" shuffle carries
+    /// Wolf to his own right (issue #172).
+    pub fn right(&self) -> Vec3 {
+        docking_right(self.outward)
+    }
     pub fn hang_position(&self) -> Vec3 {
         self.point + self.outward * HANG_OUTWARD - Vec3::Y * HANG_DEPTH
     }
+    /// The docking frame's yaw: facing the wall, which is Wolf's facing in a hang.
     pub fn yaw(&self) -> f32 {
         self.outward.x.atan2(self.outward.z)
     }
@@ -206,8 +222,8 @@ impl Docking {
                 continue;
             }
             let length = Vec3::new(d.x, 0.0, d.z).length();
-            // Endpoint labels are relative to Wolf facing away from the wall.
-            let start_is_left = d.dot(Vec3::new(outward.z, 0.0, -outward.x)) < 0.0;
+            // Endpoint labels are in the docking frame, facing the wall.
+            let start_is_left = d.dot(docking_right(outward)) > 0.0;
             let end = if t * length < END_MARGIN {
                 if start_is_left { 1 } else { 2 }
             } else if (1.0 - t) * length < END_MARGIN {
@@ -231,8 +247,7 @@ impl Docking {
     pub fn hang_blocked(&self, target: &Target, left: bool) -> bool {
         let edge = &self.edges[target.edge];
         let delta = Vec3::from(edge.end) - Vec3::from(edge.start);
-        let right = Vec3::new(target.outward.z, 0.0, -target.outward.x);
-        let toward_end = (right.dot(delta) > 0.0) != left;
+        let toward_end = (target.right().dot(delta) > 0.0) != left;
         target.end & if toward_end { 2 } else { 1 } != 0
     }
 
@@ -242,9 +257,7 @@ impl Docking {
             && hang_floor(target.point, target.outward, ground).is_some()
     }
     pub fn cover_blocked(&self, target: &Target, ground: &dyn Ground, left: bool) -> bool {
-        let direction =
-            Vec3::new(target.outward.z, 0.0, -target.outward.x) * if left { 1.0 } else { -1.0 };
-        let delta = direction * END_MARGIN;
+        let delta = target.right() * if left { -END_MARGIN } else { END_MARGIN };
         let slid = ground.slide(target.floor.to_array(), [delta.x, delta.z]);
         Vec3::new(slid[0] - delta.x, 0.0, slid[1] - delta.z).length() > COVER_BLOCK_TOLERANCE
     }

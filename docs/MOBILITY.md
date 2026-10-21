@@ -624,12 +624,13 @@ Integration edits outside the assigned files are limited to `sim/src/character.r
 **Status (2026-10-11):** Kind-3 cover supports variations 0 to 3 and 10 to 13 through the existing HKS.
 The nearest reachable, faced edge wins the shared action-button search, so E / gamepad Y selects cover or ledge hang by the candidate kind.
 Act 3026 enables env 3043 for the tick; acts 3027 and 3028 retain the existing hang search gates.
-Env 3017 supplies the authored variation and env 3011 supplies the endpoint relative to Wolf's left and right while his back faces the wall.
+Env 3017 supplies the authored variation and env 3011 supplies the endpoint in the docking frame, which faces the wall for hang and cover alike.
+With Wolf's back to the wall, the script's left is his own right: CoverMoveL (a000_021402) moves the root to source -X while HangMoveL (a000_020202) moves it to source +X, and the m11_00 left-look-only wall h018700 chain 1 has its open corner at its left end in this frame (issue #172).
 Env 3051 and 3052 test capsule sliding toward the respective end for an obstacle rather than treating every cover end as blocked.
 HKS sets `Selector_Environment` to normal or peek movement and `Selector_CoverLookDir` from the permitted endpoint.
 Entry uses `CoverStartEdgeAngle`, plays StandToCover2Back / 218103 for the verified approach, then CoverIdle / 021000.
 Docked movement projects the playing movement clip's root distance onto the selected segment, follows its supporting collision floor and clamps to its endpoints.
-The camera-relative stick supplies `DockingStickAngle`, with the HKS convention of positive right, and ordinary free-movement turning is suspended while docked.
+The camera-relative stick supplies `DockingStickAngle`, with the HKS convention of positive right in the same wall-facing frame, and ordinary free-movement turning is suspended while docked.
 Sliding accepts only the HKS along-wall input cone, strictly between 30 and 150 degrees from Wolf's facing, so wall-normal input cannot slide through a residual movement clip.
 HKS handles the cover move start/loop/end states and the look restrictions for each variation.
 The real look-out clips are 205010/205011, 205020/205021 and 205030/205031; they retain docking at the endpoint and do not slide along the wall.

@@ -47,9 +47,10 @@ fn cover_search_facing_variations_and_slide_clamps() {
                 "wall-normal input slid along the wall"
             );
         }
+        // Ends are named facing the wall: with Wolf's back to it (facing +Z), -X is left.
         for (yaw, x, end) in [
-            (std::f32::consts::FRAC_PI_2, -2.0, 2),
-            (-std::f32::consts::FRAC_PI_2, 2.0, 1),
+            (std::f32::consts::FRAC_PI_2, -2.0, 1),
+            (-std::f32::consts::FRAC_PI_2, 2.0, 2),
         ] {
             for _ in 0..100 {
                 docking.cover_step(&mut body, Some("a000_021200"), Some(yaw), 0.1, &Wall);
@@ -155,9 +156,10 @@ fn hks_cover(variation: u8, away: bool) {
         }
     }
     assert!(Vec3::from(duel.player.body.position).distance(origin) > 1.0);
+    // The stick slides Wolf to +X, the right end facing the wall: free or right-only look.
     assert_eq!(
         peek,
-        matches!(variation, 1 | 2 | 11 | 12),
+        matches!(variation, 1 | 3 | 11 | 13),
         "variation {variation}"
     );
     assert!(
@@ -292,6 +294,130 @@ fn outskirts_wall_route() {
     assert!(duel.player.docking.active.is_none() && duel.player.body.grounded);
 }
 
+/// Wolf docked into cover on the synthetic free-look wall, idle, with his back to it (facing
+/// +Z) and the camera behind him, so stick left slides him to +X.
+fn docked_free_look() -> Option<Duel> {
+    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    if !cache.join("raw/chr/c1010.behbnd.d/c9997.hkx").exists() {
+        return None;
+    }
+    let mut duel = Duel::load(&cache, 4.0).unwrap();
+    duel.enemy_active = false;
+    duel.player.ground = Box::new(Wall);
+    duel.player.docking = synthetic(1);
+    duel.player.body.position = [0.0, 0.0, 0.7];
+    let dt = 1.0 / 60.0;
+    for _ in 0..30 {
+        duel.step(&InputFrame::default(), dt);
+    }
+    duel.step(
+        &InputFrame {
+            buttons: Buttons {
+                action: true,
+                ..Buttons::default()
+            },
+            ..InputFrame::default()
+        },
+        dt,
+    );
+    for _ in 0..120 {
+        duel.step(&InputFrame::default(), dt);
+    }
+    assert!(duel.player.docking.active.is_some(), "not in cover");
+    Some(duel)
+}
+
+fn shimmy(stick_x: f32) -> InputFrame {
+    InputFrame {
+        move_stick: [stick_x, 0.0],
+        camera_yaw: std::f32::consts::PI,
+        ..InputFrame::default()
+    }
+}
+
+// Issue #172: the shuffle clip the script picks must carry Wolf the way he slides. The script's
+// sides are named facing the wall, so with his back to it his own left is its right.
+#[test]
+fn cover_shuffle_clip_moves_the_way_wolf_slides() {
+    let Some(mut duel) = docked_free_look() else {
+        return;
+    };
+    let dt = 1.0 / 60.0;
+    for stick_x in [-1.0, 1.0] {
+        let mut checked = 0;
+        for _ in 0..50 {
+            let before = duel.player.body.position[0];
+            let r = duel.step(&shimmy(stick_x), dt);
+            let moved = duel.player.body.position[0] - before;
+            let anim = r.player.animation.unwrap_or_default();
+            if !(anim.starts_with("a000_0214") || anim.starts_with("a000_0215")) || moved == 0.0 {
+                continue;
+            }
+            let [rx, _, rz, _] = duel
+                .player
+                .clips
+                .clip(&anim)
+                .and_then(|c| c.root_motion.as_ref().map(|m| m.total()))
+                .expect("cover move clip without root motion");
+            // The body's own root-motion mapping: source X mirrored, rotated by the facing.
+            let (sin, cos) = duel.player.body.yaw.sin_cos();
+            let clip_x = -cos * rx + sin * rz;
+            assert!(
+                clip_x * moved > 0.0,
+                "stick {stick_x}: {anim} carries the root {clip_x} along X, Wolf slid {moved}"
+            );
+            assert!(moved * stick_x < 0.0, "stick {stick_x} slid {moved}");
+            checked += 1;
+        }
+        assert!(
+            checked > 20,
+            "stick {stick_x}: only {checked} shuffle ticks"
+        );
+        for _ in 0..40 {
+            duel.step(&InputFrame::default(), dt);
+        }
+    }
+}
+
+// Issue #172: at the end of the wall Wolf peeks out past it, not back along the wall.
+#[test]
+fn cover_peek_leans_out_past_the_open_end() {
+    let Some(mut duel) = docked_free_look() else {
+        return;
+    };
+    let dt = 1.0 / 60.0;
+    let head = duel
+        .player
+        .skeleton
+        .bones
+        .iter()
+        .position(|b| b.name.ends_with("Head"))
+        .unwrap();
+    // Stick left runs to the +X end (the right one, facing the wall), stick right to -X.
+    for (stick_x, out, clip) in [(-1.0, 1.0, "a000_205021"), (1.0, -1.0, "a000_205020")] {
+        let mut lean = None;
+        for _ in 0..240 {
+            let r = duel.step(&shimmy(stick_x), dt);
+            if r.player.animation.as_deref() == Some(clip) {
+                let bones = duel.player.bone_source_matrices();
+                let world = duel.player.source_to_world();
+                let p = world.transform_point3(bones[head].transform_point3(Vec3::ZERO));
+                lean = Some(p.x - duel.player.body.position[0]);
+                break;
+            }
+        }
+        let lean = lean.unwrap_or_else(|| panic!("stick {stick_x}: no {clip} peek"));
+        assert!(
+            lean * out > 0.1,
+            "stick {stick_x}: head leans {lean} along X, the open end is {out}"
+        );
+        // Stick back the other way ends the peek.
+        for _ in 0..60 {
+            duel.step(&shimmy(-stick_x), dt);
+        }
+    }
+}
+
 #[test]
 fn cover_rejects_missing_wall_bad_height_and_unsupported_variation() {
     let mut docking = synthetic(1);
@@ -336,6 +462,7 @@ fn cover_obstacle_queries_distinguish_each_end() {
     };
     docking.search(&body, &Corner);
     let target = docking.candidate.as_ref().unwrap();
-    assert!(docking.cover_blocked(target, &Corner, true));
-    assert!(!docking.cover_blocked(target, &Corner, false));
+    // The +X end is the right one, facing the wall.
+    assert!(!docking.cover_blocked(target, &Corner, true));
+    assert!(docking.cover_blocked(target, &Corner, false));
 }
