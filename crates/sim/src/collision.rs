@@ -116,6 +116,11 @@ impl Ground for Counted<'_> {
         self.inner.floor(x, z, top)
     }
 
+    fn hug_floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
+        self.count();
+        self.inner.hug_floor(x, z, top)
+    }
+
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
         self.count();
         self.inner.slide(feet, delta)
@@ -559,37 +564,40 @@ pub fn triangle_visits() -> u64 {
 }
 
 impl CollisionWorld {
+    /// The collision characters and the camera meet for the file at `path`: for a map folder's
+    /// `collision.bin`, the folder's low-resolution `collision_lo.bin` when it has one, every
+    /// part whole ([`crate::lo_collision::read_mesh`]); else the file itself.
     pub fn load(path: &Path) -> Result<Self, String> {
-        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let mesh = CollisionMesh::from_bytes(&bytes).map_err(|e| e.to_string())?;
+        let (mesh, _) = crate::lo_collision::read_mesh(path)?;
         Ok(Self::from_mesh(&mesh))
     }
 
     /// Like [`CollisionWorld::load`], keeping only the triangles that reach within `radius`
     /// of `center` on the horizontal plane ([`crate::arena::crop`]).
     pub fn load_within(path: &Path, center: Vec3, radius: f32) -> Result<Self, String> {
-        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let mesh = CollisionMesh::from_bytes(&bytes).map_err(|e| e.to_string())?;
+        let (mesh, _) = crate::lo_collision::read_mesh(path)?;
         Ok(Self::from_mesh(&crate::arena::crop(&mesh, center, radius)))
     }
 
-    /// A map's `collision.bin` as the player collides with it: the helper parts its
-    /// `layout.json` names leave the walkable mesh and join as helpers
-    /// ([`crate::hit_filter::strip_helpers`], [`CollisionWorld::add_helpers`]). Without a
-    /// layout it is [`CollisionWorld::load`].
+    /// A map folder's collision as characters and the camera collide with it: the low-resolution
+    /// `l` mesh ([`crate::lo_collision`], `collision.bin` when the folder has no
+    /// `collision_lo.bin`), with the helper parts its `layout.json` names out of the walkable mesh
+    /// and joined as helpers ([`crate::hit_filter::strip_helpers`],
+    /// [`CollisionWorld::add_helpers`]), and the fall-prevention assist walls. Without a layout
+    /// it is [`CollisionWorld::load`] of the folder's `collision.bin`.
     pub fn load_map(dir: &Path) -> Result<Self, String> {
-        let path = dir.join("collision.bin");
-        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let mut mesh = CollisionMesh::from_bytes(&bytes).map_err(|e| e.to_string())?;
-        let helpers = match std::fs::read(dir.join("layout.json")) {
-            Ok(layout) => crate::hit_filter::strip_helpers(
-                &mut mesh,
-                &serde_json::from_slice(&layout).map_err(|e| e.to_string())?,
-            ),
-            Err(_) => Default::default(),
+        let block = match std::fs::read(dir.join("layout.json")) {
+            Ok(layout) => {
+                let layout = serde_json::from_slice(&layout).map_err(|e| e.to_string())?;
+                crate::lo_collision::block_collision(dir, &layout, |_| false)?
+            }
+            Err(_) => crate::lo_collision::BlockCollision {
+                mesh: crate::lo_collision::read_mesh(&dir.join(crate::lo_collision::HIGH_FILE))?.0,
+                ..Default::default()
+            },
         };
-        let mut world = Self::from_mesh(&mesh);
-        world.add_helpers(&helpers);
+        let mut world = Self::from_mesh(&block.mesh);
+        world.add_helpers(&block.helpers);
         world.add_map_fall_assist(dir, |_| true)?;
         Ok(world)
     }
@@ -636,7 +644,8 @@ impl CollisionWorld {
     }
 
     /// The collision of map blocks `blocks` as the game's play world builds it
-    /// (`crates/game/src/map_world.rs` `collision_world`): helper parts stripped from the
+    /// (`crates/game/src/map_world.rs` `collision_world`): each block's character mesh
+    /// ([`crate::lo_collision::block_collision`]) with its helper parts stripped from the
     /// walkable mesh and added back by hit filter, the fall-prevention walls, the placed
     /// objects. Without the story's switches and the ride walls' masks. `None` when any block's
     /// `collision.bin` is missing from the cache `cache`. For tests.
@@ -652,11 +661,13 @@ impl CollisionWorld {
         let mut mesh = CollisionMesh::default();
         let mut helpers = crate::hit_filter::HelperCollision::default();
         for dir in &dirs {
-            let mut part = CollisionMesh::from_bytes(&read(dir.join("collision.bin"))).unwrap();
             let layout: serde_json::Value =
                 serde_json::from_slice(&read(dir.join("layout.json"))).unwrap();
-            helpers.extend(crate::hit_filter::strip_helpers(&mut part, &layout));
-            mesh.extend(&part);
+            // Each block's character collision (`l`, [`crate::lo_collision`]) less its helpers.
+            let part = crate::lo_collision::block_collision(dir, &layout, |_| false)
+                .unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+            helpers.extend(part.helpers);
+            mesh.extend(&part.mesh);
         }
         let mut world = Self::from_mesh(&mesh);
         world.add_helpers(&helpers);
@@ -706,9 +717,14 @@ impl CollisionWorld {
     }
 
     /// Whether triangle `t` is a wall or floor at all: deep water's are neither
-    /// ([`crate::body::deep_water`]).
+    /// ([`crate::body::deep_water`]), except on a helper part, which is solid for whoever it
+    /// holds whatever its material. The water surface enemies stand on and the camera stops at
+    /// (hit filter 16, group 46) carries the deep-water material in `l` (m17's `h900702` is 22),
+    /// where `h` left it unset (#189).
     fn solid(&self, t: u32) -> bool {
-        !crate::body::deep_water(self.materials[t as usize])
+        let part = self.part_of[t as usize];
+        let helper = part != ORDINARY && part & EVENT_PART == 0;
+        helper || !crate::body::deep_water(self.materials[t as usize])
     }
 
     /// Whether triangle `t` is a solid face flat enough to stand on in `who`'s queries. The
@@ -1785,6 +1801,14 @@ impl Ground for View<'_> {
         self.floor_triangle(x, z, top).map(|(h, _)| h)
     }
 
+    fn hug_floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
+        View {
+            world: self.world,
+            who: self.who | crate::hit_filter::WALL_HUG,
+        }
+        .floor(x, z, top)
+    }
+
     fn ceiling(&self, feet: [f32; 3], rise: f32) -> Option<f32> {
         self.world.ceiling_for(feet.into(), rise, self.who)
     }
@@ -1867,6 +1891,10 @@ macro_rules! ground_via_view {
                 self.$view().floor(x, z, top)
             }
 
+            fn hug_floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
+                self.$view().hug_floor(x, z, top)
+            }
+
             fn ceiling(&self, feet: [f32; 3], rise: f32) -> Option<f32> {
                 self.$view().ceiling(feet, rise)
             }
@@ -1944,6 +1972,10 @@ impl<T: Ground + ?Sized> Ground for std::sync::Arc<T> {
 
     fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
         (**self).floor(x, z, top)
+    }
+
+    fn hug_floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
+        (**self).hug_floor(x, z, top)
     }
 
     fn ceiling(&self, feet: [f32; 3], rise: f32) -> Option<f32> {

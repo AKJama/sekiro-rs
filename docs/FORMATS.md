@@ -313,12 +313,35 @@ Map textures live in `map/mXX/mXX_000N.tpfbhd`, one TPF per texture; `other/mapt
 - Compressed mesh: sections with a run of primitives (`primitives.data`: start `>> 8`, count `& 0xFF`) and packed vertices.
   `sharedVertices.data & 0xFF` is the section's packed vertex count and `>> 8` its first entry in `sharedVerticesIndex`.
   A primitive index below the packed count is a packed vertex (x 11, y 11, z 10 bits, scaled by the section's `codecParms` scale and offset); otherwise it is a shared vertex (x 21, y 21, z 22 bits over the mesh tree domain).
-  Indices `(a, b, c, d)` with `c != d` are a quad, split as `(a, b, c)` and `(a, c, d)`; `DE AD DE AD` marks a convex primitive (78 in m11, skipped).
+  Indices `(a, b, c, d)` with `c != d` are a quad, split as `(a, b, c)` and `(a, c, d)`; `DE AD DE AD` marks an empty primitive slot (78 in m11, skipped).
+  Over every `h` and `l` binder of the nine exported maps no authored triangle's shape key points at one, and every shape's `numConvexShapes` is 0, so there is no convex shape to decode (#189).
 - Materials: `triangleIndexToShapeKey` maps each authored triangle to its shape key (left-aligned in `numShapeKeyBits`), and `pParam.triangleDataArray[i].primitiveDataIndex` selects a `PrimitiveData` whose `materialNameData` is the hit material id.
   The shape key of a decoded triangle is `(section << 8) | (primitive << 1) | second_triangle_of_quad`; with that every one of the 2.3 million m11 triangles finds its material (34 distinct ids).
 - The HKX bodies carry identity transforms and the vertices are in the collision model's own space: the MSB collision part transform places them like any other part (all m11 collision parts share `(90, 3, -40)`, rotated 20 degrees about Y).
   Check: with the transform every player start is within 0.7 m of a collision vertex, without it up to 51 m away.
-- The low-resolution `l*` and `f*` binders are not decoded.
+- Each block has two more hit binders beside `h`, with the same layout: `l<area>.hkxbhd` (low resolution) and `f<area>.hkxbhd` (the fall-prevention assist walls, `docs/OBJECT-COLLISION.md`).
+- The exe gives an ordinary part's `h` body Havok group 38 and its `l` body group 39 or 40; characters and the camera collide only with 39 and 40, so they walk on `l` (`docs/HIT-FILTERS.md`).
+  The `h` mesh is what projectile rays, foot IK, ragdolls and debris meet.
+- `sekiro-extract map <id> --lo-collision` (and every full `map` export) writes the `l` binder, placed per MSB collision part like `collision.bin`, to `collision_lo.bin` (#189).
+  `l` has no unset materials: `h` has 116,158 triangles with material `u32::MAX` across the nine exported maps, `l` none.
+  In both binders a material id carries the special setting: it is `special * 100 + row`, so `l`'s 721, 722 and 735 are HitMtrlParam rows 21, 22 and 35 (water) with special setting 7, which `h` never uses in these maps.
+  The simulation takes the row with `% 100` (`body::hit_mtrl_row`) for fall death, footsteps and water.
+
+| Map | `l` triangles | Collision parts with an `l` model | Empty `DE AD DE AD` slots in `l` |
+|---|---|---|---|
+| m10_00_00_00 | 273,514 | 143 of 144 | 2 |
+| m11_00_00_00 | 279,243 | 164 of 166 | 7 |
+| m11_01_00_00 | 233,985 | 220 of 221 | 69 |
+| m11_02_00_00 | 65,619 | 71 of 72 | 2 |
+| m13_00_00_00 | 89,302 | 46 of 46 | 3 |
+| m15_00_00_00 | 171,407 | 131 of 131 | 1 |
+| m17_00_00_00 | 222,364 | 139 of 140 | 3 |
+| m20_00_00_00 | 351,872 | 144 of 144 | 120 |
+| m25_00_00_00 | 479,127 | 240 of 240 | 15 |
+
+- Parts with an `h` model and no `l` model: m11_00's `h900700` (hit filter 8, 75 `h` triangles) and m11_01's `h012400` (hit filter 8, 2 `h` triangles).
+  m11_00's `h009500` has no model in either binder, nor do the other parts the counts above leave out.
+  A part without an `l` model gets an empty range in `collision_lo.bin`, so characters and the camera do not meet it, as in the exe.
 
 ### Draw groups
 
@@ -354,7 +377,9 @@ Explicit GPARAM overrides take precedence.
 | `models/<model>.glb` | One static GLB per placed map piece and object model, mirrored on X like every export |
 | `models/tex/<name>.dds` | Textures the GLBs reference by relative URI |
 | `layout.json` | Bevy-space instances: `pieces`, `objects`, `enemies` (chr model, NPC and think params, dummy flag), `players`, `collisions` (groups, triangle range in `collision.bin`), `models` (GLB, triangle count, bounds) |
-| `collision.bin` | `sekiro_formats::hknp::CollisionMesh` in postcard: vertices, indices, one hit material id per triangle, in Bevy space |
+| `collision.bin` | `sekiro_formats::hknp::CollisionMesh` in postcard: vertices, indices, one hit material id per triangle, in Bevy space (the `h` binder) |
+| `collision_lo.bin` | `sekiro_formats::hknp::PartCollision` in postcard: the `l` binder's mesh like `collision.bin`, with each collision part's triangle range |
+| `fall_assist.bin` | `PartCollision` of the `f` binder's fall-prevention assist walls |
 
 Transforms in `layout.json` are translation, quaternion `[x, y, z, w]` and scale, already mirrored (`M -> S M S`).
 Enemy and player rows also carry `yaw_degrees`, the Bevy-space yaw (FromSoftware's Y rotation negated).
@@ -364,6 +389,7 @@ Enemy and player rows also carry `yaw_degrees`, the Bevy-space yaw (FromSoftware
 ```powershell
 cargo run --release -p sekiro-extract -- map m11_00_00_00 --summary
 cargo run --release -p sekiro-extract -- map m11_00_00_00
+cargo run --release -p sekiro-extract -- map m11_00_00_00 --lo-collision
 cargo run --release -p sekiro-game -- --map m11_00_00_00 --start 3
 cargo run --release -p sekiro-game -- --map m11_00_00_00 --start 3 --screenshot cache/screens/map_m11_gate.png --at 2
 cargo run --release -p sekiro-game -- --map m11_00_00_00 --start 3 --collision --no-pieces
@@ -387,7 +413,10 @@ C toggles the collision wireframe, G cycles draw-group modes, M toggles enemy (r
 
 Code: `crates/sim/src/collision.rs` (`CollisionWorld`), the `Ground` trait in `crates/sim/src/body.rs`, `crates/game/src/play.rs`.
 
-- `collision.bin` is bucketed in a 4 m grid on the horizontal plane (2.3 million triangles index in 0.2 s).
+- Characters and the camera collide with `collision_lo.bin` (`crates/sim/src/lo_collision.rs`), with the layout's part ranges re-ranged into it for the story's part removal and the helpers.
+  A block exported before it existed falls back to `collision.bin`, with a log line naming the `--lo-collision` re-export.
+  The `h` mesh stays for drawing: the collision wireframe, draw-group selection and the render sweeps.
+- The collision is bucketed in a 4 m grid on the horizontal plane (2.3 million triangles index in 0.2 s).
 - Floors: the highest surface within 50 degrees of level under the feet, no higher than a step (0.5 m) above them, sampled at the centre and four points 8 cm around it so seams between triangles do not drop the body.
   Tests use `|normal.y|` and a vertical line, so the inconsistent winding of the collision (and the X mirror) does not matter.
   A grounded body follows the floor up or down by a step plus what a 50 degree slope rises over the tick's travel; an airborne body lands on the highest floor between its previous height plus a step and its new height.

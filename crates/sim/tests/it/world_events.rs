@@ -4,7 +4,7 @@ use sekiro_formats::emevd::{Emevd, Event, Instruction, Parameter, RestBehavior};
 use sekiro_sim::world_events::{self, FirstVisit, PartKind};
 
 fn cache() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache")
+    crate::arena_c_support::cache()
 }
 
 #[test]

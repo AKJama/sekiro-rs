@@ -11,10 +11,11 @@
 //! fall-prevention assists, and "map action event walls" (group 44) that nothing solid touches
 //! but whose contact runs a reaction (`FUN_1409edf20`).
 //!
-//! The exported `collision.bin` holds every part's triangles; [`strip_helpers`] takes the ones
-//! the player does not collide with out of it (in place, so the triangle ranges recorded in
-//! `layout.json` stay valid) and returns the enemy, camera and fall-prevention parts and the
-//! contact triggers for [`crate::collision::CollisionWorld::add_helpers`]. Enemies and bosses use
+//! A block's character collision ([`crate::lo_collision`]) holds every part's triangles;
+//! [`strip_helpers`] takes the ones the player does not collide with out of it (in place, so the
+//! triangle ranges of its layout rows stay valid) and returns the enemy, camera, fall-prevention
+//! and wall-hug parts and the contact triggers for
+//! [`crate::collision::CollisionWorld::add_helpers`]. Enemies and bosses use
 //! [`crate::collision::EnemyGround`]: they also stand on water surfaces and stop at
 //! enemy-only walls.
 
@@ -24,8 +25,8 @@ use sekiro_formats::hknp::CollisionMesh;
 use serde_json::Value;
 
 /// Havok collision group of a collision part (`FUN_1409b58b0`). `low` is the low-resolution
-/// (`l` binder) resource and `middle` its middle variant; the exported collision is the
-/// high-resolution binder, which ordinary parts give group 38.
+/// (`l` binder) resource and `middle` its middle variant; the high-resolution `h` binder gives
+/// ordinary parts group 38. Helper filters get their group from either binder.
 pub fn collision_group(hit_filter: u8, low: bool, middle: bool) -> u8 {
     match hit_filter {
         9 => 41,
@@ -49,8 +50,8 @@ pub fn collision_group(hit_filter: u8, low: bool, middle: bool) -> u8 {
 /// Groups the player's capsule (group 1) collides with, among the groups map parts and placed
 /// objects get, from the matrix `FUN_140933390` builds: the object groups 24 to 27, low and
 /// middle map (39, 40), the capsule-only wall (43) and the swim hit (91). The high-resolution map
-/// (38) is not among them; the exe walks the player on the low-resolution binder, which this
-/// simulation approximates with the high one.
+/// (38) is not among them: the player walks on the low-resolution binder
+/// ([`crate::lo_collision`], #189).
 const PLAYER_GROUPS: [u8; 8] = [24, 25, 26, 27, 39, 40, 43, 91];
 /// Groups an enemy's or a boss's capsule (groups 2 and 5, and their map-only variants 7 and
 /// 10) collides with: the player's plus the enemy-only wall (42) and the water surface (46).
@@ -64,6 +65,14 @@ const CAMERA_GROUPS: [u8; 6] = [24, 39, 40, 41, 46, 108];
 pub const PLAYER: u8 = 1;
 pub const ENEMY: u8 = 2;
 pub const CAMERA: u8 = 4;
+/// The wall-hug parts (壁張り付き中当たり, hit filter 25, group 85: `h900100`, `h900101`), which
+/// only a wall-hugging body stands on. Group 85 meets only itself and group 86, and
+/// `FUN_1407df900` gives a character group 86 and its IK ray group 87 (the wall-hug IK ray) in
+/// the state `FUN_140b7d5c0` tests; 86 also meets the low and middle map (39, 40), the object
+/// groups 24 to 27 and the capsule-only wall (43). In m11_00's snake pit the `l` copy of
+/// `h900100` is the slab under the narrow ledge of wall `h013600`, which has no floor of its own
+/// there in `l` (#189).
+pub const WALL_HUG: u8 = 128;
 /// The fall-prevention assist walls (落下防止アシストヒット): group 92 for ground movement and
 /// ground actions, group 93 for ground actions only. No capsule collides with them; the
 /// assist's sphere casts do (groups 94 and 96 meet 92, 95 and 96 meet 93), and only while the
@@ -190,6 +199,7 @@ pub fn group_mask(group: u8) -> u8 {
         (&CAMERA_GROUPS[..], CAMERA),
         (&[92][..], FALL_ASSIST_MOVE),
         (&[93][..], FALL_ASSIST_ACTION),
+        (&[85][..], WALL_HUG),
     ]
     .into_iter()
     .filter(|(groups, _)| groups.contains(&group))
@@ -211,9 +221,10 @@ pub fn camera_collides(hit_filter: u8) -> bool {
     mask(hit_filter) & CAMERA != 0
 }
 
-/// [`PLAYER`], [`ENEMY`] and [`CAMERA`] bits for the parts with this hit filter.
+/// [`PLAYER`], [`ENEMY`], [`CAMERA`], fall-prevention and [`WALL_HUG`] bits for the parts with
+/// this hit filter.
 pub fn mask(hit_filter: u8) -> u8 {
-    // Ordinary parts stand in for their low-resolution twins (group 39).
+    // Ordinary parts as their low-resolution body (group 39).
     group_mask(collision_group(hit_filter, true, false))
 }
 
@@ -385,6 +396,8 @@ mod tests {
         assert_eq!(mask(16), ENEMY | CAMERA);
         assert_eq!(mask(15), 0);
         assert_eq!(mask(28), FALL_ASSIST_MOVE);
+        // Only a wall-hugging body (group 86) meets the wall-hug parts (group 85).
+        assert_eq!(mask(25), WALL_HUG);
         assert_eq!(fall_assist_walls(0), FALL_ASSIST_MOVE);
         assert_eq!(fall_assist_walls(1), FALL_ASSIST_ACTION);
         assert!(rideable(Some(808)) && !rideable(Some(8)) && !rideable(None));

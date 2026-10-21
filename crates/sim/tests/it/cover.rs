@@ -430,50 +430,88 @@ fn cover_obstacle_queries_distinguish_each_end() {
     assert!(docking.cover_blocked(target, &Corner, false));
 }
 
+/// m11_00's snake pit wall `h013600` with the play world, when the cache has both blocks'
+/// `l` collision (`sekiro-extract map <block> --lo-collision`): the ledge's floor is there only.
+fn snake_pit() -> Option<(
+    Docking,
+    std::sync::Arc<sekiro_sim::collision::CollisionWorld>,
+)> {
+    let cache = crate::arena_c_support::cache();
+    let dir = cache.join("maps/m11_00_00_00");
+    let low = ["m11_00_00_00", "m11_01_00_00"].iter().all(|b| {
+        cache
+            .join("maps")
+            .join(b)
+            .join("collision_lo.bin")
+            .is_file()
+    });
+    if !low || !dir.join("edges.json").is_file() {
+        eprintln!("skipping the snake pit: no collision_lo.bin or edges.json in {cache:?}");
+        return None;
+    }
+    let world = crate::step_cost::play_world()?;
+    Some((Docking::load(&dir.join("edges.json")).unwrap(), world))
+}
+
+/// The cover edges of `h013600`'s `chain`, in order.
+fn wall(docking: &Docking, chain: u32) -> Vec<usize> {
+    (0..docking.edges.len())
+        .filter(|&i| {
+            let e = &docking.edges[i];
+            e.source_part == "h013600" && e.kind == 3 && e.chain == chain
+        })
+        .collect()
+}
+
+/// Docks at `entry` facing chain 2's third edge, as the playtest did.
+fn dock_in_snake_pit(docking: &mut Docking, world: &dyn Ground, entry: [f32; 3]) -> Body {
+    let corner = &docking.edges[wall(docking, 2)[2]];
+    let run = Vec3::from(corner.end) - Vec3::from(corner.start);
+    let mut body = Body {
+        position: entry,
+        yaw: (-run.z).atan2(run.x),
+        ..Body::default()
+    };
+    docking.active = None;
+    docking.search(&body, world);
+    assert!(
+        docking
+            .candidate
+            .as_ref()
+            .is_some_and(|t| docking.is_cover(t)),
+        "no cover at {entry:?}: {:?}",
+        docking.candidate
+    );
+    assert!(docking.cover_step(&mut body, Some("a000_218103"), None, 0.0, world));
+    body
+}
+
+/// The two spots the #147 playtest docked at in the snake pit.
+const SNAKE_PIT_ENTRIES: [[f32; 3]; 2] = [[-3.5467, -141.634, 5.6632], [-2.2022, -141.610, 8.1418]];
+
 /// The wall hug in m11_00's foggy snake pit (#147): wall `h013600` is chain 2 (variation 0)
-/// joined end to start to chain 3 (variation 10), a ledge too narrow for a floor under the
-/// docked feet. From both spots the playtest docked at, Wolf hugs back to chain 2's corner and
-/// on across the joint onto chain 3, where he used to stop at the joint or at once.
+/// joined end to start to chain 3 (variation 10), a narrow ledge. From both spots the playtest
+/// docked at, Wolf hugs back to chain 2's corner and on across the joint onto chain 3, where he
+/// used to stop at the joint or at once, and past its first half (on `l` he hugs on further,
+/// [`snake_pit_wall_hug_reaches_the_far_end_on_the_hug_slab`]).
 #[test]
 fn snake_pit_wall_hug_crosses_the_chain_joint() {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache/maps/m11_00_00_00");
-    let Some(world) = crate::step_cost::play_world() else {
+    let Some((mut docking, world)) = snake_pit() else {
         return;
     };
-    if !dir.join("edges.json").exists() {
-        return;
-    }
     let world = &*world;
-    let mut docking = Docking::load(&dir.join("edges.json")).unwrap();
-    let wall = |docking: &Docking, chain: u32| -> Vec<usize> {
-        (0..docking.edges.len())
-            .filter(|&i| {
-                let e = &docking.edges[i];
-                e.source_part == "h013600" && e.kind == 3 && e.chain == chain
-            })
-            .collect()
-    };
     let (corner, narrow) = (wall(&docking, 2)[2], wall(&docking, 3)[0]);
+    // The edges after the narrow ledge's first one, in hug order.
+    let beyond: Vec<usize> = wall(&docking, 3)[1..]
+        .iter()
+        .chain(&wall(&docking, 4))
+        .copied()
+        .collect();
     let run = |e: &MapEdge| Vec3::from(e.end) - Vec3::from(e.start);
-    for entry in [[-3.5467, -141.634, 5.6632], [-2.2022, -141.610, 8.1418]] {
+    for entry in SNAKE_PIT_ENTRIES {
         // Toward chain 2's start the hug stops at the sharp corner; the other way it runs on.
         for (sign, edge, past) in [(-1.0f32, corner, 0.0f32), (1.0, narrow, 0.5)] {
-            let mut body = Body {
-                position: entry,
-                yaw: (-run(&docking.edges[corner]).z).atan2(run(&docking.edges[corner]).x),
-                ..Body::default()
-            };
-            docking.active = None;
-            docking.search(&body, world);
-            assert!(
-                docking
-                    .candidate
-                    .as_ref()
-                    .is_some_and(|t| docking.is_cover(t)),
-                "no cover at {entry:?}: {:?}",
-                docking.candidate
-            );
-            assert!(docking.cover_step(&mut body, Some("a000_218103"), None, 0.0, world));
+            let mut body = dock_in_snake_pit(&mut docking, world, entry);
             let d = run(&docking.edges[corner]) * sign;
             let stick = (-d.x).atan2(-d.z);
             for _ in 0..300 {
@@ -483,7 +521,8 @@ fn snake_pit_wall_hug_crosses_the_chain_joint() {
             let e = &docking.edges[edge];
             let along = (target.point - Vec3::from(e.start)).dot(run(e)) / run(e).length_squared();
             assert!(
-                target.edge == edge && along >= past - 1e-3,
+                target.edge == edge && along >= past - 1e-3
+                    || sign > 0.0 && beyond.contains(&target.edge),
                 "from {entry:?} sign {sign}: stopped at {target:?}, {along} along edge {}",
                 target.edge
             );
@@ -492,4 +531,115 @@ fn snake_pit_wall_hug_crosses_the_chain_joint() {
             }
         }
     }
+}
+
+/// The whole snake pit hug (#189): from both entry spots Wolf hugs `h013600` across chain 3 (the
+/// narrow ledge, variation 10) and chain 4 to the far end, every step docked on a floor a
+/// wall-hugging body stands on, at the ledge's height. On `l` the ledge has no character floor
+/// under the docked feet along most of chain 3; the wall-hug slab (`h900100`, hit filter 25,
+/// [`sekiro_sim::hit_filter::WALL_HUG`]) is the floor there, so without it the hug stops at the
+/// ledge's start.
+#[test]
+fn snake_pit_wall_hug_reaches_the_far_end_on_the_hug_slab() {
+    let Some((mut docking, world)) = snake_pit() else {
+        return;
+    };
+    let world = &*world;
+    let (ledge, far) = (wall(&docking, 3), wall(&docking, 4));
+    let far_end = *far.last().unwrap();
+    let run = |e: &MapEdge| Vec3::from(e.end) - Vec3::from(e.start);
+    for entry in SNAKE_PIT_ENTRIES {
+        let mut body = dock_in_snake_pit(&mut docking, world, entry);
+        let mut visited = std::collections::BTreeSet::new();
+        let mut arrived = None;
+        for step in 0..1500 {
+            let d = run(&docking.edges[docking.active.as_ref().unwrap().edge]);
+            let stick = (-d.x).atan2(-d.z);
+            docking.cover_step(&mut body, Some("a000_021203"), Some(stick), 0.05, world);
+            let target = docking.active.clone().unwrap();
+            visited.insert(target.edge);
+            let feet = target.floor;
+            let hug = world.hug_floor(feet.x, feet.z, feet.y + 0.5);
+            assert!(
+                hug.is_some_and(|y| (y - feet.y).abs() < 0.05),
+                "from {entry:?} step {step}: docked on {feet:?}, hug floor {hug:?}: {target:?}"
+            );
+            // At the ledge's height under the wall, never dropping toward the pit: the ledge
+            // climbs from about -141.6 to -140.1 and the feet stay within 0.25 m of its edge.
+            assert!(
+                (body.position[1] - feet.y).abs() < 0.05 && (feet.y - target.point.y).abs() < 0.3,
+                "from {entry:?} step {step}: Wolf at {:?}, floor {feet:?}, edge at {:?}",
+                body.position,
+                target.point
+            );
+            let e = &docking.edges[target.edge];
+            let along = (target.point - Vec3::from(e.start)).dot(run(e)) / run(e).length_squared();
+            if target.edge == far_end && along >= 0.9 && target.end != 0 {
+                arrived = Some(step);
+                break;
+            }
+        }
+        assert!(
+            arrived.is_some(),
+            "from {entry:?}: never reached the far end, stopped at {:?}, visited {visited:?}",
+            docking.active
+        );
+        for edge in ledge.iter().chain(&far) {
+            assert!(
+                visited.contains(edge),
+                "from {entry:?}: skipped edge {edge}"
+            );
+        }
+    }
+}
+
+/// Walking the snake pit ledge without hugging (#189): the player's capsule (group 1) does not
+/// collide with the wall-hug slab (group 85), and on `l` the ledge itself gives no floor under
+/// about half of chain 3 where the hug stands (0.7 m out,,
+/// [`sekiro_sim::docking::DOCKING_TRANSLATION_OFFSET_COVER`]), in gaps over 3 m long, over the pit's fall-return trigger. So a walking Wolf falls into the
+/// pit there; only the hug carries him across, as the game's wall-hug group is built for.
+#[test]
+fn snake_pit_ledge_has_no_walking_floor() {
+    let Some((docking, world)) = snake_pit() else {
+        return;
+    };
+    let world = &*world;
+    let (mut samples, mut missing, mut gap, mut longest) = (0, 0, 0.0f32, 0.0f32);
+    for &i in &wall(&docking, 3) {
+        let e = &docking.edges[i];
+        let (start, end) = (Vec3::from(e.start), Vec3::from(e.end));
+        let d = (end - start).with_y(0.0);
+        let outward = Vec3::new(-d.z, 0.0, d.x).normalize();
+        let steps = (d.length() / 0.05) as usize;
+        for s in 0..=steps {
+            let p = start.lerp(end, s as f32 / steps as f32)
+                + outward * sekiro_sim::docking::DOCKING_TRANSLATION_OFFSET_COVER;
+            samples += 1;
+            let hug = world.hug_floor(p.x, p.z, p.y + 0.5);
+            assert!(
+                hug.is_some_and(|y| (y - p.y).abs() <= 0.3),
+                "no hug floor at {p:?}: {hug:?}"
+            );
+            let walk = world.floor(p.x, p.z, p.y + 0.5);
+            if walk.is_some_and(|y| (y - p.y).abs() <= 0.3) {
+                gap = 0.0;
+                continue;
+            }
+            assert!(
+                walk.is_none(),
+                "a floor off the ledge's height at {p:?}: {walk:?}"
+            );
+            assert!(
+                world.fall_return_below(p.x, p.y, p.z),
+                "no fall return under {p:?}"
+            );
+            missing += 1;
+            gap += d.length() / steps as f32;
+            longest = longest.max(gap);
+        }
+    }
+    assert!(
+        missing * 3 > samples && longest > 3.0,
+        "{missing} of {samples} ledge points without a walking floor, longest gap {longest} m"
+    );
 }

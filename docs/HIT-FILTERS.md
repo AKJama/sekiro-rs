@@ -27,7 +27,7 @@ The English is a translation.
 | 18 | 51 | 敵レイキャストだけあたる壁 (wall only enemy raycasts hit) | no | no | no | | |
 | 22 | 43 | キャラのカプセルだけ当たる壁当たり (wall only character capsules hit) | yes | yes | no | `h900600` | `h900600`, `h900601`, `h900800` |
 | 24 | 68 | なににも当たらない (hits nothing) | no | no | no | | |
-| 25 | 85 | 壁張り付き中当たり (hit while wall-hugging) | no | no | no | `h900100`, `h900101` | |
+| 25 | 85 | 壁張り付き中当たり (hit while wall-hugging) | while wall-hugging (group 86) | no | no | `h900100`, `h900101` | |
 | 26 | 88 | 壁ジャンプ出来ない壁 (wall that cannot be wall-jumped) | no | no | no | | `h901000` |
 | 27 | 91 | 水泳当たり (swim hit) | yes | yes | no | | 12 `h0xxxxx` parts |
 | 28 | 92 | 落下防止アシストヒット(地上移動＆地上アクション) (fall-prevention assist, ground movement and actions) | no | no | no | `h900400`, `h900410` | `h900400`, `h900401` |
@@ -45,7 +45,21 @@ Replaying its arguments from the disassembly gives:
 - The camera ray, group 48 (カメラ), collides with 39, 40, 41 and 46.
 - Group 44 collides only with group 45 (マップアクション壁収集用, the map action wall collector) and group 82 (a map event detection ray), so nothing solid stands on or bumps into an event wall.
 
-So the player walks on the low-resolution binder in the exe; the simulation keeps using the exported high-resolution one as its stand-in.
+So the player walks on the low-resolution binder in the exe, and so does the simulation (#189): the player, enemies and the camera all collide with `collision_lo.bin` (`crates/sim/src/lo_collision.rs`, `docs/FORMATS.md`).
+The helper parts keep their fixed groups whichever binder their body comes from, so their `l` copies are the ones characters meet, and the story's part removal and the helper stripping read the parts' ranges in `collision_lo.bin`.
+A block exported before `collision_lo.bin` existed falls back to `collision.bin`, with a log line naming `sekiro-extract map <block> --lo-collision`.
+Parts with an `h` model and no `l` model, m11_00's `h900700` and m11_01's `h012400`, are met by no character and no camera in the exe and get an empty range; m11_00's `h009500` has no model in either binder.
+
+## Wall-hug collision
+
+Group 85 (壁張り付き中当たり, hit filter 25) collides only with itself and group 86.
+`FUN_1407df900` sets a character's collision group (`+0x910`) to 86 (0x56) and its IK ray's to 87 (0x57, the wall-hug IK ray) while `FUN_140b7d5c0` on `chr+0x1ff8 -> +0x128` is true, the wall-hug state.
+Group 86 collides with 1, 2, 17, 18, 24 to 27, 32, 39, 40, 43, 71, 75, 85 and 102 (`FUN_140933390`'s enables).
+So a wall-hugging body stands on the low and middle map, the capsule-only walls and the objects like a walking one, and on the wall-hug parts too.
+
+In m11_00's snake pit the `l` copy of `h900100` is a flat slab under the narrow ledge (variation 10) of cover wall `h013600`: its top lies within 0.1 m below the ledge's edge, it is about half a metre thick, and it reaches more than 1.2 m out from the wall.
+On `l` the ledge itself has no floor under the docked feet (0.7 m out) along about half of chain 3, in gaps up to 3.7 m, over the pit's fall-return trigger.
+The simulation gives the wall-hug parts the `hit_filter::WALL_HUG` bit and the cover search the `Ground::hug_floor` query, which adds them; so the hug crosses the ledge to the far end of chain 4 on the slab, and a walking Wolf, which does not meet group 85, falls into the pit there (`snake_pit_wall_hug_reaches_the_far_end_on_the_hug_slab` and `snake_pit_ledge_has_no_walking_floor` in `crates/sim/tests/it/cover.rs`).
 
 ## Event wall contact reactions
 
@@ -63,11 +77,13 @@ Filter 15 under a pit is the fall return's trigger: Wolf falls through it, fades
 ## What the simulation applies
 
 - `hit_filter::strip_helpers` takes every part the player does not collide with out of the walkable collision when a map, an arena or the wire's collision loads (`map_world::collision_world`, `Arena::load`, `CollisionWorld::load_map`).
-  Removed triangles collapse to a point, so the triangle ranges in `layout.json` stay valid.
+  Removed triangles collapse to a point, so the parts' triangle ranges stay valid.
   An arena strips them after its disabled, event and hidden parts are taken out, so those do not return as helpers, and crops them to its radius like the rest.
 - The switched event collision `h900900` (entity 1124860, `arena_c::take_event_collision`) has hit filter 9, so while on it holds only the camera.
 - The removed parts that enemies or the camera collide with stay in the world, tagged with who: enemies and bosses query it through `collision::EnemyGround` (filters 11, 16 and 19), and `CollisionWorld::camera_raycast` (the play camera) stops at filters 9 and 16.
   The player's queries skip them all.
+  A helper part is solid for whoever it holds whatever its material (`CollisionWorld::solid`): in `l` the water surface (filter 16) carries the deep-water material 22, which `h` left unset, and the Guardian Ape stands on m17's `h900702` (#189).
+  In m13's dungeon pool the `l` water surface (`h900100`, filter 16 there) lies 1 m below `h`'s; the player swims at the swim hit (filter 27), which he does collide with.
 - Fall-prevention parts (hit filter 28, group 92) stay as walls only the fall-prevention assist sees: they hold Wolf at cliff edges while his script asks for it (`docs/OBJECT-COLLISION.md`, #119).
 - Event walls (group 44) become contact triggers (`CollisionWorld::trigger_contact`, tested along the capsule's path at its bottom, middle and top).
   Contact with filter 15 starts the fall return: after the 0.5 s fade Wolf is returned to where he last stood, the existing return path.

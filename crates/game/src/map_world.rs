@@ -408,6 +408,8 @@ pub(crate) fn play_blocks(cache: &Path, id: &str) -> Result<BTreeMap<String, Val
 /// Physics bootstrap uses the same bounded block inventory as rendering ([`play_blocks`]).
 /// Collision/group records remain separate in MapWorld; only the broad-phase query
 /// mesh is concatenated, without adding MapOffset or translating any vertex.
+/// Each block's mesh is the low-resolution `l` collision characters and the camera collide
+/// with (`sekiro_sim::lo_collision`, #189), or its `collision.bin` when it has none (logged).
 /// Collision parts and placed objects the block's `story` switches off are left out.
 /// Helper parts the player does not collide with (`sekiro_sim::hit_filter`) leave the
 /// walkable mesh and join the world as camera-only triangles or event walls.
@@ -420,18 +422,18 @@ pub(crate) fn collision_world(
     let mut helpers = sekiro_sim::hit_filter::HelperCollision::default();
     let mut story_off = 0;
     for (block, layout) in layouts {
-        let path = cache.join("maps").join(block).join("collision.bin");
-        if path.is_file() {
-            let mut part = CollisionMesh::from_bytes(&std::fs::read(path)?)?;
-            // Before the helpers, so a switched-off helper part does not come back as one.
-            if let Some(story) = story.maps.get(block) {
-                story_off +=
-                    sekiro_sim::arenas_a::remove_hidden_collision(&mut part, layout, |n| {
-                        story.switched_off(n)
-                    });
-            }
-            helpers.extend(sekiro_sim::hit_filter::strip_helpers(&mut part, layout));
-            mesh.extend(&part);
+        let dir = cache.join("maps").join(block);
+        if dir.join(sekiro_sim::lo_collision::HIGH_FILE).is_file()
+            || dir.join(sekiro_sim::lo_collision::LOW_FILE).is_file()
+        {
+            let story = story.maps.get(block);
+            let part = sekiro_sim::lo_collision::block_collision(&dir, layout, |n| {
+                story.is_some_and(|s| s.switched_off(n))
+            })
+            .map_err(anyhow::Error::msg)?;
+            story_off += part.story_off;
+            helpers.extend(part.helpers);
+            mesh.extend(&part.mesh);
         }
     }
     eprintln!(

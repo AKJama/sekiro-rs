@@ -113,10 +113,28 @@ impl WaterSurface {
     }
 }
 
+/// The HitMtrlParam row of a collision triangle's material id, which is its
+/// HitMaterialSpecialSettingParam row times 100 plus its HitMtrlParam row
+/// ([`crate::hit_filter::RIDEABLE_SPECIAL`]): the `l` binder's deep water is 22 and 722 alike.
+/// `None` for a triangle without a material (`u32::MAX`).
+pub const fn hit_mtrl_row(material: u32) -> Option<u32> {
+    if material == u32::MAX {
+        None
+    } else {
+        Some(material % 100)
+    }
+}
+
+/// Whether hit material `material` is water ([`hit_mtrl_row`] 20 to 24 or 35 to 38): a plane
+/// bodies swim or wade in, which [`deep_water`] narrows down.
+pub const fn water(material: u32) -> bool {
+    matches!(hit_mtrl_row(material), Some(20..=24 | 35..=38))
+}
+
 /// Whether hit material `material` is deep water: a surface bodies stand in, never a floor or
 /// wall ([`crate::collision::CollisionWorld`] leaves its triangles out of both).
 pub const fn deep_water(material: u32) -> bool {
-    matches!(material, 22 | 36 | 38)
+    matches!(hit_mtrl_row(material), Some(22 | 36 | 38))
 }
 
 /// Something the character can stand on.
@@ -163,6 +181,12 @@ pub trait Ground {
     fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
         let _ = top;
         self.height(x, z)
+    }
+
+    /// [`Ground::floor`] for a body hugging a wall, which also stands on the wall-hug parts
+    /// ([`crate::hit_filter::WALL_HUG`]). Grounds without them have just their floor.
+    fn hug_floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
+        self.floor(x, z, top)
     }
 
     /// The highest the feet of a body at `feet` can rise straight up, by at most `rise`, before
@@ -504,6 +528,15 @@ impl Body {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn material_rows_drop_the_special_setting() {
+        assert_eq!(hit_mtrl_row(8), Some(8));
+        assert_eq!(hit_mtrl_row(808), Some(8));
+        assert_eq!(hit_mtrl_row(u32::MAX), None);
+        assert!(deep_water(722) && water(721) && !deep_water(721));
+        assert!(!water(u32::MAX) && !deep_water(u32::MAX));
+    }
 
     fn close(actual: Vec2, expected: Vec2) {
         assert!(

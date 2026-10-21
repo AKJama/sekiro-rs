@@ -39,24 +39,34 @@ fn water_planes_are_separate_from_shallow_support_and_underwater_floor() {
 
 #[test]
 fn water_material_roles_follow_hit_mtrl_names() {
-    for material in [20, 21, 22, 23, 24, 35, 36, 37, 38, 45, 46, 47] {
-        let mesh = CollisionMesh {
-            vertices: vec![[-2.0, 0.0, -2.0], [2.0, 0.0, -2.0], [0.0, 0.0, 2.0]],
-            indices: vec![0, 1, 2],
-            materials: vec![material],
-        };
-        let world = CollisionWorld::from_mesh(&mesh);
-        let water = world.water_surface(0.0, 0.0, 1.0);
-        assert_eq!(water.is_some(), material < 45);
-        assert_eq!(
-            water.is_some_and(|w| w.deep()),
-            matches!(material, 22 | 36 | 38)
-        );
-        assert_eq!(
-            world.floor(0.0, 0.0, 1.0).is_none(),
-            matches!(material, 22 | 36 | 38)
-        );
+    // A material id is its special setting times 100 plus its HitMtrlParam row: the `l`
+    // binder's water has special setting 7 (721, 722, 735), and its role is the row's.
+    for row in [20, 21, 22, 23, 24, 35, 36, 37, 38, 45, 46, 47] {
+        for material in [row, 700 + row] {
+            water_material_role(material, row);
+        }
     }
+}
+
+fn water_material_role(material: u32, row: u32) {
+    let mesh = CollisionMesh {
+        vertices: vec![[-2.0, 0.0, -2.0], [2.0, 0.0, -2.0], [0.0, 0.0, 2.0]],
+        indices: vec![0, 1, 2],
+        materials: vec![material],
+    };
+    let world = CollisionWorld::from_mesh(&mesh);
+    let water = world.water_surface(0.0, 0.0, 1.0);
+    assert_eq!(water.is_some(), row < 45, "{material}");
+    assert_eq!(
+        water.is_some_and(|w| w.deep()),
+        matches!(row, 22 | 36 | 38),
+        "{material}"
+    );
+    assert_eq!(
+        world.floor(0.0, 0.0, 1.0).is_none(),
+        matches!(row, 22 | 36 | 38),
+        "{material}"
+    );
 }
 
 #[test]
@@ -98,14 +108,17 @@ fn falling_body_lands_on_water_then_dives_through_plane() {
 }
 
 fn cache() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache")
+    crate::arena_c_support::cache()
 }
 
 #[test]
 fn dungeon_water_route() {
     let mut duel = Duel::load(&cache(), 4.0).unwrap();
     duel.enemy_active = false;
-    let world = CollisionWorld::load(&cache().join("maps/m13_00_00_00/collision.bin")).unwrap();
+    // The pool as the player meets it in play: the swim hit (`h001000`, hit filter 27) is his
+    // water, and the water surface only enemies and the camera meet (`h900100`, hit filter 16)
+    // is a helper (#189: in `l` it lies a metre below `h`'s, over a shallow bed).
+    let world = CollisionWorld::load_map(&cache().join("maps/m13_00_00_00")).unwrap();
     duel.player.body.position = [467.0, world.floor(467.0, 346.0, -57.0).unwrap(), 346.0];
     let yaw = -45.0f32.to_radians();
     duel.player.body.yaw = yaw;

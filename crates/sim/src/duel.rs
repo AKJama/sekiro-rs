@@ -3012,7 +3012,13 @@ impl Duel {
             return;
         }
         let lethal_landing = !was_grounded && b.grounded && {
-            let material = self.player.ground.material(x, z, y + 0.01).unwrap_or(1);
+            // Keyed by HitMtrlParam row, without the material's special setting.
+            let material = self
+                .player
+                .ground
+                .material(x, z, y + 0.01)
+                .and_then(crate::body::hit_mtrl_row)
+                .unwrap_or(1);
             self.fall_materials.get(&material).is_some_and(|m| {
                 m.disable_fall_damage == 0 && b.last_fall_height >= m.fall_death_dist as f32
             })

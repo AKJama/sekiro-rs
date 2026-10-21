@@ -15,7 +15,11 @@
 //!   scale xyz). Otherwise it selects a shared vertex through `sharedVerticesIndex`
 //!   (64 bits: x 21, y 21, z 22, dequantised over the mesh tree's domain AABB).
 //! - Indices `(a, b, c, d)` with `c != d` are a quad, split as `(a, b, c)` and `(a, c, d)`.
-//!   `DE AD DE AD` marks a convex-shape primitive, which map collision does not use.
+//!   `DE AD DE AD` marks an empty primitive slot: over every `h` and `l` binder of the nine
+//!   exported maps no authored triangle's shape key points at one, and every shape's
+//!   `numConvexShapes` is 0, so there is no convex shape behind it to decode (#189).
+//! - Authored triangles the builder dropped have the all-ones (invalid) shape key; with those
+//!   and the empty slots, the triangles decoded are exactly the authored ones with a valid key.
 //!
 //! The FromSoftware wrapper adds `triangleIndexToShapeKey` (authored triangle index to shape
 //! key, the key left-aligned in `numShapeKeyBits`) and `pParam`, whose per-triangle
@@ -75,6 +79,8 @@ pub struct DecodeStats {
     pub sections: usize,
     pub primitives: usize,
     pub quads: usize,
+    /// Empty `DE AD DE AD` primitive slots (no triangle and no convex shape, see the module
+    /// notes).
     pub convex_skipped: usize,
     /// Triangles whose shape key had no material entry.
     pub unmatched_material: usize,
@@ -130,25 +136,34 @@ impl ObjectCollision {
     }
 }
 
-/// A map's fall-prevention assist walls (`cache/maps/<id>/fall_assist.bin`, postcard): the
-/// `f<map>.hkxbhd` binder's mesh for each MSB collision part, placed like `collision.bin`, in
-/// Bevy space. Only the assist's sphere casts meet them (docs/OBJECT-COLLISION.md).
+/// One of a map's hit binders placed by its MSB collision parts, in Bevy space like
+/// `collision.bin`, with each part's triangle range (postcard):
+///
+/// - `cache/maps/<id>/fall_assist.bin`: the `f<map>.hkxbhd` binder, the fall-prevention assist
+///   walls only the assist's sphere casts meet (docs/OBJECT-COLLISION.md),
+/// - `cache/maps/<id>/collision_lo.bin`: the `l<map>.hkxbhd` binder, the low-resolution hit
+///   collision characters and the camera collide with (docs/HIT-FILTERS.md, #189).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct FallAssistCollision {
-    pub parts: Vec<FallAssistPart>,
+pub struct PartCollision {
+    pub parts: Vec<PartRange>,
     pub mesh: CollisionMesh,
 }
 
-/// One collision part's walls in [`FallAssistCollision::mesh`]: `count` triangles from `first`.
+/// One collision part's triangles in [`PartCollision::mesh`]: `count` triangles from `first`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct FallAssistPart {
+pub struct PartRange {
     /// MSB collision part name, the key of its row in `layout.json`'s `collisions`.
     pub name: String,
     pub first: u32,
     pub count: u32,
 }
 
-impl FallAssistCollision {
+/// `fall_assist.bin` ([`PartCollision`]).
+pub type FallAssistCollision = PartCollision;
+/// One collision part's walls in a [`FallAssistCollision`].
+pub type FallAssistPart = PartRange;
+
+impl PartCollision {
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         postcard::to_stdvec(self).map_err(|e| crate::Error::Format(e.to_string()))
     }

@@ -6,8 +6,11 @@ use sekiro_sim::body::Ground;
 use sekiro_sim::duel::{Duel, FightEvents};
 use sekiro_sim::{InputFrame, events::EventHost};
 
+/// The cache: `SEKIRO_CACHE` when set, else the repo's.
 pub fn cache() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache")
+    std::env::var_os("SEKIRO_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache"))
 }
 
 pub fn staged(name: &str, fog: usize) -> Option<(Arena, Duel)> {
