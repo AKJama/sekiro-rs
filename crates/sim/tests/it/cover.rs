@@ -1,5 +1,5 @@
 use glam::Vec3;
-use sekiro_sim::body::{Body, Ground};
+use sekiro_sim::body::{Body, Ground, root_motion_world};
 use sekiro_sim::docking::{Docking, MapEdge};
 use sekiro_sim::duel::Duel;
 use sekiro_sim::{Buttons, InputFrame};
@@ -85,28 +85,34 @@ fn hks_cover_enter_idle_slide_peek_and_exit() {
         .for_each(|&(variation, away)| hks_cover(variation, away));
 }
 
-fn hks_cover(variation: u8, away: bool) {
+const DT: f32 = 1.0 / 60.0;
+
+fn press() -> InputFrame {
+    InputFrame {
+        buttons: Buttons {
+            action: true,
+            ..Buttons::default()
+        },
+        ..InputFrame::default()
+    }
+}
+
+/// Wolf docked into cover on the synthetic wall of this variation, idle, with his back to it
+/// (facing +Z) and the camera behind him, so stick left ([`shimmy`]) slides him to +X.
+fn docked(variation: u8) -> Option<Duel> {
     let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
     if !cache.join("raw/chr/c1010.behbnd.d/c9997.hkx").exists() {
-        return;
+        return None;
     }
     let mut duel = Duel::load(&cache, 4.0).unwrap();
     duel.enemy_active = false;
     duel.player.ground = Box::new(Wall);
     duel.player.docking = synthetic(variation);
     duel.player.body.position = [0.0, 0.0, 0.7];
-    let dt = 1.0 / 60.0;
-    let press = InputFrame {
-        buttons: Buttons {
-            action: true,
-            ..Buttons::default()
-        },
-        ..InputFrame::default()
-    };
     for _ in 0..30 {
-        duel.step(&InputFrame::default(), dt);
+        duel.step(&InputFrame::default(), DT);
     }
-    let r = duel.step(&press, dt);
+    let r = duel.step(&press(), DT);
     assert!(
         r.player
             .behavior
@@ -118,10 +124,27 @@ fn hks_cover(variation: u8, away: bool) {
     );
     let mut idle = false;
     for _ in 0..180 {
-        let r = duel.step(&InputFrame::default(), dt);
+        let r = duel.step(&InputFrame::default(), DT);
         idle |= r.player.animation.as_deref() == Some("a000_021000");
     }
-    assert!(idle);
+    assert!(idle, "variation {variation}: no cover idle");
+    assert!(duel.player.docking.active.is_some(), "not in cover");
+    Some(duel)
+}
+
+/// The stick along the wall with the camera behind Wolf: -1 is left, 1 is right.
+fn shimmy(stick_x: f32) -> InputFrame {
+    InputFrame {
+        move_stick: [stick_x, 0.0],
+        camera_yaw: std::f32::consts::PI,
+        ..InputFrame::default()
+    }
+}
+
+fn hks_cover(variation: u8, away: bool) {
+    let Some(mut duel) = docked(variation) else {
+        return;
+    };
     assert_eq!(
         duel.player
             .behavior
@@ -130,14 +153,10 @@ fn hks_cover(variation: u8, away: bool) {
         Some(if variation >= 10 { 1.0 } else { 0.0 })
     );
     let origin = Vec3::from(duel.player.body.position);
-    let slide = InputFrame {
-        move_stick: [-1.0, 0.0],
-        camera_yaw: std::f32::consts::PI,
-        ..InputFrame::default()
-    };
+    let slide = shimmy(-1.0);
     let mut peek = false;
     for tick in 0..600 {
-        let r = duel.step(&slide, dt);
+        let r = duel.step(&slide, DT);
         peek |= r
             .player
             .behavior
@@ -173,9 +192,9 @@ fn hks_cover(variation: u8, away: bool) {
             ..InputFrame::default()
         }
     } else {
-        press
+        press()
     };
-    let r = duel.step(&end, dt);
+    let r = duel.step(&end, DT);
     assert!(
         r.player
             .behavior
@@ -186,7 +205,7 @@ fn hks_cover(variation: u8, away: bool) {
         r.player
     );
     for _ in 0..180 {
-        duel.step(&InputFrame::default(), dt);
+        duel.step(&InputFrame::default(), DT);
     }
     assert!(duel.player.docking.active.is_none() && duel.player.body.grounded);
     let before = Vec3::from(duel.player.body.position);
@@ -197,7 +216,7 @@ fn hks_cover(variation: u8, away: bool) {
                 camera_yaw: std::f32::consts::PI,
                 ..InputFrame::default()
             },
-            dt,
+            DT,
         );
     }
     assert!(Vec3::from(duel.player.body.position).distance(before) > 0.5);
@@ -294,98 +313,15 @@ fn outskirts_wall_route() {
     assert!(duel.player.docking.active.is_none() && duel.player.body.grounded);
 }
 
-/// Wolf docked into cover on the synthetic free-look wall, idle, with his back to it (facing
-/// +Z) and the camera behind him, so stick left slides him to +X.
-fn docked_free_look() -> Option<Duel> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
-    if !cache.join("raw/chr/c1010.behbnd.d/c9997.hkx").exists() {
-        return None;
-    }
-    let mut duel = Duel::load(&cache, 4.0).unwrap();
-    duel.enemy_active = false;
-    duel.player.ground = Box::new(Wall);
-    duel.player.docking = synthetic(1);
-    duel.player.body.position = [0.0, 0.0, 0.7];
-    let dt = 1.0 / 60.0;
-    for _ in 0..30 {
-        duel.step(&InputFrame::default(), dt);
-    }
-    duel.step(
-        &InputFrame {
-            buttons: Buttons {
-                action: true,
-                ..Buttons::default()
-            },
-            ..InputFrame::default()
-        },
-        dt,
-    );
-    for _ in 0..120 {
-        duel.step(&InputFrame::default(), dt);
-    }
-    assert!(duel.player.docking.active.is_some(), "not in cover");
-    Some(duel)
-}
-
-fn shimmy(stick_x: f32) -> InputFrame {
-    InputFrame {
-        move_stick: [stick_x, 0.0],
-        camera_yaw: std::f32::consts::PI,
-        ..InputFrame::default()
-    }
-}
-
-// Issue #172: the shuffle clip the script picks must carry Wolf the way he slides. The script's
-// sides are named facing the wall, so with his back to it his own left is its right.
+// Issue #172: docked on the free-look wall, Wolf runs to each end in turn. On the way the
+// shuffle clip the script picks must carry him the way he slides (its sides are named facing
+// the wall, so with his back to it his own left is its right), and at the end he must peek out
+// past the open end, not back along the wall.
 #[test]
-fn cover_shuffle_clip_moves_the_way_wolf_slides() {
-    let Some(mut duel) = docked_free_look() else {
+fn cover_shuffle_and_peek_follow_the_slide() {
+    let Some(mut duel) = docked(1) else {
         return;
     };
-    let dt = 1.0 / 60.0;
-    for stick_x in [-1.0, 1.0] {
-        let mut checked = 0;
-        for _ in 0..50 {
-            let before = duel.player.body.position[0];
-            let r = duel.step(&shimmy(stick_x), dt);
-            let moved = duel.player.body.position[0] - before;
-            let anim = r.player.animation.unwrap_or_default();
-            if !(anim.starts_with("a000_0214") || anim.starts_with("a000_0215")) || moved == 0.0 {
-                continue;
-            }
-            let [rx, _, rz, _] = duel
-                .player
-                .clips
-                .clip(&anim)
-                .and_then(|c| c.root_motion.as_ref().map(|m| m.total()))
-                .expect("cover move clip without root motion");
-            // The body's own root-motion mapping: source X mirrored, rotated by the facing.
-            let (sin, cos) = duel.player.body.yaw.sin_cos();
-            let clip_x = -cos * rx + sin * rz;
-            assert!(
-                clip_x * moved > 0.0,
-                "stick {stick_x}: {anim} carries the root {clip_x} along X, Wolf slid {moved}"
-            );
-            assert!(moved * stick_x < 0.0, "stick {stick_x} slid {moved}");
-            checked += 1;
-        }
-        assert!(
-            checked > 20,
-            "stick {stick_x}: only {checked} shuffle ticks"
-        );
-        for _ in 0..40 {
-            duel.step(&InputFrame::default(), dt);
-        }
-    }
-}
-
-// Issue #172: at the end of the wall Wolf peeks out past it, not back along the wall.
-#[test]
-fn cover_peek_leans_out_past_the_open_end() {
-    let Some(mut duel) = docked_free_look() else {
-        return;
-    };
-    let dt = 1.0 / 60.0;
     let head = duel
         .player
         .skeleton
@@ -395,29 +331,58 @@ fn cover_peek_leans_out_past_the_open_end() {
         .unwrap();
     // Stick left runs to the +X end (the right one, facing the wall), stick right to -X.
     for (stick_x, out, clip) in [(-1.0, 1.0, "a000_205021"), (1.0, -1.0, "a000_205020")] {
-        let mut lean = None;
-        for _ in 0..240 {
-            let r = duel.step(&shimmy(stick_x), dt);
-            if r.player.animation.as_deref() == Some(clip) {
+        let mut shuffled = 0;
+        let mut peek_ticks = 0;
+        let mut lean = f32::NEG_INFINITY;
+        for _ in 0..600 {
+            let before = duel.player.body.position[0];
+            let r = duel.step(&shimmy(stick_x), DT);
+            let moved = duel.player.body.position[0] - before;
+            let anim = r.player.animation.unwrap_or_default();
+            if anim == clip {
+                // The largest lean over the first ticks of the loop, so a blend frame cannot
+                // decide it.
                 let bones = duel.player.bone_source_matrices();
                 let world = duel.player.source_to_world();
                 let p = world.transform_point3(bones[head].transform_point3(Vec3::ZERO));
-                lean = Some(p.x - duel.player.body.position[0]);
-                break;
+                lean = lean.max((p.x - duel.player.body.position[0]) * out);
+                peek_ticks += 1;
+                if peek_ticks == 20 {
+                    break;
+                }
+            } else if (anim.starts_with("a000_0214") || anim.starts_with("a000_0215"))
+                && moved != 0.0
+            {
+                let total = duel
+                    .player
+                    .clips
+                    .clip(&anim)
+                    .and_then(|c| c.root_motion.as_ref().map(|m| m.total()))
+                    .expect("cover move clip without root motion");
+                let [clip_x, _] = root_motion_world(total, duel.player.body.yaw.sin_cos());
+                assert!(
+                    clip_x * moved > 0.0,
+                    "stick {stick_x}: {anim} carries the root {clip_x} along X, Wolf slid {moved}"
+                );
+                assert!(moved * stick_x < 0.0, "stick {stick_x} slid {moved}");
+                shuffled += 1;
             }
         }
-        let lean = lean.unwrap_or_else(|| panic!("stick {stick_x}: no {clip} peek"));
         assert!(
-            lean * out > 0.1,
-            "stick {stick_x}: head leans {lean} along X, the open end is {out}"
+            shuffled > 20,
+            "stick {stick_x}: only {shuffled} shuffle ticks"
+        );
+        assert!(peek_ticks > 0, "stick {stick_x}: no {clip} peek");
+        assert!(
+            lean > 0.1,
+            "stick {stick_x}: head leans {lean} toward the open end"
         );
         // Stick back the other way ends the peek.
         for _ in 0..60 {
-            duel.step(&shimmy(-stick_x), dt);
+            duel.step(&shimmy(-stick_x), DT);
         }
     }
 }
-
 #[test]
 fn cover_rejects_missing_wall_bad_height_and_unsupported_variation() {
     let mut docking = synthetic(1);

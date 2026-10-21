@@ -839,7 +839,7 @@ impl Character {
         if env.cover_active
             && docking_idle
             && self.input.stick_world_yaw().is_some()
-            && docking_angle.abs() > 180.0 - crate::docking::COVER_AWAY_ANGLE
+            && crate::docking::cover_stick_away(docking_angle)
         {
             env.requested.insert(crate::input::arm::ACTION);
         }

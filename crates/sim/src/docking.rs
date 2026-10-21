@@ -35,7 +35,16 @@ pub const COVER_HEIGHT_TOLERANCE: f32 = 0.8;
 pub const COVER_WALL_PROBE: f32 = 1.0;
 pub const COVER_PROBE_LIFT: f32 = 0.6;
 pub const COVER_BLOCK_TOLERANCE: f32 = 0.05;
+/// Placeholder away-stick cover exit: half-width in degrees of the stick cone around straight
+/// away from the wall, which is 180 degrees in the docking frame ([`Target::right`]).
 pub const COVER_AWAY_ANGLE: f32 = 30.0;
+
+/// Whether a `DockingStickAngle` (degrees, docking frame) points away from the wall within
+/// [`COVER_AWAY_ANGLE`].
+pub fn cover_stick_away(docking_stick_angle: f32) -> bool {
+    docking_stick_angle.abs() > 180.0 - COVER_AWAY_ANGLE
+}
+
 /// Air hang (env 3045): how far out from the face a fall or jump catches the lip, short range
 /// (type 1) and long range (type 2), and the band of lip heights over the feet. Not traced (the
 /// exe's search); Fireguy32's RustSekiro values.
@@ -150,7 +159,7 @@ pub struct Target {
     pub angle: f32,
 }
 
-/// Right in the docking frame, which faces the wall (`-outward`) for hang and cover alike.
+/// [`Target::right`] from a bare outward normal; the frame and its evidence are documented there.
 fn docking_right(outward: Vec3) -> Vec3 {
     Vec3::new(outward.z, 0.0, -outward.x)
 }
