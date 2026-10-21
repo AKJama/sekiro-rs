@@ -20,8 +20,11 @@ pub const HANG_OUTWARD: f32 = 0.635;
 /// Where the climb ends, in from the lip: HangToStand / HangFootHoldToStand (a000_217500 /
 /// 217600) carry the root 1.10 m forward and 1.60 m up from the hang, 1.10 - 0.635 m past it.
 pub const CLIMB_INWARD: f32 = 0.465;
-/// RustSekiro's stop distance from either hang-edge end.
+/// RustSekiro's stop distance from either end of a hang ledge (its edge chain).
 pub const HANG_END_MARGIN: f32 = 0.35;
+/// How close two hang edges' ends must be to join them into one ledge: the extractor writes
+/// a chain's shared corners as the same vertex, so this only absorbs float noise.
+const CHAIN_JOIN: f32 = 0.01;
 pub const FLOOR_TOLERANCE: f32 = 0.3;
 pub const END_MARGIN: f32 = 0.2;
 pub const OUTWARD_PROBE: f32 = 0.6;
@@ -83,11 +86,27 @@ pub(crate) fn is_cover_clip(name: &str) -> bool {
         )
 }
 
-/// Hang endpoint bits: 1 at the start, 2 at the end, 3 at both on a short edge.
-fn hang_end(distance: f32, length: f32) -> u8 {
-    const END_EPSILON: f32 = 1e-3;
-    let limit = HANG_END_MARGIN + END_EPSILON;
-    u8::from(distance <= limit) | (u8::from(length - distance <= limit) << 1)
+/// Hang endpoint bits: 1 at the start, 2 at the end, 3 at both on a short edge. `margins` are
+/// the stops in from the start and the end, `None` where the ledge carries on into the next
+/// edge. The tolerance covers the hang stop clips' root drift back off the stop (2 to 7 mm in
+/// the foot-hold set), which would otherwise clear the bit and restart the shimmy.
+fn hang_end(distance: f32, length: f32, margins: (Option<f32>, Option<f32>)) -> u8 {
+    const END_EPSILON: f32 = 0.01;
+    let at = |gap: f32, margin: Option<f32>| margin.is_some_and(|m| gap <= m + END_EPSILON);
+    u8::from(at(distance, margins.0)) | (u8::from(at(length - distance, margins.1)) << 1)
+}
+
+/// [`hang_end`]'s bits in the docking frame ([`Target::right`]): 1 left, 2 right, as for
+/// cover. The script reads env 3011 as `DOCKING_TGT_END_TYPE_LEFT` / `_RIGHT` for both, and
+/// refuses a shimmy toward that side, so edge order would block the wrong way on edges that
+/// run right to left.
+fn hang_side_end(bits: u8, edge: &MapEdge, outward: Vec3) -> u8 {
+    let d = Vec3::from(edge.end) - Vec3::from(edge.start);
+    if d.dot(docking_right(outward)) > 0.0 {
+        bits
+    } else {
+        ((bits & 1) << 1) | (bits >> 1)
+    }
 }
 
 /// Check one known face, without searching the edge again or trying its opposite side.
@@ -118,22 +137,6 @@ pub struct MapEdge {
 }
 
 impl MapEdge {
-    /// Horizontal hang span, inset at both ends; short edges hold at their midpoint.
-    fn hang_span(&self, position: Vec3) -> (Vec3, u8) {
-        let a = Vec3::from(self.start);
-        let delta = Vec3::from(self.end) - a;
-        let horizontal = Vec3::new(delta.x, 0.0, delta.z);
-        let length = horizontal.length();
-        let margin = HANG_END_MARGIN.min(length * 0.5);
-        let distance = if length > 0.0 {
-            ((position - a).dot(horizontal) / length).clamp(margin, length - margin)
-        } else {
-            0.0
-        };
-        let t = if length > 0.0 { distance / length } else { 0.5 };
-        (a + delta * t, hang_end(distance, length))
-    }
-
     pub fn closest(&self, position: Vec3) -> (Vec3, f32) {
         let a = Vec3::from(self.start);
         let delta = Vec3::from(self.end) - a;
@@ -153,8 +156,8 @@ pub struct Target {
     pub point: Vec3,
     pub outward: Vec3,
     pub floor: Vec3,
-    /// Cover: 1 left, 2 right, in the docking frame ([`Target::right`]). Hang: 1 start, 2 end,
-    /// 3 both on short edges.
+    /// The ledge or wall ends Wolf is at: 1 left, 2 right, in the docking frame
+    /// ([`Target::right`]); 3 both on a short hang edge.
     pub end: u8,
     pub angle: f32,
 }
@@ -198,6 +201,96 @@ pub struct Docking {
 impl Docking {
     pub fn is_cover(&self, target: &Target) -> bool {
         self.edges[target.edge].kind == 3
+    }
+
+    /// The hang edge that carries the ledge on past one end of edge `index` (its end when
+    /// `at_end`, else its start): same part and chain, sharing that corner. The extractor
+    /// writes a ledge as a chain of straight edges, so a shimmy follows the chain, not one edge.
+    fn chain_next(&self, index: usize, at_end: bool) -> Option<usize> {
+        let edge = &self.edges[index];
+        let corner = Vec3::from(if at_end { edge.end } else { edge.start });
+        self.edges.iter().enumerate().position(|(j, other)| {
+            j != index
+                && is_hang(other)
+                && other.chain == edge.chain
+                && other.source_part == edge.source_part
+                && [other.start, other.end]
+                    .iter()
+                    .any(|&p| Vec3::from(p).distance(corner) <= CHAIN_JOIN)
+        })
+    }
+
+    /// The outward normal on chain edge `to` after rounding the corner from `from`: on the same
+    /// side of the ledge's run (left or right of it), whichever way each edge is stored.
+    fn chain_outward(&self, from: usize, to: usize, outward: Vec3) -> Vec3 {
+        let (a, b) = (&self.edges[from], &self.edges[to]);
+        let near = |p: [f32; 3], q: [f32; 3]| Vec3::from(p).distance(Vec3::from(q)) <= CHAIN_JOIN;
+        let along = if near(a.end, b.start) || near(a.start, b.end) {
+            1.0
+        } else {
+            -1.0
+        };
+        let side = |e: &MapEdge| {
+            let d = Vec3::from(e.end) - Vec3::from(e.start);
+            Vec3::new(-d.z, 0.0, d.x).normalize_or_zero()
+        };
+        let sign = if side(a).dot(outward) >= 0.0 {
+            1.0
+        } else {
+            -1.0
+        };
+        side(b) * sign * along
+    }
+
+    /// The hang point nearest `position` along the ledge through edge `index`. Past a shared
+    /// corner it moves onto the chain's next edge; it stops [`HANG_END_MARGIN`] in from the
+    /// ledge's real ends only, and a short lone edge holds at its midpoint. Returns the edge,
+    /// the point on it and the end bits in edge order ([`hang_end`]).
+    fn hang_span(&self, mut index: usize, position: Vec3) -> (usize, Vec3, u8) {
+        let mut came_from = None;
+        loop {
+            let edge = &self.edges[index];
+            let a = Vec3::from(edge.start);
+            let delta = Vec3::from(edge.end) - a;
+            let horizontal = Vec3::new(delta.x, 0.0, delta.z);
+            let length = horizontal.length();
+            let distance = if length > 0.0 {
+                (position - a).dot(horizontal) / length
+            } else {
+                0.0
+            };
+            let prev = self.chain_next(index, false);
+            let next = self.chain_next(index, true);
+            let onward = if distance < 0.0 {
+                prev
+            } else if distance > length {
+                next
+            } else {
+                None
+            };
+            // Never step back onto the edge just left: just past a corner, both overhang. A
+            // shimmy tick moves centimetres, so one step onto the next edge is all it needs.
+            if came_from.is_none()
+                && let Some(j) = onward
+            {
+                came_from = Some(index);
+                index = j;
+                continue;
+            }
+            let mut margins = (
+                prev.is_none().then_some(HANG_END_MARGIN),
+                next.is_none().then_some(HANG_END_MARGIN),
+            );
+            let total = margins.0.unwrap_or(0.0) + margins.1.unwrap_or(0.0);
+            if total > length {
+                let scale = length / total;
+                margins = (margins.0.map(|m| m * scale), margins.1.map(|m| m * scale));
+            }
+            let distance =
+                distance.clamp(margins.0.unwrap_or(0.0), length - margins.1.unwrap_or(0.0));
+            let t = if length > 0.0 { distance / length } else { 0.5 };
+            return (index, a + delta * t, hang_end(distance, length, margins));
+        }
     }
 
     fn cover_target(&self, index: usize, position: Vec3, ground: &dyn Ground) -> Option<Target> {
@@ -252,12 +345,9 @@ impl Docking {
         None
     }
 
-    /// RustSekiro held_state: block only travel beyond the endpoint in Wolf's own frame.
+    /// RustSekiro held_state: block only travel beyond the ledge end on that side.
     pub fn hang_blocked(&self, target: &Target, left: bool) -> bool {
-        let edge = &self.edges[target.edge];
-        let delta = Vec3::from(edge.end) - Vec3::from(edge.start);
-        let toward_end = (target.right().dot(delta) > 0.0) != left;
-        target.end & if toward_end { 2 } else { 1 } != 0
+        target.end & if left { 1 } else { 2 } != 0
     }
 
     /// Recheck only the docked face's floor and drop, not the edge search.
@@ -345,7 +435,8 @@ impl Docking {
         if !is_hang(edge) {
             return None;
         }
-        let (point, end) = edge.hang_span(position);
+        let (index, point, end) = self.hang_span(index, position);
+        let edge = &self.edges[index];
         let d = Vec3::from(edge.end) - Vec3::from(edge.start);
         let side = Vec3::new(-d.z, 0.0, d.x).try_normalize()?;
         for outward in [side, -side] {
@@ -357,7 +448,7 @@ impl Docking {
                 point,
                 outward,
                 floor,
-                end,
+                end: hang_side_end(end, edge, outward),
                 angle: 0.0,
             });
         }
@@ -490,17 +581,18 @@ impl Docking {
         {
             self.active = self.candidate.clone();
         }
-        let Some(target) = self.active.as_mut() else {
+        // Taken out while it is moved, so the ledge search below can borrow the edges.
+        let Some(mut target) = self.active.take() else {
             return false;
         };
         if self.edges[target.edge].kind == 3 {
+            self.active = Some(target);
             return false;
         }
         if DROP_CLIPS.contains(&name) {
             body.grounded = false;
             body.velocity = [0.0; 3];
             body.fall_top = body.position[1];
-            self.active = None;
             self.climb_start = None;
             return false;
         }
@@ -515,28 +607,30 @@ impl Docking {
                     .clamp(0.0, 1.0),
             )
         } else if self.climb_start.is_some() {
-            let floor = target.floor;
-            body.position = floor.to_array();
+            body.position = target.floor.to_array();
             body.grounded = true;
             body.velocity = [0.0; 3];
             body.last_fall_height = 0.0;
-            self.active = None;
             self.climb_start = None;
             return true;
         } else if is_hang_clip(name) {
             // RustSekiro hold: keep the authored root displacement along the edge.
             // Outward is (sin yaw, 0, cos yaw), so no angle round-trip is needed.
             let [x, z] = root_motion_world(root_motion, (target.outward.x, target.outward.z));
-            let (point, end) =
-                self.edges[target.edge].hang_span(target.point + Vec3::new(x, 0.0, z));
-            target.floor += point - target.point;
+            let moved = target.point + Vec3::new(x, 0.0, z);
+            let (index, point, end) = self.hang_span(target.edge, moved);
+            if index != target.edge {
+                target.outward = self.chain_outward(target.edge, index, target.outward);
+                target.edge = index;
+            }
+            let lift = target.floor.y - target.point.y;
+            target.floor = point - target.outward * CLIMB_INWARD + Vec3::Y * lift;
             target.point = point;
-            target.end = end;
+            target.end = hang_side_end(end, &self.edges[index], target.outward);
             target.hang_position()
         } else if name.starts_with("a000_217") && !name.starts_with("a000_2177") {
             target.hang_position()
         } else {
-            self.active = None;
             return false;
         };
         body.position = position.to_array();
@@ -544,6 +638,7 @@ impl Docking {
         body.velocity = [0.0; 3];
         body.grounded = false;
         body.fall_top = position.y;
+        self.active = Some(target);
         true
     }
 }

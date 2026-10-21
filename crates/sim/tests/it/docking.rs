@@ -61,7 +61,7 @@ fn closest_reach_facing_and_ends() {
     assert!(docking.candidate.is_none());
     body.position = [1.99, 0.0, 0.4];
     docking.search(&body, &Step);
-    assert_eq!(docking.candidate.unwrap().end, 2);
+    assert_eq!(docking.candidate.unwrap().end, 1);
 }
 
 #[test]
@@ -99,10 +99,9 @@ fn hang_travel_updates_endpoint_flags_with_reversed_edges() {
         }
         docking.active = docking.target(0, Vec3::new(0.0, 0.0, 0.4), &Step);
         let mut body = Body::default();
-        for (motion, end) in [
-            (100.0, if reversed { 1 } else { 2 }),
-            (-100.0, if reversed { 2 } else { 1 }),
-        ] {
+        // Facing the wall (outward -Z), +X is Wolf's left: the end bits follow his sides,
+        // not the edge's stored order.
+        for (motion, end) in [(100.0, 1), (-100.0, 2)] {
             assert!(docking.step(
                 &mut body,
                 Some("a000_020202"),
@@ -407,5 +406,134 @@ fn shimmy_both_ways_stops_at_ends_and_can_climb_or_drop() {
         } else {
             assert!(duel.player.body.position[1] < initial.y - 1.0);
         }
+    }
+}
+
+/// A ledge is a chain of edges (#147): the shimmy rounds the shared corner onto the next
+/// edge, keeps to the same side of the ledge, and stops only near the chain's own ends,
+/// whichever way each edge is stored.
+#[test]
+fn hang_travel_follows_the_edge_chain_round_a_corner() {
+    let mut docking = synthetic();
+    // An inside corner at (2, 0, 0), the second edge stored the other way round, toward it.
+    docking.edges.push(MapEdge {
+        start: [2.0, 0.0, -3.0],
+        end: [2.0, 0.0, 0.0],
+        ..docking.edges[0].clone()
+    });
+    docking.active = docking.target(0, Vec3::new(0.0, 0.0, 0.4), &Step);
+    let mut body = Body::default();
+    let mut step = |docking: &mut Docking, motion: f32| {
+        assert!(docking.step(
+            &mut body,
+            Some("a000_020202"),
+            0.0,
+            None,
+            [motion, 0.0, 0.0, 0.0]
+        ));
+        docking.active.clone().unwrap()
+    };
+    // Facing the wall (outward -Z), Wolf's left is +X, toward the corner.
+    let mut target = step(&mut docking, 0.0);
+    for _ in 0..60 {
+        target = step(&mut docking, 0.1);
+    }
+    assert_eq!(target.edge, 1, "{target:?}");
+    assert!(target.outward.distance(-Vec3::X) < 1e-4, "{target:?}");
+    assert_eq!(target.end, 1, "at the ledge's left end: {target:?}");
+    assert!((target.point - Vec3::new(2.0, 0.0, -3.0 + HANG_END_MARGIN)).length() < 1e-4);
+    assert!(docking.hang_blocked(&target, true) && !docking.hang_blocked(&target, false));
+    // Back round the corner to the first edge's free end, the ledge's right end.
+    for _ in 0..80 {
+        target = step(&mut docking, -0.1);
+    }
+    assert_eq!(target.edge, 0, "{target:?}");
+    assert_eq!(target.outward, -Vec3::Z);
+    assert_eq!(target.end, 2);
+    assert!((target.point - Vec3::new(-2.0 + HANG_END_MARGIN, 0.0, 0.0)).length() < 1e-4);
+}
+
+/// The wall in m11_00's foggy pit (#147): one foot-hold ledge of seven edges (h013500 chain
+/// 1). Hung from its second edge, Wolf shimmies to both of the ledge's ends, not each edge's.
+#[test]
+fn snake_pit_shimmy_runs_the_whole_ledge() {
+    let dir = cache().join("maps/m11_00_00_00");
+    if !dir.join("edges.json").exists() || !dir.join("collision.bin").exists() {
+        return;
+    }
+    let world = sekiro_sim::collision::CollisionWorld::load(&dir.join("collision.bin")).unwrap();
+    let docking = Docking::load(&dir.join("edges.json")).unwrap();
+    let ledge: Vec<usize> = (0..docking.edges.len())
+        .filter(|&i| {
+            let e = &docking.edges[i];
+            e.source_part == "h013500" && e.chain == 1 && e.kind == 2
+        })
+        .collect();
+    assert_eq!(ledge.len(), 7);
+    let start = ledge[1];
+    let e = &docking.edges[start];
+    let mid = (Vec3::from(e.start) + Vec3::from(e.end)) * 0.5;
+    let target = docking.target(start, mid, &world).unwrap();
+    let mut duel = Duel::load(&cache(), 4.0).unwrap();
+    duel.enemy_active = false;
+    duel.player.body.position = target.floor.to_array();
+    duel.player.body.yaw = (-target.outward.x).atan2(-target.outward.z);
+    duel.player.ground = Box::new(world);
+    duel.player.docking = docking;
+    let dt = 1.0 / 60.0;
+    for _ in 0..30 {
+        duel.step(&InputFrame::default(), dt);
+    }
+    let action = press(Buttons {
+        action: true,
+        ..Buttons::default()
+    });
+    let r = duel.step(&action, dt);
+    assert!(
+        r.player
+            .behavior
+            .events
+            .iter()
+            .any(|e| e == "W_StandToHangFootHold1"),
+        "{:?}",
+        r.player.behavior.events
+    );
+    for _ in 0..90 {
+        duel.step(&InputFrame::default(), dt);
+    }
+    // Docking left (stick -1) runs toward the chain's first edge's start, right to the last's end.
+    let edges = &duel.player.docking.edges;
+    let ends = [
+        (-1.0, ledge[0], Vec3::from(edges[ledge[0]].start)),
+        (1.0, ledge[6], Vec3::from(edges[ledge[6]].end)),
+    ];
+    for (side, edge, end) in ends {
+        let mut target = None;
+        for _ in 0..900 {
+            let yaw = duel.player.docking.active.as_ref().unwrap().yaw();
+            let moving = InputFrame {
+                move_stick: [side, 0.0],
+                camera_yaw: yaw,
+                ..InputFrame::default()
+            };
+            let r = duel.step(&moving, dt);
+            let t = duel.player.docking.active.clone().expect("still hanging");
+            if r.player.animation.as_deref() == Some("a000_020010") && t.end != 0 {
+                target = Some(t);
+                break;
+            }
+        }
+        let target = target.unwrap_or_else(|| {
+            panic!(
+                "side {side}: never settled at an end: {:?}",
+                duel.player.docking.active
+            )
+        });
+        assert_eq!(target.edge, edge, "side {side}: stopped short: {target:?}");
+        let gap = Vec3::new(target.point.x - end.x, 0.0, target.point.z - end.z).length();
+        assert!(
+            (gap - HANG_END_MARGIN).abs() < 0.02,
+            "side {side}: {gap} m from the ledge's end"
+        );
     }
 }
