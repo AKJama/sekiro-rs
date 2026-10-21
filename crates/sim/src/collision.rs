@@ -8,7 +8,7 @@
 //!   [`MAX_SLOPE_DEGREES`] of up) under a point, no higher than a given top. Bodies ask for
 //!   the floor up to [`STEP_HEIGHT`] above their feet, so stairs and small ledges are stepped
 //!   onto, and follow the floor down by the same amount before they start falling.
-//! - Walls: the body is three spheres stacked above the step zone (radius [`RADIUS`]).
+//! - Walls: the body is two spheres stacked above the step zone (radius [`RADIUS`]).
 //!   [`CollisionWorld::slide`] moves them in sub-steps and pushes them out of every triangle
 //!   horizontally, so the body stops at walls and slides along them, and steep slopes act as
 //!   walls. Vertical pushes are left to the floor query.
@@ -337,13 +337,17 @@ pub const STEP_HEIGHT: f32 = 0.5;
 /// Steepest walkable surface.
 /// Havok character proxy default, FUN_14104d3d0 (FwLo's RustSekiro, map.rs).
 pub const MAX_SLOPE_DEGREES: f32 = 60.0;
-/// Heights of the collision spheres' centres above the feet. The lowest sphere's bottom sits
-/// at the step height, so stairs reach the floor query rather than the wall push.
-const SPHERES: [f32; 3] = [STEP_HEIGHT + RADIUS, 1.2, 1.55];
 /// The player's physics capsule height (see [`RADIUS`]).
 pub const CAPSULE_HEIGHT: f32 = 1.5;
-/// The top of the body's top collision sphere above the feet: where its head meets a ceiling.
-pub const HEAD_TOP: f32 = SPHERES[SPHERES.len() - 1] + RADIUS;
+/// The top of the body's top collision sphere above the feet, the capsule's top: where its
+/// head meets a ceiling.
+pub const HEAD_TOP: f32 = CAPSULE_HEIGHT;
+/// Heights of the collision spheres' centres above the feet. The lowest sphere's bottom sits
+/// at the step height, so stairs reach the floor query rather than the wall push; the top
+/// sphere's top is the capsule's, so Wolf passes under anything over 1.5 m, as in the game:
+/// the broken-wall gap past the Outskirts Wall - Gate Path idol has planks down to 1.77 m
+/// above the floor (#146), which a top sphere reaching 1.95 m ran into.
+const SPHERES: [f32; 2] = [STEP_HEIGHT + RADIUS, HEAD_TOP - RADIUS];
 /// How close the fall-prevention assist lets a body come to its walls: `FallAssistMinRadius`,
 /// physics module `+0xaec`, 0.16 m from the constructor `FUN_140bbb010` (`+0xae8`,
 /// `FallAssistMaxRadius`, is 0.4). `FUN_140bc68d0` slides the body's move along the walls its
@@ -1101,7 +1105,8 @@ impl CollisionWorld {
         let min = Vec2::new(start.x.min(start.x + d.x), start.z.min(start.z + d.y)) - reach;
         let max = Vec2::new(start.x.max(start.x + d.x), start.z.max(start.z + d.y)) + reach;
         let low = start.y + SPHERES[0] - RADIUS - 0.01;
-        let high = start.y + SPHERES[SPHERES.len() - 1] + RADIUS + 0.01;
+        let high = start.y + HEAD_TOP + 0.01;
+
         // The horizontal keep box: the move's reach plus the move's length and a body radius
         // more. Push-outs carry the body off the straight line, along a slanted wall for one:
         // each sub-step's push only undoes what that sub-step pushed into a wall, so together
