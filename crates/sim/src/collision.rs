@@ -337,11 +337,14 @@ pub const STEP_HEIGHT: f32 = 0.5;
 /// Steepest walkable surface.
 /// Havok character proxy default, FUN_14104d3d0 (FwLo's RustSekiro, map.rs).
 pub const MAX_SLOPE_DEGREES: f32 = 60.0;
-/// Heights of the collision spheres' centres above the feet. The lowest sphere's bottom sits
-/// at the step height, so stairs reach the floor query rather than the wall push.
-const SPHERES: [f32; 3] = [STEP_HEIGHT + RADIUS, 1.2, 1.55];
 /// The player's physics capsule height (see [`RADIUS`]).
 pub const CAPSULE_HEIGHT: f32 = 1.5;
+/// Heights of the collision spheres' centres above the feet. The lowest sphere's bottom sits
+/// at the step height, so stairs reach the floor query rather than the wall push; the top
+/// sphere's top is the capsule's, so Wolf passes under anything over 1.5 m, as in the game:
+/// the broken-wall gap past the Outskirts Wall - Gate Path idol has planks down to 1.77 m
+/// above the floor (#146), which a top sphere reaching 1.95 m ran into.
+const SPHERES: [f32; 2] = [STEP_HEIGHT + RADIUS, CAPSULE_HEIGHT - RADIUS];
 /// The top of the body's top collision sphere above the feet: where its head meets a ceiling.
 pub const HEAD_TOP: f32 = SPHERES[SPHERES.len() - 1] + RADIUS;
 /// How close the fall-prevention assist lets a body come to its walls: `FallAssistMinRadius`,

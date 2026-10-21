@@ -232,3 +232,33 @@ fn castle_gate_route_never_sinks_below_the_floor() {
         assert!((back[1] + 59.2).abs() < 0.5, "back at the moat: {back:?}");
     }
 }
+
+/// #146: past the Outskirts Wall - Gate Path idol, Wolf walks through the hole in the broken
+/// wooden wall (map part h004810) below the broken railing and back. Its splintered planks hang
+/// to 1.77 m above the floor: under the 1.5 m capsule's top, so the body must pass under them.
+#[test]
+fn wolf_walks_through_the_broken_wall_past_the_gate_path_idol() {
+    let dir = map_dir();
+    if !dir.join("object_collision.bin").is_file() {
+        eprintln!("skipping: {} not exported", dir.display());
+        return;
+    }
+    let mut world = CollisionWorld::load_map(&dir).unwrap();
+    world
+        .add_block_objects(&dir, "m11_00_00_00", |_, who| who)
+        .unwrap();
+    // Where the playtester stood at the hole, then through it to the floor 0.2 m lower.
+    let through = [
+        [-180.97, -29.075, 26.33],
+        [-181.8, -29.2, 24.6],
+        [-182.6, -29.29, 22.8],
+    ];
+    let end = walk_route(&world, &through, 0.08);
+    assert!((end[1] + 29.29).abs() < 0.1, "on the far floor: {end:?}");
+    let back = [end, [-181.8, -29.2, 24.6], [-181.0, -29.075, 26.6]];
+    let end = walk_route(&world, &back, 0.08);
+    assert!(
+        (end[1] + 29.075).abs() < 0.1,
+        "back at the idol side: {end:?}"
+    );
+}
