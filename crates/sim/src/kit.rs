@@ -6,11 +6,16 @@
 //! does not take its half of the Sen and experience (TentativePlayerParam `MoneyLostRate` /
 //! `SkillPointLostRate` 50).
 //! Map items (`crate::items`) go into the kit with [`Kit::add`], and their taken flags too;
-//! what is over the carry limit goes to the Storage (`storage`). The gourd's charges, the Spirit
-//! Emblems and the other goods are counted, added and used through one place ([`Kit::held`]).
-//! gap: Rest does not restock the carried goods from the Storage yet.
+//! what is over the carry limit goes to the Storage (`storage`), and Rest at an idol or a
+//! respawn after death refills the gourd and tops the carried goods back up from it
+//! ([`Kit::restock`]), each as its EquipParamGoods row says ([`GoodsRule`]). The gourd's
+//! charges, the Spirit Emblems and the other goods are counted, added and used through one
+//! place ([`Kit::held`]).
+//! gap: the gourd's maximum stays at the start kit's 3 (no Gourd Seeds).
 
 use std::collections::{BTreeMap, BTreeSet};
+
+use crate::items::GoodsRule;
 
 /// Experience from skill point n to n + 1 (n = points earned so far, spent or not); past the
 /// table the last step repeats. The exe computes it, not the params: the table is the one the
@@ -49,6 +54,9 @@ pub struct Reward {
 pub struct Kit {
     /// Healing Gourd uses left.
     pub gourd_charges: u32,
+    /// Healing Gourd uses when full, what Rest and a respawn refill it to (#184; Gourd Seeds
+    /// raise it in the game, not modelled).
+    pub gourd_max: u32,
     /// Spirit Emblems carried (the menu's starting capacity is 15).
     pub spirit_emblems: u32,
     /// Resurrection nodes available.
@@ -89,6 +97,7 @@ impl Default for Kit {
     fn default() -> Self {
         Self {
             gourd_charges: 3,
+            gourd_max: 3,
             spirit_emblems: 15,
             resurrections: 2,
             combat_art: 5100,
@@ -159,20 +168,47 @@ impl Kit {
         self.storage.get(&id).copied().unwrap_or(0)
     }
 
-    /// Takes `n` of the goods `id` up to `max` carried (EquipParamGoods `maxNum`), the rest to
-    /// the Storage. The gourd (goods 3000) fills its charges and Spirit Emblems (goods 1000)
-    /// their count, as [`Kit::held`] keeps them.
-    pub fn add(&mut self, id: i32, n: u32, max: u32) {
-        let added = n.min(max.saturating_sub(self.count(id)));
-        if added > 0 {
-            match self.held_mut(id) {
-                Some(held) => *held += added,
-                None => self.goods.push((id, added)),
+    /// Takes `n` of the goods `id` up to its carry limit, the rest to the Storage up to what the
+    /// Storage keeps of it (beyond that it is lost). The gourd (goods 3000) fills its charges
+    /// and Spirit Emblems (goods 1000) their count, as [`Kit::held`] keeps them.
+    pub fn add(&mut self, id: i32, n: u32, rule: GoodsRule) {
+        let over = n - self.carry(id, n, rule.carry);
+        if over > 0 && rule.store > 0 {
+            let stored = self.storage.entry(id).or_default();
+            *stored = stored.saturating_add(over).min(rule.store);
+        }
+    }
+
+    /// Rest at an idol, or a respawn after death: the Healing Gourd is refilled to
+    /// `gourd_max`, and every goods in the Storage whose rule restocks is carried again up to
+    /// its carry limit, the rest left stored. EquipParamGoods `autoReplenishType` marks it
+    /// ([`GoodsRule::restock`]); the exe's use of it is not read, so this takes from the Storage
+    /// only what tops the carried count up, as the game behaves.
+    pub fn restock(&mut self, rule: impl Fn(i32) -> GoodsRule) {
+        self.gourd_charges = self.gourd_charges.max(self.gourd_max);
+        for (id, n) in std::mem::take(&mut self.storage) {
+            let r = rule(id);
+            let taken = if r.restock {
+                self.carry(id, n, r.carry)
+            } else {
+                0
+            };
+            if n > taken {
+                self.storage.insert(id, n - taken);
             }
         }
-        if n > added {
-            *self.storage.entry(id).or_default() += n - added;
+    }
+
+    /// Carries up to `n` more of `id` without passing `limit`; returns how many it took.
+    fn carry(&mut self, id: i32, n: u32, limit: u32) -> u32 {
+        let taken = n.min(limit.saturating_sub(self.count(id)));
+        if taken > 0 {
+            match self.held_mut(id) {
+                Some(held) => *held += taken,
+                None => self.goods.push((id, taken)),
+            }
         }
+        taken
     }
 
     /// A defeated enemy's reward: its experience fills the gauge, each full gauge a skill point
@@ -293,29 +329,67 @@ mod tests {
     fn goods_over_the_carry_limit_go_to_the_storage() {
         let mut kit = Kit::default();
         // Pellets (3020) are at their limit of 3: both go to the Storage.
-        kit.add(3020, 2, 3);
+        kit.add(3020, 2, GoodsRule::consumable(3));
         assert_eq!((kit.count(3020), kit.stored(3020)), (3, 2));
         // Room for one of two Spirit Emblems.
         kit.spirit_emblems = 14;
-        kit.add(crate::items::SPIRIT_EMBLEM, 2, 15);
+        kit.add(crate::items::SPIRIT_EMBLEM, 2, GoodsRule::consumable(15));
         assert_eq!((kit.spirit_emblems, kit.stored(1000)), (15, 1));
         // A goods not held is carried, with nothing stored.
-        kit.add(7, 2, 99);
+        kit.add(7, 2, GoodsRule::consumable(99));
         assert_eq!((kit.count(7), kit.stored(7)), (2, 0));
         // Nothing carried at a limit of 0: no empty goods entry.
-        kit.add(8, 1, 0);
+        kit.add(8, 1, GoodsRule::consumable(0));
         assert_eq!((kit.count(8), kit.stored(8)), (0, 1));
         assert!(kit.goods.iter().all(|(g, _)| *g != 8));
     }
 
     #[test]
-    fn adding_the_gourd_fills_its_charges_not_a_goods_entry() {
+    fn adding_the_gourd_fills_its_charges_and_loses_the_rest() {
         let mut kit = Kit::default();
         let gourd = crate::items::HEALING_GOURD;
         kit.gourd_charges = 1;
-        // Room for two of three charges at a limit of 3; the third goes to the Storage.
-        kit.add(gourd, 3, 3);
-        assert_eq!((kit.gourd_charges, kit.stored(gourd)), (3, 1));
+        // Room for two of three charges; goods 3000 has no Storage (isDeposit 0).
+        let rule = GoodsRule {
+            store: 0,
+            ..GoodsRule::consumable(3)
+        };
+        kit.add(gourd, 3, rule);
+        assert_eq!((kit.gourd_charges, kit.stored(gourd)), (3, 0));
         assert!(kit.goods.iter().all(|(g, _)| *g != gourd));
+        assert!(kit.storage.is_empty());
+    }
+
+    #[test]
+    fn rest_refills_the_gourd_and_restocks_goods_from_the_storage_up_to_their_limit() {
+        let mut kit = Kit::default();
+        let emblem = crate::items::SPIRIT_EMBLEM;
+        kit.storage = BTreeMap::from([(3020, 5), (3500, 1), (emblem, 4), (5400, 2)]);
+        // Two Pellets used, all 10 Ceramic Shards thrown, 13 of 15 Spirit Emblems spent.
+        kit.use_goods(3020);
+        kit.use_goods(3020);
+        kit.goods.retain(|(g, _)| *g != 3500);
+        kit.spirit_emblems = 2;
+        // One gourd use drunk: the gourd has no Storage, it refills to its maximum.
+        kit.use_goods(crate::items::HEALING_GOURD);
+        let rule = |id| match id {
+            3020 => GoodsRule::consumable(3),
+            // A goods whose row does not restock stays stored.
+            5400 => GoodsRule {
+                restock: false,
+                ..GoodsRule::consumable(1)
+            },
+            _ => GoodsRule::consumable(if id == emblem { 15 } else { 10 }),
+        };
+        kit.restock(rule);
+        assert_eq!(kit.gourd_charges, kit.gourd_max);
+        assert_eq!((kit.count(3020), kit.stored(3020)), (3, 3));
+        assert_eq!((kit.count(3500), kit.stored(3500)), (1, 0));
+        assert_eq!((kit.spirit_emblems, kit.stored(emblem)), (6, 0));
+        assert_eq!((kit.count(5400), kit.stored(5400)), (0, 2));
+        assert_eq!(
+            kit.storage.keys().copied().collect::<Vec<_>>(),
+            [3020, 5400]
+        );
     }
 }

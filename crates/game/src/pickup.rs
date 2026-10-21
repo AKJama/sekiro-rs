@@ -27,28 +27,38 @@ const PICK_UP: i32 = 10010103;
 const LINE_SECS: f32 = 2.5;
 const COUNT_TEXT: Color = Color::srgb(0.88, 0.85, 0.78);
 
-/// The items lying on the play `blocks`, with the params they read; empty when the params or
-/// the blocks' MSBs are missing.
+/// The item params, read once for the sim's pickups and Storage and the game menu's carry
+/// limits; empty (logged here, once) when they are missing.
+pub(super) fn item_data(cache: &std::path::Path) -> Arc<ItemData> {
+    match ItemData::load(cache) {
+        Ok(data) => Arc::new(data),
+        Err(e) => {
+            warn!(
+                "item params: {e}; no map items, and goods are carried up to 99 but never stored or restocked"
+            );
+            Arc::default()
+        }
+    }
+}
+
+/// The items lying on the play `blocks`; empty when the params or the blocks' MSBs are missing.
 pub(super) fn load(
     cache: &std::path::Path,
     blocks: &BTreeMap<String, serde_json::Value>,
-) -> (Vec<MapPickup>, Arc<ItemData>) {
-    let data = match ItemData::load(cache) {
-        Ok(data) => Arc::new(data),
-        Err(e) => {
-            warn!("map items: {e}");
-            return (Vec::new(), Arc::default());
-        }
-    };
+    data: &ItemData,
+) -> Vec<MapPickup> {
+    if data.lots.is_empty() {
+        return Vec::new();
+    }
     let mut pickups = Vec::new();
     for block in blocks.keys() {
-        match sekiro_sim::items::map_pickups(cache, block, &data) {
+        match sekiro_sim::items::map_pickups(cache, block, data) {
             Ok(found) => pickups.extend(found),
             Err(e) => warn!("map items: {e}"),
         }
     }
     eprintln!("map items: {} on {} blocks", pickups.len(), blocks.len());
-    (pickups, data)
+    pickups
 }
 
 #[derive(Component)]

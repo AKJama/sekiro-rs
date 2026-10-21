@@ -456,7 +456,9 @@ pub fn run(options: Options) -> Result<()> {
     let mut stories = map::story::MapStory::default();
     let mut start_yaw = 0.0;
     let mut idols = idol::Idols::default();
-    let mut has_pickups = false;
+    // The item params, shared by the sim (pickups, Storage, restock) and the game menu.
+    let item_data = pickup::item_data(&cache);
+    let mut pickups = Vec::new();
     let mut within = None;
     let mut fog_walls = Vec::new();
     if let Some(spec) = options.arena {
@@ -517,9 +519,7 @@ pub fn run(options: Options) -> Result<()> {
         stage("collision world");
         idols = idol::Idols::load(&cache, &blocks, |x, z, y| world.floor(x, z, y + 1.0));
         duel.set_idols(idols.spots.clone());
-        let (pickups, item_data) = pickup::load(&cache, &blocks);
-        has_pickups = !pickups.is_empty();
-        duel.set_pickups(pickups, item_data);
+        pickups = pickup::load(&cache, &blocks, &item_data);
         let (start, yaw_degrees) = match options.spawn {
             Some([x, y, z, yaw]) => {
                 let y = world.floor(x, z, y + 1.0).unwrap_or(y);
@@ -549,6 +549,8 @@ pub fn run(options: Options) -> Result<()> {
         on_map = Some((dir, id.clone(), world));
         map::raise_io_stack();
     }
+    let has_pickups = !pickups.is_empty();
+    duel.set_pickups(pickups, item_data.clone());
     if let Some((dir, _, _)) = &on_map
         && dir.join("edges.json").exists()
     {
@@ -828,7 +830,7 @@ pub fn run(options: Options) -> Result<()> {
     );
     crate::menu::install(&mut app);
     // First of the screens, so its extra menu atlases load with theirs in one read.
-    game_menu::install(&mut app, options.attack_power.value());
+    game_menu::install(&mut app, options.attack_power.value(), item_data);
     crate::death_screen::install(&mut app);
     idol::install(&mut app, idols);
     pickup::install(&mut app, has_pickups);

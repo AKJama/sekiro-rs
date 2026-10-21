@@ -205,3 +205,13 @@ The extractor crops the five SB_FE wire sprites from the menu layout and texture
 The XML layout gives sprite rectangles, without movie animation instructions, so distant acquisition uses an expanding radial reveal of MENU_Wire_Distance, starting at a central dot inside MENU_Wire_02.
 MENU_Wire_01 frames the ready MENU_Wire_Marker disc; non-rideable targets show the ring with MENU_Wire_Cursor instead.
 The approximately 49 px outer diameter at 1440p and dot size are fitted to the supplied retail captures; the native FE movie's reveal curve, glow and transition timing remain approximations.
+
+## Goods Storage and restock, issue #186
+
+Goods over their EquipParamGoods `maxNum` go to the Storage only on `isDeposit` 1 rows, up to `maxRepositoryNum`; the rest is lost, as for the Healing Gourd and most key items.
+Which goods Rest tops back up from the Storage is read from `autoReplenishType` (0 or 2 in the data): 2 is taken to mean "restock from the Storage up to the carry limit".
+The exe's handling of that field is not read; 2 is also set on 44 key items (the Memories 5200-5322, the Sakes 9100-9105, the carp feeds 9180-9182 and the Treasure Carp Scales 10000) and on 21 `isDeposit` 0 rows such as the gourd 3000, which never reach the Storage.
+A respawn after death restocks the goods and refills the gourd as Rest does.
+No data or RE note covers it (FwLo's RustSekiro kb only records that Rest refills the gourd); it follows the game's well-known behaviour that dying refills consumables like resting.
+A goods with no EquipParamGoods row, or with the params missing, is carried up to 99 but never stored or restocked.
+The gourd's maximum stays at the start kit's 3 uses; Gourd Seeds are not modelled.

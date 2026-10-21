@@ -3107,6 +3107,8 @@ impl Duel {
         if let Some(t) = self.respawn_in.as_mut() {
             *t -= dt;
             if *t <= 0.0 && self.reset().is_ok() {
+                // A respawn after death restocks the goods as Rest does (docs/FIDELITY.md).
+                self.restock_kit();
                 respawned = true;
             }
         }
