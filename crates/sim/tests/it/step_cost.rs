@@ -138,6 +138,29 @@ fn wall_slide_tests_only_the_body_band() {
     assert!(tested < 2000, "{tested} triangles per push-out pass");
 }
 
+/// A rising head's ceiling sweep tests only the flat faces in its height band whose boxes reach
+/// its rim: at the worst wall spot of #145, and just under the cap beam pressed against the gate
+/// fence (#170).
+#[test]
+fn ceiling_sweeps_test_only_nearby_faces() {
+    use sekiro_sim::body::Ground;
+    let Some(world) = play_world() else {
+        return;
+    };
+    let [x, z] = [-257.0, 8.0];
+    let wall = [x, world.floor(x, z, -44.0).unwrap(), z];
+    let [x, z] = [-141.79, -149.49];
+    let floor = [x, world.floor(x, z, -50.0).unwrap(), z];
+    let beam = world
+        .ceiling(floor, 5.0)
+        .expect("the cap beam over the fence");
+    for feet in [wall, [x, beam - 0.1, z]] {
+        let tested = world.ceiling_triangle_count(feet, 0.2);
+        // 30 and 32.
+        assert!(tested < 100, "{tested} triangles at {feet:?}");
+    }
+}
+
 /// The deathblow on the soldier where the live game stalled (#156, Wolf at about
 /// (-126.3, -47.2, -193.9) facing 270 degrees): no step of the throw may spend more than a
 /// bounded number of ground queries searching for pair clearance (the start's search tried
