@@ -1114,11 +1114,9 @@ fn inventory(cat: usize, kit: &Kit, book: &Book) -> Vec<Entry> {
     };
     let held = |n: u32, of: u32| ("Number Held".to_string(), format!("{n}/ {of}"));
     let storage = |id: i32| {
-        let n = kit.stored(id);
-        let n = if n > 0 {
-            n.to_string()
-        } else {
-            "-".to_string()
+        let n = match kit.stored(id) {
+            0 => "-".into(),
+            n => n.to_string(),
         };
         ("In Storage".to_string(), n)
     };
@@ -1135,7 +1133,10 @@ fn inventory(cat: usize, kit: &Kit, book: &Book) -> Vec<Entry> {
             let gourd = entry(
                 Slot::Goods(HEALING_GOURD, g),
                 Some(g),
-                vec![("Uses".to_string(), format!("{g}/{g}")), storage(3000)],
+                vec![
+                    ("Uses".to_string(), format!("{g}/{g}")),
+                    storage(HEALING_GOURD),
+                ],
             );
             std::iter::once(gourd)
                 .chain(held_goods(kit, tables, 0).into_iter().map(stocked))
