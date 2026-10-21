@@ -31,6 +31,7 @@ mod docking;
 mod duel;
 mod edge_hold;
 mod emma;
+mod fence;
 mod folding_screen_monkeys;
 mod fountainhead_bridge;
 mod fountainhead_sanctuary;

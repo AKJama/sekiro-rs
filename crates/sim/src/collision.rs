@@ -354,8 +354,19 @@ const SPHERES: [f32; 2] = [STEP_HEIGHT + RADIUS, HEAD_TOP - RADIUS];
 /// sphere cast meets and cuts it where the body would come nearer than this to one.
 pub const FALL_ASSIST_RADIUS: f32 = 0.16;
 const CELL: f32 = 4.0;
-/// How far off the top sphere's centre line [`CollisionWorld::ceiling_for`] also looks up.
-const CEILING_SAMPLE: f32 = 0.25;
+/// How far inside the head sphere's rim, seen from above, a ceiling must reach to stop a rise
+/// ([`CollisionWorld::ceiling_for`]). The slide leaves a body pressed against a wall at
+/// [`RADIUS`] from it, give or take roundoff, so the wall's top edge passes a hair inside the
+/// rim; skipping such a face lets the sphere overlap it by at most this.
+const CEILING_GRAZE: f32 = 1e-3;
+/// The least upward part of the direction from the head sphere's centre to where it first meets
+/// a face for that face to stop a rise ([`CollisionWorld::ceiling_for`]): the cosine of 39
+/// degrees, so the touch is within 0.25 m of the centre line seen from above at [`RADIUS`]
+/// 0.4. Further out the face only meets the sphere's shoulder, the wall slide pushes it off,
+/// and stopping there blocked most jumps up m11_00's rock walls under their ledge lips; the gate
+/// fence's cap beam (#170) meets it 0.23 m out. 0.25 m is where the sampled test before #170
+/// looked, which those walls were climbed with.
+const CEILING_UP: f32 = 0.78;
 /// `CollisionWorld::part_of` for a triangle in no helper or event part.
 const ORDINARY: u16 = 0;
 /// `CollisionWorld::part_of` bit marking an event part's triangle.
@@ -869,66 +880,136 @@ impl CollisionWorld {
 
     /// The highest the feet of `who`'s body at `feet` can rise by at most `rise` before its top
     /// sphere meets a ceiling over it: any surface flat enough to be a floor (the winding does
-    /// not say which side is solid, see the module notes) above that sphere's centre. The
-    /// sphere is tested at its centre line and four lines [`CEILING_SAMPLE`] out, each against
-    /// its surface's height there, so a beam or a sloping underside off the centre stops it too.
-    /// When `Some`, it is below `feet.y + rise`.
+    /// not say which side is solid, see the module notes) above that sphere's centre. The sphere
+    /// is swept straight up against each such face, its interior, edges and corners, so a beam's
+    /// edge over the rim or a sloping underside stops it where it first touches (#170). Only a
+    /// face the sphere rises into counts: not one it is already in at the start, nor one that
+    /// reaches no more than [`CEILING_GRAZE`] inside its rim, such as the top edge of a wall the
+    /// body is pressed against, nor one it first meets lower on the sphere than [`CEILING_UP`]
+    /// allows, such as a rock lip over the wall it is jumping up. When `Some`, it is below
+    /// `feet.y + rise`.
     // TODO(#163): this scans whole 4 m cells; a height-banded grid would cut that.
     fn ceiling_for(&self, feet: Vec3, rise: f32, who: u8) -> Option<f32> {
-        let head = HEAD_TOP - RADIUS;
-        let centre = feet.y + head;
-        let high = feet.y + HEAD_TOP + rise;
-        let s = CEILING_SAMPLE;
-        let lift = (RADIUS * RADIUS - s * s).sqrt();
-        let samples = [
-            (0.0, 0.0, RADIUS),
-            (s, 0.0, lift),
-            (-s, 0.0, lift),
-            (0.0, s, lift),
-            (0.0, -s, lift),
-        ]
-        .map(|(dx, dz, up)| (feet.x + dx, feet.z + dz, up));
-        let (x0, z0) = cell_of(feet.x - s, feet.z - s);
-        let (x1, z1) = cell_of(feet.x + s, feet.z + s);
+        let centre = feet + Vec3::Y * (HEAD_TOP - RADIUS);
         let mut best: Option<f32> = None;
-        for cx in x0..=x1 {
-            for cz in z0..=z1 {
-                let Some(cell) = self.cells.get(&(cx, cz)) else {
-                    continue;
-                };
-                for &t in cell {
+        for t in self.ceiling_candidates(feet, rise, who) {
+            if let Some(up) = self.rise_into(t, centre, rise) {
+                best = Some(best.map_or(up, |b| b.min(up)));
+            }
+        }
+        best.map(|up| feet.y + up)
+    }
+
+    /// The triangles [`CollisionWorld::ceiling_for`] sweeps the head sphere against, each once:
+    /// faces flat enough to be a ceiling, reaching from above the sphere's centre to below its
+    /// top after `rise`, whose boxes come within [`ceiling_reach`] of its centre line.
+    fn ceiling_candidates(&self, feet: Vec3, rise: f32, who: u8) -> impl Iterator<Item = u32> {
+        let centre = feet.y + HEAD_TOP - RADIUS;
+        let high = feet.y + HEAD_TOP + rise;
+        let line = Vec2::new(feet.x, feet.z);
+        let reach = ceiling_reach();
+        let (min, max) = (line - RADIUS, line + RADIUS);
+        let (x0, z0) = cell_of(min.x, min.y);
+        let (x1, z1) = cell_of(max.x, max.y);
+        (x0..=x1)
+            .flat_map(move |cx| (z0..=z1).map(move |cz| (cx, cz)))
+            .filter_map(|key| Some((key, self.cells.get(&key)?)))
+            .flat_map(move |(key, cell)| {
+                cell.iter().copied().filter(move |&t| {
                     let [lo, hi] = self.bounds[t as usize];
-                    if hi.y < centre
-                        || lo.y > high
-                        || hi.x < feet.x - s
-                        || lo.x > feet.x + s
-                        || hi.z < feet.z - s
-                        || lo.z > feet.z + s
-                        || !self.walkable(t, who)
-                    {
-                        continue;
-                    }
-                    let [a, b, c] = self.corners(t);
-                    for (x, z, up) in samples {
-                        // Each sample line is tested only by the cell that holds it, and only
-                        // against triangles whose box holds it.
-                        if cell_of(x, z) != (cx, cz) || x < lo.x || x > hi.x || z < lo.z || z > hi.z
-                        {
-                            continue;
-                        }
-                        if let Some(h) = height_on(x, z, a, b, c)
-                            && h >= centre
-                        {
-                            let top = h - up - head;
-                            if top < feet.y + rise && best.is_none_or(|b| top < b) {
-                                best = Some(top);
-                            }
-                        }
-                    }
+                    let (lo2, hi2) = (Vec2::new(lo.x, lo.z), Vec2::new(hi.x, hi.z));
+                    // Tested by the first cell of the scan that holds it.
+                    hi.y >= centre
+                        && lo.y <= high
+                        && line.distance_squared(line.clamp(lo2, hi2)) < reach * reach
+                        && cell_of(lo.x.max(min.x), lo.z.max(min.y)) == key
+                        && self.walkable(t, who)
+                })
+            })
+    }
+
+    /// How far the sphere of [`RADIUS`] at `centre` rises, less than `rise`, before it first
+    /// touches triangle `t`: the least rise at which it meets the face's interior, one of its
+    /// edges or one of its corners, 0 if it touches it already. `None` when it does not touch it
+    /// within `rise`, when it is already more than [`CEILING_GRAZE`] into it, or when the touch
+    /// is lower on the sphere than [`CEILING_UP`] allows (which a face reaching no further than
+    /// [`ceiling_reach`] from its centre line, seen from above, always is).
+    fn rise_into(&self, t: u32, centre: Vec3, rise: f32) -> Option<f32> {
+        let [a, b, c] = self.corners(t);
+        let line = centre.with_y(0.0);
+        let reach = ceiling_reach();
+        let q = closest_on_triangle(line, a.with_y(0.0), b.with_y(0.0), c.with_y(0.0));
+        if q.distance_squared(line) >= reach * reach {
+            return None;
+        }
+        let r2 = RADIUS * RADIUS;
+        let mut first = f32::INFINITY;
+        // The interior: from wholly below the face's plane up to touching it.
+        let n = self.normals[t as usize];
+        let n = if n.y < 0.0 { -n } else { n };
+        let below = n.dot(centre - a);
+        if below <= -RADIUS {
+            let up = (-RADIUS - below) / n.y;
+            let touch = centre + Vec3::Y * up + n * RADIUS;
+            if height_on(touch.x, touch.z, a, b, c).is_some() {
+                first = up;
+            }
+        }
+        // The edges: the vertical line meets the cylinder of RADIUS round each, between its ends.
+        for (p, e) in [(a, b - a), (b, c - b), (c, a - c)] {
+            let ee = e.length_squared();
+            let m = centre - p;
+            let m_off = m - e * (m.dot(e) / ee);
+            let y_off = Vec3::Y - e * (e.y / ee);
+            let aa = y_off.length_squared();
+            let bb = m_off.dot(y_off);
+            let disc = bb * bb - aa * (m_off.length_squared() - r2);
+            // A vertical edge is met first at a corner.
+            if aa < 1e-9 || disc <= 0.0 {
+                continue;
+            }
+            let root = disc.sqrt();
+            let up = (-bb - root) / aa;
+            let along = (m.dot(e) + up * e.y) / ee;
+            if -bb + root > 0.0 && (0.0..=1.0).contains(&along) {
+                first = first.min(up);
+            }
+        }
+        // The corners.
+        for p in [a, b, c] {
+            let d2 = (p - centre).with_y(0.0).length_squared();
+            if d2 < r2 {
+                let (dy, half) = (p.y - centre.y, (r2 - d2).sqrt());
+                if dy + half > 0.0 {
+                    first = first.min(dy - half);
                 }
             }
         }
-        best
+        if first >= rise {
+            return None;
+        }
+        let touching = first < 0.0;
+        let first = first.max(0.0);
+        let at = centre + Vec3::Y * first;
+        let q = closest_on_triangle(at, a, b, c);
+        let to = q - at;
+        // Already touching: within the graze it stops the rise now; deeper, the body is in the
+        // face already (a slope it walked under), and rising carries it out.
+        let graze = RADIUS - CEILING_GRAZE;
+        if touching && to.length_squared() < graze * graze {
+            return None;
+        }
+        // Off the top of the sphere it meets the face with its shoulder, as a jump up an uneven
+        // wall meets each rock lip it is pressed against: the slide pushes it off that.
+        (to.y >= CEILING_UP * to.length()).then_some(first)
+    }
+
+    /// How many triangles a [`CollisionWorld::ceiling_for`] of `rise` from `feet` sweeps the
+    /// head sphere against. Only for the step-cost test.
+    #[doc(hidden)]
+    pub fn ceiling_triangle_count(&self, feet: [f32; 3], rise: f32) -> usize {
+        self.ceiling_candidates(Vec3::from(feet), rise, PLAYER)
+            .count()
     }
 
     /// Every surface the vertical line through `(x, z)` crosses: (height, normal y), highest
@@ -1551,6 +1632,12 @@ pub fn ray_triangle(o: Vec3, d: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> 
     (t >= 0.0).then_some(t)
 }
 
+/// The furthest off the head sphere's centre line, seen from above, a touch that stops a rise
+/// can be: where [`CEILING_UP`] puts it on the sphere's surface.
+fn ceiling_reach() -> f32 {
+    RADIUS * (1.0 - CEILING_UP * CEILING_UP).sqrt()
+}
+
 /// Closest point on triangle `abc` to `p` (Ericson, Real-Time Collision Detection 5.1.5).
 fn closest_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
     let ab = b - a;
@@ -1771,5 +1858,111 @@ mod tests {
         assert_eq!(world.floor_material(0.0, 0.0, 0.5), Some(1));
         assert_eq!(Ground::material(&world, 0.0, 0.0, 0.5), Some(1));
         assert_eq!(world.floor_material(9.0, 0.0, 2.0), None);
+    }
+
+    /// A beam 0.25 m above the head, whose edge is 0.2 m out, inside the head sphere's rim but
+    /// clear of its centre line, stops the rise where the sphere meets that edge (#170); 0.3 m
+    /// out, past [`ceiling_reach`], it only meets the sphere's shoulder and does not.
+    #[test]
+    fn a_beam_edge_over_the_head_rim_stops_the_rise() {
+        let y = HEAD_TOP + 0.25;
+        let mut m = CollisionMesh::default();
+        m.vertices.extend_from_slice(&[
+            [-2.0, y, -2.0],
+            [2.0, y, -2.0],
+            [2.0, y, -0.2],
+            [-2.0, y, -0.2],
+        ]);
+        m.indices.extend([0, 1, 2, 0, 2, 3]);
+        m.materials.extend([0, 0]);
+        let world = CollisionWorld::from_mesh(&m);
+        let top = world.ceiling_for(Vec3::ZERO, 1.0, PLAYER);
+        let want = y - (RADIUS * RADIUS - 0.2 * 0.2).sqrt() - (HEAD_TOP - RADIUS);
+        assert!(
+            top.is_some_and(|t| (t - want).abs() < 1e-4),
+            "{top:?}, want {want}"
+        );
+        for z in [0.1, 0.21] {
+            assert_eq!(
+                world.ceiling_for(Vec3::new(0.0, 0.0, z), 1.0, PLAYER),
+                None,
+                "{z}"
+            );
+        }
+    }
+
+    /// A world of the given quads, each two triangles.
+    fn quads(quads: &[[[f32; 3]; 4]]) -> CollisionWorld {
+        let mut m = CollisionMesh::default();
+        for q in quads {
+            let base = m.vertices.len() as u32;
+            m.vertices.extend_from_slice(q);
+            m.indices.extend([0, 1, 2, 0, 2, 3].map(|i| base + i));
+            m.materials.extend([0, 0]);
+        }
+        CollisionWorld::from_mesh(&m)
+    }
+
+    /// An underside sloping down away from the centre line, its near edge 0.1 m out, meets the
+    /// head sphere first on its face, before the edge nearest the line would.
+    #[test]
+    fn a_sloped_underside_stops_the_rise_at_its_first_touch() {
+        let (y0, k) = (HEAD_TOP + 0.3, 0.7);
+        let y = |x: f32| y0 - k * (x - 0.1);
+        let world = quads(&[[
+            [0.1, y(0.1), -3.0],
+            [3.0, y(3.0), -3.0],
+            [3.0, y(3.0), 3.0],
+            [0.1, y(0.1), 3.0],
+        ]]);
+        let head = HEAD_TOP - RADIUS;
+        let face = y0 + 0.1 * k - RADIUS * (1.0 + k * k).sqrt() - head;
+        let edge = y0 - (RADIUS * RADIUS - 0.1 * 0.1).sqrt() - head;
+        assert!(face < edge - 0.02, "{face} {edge}");
+        let top = world.ceiling_for(Vec3::ZERO, 1.0, PLAYER);
+        assert!(
+            top.is_some_and(|t| (t - face).abs() < 1e-4),
+            "{top:?}, want {face}"
+        );
+    }
+
+    /// The top of a wall the slide leaves the body pressed against, its edge at the head
+    /// sphere's rim, does not stop a jump up past it (ledge grabs and wall jumps); within
+    /// [`ceiling_reach`] of the centre line, it does.
+
+    #[test]
+    fn a_wall_top_at_the_rim_does_not_stop_the_rise() {
+        let y = 2.0;
+        let world = quads(&[
+            [
+                [-3.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+                [3.0, 0.0, 3.0],
+                [-3.0, 0.0, 3.0],
+            ],
+            [
+                [-3.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+                [3.0, y, 0.0],
+                [-3.0, y, 0.0],
+            ],
+            [
+                [-3.0, y, -3.0],
+                [3.0, y, -3.0],
+                [3.0, y, 0.0],
+                [-3.0, y, 0.0],
+            ],
+        ]);
+        let [dx, dz] = world.slide([0.3, 0.0, 1.0], [0.0, -1.0]);
+        let pressed = Vec3::new(0.3 + dx, 0.0, 1.0 + dz);
+        assert!((pressed.z - RADIUS).abs() < 1e-3, "{pressed}");
+        for feet in [pressed, Vec3::new(0.3, 0.0, RADIUS)] {
+            assert_eq!(world.ceiling_for(feet, 1.0, PLAYER), None, "{feet}");
+        }
+        assert!(
+            world
+                .ceiling_for(Vec3::new(0.3, 0.0, 0.2), 1.0, PLAYER)
+                .is_some()
+        );
     }
 }

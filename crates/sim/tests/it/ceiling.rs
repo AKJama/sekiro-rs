@@ -3,8 +3,9 @@
 //! mesh's winding is not consistent, so any flat face is a floor), trapping Wolf and the camera
 //! in it. Skips without the exported maps.
 
+use sekiro_formats::hknp::CollisionMesh;
 use sekiro_sim::body::{Body, BodyInput};
-use sekiro_sim::collision::{CollisionWorld, HEAD_TOP, MAX_SLOPE_DEGREES};
+use sekiro_sim::collision::{CollisionWorld, HEAD_TOP, MAX_SLOPE_DEGREES, RADIUS};
 use sekiro_sim::tae::VelocityChange;
 use sekiro_sim::{Buttons, Character, InputFrame};
 
@@ -32,6 +33,31 @@ fn floor_and_ceiling(world: &CollisionWorld, x: f32, z: f32) -> (f32, f32) {
     (floor, ceiling)
 }
 
+/// Wolf jumps (jump held 3 ticks) with the stick at `move_stick` for `camera_yaw` and runs
+/// `ticks` ticks: the highest his feet rose, and whether he left the ground.
+fn jump(wolf: &mut Character, move_stick: [f32; 2], camera_yaw: f32, ticks: u32) -> (f32, bool) {
+    let (mut peak, mut airborne) = (f32::MIN, false);
+    for i in 0..ticks {
+        let input = InputFrame {
+            move_stick,
+            camera_yaw,
+            buttons: Buttons {
+                jump: i < 3,
+                ..Buttons::default()
+            },
+        };
+        let report = wolf.tick(&input, DT);
+        assert!(
+            report.behavior.script_errors.is_empty(),
+            "{:?}",
+            report.behavior.script_errors
+        );
+        airborne |= !report.grounded;
+        peak = peak.max(report.position[1]);
+    }
+    (peak, airborne)
+}
+
 /// Wolf's own standing jump where the shack's ceiling is 3.13 m over the floor, under the 3.93 m
 /// a free jump's head reaches: his head stops under it and he lands back on the floor (before,
 /// he rose into the roof and landed in it, 2.38 m up).
@@ -51,24 +77,7 @@ fn standing_jump_under_the_shack_ceiling_lands_on_the_floor() {
     wolf.ground = Box::new(world.clone());
     wolf.body.position = [x, floor, z];
     settle(&mut wolf);
-    let (mut peak, mut airborne) = (f32::MIN, false);
-    for i in 0..150 {
-        let input = InputFrame {
-            buttons: Buttons {
-                jump: (0..3).contains(&i),
-                ..Buttons::default()
-            },
-            ..InputFrame::default()
-        };
-        let report = wolf.tick(&input, DT);
-        assert!(
-            report.behavior.script_errors.is_empty(),
-            "{:?}",
-            report.behavior.script_errors
-        );
-        airborne |= !report.grounded;
-        peak = peak.max(report.position[1]);
-    }
+    let (peak, airborne) = jump(&mut wolf, [0.0, 0.0], 0.0, 150);
     assert!(airborne, "never jumped");
     assert!(
         peak + HEAD_TOP <= ceiling + 0.01,
@@ -130,4 +139,113 @@ fn running_jumps_in_the_shack_stay_under_its_roof() {
         }
     }
     assert!(trapped.is_empty(), "landed inside the roof: {trapped:?}");
+}
+
+/// A floor at y 0 for z > 0 and a wall at z 0 whose top, `top` m up, runs back over z < 0.
+fn wall_world(top: f32) -> CollisionWorld {
+    let mut m = CollisionMesh::default();
+    for q in [
+        [
+            [-3.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+            [3.0, 0.0, 3.0],
+            [-3.0, 0.0, 3.0],
+        ],
+        [
+            [-3.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+            [3.0, top, 0.0],
+            [-3.0, top, 0.0],
+        ],
+        [
+            [-3.0, top, -3.0],
+            [3.0, top, -3.0],
+            [3.0, top, 0.0],
+            [-3.0, top, 0.0],
+        ],
+    ] {
+        let base = m.vertices.len() as u32;
+        m.vertices.extend_from_slice(&q);
+        m.indices.extend([0, 1, 2, 0, 2, 3].map(|i| base + i));
+        m.materials.extend([0, 0]);
+    }
+    CollisionWorld::from_mesh(&m)
+}
+
+/// A running jump into a wall whose top is within its reach: pressed against the wall as its
+/// head sphere's centre passes the top, whose edge is then at the sphere's rim, the body rises
+/// as high as by a wall too tall to reach the top of, so ledge grabs and wall jumps still carry
+/// it up past the top.
+#[test]
+fn a_jump_flush_against_a_wall_rises_past_its_top() {
+    let top = 2.5;
+    let head = HEAD_TOP - RADIUS;
+    // The peak height and where the body was as its head's centre passed `top`.
+    let rise = |world: &CollisionWorld| {
+        let mut body = Body {
+            position: [0.0, 0.0, 0.6],
+            ..Default::default()
+        };
+        let jump = VelocityChange {
+            fall_type: 0,
+            horizontal_scale: 0.0,
+            vertical_scale: 0.0,
+            horizontal: 3.0,
+            vertical: 9.64,
+            horizontal_angle: 0.0,
+        };
+        let mut input = BodyInput {
+            velocity_change: Some(jump),
+            ..Default::default()
+        };
+        let (mut peak, mut passing) = (f32::MIN, None);
+        for _ in 0..120 {
+            body.step(&input, DT, world);
+            input = BodyInput::default();
+            peak = peak.max(body.position[1]);
+            if body.position[1] + head > top {
+                passing.get_or_insert(body.position);
+            }
+        }
+        (peak, passing)
+    };
+    let (peak, passing) = rise(&wall_world(top));
+    assert!(
+        passing.is_some_and(|p| (p[2] - RADIUS).abs() < 0.01),
+        "not pressed against the wall as the head passed its top: {passing:?}"
+    );
+    let (free, _) = rise(&wall_world(20.0));
+    assert!(
+        (peak - free).abs() < 1e-3,
+        "peaked at {peak}, {free} by a taller wall"
+    );
+}
+
+/// Wolf jumps up the rock wall of the gully by m11_00's start 0 (about (-132, -38, -106)),
+/// pressed against it under the ledge he means to catch: each jump rises as high as a free one
+/// (2.13 m, as before #170). The wall's uneven rock juts lips over his head sphere's shoulder,
+/// up to 0.4 m off its centre line, and stopping at those held these jumps to 0.5 to 1.2 m.
+#[test]
+fn jumps_up_the_gully_rock_wall_rise_past_its_lips() {
+    let (Some(world), Some(cache)) = (play_world(), cache()) else {
+        return;
+    };
+    let mut low = Vec::new();
+    for (x, z, yaw) in [
+        (-132.83, -105.78, 191.25f32),
+        (-130.98, -106.23, 202.5),
+        (-131.83, -105.89, 213.75),
+    ] {
+        let floor = world.floor(x, z, -37.0).expect("the gully floor");
+        let mut wolf = Character::load_from_cache(&cache).unwrap();
+        wolf.ground = Box::new(world.clone());
+        wolf.body.position = [x, floor, z];
+        settle(&mut wolf);
+        wolf.snap_yaw(yaw.to_radians());
+        let (peak, _) = jump(&mut wolf, [0.0, 1.0], yaw.to_radians(), 90);
+        if peak - floor < 2.0 {
+            low.push((x, z, peak - floor));
+        }
+    }
+    assert!(low.is_empty(), "stopped low on the wall: {low:?}");
 }
