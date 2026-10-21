@@ -1,9 +1,12 @@
 //! The in-game menu (#127): Esc pauses the world under the game's wooden board with the tabs
 //! Equipment, Inventory, Skills and Options, drawn with its menu art, item icons and texts
 //! (item.msgbnd) and showing Wolf's kit (`sekiro_sim::kit`). X / Z switch tabs, V / C the
-//! category, the arrows move the cursor; Esc closes it.
+//! category, the arrows move the cursor; Esc closes it. A click on a tab, category or arrow
+//! switches it, a click on a row moves the cursor there and a second click on it confirms it, as
+//! OK (E) does: Options rows act on the first click, and a Quick Item is used.
 //! After FwLo's RustSekiro `src/game_menu.rs` (the layout set from captures of the game).
-//! gap: display only (no Equipped Items picker, no item use, no mouse); the tab and section
+//! gap: no Equipped Items picker, and a used item only loses one from its count (no effect,
+//! no use animation, no Use / Discard submenu); the tab and section
 //! labels are English strings, not yet the game's FMG ids; attribute levels, Unseen Aid and
 //! skill experience are not modelled; Options holds this build's Resume / Back to start menu /
 //! Quit, not the game's settings; Ninjutsu lists nothing (Wolf starts with none, and the game
@@ -12,6 +15,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use bevy::prelude::*;
+use bevy::ui_widgets::{Activate, ActivateOnPress, Button, observe};
+use sekiro_sim::items::HEALING_GOURD;
 use sekiro_sim::kit::Kit;
 
 use super::Sim;
@@ -59,7 +64,38 @@ struct GameMenu {
     index: usize,
     cat: [usize; 2],
     top: usize,
+    /// The row of this screen the last click went to: a click on it again confirms it. Only
+    /// clicks set it, so the cursor's row (moved by the keys, or the first row on opening) is
+    /// never confirmed by a single click.
+    armed: Option<usize>,
 }
+
+/// One menu input, from a key or a click: both change the menu the same way. As a component
+/// it marks the clickable menu element that sends it.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+enum Cmd {
+    /// Open this tab.
+    Tab(usize),
+    /// Open the next tab (true) or the previous one, wrapping.
+    TabStep(bool),
+    /// Show this category of the open list tab.
+    Cat(usize),
+    /// Show the next category (true) or the previous one of the open list tab, wrapping.
+    CatStep(bool),
+    /// Put the cursor on this row; when the last click was on it too, confirm it.
+    Row(usize),
+    /// Confirm the row under the cursor (OK).
+    Ok,
+    /// Close the menu (Back).
+    Back,
+    /// Move the cursor one row forward (true) or back, wrapping.
+    Step(bool),
+}
+
+/// This frame's clicks on menu elements, applied with the keys in `menu_keys`; dropped while
+/// the menu is not open, so none is applied late.
+#[derive(Resource, Default)]
+struct Clicks(Vec<Cmd>);
 
 #[derive(Component)]
 struct GameMenuRoot;
@@ -108,6 +144,8 @@ struct Goods {
     kind: i64,
     sort: i64,
     max: u32,
+    /// `isConsume`: using it takes one (not the Homeward Idol).
+    consume: bool,
 }
 
 #[derive(Default)]
@@ -172,6 +210,7 @@ impl Tables {
                     kind: row["goodsType"].as_i64().unwrap_or(-1),
                     sort: row["sortId"].as_i64().unwrap_or(0),
                     max: row["maxNum"].as_u64().unwrap_or(99) as u32,
+                    consume: row["isConsume"].as_i64() == Some(1),
                 },
             );
         }
@@ -269,7 +308,7 @@ fn slot_icon(tables: &Tables, slot: &Slot) -> Option<String> {
             .get(id)
             .or_else(|| tables.weapon_icon.get(&(id / 100 * 100)))
             .copied(),
-        Slot::Goods(3000, _) => Some(151),
+        Slot::Goods(HEALING_GOURD, _) => Some(151),
         Slot::Goods(id, _) => tables.goods_icon.get(id).copied(),
         Slot::Empty => None,
     }?;
@@ -348,6 +387,45 @@ impl Ui<'_> {
     }
 }
 
+/// What makes a menu element clickable: a press queues `cmd` for `menu_keys`.
+fn click(cmd: Cmd) -> impl Bundle {
+    (
+        Button,
+        ActivateOnPress,
+        cmd,
+        observe(move |_: On<Activate>, mut clicks: ResMut<Clicks>| clicks.0.push(cmd)),
+    )
+}
+
+/// A clickable switch at one end of the tabs or categories, at `rect`: the brush arrow on the
+/// outer side and the key cap on the inner side. `size` gives, in percent of `rect`, the arrow's
+/// width and the cap's width, top and height.
+fn arrow_key(
+    root: &mut ChildSpawnerCommands,
+    ui: &Ui,
+    rect: [f32; 4],
+    cmd: Cmd,
+    key: &str,
+    arrow_left: bool,
+    size: (f32, [f32; 3]),
+) {
+    let (arrow_w, [cap_w, cap_t, cap_h]) = size;
+    let [l, t, w, h] = rect;
+    let mut arrow = ui.image("sb_in_game/MENU_Arrow");
+    arrow.flip_x = !arrow_left;
+    let cap = ui.image(&format!("sb_keytop/{key}"));
+    root.spawn((abs(l, t, w, h), click(cmd)))
+        .with_children(|b| {
+            if arrow_left {
+                b.spawn((abs(0.0, 0.0, arrow_w, 100.0), arrow));
+                b.spawn((abs(100.0 - cap_w, cap_t, cap_w, cap_h), cap));
+            } else {
+                b.spawn((abs(0.0, cap_t, cap_w, cap_h), cap));
+                b.spawn((abs(100.0 - arrow_w, 0.0, arrow_w, 100.0), arrow));
+            }
+        });
+}
+
 /// A full-size child laid out as a row, vertically centred.
 fn fill_row() -> Node {
     Node {
@@ -367,6 +445,8 @@ struct Entry {
     art: Option<String>,
     stats: Vec<(String, String)>,
     info: String,
+    /// The consumable goods this row shows: OK uses one.
+    usable: Option<i32>,
 }
 
 /// Installs the display over the existing pause state, with the kit owned by the sim.
@@ -376,79 +456,166 @@ pub(super) fn install(app: &mut App, attack: u8) {
     game_ui::install_cover(app);
     app.insert_resource(Book::load(&sekiro_sim::cache::root(), attack))
         .init_resource::<GameMenu>()
+        .init_resource::<Clicks>()
         .init_resource::<crate::menu::PauseView>()
         .add_systems(
             PreUpdate,
-            menu_keys
+            (
+                menu_keys.run_if(crate::menu::paused),
+                drop_clicks.run_if(not(crate::menu::paused)),
+            )
                 .after(bevy::input::InputSystems)
-                .after(crate::menu::PauseSystems)
-                .run_if(crate::menu::paused),
+                .after(crate::menu::PauseSystems),
         )
         .add_systems(Update, show);
 }
 
-/// Tab and category switches, wrapped cursor movement, and the Options actions only.
+/// Clicks queued as the menu closed (on the frame of the closing Esc) are never applied, not on
+/// the next open either.
+fn drop_clicks(mut clicks: ResMut<Clicks>) {
+    clicks.0.clear();
+}
+
+/// The keys and this frame's clicks: tab and category switches, wrapped cursor movement, the
+/// Options actions and using a Quick Item.
 fn menu_keys(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
+    mut clicks: ResMut<Clicks>,
     mut menu: ResMut<GameMenu>,
     mut view: ResMut<crate::menu::PauseView>,
     book: Res<Book>,
-    sim: NonSend<Sim>,
+    mut sim: NonSendMut<Sim>,
 ) {
     let key = |k: &[KeyCode]| keys.any_just_pressed(k.iter().copied());
     let pad = |b| pads.iter().any(|p| p.just_pressed(b));
+    let mut cmds = std::mem::take(&mut clicks.0);
     if key(&[crate::menu::MENU_NEXT_TAB_KEY]) || pad(GamepadButton::RightTrigger) {
-        menu.tab = (menu.tab + 1) % TABS.len();
-        menu.index = 0;
-        menu.top = 0;
+        cmds.push(Cmd::TabStep(true));
     }
     if key(&[crate::menu::MENU_PREVIOUS_TAB_KEY]) || pad(GamepadButton::LeftTrigger) {
-        menu.tab = (menu.tab + TABS.len() - 1) % TABS.len();
-        menu.index = 0;
-        menu.top = 0;
+        cmds.push(Cmd::TabStep(false));
     }
-    if menu.tab == 1 || menu.tab == 2 {
-        let k = menu.tab - 1;
-        if key(&[KeyCode::KeyV]) || pad(GamepadButton::RightTrigger2) {
-            menu.cat[k] = (menu.cat[k] + 1) % 4;
-            menu.index = 0;
-            menu.top = 0;
-        }
-        if key(&[KeyCode::KeyC]) || pad(GamepadButton::LeftTrigger2) {
-            menu.cat[k] = (menu.cat[k] + 3) % 4;
-            menu.index = 0;
-            menu.top = 0;
-        }
+    if key(&[KeyCode::KeyV]) || pad(GamepadButton::RightTrigger2) {
+        cmds.push(Cmd::CatStep(true));
     }
-    if menu.tab == 3 && crate::menu::ok_pressed(&keys, &pads) {
-        view.request = Some(menu.index);
+    if key(&[KeyCode::KeyC]) || pad(GamepadButton::LeftTrigger2) {
+        cmds.push(Cmd::CatStep(false));
+    }
+    if crate::menu::ok_pressed(&keys, &pads) {
+        cmds.push(Cmd::Ok);
     }
     // Back (Q, B) closes the menu, as Resume and Esc do: it has no nested level.
     if crate::menu::back_pressed(&keys, &pads) {
-        view.request = Some(0);
+        cmds.push(Cmd::Back);
     }
     // The pause's own arrows, D-pad and stick, plus WASD.
     let step = view.movement.x + view.movement.y;
-    let next = step > 0 || key(&[KeyCode::KeyD, KeyCode::KeyS]);
-    let back = step < 0 || key(&[KeyCode::KeyA, KeyCode::KeyW]);
-    if !next && !back {
-        return;
+    if step > 0 || key(&[KeyCode::KeyD, KeyCode::KeyS]) {
+        cmds.push(Cmd::Step(true));
+    } else if step < 0 || key(&[KeyCode::KeyA, KeyCode::KeyW]) {
+        cmds.push(Cmd::Step(false));
     }
-    // The rows are counted only when the cursor moves.
-    let kit = &sim.duel.kit;
-    let n = match menu.tab {
-        0 => 10,
-        1 => inventory(menu.cat[0], kit, &book).len(),
-        2 => skills(menu.cat[1], kit, &book).len(),
-        _ => PAUSE_ROWS.len(),
+    for cmd in cmds {
+        if let Some(row) = apply(&mut menu, cmd, &mut sim.duel.kit, &book) {
+            view.request = Some(row);
+        }
     }
-    .max(1);
-    menu.index = (menu.index + if next { 1 } else { n - 1 }) % n;
-    menu.top = keep_visible(menu.top, menu.index, n);
 }
 
-/// Rebuilds only for a changed cursor or screen; closing keeps the tab and categories.
+/// The rows of the open screen, at least one: the lengths of the lists `build` draws, counted
+/// without building them.
+fn row_count(menu: &GameMenu, kit: &Kit, book: &Book) -> usize {
+    let tables = &book.tables;
+    match menu.tab {
+        0 => slots(kit).len(),
+        1 => match menu.cat[0] {
+            0 => 1 + held_goods(kit, tables, 0).len(),
+            1 => book.key_items.len() + held_goods(kit, tables, 1).len(),
+            2 => held_goods(kit, tables, 2).len(),
+            _ => kit.prosthetics.len(),
+        },
+        2 => learned(menu.cat[1], kit, book).count(),
+        _ => PAUSE_ROWS.len(),
+    }
+    .max(1)
+}
+
+/// The place after `i` (true) or before it, of `n` places, wrapping.
+fn wrap(i: usize, n: usize, next: bool) -> usize {
+    (i + if next { 1 } else { n - 1 }) % n
+}
+
+/// Applies one command; returns the Options row (an index into `PAUSE_ROWS`) it picks.
+fn apply(menu: &mut GameMenu, cmd: Cmd, kit: &mut Kit, book: &Book) -> Option<usize> {
+    let list = menu.tab == 1 || menu.tab == 2;
+    match cmd {
+        Cmd::Tab(tab) if tab != menu.tab => {
+            menu.tab = tab;
+            menu.index = 0;
+            menu.top = 0;
+            menu.armed = None;
+        }
+        Cmd::TabStep(next) => {
+            return apply(menu, Cmd::Tab(wrap(menu.tab, TABS.len(), next)), kit, book);
+        }
+        Cmd::Cat(cat) if list && cat != menu.cat[menu.tab - 1] => {
+            menu.cat[menu.tab - 1] = cat;
+            menu.index = 0;
+            menu.top = 0;
+            menu.armed = None;
+        }
+        Cmd::CatStep(next) if list => {
+            let cat = wrap(menu.cat[menu.tab - 1], INV_CATS.len(), next);
+            return apply(menu, Cmd::Cat(cat), kit, book);
+        }
+        Cmd::Step(next) => {
+            let n = row_count(menu, kit, book);
+            menu.index = wrap(menu.index, n, next);
+            menu.top = keep_visible(menu.top, menu.index, n);
+            menu.armed = None;
+        }
+        Cmd::Row(row) => {
+            let n = row_count(menu, kit, book);
+            if row >= n {
+                return None;
+            }
+            let again = menu.armed == Some(row);
+            menu.index = row;
+            menu.top = keep_visible(menu.top, row, n);
+            menu.armed = Some(row);
+            // Options rows are buttons: one click acts.
+            if again || menu.tab == 3 {
+                return apply(menu, Cmd::Ok, kit, book);
+            }
+        }
+        Cmd::Ok if menu.tab == 3 => return Some(menu.index),
+        Cmd::Ok if menu.tab == 1 && menu.cat[0] == 0 => {
+            let usable = inventory(0, kit, book)
+                .get(menu.index)
+                .and_then(|e| e.usable);
+            let before = row_count(menu, kit, book);
+            if let Some(id) = usable
+                && kit.use_goods(id)
+            {
+                info!("game menu: used goods {id}, {} left", kit.count(id));
+                let n = row_count(menu, kit, book);
+                if n != before {
+                    // The last one used: its row is gone, and a click must not use the row
+                    // that took its place.
+                    menu.armed = None;
+                }
+                menu.index = menu.index.min(n - 1);
+                menu.top = keep_visible(menu.top, menu.index, n);
+            }
+        }
+        Cmd::Back => return Some(0),
+        _ => {}
+    }
+    None
+}
+
+/// Rebuilds only for a changed cursor, screen or kit; closing keeps the tab and categories.
 fn show(
     mut commands: Commands,
     state: Res<crate::menu::PanelState>,
@@ -456,7 +623,7 @@ fn show(
     (fonts, art, book): (Res<GameFonts>, Res<MenuArt>, Res<Book>),
     sim: NonSend<Sim>,
     (roots, windows): (Query<Entity, With<GameMenuRoot>>, Query<&Window>),
-    mut built: Local<Option<Place>>,
+    mut built: Local<Option<(Place, Kit)>>,
 ) {
     if !state.paused {
         if built.take().is_some() {
@@ -465,6 +632,7 @@ fn show(
             }
             menu.index = 0;
             menu.top = 0;
+            menu.armed = None;
         }
         return;
     }
@@ -480,7 +648,12 @@ fn show(
         menu.cat,
         (aspect * 1000.0) as u32,
     );
-    if *built == Some(now) {
+    // A changed kit (an item used) rebuilds under an unchanged cursor.
+    let kit = &sim.duel.kit;
+    if built
+        .as_ref()
+        .is_some_and(|(place, drawn)| *place == now && drawn == kit)
+    {
         return;
     }
     for root in &roots {
@@ -495,11 +668,11 @@ fn show(
             aspect,
         },
         &menu,
-        &sim.duel.kit,
+        kit,
         &book,
         (hp.hp as f32, hp.max_hp as f32),
     );
-    *built = Some(now);
+    *built = Some((now, kit.clone()));
 }
 
 /// The key guide at the bottom right, using the game's OK and Close labels.
@@ -556,8 +729,17 @@ fn list_screen(
         });
     }
     if !cats.is_empty() {
-        root.spawn((abs(5.4, 19.2, 1.4, 4.4), ui.image("sb_in_game/MENU_Arrow")));
-        root.spawn((abs(7.4, 19.8, 1.6, 3.2), ui.image("sb_keytop/KG_Key_C")));
+        let (back, next) = (Cmd::CatStep(false), Cmd::CatStep(true));
+        let rect = [5.4, 19.2, 3.6, 4.4];
+        arrow_key(
+            root,
+            ui,
+            rect,
+            back,
+            "KG_Key_C",
+            true,
+            (38.9, [44.4, 13.6, 72.7]),
+        );
         for (i, (_, icon)) in cats.iter().enumerate() {
             let l = 10.0 + i as f32 * 4.85;
             if i == cat {
@@ -569,13 +751,20 @@ fn list_screen(
             root.spawn((
                 abs(l, 18.3, 3.2, 6.0),
                 ui.image(&format!("sb_in_game/{icon}")),
+                click(Cmd::Cat(i)),
             ));
         }
         let end = 10.0 + cats.len() as f32 * 4.85;
-        root.spawn((abs(end, 19.8, 1.6, 3.2), ui.image("sb_keytop/KG_Key_V")));
-        let mut right = ui.image("sb_in_game/MENU_Arrow");
-        right.flip_x = true;
-        root.spawn((abs(end + 2.1, 19.2, 1.4, 4.4), right));
+        let rect = [end, 19.2, 3.5, 4.4];
+        arrow_key(
+            root,
+            ui,
+            rect,
+            next,
+            "KG_Key_V",
+            false,
+            (40.0, [45.7, 13.6, 72.7]),
+        );
     }
     for (k, (i, row)) in entries.iter().enumerate().skip(top).take(ROWS).enumerate() {
         let sel = i == index;
@@ -583,6 +772,7 @@ fn list_screen(
         root.spawn((
             abs(7.4, t, 4.2, 7.4),
             ui.image("sb_in_game/MENU_IconBase_02"),
+            click(Cmd::Row(i)),
         ))
         .with_children(|b| {
             if let Some(icon) = &row.icon {
@@ -606,6 +796,7 @@ fn list_screen(
             "sb_in_game/MENU_ItemBase_02"
         };
         root.spawn((abs(12.3, t + 0.6, 36.6, 6.2), ui.image(plate)))
+            .insert(click(Cmd::Row(i)))
             .with_children(|b| {
                 b.spawn(Node {
                     padding: UiRect::axes(Val::Percent(4.5), Val::Px(0.0)),
@@ -914,6 +1105,10 @@ fn inventory(cat: usize, kit: &Kit, book: &Book) -> Vec<Entry> {
             count: count.map(|n| n.to_string()),
             stats,
             info,
+            usable: match slot {
+                Slot::Goods(id, _) if tables.goods.get(&id).is_some_and(|g| g.consume) => Some(id),
+                _ => None,
+            },
             ..default()
         }
     };
@@ -928,9 +1123,9 @@ fn inventory(cat: usize, kit: &Kit, book: &Book) -> Vec<Entry> {
     };
     match cat {
         0 => {
-            let g = kit.count(3000);
+            let g = kit.count(HEALING_GOURD);
             let gourd = entry(
-                Slot::Goods(3000, g),
+                Slot::Goods(HEALING_GOURD, g),
                 Some(g),
                 vec![("Uses".to_string(), format!("{g}/{g}")), storage()],
             );
@@ -964,9 +1159,7 @@ fn inventory(cat: usize, kit: &Kit, book: &Book) -> Vec<Entry> {
 /// them), each with its story art (sb_icon_skill MENU_SkillStory_<iconId>).
 fn skills(cat: usize, kit: &Kit, book: &Book) -> Vec<Entry> {
     let tables = &book.tables;
-    tables.skills[cat]
-        .iter()
-        .filter(|s| kit.all_skills || kit.skills.contains(&s.id))
+    learned(cat, kit, book)
         .map(|s| {
             let slot = Slot::Weapon(s.weapon);
             let (name, info) = slot_text(&book.texts, &slot);
@@ -982,6 +1175,13 @@ fn skills(cat: usize, kit: &Kit, book: &Book) -> Vec<Entry> {
             }
         })
         .collect()
+}
+
+/// The learned skills of a category (`Kit::skills`; with `all_skills`, all of them).
+fn learned<'a>(cat: usize, kit: &'a Kit, book: &'a Book) -> impl Iterator<Item = &'a Skill> {
+    book.tables.skills[cat]
+        .iter()
+        .filter(|s| kit.all_skills || kit.skills.contains(&s.id))
 }
 
 fn equipment(root: &mut ChildSpawnerCommands, ui: &Ui, menu: &GameMenu, kit: &Kit, book: &Book) {
@@ -1019,6 +1219,7 @@ fn equipment(root: &mut ChildSpawnerCommands, ui: &Ui, menu: &GameMenu, kit: &Ki
         let w = size * 9.0 / 16.0;
         let slot = &all[i];
         root.spawn((abs(l, t, w, size), ui.image("sb_in_game/MENU_IconBase_02")))
+            .insert(click(Cmd::Row(i)))
             .with_children(|s| {
                 // The cursor glows behind the item, not over it.
                 if i == menu.index {
@@ -1086,12 +1287,27 @@ fn build(
                 ui.image("sb_in_game/MENU_Base_00"),
             ));
             // Tabs, with the switch keys and the brush arrows at either end.
-            root.spawn((abs(5.3, 6.0, 1.3, 4.6), ui.image("sb_in_game/MENU_Arrow")));
-            root.spawn((abs(7.3, 6.4, 1.8, 3.4), ui.image("sb_keytop/KG_Key_Z")));
-            root.spawn((abs(90.0, 6.4, 1.8, 3.4), ui.image("sb_keytop/KG_Key_X")));
-            let mut right = ui.image("sb_in_game/MENU_Arrow");
-            right.flip_x = true;
-            root.spawn((abs(92.4, 6.0, 1.3, 4.6), right));
+            let (back, next) = (Cmd::TabStep(false), Cmd::TabStep(true));
+            let rect = [5.3, 6.0, 3.8, 4.6];
+            arrow_key(
+                root,
+                ui,
+                rect,
+                back,
+                "KG_Key_Z",
+                true,
+                (34.2, [47.4, 8.7, 73.9]),
+            );
+            let rect = [90.0, 6.0, 3.7, 4.6];
+            arrow_key(
+                root,
+                ui,
+                rect,
+                next,
+                "KG_Key_X",
+                false,
+                (35.1, [48.6, 8.7, 73.9]),
+            );
             for (i, name) in TABS.iter().enumerate() {
                 let open = i == menu.tab;
                 let brush = if open {
@@ -1100,6 +1316,7 @@ fn build(
                     "sb_in_game/MENU_Caption_01"
                 };
                 root.spawn((abs(11.5 + i as f32 * 19.0, 4.2, 18.0, 9.0), ui.image(brush)))
+                    .insert(click(Cmd::Tab(i)))
                     .with_children(|t| {
                         t.spawn(Node {
                             justify_content: JustifyContent::Center,
@@ -1135,6 +1352,7 @@ fn build(
                             "sb_in_game/MENU_Caption_01"
                         };
                         root.spawn((abs(6.8, 18.0 + i as f32 * 7.55, 22.2, 6.4), ui.image(plate)))
+                            .insert(click(Cmd::Row(i)))
                             .with_children(|b| {
                                 b.spawn(Node {
                                     justify_content: JustifyContent::Center,
@@ -1255,5 +1473,123 @@ mod tests {
         top = keep_visible(top, 1, n);
         assert_eq!(top, 1);
         assert_eq!(keep_visible(9, 11, n), 6, "never past the end");
+    }
+
+    /// Clicks on the drawn menu go through picking to the same commands as the keys: a tab
+    /// click opens it, a row click selects, a second click on it uses the Quick Item, and an
+    /// Options row acts on one click. The keyboard cursor never arms a row.
+    #[test]
+    fn clicks_switch_tabs_select_rows_and_use_items() {
+        let Some(book) = book() else {
+            return;
+        };
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::ui_widgets::ButtonPlugin))
+            .init_resource::<Clicks>();
+        let mut menu = GameMenu::default();
+        let mut kit = Kit::default();
+        let mut requests = Vec::new();
+        let mut click_on = |app: &mut App, menu: &mut GameMenu, kit: &mut Kit, cmd: Cmd| {
+            // Redraw the menu as `show` does, then press and release on the element.
+            let world = app.world_mut();
+            let roots: Vec<_> = world
+                .query_filtered::<Entity, With<GameMenuRoot>>()
+                .iter(world)
+                .collect();
+            for root in roots {
+                world.entity_mut(root).despawn();
+            }
+            let (art, fonts) = (MenuArt::default(), GameFonts::default());
+            let ui = Ui {
+                art: &art,
+                fonts: &fonts,
+                aspect: 16.0 / 9.0,
+            };
+            build(&mut world.commands(), &ui, menu, kit, &book, (1.0, 1.0));
+            world.flush();
+            let entity = world
+                .query::<(Entity, &Cmd)>()
+                .iter(world)
+                .find_map(|(e, c)| (*c == cmd).then_some(e))
+                .unwrap_or_else(|| panic!("no element sends {cmd:?}"));
+            crate::menu::test_click(world, entity, entity);
+            app.update();
+            let clicks = std::mem::take(&mut app.world_mut().resource_mut::<Clicks>().0);
+            assert_eq!(clicks, [cmd], "one click sends its command once");
+            requests.extend(apply(menu, cmd, kit, &book));
+        };
+        let gourd = HEALING_GOURD;
+        click_on(&mut app, &mut menu, &mut kit, Cmd::Tab(1));
+        assert_eq!((menu.tab, menu.cat[0], menu.index), (1, 0, 0));
+        click_on(&mut app, &mut menu, &mut kit, Cmd::Row(0));
+        assert_eq!(
+            (menu.index, kit.count(gourd)),
+            (0, 3),
+            "the first click on the gourd under the opening cursor only selects it"
+        );
+        click_on(&mut app, &mut menu, &mut kit, Cmd::Row(0));
+        assert_eq!(kit.count(gourd), 2, "a second click uses the Healing Gourd");
+        click_on(&mut app, &mut menu, &mut kit, Cmd::Row(1));
+        assert_eq!(
+            (menu.index, kit.count(gourd)),
+            (1, 2),
+            "another row: selected"
+        );
+        // The keys move the cursor back to the gourd: one click there only selects.
+        apply(&mut menu, Cmd::Step(false), &mut kit, &book);
+        assert_eq!(menu.index, 0);
+        click_on(&mut app, &mut menu, &mut kit, Cmd::Row(0));
+        assert_eq!(
+            kit.count(gourd),
+            2,
+            "a keyboard-selected row is not used by one click"
+        );
+        click_on(&mut app, &mut menu, &mut kit, Cmd::Tab(3));
+        click_on(&mut app, &mut menu, &mut kit, Cmd::Row(1));
+        assert_eq!(requests, [1], "Back to start menu acts on one click");
+    }
+
+    /// Tab and category steps wrap, and a category step in the same frame as a tab step
+    /// applies to the tab it opened (X then V from Equipment).
+    #[test]
+    fn steps_wrap_and_apply_in_order() {
+        let Some(book) = book() else {
+            return;
+        };
+        let (mut menu, mut kit) = (GameMenu::default(), Kit::default());
+        for cmd in [Cmd::TabStep(true), Cmd::CatStep(true)] {
+            apply(&mut menu, cmd, &mut kit, &book);
+        }
+        assert_eq!((menu.tab, menu.cat), (1, [1, 0]));
+        apply(&mut menu, Cmd::CatStep(false), &mut kit, &book);
+        apply(&mut menu, Cmd::CatStep(false), &mut kit, &book);
+        assert_eq!(menu.cat, [3, 0], "categories wrap");
+        apply(&mut menu, Cmd::TabStep(false), &mut kit, &book);
+        apply(&mut menu, Cmd::TabStep(false), &mut kit, &book);
+        assert_eq!(menu.tab, 3, "tabs wrap");
+        apply(&mut menu, Cmd::CatStep(true), &mut kit, &book);
+        assert_eq!(menu.cat, [3, 0], "Options has no categories");
+    }
+
+    /// The rows counted for the cursor are the rows drawn, on every screen.
+    #[test]
+    fn row_count_matches_the_drawn_lists() {
+        let Some(book) = book() else {
+            return;
+        };
+        let kit = Kit::default();
+        let mut menu = GameMenu::default();
+        assert_eq!(row_count(&menu, &kit, &book), slots(&kit).len());
+        menu.tab = 3;
+        assert_eq!(row_count(&menu, &kit, &book), PAUSE_ROWS.len());
+        for cat in 0..4 {
+            menu.tab = 1;
+            menu.cat = [cat, cat];
+            let n = inventory(cat, &kit, &book).len().max(1);
+            assert_eq!(row_count(&menu, &kit, &book), n, "inventory category {cat}");
+            menu.tab = 2;
+            let n = skills(cat, &kit, &book).len().max(1);
+            assert_eq!(row_count(&menu, &kit, &book), n, "skill category {cat}");
+        }
     }
 }

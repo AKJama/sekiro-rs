@@ -20,6 +20,8 @@ use serde_json::Value;
 pub const LOT_GOODS: i32 = 0x4000_0000;
 /// The goods id of a Spirit Emblem (kept as a count in the kit, not in its goods).
 pub const SPIRIT_EMBLEM: i32 = 1000;
+/// The goods id of the Healing Gourd (kept as charges in the kit, not in its goods).
+pub const HEALING_GOURD: i32 = 3000;
 /// ActionButtonParam "Pick up an item", for treasures whose ActionButtonID is -1.
 pub const PICK_UP_BUTTON: i32 = 4000;
 
