@@ -11,6 +11,7 @@ mod brain_tactics;
 mod butterfly;
 mod button_combos;
 mod camera_turn_movement;
+mod ceiling;
 mod character_demo;
 mod coach;
 mod combat_polish;
