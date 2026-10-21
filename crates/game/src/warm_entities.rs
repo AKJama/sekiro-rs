@@ -76,6 +76,16 @@ pub(super) fn cancel(world: &mut World) {
     queue.pipelines.clear();
 }
 
+/// The fraction of resident placements warmed, 0 before the entity warmup starts.
+pub(super) fn progress(world: &World) -> f32 {
+    let queue = world.resource::<Queue>();
+    if queue.started {
+        crate::play::fraction(queue.completed, queue.completed + queue.work.len())
+    } else {
+        0.0
+    }
+}
+
 pub(super) fn warm<M: Material>(world: &mut World, budget: std::time::Duration) -> bool {
     let _timer = crate::perf_log::SystemTimer::start("entity pipeline warmup");
     let mut queue = world.remove_resource::<Queue>().unwrap();
