@@ -203,6 +203,25 @@ impl Kit {
     pub fn xp_fill(&self) -> f32 {
         (self.skill_xp as f32 / self.xp_needed() as f32).clamp(0.0, 1.0)
     }
+
+    /// Uses one of the goods `id` (the gourd: one charge); false when none is left.
+    /// gap: only the count drops; the item's effect (its SpEffect and use animation) is not
+    /// modelled yet.
+    pub fn use_goods(&mut self, id: i32) -> bool {
+        let held = if id == 3000 {
+            &mut self.gourd_charges
+        } else {
+            match self.goods.iter_mut().find(|(g, _)| *g == id) {
+                Some((_, n)) => n,
+                None => return false,
+            }
+        };
+        if *held == 0 {
+            return false;
+        }
+        *held -= 1;
+        true
+    }
 }
 
 #[cfg(test)]

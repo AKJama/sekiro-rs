@@ -1,9 +1,12 @@
 //! The in-game menu (#127): Esc pauses the world under the game's wooden board with the tabs
 //! Equipment, Inventory, Skills and Options, drawn with its menu art, item icons and texts
 //! (item.msgbnd) and showing Wolf's kit (`sekiro_sim::kit`). X / Z switch tabs, V / C the
-//! category, the arrows move the cursor; Esc closes it.
+//! category, the arrows move the cursor; Esc closes it. A click on a tab, category or arrow
+//! switches it, a click on a row moves the cursor there and a second click confirms it, as OK
+//! (E) does: Options rows act on the first click, and a Quick Item is used.
 //! After FwLo's RustSekiro `src/game_menu.rs` (the layout set from captures of the game).
-//! gap: display only (no Equipped Items picker, no item use, no mouse); the tab and section
+//! gap: no Equipped Items picker, and a used item only loses one from its count (no effect,
+//! no use animation, no Use / Discard submenu); the tab and section
 //! labels are English strings, not yet the game's FMG ids; attribute levels, Unseen Aid and
 //! skill experience are not modelled; Options holds this build's Resume / Back to start menu /
 //! Quit, not the game's settings; Ninjutsu lists nothing (Wolf starts with none, and the game
@@ -12,6 +15,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use bevy::prelude::*;
+use bevy::ui_widgets::{Activate, ActivateOnPress, Button};
 use sekiro_sim::kit::Kit;
 
 use super::Sim;
@@ -59,7 +63,31 @@ struct GameMenu {
     index: usize,
     cat: [usize; 2],
     top: usize,
+    /// Set when the kit changed under an unchanged cursor (an item used), to redraw.
+    redraw: bool,
 }
+
+/// One menu input, from a key or a click: both change the menu the same way. As a component
+/// it marks the clickable menu element that sends it.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+enum Cmd {
+    /// Open this tab.
+    Tab(usize),
+    /// Show this category of the open list tab.
+    Cat(usize),
+    /// Put the cursor on this row; on the row already under it, confirm it.
+    Row(usize),
+    /// Confirm the row under the cursor (OK).
+    Ok,
+    /// Close the menu (Back).
+    Back,
+    /// Move the cursor one row forward (true) or back, wrapping.
+    Step(bool),
+}
+
+/// This frame's clicks on menu elements, applied with the keys in `menu_keys`.
+#[derive(Resource, Default)]
+struct Clicks(Vec<Cmd>);
 
 #[derive(Component)]
 struct GameMenuRoot;
@@ -108,6 +136,8 @@ struct Goods {
     kind: i64,
     sort: i64,
     max: u32,
+    /// `isConsume`: using it takes one (not the Homeward Idol).
+    consume: bool,
 }
 
 #[derive(Default)]
@@ -172,6 +202,7 @@ impl Tables {
                     kind: row["goodsType"].as_i64().unwrap_or(-1),
                     sort: row["sortId"].as_i64().unwrap_or(0),
                     max: row["maxNum"].as_u64().unwrap_or(99) as u32,
+                    consume: row["isConsume"].as_i64() == Some(1),
                 },
             );
         }
@@ -348,6 +379,11 @@ impl Ui<'_> {
     }
 }
 
+/// What makes a menu element clickable: a press sends `cmd` (see `clicked`).
+fn click(cmd: Cmd) -> impl Bundle {
+    (Button, ActivateOnPress, cmd)
+}
+
 /// A full-size child laid out as a row, vertically centred.
 fn fill_row() -> Node {
     Node {
@@ -367,6 +403,8 @@ struct Entry {
     art: Option<String>,
     stats: Vec<(String, String)>,
     info: String,
+    /// The goods this row shows, for using it.
+    goods: Option<i32>,
 }
 
 /// Installs the display over the existing pause state, with the kit owned by the sim.
@@ -376,7 +414,9 @@ pub(super) fn install(app: &mut App, attack: u8) {
     game_ui::install_cover(app);
     app.insert_resource(Book::load(&sekiro_sim::cache::root(), attack))
         .init_resource::<GameMenu>()
+        .init_resource::<Clicks>()
         .init_resource::<crate::menu::PauseView>()
+        .add_observer(clicked)
         .add_systems(
             PreUpdate,
             menu_keys
@@ -387,65 +427,125 @@ pub(super) fn install(app: &mut App, attack: u8) {
         .add_systems(Update, show);
 }
 
-/// Tab and category switches, wrapped cursor movement, and the Options actions only.
+/// A click on a menu element queues its command for `menu_keys`.
+fn clicked(event: On<Activate>, cmds: Query<&Cmd>, mut clicks: ResMut<Clicks>) {
+    if let Ok(cmd) = cmds.get(event.entity) {
+        clicks.0.push(*cmd);
+    }
+}
+
+/// The keys and this frame's clicks: tab and category switches, wrapped cursor movement, the
+/// Options actions and using a Quick Item.
 fn menu_keys(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
+    mut clicks: ResMut<Clicks>,
     mut menu: ResMut<GameMenu>,
     mut view: ResMut<crate::menu::PauseView>,
     book: Res<Book>,
-    sim: NonSend<Sim>,
+    mut sim: NonSendMut<Sim>,
 ) {
     let key = |k: &[KeyCode]| keys.any_just_pressed(k.iter().copied());
     let pad = |b| pads.iter().any(|p| p.just_pressed(b));
+    let mut cmds = std::mem::take(&mut clicks.0);
     if key(&[crate::menu::MENU_NEXT_TAB_KEY]) || pad(GamepadButton::RightTrigger) {
-        menu.tab = (menu.tab + 1) % TABS.len();
-        menu.index = 0;
-        menu.top = 0;
+        cmds.push(Cmd::Tab((menu.tab + 1) % TABS.len()));
     }
     if key(&[crate::menu::MENU_PREVIOUS_TAB_KEY]) || pad(GamepadButton::LeftTrigger) {
-        menu.tab = (menu.tab + TABS.len() - 1) % TABS.len();
-        menu.index = 0;
-        menu.top = 0;
+        cmds.push(Cmd::Tab((menu.tab + TABS.len() - 1) % TABS.len()));
     }
     if menu.tab == 1 || menu.tab == 2 {
-        let k = menu.tab - 1;
+        let cat = menu.cat[menu.tab - 1];
         if key(&[KeyCode::KeyV]) || pad(GamepadButton::RightTrigger2) {
-            menu.cat[k] = (menu.cat[k] + 1) % 4;
-            menu.index = 0;
-            menu.top = 0;
+            cmds.push(Cmd::Cat((cat + 1) % 4));
         }
         if key(&[KeyCode::KeyC]) || pad(GamepadButton::LeftTrigger2) {
-            menu.cat[k] = (menu.cat[k] + 3) % 4;
-            menu.index = 0;
-            menu.top = 0;
+            cmds.push(Cmd::Cat((cat + 3) % 4));
         }
     }
-    if menu.tab == 3 && crate::menu::ok_pressed(&keys, &pads) {
-        view.request = Some(menu.index);
+    if crate::menu::ok_pressed(&keys, &pads) {
+        cmds.push(Cmd::Ok);
     }
     // Back (Q, B) closes the menu, as Resume and Esc do: it has no nested level.
     if crate::menu::back_pressed(&keys, &pads) {
-        view.request = Some(0);
+        cmds.push(Cmd::Back);
     }
     // The pause's own arrows, D-pad and stick, plus WASD.
     let step = view.movement.x + view.movement.y;
-    let next = step > 0 || key(&[KeyCode::KeyD, KeyCode::KeyS]);
-    let back = step < 0 || key(&[KeyCode::KeyA, KeyCode::KeyW]);
-    if !next && !back {
-        return;
+    if step > 0 || key(&[KeyCode::KeyD, KeyCode::KeyS]) {
+        cmds.push(Cmd::Step(true));
+    } else if step < 0 || key(&[KeyCode::KeyA, KeyCode::KeyW]) {
+        cmds.push(Cmd::Step(false));
     }
-    // The rows are counted only when the cursor moves.
-    let kit = &sim.duel.kit;
-    let n = match menu.tab {
+    for cmd in cmds {
+        if let Some(row) = apply(&mut menu, cmd, &mut sim.duel.kit, &book) {
+            view.request = Some(row);
+        }
+    }
+}
+
+/// The rows of the open screen, at least one.
+fn row_count(menu: &GameMenu, kit: &Kit, book: &Book) -> usize {
+    match menu.tab {
         0 => 10,
-        1 => inventory(menu.cat[0], kit, &book).len(),
-        2 => skills(menu.cat[1], kit, &book).len(),
+        1 => inventory(menu.cat[0], kit, book).len(),
+        2 => skills(menu.cat[1], kit, book).len(),
         _ => PAUSE_ROWS.len(),
     }
-    .max(1);
-    menu.index = (menu.index + if next { 1 } else { n - 1 }) % n;
-    menu.top = keep_visible(menu.top, menu.index, n);
+    .max(1)
+}
+
+/// Applies one command; returns the Options row (an index into `PAUSE_ROWS`) it picks.
+fn apply(menu: &mut GameMenu, cmd: Cmd, kit: &mut Kit, book: &Book) -> Option<usize> {
+    match cmd {
+        Cmd::Tab(tab) if tab != menu.tab => {
+            menu.tab = tab % TABS.len();
+            menu.index = 0;
+            menu.top = 0;
+        }
+        Cmd::Cat(cat) if (menu.tab == 1 || menu.tab == 2) && cat != menu.cat[menu.tab - 1] => {
+            menu.cat[menu.tab - 1] = cat % 4;
+            menu.index = 0;
+            menu.top = 0;
+        }
+        Cmd::Step(next) => {
+            let n = row_count(menu, kit, book);
+            menu.index = (menu.index + if next { 1 } else { n - 1 }) % n;
+            menu.top = keep_visible(menu.top, menu.index, n);
+        }
+        Cmd::Row(row) => {
+            let n = row_count(menu, kit, book);
+            if row >= n {
+                return None;
+            }
+            let again = row == menu.index;
+            menu.index = row;
+            menu.top = keep_visible(menu.top, row, n);
+            // Options rows are buttons: one click acts.
+            if again || menu.tab == 3 {
+                return apply(menu, Cmd::Ok, kit, book);
+            }
+        }
+        Cmd::Ok if menu.tab == 3 => return Some(menu.index),
+        Cmd::Ok if menu.tab == 1 && menu.cat[0] == 0 => {
+            let goods = inventory(0, kit, book)
+                .get(menu.index)
+                .and_then(|e| e.goods)
+                .filter(|id| book.tables.goods.get(id).is_some_and(|g| g.consume));
+            if let Some(id) = goods
+                && kit.use_goods(id)
+            {
+                info!("game menu: used goods {id}, {} left", kit.count(id));
+                let n = row_count(menu, kit, book);
+                menu.index = menu.index.min(n - 1);
+                menu.top = keep_visible(menu.top, menu.index, n);
+                menu.redraw = true;
+            }
+        }
+        Cmd::Back => return Some(0),
+        _ => {}
+    }
+    None
 }
 
 /// Rebuilds only for a changed cursor or screen; closing keeps the tab and categories.
@@ -480,7 +580,8 @@ fn show(
         menu.cat,
         (aspect * 1000.0) as u32,
     );
-    if *built == Some(now) {
+    let redraw = std::mem::take(&mut menu.redraw);
+    if *built == Some(now) && !redraw {
         return;
     }
     for root in &roots {
@@ -556,8 +657,18 @@ fn list_screen(
         });
     }
     if !cats.is_empty() {
-        root.spawn((abs(5.4, 19.2, 1.4, 4.4), ui.image("sb_in_game/MENU_Arrow")));
-        root.spawn((abs(7.4, 19.8, 1.6, 3.2), ui.image("sb_keytop/KG_Key_C")));
+        let (back, next) = (
+            click(Cmd::Cat((cat + 3) % 4)),
+            click(Cmd::Cat((cat + 1) % 4)),
+        );
+        root.spawn((abs(5.4, 19.2, 3.6, 4.4), back))
+            .with_children(|b| {
+                b.spawn((
+                    abs(0.0, 0.0, 38.9, 100.0),
+                    ui.image("sb_in_game/MENU_Arrow"),
+                ));
+                b.spawn((abs(55.6, 13.6, 44.4, 72.7), ui.image("sb_keytop/KG_Key_C")));
+            });
         for (i, (_, icon)) in cats.iter().enumerate() {
             let l = 10.0 + i as f32 * 4.85;
             if i == cat {
@@ -569,13 +680,17 @@ fn list_screen(
             root.spawn((
                 abs(l, 18.3, 3.2, 6.0),
                 ui.image(&format!("sb_in_game/{icon}")),
+                click(Cmd::Cat(i)),
             ));
         }
         let end = 10.0 + cats.len() as f32 * 4.85;
-        root.spawn((abs(end, 19.8, 1.6, 3.2), ui.image("sb_keytop/KG_Key_V")));
         let mut right = ui.image("sb_in_game/MENU_Arrow");
         right.flip_x = true;
-        root.spawn((abs(end + 2.1, 19.2, 1.4, 4.4), right));
+        root.spawn((abs(end, 19.2, 3.5, 4.4), next))
+            .with_children(|b| {
+                b.spawn((abs(0.0, 13.6, 45.7, 72.7), ui.image("sb_keytop/KG_Key_V")));
+                b.spawn((abs(60.0, 0.0, 40.0, 100.0), right));
+            });
     }
     for (k, (i, row)) in entries.iter().enumerate().skip(top).take(ROWS).enumerate() {
         let sel = i == index;
@@ -583,6 +698,7 @@ fn list_screen(
         root.spawn((
             abs(7.4, t, 4.2, 7.4),
             ui.image("sb_in_game/MENU_IconBase_02"),
+            click(Cmd::Row(i)),
         ))
         .with_children(|b| {
             if let Some(icon) = &row.icon {
@@ -606,6 +722,7 @@ fn list_screen(
             "sb_in_game/MENU_ItemBase_02"
         };
         root.spawn((abs(12.3, t + 0.6, 36.6, 6.2), ui.image(plate)))
+            .insert(click(Cmd::Row(i)))
             .with_children(|b| {
                 b.spawn(Node {
                     padding: UiRect::axes(Val::Percent(4.5), Val::Px(0.0)),
@@ -914,6 +1031,10 @@ fn inventory(cat: usize, kit: &Kit, book: &Book) -> Vec<Entry> {
             count: count.map(|n| n.to_string()),
             stats,
             info,
+            goods: match slot {
+                Slot::Goods(id, _) => Some(id),
+                _ => None,
+            },
             ..default()
         }
     };
@@ -1019,6 +1140,7 @@ fn equipment(root: &mut ChildSpawnerCommands, ui: &Ui, menu: &GameMenu, kit: &Ki
         let w = size * 9.0 / 16.0;
         let slot = &all[i];
         root.spawn((abs(l, t, w, size), ui.image("sb_in_game/MENU_IconBase_02")))
+            .insert(click(Cmd::Row(i)))
             .with_children(|s| {
                 // The cursor glows behind the item, not over it.
                 if i == menu.index {
@@ -1086,12 +1208,28 @@ fn build(
                 ui.image("sb_in_game/MENU_Base_00"),
             ));
             // Tabs, with the switch keys and the brush arrows at either end.
-            root.spawn((abs(5.3, 6.0, 1.3, 4.6), ui.image("sb_in_game/MENU_Arrow")));
-            root.spawn((abs(7.3, 6.4, 1.8, 3.4), ui.image("sb_keytop/KG_Key_Z")));
-            root.spawn((abs(90.0, 6.4, 1.8, 3.4), ui.image("sb_keytop/KG_Key_X")));
+            let n = TABS.len();
+            root.spawn((
+                abs(5.3, 6.0, 3.8, 4.6),
+                click(Cmd::Tab((menu.tab + n - 1) % n)),
+            ))
+            .with_children(|b| {
+                b.spawn((
+                    abs(0.0, 0.0, 34.2, 100.0),
+                    ui.image("sb_in_game/MENU_Arrow"),
+                ));
+                b.spawn((abs(52.6, 8.7, 47.4, 73.9), ui.image("sb_keytop/KG_Key_Z")));
+            });
             let mut right = ui.image("sb_in_game/MENU_Arrow");
             right.flip_x = true;
-            root.spawn((abs(92.4, 6.0, 1.3, 4.6), right));
+            root.spawn((
+                abs(90.0, 6.0, 3.7, 4.6),
+                click(Cmd::Tab((menu.tab + 1) % n)),
+            ))
+            .with_children(|b| {
+                b.spawn((abs(0.0, 8.7, 48.6, 73.9), ui.image("sb_keytop/KG_Key_X")));
+                b.spawn((abs(64.9, 0.0, 35.1, 100.0), right));
+            });
             for (i, name) in TABS.iter().enumerate() {
                 let open = i == menu.tab;
                 let brush = if open {
@@ -1100,6 +1238,7 @@ fn build(
                     "sb_in_game/MENU_Caption_01"
                 };
                 root.spawn((abs(11.5 + i as f32 * 19.0, 4.2, 18.0, 9.0), ui.image(brush)))
+                    .insert(click(Cmd::Tab(i)))
                     .with_children(|t| {
                         t.spawn(Node {
                             justify_content: JustifyContent::Center,
@@ -1135,6 +1274,7 @@ fn build(
                             "sb_in_game/MENU_Caption_01"
                         };
                         root.spawn((abs(6.8, 18.0 + i as f32 * 7.55, 22.2, 6.4), ui.image(plate)))
+                            .insert(click(Cmd::Row(i)))
                             .with_children(|b| {
                                 b.spawn(Node {
                                     justify_content: JustifyContent::Center,
@@ -1255,5 +1395,93 @@ mod tests {
         top = keep_visible(top, 1, n);
         assert_eq!(top, 1);
         assert_eq!(keep_visible(9, 11, n), 6, "never past the end");
+    }
+
+    /// Clicks on the drawn menu go through picking to the same commands as the keys: a tab
+    /// click opens it, a row click selects, a second click on it uses the Quick Item, and an
+    /// Options row acts on one click.
+    #[test]
+    fn clicks_switch_tabs_select_rows_and_use_items() {
+        use bevy::camera::{ManualTextureViewHandle, NormalizedRenderTarget};
+        use bevy::picking::{
+            backend::HitData,
+            events::{Pointer, PointerPress, PointerRelease},
+            pointer::{Location, PointerButton, PointerId},
+        };
+        let Some(book) = book() else {
+            return;
+        };
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::ui_widgets::ButtonPlugin))
+            .init_resource::<Clicks>()
+            .add_observer(clicked);
+        // Pointer event traversal also queries Window, including in a windowless test.
+        app.world_mut().register_component::<Window>();
+        let mut menu = GameMenu::default();
+        let mut kit = Kit::default();
+        let mut requests = Vec::new();
+        let mut click_on = |app: &mut App, menu: &mut GameMenu, kit: &mut Kit, cmd: Cmd| {
+            // Redraw the menu as `show` does, then press and release on the element.
+            let world = app.world_mut();
+            let roots: Vec<_> = world
+                .query_filtered::<Entity, With<GameMenuRoot>>()
+                .iter(world)
+                .collect();
+            for root in roots {
+                world.entity_mut(root).despawn();
+            }
+            let (art, fonts) = (MenuArt::default(), GameFonts::default());
+            let ui = Ui {
+                art: &art,
+                fonts: &fonts,
+                aspect: 16.0 / 9.0,
+            };
+            build(&mut world.commands(), &ui, menu, kit, &book, (1.0, 1.0));
+            world.flush();
+            let entity = world
+                .query::<(Entity, &Cmd)>()
+                .iter(world)
+                .find_map(|(e, c)| (*c == cmd).then_some(e))
+                .unwrap_or_else(|| panic!("no element sends {cmd:?}"));
+            let pointer = Pointer::new(
+                PointerId::Mouse,
+                Location {
+                    target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(5)),
+                    position: Vec2::ZERO,
+                },
+            );
+            let hit = HitData::new(entity, 0., None, None);
+            world.trigger(PointerPress {
+                entity,
+                pointer: pointer.clone(),
+                button: PointerButton::Primary,
+                hit: hit.clone(),
+                count: 1,
+            });
+            world.trigger(PointerRelease {
+                entity,
+                pointer,
+                button: PointerButton::Primary,
+                hit,
+            });
+            app.update();
+            let clicks = std::mem::take(&mut app.world_mut().resource_mut::<Clicks>().0);
+            assert_eq!(clicks, [cmd], "one click sends its command once");
+            for cmd in clicks {
+                requests.extend(apply(menu, cmd, kit, &book));
+            }
+        };
+        click_on(&mut app, &mut menu, &mut kit, Cmd::Tab(1));
+        assert_eq!((menu.tab, menu.cat[0], menu.index), (1, 0, 0));
+        click_on(&mut app, &mut menu, &mut kit, Cmd::Row(1));
+        assert_eq!(menu.index, 1, "the first click on a row selects it");
+        click_on(&mut app, &mut menu, &mut kit, Cmd::Row(0));
+        assert_eq!((menu.index, kit.count(3000)), (0, 3));
+        click_on(&mut app, &mut menu, &mut kit, Cmd::Row(0));
+        assert_eq!(kit.count(3000), 2, "a second click uses the Healing Gourd");
+        assert!(menu.redraw);
+        click_on(&mut app, &mut menu, &mut kit, Cmd::Tab(3));
+        click_on(&mut app, &mut menu, &mut kit, Cmd::Row(1));
+        assert_eq!(requests, [1], "Back to start menu acts on one click");
     }
 }
