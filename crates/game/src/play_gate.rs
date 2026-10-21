@@ -132,6 +132,35 @@ impl PlayGate {
     }
 }
 
+/// How far each loading step is, from 0 to 1, for the bar.
+#[derive(Clone, Copy, Debug, Default)]
+struct Steps {
+    /// Map GLBs, textures and scene instances ([`crate::map::Pending::progress`]).
+    map: f32,
+    /// Static map merges installed ([`crate::map::StaticBatches::progress`]).
+    batches: f32,
+    /// Resident pipeline warmup ([`crate::pipeline_warmup::PipelineWarmup::progress`]).
+    warmup: f32,
+    rigs: bool,
+    /// No render pipeline is compiling, counted only once the map is ready so the start of the
+    /// warmup's compiles does not move the bar back.
+    compiled: bool,
+    settle: f32,
+}
+
+impl Steps {
+    /// The bar's fill from 0 to 1. The merges and the warmup follow the map load and took about
+    /// 14 s of a 51 s load on m11_00 (#171), so they have their own share and move the bar.
+    fn bar(&self) -> f32 {
+        0.8 * self.map
+            + 0.03 * self.batches
+            + 0.07 * self.warmup
+            + 0.04 * f32::from(u8::from(self.rigs))
+            + 0.03 * f32::from(u8::from(self.compiled))
+            + 0.03 * self.settle
+    }
+}
+
 #[derive(Component)]
 pub(super) struct LoadingScreen;
 
@@ -263,10 +292,15 @@ pub(super) fn update(
                 }
             }
         }
-        pending.as_ref().map_or(1.0, |p| p.progress()) * 0.9
-            + 0.04 * f32::from(u8::from(rigs_bound))
-            + 0.03 * f32::from(u8::from(compiled))
-            + 0.03 * gate.settle.progress()
+        Steps {
+            map: pending.as_ref().map_or(1.0, |p| p.progress()),
+            batches: batches.as_ref().map_or(1.0, |b| b.progress()),
+            warmup: warmup.as_ref().map_or(1.0, |w| w.progress()),
+            rigs: rigs_bound,
+            compiled: map && compiled,
+            settle: gate.settle.progress(),
+        }
+        .bar()
     } else {
         1.0
     };
@@ -407,6 +441,43 @@ mod tests {
 
     fn drawn(frames: impl IntoIterator<Item = f32>) -> impl Iterator<Item = (f32, bool)> {
         frames.into_iter().map(|seconds| (seconds, true))
+    }
+
+    #[test]
+    fn bar_rises_through_every_step_of_a_load() {
+        // A load in its real order: rigs bind while the map streams, then the merges, the
+        // warmup and its compiles, and the settle.
+        let mut s = Steps::default();
+        let mut states = Vec::new();
+        for map in [0.0, 0.5, 0.99] {
+            s.map = map;
+            s.rigs = map > 0.4;
+            states.push(s);
+        }
+        s.map = 1.0;
+        for step in [0.0, 0.5, 1.0] {
+            s.batches = step;
+            states.push(s);
+        }
+        let warmup_start = states.len();
+        for step in [0.2, 0.4, 0.7, 1.0] {
+            s.warmup = step;
+            states.push(s);
+        }
+        let warmup_end = states.len() - 1;
+        s.compiled = true;
+        for step in [0.0, 0.5, 1.0] {
+            s.settle = step;
+            states.push(s);
+        }
+        let bars: Vec<f32> = states.iter().map(Steps::bar).collect();
+        assert!(bars.windows(2).all(|w| w[1] >= w[0]), "{bars:?}");
+        assert!((bars[bars.len() - 1] - 1.0).abs() < 1e-6, "{bars:?}");
+        // The warmup takes seconds, so it must visibly move the bar.
+        assert!(
+            bars[warmup_end] - bars[warmup_start - 1] >= 0.05,
+            "{bars:?}"
+        );
     }
 
     #[test]

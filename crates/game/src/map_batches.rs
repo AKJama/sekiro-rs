@@ -56,6 +56,11 @@ struct Job {
     task: Task<Option<Mesh>>,
 }
 
+/// Main-thread time per frame for installing finished merges. Each install is a few tens of
+/// microseconds; the earlier cap of 4 installs a frame spread the 1418 merges of m11_00 over
+/// about 6 s at the end of loading (#171), while this installs them in a few frames.
+const APPLY_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
+
 #[derive(Component)]
 struct BatchMember(usize);
 
@@ -66,6 +71,8 @@ struct Planned;
 pub(crate) struct StaticBatches {
     started: bool,
     jobs: Vec<Job>,
+    /// Merge jobs planned so far, for the loading bar.
+    planned: usize,
     batches: HashMap<usize, Batch>,
     next_batch: usize,
     dirty: Vec<usize>,
@@ -77,6 +84,17 @@ pub(crate) struct StaticBatches {
 impl StaticBatches {
     pub(crate) fn ready(&self) -> bool {
         self.started && self.jobs.is_empty()
+    }
+
+    /// The fraction of planned merges installed, from 0 to 1, for the loading bar.
+    pub(crate) fn progress(&self) -> f32 {
+        if !self.started {
+            0.0
+        } else if self.planned == 0 {
+            1.0
+        } else {
+            1.0 - self.jobs.len().min(self.planned) as f32 / self.planned as f32
+        }
     }
 }
 
@@ -174,17 +192,17 @@ fn update(world: &mut World) {
                 jobs.iter().map(|j| j.group.sources.len()).sum::<usize>()
             );
         }
+        state.planned += jobs.len();
         state.jobs.extend(jobs);
     }
-    let mut completed = 0;
+    let applying = std::time::Instant::now();
     let mut i = 0;
-    while i < state.jobs.len() && completed < 4 {
+    while i < state.jobs.len() && applying.elapsed() < APPLY_BUDGET {
         let Some(mesh) = block_on(poll_once(&mut state.jobs[i].task)) else {
             i += 1;
             continue;
         };
         let job = state.jobs.swap_remove(i);
-        completed += 1;
         let Some(mut mesh) = mesh else {
             continue;
         };
