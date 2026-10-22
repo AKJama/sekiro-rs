@@ -137,13 +137,12 @@ fn emma_posture_deathblow_reaches_isshin_through_the_map_script() {
         );
         assert!(r.player.behavior.script_errors.is_empty(), "{r:?}");
         assert!(r.enemy.behavior.script_errors.is_empty(), "{r:?}");
-        // A guarded hit that empties her posture is a guard break, as deathblow-ready as a
-        // clean hit's break: count both, or Wolf's cadence can stay in step with her guard.
+        // She guards Wolf's slash, so her break is a guard break (1001): the hit report must
+        // count it as a posture break like a clean hit's (#192).
         broke |= r
             .hits
             .iter()
-            .any(|(h, r)| h.attacker == 0 && r.posture_broke)
-            || duel.rules.fighters[1].posture.broken();
+            .any(|(h, r)| h.attacker == 0 && r.posture_broke);
         started |= r.deathblow.started.is_some();
         if duel.spec.chr == "c5430" {
             break;

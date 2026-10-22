@@ -490,10 +490,8 @@ fn blocking_on_an_empty_posture_breaks_wolfs_guard() {
         let r = duel.step(&frame(i > 20, false), DT);
         if let Some((_, res)) = r.hits.iter().find(|(h, _)| h.attacker == 1) {
             code = Some(res.defender.damage_type);
-            assert!(
-                res.posture_broke || res.defender.damage_type == 1001,
-                "{res:?}"
-            );
+            // A guard break is a posture break in the hit report too (#192).
+            assert!(res.posture_broke, "{res:?}");
         }
         let name = r
             .player

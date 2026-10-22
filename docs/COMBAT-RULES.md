@@ -284,6 +284,10 @@ All posture changes go through `bd6710` (remaining = absolute target) and its he
 
 What happens after a break (the deathblow window length, the recovery from a broken state) is driven by the reaction animations, HKS and TAE, not by this code as far as traced.
 
+A guard break opens a deathblow just as a direct hit's break does.
+The block leaves the defender's posture empty, and the guard-break reaction carries the same deathblow-ready SpEffect as the posture-break stagger: Emma's script answers damage type 1001 with `GuardBreakLeft`, whose clip `a000_008551` keeps SpEffect 220420 on, the effect the soldier's `TrunkCollapse` clip `a000_008300` holds while he can be deathblown (see `docs/DEATHBLOW.md`).
+So the sim's hit report (`HitResult::posture_broke`) counts a guard break as a posture break of the defender, alongside direct-hit breaks and attackers broken by a deflect or block (#192).
+
 ## Damage type codes (env 202)
 
 Defender, in the engine's order of precedence (`b6bd40`):
