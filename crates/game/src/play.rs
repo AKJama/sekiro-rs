@@ -59,6 +59,8 @@ mod game_menu;
 mod idol;
 #[path = "idol_found.rs"]
 mod idol_found;
+#[path = "idol_travel.rs"]
+mod idol_travel;
 #[path = "live_check.rs"]
 mod live_check;
 #[path = "map_enemies.rs"]
@@ -134,6 +136,12 @@ pub struct Options {
     /// Time of day (hours) and draw param override for the map lighting.
     pub hour: f32,
     pub gparam: Option<String>,
+    /// Start at this idol (BonfireWarpParam `bonfireEntityId`) of `map`, at its warp point:
+    /// how Travel to an idol on another map arrives (`--at-idol`).
+    pub at_idol: Option<i32>,
+    /// What Wolf carries, has learned and found, carried over from the run that travelled
+    /// here (`--kit`, JSON).
+    pub kit: Option<sekiro_sim::kit::Kit>,
     /// A boss arena (`--arena owl`): the boss's map, his MSB placement and Wolf's start;
     /// replaces `map` and `start`.
     pub arena: Option<&'static ArenaSpec>,
@@ -520,12 +528,23 @@ pub fn run(options: Options) -> Result<()> {
         idols = idol::Idols::load(&cache, &blocks, |x, z, y| world.floor(x, z, y + 1.0));
         duel.set_idols(idols.spots.clone());
         pickups = pickup::load(&cache, &blocks, &item_data);
-        let (start, yaw_degrees) = match options.spawn {
-            Some([x, y, z, yaw]) => {
+        let at_idol = options.at_idol.and_then(|e| {
+            let i = idols.index(e);
+            if i.is_none() {
+                warn!("--at-idol {e}: no such idol on {id}");
+            }
+            i
+        });
+        let (start, yaw_degrees) = match (at_idol, options.spawn) {
+            (Some(i), _) => {
+                let p = idols.spots[i].checkpoint;
+                (Vec3::from(p.position), p.yaw.to_degrees())
+            }
+            (None, Some([x, y, z, yaw])) => {
                 let y = world.floor(x, z, y + 1.0).unwrap_or(y);
                 (Vec3::new(x, y, z), yaw)
             }
-            None => map::player_start(&dir, options.start)?,
+            (None, None) => map::player_start(&dir, options.start)?,
         };
         let yaw = yaw_degrees.to_radians();
         start_yaw = yaw;
@@ -536,6 +555,9 @@ pub fn run(options: Options) -> Result<()> {
             options.enemy_distance,
             |x, z, near| world.floor(x, z, near + 1.0).unwrap_or(near),
         );
+        if let Some(i) = at_idol {
+            duel.start_at_idol(i);
+        }
         duel.player.ground = Box::new(world.clone());
         duel.enemy.ground = Box::new(sekiro_sim::collision::EnemyGround(world.clone()));
         // Placeholder until the map's authored void return volumes are decoded.
@@ -548,6 +570,9 @@ pub fn run(options: Options) -> Result<()> {
         );
         on_map = Some((dir, id.clone(), world));
         map::raise_io_stack();
+    }
+    if let Some(kit) = &options.kit {
+        duel.kit = kit.clone();
     }
     let has_pickups = !pickups.is_empty();
     duel.set_pickups(pickups, item_data.clone());
@@ -1275,6 +1300,7 @@ fn gather_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     held: Res<crate::menu::HeldThroughMenu>,
+    modal: Option<Res<crate::menu::Modal>>,
     gamepads: Query<&Gamepad>,
     orbit: Res<Orbit>,
     mut live: ResMut<LiveInput>,
@@ -1294,11 +1320,12 @@ fn gather_input(
         capture.focus_requested = true;
     }
     // A click while the cursor is free (after Esc) takes the mouse back for the camera; that
-    // click is not an attack.
+    // click is not an attack. Not while a screen over the game (the idol menu) has the mouse.
     if !mouse.pressed(MouseButton::Left) {
         capture.grab_click = false;
     }
     if mouse.just_pressed(MouseButton::Left)
+        && !modal.is_some_and(|m| m.0)
         && let Ok((window, mut c)) = windows.single_mut()
         && window.focused
         && window.cursor_position().is_some()

@@ -1151,6 +1151,8 @@ impl Duel {
         self.enemy_throw = None;
         self.mikiri = None;
         self.respawn_in = None;
+        // The driver's fight restarts below (an unfinished one ends as such), not as a win.
+        self.idols.arriving = false;
         // A fall return cut short by death must not move the respawned Wolf.
         self.fall_return_fade = None;
         self.fall_return_part = None;

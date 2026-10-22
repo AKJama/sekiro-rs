@@ -39,7 +39,8 @@ fn xp_to_next(earned: u32) -> u32 {
 }
 
 /// One defeat's gain, as [`Kit::earn`] recorded it.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Reward {
     /// Experience gained.
     pub xp: u32,
@@ -49,8 +50,12 @@ pub struct Reward {
     pub points: u32,
 }
 
-/// What Wolf carries and has learned, independent of the screen that shows it.
-#[derive(Debug, Clone, PartialEq)]
+/// What Wolf carries, has learned and has found, independent of the screen that shows it.
+/// It is plain data (serde), so Travel to an idol on another map hands it to the next run; a
+/// field missing from the JSON (a partial `--kit`, or a kit from before a field was added)
+/// keeps its start-kit value.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Kit {
     /// Healing Gourd uses left.
     pub gourd_charges: u32,
@@ -91,6 +96,9 @@ pub struct Kit {
     pub last_reward: Reward,
     /// ItemLotParam `getItemFlagId`s of the map items taken: they stay gone.
     pub taken_flags: BTreeSet<i32>,
+    /// The Sculptor's Idols found (lit by the first kneel at each, #152), by BonfireWarpParam
+    /// `bonfireEntityId`: Travel lists these (#148).
+    pub found_idols: BTreeSet<i32>,
 }
 
 impl Default for Kit {
@@ -152,6 +160,7 @@ impl Default for Kit {
             rewards: 0,
             last_reward: Reward::default(),
             taken_flags: BTreeSet::new(),
+            found_idols: BTreeSet::new(),
         }
     }
 }
@@ -287,6 +296,21 @@ impl Kit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_partial_kit_keeps_the_start_kit_for_what_it_leaves_out() {
+        let kit: Kit = serde_json::from_str(r#"{"sen":1}"#).unwrap();
+        assert_eq!(
+            kit,
+            Kit {
+                sen: 1,
+                ..Kit::default()
+            }
+        );
+        // A whole kit comes back as it went.
+        let json = serde_json::to_string(&kit).unwrap();
+        assert_eq!(serde_json::from_str::<Kit>(&json).unwrap(), kit);
+    }
 
     #[test]
     fn full_gauges_roll_over_into_skill_points() {

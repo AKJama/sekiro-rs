@@ -3404,7 +3404,11 @@ impl BrainDriver {
 
     /// Map events own encounter victory, including final phases and scripted finishes.
     /// A dead phase actor alone is insufficient: it can be waiting for a handover.
+    /// The respawn a Travel within the play world asks for ends nothing.
     pub(crate) fn finish_if_over(&mut self, duel: &Duel) {
+        if duel.idol_arriving() {
+            return;
+        }
         let end = if duel.respawn_in.is_some() && duel.rules.fighters[0].dead() {
             Some(FightEnd::BossWon)
         } else if duel.events.as_ref().is_some_and(|events| events.defeated)

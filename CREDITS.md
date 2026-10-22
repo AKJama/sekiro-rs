@@ -37,6 +37,7 @@ From [FFwLo/RustSekiro](https://github.com/FFwLo/RustSekiro), under the MIT lice
 - Combat and camera: deathblow camera, perilous HUD, sweep and kick-off rules, Mikiri, parry posture and throw selection.
 - Effects: FXR runtime, particle batching, blood, decals, distortion and point lights.
 - Grappling: the camera-view hook search with its soft lock (RustSekiro commit 292655ca24e4438a959770a86b97baedf9584382, `grapple_target`), with the box checked against our own exe trace.
+- Idol Travel: the warp state and its 2.0 s cut, the Travel list order and the screen layout (RustSekiro commit f6002306787102f9cd432f2f7c1bda9167f8efca, `src/idol.rs`), and cross-map travel by relaunch (`sr_map.rs`, `map_of`).
 - Cloth: simulation solver, collisions, deformation and the traced bend-stiffness formula.
 - Character materials: texture interpretation and cutouts, adapted into exported glTF metallic-roughness textures.
 

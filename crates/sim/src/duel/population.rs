@@ -355,6 +355,9 @@ impl Duel {
                 if let Err(error) = self.reset() {
                     eprintln!("population Wolf respawn failed: {error}");
                 } else {
+                    // A respawn after death restocks the goods as Rest does (docs/FIDELITY.md),
+                    // as the solo step's does.
+                    self.restock_kit();
                     self.respawn_foes(&mut population);
                     respawned = true;
                 }
