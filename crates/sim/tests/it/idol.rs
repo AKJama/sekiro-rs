@@ -355,3 +355,63 @@ fn travel_within_the_play_world_ends_no_fight() {
     });
     assert_eq!(fights(&duel), 1);
 }
+
+#[test]
+fn rest_travel_and_death_leave_the_storage_alone_while_every_pellet_is_carried() {
+    let Some((mut duel, [_, there])) = praying_at_one_of_two_idols(false) else {
+        return;
+    };
+    let cache = sekiro_sim::cache::root();
+    let data = std::sync::Arc::new(sekiro_sim::items::ItemData::load(&cache).unwrap());
+    // The Pellets' row: three carried, the rest stored, restocked on Rest.
+    let pellet = data.rule(3020);
+    assert_eq!(
+        (pellet.carry, pellet.store, pellet.restock),
+        (3, 9999, true)
+    );
+    duel.set_pickups(Vec::new(), data);
+    // The start kit carries all three, two more in the Storage (m11_00's pair, #202).
+    assert_eq!(duel.kit.count(3020), pellet.carry);
+    duel.kit.storage.insert(3020, 2);
+    let pellets = |d: &Duel| (d.kit.count(3020), d.kit.stored(3020));
+    let praying = |d: &Duel| d.idol_phase() == Some(IdolPhase::Praying);
+
+    // Rest with the gourd drunk: it refills, the Pellets stay as they were.
+    duel.kit.gourd_charges = 0;
+    let before = duel.kit.clone();
+    duel.rest_at_idol();
+    run(&mut duel, 5.0, |d| {
+        d.idol_phase() == Some(IdolPhase::Resting)
+    });
+    run(&mut duel, 5.0, praying);
+    assert_eq!(duel.kit.gourd_charges, duel.kit.gourd_max);
+    assert_eq!(pellets(&duel), (3, 2));
+    assert_eq!(
+        sekiro_sim::kit::Kit {
+            gourd_charges: before.gourd_max,
+            ..before
+        },
+        duel.kit
+    );
+
+    // One used: the next Rest moves exactly one from the Storage, and a Travel after it
+    // (which restocks again, then respawns him there) moves no more.
+    assert!(duel.kit.use_goods(3020));
+    duel.rest_at_idol();
+    assert_eq!(pellets(&duel), (3, 1));
+    run(&mut duel, 5.0, |d| {
+        d.idol_phase() == Some(IdolPhase::Resting)
+    });
+    run(&mut duel, 5.0, praying);
+    assert!(duel.travel_to_idol(Destination::Here(1)));
+    run(&mut duel, WARP_CUT + 0.5, |d| d.idol_travel().is_none());
+    assert_eq!(duel.player.body.position, there.checkpoint.position);
+    assert_eq!(pellets(&duel), (3, 1));
+
+    // A death: the respawn restocks as Rest does, nothing to move.
+    duel.rules.fighters[0].vitality.hp = 0;
+    run(&mut duel, RESPAWN_DELAY + 1.0, |d| {
+        d.respawn_in.is_none() && !d.rules.fighters[0].dead()
+    });
+    assert_eq!(pellets(&duel), (3, 1));
+}

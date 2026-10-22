@@ -416,4 +416,65 @@ mod tests {
             [3020, 5400]
         );
     }
+
+    /// Pellets (goods 3020: maxNum 3, isDeposit 1, autoReplenishType 2) and the gourd (3000:
+    /// isDeposit 0) as EquipParamGoods has them.
+    fn pellet_rules(id: i32) -> GoodsRule {
+        match id {
+            3020 => GoodsRule::consumable(3),
+            crate::items::HEALING_GOURD => GoodsRule {
+                store: 0,
+                ..GoodsRule::consumable(10)
+            },
+            _ => GoodsRule::UNKNOWN,
+        }
+    }
+
+    /// The start kit with two Pellets in the Storage, as after picking up m11_00's pair (#202).
+    fn kit_with_stored_pellets() -> Kit {
+        let mut kit = Kit::default();
+        kit.storage.insert(3020, 2);
+        kit
+    }
+
+    #[test]
+    fn rest_with_every_pellet_carried_leaves_the_storage_alone() {
+        let mut kit = kit_with_stored_pellets();
+        // The start kit carries the Pellets' limit, so a first Rest has nothing to top up.
+        assert_eq!(kit.count(3020), pellet_rules(3020).carry);
+        let before = kit.clone();
+        kit.restock(pellet_rules);
+        assert_eq!(kit, before);
+    }
+
+    #[test]
+    fn rest_after_one_pellet_moves_exactly_one_from_the_storage() {
+        let mut kit = kit_with_stored_pellets();
+        assert!(kit.use_goods(3020));
+        kit.restock(pellet_rules);
+        assert_eq!((kit.count(3020), kit.stored(3020)), (3, 1));
+    }
+
+    #[test]
+    fn the_gourd_refill_does_not_touch_the_pellets() {
+        let mut kit = kit_with_stored_pellets();
+        assert!(kit.use_goods(crate::items::HEALING_GOURD));
+        assert!(kit.use_goods(crate::items::HEALING_GOURD));
+        kit.restock(pellet_rules);
+        assert_eq!(kit.gourd_charges, kit.gourd_max);
+        assert_eq!((kit.count(3020), kit.stored(3020)), (3, 2));
+    }
+
+    #[test]
+    fn restocking_twice_moves_nothing_more() {
+        // A Rest then a Travel, or a Rest then a death: each restocks.
+        let mut kit = kit_with_stored_pellets();
+        assert!(kit.use_goods(3020));
+        kit.restock(pellet_rules);
+        let once = kit.clone();
+        kit.restock(pellet_rules);
+        kit.restock(pellet_rules);
+        assert_eq!(kit, once);
+        assert_eq!((kit.count(3020), kit.stored(3020)), (3, 1));
+    }
 }
