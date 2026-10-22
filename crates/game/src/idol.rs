@@ -2,35 +2,47 @@
 //! with its key; the action button (E, or Y on a pad) kneels Wolf there (`Duel::idol_input`,
 //! which also makes it the checkpoint), and once he prays the idol menu opens: the idol's name
 //! (BonfireWarpParam `msgId` in NTC_メニューテキスト), the game's rows with their help lines,
-//! Rest working and the rest greyed, and the key guide. Esc (or B) stands him up.
+//! Rest and Travel (`super::idol_travel`, #148) working and the rest greyed, and the key guide.
+//! Esc (or B) stands him up.
 //!
 //! The idols are the play world's objects whose entity is a BonfireWarpParam `bonfireEntityId`
-//! (o005000, o115040), facing their front (the object's -Z). Layout, sizes and colours from
-//! FwLo's RustSekiro `src/idol.rs`, `src/action_guide.rs` and `src/game_menu.rs` (Fireguy32's
-//! idols, set from captures of the game), in percent of the screen and pixels of its
-//! 1920 x 1080 stage.
-//! gap: the menu's stats plate, Travel, Purchase Spirit Emblems, skills and forms (#73, #96).
+//! (o005000, o005500, o115040), facing their front (the object's -Z). Layout, sizes and colours
+//! from FwLo's RustSekiro `src/idol.rs`, `src/action_guide.rs` and `src/game_menu.rs`
+//! (Fireguy32's idols, set from captures of the game), in percent of the screen and pixels of
+//! its 1920 x 1080 stage.
+//!
+//! Each idol's warp point, where a Travel to it and a respawn after death stand Wolf, is the
+//! MSB player part (c0000) whose entity is the bonfire entity minus [`WARP_POINT`]: every one of
+//! the 58 BonfireWarpParam rows has one in its own map, 1 to 7 m in front of the idol, with the
+//! facing Wolf takes there (docs/FIDELITY.md).
+//! gap: the menu's stats plate, Purchase Spirit Emblems, skills and forms (#73, #96).
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use bevy::prelude::*;
 use sekiro_sim::arena::yaw_toward;
 use sekiro_sim::deathblow::Placement;
-use sekiro_sim::duel::idol::{IdolPhase, IdolSpot, LitKey};
+use sekiro_sim::duel::idol::{IdolPhase, IdolSpot};
 
 use super::Sim;
+use super::idol_travel::{self, Atlas};
 use crate::game_ui::{GameFonts, MenuArt, abs, stage};
 
-/// How far in front of the idol Wolf kneels, and how much further out a respawn stands him (m).
+/// How far in front of the idol Wolf kneels, and how much further out a respawn stands him when
+/// the map has no warp point for it (m).
 const KNEEL: f32 = 0.9;
 const RESPAWN: f32 = 0.4;
-/// イベントテキスト: "Rest" (the guide and the first row), and the menu's rows in the game's
-/// order (each one's help line is its id + 100000) with whether they work here.
+/// An idol's warp point is the player part of entity `bonfireEntityId - WARP_POINT` (idol
+/// 1101950, Dilapidated Temple, warps to c0000 part 1100970).
+pub(super) const WARP_POINT: i32 = 980;
+/// イベントテキスト: "Rest" (the guide and the first row), "Travel", and the menu's rows in the
+/// game's order (each one's help line is its id + 100000) with whether they work here.
 const REST: i32 = 15000120;
+pub(super) const TRAVEL: i32 = 15000150;
 const ROWS: [(i32, bool); 10] = [
     (REST, true),
     (15000140, false), // Purchase Spirit Emblems
-    (15000150, false), // Travel
+    (TRAVEL, true),
     (15000300, false), // Acquire Skills
     (15000170, false), // Enhance Physical Attributes
     (15000600, false), // Enhance Attack Power
@@ -39,20 +51,22 @@ const ROWS: [(i32, bool); 10] = [
     (15000900, false), // Reflection of Strength
     (15000901, false), // Gauntlet of Strength
 ];
-const HELP: i32 = 100000;
+pub(super) const HELP: i32 = 100000;
 /// NTC_キーガイド: "OK", "Close".
-const KEY_OK: i32 = 100000;
+pub(super) const KEY_OK: i32 = 100000;
 const KEY_CLOSE: i32 = 110001;
-const TEXT: Color = Color::srgb(0.88, 0.85, 0.78);
-const DIM: Color = Color::srgba(0.75, 0.72, 0.66, 0.85);
-const GREYED: Color = Color::srgba(0.7, 0.68, 0.64, 0.4);
-const CURSOR: Color = Color::srgba(0.8, 0.55, 0.3, 0.95);
+pub(super) const TEXT: Color = Color::srgb(0.88, 0.85, 0.78);
+pub(super) const DIM: Color = Color::srgba(0.75, 0.72, 0.66, 0.85);
+pub(super) const GREYED: Color = Color::srgba(0.7, 0.68, 0.64, 0.4);
+pub(super) const CURSOR: Color = Color::srgba(0.8, 0.55, 0.3, 0.95);
 
-/// The play world's idols: where Wolf kneels at each (for the sim) and its name.
+/// The play world's idols: where Wolf kneels at each (for the sim) and its name, and the
+/// game's Travel list.
 #[derive(Resource, Default)]
 pub(super) struct Idols {
     pub spots: Vec<IdolSpot>,
     names: Vec<String>,
+    pub atlas: Atlas,
 }
 
 impl Idols {
@@ -66,20 +80,30 @@ impl Idols {
         let rows = sekiro_sim::registry::rows(cache, "BonfireWarpParam")
             .inspect_err(|e| warn!("idols: {e}"))
             .unwrap_or_default();
-        Self::place(&warps(rows.values()), &names, layouts, floor)
+        let mut idols = Self::place(&warps(rows.values()), &names, layouts, floor);
+        idols.atlas = Atlas::load(cache, rows.values(), &names);
+        idols
     }
 
-    /// The objects of `layouts` that are idols of `warps`, named from `names`.
+    /// The objects of `layouts` that are idols of `warps`, named from `names`, each with its
+    /// warp point from the layouts' player parts.
     fn place(
-        warps: &HashMap<i32, (i32, LitKey)>,
+        warps: &HashMap<i32, i32>,
         names: &BTreeMap<i32, String>,
         layouts: &BTreeMap<String, serde_json::Value>,
         floor: impl Fn(f32, f32, f32) -> Option<f32>,
     ) -> Self {
+        let players: HashMap<i32, &serde_json::Value> = layouts
+            .values()
+            .flat_map(|l| l["players"].as_array().into_iter().flatten())
+            .filter_map(|p| Some((int(&p["entity_id"])?, p)))
+            .collect();
         let mut idols = Self::default();
         for layout in layouts.values() {
             for o in layout["objects"].as_array().into_iter().flatten() {
-                let Some((msg, lit)) = int(&o["entity_id"]).and_then(|e| warps.get(&e)) else {
+                let Some((entity, msg)) =
+                    int(&o["entity_id"]).and_then(|e| Some((e, warps.get(&e)?)))
+                else {
                     continue;
                 };
                 let Some(pose) = crate::map::pose(o) else {
@@ -89,22 +113,30 @@ impl Idols {
                 let out = (pose.rotation.normalize() * Vec3::NEG_Z)
                     .with_y(0.0)
                     .normalize_or(Vec3::Z);
-                let at = |d: f32| {
-                    let p = base + out * d;
-                    p.with_y(floor(p.x, p.z, base.y).unwrap_or(base.y))
-                };
-                let (kneel, checkpoint) = (at(KNEEL), at(KNEEL + RESPAWN));
+                let on_floor = |p: Vec3| p.with_y(floor(p.x, p.z, p.y).unwrap_or(p.y));
+                let kneel = on_floor(base + out * KNEEL);
                 let yaw = yaw_toward(kneel, base);
+                let checkpoint = match players.get(&(entity - WARP_POINT)) {
+                    Some(p) => Placement {
+                        position: on_floor(crate::map::pose(p).map_or(base, |t| t.translation))
+                            .to_array(),
+                        yaw: (p["yaw_degrees"].as_f64().unwrap_or(0.0) as f32).to_radians(),
+                    },
+                    None => {
+                        warn!("idol {entity}: no warp point {}", entity - WARP_POINT);
+                        Placement {
+                            position: on_floor(base + out * (KNEEL + RESPAWN)).to_array(),
+                            yaw: yaw + std::f32::consts::PI,
+                        }
+                    }
+                };
                 idols.spots.push(IdolSpot {
                     kneel: Placement {
                         position: kneel.to_array(),
                         yaw,
                     },
-                    checkpoint: Placement {
-                        position: checkpoint.to_array(),
-                        yaw: yaw + std::f32::consts::PI,
-                    },
-                    lit: *lit,
+                    checkpoint,
+                    entity,
                 });
                 idols
                     .names
@@ -113,30 +145,28 @@ impl Idols {
         }
         idols
     }
+
+    /// The play world's idol of bonfire `entity`, as an index of `spots`.
+    pub fn index(&self, entity: i32) -> Option<usize> {
+        self.spots.iter().position(|s| s.entity == entity)
+    }
 }
 
-/// BonfireWarpParam `rows` by their bonfire entity: the idol's name and what marks it lit, its
-/// `eventflagId`, or the entity itself when the flag is missing or 0.
-fn warps<'a>(rows: impl IntoIterator<Item = &'a serde_json::Value>) -> HashMap<i32, (i32, LitKey)> {
+/// BonfireWarpParam `rows` by their bonfire entity: the idol's name (`msgId`).
+fn warps<'a>(rows: impl IntoIterator<Item = &'a serde_json::Value>) -> HashMap<i32, i32> {
     rows.into_iter()
-        .filter_map(|r| {
-            let entity = int(&r["bonfireEntityId"])?;
-            let lit = int(&r["eventflagId"])
-                .filter(|&f| f != 0)
-                .map_or(LitKey::Entity(entity), LitKey::Flag);
-            Some((entity, (int(&r["msgId"])?, lit)))
-        })
+        .filter_map(|r| Some((int(&r["bonfireEntityId"])?, int(&r["msgId"])?)))
         .collect()
 }
 
 /// A JSON integer that fits an `i32`.
-fn int(v: &serde_json::Value) -> Option<i32> {
+pub(super) fn int(v: &serde_json::Value) -> Option<i32> {
     i32::try_from(v.as_i64()?).ok()
 }
 
 /// The row picked in the idol menu.
 #[derive(Resource, Default)]
-struct Row(usize);
+pub(super) struct Row(usize);
 
 #[derive(Component)]
 struct Guide;
@@ -162,6 +192,7 @@ pub(super) fn install(app: &mut App, idols: Idols) {
     crate::game_ui::install_cover(app);
     let events = crate::game_ui::menu_texts(&sekiro_sim::cache::root(), "イベントテキスト");
     super::idol_found::install(app, &events);
+    idol_travel::install(app, &events);
     app.insert_resource(idols)
         .init_resource::<Row>()
         .init_resource::<crate::menu::Modal>()
@@ -290,13 +321,15 @@ fn fade(alpha: f32) -> Color {
 
 /// The menu's keys while Wolf prays (not while a first light's banner plays): up and down pick
 /// a row, OK (Enter, Space, E, A) takes it, Esc or back (Q, B) stands him up.
-fn menu_keys(
+pub(super) fn menu_keys(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
     mut row: ResMut<Row>,
+    mut travel: ResMut<idol_travel::TravelMenu>,
+    idols: Res<Idols>,
     mut sim: NonSendMut<Sim>,
 ) {
-    if sim.duel.idol_phase() != Some(IdolPhase::Praying) {
+    if sim.duel.idol_phase() != Some(IdolPhase::Praying) || travel.open {
         return;
     }
     let pad = |b| pads.iter().any(|p| p.just_pressed(b));
@@ -307,8 +340,13 @@ fn menu_keys(
     if key(&[KeyCode::ArrowUp, KeyCode::KeyW]) || pad(GamepadButton::DPadUp) {
         row.0 = (row.0 + ROWS.len() - 1) % ROWS.len();
     }
-    if crate::menu::ok_pressed(&keys, &pads) && ROWS[row.0].0 == REST {
-        sim.duel.rest_at_idol();
+    if crate::menu::ok_pressed(&keys, &pads) {
+        match ROWS[row.0].0 {
+            REST => sim.duel.rest_at_idol(),
+            TRAVEL => travel.open_at(&idols, &sim.duel),
+            _ => {}
+        }
+        return;
     }
     if key(&[KeyCode::Escape, KeyCode::Backspace]) || crate::menu::back_pressed(&keys, &pads) {
         sim.duel.leave_idol();
@@ -325,10 +363,12 @@ fn menu_open(sim: &Sim) -> bool {
 
 /// The guide near an idol and the menu while Wolf prays.
 #[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
 fn show(
     sim: NonSend<Sim>,
     row: Res<Row>,
     idols: Res<Idols>,
+    travel: Res<idol_travel::TravelMenu>,
     mut shown_for: Local<Option<(usize, usize)>>,
     mut parts: Query<
         (&mut Visibility, Has<Guide>, Option<&Cursor>),
@@ -338,7 +378,7 @@ fn show(
     mut texts: Query<(&mut Text, Option<&HelpLine>), Or<(With<Place>, With<HelpLine>)>>,
 ) {
     let near = sim.duel.idol_in_reach().is_some();
-    let open = menu_open(&sim);
+    let open = menu_open(&sim) && !travel.open;
     for (mut v, guide, cursor) in &mut parts {
         let on = match (guide, cursor) {
             (true, _) => near,
@@ -404,57 +444,57 @@ mod tests {
             "{:?}",
             idols.names
         );
-        // Each is lit by its own flag, so lighting one leaves the others unfound.
-        let lit: std::collections::BTreeSet<_> = idols.spots.iter().map(|s| s.lit).collect();
-        assert_eq!(lit.len(), idols.spots.len());
-        assert!(
-            lit.iter().all(|k| matches!(k, LitKey::Flag(f) if *f != 0)),
-            "{lit:?}"
-        );
+        // Each is its own idol, and Wolf arrives at its warp point: the c0000 player part of
+        // entity `idol - 980`, a few metres off the idol.
+        let entities: std::collections::BTreeSet<_> =
+            idols.spots.iter().map(|s| s.entity).collect();
+        assert_eq!(entities.len(), idols.spots.len());
         for s in &idols.spots {
-            let kneel = Vec3::from_array(s.kneel.position);
-            let out = Vec3::from_array(s.checkpoint.position) - kneel;
-            assert!((out.length() - RESPAWN).abs() < 1e-3);
-            // Kneeling he faces the idol; the respawn stands him further out, facing away.
-            let facing = sekiro_sim::arena::forward(s.kneel.yaw);
-            assert!(facing.dot(out.normalize()) < -0.999, "{s:?}");
-            let away = sekiro_sim::arena::forward(s.checkpoint.yaw);
-            assert!(away.dot(out.normalize()) > 0.999, "{s:?}");
+            let off = Vec3::from_array(s.checkpoint.position) - Vec3::from_array(s.kneel.position);
+            assert!(off.length() < 8.0, "{s:?}");
         }
+        let gate = &idols.spots[idols.index(1101951).expect("idol 1101951")];
+        let [x, y, z] = gate.checkpoint.position;
+        assert!(
+            (x + 161.22).abs() < 0.05 && (y + 28.61).abs() < 0.05 && (z - 23.0).abs() < 0.05,
+            "{gate:?}"
+        );
+        assert!(
+            (gate.checkpoint.yaw.to_degrees() - 99.7).abs() < 0.1,
+            "{gate:?}"
+        );
     }
 
     #[test]
-    fn idols_without_a_flag_are_placed_and_lit_apart() {
-        // One idol's flag is 0, another's is missing: both stand, each lit by its entity.
+    fn an_idol_without_a_warp_point_still_stands_with_a_spot_of_its_own() {
         let rows = [
-            serde_json::json!({"bonfireEntityId": 1100950, "msgId": 7, "eventflagId": 0}),
-            serde_json::json!({"bonfireEntityId": 1100951, "msgId": 8}),
-            serde_json::json!({"bonfireEntityId": 1100952, "msgId": 9, "eventflagId": 11100001}),
+            serde_json::json!({"bonfireEntityId": 1101950, "msgId": 7}),
+            serde_json::json!({"bonfireEntityId": 1101951, "msgId": 8}),
         ];
-        let object = |entity: i32, x: f32| {
+        let part = |entity: i32, x: f32| {
             serde_json::json!({
                 "entity_id": entity,
                 "translation": [x, 0.0, 0.0],
                 "rotation": [0.0, 0.0, 0.0, 1.0],
+                "yaw_degrees": 90.0,
             })
         };
         let layouts = BTreeMap::from([(
             "m00".to_string(),
-            serde_json::json!({"objects": [
-                object(1100950, 0.0),
-                object(1100951, 10.0),
-                object(1100952, 20.0),
-            ]}),
+            serde_json::json!({
+                "objects": [part(1101950, 0.0), part(1101951, 10.0)],
+                "players": [part(1100970, 3.0)],
+            }),
         )]);
         let idols = Idols::place(&warps(&rows), &BTreeMap::new(), &layouts, |_, _, y| Some(y));
-        let lit: Vec<_> = idols.spots.iter().map(|s| s.lit).collect();
-        assert_eq!(
-            lit,
-            [
-                LitKey::Entity(1100950),
-                LitKey::Entity(1100951),
-                LitKey::Flag(11100001)
-            ]
-        );
+        assert_eq!(idols.spots.len(), 2);
+        let warped = idols.spots[0].checkpoint;
+        assert_eq!(warped.position, [3.0, 0.0, 0.0]);
+        assert!((warped.yaw - 90f32.to_radians()).abs() < 1e-6);
+        // No part 1100971: he stands out from the second idol, facing away from it.
+        let spot = &idols.spots[1];
+        let out =
+            Vec3::from_array(spot.checkpoint.position) - Vec3::from_array(spot.kneel.position);
+        assert!((out.length() - RESPAWN).abs() < 1e-3, "{spot:?}");
     }
 }

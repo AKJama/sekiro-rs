@@ -9,6 +9,10 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 static NEXT: Mutex<Option<Vec<String>>> = Mutex::new(None);
+/// Starts the game again with `args` once this run exits ([`relaunch`]).
+pub(crate) fn relaunch_with(args: Vec<String>) {
+    *NEXT.lock().unwrap() = Some(args);
+}
 pub fn relaunch() -> anyhow::Result<()> {
     if let Some(args) = NEXT.lock().unwrap().take() {
         std::process::Command::new(std::env::current_exe()?)

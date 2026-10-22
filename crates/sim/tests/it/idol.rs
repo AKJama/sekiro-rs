@@ -1,6 +1,6 @@
 use sekiro_sim::InputFrame;
 use sekiro_sim::deathblow::Placement;
-use sekiro_sim::duel::idol::{IdolPhase, IdolSpot, LIGHTING_SECS, LitKey};
+use sekiro_sim::duel::idol::{Destination, IdolPhase, IdolSpot, LIGHTING_SECS, WARP_CUT};
 use sekiro_sim::duel::{Duel, RESPAWN_DELAY};
 
 const DT: f32 = 1.0 / 60.0;
@@ -50,7 +50,7 @@ fn wolf_kneels_rests_stands_and_comes_back_at_the_idol() {
             position: [start[0] + 1.0, start[1], start[2] + 0.5],
             yaw: -2.0,
         },
-        lit: LitKey::Flag(11100000),
+        entity: 1101950,
     };
     duel.set_idols(vec![spot]);
     assert_eq!(duel.idol_in_reach(), Some(0));
@@ -160,7 +160,7 @@ fn the_nearer_item_takes_the_press_and_stays_taken_while_rest_and_death_restock_
             position: [start[0] + 1.0, start[1], start[2] + 0.5],
             yaw: -2.0,
         },
-        lit: LitKey::Flag(11100000),
+        entity: 1101950,
     }]);
     assert_eq!(duel.pickup_in_reach(), Some(0));
     assert_eq!(duel.idol_in_reach(), None);
@@ -199,4 +199,74 @@ fn the_nearer_item_takes_the_press_and_stays_taken_while_rest_and_death_restock_
     });
     assert_eq!((duel.kit.count(3020), duel.kit.stored(3020)), (3, 0));
     assert_eq!(duel.kit.gourd_charges, duel.kit.gourd_max);
+}
+
+#[test]
+fn a_rest_records_the_idol_and_travel_puts_wolf_at_the_other_idols_warp_point() {
+    let cache = sekiro_sim::cache::root();
+    if !cache.join("anim/c0000/a000_710360.bin").exists() {
+        eprintln!("skipping: cache not extracted");
+        return;
+    }
+    let mut duel = Duel::load(&cache, 30.0).unwrap();
+    duel.enemy_present = false;
+    duel.enemy_active = false;
+    run(&mut duel, 1.0, |d| d.player.body.grounded);
+    let start = duel.player.body.position;
+    let spot = |dx: f32, entity: i32| IdolSpot {
+        kneel: Placement {
+            position: [start[0] + dx, start[1], start[2]],
+            yaw: 1.0,
+        },
+        checkpoint: Placement {
+            position: [start[0] + dx, start[1], start[2] + 3.0],
+            yaw: -2.0,
+        },
+        entity,
+    };
+    let (here, there) = (spot(1.0, 1101951), spot(20.0, 1101952));
+    duel.set_idols(vec![here, there]);
+
+    // Kneeling at the first records it found, the other not yet.
+    let mut press = InputFrame::default();
+    press.buttons.action = true;
+    duel.step(&press, DT);
+    assert_eq!(duel.idol(), Some(0));
+    assert_eq!(
+        duel.kit.found_idols.iter().copied().collect::<Vec<_>>(),
+        [1101951]
+    );
+    let praying = |d: &Duel| d.idol_phase() == Some(IdolPhase::Praying);
+    run(&mut duel, LIGHTING_SECS + 1.0, praying);
+
+    // Not to the idol he is at; to the other the warp clip plays, then he arrives at its warp
+    // point facing its way, whole, and it is the checkpoint.
+    assert!(!duel.travel_to_idol(Destination::Here(0)));
+    duel.rules.fighters[0].vitality.hp = 10;
+    assert!(duel.travel_to_idol(Destination::Here(1)));
+    run(&mut duel, 0.5, |d| {
+        d.idol_phase() == Some(IdolPhase::Traveling)
+    });
+    run(&mut duel, WARP_CUT + 0.5, |d| d.idol_travel().is_none());
+    assert_eq!((duel.respawn_in, duel.idol()), (None, None));
+    assert_eq!(duel.player.body.position, there.checkpoint.position);
+    assert!((duel.player.body.yaw - there.checkpoint.yaw).abs() < 1e-4);
+    let max = duel.rules.fighters[0].vitality.max_hp;
+    assert_eq!(duel.rules.fighters[0].vitality.hp, max);
+    duel.rules.fighters[0].vitality.hp = 0;
+    run(&mut duel, RESPAWN_DELAY + 1.0, |d| {
+        d.respawn_in.is_none() && !d.rules.fighters[0].dead()
+    });
+    assert_eq!(duel.player.body.position, there.checkpoint.position);
+
+    // Travel to another map's idol hands it to the game once, at the cut.
+    run(&mut duel, 1.0, |d| d.player.body.grounded);
+    duel.player.body.position = here.kneel.position;
+    duel.step(&InputFrame::default(), DT);
+    duel.step(&press, DT);
+    run(&mut duel, 3.0, praying);
+    assert!(duel.travel_to_idol(Destination::Away(1111950)));
+    run(&mut duel, WARP_CUT + 0.5, |d| d.idol_travel().is_none());
+    assert_eq!(duel.take_departure(), Some(1111950));
+    assert_eq!(duel.take_departure(), None);
 }

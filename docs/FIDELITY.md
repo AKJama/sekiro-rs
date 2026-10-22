@@ -233,3 +233,23 @@ A respawn after death restocks the goods and refills the gourd as Rest does.
 No data or RE note covers it (FwLo's RustSekiro kb only records that Rest refills the gourd); it follows the game's well-known behaviour that dying refills consumables like resting.
 A goods with no EquipParamGoods row, or with the params missing, is carried up to 99 but never stored or restocked.
 The gourd's maximum stays at the start kit's 3 uses; Gourd Seeds are not modelled.
+
+## Travel between Sculptor's Idols, issue #148
+
+The Travel list is BonfireWarpParam's: one page per `menuPageNo`, titled NTC_メニューテキスト 211100 + page, whose `<?placeName@n?>` tags resolve through 地名 n.
+Each page lists its rows' idols in row id order, by `msgId` name, and only pages with a found idol show.
+Page 0 ("Important Places", rows 100-102) repeats idols that also sit on their area pages, so an idol can be listed twice, as in the game.
+Found idols are kept in `Kit::found_idols` by `bonfireEntityId`; an idol counts as found once Wolf has lit or rested at it.
+The game records them by `eventflagId`; in the data the flag and the entity are one to one, so the entity stands in for the flag.
+Wolf arrives at the idol's warp point: the c0000 MSB player part whose entity is the idol's minus 980 (idol 1101951, warp point 1100971), facing that part's yaw.
+All 58 rows have such a part, in the map the idol's entity names (`m{area}_{block}_00_00`), 0.9 to 7.2 m from the idol.
+That spot is also where Wolf now respawns after death, replacing the earlier guess of a point 1.5 m out from the kneeling spot.
+The warp plays HKS StatueAttachWarp (a000_710360) and moves Wolf at 2.0 s into it, FwLo's RustSekiro value (`WARP_CUT`); the screen fades to black over that time and lifts over 0.6 s, the death screen's lift.
+Travel within the play world is a teleport plus a respawn: world reset, enemies respawn, camera snaps behind Wolf, goods restock.
+The arrival animation is not modelled; Wolf stands at the warp point.
+There is no runtime map switching, so Travel to an idol on another map ends the run and starts the game again on that map (`--map`, `--at-idol`, `--kit` with the kit as JSON), the path the start menu's map changes take.
+The game streams the other map in the same run, with a load screen; ours shows the window closing and a fresh one loading.
+Only kit state carries over: there are no saves yet, so story flags, opened doors and killed enemies of the run are not.
+An idol whose map is not extracted is listed greyed and cannot be picked.
+`grayoutEventflagId` greying, the page's area picture (`menuImageId`) and Wolf's marker in his area are not modelled.
+The idol menu and the Travel screen take keys and the pad, not the mouse.

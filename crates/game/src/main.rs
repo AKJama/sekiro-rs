@@ -205,7 +205,7 @@ fn dispatch() -> anyhow::Result<()> {
         "usage: sekiro-rs --play [--attack-power 1..99] [--progression castle-roof] [--script FILE|builtin] [--shots step:path,...] [--exit]"
     );
     eprintln!(
-        "                 [--map <id> [--start <n> | --spawn x,y,z,yaw,0]] [--no-enemy] [--lock-on]"
+        "                 [--map <id> [--start <n> | --spawn x,y,z,yaw,0 | --at-idol <entity>]] [--kit <json>] [--no-enemy] [--lock-on]"
     );
     eprintln!(
         "                 [--checkpoint local|decisions|off] [--brain-moves local|off] [--brain-move-every 1|2|3] [--coach-review-every <n>] (local defaults; review 5, 0 disables)"
@@ -428,6 +428,14 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
         enemy_distance: arg_f32(args, "--enemy-distance", 5.0)?,
         hour: arg_f32(args, "--hour", default_hour)?,
         gparam: arg_value(args, "--gparam"),
+        at_idol: arg_value(args, "--at-idol")
+            .map(|v| v.parse())
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("--at-idol wants an idol entity id: {e}"))?,
+        kit: arg_value(args, "--kit")
+            .map(|v| serde_json::from_str(&v))
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("--kit wants a kit as JSON: {e}"))?,
     })
 }
 
