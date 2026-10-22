@@ -20,6 +20,20 @@ Span profiles before and after: main schedule 19.0 to 14.0 ms, render schedule 1
 On a quiet machine the castle start went from 55.5 fps idle and 49.9 fps walking (main thread 13.2 and 14.6 ms) to the 60 Hz cap (main thread 7.1 and 7.3 ms).
 Screenshots at the same steps differ from main no more than main differs from itself (falling snow).
 
+## Outskirts fence corner (#121, 2026-10-22)
+
+Wolf pushed into the wooden fence corner by the snowy firewood in the samurai general's courtyard (m11_00, about (-221.6, -38.0, 11.5), standing on log o114541_1809) dropped the game to 3-10 fps.
+The cause was the fixed simulation step, not rendering, and #159 and #161 already fixed it.
+- The build before #159 (44c372f), on the issue's route: at the corner each frame ran 15 catch-up steps (the old 250 ms cap), the fixed steps took a median 257 ms a frame and `sim character` 16.6 ms a step, so frames took a median 286 ms.
+  The render world stayed at a median 17.4 ms and the GPU under 45% busy.
+  Walking more than 5 m away the same build stepped at 5.4 ms a step and 32 ms a frame.
+- Main (6bfbc9c) on the same route, pushing for 40 s: median frame 16.5 ms (p95 20.0 ms), one step a frame at 1.1 ms, main thread 11.1 ms, render world 15.6 ms, GPU 40 to 46% busy; the same as walking more than 5 m away (17.1 ms).
+  Spawned at the corner and pushing for 60 s: median frame 16.6 ms, p95 20.4 ms.
+- In the sim alone (map and object collision of m11_00 with its hook points), a pushing step costs a median 4.9 ms before #159 and 0.27 ms on main.
+
+The GPU-bound reading from #70's run (GPU 99% busy, 67 ms swapchain waits) came while another game shared the GPU; alone the corner never passed 46% GPU.
+`step_cost::fence_corner_push_is_bounded` walks Wolf into the corner with the placed objects and the hook search and bounds each step's collision work (1,282 grid entries now, under 10,000).
+
 ## Measuring
 
 `--perf` with `PLAY_PERF_DIR=<folder>` writes the per-frame CSV outside `cache/perf`.
@@ -29,7 +43,6 @@ Other agents' builds on the same machine move medians by several milliseconds, s
 ## Open
 
 - #106 (castle roof, spawn `83.307,30.6,243.649,133.216,0`): about 46 fps after #70, render-bound (render world about 20 ms, of which queue submit about 6.4 ms).
-- #121 (Outskirts fence corner): GPU-bound, not CPU-bound; swapchain acquire waits about 67 ms with the GPU 99% busy and the main thread at about 10 ms.
 - Render world: queue submit 4.5 to 6.5 ms, `prepare_preprocess_bind_groups` about 2 ms, shadow `write_binned_instance_buffers` about 1.9 ms.
 - Effects (`fxr::render`, 2 to 3 ms) and cloth simulation (about 1.5 ms) on the main thread.
 - Bevy's per-material specialization checks and `calculate_bounds` over about 180,000 entities; static batching (#118) would cut the entity count.
