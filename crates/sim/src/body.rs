@@ -60,6 +60,13 @@ pub const FALL_TYPES: [FallControl; 4] = [
     },
 ];
 
+/// How far a walkable floor can rise over a metre of horizontal travel: the tangent of the
+/// steepest walkable slope ([`crate::collision::MAX_SLOPE_DEGREES`]), for telling one floor a
+/// tick on from another ([`Body::carried_onto`]).
+fn max_rise_per_metre() -> f32 {
+    crate::collision::MAX_SLOPE_DEGREES.to_radians().tan()
+}
+
 /// Horizontal air integration described by FwLo's RustSekiro (MIT).
 fn air_velocity(mut v: Vec2, stick: Vec2, control: FallControl, dt: f32) -> Vec2 {
     let decay = control.horizontal_accel.abs() * dt;
@@ -197,6 +204,14 @@ pub trait Ground {
         None
     }
 
+    /// Whether the head sphere of a body at `feet` touches anything, so a push-out there has
+    /// work to do (the gate on [`Body`]'s push-out after a rise). True by default, so a ground
+    /// that does not know always gets the push-out.
+    fn head_contact(&self, feet: [f32; 3]) -> bool {
+        let _ = feet;
+        true
+    }
+
     /// The horizontal displacement a body at `feet` actually makes when it tries to move by
     /// `delta` (walls stop it and it slides along them). Unobstructed by default.
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
@@ -264,6 +279,9 @@ pub struct Body {
     /// on a rideable floor, counted down otherwise. While above 0 the rideable objects'
     /// fall-prevention walls hold the body ([`crate::hit_filter::riding_walls`]).
     pub riding: f32,
+    /// The height of a floor over the feet of an airborne body that they came onto over its
+    /// edge, from the side, and that it is still landing on ([`Body::landing_floor`]).
+    pub carried_onto: Option<f32>,
 }
 
 impl Default for Body {
@@ -278,6 +296,7 @@ impl Default for Body {
             fall_top: 0.0,
             last_fall_height: 0.0,
             riding: 0.0,
+            carried_onto: None,
         }
     }
 }
@@ -358,13 +377,68 @@ impl Body {
     /// ceiling, and the upward speed with it, as the character proxy's contact does; otherwise
     /// a jump carries the head into a low roof and the fall lands on its underside, which reads
     /// as a floor (#160).
-    fn stop_rise_at_ceiling(&mut self, from: f32, ground: &dyn Ground) {
+    ///
+    /// A face the head meets off its top, at its shoulder, does not stop the rise: the body is
+    /// pushed off it sideways at the height it rose to, by the slide's own push-out (a slide of
+    /// nothing with the fall-prevention walls `walls`), as the proxy slides along such a contact.
+    /// Before, the push waited for the next tick's slide, so a beam edge beside the head's centre
+    /// line went up to a tick's rise into the head (#168). The push-out runs only when the head
+    /// touches something ([`Ground::head_contact`]), so a jump in open air costs what it did
+    /// before. `walls` is `None` for a move that
+    /// ignores walls.
+    fn stop_rise_at_ceiling(&mut self, from: f32, ground: &dyn Ground, walls: Option<u8>) {
         let rise = self.position[1] - from;
-        if rise > 0.0
-            && let Some(top) = ground.ceiling([self.position[0], from, self.position[2]], rise)
-        {
+        if rise <= 0.0 {
+            return;
+        }
+        if let Some(top) = ground.ceiling([self.position[0], from, self.position[2]], rise) {
             self.position[1] = top.max(from);
             self.velocity[1] = self.velocity[1].min(0.0);
+        }
+        if let Some(walls) = walls
+            && ground.head_contact(self.position)
+        {
+            let [dx, dz] = ground.slide_assisted(self.position, [0.0, 0.0], walls);
+            self.position[0] += dx;
+            self.position[2] += dz;
+        }
+    }
+
+    /// The floor an airborne body whose feet were at `start` when this tick began lands on at
+    /// its feet now: the highest one no more than a step above `start`, unless that one is above
+    /// the feet and was come at from below (#168). The character proxy's contact normals point
+    /// from the surface to the capsule, so the underside of a roof is only ever a ceiling to it;
+    /// the mesh's winding does not say which side of a face is solid, so here the side is the
+    /// one the feet came from. A floor above the feet was come at from below when a floor was
+    /// already over them, within a step, where this tick began, and they had not been carried
+    /// onto it over its edge on an earlier tick ([`Body::carried_onto`]); otherwise they came
+    /// over its edge this tick, as onto a stair tread or a ledge, and it still counts. The
+    /// body then lands on the highest floor it passed through instead.
+    fn landing_floor(&mut self, start: [f32; 3], ground: &dyn Ground) -> Option<f32> {
+        // How far above the feet a floor must be to count as over them, against roundoff.
+        const OVER: f32 = 1e-3;
+        let [x, _, z] = self.position;
+        let (from, top) = (start[1], start[1] + ground.max_step());
+        let floor = ground.floor(x, z, top);
+        let Some(h) = floor.filter(|&h| h > from + OVER) else {
+            self.carried_onto = None;
+            return floor;
+        };
+        // The same floor a tick on: within roundoff, or as far as a walkable slope rises over
+        // this tick's travel.
+        let travel = (x - start[0]).hypot(z - start[2]);
+        let carried = self
+            .carried_onto
+            .is_some_and(|c| (c - h).abs() <= 0.01 + travel * max_rise_per_metre());
+        let under = ground
+            .floor(start[0], start[2], top)
+            .is_some_and(|f| f > from + OVER);
+        if under && !carried {
+            self.carried_onto = None;
+            ground.floor(x, z, from + OVER)
+        } else {
+            self.carried_onto = Some(h);
+            floor
         }
     }
 
@@ -420,11 +494,14 @@ impl Body {
         } else {
             (self.riding - dt).max(0.0)
         };
-        let [mx, mz] = if input.ignore_walls {
-            travel
-        } else {
-            let walls = crate::hit_filter::riding_walls(input.fall_assist, self.riding > 0.0);
-            ground.slide_assisted(self.position, travel, walls)
+        // The fall-prevention walls this tick's moves keep to; `None` when they ignore walls.
+        let walls = (!input.ignore_walls)
+            .then(|| crate::hit_filter::riding_walls(input.fall_assist, self.riding > 0.0));
+        // Where the feet were before this tick's move, for the landing (#168).
+        let start = self.position;
+        let [mx, mz] = match walls {
+            None => travel,
+            Some(walls) => ground.slide_assisted(self.position, travel, walls),
         };
         self.position[0] += mx;
         self.position[2] += mz;
@@ -452,7 +529,7 @@ impl Body {
                 );
                 let from = self.position[1];
                 self.position[1] = (self.position[1] + input.root_motion[1]).min(water.height);
-                self.stop_rise_at_ceiling(from, ground);
+                self.stop_rise_at_ceiling(from, ground, walls);
                 if let Some(floor) = floor {
                     self.position[1] = self.position[1].max(floor);
                 }
@@ -465,7 +542,7 @@ impl Body {
         if !self.gravity_enabled {
             let from = self.position[1];
             self.position[1] += input.root_motion[1] + self.velocity[1] * dt;
-            self.stop_rise_at_ceiling(from, ground);
+            self.stop_rise_at_ceiling(from, ground, walls);
             return;
         }
         let step = ground.max_step();
@@ -499,11 +576,11 @@ impl Body {
                 .abs();
         self.position[1] += self.velocity[1] * dt - 0.5 * gravity * dt * dt;
         self.velocity[1] -= gravity * dt;
-        self.stop_rise_at_ceiling(previous_y, ground);
+        self.stop_rise_at_ceiling(previous_y, ground, walls);
         self.fall_top = self.fall_top.max(self.position[1]);
         // Land on the highest floor the feet passed through this tick, or one up to a step
         // above them (a stair tread or ledge the body was carried into while airborne).
-        let floor = ground.floor(self.position[0], self.position[2], previous_y + step);
+        let floor = self.landing_floor(start, ground);
         let water = ground
             .water_surface(self.position[0], self.position[2], previous_y + step)
             .filter(|w| w.deep() && floor.is_none_or(|h| h < w.height - ground.max_step()))
@@ -521,6 +598,7 @@ impl Body {
             self.grounded = true;
             self.fall_type = 0;
             self.last_fall_height = self.fall_top - h;
+            self.carried_onto = None;
         }
     }
 }

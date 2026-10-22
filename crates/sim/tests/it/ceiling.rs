@@ -250,3 +250,101 @@ fn jumps_up_the_gully_rock_wall_rise_past_its_lips() {
     }
     assert!(low.is_empty(), "stopped low on the wall: {low:?}");
 }
+
+/// A floor at y 0 and a beam 0.3 m deep and 0.6 m wide whose underside is 2.3 m up and whose
+/// near edge is `edge` m from z 0 (negative: over the line z 0), as a closed box of quads.
+fn beam_world(edge: f32) -> CollisionWorld {
+    let (y0, y1, z0, z1) = (2.3, 2.6, edge, edge + 0.6);
+    let mut m = CollisionMesh::default();
+    for q in [
+        [
+            [-3.0, 0.0, -3.0],
+            [3.0, 0.0, -3.0],
+            [3.0, 0.0, 3.0],
+            [-3.0, 0.0, 3.0],
+        ],
+        [[-3.0, y0, z0], [3.0, y0, z0], [3.0, y0, z1], [-3.0, y0, z1]],
+        [[-3.0, y1, z0], [3.0, y1, z0], [3.0, y1, z1], [-3.0, y1, z1]],
+        [[-3.0, y0, z0], [3.0, y0, z0], [3.0, y1, z0], [-3.0, y1, z0]],
+        [[-3.0, y0, z1], [3.0, y0, z1], [3.0, y1, z1], [-3.0, y1, z1]],
+    ] {
+        let base = m.vertices.len() as u32;
+        m.vertices.extend_from_slice(&q);
+        m.indices.extend([0, 1, 2, 0, 2, 3].map(|i| base + i));
+        m.materials.extend([0, 0]);
+    }
+    CollisionWorld::from_mesh(&m)
+}
+
+/// Standing jumps at z 0 under beams whose near edge is from over the head's centre line to
+/// just inside its rim (#168): at the end of no tick is the head sphere more than 1 cm into the
+/// beam, and each lands back on the floor. Before, the rise stopped only at a touch within
+/// 0.25 m of the centre line, so an edge further out passed into the head sphere's shoulder by
+/// up to a tick's rise before the next tick's slide pushed it off.
+#[test]
+fn a_jump_under_an_off_centre_beam_keeps_the_head_out_of_it() {
+    let mut bad = Vec::new();
+    for edge in [-0.2, 0.1, 0.2, 0.26, 0.3, 0.35, 0.39] {
+        let world = beam_world(edge);
+        let mut body = Body {
+            position: [0.0, 0.0, 0.0],
+            fall_top: 0.0,
+            ..Default::default()
+        };
+        let jump = VelocityChange {
+            fall_type: 0,
+            horizontal_scale: 0.0,
+            vertical_scale: 0.0,
+            horizontal: 0.0,
+            vertical: 9.64,
+            horizontal_angle: 0.0,
+        };
+        let mut input = BodyInput {
+            velocity_change: Some(jump),
+            ..Default::default()
+        };
+        let mut deepest = 0.0f32;
+        for _ in 0..120 {
+            body.step(&input, DT, &world);
+            input = BodyInput::default();
+            let [x, y, z] = body.position;
+            let head = glam::Vec3::new(x, y + HEAD_TOP - RADIUS, z);
+            let lo = glam::Vec3::new(-3.0, 2.3, edge);
+            let hi = glam::Vec3::new(3.0, 2.6, edge + 0.6);
+            deepest = deepest.max(RADIUS - head.distance(head.clamp(lo, hi)));
+        }
+        if deepest > 0.01 || !body.grounded || body.position[1].abs() > 1e-3 {
+            bad.push((edge, deepest, body.position, body.grounded));
+        }
+    }
+    assert!(bad.is_empty(), "(edge, depth, end, grounded): {bad:?}");
+}
+
+/// A body whose feet are 0.3 m under the shack roof's underside, falling (any way of getting
+/// there the rise stop does not cover, #168): it falls to the floor rather than landing on the
+/// underside, which it came at from below. The underside is a lone plane, the next face over it
+/// 3.7 m up, so no slab-thickness filter can tell it from a floor.
+#[test]
+fn a_body_under_the_shack_roof_never_lands_on_its_underside() {
+    let Some(world) = play_world() else {
+        return;
+    };
+    let [x, z] = [-123.3, -193.33];
+    let (floor, ceiling) = floor_and_ceiling(&world, x, z);
+    for below in [0.05, 0.3, 0.45] {
+        let mut body = Body {
+            position: [x, ceiling - below, z],
+            grounded: false,
+            fall_top: ceiling - below,
+            ..Default::default()
+        };
+        for _ in 0..120 {
+            body.step(&BodyInput::default(), DT, &*world);
+        }
+        let y = body.position[1];
+        assert!(
+            body.grounded && (y - floor).abs() < 0.3,
+            "{below} m under the roof: landed at {y:.2}, the floor is at {floor:.2}, the roof at {ceiling:.2}"
+        );
+    }
+}

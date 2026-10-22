@@ -605,6 +605,10 @@ impl Wire {
         self.rope_dummy = None;
     }
 
+    /// How far the body at feet `current` flies along `delta` before it meets a face: rays along
+    /// its centre line at the feet, the capsule's sphere centres and over the head, and the top
+    /// half of the head sphere swept along the move, so an overhang beside the centre line
+    /// stops it too (#168).
     fn sweep(&self, current: Vec3, delta: Vec3) -> Option<f32> {
         self.collision.as_ref().and_then(|w| {
             [0.05, 0.4, 1.2, 1.55]
@@ -616,6 +620,7 @@ impl Wire {
                         delta.length() + 0.001,
                     )
                 })
+                .chain(w.head_sweep(current, delta))
                 .min_by(f32::total_cmp)
         })
     }
@@ -643,6 +648,9 @@ impl Ground for PerchGround<'_> {
     }
     fn ceiling(&self, feet: [f32; 3], rise: f32) -> Option<f32> {
         self.terrain.ceiling(feet, rise)
+    }
+    fn head_contact(&self, feet: [f32; 3]) -> bool {
+        self.terrain.head_contact(feet)
     }
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
         self.terrain.slide(feet, delta)
