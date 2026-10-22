@@ -359,3 +359,34 @@ The InitialDirection enum (reference/fxr, as FwLo's RustSekiro `docs/kb/fxr.md` 
 The snow now blows along its region's yaw at about 8 m/s, and the 6-driven fog banks (839520, 839540, 839541, 839547) drift sideways at 0.3 to 1 m/s instead of rising.
 The torch 300163 and brazier 839530 nodes that motivated the world-up reading still rise through their negative gravity; their 6 nodes are slow (0.075 to 0.4 m/s).
 Open: object dummy orientation (FLVER dummy forward / upward) is not applied to map object effects, only the dummy position; the brazier dummy 200 faces +Z with +Y up, so it does not change these effects.
+
+## Soft sprite pull and uniformScale, 2026-10-22 (#78)
+
+The Genichiro door's fog wall (asset o001401, FXR 11) spread over the door frame and the walls.
+FXR 11 has two 603 sprite nodes with `depthBlend` on, `unkDepthBlend1` 0.25, `unkDepthBlend2` 0, `uniformScale` on, width 0.75 to 1.5 (and 1 to 2) and particle scale 7.03 (or 5.63) by 2.81.
+
+### What the exe does (traced read-only in the Ghidra copy)
+
+603 is `GXFFX::GXFfxAppearanceBillboardEx` (vtable 326bdc8, created by 436bb0 when the action id is 0x25b); 604 is `GXFfxAppearanceMultiTextureBillboardEx` (326be98, created by 4408a0).
+Their draws (436d70, 440a60) run on `GXFFX::GXFfxDrawContext` (vtable 3272e88).
+
+- Sprite size: 436d70 evaluates the width property (slot 5); when `uniformScale` (fields1 +0x10) is set it reuses that value for the height instead of evaluating the height property (slot 6).
+  Width and height are then multiplied by the particle's own X and Y scale, so `uniformScale` keeps the width and height properties equal, not the sprite square.
+- TEXCOORD2.y: 436d70 writes `(w + h) * 0.5` (`DAT_143289124` = 0.5) at vertex offset 0x3c, the per-sprite size the soft geometry shader reads.
+- `softSpriteScaleOffset`: the draw context's 46b400 resets it to (1, 0) (`MOV qword [+0x2d0], 0x3f800000`).
+  Its vfunc 0xd8 (46ffb0), which the 603 draw calls, copies fields2 +0x64 (`unkDepthBlend1`) into x and fields2 +0x68 (`unkDepthBlend2`) XOR the sign bit (`DAT_14328b240` = 0x80000000) into y, at +0x2d0 / +0x2d4 and +0x590 / +0x594.
+  Those are CPU images of the `DSCommonBuffer` cbuffer (image base +0x120, so `softSpriteParam` is +0x2c0); 46ee50 (vfunc 0xa8, called only with `depthBlend`) fills the depth linearization the pixel shader uses.
+  The same fields2 block gives the bloom flag and colour, the four blend types and the four fade distances at the offsets the schema names, which pins the field indices.
+- Shader (`GXFfxtessellateSoftTexture.gpo`): `pull = scale * T * 0.5 + offset` and `soft = scale * T * 0.5 + 2 * offset`, with the quad's depth moved by `pull` and its screen position kept.
+  The pixel shader (`.ppo`) fades by `saturate(min(sceneZ - pulledZ, soft) / soft)`.
+
+So pull = `unkDepthBlend1 * (w + h) / 4 - unkDepthBlend2`, soft = `unkDepthBlend1 * (w + h) / 4 - 2 * unkDepthBlend2`.
+
+### What changed
+
+`soften` in `crates/game/src/fxr.rs` used the larger side instead of the mean and added `unkDepthBlend2` instead of subtracting it; both now follow the exe.
+603 / 604 sprites with `uniformScale` used the width times the X scale for the height; they now use the width property times the Y scale.
+That is the main change for the fog wall: its sprites were 5.3 to 10.5 m square and are now 5.3 to 10.5 m wide by 2.1 to 4.2 m tall, and the pull drops from 0.66 to 1.3 m to 0.46 to 0.92 m.
+Every soft or uniform-scale 603 / 604 effect changes the same way.
+In the common effects, 603 nodes with (0.25, 0) as in FXR 11 are the second most common setting (609 nodes after 1897 with (1, 0)), and at least 95 depth-blended nodes have a non-zero `unkDepthBlend2` (for example (0.5, -0.5) in 56 nodes such as FXR 222001), which now pull the other way.
+A negative soft distance (for example `unkDepthBlend2` 1.5 with a small sprite) means no fade, as in the shader.
