@@ -3,9 +3,9 @@
 //! Adapted from FwLo's RustSekiro `src/fxr.rs` (MIT, see `CREDITS.md`), which plays effects from
 //! the named tree of EvenTorset's FXR library (Unlicense; the same tree
 //! [`sekiro_formats::fxr_json`] builds from our own reader). Semantics follow that library's
-//! action definitions: the node tree (2000 root, 2200 basic nodes, 2001 references, 2202 levels
-//! of detail), configs (1004 particles, 1005 child nodes), emitters (399 once, 300 periodic, 301
-//! by distance), emitter shapes (400-405), spread (500-503), particle movement
+//! action definitions: the node tree (2000 root, 2200 basic nodes, 2001 references, 2002 levels
+//! of detail, 2202 node emitters), configs (1004 particles, 1005 child nodes), emitters (399
+//! once, 300 periodic, 301 by distance), emitter shapes (400-405), spread (500-503), particle movement
 //! (55/60/84/105/64/65), node movement (1/15/34/83/106/120/122), and properties over
 //! Constant0 / ParticleAge / EmissionTime / ActiveTime with Linear / Stepped / Hermite / Bezier
 //! keyframes and RandomDelta / RandomFraction / RandomRange modifiers. Hermite keyframes blend as
@@ -462,7 +462,11 @@ impl NodeDef {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .take(if kind == 2202 { 1 } else { usize::MAX })
+                // A LevelsOfDetail node (2002) shows one child at a time by camera distance
+                // (reference/fxr NodeType); the first, nearest level is the one drawn (FwLo's
+                // RustSekiro rule). Running every level drew the far ones over the near one.
+                // A NodeEmitter (2202) keeps all its children: they are its templates.
+                .take(if kind == 2002 { 1 } else { usize::MAX })
                 .map(|n| Arc::new(Self::new(n)))
                 .collect(),
         }
@@ -1555,6 +1559,45 @@ mod tests {
         let (up, out, _, count) = free_particle_drift(800140, 10., ground_fire_place());
         assert!(count > 500, "{count} particle samples");
         assert!(up > 4.0 && up > 4.0 * out, "smoke {up} m up, {out} m out");
+    }
+
+    /// #268: the ground fire 800140 is a LevelsOfDetail node (2002) over a near and a far level,
+    /// and its near level's NodeEmitter (2202, selector 200 "all") holds the flames and smoke
+    /// in one template and the 604 fire sheet in another. Only the near level draws, with both
+    /// templates. Running both levels stacked a second 15 m additive glow and a second smoke
+    /// column (blend 6) over the first, washing Wolf orange; keeping one template dropped the
+    /// fire sheet.
+    #[test]
+    fn ground_fire_draws_one_level_with_every_template() {
+        fn walk(n: &NodeInst, out: &mut Vec<(i64, i64, i64)>) {
+            if let Some(c) = n.cfg.as_ref().filter(|_| !n.particles.is_empty()) {
+                let a = &c.appearance;
+                out.push((
+                    a[Field::Type].as_i64().unwrap_or(0),
+                    int(a, Field::BlendMode, 2),
+                    int(a, Field::Texture, 0),
+                ));
+            }
+            for ch in &n.children {
+                walk(ch, out);
+            }
+        }
+        let mut lib = FxrLib::scan(&sekiro_sim::cache::root());
+        let def = lib.compiled(800140).expect("effect installed");
+        let mut n = make_node(&mut lib, &def, 1, 0).unwrap();
+        let place = ground_fire_place();
+        for _ in 0..300 {
+            step_node(&mut n, &mut lib, place, 1. / 30., false);
+        }
+        let mut drawn = Vec::new();
+        walk(&n, &mut drawn);
+        let glows = drawn.iter().filter(|d| d.0 == 603 && d.2 == 1000).count();
+        assert_eq!(glows, 1, "ground glows drawn: {drawn:?}");
+        assert!(
+            !drawn.iter().any(|d| d.1 == 6),
+            "far level drawn: {drawn:?}"
+        );
+        assert!(drawn.iter().any(|d| d.0 == 604), "no fire sheet: {drawn:?}");
     }
 
     #[test]

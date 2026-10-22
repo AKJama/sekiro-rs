@@ -395,6 +395,20 @@ The torch 300163, brazier 839530 and blowing snow 839542 do not use disk emitter
 The brazier's smoke drifts 1.3 m up for 0.9 m sideways: its nodes are turned +45 about X under a node emitter (2202) with direction 3, global north, so every brazier leans the same world way; not yet compared with the game.
 Open: a box emitter's direction 0 (a random local axis inside, the face normal outside, per the same enum) is still read as +Z.
 
+## Levels of detail and node emitters, 2026-10-22 (#268)
+
+Symptom: after #264 the ground fire's smoke column read as a bright orange glow washing over Wolf; in the game the smoke is grey and only the flames and sparks are orange.
+Cause: the node tree mixed up two node types.
+Per EvenTorset's fxr `NodeType`, 2002 is LevelsOfDetail (one child at a time, by camera distance) and 2202 is NodeEmitter (its children are templates, `nodeSelector` 200 emits all, 201 one at random).
+`NodeDef::new` kept only the first child of 2202 and every child of 2002.
+So 800140 drew its near and far levels together: two 15 m additive orange glows (texture 1000, pulled 5.6 m toward the camera by its soft-sprite offset) and two smoke columns, while its near level's second template, the 604 fire sheet, never emitted.
+Now a 2002 node keeps only its first, nearest level, as FwLo's RustSekiro does, and a 2202 node keeps every template.
+The smoke colour data itself was read right: grey 0.5 times colour3 2.0 to 0.05, alpha blend, lit (lighting -2, drawn at the 1/8 stand-in).
+The lit additive layer 31421 (blend 4, rgbMultiplier 15) still adds a faint orange at the column's foot; the real light term of lit particles stays open, as in FwLo's notes.
+Effects touched: 62 common effects have a 2002 node with more than one level and 100 a 2202 node with more than one template, among them the brazier 839530 (its own 609 light, sparks and smoke now emit; before, the far level's light stood in for them) and the item glint 61 (no longer doubled by its far level).
+The torch 300163, the fog wall 11 and the snow 839500 have neither and are unchanged.
+Open: the LOD switch distances (`threshold0` is 1 in all 62 effects, `threshold1` 10 to 165) are not applied; the near level is drawn at every distance.
+
 ## Soft sprite pull and uniformScale, 2026-10-22 (#78)
 
 The Genichiro door's fog wall (asset o001401, FXR 11) spread over the door frame and the walls.
