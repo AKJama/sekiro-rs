@@ -36,6 +36,11 @@ An activation part can be a meshless helper, so effects use its authored residen
 Native Outskirts event 11105107 deletes 1108010/1108020, waits two seconds and selects ordinary snow or invasion embers using flags 8302/9100, region 1102107 and map membership.
 Castle event 11115170 deletes and restores snow entity 1114350, suppressing it for invasion, regions 1112150/1112151 and player SpEffect 110040.
 The retained region graph resolves the authored composite indoor volumes.
+These event regions are the game's whole data rule for indoor snow (#79): no param, GPARAM or FXR field occludes weather, and SpEffect 110040 in the Castle event is the underwater check (SpEffectParam "underwater judgment"), not an indoor one.
+Outskirts region 1102107 is one 20 x 16 x 8 m box over the temple building at MSB (94.4, -52.2, -154.1), collision h023200.
+The Sculptor's hall at start 0 (collision h022400) has LightSet 110 like that building but no region, so the event keeps its snow falling; we follow the event rather than a LightSet or roof test.
+Whether the original game really shows snow inside the Sculptor's hall still needs a real-game look; if it does not, the hiding is an engine rule not yet traced in the exe.
+The underwater SpEffect 110040 condition is not implemented.
 The rooftop ordinary-fight and Tomoe transitions are described in LIGHTING.md's Genichiro snow audit.
 
 ## Runtime and fidelity limits
