@@ -141,9 +141,12 @@ fn divine_dragon_retry_runs_its_lua_and_authored_bullets() {
     let arena = Arena::load(&cache, arena_spec, false).unwrap();
     let mut duel = Duel::load_with(&cache, 6.0, arena_spec.enemy_spec()).unwrap();
     arena.place(&mut duel);
-    duel.player.wire =
-        sekiro_sim::wire::Wire::load(&cache, &cache.join(format!("maps/{}", arena_spec.map)))
-            .unwrap();
+    duel.player.wire = sekiro_sim::wire::Wire::load(
+        &cache,
+        &cache.join(format!("maps/{}", arena_spec.map)),
+        arena.world.clone(),
+    )
+    .unwrap();
     duel.god = true;
     duel.events
         .as_mut()

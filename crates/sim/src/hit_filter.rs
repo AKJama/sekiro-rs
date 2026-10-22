@@ -155,6 +155,30 @@ pub fn load_ride_wall_groups(cache: &std::path::Path, map: &str) -> Result<Vec<u
     ride_wall_groups(&read(map)?, &read("common_func")?)
 }
 
+/// Names of a layout's placed objects in any of `groups`, the entity groups whose
+/// fall-prevention walls common event 20005560 switches on while Wolf has SpEffect 4100
+/// ([`ride_wall_groups`], [`RIDE_ASSIST_MOVE`]).
+pub fn ride_wall_objects(
+    layout: &serde_json::Value,
+    groups: &[u32],
+) -> std::collections::HashSet<String> {
+    layout["objects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|row| {
+            row["entity_group_ids"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .take(8)
+                .filter_map(|g| g.as_u64().or_else(|| g.as_i64().map(|v| v as u64)))
+                .any(|g| g as u32 != 0 && groups.contains(&(g as u32)))
+        })
+        .filter_map(|row| row["name"].as_str().map(str::to_string))
+        .collect()
+}
+
 /// True for the material id of a floor that gives the riding state ([`RIDEABLE_SPECIAL`]).
 pub fn rideable(floor_material: Option<u32>) -> bool {
     floor_material.is_some_and(|m| m / 100 == RIDEABLE_SPECIAL)

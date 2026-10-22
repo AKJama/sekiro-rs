@@ -324,15 +324,28 @@ fn no_band_on_flat_ground_holds_a_walk() {
     };
     let (_, world) = map().unwrap();
     let layout = serde_json::from_slice(&std::fs::read(dir.join("layout.json")).unwrap()).unwrap();
-    let block = sekiro_sim::lo_collision::block_collision(&dir, &layout, |_| false).unwrap();
+    // The map world without its bands: the same story, helpers and placed objects.
+    let cache = sekiro_sim::cache::root();
+    let block_name = dir.file_name().unwrap().to_str().unwrap();
+    let off = sekiro_sim::world_events::first_visit_off(&cache, block_name, &layout).unwrap();
+    let block =
+        sekiro_sim::lo_collision::block_collision(&dir, &layout, |n| off.contains(n)).unwrap();
     let mut bare = CollisionWorld::from_mesh(&block.mesh);
     bare.add_helpers(&block.helpers);
+    bare.add_map_objects(&cache, block_name, &layout, |n| !off.contains(n), None)
+        .unwrap();
     let walls =
         PartCollision::from_bytes(&std::fs::read(dir.join("fall_assist.bin")).unwrap()).unwrap();
     let m = &walls.mesh;
     let (mut flat, mut walk_held, mut action_held) = (0, Vec::new(), 0);
-    for t in m.indices.as_chunks::<3>().0 {
-        let [a, b, c] = t.map(|k| Vec3::from(m.vertices[k as usize]));
+    // The bands of the parts the story keeps, which the map world holds.
+    let kept = walls
+        .parts
+        .iter()
+        .filter(|p| !off.contains(&p.name))
+        .flat_map(|p| p.first as usize..(p.first + p.count) as usize);
+    for t in kept.map(|t| &m.indices[t * 3..t * 3 + 3]) {
+        let [a, b, c] = [t[0], t[1], t[2]].map(|k| Vec3::from(m.vertices[k as usize]));
         let n = (b - a).cross(c - a);
         let flat_n = Vec2::new(n.x, n.z);
         if flat_n.length() < 0.5 * n.length() || n.length_squared() < 1e-12 {

@@ -615,10 +615,12 @@ pub fn run(options: Options) -> Result<()> {
         duel.player.docking = sekiro_sim::docking::Docking::load(&dir.join("edges.json"))
             .map_err(anyhow::Error::msg)?;
     }
-    if let Some((dir, _, _)) = &on_map
+    if let Some((dir, _, world)) = &on_map
         && dir.join("grapple.json").exists()
     {
-        duel.player.wire = sekiro_sim::wire::Wire::load(&cache, dir).map_err(anyhow::Error::msg)?;
+        // The wire aims through the world Wolf collides with (#18).
+        duel.player.wire =
+            sekiro_sim::wire::Wire::load(&cache, dir, world.clone()).map_err(anyhow::Error::msg)?;
     }
     if !options.enemy_present {
         vacant_enemy_slot(&mut duel);
@@ -920,11 +922,20 @@ pub fn run(options: Options) -> Result<()> {
         );
     }
     if let Some((dir, id, world)) = on_map {
+        // What the arena leaves out of its collision it does not draw either (#18).
         let arena_hidden = options
             .arena
-            .map(|a| sekiro_sim::arenas_a::hidden_parts(&cache, a))
-            .transpose()
-            .map_err(anyhow::Error::msg)?
+            .map(|a| {
+                let layout = map::world::read_layout(&dir)?;
+                let mut hidden =
+                    sekiro_sim::arenas_a::hidden_parts(&cache, a).map_err(anyhow::Error::msg)?;
+                hidden.extend(
+                    sekiro_sim::arena::story_objects_off(&cache, a, &layout)
+                        .map_err(anyhow::Error::msg)?,
+                );
+                anyhow::Ok(hidden)
+            })
+            .transpose()?
             .unwrap_or_default();
         // The map's sun, ambient light and sky replace the floor setup's.
         if options.arena.is_some() {
