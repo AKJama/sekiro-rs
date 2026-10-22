@@ -7,8 +7,8 @@
 //! map asset loaded. Once the player can move it samples Wolf at 4 Hz: the collision floor
 //! under him and whether a drawn map triangle lies on it (a ground hole is a grounded sample
 //! with collision but no drawn ground), plus how much of the collision floor within 20 m lies
-//! inside drawn map mesh bounds, and each patrolling foe within 60 m (route point and
-//! position). Frame times are taken after a settle period. Without a map (`--play` with no
+//! inside drawn map mesh bounds, and each map foe within 60 m (think row, goal chain, battle
+//! state, LOD, clip, route point and position). Frame times are taken after a settle period. Without a map (`--play` with no
 //! `--map`, the flat-floor fight) samples and stops record Wolf's position, grounded state and
 //! step only.
 //!
@@ -46,8 +46,8 @@ const GROUND_TOLERANCE: f32 = 1.0;
 const TOUR_WAIT: f32 = 3.0;
 /// Seconds at a `drop:x,y,z` tour stop: a 30 m fall, the fall return's fade and the return.
 const DROP_WAIT: f32 = 8.0;
-/// Patrolling foes within this distance of Wolf are listed in each sample.
-const PATROL_RADIUS: f32 = 60.0;
+/// Map foes within this distance of Wolf are listed in each sample.
+const FOE_RADIUS: f32 = 60.0;
 /// Degrees between `--live-orbit` screenshots.
 const ORBIT_SHOT_DEGREES: f32 = 45.0;
 
@@ -622,9 +622,9 @@ pub(super) fn observe(
                 "can_fire": wire.can_fire(),
             })
         });
-    // Patrolling foes near Wolf: their route point and position, to read walk pace and the
-    // arrival waits from the samples.
-    sample["patrols"] = sim
+    // Map foes near Wolf: their AI's think row, goal chain and state, scheduling level, the
+    // route point of a patrol and position, to see which stand, walk or fight and why.
+    sample["foes"] = sim
         .duel
         .population
         .as_ref()
@@ -633,17 +633,24 @@ pub(super) fn observe(
                 .foes
                 .iter()
                 .filter_map(|foe| {
-                    let patrol = foe.duel.ai.as_ref()?.state.patrol.as_ref()?;
                     let at = foe.duel.enemy.body.position;
-                    (Vec3::from_array(at).distance(Vec3::from_array(body.position)) < PATROL_RADIUS)
-                        .then(|| {
-                            serde_json::json!({
-                                "part": foe.part,
-                                "point": patrol.current,
-                                "previous": patrol.previous,
-                                "at": at,
-                            })
-                        })
+                    if Vec3::from_array(at).distance(Vec3::from_array(body.position)) >= FOE_RADIUS
+                    {
+                        return None;
+                    }
+                    let ai = foe.duel.ai.as_ref();
+                    let patrol = ai.and_then(|ai| ai.state.patrol.as_ref());
+                    Some(serde_json::json!({
+                        "part": foe.part,
+                        "think": ai.map(|ai| ai.state.think.id),
+                        "goals": ai.map(|ai| ai.goal_stack().join(">")),
+                        "battle": ai.is_some_and(|ai| ai.state.battle),
+                        "lod": format!("{:?}", foe.lod),
+                        "clip": foe.report.enemy.animation,
+                        "point": patrol.map(|p| p.current),
+                        "previous": patrol.map(|p| p.previous),
+                        "at": at,
+                    }))
                 })
                 .collect::<Vec<_>>()
         })

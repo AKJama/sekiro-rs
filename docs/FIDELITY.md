@@ -294,3 +294,13 @@ MoveToSomewhere, LeaveTarget and SidewayMove's native updates were not identifie
 So a numeric walk flag of 0 from an approach script (`Approach_Act_Flex`) or the brain's run tactics (RunIn, Retreat) now runs where it walked before, which makes bosses run on far approaches.
 The brain's reach gate, which holds a planned attack whose target moved out of reach, now also covers the CommonAttack a planned table goal such as ComboAttackTunableSpin adds.
 No AI script calls `StepNextMovePoint`, so patrol stepping happens only in the move goal on arrival at point 103, as in the exe's MoveTo terminate callbacks and FwLo's `src/ai.rs`.
+
+## Standing guards and small acts, issue #115
+
+Map foes with no patrol route stand at their post in NonBattleAct's `Stay` because `GetSmallActAnimId` now returns -1, as the exe does when the MSB enemy has no small act.
+The exe reads the enemy part's small-act index (its `init_anim_id_type`, part data +0x22) and returns -1 when it is negative (`FUN_140604450` over `FUN_14060c1b0`), and the pre and post waits return 0 (`FUN_1406044d0`).
+Our unknown-method default returned 0, so NonBattleAct queued a 20 s `WaitWithAnime` of anim 0, an AttackNonCancel of the idle the foe was already playing, and repeated it.
+184 of the 188 Outskirts enemy parts have no small act; the other four (indices 0, 1 and 2) point at rows of a table the exe reads by index 0x14 from a per-character resource (`FUN_141094ff0`), which is not identified, so they also read -1 here, as in FwLo's `src/ai.rs`.
+`Stay(life, 0, POINT_INIT_POSE)` faces its third argument (goal parameter 1), as FwLo's `Native::Stay` reads it, not parameter 0 as `Wait` does.
+POINT_INIT_POSE is the spawn point here, not the spawn facing, and an NPC in its idle state does not turn in place (its TAE turn speed is 0), so a guard moved off its facing does not turn back to it.
+Hearing (`GetLatestSoundTargetID` reads 0) and the caution state are not implemented for map foes, so guards react only to sight, `nose_dist` and damage.
