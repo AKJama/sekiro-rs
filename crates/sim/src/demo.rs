@@ -3,7 +3,8 @@
 //! One line per segment: `<frames> <stick_x> <stick_y> <buttons> [yaw_degrees
 //! [pitch_degrees]]`, the pitch down positive.
 //! Buttons are a comma list of `attack, guard, jump, dodge, crouch, grapple, prosthetic, item,
-//! combat_art, lock_on`, or `-` for none. `#` starts a comment.
+//! combat_art, lock_on, action` (`action` kneels at an idol or picks up), or `-` for none.
+//! `#` starts a comment.
 //!
 //! The stick is camera-relative, like a player's: `stick_y` 1 is away from the camera, `stick_x`
 //! 1 to its right. The yaw and pitch columns are offsets that turn the camera the row is played
@@ -70,6 +71,7 @@ fn parse_buttons(s: &str) -> Result<Buttons, String> {
             "item" => b.item = true,
             "combat_art" => b.combat_art = true,
             "lock_on" => b.lock_on = true,
+            "action" => b.action = true,
             other => return Err(format!("unknown button {other:?}")),
         }
     }
@@ -119,6 +121,7 @@ mod tests {
         assert!(frames.len() > 600);
         assert!(frames[30].move_stick[1] == 1.0);
         assert!(super::parse("3 0 0 kick").is_err());
+        assert!(super::parse("1 0 0 action").unwrap()[0].buttons.action);
         let aimed = super::parse("1 0 0 - 90 30").unwrap()[0];
         assert!((aimed.camera_yaw - 90f32.to_radians()).abs() < 1e-6);
         assert!((aimed.camera_pitch - 30f32.to_radians()).abs() < 1e-6);

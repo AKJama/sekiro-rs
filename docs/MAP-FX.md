@@ -13,9 +13,9 @@ Native FXR trees and raw region records belong in the local audit output, not tr
 
 Outskirts has 157 SFX/WindSFX regions and Castle has 95.
 These counts exclude ModelSfxParam and event-created object attachments.
-Including parameter attachments, explicit object FX and registered-idol TAE produces 312 placements in Outskirts and 287 in Castle.
-Of these, 240 and 223 are story-enabled before residency, distance and activation-parent gates.
-The model-parameter contributions are 147 and 181 placements; explicit object FX contribute one and four, and registered-idol TAE contributes seven in each map.
+Including parameter attachments, explicit object FX and registered-idol TAE produces 319 placements in Outskirts and 294 in Castle.
+Of these, 246 and 230 are story-enabled before residency, distance and activation-parent gates.
+The model-parameter contributions are 147 and 181 placements; explicit object FX contribute one and four, and registered-idol TAE contributes fourteen in each map (each idol's unlit and lit idle, #154).
 An entity of -1 has no script-addressable entity ID and is still a real placement.
 StartDisabled supplies the initial gate; an executed spawn or delete overrides it.
 Ordinary object enablement and loaded-map visibility also gate each attachment.
@@ -26,6 +26,9 @@ Each positive sfxId slot supplies its own dmypolyId, resolved through the object
 For example, o116000 uses row 116000000, FXR 839530 and dummy 200.
 RegisterBonfire commands retain their entity, unlock flag, kindling state and event provenance.
 Their settled lit/unlit presentation reads the object's own TAE idle animation 11/1 and its time-zero FX events, including the authored FXR and dummy, rather than an invented glow on the idol material.
+Both idles are inventoried for every idol, tagged lit or unlit (`IdolIdle`), and only the one matching the idol's state shows: lit when the story lights it (bonfire flag or kindling) or once Wolf has lit it in play (`Kit::found_idols`), #154.
+The unlit idle (FFX 1010) is embers circling the idol 0.6 m out at 0.75 m up; the lit one (FFX 1011, 1012 at the temple's o115040) is the flame 1.1 m up, just above the hands.
+Before #154 the inventory held only the first-visit idle, so an idol Wolf lit kept its circling embers instead of the flame.
 The animation-selection bridge is an explicit approximation until the native bonfire controller is traced; the FXR IDs and dummy locations themselves come from TAE.
 The inventory encodes this provenance with command 200903, distinguishing registration-driven TAE from explicit 2006 object FX commands.
 An activation part can be a meshless helper, so effects use its authored residency demand and story enablement instead of requiring that a mesh was rendered.

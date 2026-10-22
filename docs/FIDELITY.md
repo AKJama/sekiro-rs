@@ -289,6 +289,14 @@ The world resets (Vitality and the gourd refilled, the goods restocked, the foes
 A rest cut short before the dark is full (Wolf taken off the idol) resets nothing, and the dark lifts from where it got to at the curve's own rate.
 No real-game capture of a rest was available to compare the timing against.
 
+## Idol flame once lit, issue #154
+
+An idol's idle effect is the one its object's idle clip plays: clip 1 (unlit) spawns FFX 1010 and clip 11 (lit) FFX 1011 (1012 for the temple's o115040), both on dummy 100, the idol's origin.
+FFX 1010 is embers that circle the idol 0.6 m out at 0.75 m up; FFX 1011 is the flame 1.1 m up, just above the hands of the 1.05 m idol.
+The map's effects used to be fixed at the first-visit story state, so an idol Wolf lit in play kept its circling embers; now the lit idle replaces the unlit one the step the idol is found (`Kit::found_idols`).
+Gap: the game's lighting clip 10 also plays FFX 1000 (a 1.3 s burst) as the idol lights; it is not played yet, and the idle swaps at once.
+Gap: which clip the game's bonfire controller picks is inferred from the clip numbers and their effects, not traced in the exe (see [MAP-FX.md](MAP-FX.md)).
+
 ## Edge hold, issue #203
 
 The fall-prevention assist follows the exe's groups (see [OBJECT-COLLISION.md](OBJECT-COLLISION.md#the-fall-prevention-assist)): walking is held only by filter-28 walls and type 6 objects (group 92), and the `f` binder's bands (group 93) hold only ground actions and NPCs.
