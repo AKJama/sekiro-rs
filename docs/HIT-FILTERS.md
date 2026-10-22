@@ -47,6 +47,9 @@ Replaying its arguments from the disassembly gives:
 
 So the player walks on the low-resolution binder in the exe, and so does the simulation (#189): the player, enemies and the camera all collide with `collision_lo.bin` (`crates/sim/src/lo_collision.rs`, `docs/FORMATS.md`).
 The helper parts keep their fixed groups whichever binder their body comes from, so their `l` copies are the ones characters meet, and the story's part removal and the helper stripping read the parts' ranges in `collision_lo.bin`.
+`l` models a flight of stairs as a ramp where `h` has real treads, so Wolf rises and descends a flight smoothly (#104).
+On the long castle stairs past start 3's moat gate his height changes by at most 0.047 m a tick at a run and never against the way he walks; on `h` a riser lifted him up to 0.29 m in one tick (`play_collision_world_walks_stairs_smoothly`).
+In the exe the treads are left to foot IK, which meets `h`; the simulation has no foot IK, so on stairs the feet are drawn at the ramp.
 A block exported before `collision_lo.bin` existed falls back to `collision.bin`, with a log line naming `sekiro-extract map <block> --lo-collision`.
 Parts with an `h` model and no `l` model, m11_00's `h900700` and m11_01's `h012400`, are met by no character and no camera in the exe and get an empty range; m11_00's `h009500` has no model in either binder.
 

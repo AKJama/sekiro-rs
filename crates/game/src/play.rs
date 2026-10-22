@@ -2421,7 +2421,8 @@ fn log_enabled() -> bool {
 }
 
 /// One `move` line per simulation step: the camera yaw the step used, the stick and its world
-/// direction, Wolf's facing and direction of travel, and the travel error against the stick.
+/// direction, Wolf's facing and direction of travel, the travel error against the stick, and
+/// his feet's height and whether he is grounded (a bounce on stairs shows in `y`, #104).
 fn log_move(step: usize, frame: &InputFrame, before: [f32; 3], duel: &Duel, r: &StepReport) {
     let wolf = &duel.player;
     let (dx, dz) = (r.position[0] - before[0], r.position[2] - before[2]);
@@ -2434,7 +2435,7 @@ fn log_move(step: usize, frame: &InputFrame, before: [f32; 3], duel: &Duel, r: &
     };
     let var = |n: &str| wolf.behavior.runtime.variable(n).unwrap_or(f32::NAN);
     eprintln!(
-        "move {step} cam {:.1} stick {:.2},{:.2} stick_yaw {:.1} face {:.1} travel {:.1} speed {:.2} err {:.1} MoveAngle {:.1} walk_twist {:.1} lock {} {} {}",
+        "move {step} cam {:.1} stick {:.2},{:.2} stick_yaw {:.1} face {:.1} travel {:.1} speed {:.2} err {:.1} MoveAngle {:.1} walk_twist {:.1} y {:.4} grounded {} lock {} {} {}",
         frame.camera_yaw.to_degrees(),
         frame.move_stick[0],
         frame.move_stick[1],
@@ -2445,6 +2446,8 @@ fn log_move(step: usize, frame: &InputFrame, before: [f32; 3], duel: &Duel, r: &
         err,
         var("MoveAngle"),
         wolf.walk_twist,
+        r.position[1],
+        r.grounded,
         wolf.lock_target.is_some(),
         r.behavior.state_path.last().map_or("-", String::as_str),
         r.animation.as_deref().unwrap_or("-"),
