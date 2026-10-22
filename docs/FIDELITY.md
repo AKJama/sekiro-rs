@@ -385,4 +385,13 @@ A grounded foe on the mesh whose state asks for no assist has its move cut where
 A move that only crosses a hole in the mesh (the mesh carries on within 2 m past the move's end, along it) is let through, standing in for the path the game would take round the rocks, posts and bushes the mesh leaves out.
 This is the simulation's rule, not the exe's: the AI's path search and path following over the mesh (Havok AI), the mesh's user edges between pieces, the object navmeshes (`onav`), the height tolerance (1 m here) and the hole width (2 m) were not traced.
 A foe whose target is off the mesh walks in place at the edge, which matches what players see foes do in FromSoftware games, but was not checked against a recording; the Ochimusha's ranged acts when it has no path (the Lua's navmesh queries still answer open floor) are not modelled.
-Foes knocked off the mesh, and attacks and steps (held by the `f` bands as before), move freely, and a foe that falls into the void still falls for good: the filter-15 kill plane under the ravine (`h900000`) and fall death are not applied to foes.
+Foes knocked off the mesh, and attacks and steps (held by the `f` bands as before), move freely; a foe that falls off dies of the fall (#234, below).
+
+## Foes die of a fall, issue #234
+
+The exe runs one fall-dead routine for every character (`FUN_140b975f0`, logged as `SprjPlaylog_ChrFallDead`), and for a character that is not a player it always kills: HP to 0 through the HP setter (so a foe that cannot die, or has deathblows left, keeps 1 HP), damage type 6, and the NPC death flags (`FUN_1409ee7e0`).
+It runs when the character meets a filter-15 event wall (the ravine's `h900000`), which also fades the model out over 0.5 s and then holds the body, and when a fall goes on too long: 30 s airborne or 1500 m below where it last stood (`FUN_140bc2210`, with no fade).
+`crates/sim/src/npc_fall.rs` applies both to the enemy of every duel, map foes included.
+In the #227 run the Outskirts soldier c1010_0000 went off the ravine edge in an attack (a000_003012 in the sim's repro): the edge has an `f` band (part `h000300`, about z -57.3 there), but the soldier had already run onto it (runs ask for no assist), so the attack's assist started past the band and did not hold it.
+Not modelled: the damage type 6 is not handed to the foe's script (its `IsDead` reads HP), the exe's third trigger (physics `+0x8e8`, set after 10 s airborne with the height changing by at most 0.02 m a step) is left out, and the renderer has no model opacity, so the fade is not drawn and the foe is hidden once it ends.
+The script's mid-air death (`ExecDeath` plays `W_DeathStartDefault` once env 224 passes `HEIGHT_FORCE_DEATH`, 60 m) does not play: the simulation's env 224 is the last landed fall's height, while the exe's grows during the fall.

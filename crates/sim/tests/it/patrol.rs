@@ -384,3 +384,66 @@ fn outskirts_guard_chasing_wolf_stops_at_the_ravine_edge() {
         "the guard stays on the ground above the ravine (lowest y {lowest:.2})"
     );
 }
+
+/// An Outskirts soldier carried off the start ravine's edge dies of the fall (#234). In the
+/// #227 run c1010_0000's attack combo (a000_003012 here) took it past the edge's `f` band
+/// (part h000300, which it had already run onto) at about (-81.8, -47.3, -57.7), and it fell
+/// for good. The exe's fall-dead routine kills an NPC that meets a filter-15 event wall, here
+/// `h900000` under the ravine, fades its model out over 0.5 s and holds its body.
+#[test]
+fn outskirts_soldier_falling_into_the_ravine_dies() {
+    let cache = sekiro_sim::cache::root();
+    let map = "m11_00_00_00";
+    let dir = cache.join(format!("maps/{map}"));
+    if !dir.join("collision.bin").exists() || !cache.join("anim/c1010").is_dir() {
+        return;
+    }
+    let mut wolf = outskirts(&cache, map, &dir);
+    fn soldier(wolf: &mut Duel) -> &mut Duel {
+        wolf.population
+            .as_mut()
+            .unwrap()
+            .foes
+            .iter_mut()
+            .find(|f| f.part == "c1010_0000")
+            .unwrap()
+            .duel
+            .as_mut()
+    }
+    // Just past the edge where the attack left the ground, as in the live run.
+    let body = &mut soldier(&mut wolf).enemy.body;
+    body.position = [-81.84, -47.29, -57.9];
+    body.grounded = false;
+    let dt = 1.0 / 60.0;
+    let mut track = Vec::new();
+    for _ in 0..60 * 4 {
+        wolf.step(&InputFrame::default(), dt);
+        let foe = soldier(&mut wolf);
+        track.push(foe.enemy.body.position);
+    }
+    let foe = soldier(&mut wolf);
+    let lowest = track.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
+    eprintln!(
+        "soldier: {:?}, hp {}, lowest y {lowest:.2}, opacity {}",
+        foe.enemy_fall.death,
+        foe.rules.fighters[1].vitality.hp,
+        foe.enemy_fall_opacity()
+    );
+    assert!(
+        foe.rules.fighters[1].dead(),
+        "the soldier survives the fall (lowest y {lowest:.2})"
+    );
+    assert_eq!(
+        foe.enemy_fall.death,
+        Some(sekiro_sim::npc_fall::FallDeath::EventWall("h900000".into()))
+    );
+    assert_eq!(foe.enemy_fall_opacity(), 0.0, "the model fades out");
+    // Held where the fade ended: the last second does not move.
+    let last = track[track.len() - 60..].to_vec();
+    assert!(
+        last.iter().all(|p| *p == last[0]),
+        "the body is not held ({:?} to {:?})",
+        last[0],
+        last[59]
+    );
+}

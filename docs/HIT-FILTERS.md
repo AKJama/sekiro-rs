@@ -85,6 +85,10 @@ m25's `h004200` and `h016200`, lost while deep material counted as water on ordi
 - 13: when the toucher is the local player (`FUN_1409f3430`: `WorldChrMan+0x88`) and three state checks pass, sets `WorldChrMan+0x98` to 1. Untraced further.
 - 14: sets bit 2 of a word at `chr+0x50 -> +0x9c`. Untraced.
 - 15: when the state checks and `FUN_140b975f0(.., 1)` pass, sets `chr+0x1a48` to 1.0, `chr+0x1a4c` to -2.0 and bit 8 of `chr+0x1a14`.
+  `FUN_140b975f0` is the fall-dead routine (it logs `SprjPlaylog_ChrFallDead`).
+  For a character that is not a player (`chr` vtable `+0x1a8` false) it always sets HP to 0 (through the HP setter `FUN_140bd64e0`) and damage type 6, and returns true, so an NPC dies and fades (#234, `crates/sim/src/npc_fall.rs`).
+  For the player it takes a share of 0.4 (`DAT_143b01958`) of a value read by `FUN_1405a9e40` (likely max HP) off his HP and sets damage type 14 (`FALL_DEAD_RETURN`), and returns false; when HP is too low, it kills him as an NPC.
+  The per-character update `FUN_1409f78a0` calls it too, when the physics module's `FUN_140bc2210` reports a fall of 30 s airborne or 1500 m below the last stance, or `+0x8e8` (10 s airborne with the height changing by at most 0.02 m a step).
   `FUN_1409f6b20` adds `0x1a4c * dt` to `0x1a48` each frame and multiplies the model's draw alpha by it, so the model fades out over 0.5 s.
   When it reaches 0 with bit 8 set, it sets the physics module's `0x92b`, and `FUN_140bcc420` then sets `0x92a`, which holds the body.
 - 16: spawns an effect at the contact point. 17: `FUN_1409f5820`. 20: a flag at `chr+0x1a12`. 21: a flag, then a warp to a point found from the part's parameter plus 100 (`FUN_1406d5f00`). 23: a virtual call with `0x140000001`. 27: `FUN_1409ee830`.
@@ -120,6 +124,7 @@ Filter 15 under a pit is the fall return's trigger: Wolf falls through it, fades
   An arena keeps an event wall whole when any of it reaches the arena's radius: `l`'s walls are 9 large triangles each, and cropped per triangle the part under that point was lost, so the placeholder void depth returned Wolf instead.
   The Guardian Ape deathblow test (`guardian_ape.rs`) stood Wolf on the pond's water surface helper (filter 16); the pond is deep water (hit material 22), so the test now takes the fight to the dry bank.
 - Where an authored filter-15 wall lies below a falling Wolf, the placeholder void depth waits for it.
+- A foe (the enemy of any duel) that meets a filter-15 wall dies, fades over the same 0.5 s and is then held (#234); a foe airborne 30 s or 1500 m below its last stance dies too.
 - `crates/sim/tests/it/hit_filters.rs` counts the parts by hit filter over the whole of m11_00_00_00 and m11_01_00_00, asserts which the player collides with, and checks the ravine.
   The live test (`crates/game/tests/it/live_play.rs`) drops Wolf into the ravine with `--live-tour drop:x,y,z`.
 
@@ -134,7 +139,7 @@ Dropping from (-137.6, -44.3, -124.5) in the live game with Outskirts start 0:
 
 ## Unresolved
 
-- The fall return's HP cost, where the exe puts the character back, and what `0x92a` does beyond holding the body are untraced; the return uses the last stance on collision, as before.
+- The fall return's HP cost (above) is not applied, and where the exe puts the character back and what `0x92a` does beyond holding the body are untraced; the return uses the last stance on collision, as before.
 - The extra condition `FUN_140b975f0(.., 1)` for filter 15 and the other reactions (13, 14, 20, 21, 23, 27) are not decoded or applied.
 - The fade itself is not drawn: `Duel::fall_return_opacity` exposes it, but the renderer has no model opacity yet.
 - The camera ray in the exe passes through filters 22 and 27, which the simulation's camera ray still hits; wire and other rays use the player's set.
