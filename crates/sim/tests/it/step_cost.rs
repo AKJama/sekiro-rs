@@ -1,5 +1,5 @@
 //! Sim step cost at the m11_00 spots where the live game's fixed step slowed down (#145, #156,
-//! #161), counted in collision work so the tests do not depend on the machine.
+//! #161, #121), counted in collision work so the tests do not depend on the machine.
 //! Skips without the exported maps.
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -335,4 +335,72 @@ fn slide_cull_keeps_every_contact() {
         })
         .reduce(|| 0.0, f32::max);
     assert!(worst <= 1e-5, "the cull moved a slide by {worst} m");
+}
+
+/// Wolf walking into the wooden fence corner beside the snowy firewood in the samurai general's
+/// courtyard and pushing there (#121, Wolf stuck at about (-221.6, -38.0, 11.5) on log
+/// o114541_1809): before #159 and #161 a step there took about 16.6 ms in the live game, so the
+/// fixed step's catch-up ran 15 steps a frame and the game fell to 3-10 fps. With the placed
+/// objects, as the play world has them, no step of the walk and the push may look at more than
+/// a bounded number of grid entries.
+#[test]
+fn fence_corner_push_is_bounded() {
+    use glam::Vec3;
+    use sekiro_sim::{Character, InputFrame};
+
+    use crate::movement_helpers::{DT, settle};
+    let Some(cache) = cache() else {
+        return;
+    };
+    let Some(mut world) = CollisionWorld::load_blocks(&cache, &["m11_00_00_00", "m11_01_00_00"])
+    else {
+        return;
+    };
+    let dir = cache.join("maps/m11_00_00_00");
+    if dir.join("object_collision.bin").is_file() {
+        world
+            .add_block_objects(&dir, "m11_00_00_00", |_, who| who)
+            .unwrap();
+    }
+    let world = Arc::new(world);
+    let mut wolf = Character::load_from_cache(&cache).unwrap();
+    wolf.ground = Box::new(world.clone());
+    // The hook search's sight rays are part of every step's cost here (#161).
+    wolf.wire = sekiro_sim::wire::Wire::load(&cache, &dir).unwrap();
+    // The last two points of the issue's route: from (-220, 9) toward (-224, 12), past the corner.
+    let (x, z) = (-220.0, 9.0);
+    wolf.body.position = [x, world.floor(x, z, -37.0).unwrap(), z];
+    settle(&mut wolf);
+    let toward = Vec3::new(-4.0, 0.0, 3.0).normalize();
+    // The camera looks along `rotate_y(yaw) * -Z`, so forward on the stick walks along `toward`.
+    let yaw = (-toward.x).atan2(-toward.z);
+    let input = InputFrame {
+        move_stick: [0.0, 1.0],
+        camera_yaw: yaw,
+        ..Default::default()
+    };
+    let (mut worst, mut pushed) = (0, 0);
+    for _ in 0..600 {
+        let before = wolf.body.position;
+        let (report, seen) = visits(|| wolf.tick(&input, DT));
+        assert!(
+            report.behavior.script_errors.is_empty(),
+            "{:?}",
+            report.behavior.script_errors
+        );
+        worst = worst.max(seen);
+        let moved = (report.position[0] - before[0]).hypot(report.position[2] - before[2]);
+        pushed += usize::from(moved < 0.001);
+    }
+    let [x, y, z] = wolf.body.position;
+    eprintln!(
+        "fence corner: worst step {worst} grid entries, {pushed} steps without moving, ends at ({x:.2}, {y:.2}, {z:.2})"
+    );
+    assert!(
+        pushed > 300 && Vec3::new(x, 0.0, z).distance(Vec3::new(-221.6, 0.0, 11.5)) < 1.0,
+        "Wolf never pressed into the corner: ends at ({x}, {y}, {z}) after {pushed} still steps"
+    );
+    // 1,282 (Wolf's slides, floors and the hook search's sight rays). Before #159 and #161 a
+    // single slide pass tested 7k-18k triangles and the hook rays 168k at the spot 7 m away.
+    assert!(worst < 10_000, "{worst} grid entries in one step");
 }
