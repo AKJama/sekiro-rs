@@ -86,6 +86,32 @@ pub struct InputFrame {
     pub buttons: Buttons,
 }
 
+impl InputFrame {
+    /// A script row ([`crate::demo::parse`]) played from the camera at `camera_yaw` and
+    /// `camera_pitch`: the row's yaw and pitch columns are offsets from that camera, so its stick
+    /// is camera-relative like a player's. A forward stick then pushes along world yaw
+    /// `camera_yaw + column` ([`InputState::stick_world_yaw`]; yaw 0 faces -Z, positive turns
+    /// left, see [`crate::arena::forward`]).
+    pub fn from_camera(self, camera_yaw: f32, camera_pitch: f32) -> Self {
+        Self {
+            camera_yaw: camera_yaw + self.camera_yaw,
+            camera_pitch: camera_pitch + self.camera_pitch,
+            ..self
+        }
+    }
+
+    /// A forward stick of `level` pushing along world yaw `yaw`, whatever the camera (the
+    /// `--script-route` steering). The same push as a script row with stick `0 level` and yaw
+    /// column `yaw - camera` played [`Self::from_camera`] `camera`.
+    pub fn toward_world_yaw(yaw: f32, level: f32) -> Self {
+        Self {
+            move_stick: [0.0, level],
+            camera_yaw: yaw,
+            ..Self::default()
+        }
+    }
+}
+
 /// Script extensions for docking's action button and the water movement aliases.
 pub fn parse_action_script(text: &str) -> Result<Vec<InputFrame>, String> {
     let mut frames = Vec::new();
@@ -373,5 +399,37 @@ mod tests {
         // Right is a clockwise (negative) yaw.
         assert!((s.stick_world_yaw().unwrap() + std::f32::consts::FRAC_PI_2).abs() < 1e-6);
         assert!((angle_diff(3.0, -3.0) - (6.0 - std::f32::consts::TAU)).abs() < 1e-6);
+    }
+
+    /// A script row's yaw column turns the camera it is played from (#215): forward pushes along
+    /// camera plus column, back along the opposite, and a route frame toward that world yaw is
+    /// the same push.
+    #[test]
+    fn script_rows_push_along_camera_plus_yaw_column_like_a_route() {
+        let world = |frame: InputFrame| {
+            let mut s = InputState::default();
+            s.update(&frame, 0.0, &TaeFrame::default());
+            s.stick_world_yaw().unwrap()
+        };
+        let camera = (-158f32).to_radians();
+        for (row, column, back) in [
+            ("1 0 1 - 0", 0.0, false),
+            ("1 0 1 - 90", 90.0, false),
+            ("1 0 1 - -135 10", -135.0, false),
+            ("1 0 -1 - 0", 0.0, true),
+        ] {
+            let parsed = parse_action_script(row).unwrap()[0];
+            let played = parsed.from_camera(camera, 0.25);
+            let turn = if back { std::f32::consts::PI } else { 0.0 };
+            let want = camera + f32::to_radians(column) + turn;
+            assert!(angle_diff(world(played), want).abs() < 1e-5, "{row}");
+            let route = InputFrame::toward_world_yaw(want, 1.0);
+            assert!(
+                angle_diff(world(route), world(played)).abs() < 1e-5,
+                "{row}"
+            );
+        }
+        let pitched = parse_action_script("1 0 0 - 0 10").unwrap()[0].from_camera(0.0, 0.25);
+        assert!((pitched.camera_pitch - (0.25 + 10f32.to_radians())).abs() < 1e-6);
     }
 }

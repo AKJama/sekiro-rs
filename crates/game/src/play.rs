@@ -1487,13 +1487,13 @@ fn simulate(
             camera_pitch: orbit.pitch,
             ..f
         },
-        (Some(frames), None) => {
-            // Scripted sticks are camera-relative to the current orbit, like a player's.
-            let mut f = frames.get(sim.step).copied().unwrap_or_default();
-            f.camera_yaw += orbit.yaw;
-            f.camera_pitch += orbit.pitch;
-            f
-        }
+        // Scripted sticks are camera-relative to the current orbit, like a player's, its yaw and
+        // pitch columns turning that camera (`InputFrame::from_camera`).
+        (Some(frames), None) => frames
+            .get(sim.step)
+            .copied()
+            .unwrap_or_default()
+            .from_camera(orbit.yaw, orbit.pitch),
         // The stick is relative to the camera on screen now (the orbit of the last frame).
         (None, None) => InputFrame {
             camera_yaw: orbit.yaw,
@@ -2364,11 +2364,7 @@ impl ScriptRoute {
                 self.next += 1;
                 continue;
             }
-            return Some(InputFrame {
-                move_stick: [0.0, 0.3],
-                camera_yaw: (-d.x).atan2(-d.y),
-                ..InputFrame::default()
-            });
+            return Some(InputFrame::toward_world_yaw((-d.x).atan2(-d.y), 0.3));
         }
         None
     }

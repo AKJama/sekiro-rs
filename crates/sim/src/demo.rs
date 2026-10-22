@@ -1,9 +1,18 @@
 //! Scripted input: a tiny text format for repeatable play sessions, and a built-in demo.
 //!
-//! One line per segment: `<frames> <stick_x> <stick_y> <buttons> [camera_yaw_degrees
-//! [camera_pitch_degrees]]`, the pitch down positive.
+//! One line per segment: `<frames> <stick_x> <stick_y> <buttons> [yaw_degrees
+//! [pitch_degrees]]`, the pitch down positive.
 //! Buttons are a comma list of `attack, guard, jump, dodge, crouch, grapple, prosthetic, item,
 //! combat_art, lock_on`, or `-` for none. `#` starts a comment.
+//!
+//! The stick is camera-relative, like a player's: `stick_y` 1 is away from the camera, `stick_x`
+//! 1 to its right. The yaw and pitch columns are offsets that turn the camera the row is played
+//! from (`InputFrame::from_camera`), not world angles. In `--play` that camera is the orbit,
+//! which starts at the spawn yaw (`--spawn x,y,z,yaw,pitch`, or the map start's facing) and
+//! then moves only with the mouse, a pad's right stick, lock-on, a respawn or a cinematic, so a
+//! forward stick runs along world yaw `spawn + column` (yaw 0 faces -Z, positive turns left, see
+//! [`crate::arena::forward`]). To aim along a world direction `(dx, dz)`, write the column
+//! `atan2(-dx, -dz)` in degrees minus the spawn yaw. A `0 -1` stick runs back toward the camera.
 
 use crate::input::{Buttons, InputFrame};
 
