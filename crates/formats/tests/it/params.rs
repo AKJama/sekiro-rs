@@ -10,14 +10,14 @@ use sekiro_formats::param::ParamSet;
 use sekiro_formats::param::typed::CombatParams;
 
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    sekiro_formats::cache::root()
 }
 
 fn set() -> Option<&'static ParamSet> {
     static SET: OnceLock<Option<ParamSet>> = OnceLock::new();
     SET.get_or_init(|| {
-        let dir = root().join("cache/raw/param/gameparam/gameparam.parambnd.d");
-        let defs = root().join("cache/refs/paramdex/Defs");
+        let dir = root().join("raw/param/gameparam/gameparam.parambnd.d");
+        let defs = root().join("refs/paramdex/Defs");
         if !dir.is_dir() || !defs.is_dir() {
             eprintln!("skipping: cache/ not extracted (run sekiro-extract unpack and fetch-refs)");
             return None;

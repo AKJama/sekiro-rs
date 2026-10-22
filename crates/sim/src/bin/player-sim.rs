@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 fn main() {
     let mut which = "hold".to_owned();
-    let mut cache = PathBuf::from("cache");
+    let mut cache = sekiro_sim::cache::root();
     let mut calls = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {

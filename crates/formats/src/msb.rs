@@ -882,8 +882,7 @@ fn read_part(data: &[u8], start: usize) -> Result<Part> {
 mod env_tests {
     #[test]
     fn castle_probe_regions() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../cache/raw/map/mapstudio/m11_01_00_00.msb");
+        let path = crate::cache::root().join("raw/map/mapstudio/m11_01_00_00.msb");
         if !path.exists() {
             return;
         }
@@ -904,8 +903,7 @@ mod env_tests {
 
     #[test]
     fn ashina_outskirts_treasures() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../cache/raw/map/mapstudio/m11_00_00_00.msb");
+        let path = crate::cache::root().join("raw/map/mapstudio/m11_00_00_00.msb");
         if !path.exists() {
             return;
         }

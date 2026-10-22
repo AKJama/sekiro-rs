@@ -10,7 +10,7 @@ use sekiro_formats::hkx::{self, Compendium, DecodeStats, TagFile, tagfile};
 use sekiro_formats::tae::{self, FieldValue, Template};
 
 fn chr() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache/raw/chr")
+    sekiro_formats::cache::root().join("raw/chr")
 }
 
 fn read(rel: &str) -> Option<Vec<u8>> {

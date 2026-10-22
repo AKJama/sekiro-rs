@@ -6,7 +6,7 @@ use sekiro_formats::fev::{Fev, sound_stem};
 use sekiro_formats::fsb::{CODEC_VORBIS, Fsb, is_fsb5, vorbis_packets};
 
 fn sound_dir() -> Option<PathBuf> {
-    let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache/raw/sound");
+    let d = sekiro_formats::cache::root().join("raw/sound");
     d.is_dir().then_some(d)
 }
 

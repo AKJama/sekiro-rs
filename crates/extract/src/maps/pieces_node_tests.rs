@@ -12,7 +12,7 @@ const MAPS: [&str; 2] = ["m11_00_00_00", "m11_01_00_00"];
 const TOLERANCE: f32 = 0.01;
 
 fn cache() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache")
+    sekiro_formats::cache::root()
 }
 
 /// Every map piece and object model placed in `id`, with its FLVER path.

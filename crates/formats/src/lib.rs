@@ -8,6 +8,7 @@ pub mod bhd;
 pub mod bnd4;
 pub mod btl;
 pub mod bxf4;
+pub mod cache;
 pub mod dcx;
 pub mod dvd;
 pub mod edge;

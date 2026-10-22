@@ -1100,7 +1100,7 @@ mod tests {
     /// The installed characters' cloth reproduces its rest pose through every deformer.
     #[test]
     fn installed_cloth_reproduces_the_bind_pose() {
-        let raw = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/raw/chr");
+        let raw = crate::cache::root().join("raw/chr");
         let mut checked = 0;
         for id in ["c1010", "c5060", "c7100", "c7110"] {
             let dir = raw.join(format!("{id}.chrbnd.d"));

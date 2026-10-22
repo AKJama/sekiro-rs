@@ -14,7 +14,7 @@ pub mod behavior;
 pub mod body;
 pub mod brain;
 pub mod bullets;
-pub mod cache;
+pub use sekiro_formats::cache;
 pub mod camera;
 pub mod character;
 pub mod clips;

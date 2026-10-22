@@ -121,8 +121,7 @@ mod tests {
     use super::*;
     #[test]
     fn installed_castle_and_truncation() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../cache/raw/map/m11_01_00_00");
+        let root = crate::cache::root().join("raw/map/m11_01_00_00");
         let Ok(data) = std::fs::read(root.join("m11_01_00_00_0000.btl")) else {
             return;
         };
@@ -148,7 +147,7 @@ mod tests {
     }
     #[test]
     fn installed_maps_census() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/raw/map");
+        let root = crate::cache::root().join("raw/map");
         let Ok(maps) = std::fs::read_dir(root) else {
             return;
         };

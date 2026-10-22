@@ -910,14 +910,8 @@ impl FogBanks {
         self.0
             .entry(source.into())
             .or_insert_with(|| {
-                let args: Vec<_> = std::env::args().collect();
-                let cache = args
-                    .windows(2)
-                    .find(|pair| pair[0] == "--cache")
-                    .map_or("cache", |pair| pair[1].as_str());
                 let bytes = std::fs::read(
-                    std::path::Path::new(cache)
-                        .join(format!("raw/param/drawparam/{source}.gparam")),
+                    sekiro_sim::cache::root().join(format!("raw/param/drawparam/{source}.gparam")),
                 )
                 .ok()?;
                 sekiro_formats::gparam::parse(&bytes).ok()

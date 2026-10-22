@@ -2,7 +2,7 @@ use sekiro_formats::{bxf4, dcx::Oodle, edge, msb};
 use std::path::PathBuf;
 #[test]
 fn authored_grapple_census() {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_formats::cache::root();
     for (id, objects, edges) in [("m11_01_00_00", 172, 224), ("m11_00_00_00", 237, 360)] {
         let path = cache.join(format!("raw/map/mapstudio/{id}.msb"));
         if !path.exists() {

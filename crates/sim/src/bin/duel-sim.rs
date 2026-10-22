@@ -12,7 +12,6 @@ use sekiro_sim::duel::Duel;
 use sekiro_sim::enemy::EnemySpec;
 use sekiro_sim::lua_ai::AiEvent;
 use sekiro_sim::{InputFrame, demo};
-use std::path::Path;
 
 const DEFAULT: &str = "\
 # stand still, then hold guard for a while, then attack the soldier
@@ -67,7 +66,7 @@ fn main() {
         progression.as_deref(),
     )
     .unwrap_or_else(|e| panic!("{e}"));
-    let mut duel = Duel::load_with(Path::new("cache"), 4.0, spec).expect("load");
+    let mut duel = Duel::load_with(&sekiro_sim::cache::root(), 4.0, spec).expect("load");
     duel.rules
         .set_attack_power(power)
         .expect("attack power data");

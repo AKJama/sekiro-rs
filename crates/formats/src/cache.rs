@@ -1,4 +1,4 @@
-//! Runtime location of the extracted game data, shared by the CLI and simulation.
+//! Runtime location of the extracted game data, shared by every crate (`sekiro_sim::cache`).
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 

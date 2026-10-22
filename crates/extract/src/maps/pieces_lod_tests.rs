@@ -1,5 +1,4 @@
 use super::*;
-use std::path::Path;
 
 fn document(bytes: &[u8]) -> Value {
     let len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
@@ -8,7 +7,7 @@ fn document(bytes: &[u8]) -> Value {
 
 #[test]
 fn mountain_retains_native_snow_mask_and_baked_occlusion() {
-    let raw = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/raw");
+    let raw = sekiro_formats::cache::root().join("raw");
     let source =
         raw.join("map/m11_00_00_00/m11_00_00_00_925000.mapbnd.d/m11_00_00_00_925000.flver");
     if !source.is_file() {
@@ -204,7 +203,7 @@ fn alternate_levels_reuse_legacy_materials_and_append_culling_variants() {
 
 #[test]
 fn all_eight_outskirts_models_keep_separate_authored_detail_meshes() {
-    let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_formats::cache::root();
     let raw = cache.join("raw");
     if !raw.join("map/mapstudio/m11_00_00_00.msb").is_file() {
         eprintln!("installed-map fixture unavailable");

@@ -4,7 +4,6 @@ mod layout;
 use sekiro_formats::msb;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
 
 // Authored MSBS scalars are f32; JSON reparsing can differ by one f64 ULP.
 // Require exact authored precision, not a tolerance that can conceal an MSB change.
@@ -74,7 +73,7 @@ fn connection_inventory_matching_preserves_retail_signed_fields() {
 
 #[test]
 fn installed_layout_preserves_all_parts_and_matches_job_a_audit() {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    let cache = sekiro_formats::cache::root();
     if !cache.join("raw/map/mapstudio/m11_00_00_00.msb").exists() {
         eprintln!("installed-map fixture unavailable");
         return;

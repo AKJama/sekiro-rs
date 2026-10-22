@@ -2,7 +2,9 @@
 use std::{collections::BTreeSet, path::PathBuf};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cache = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| "cache".into()));
+    let cache = std::env::args()
+        .nth(1)
+        .map_or_else(sekiro_formats::cache::root, PathBuf::from);
     for id in ["m11_00_00_00", "m11_01_00_00", "m25_00_00_00"] {
         println!("MAP {id}");
         let msb = sekiro_formats::msb::parse(&std::fs::read(

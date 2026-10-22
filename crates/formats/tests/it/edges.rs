@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 #[test]
 fn installed_map_edge_counts() {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache/raw/map");
+    let cache = sekiro_formats::cache::root().join("raw/map");
     for (map, hang, cover) in [("m11_01_00_00", 963, 1326), ("m11_00_00_00", 584, 974)] {
         let base = cache.join(map).join(map);
         if !base.with_extension("edgebhd").exists() {

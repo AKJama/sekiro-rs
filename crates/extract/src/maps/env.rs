@@ -400,8 +400,8 @@ mod tests {
 
     #[test]
     fn cached_bc6_cube_keeps_hdr_and_matches_decoder() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../cache/raw/map/m11_01_00_00/m11_01_00_00_envmap_02.tpf");
+        let path =
+            sekiro_formats::cache::root().join("raw/map/m11_01_00_00/m11_01_00_00_envmap_02.tpf");
         if !path.exists() {
             return;
         }

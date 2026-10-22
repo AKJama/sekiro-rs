@@ -2,7 +2,7 @@
 use std::path::PathBuf;
 
 fn raw() -> Option<PathBuf> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache/raw");
+    let root = sekiro_formats::cache::root().join("raw");
     root.join("font").is_dir().then_some(root)
 }
 
