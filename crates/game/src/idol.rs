@@ -752,4 +752,201 @@ mod tests {
             Vec3::from_array(spot.checkpoint.position) - Vec3::from_array(spot.kneel.position);
         assert!((out.length() - RESPAWN).abs() < 1e-3, "{spot:?}");
     }
+
+    /// #266: one press of the action button at the Stairway idol of the real m11_00 world kneels
+    /// Wolf and lights it with its banner, whether he stands, walks, runs, crouch-walks or
+    /// quick-turns there. While he sprints the press does nothing: c0000.hks's `Control` turns
+    /// the idol's action button on (`act(3034, ACTION_BUTTON_EXEC_TYPE_BASE)`) in the stand and
+    /// crouch moves but not in the sprint or the step.
+    #[test]
+    fn one_press_kneels_at_the_idol_from_idle_walk_run_crouch_and_quick_turn_but_not_sprint() {
+        use sekiro_sim::InputFrame;
+        use sekiro_sim::duel::Duel;
+        use std::sync::Arc;
+
+        const DT: f32 = 1.0 / 60.0;
+        let cache = sekiro_sim::cache::root();
+        if !cache.join("maps/m11_00_00_00/layout.json").is_file()
+            || !cache.join("anim/c0000/a000_710310.bin").exists()
+        {
+            eprintln!("skipping: cache not extracted");
+            return;
+        }
+        let blocks = crate::map::world::play_blocks(&cache, "m11_00_00_00").unwrap();
+        let stories = crate::map::story::load_blocks(&cache, &blocks).unwrap();
+        let world =
+            Arc::new(crate::map::world::collision_world(&cache, &blocks, &stories).unwrap());
+        let idols = Idols::load(&cache, &blocks, |x, z, y| world.floor(x, z, y + 1.0));
+        let stairway = idols
+            .names
+            .iter()
+            .position(|n| n.contains("Stairway"))
+            .unwrap_or_else(|| panic!("no Stairway idol: {:?}", idols.names));
+        let spot = idols.spots[stairway];
+        let [kx, ky, kz] = spot.kneel.position;
+        let [cx, _, cz] = spot.checkpoint.position;
+        // The idol's warp point is about 1 m out from its kneeling spot; Wolf comes in along that
+        // line. `toward` is the yaw heading along (dx, dz), the camera's convention.
+        let toward = |dx: f32, dz: f32| (-dx).atan2(-dz);
+        let (ux, uz) = {
+            let out = (cx - kx).hypot(cz - kz);
+            ((cx - kx) / out, (cz - kz) / out)
+        };
+        let to_idol = toward(-ux, -uz);
+        let duel = |out: f32, yaw: f32| {
+            let (x, z) = (kx + ux * out, kz + uz * out);
+            let y = world.floor(x, z, ky + 1.0).unwrap();
+            let mut duel = Duel::load(&cache, 30.0).unwrap();
+            duel.enemy_present = false;
+            duel.enemy_active = false;
+            duel.player.ground = Box::new(world.clone());
+            duel.set_idols(idols.spots.clone());
+            duel.player.body.position = [x, y, z];
+            duel.player.body.fall_top = y;
+            duel.player.snap_yaw(yaw);
+            for _ in 0..60 {
+                duel.step(&InputFrame::default(), DT);
+            }
+            assert!(duel.player.body.grounded, "{:?}", duel.player.body.position);
+            duel
+        };
+        let state = |d: &Duel| d.player.behavior.runtime.main_state_name().to_string();
+        let near = |d: &Duel| {
+            let [x, _, z] = d.player.body.position;
+            (x - kx).hypot(z - kz) < 1.0
+        };
+
+        struct Case {
+            name: &'static str,
+            /// How far out he starts and which way he faces.
+            out: f32,
+            yaw: f32,
+            stick: f32,
+            sprint: bool,
+            crouch: bool,
+            /// The state family he presses in.
+            pressed_in: &'static str,
+            kneels: bool,
+        }
+        let cases = [
+            Case {
+                name: "idle",
+                out: 0.0,
+                yaw: to_idol,
+                stick: 0.0,
+                sprint: false,
+                crouch: false,
+                pressed_in: "StandIdle",
+                kneels: true,
+            },
+            Case {
+                name: "walk",
+                out: 5.0,
+                yaw: to_idol,
+                stick: 0.4,
+                sprint: false,
+                crouch: false,
+                pressed_in: "StandMove",
+                kneels: true,
+            },
+            Case {
+                name: "run",
+                out: 5.0,
+                yaw: to_idol,
+                stick: 1.0,
+                sprint: false,
+                crouch: false,
+                pressed_in: "StandMove",
+                kneels: true,
+            },
+            Case {
+                name: "crouch walk",
+                out: 5.0,
+                yaw: to_idol,
+                stick: 1.0,
+                sprint: false,
+                crouch: true,
+                pressed_in: "CrouchMove",
+                kneels: true,
+            },
+            // Standing by the kneeling spot with his back to the idol, the stick pushed toward it.
+            Case {
+                name: "quick turn",
+                out: 0.8,
+                yaw: toward(ux, uz),
+                stick: 1.0,
+                sprint: false,
+                crouch: false,
+                pressed_in: "StandQuickTurn",
+                kneels: true,
+            },
+            Case {
+                name: "sprint",
+                out: 5.0,
+                yaw: to_idol,
+                stick: 1.0,
+                sprint: true,
+                crouch: false,
+                pressed_in: "Sprint",
+                kneels: false,
+            },
+        ];
+        let mut failed = Vec::new();
+        for c in cases {
+            let mut d = duel(c.out, c.yaw);
+            let mut input = InputFrame {
+                camera_yaw: to_idol,
+                ..InputFrame::default()
+            };
+            if c.crouch {
+                input.buttons.crouch = true;
+                d.step(&input, DT);
+                input.buttons.crouch = false;
+                for _ in 0..20 {
+                    d.step(&input, DT);
+                }
+            }
+            input.move_stick = [0.0, c.stick];
+            input.buttons.dodge = c.sprint;
+            let mut seen: Vec<String> = Vec::new();
+            let mut pressed = false;
+            for _ in 0..300 {
+                let s = state(&d);
+                if near(&d) && s.starts_with(c.pressed_in) {
+                    let mut press = input;
+                    press.buttons.action = true;
+                    d.step(&press, DT);
+                    pressed = true;
+                    break;
+                }
+                if seen.last() != Some(&s) {
+                    seen.push(s);
+                }
+                d.step(&input, DT);
+            }
+            if !pressed {
+                failed.push(format!(
+                    "{}: never pressed in {}: {seen:?}",
+                    c.name, c.pressed_in
+                ));
+                continue;
+            }
+            // He keeps the stick held: the kneel holds his input from here.
+            d.step(&input, DT);
+            let knelt = d.idol_phase() == Some(IdolPhase::Lighting)
+                && d.idol_lit(stairway)
+                && d.idol_lighting().is_some();
+            if knelt != c.kneels || (!c.kneels && d.idol_lit(stairway)) {
+                failed.push(format!(
+                    "{}: pressed in {}, then {} ({:?}, lit {})",
+                    c.name,
+                    c.pressed_in,
+                    state(&d),
+                    d.idol_phase(),
+                    d.idol_lit(stairway)
+                ));
+            }
+        }
+        assert!(failed.is_empty(), "{failed:#?}");
+    }
 }

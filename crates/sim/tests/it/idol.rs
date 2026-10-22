@@ -128,9 +128,9 @@ fn wolf_kneels_rests_stands_and_comes_back_at_the_idol() {
     assert_eq!(seen, [Some(IdolPhase::Kneeling), Some(IdolPhase::Praying)]);
 }
 
-/// #262: a press the behaviour drops (here as Wolf starts walking, a state with no kneel
-/// transition) spends neither the idol's first light nor its "found" banner: the first kneel
-/// he really makes there lights it, whichever idol it is.
+/// #262: a press the behaviour drops (here a step dodged in the same frame as Wolf walks, whose
+/// event follows the kneel's and takes him out of it) spends neither the idol's first light nor
+/// its "found" banner: the first kneel he really makes there lights it, whichever idol it is.
 #[test]
 fn a_dropped_kneel_leaves_the_idol_unlit_for_its_first_real_kneel() {
     let cache = sekiro_sim::cache::root();
@@ -161,9 +161,10 @@ fn a_dropped_kneel_leaves_the_idol_unlit_for_its_first_real_kneel() {
     assert_eq!(duel.idol_in_reach(), Some(0));
     let mut press = walk;
     press.buttons.action = true;
+    press.buttons.dodge = true;
     duel.step(&press, DT);
     duel.step(&InputFrame::default(), DT);
-    assert_eq!(duel.idol_phase(), None, "the walk takes no kneel");
+    assert_eq!(duel.idol_phase(), None, "the step takes no kneel");
     assert!(!duel.idol_lit(0), "a dropped kneel lit the idol");
 
     // Standing still, the next press kneels and lights it with its banner.
