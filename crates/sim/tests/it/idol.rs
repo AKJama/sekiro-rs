@@ -128,6 +128,58 @@ fn wolf_kneels_rests_stands_and_comes_back_at_the_idol() {
     assert_eq!(seen, [Some(IdolPhase::Kneeling), Some(IdolPhase::Praying)]);
 }
 
+/// #262: a press the behaviour drops (here as Wolf starts walking, a state with no kneel
+/// transition) spends neither the idol's first light nor its "found" banner: the first kneel
+/// he really makes there lights it, whichever idol it is.
+#[test]
+fn a_dropped_kneel_leaves_the_idol_unlit_for_its_first_real_kneel() {
+    let cache = sekiro_sim::cache::root();
+    if !cache.join("anim/c0000/a000_710310.bin").exists() {
+        eprintln!("skipping: cache not extracted");
+        return;
+    }
+    let mut duel = Duel::load(&cache, 30.0).unwrap();
+    duel.enemy_present = false;
+    duel.enemy_active = false;
+    run(&mut duel, 1.0, |d| d.player.body.grounded);
+    let walk = InputFrame {
+        move_stick: [0.0, 1.0],
+        ..InputFrame::default()
+    };
+    run_with(&mut duel, &walk, 1.0, |d| {
+        d.player.behavior.runtime.main_state_name() == "StandMoveStart"
+    });
+    let here = Placement {
+        position: duel.player.body.position,
+        yaw: 0.0,
+    };
+    duel.set_idols(vec![IdolSpot {
+        kneel: here,
+        checkpoint: here,
+        entity: 1101953,
+    }]);
+    assert_eq!(duel.idol_in_reach(), Some(0));
+    let mut press = walk;
+    press.buttons.action = true;
+    duel.step(&press, DT);
+    duel.step(&InputFrame::default(), DT);
+    assert_eq!(duel.idol_phase(), None, "the walk takes no kneel");
+    assert!(!duel.idol_lit(0), "a dropped kneel lit the idol");
+
+    // Standing still, the next press kneels and lights it with its banner.
+    run(&mut duel, 2.0, |d| {
+        d.player.behavior.runtime.main_state_name() == "StandIdle"
+    });
+    duel.player.body.position = here.position;
+    duel.step(&InputFrame::default(), DT);
+    let mut press = InputFrame::default();
+    press.buttons.action = true;
+    duel.step(&press, DT);
+    assert_eq!(duel.idol_phase(), Some(IdolPhase::Lighting));
+    assert!(duel.idol_lit(0));
+    assert_eq!(duel.idol_lighting(), Some(0.0));
+}
+
 #[test]
 fn the_nearer_item_takes_the_press_and_stays_taken_while_rest_and_death_restock_it() {
     let cache = sekiro_sim::cache::root();

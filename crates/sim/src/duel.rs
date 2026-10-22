@@ -3251,6 +3251,13 @@ impl Duel {
     }
 
     pub fn step(&mut self, input: &InputFrame, dt: f32) -> DuelReport {
+        let report = self.step_frame(input, dt);
+        // A kneel the behaviour took this step lights its idol (#262).
+        self.light_idol();
+        report
+    }
+
+    fn step_frame(&mut self, input: &InputFrame, dt: f32) -> DuelReport {
         // The hook search looks through the follow camera as the director left it last step,
         // as the camera on screen does. A duel sharing the player's frame (a cast actor) does
         // not own the camera, so it leaves the rig alone.
