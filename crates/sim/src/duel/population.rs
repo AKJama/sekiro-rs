@@ -53,6 +53,42 @@ impl SightCone {
     }
 }
 
+/// One AiSoundParam row as a listener reads it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AiSound {
+    pub radius: f32,
+    /// AI_SOUND_RANK (0 normal, 1 important).
+    pub rank: i32,
+    /// `bSpEffectEnable`: the maker's SpEffects scale the radius (`hearingSearchEnemyRate`).
+    pub scaled: bool,
+    /// `opposeTarget`: heard by the maker's enemies (every map foe, for Wolf's sounds).
+    pub oppose: bool,
+}
+
+/// What a listener's ear is: NpcThinkParam `ear_dist` and `ear_soundcut_dist`, and its
+/// hearing rate, prod(1 - hearingSearchEnemyCut / 100) over its SpEffects (FUN_140bfe590).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Hearing {
+    pub ear: f32,
+    pub cut: f32,
+    pub rate: f32,
+}
+
+impl Hearing {
+    /// Whether a sound of `radius` (already scaled by its maker) made with its maker's centre
+    /// `distance` metres from the listener's is heard, the bodies' radii adding up to `radii`.
+    ///
+    /// The exe's listener (SprjAiSoundNormalListener FUN_140610470 -> FUN_140610b30 ->
+    /// FUN_140610a30): reach = rate x radius - ear_soundcut_dist, none if <= 0; heard while
+    /// the gap between the bodies is under reach + ear_dist x the listener's factor at +0x20
+    /// (gap: taken as 1). Ported from FwLo's RustSekiro (`src/enemy.rs`, `wolf_sounds`); the
+    /// radii (listener vfunc +0x50, maker FUN_1409efb80) are our capsule radii.
+    pub fn hears(&self, radius: f32, distance: f32, radii: f32) -> bool {
+        let reach = self.rate * radius - self.cut;
+        reach > 0.0 && distance - radii < reach + self.ear
+    }
+}
+
 /// Our scheduling policy, not a recovered engine LOD distance.
 /// Activation/deactivation still comes from NpcParam (100 m for a zero border).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,6 +172,8 @@ pub struct Population {
     world: Option<Arc<crate::collision::CollisionWorld>>,
     pub registry: Option<Arc<crate::registry::Registry>>,
     pub excluded: Vec<Excluded>,
+    /// AiSoundParam by id, for the foes' hearing.
+    pub sounds: std::collections::HashMap<i32, AiSound>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -189,6 +227,19 @@ impl Population {
         }
         p.world = Some(world);
         p.registry = Some(registry);
+        p.sounds = crate::registry::rows(cache, "AiSoundParam")?
+            .into_iter()
+            .map(|(id, row)| {
+                let flag = |name: &str| row[name].as_i64() == Some(1);
+                let sound = AiSound {
+                    radius: row["radius"].as_f64().unwrap_or(0.0) as f32,
+                    rank: row["rank"].as_i64().unwrap_or(0) as i32,
+                    scaled: flag("bSpEffectEnable"),
+                    oppose: flag("opposeTarget"),
+                };
+                (id, sound)
+            })
+            .collect();
         Ok(p)
     }
 
@@ -364,6 +415,7 @@ impl Population {
             world: None,
             registry: None,
             excluded: Vec::new(),
+            sounds: Default::default(),
         })
     }
 }
@@ -385,6 +437,11 @@ impl Duel {
             foe.accrued = 0.0;
             foe.search_left = 0.0;
             foe.sees = false;
+            if let Some(ai) = &mut foe.duel.ai {
+                ai.state.sound = None;
+                ai.state.sound_new = false;
+                ai.state.ai_mark = None;
+            }
         }
         population.locked = None;
     }
@@ -425,6 +482,27 @@ impl Duel {
         let wolf = glam::Vec3::from_array(self.player.body.position);
         let distance =
             |foe: &Foe| glam::Vec3::from_array(foe.duel.enemy.body.position).distance_squared(wolf);
+        // The AI sounds Wolf's clips make this step (TAE 237), their radius scaled by his
+        // SpEffects' hearingSearchEnemyRate for bSpEffectEnable rows (Covert B 150010: 0.5).
+        let noise: Vec<(i32, f32, i32)> = {
+            let tae = &self.player.tae;
+            let runtime = &self.player.tae_runtime;
+            let rate: f32 = runtime
+                .active_sp_effects()
+                .iter()
+                .filter_map(|id| tae.sp_effects.get(id))
+                .map(|e| e.sound_rate)
+                .product();
+            let mut ids = runtime.frame.ai_sounds.clone();
+            ids.sort_unstable();
+            ids.dedup();
+            ids.into_iter()
+                .filter_map(|id| {
+                    let s = population.sounds.get(&id).filter(|s| s.oppose)?;
+                    Some((id, s.radius * if s.scaled { rate } else { 1.0 }, s.rank))
+                })
+                .collect()
+        };
         if let Some(world) = &population.world {
             let locked = population.locked;
             for (i, foe) in population.foes.iter_mut().enumerate() {
@@ -448,9 +526,32 @@ impl Duel {
                     d.enemy_active = false;
                     continue;
                 };
+                let feet = glam::Vec3::from_array(d.enemy.body.position);
+                // Hearing, every frame (FwLo's enemy.rs: sounds, then sight and the state).
+                let runtime = &d.enemy.tae_runtime;
+                let think = |name: &str| ai.state.think.fields.get(name).copied().unwrap_or(0.0);
+                let ear = Hearing {
+                    ear: think("ear_dist") as f32,
+                    cut: think("ear_soundcut_dist") as f32,
+                    rate: runtime
+                        .active_sp_effects()
+                        .iter()
+                        .filter_map(|id| d.enemy.tae.sp_effects.get(id))
+                        .map(|e| 1.0 - e.hearing_cut.max(0.0) / 100.0)
+                        .product::<f32>()
+                        .clamp(0.0, 1.0),
+                };
+                let radii = d.fighters[0].radius + d.fighters[1].radius;
+                let heard = noise
+                    .iter()
+                    .filter(|(_, radius, _)| ear.hears(*radius, wolf.distance(feet), radii))
+                    .max_by_key(|(_, _, rank)| *rank);
+                ai.state.age_sound(dt);
+                if let Some(&(id, _, rank)) = heard {
+                    ai.state.hear(wolf.to_array(), id, rank);
+                }
                 let field =
                     |name: &str| ai.state.think.fields.get(name).copied().unwrap_or(0.0) as f32;
-                let feet = glam::Vec3::from_array(d.enemy.body.position);
                 let eye = feet + glam::Vec3::Y * d.fighters[1].height * 0.8;
                 let delta = wolf + glam::Vec3::Y - eye;
                 let horizontal = delta.x.hypot(delta.z);
@@ -481,10 +582,16 @@ impl Duel {
                     foe.memory = (foe.memory - dt).max(0.0);
                 }
                 let aware = foe.memory > 0.0;
-                if !aware && ai.state.battle {
-                    ai.state.battle = false;
-                    ai.state.target_state = 0;
-                    ai.state.replan = true;
+                // Unseen, a held sound makes CAUTION, nothing NONE (FUN_1406208c0 via FwLo's
+                // `Targeting::update`); a change replans unless goalAction_ToCaution is 0
+                // (FUN_14061f500).
+                if !aware {
+                    let state = i32::from(ai.state.sound.is_some());
+                    if ai.state.battle || ai.state.target_state != state {
+                        ai.state.battle = false;
+                        ai.state.target_state = state;
+                        ai.state.replan |= state == 0 || field("goalAction_ToCaution") != 0.0;
+                    }
                 }
                 d.population_target = Some(aware);
                 if aware {

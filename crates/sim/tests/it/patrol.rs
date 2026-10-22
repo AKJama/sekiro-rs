@@ -116,7 +116,7 @@ fn outskirts_guard_stays_at_its_post() {
 
 /// Wolf at the issue's spawn (#116), out of the Outskirts soldiers' sight, with the map's
 /// population.
-fn outskirts(cache: &std::path::Path, map: &str, dir: &std::path::Path) -> Duel {
+pub(crate) fn outskirts(cache: &std::path::Path, map: &str, dir: &std::path::Path) -> Duel {
     let mut wolf = Duel::load(cache, 5.0).unwrap();
     wolf.god = true;
     wolf.player.body.position = [-83.0, -44.6, -37.5];

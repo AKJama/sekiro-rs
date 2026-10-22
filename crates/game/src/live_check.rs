@@ -624,7 +624,8 @@ pub(super) fn observe(
                 "can_fire": wire.can_fire(),
             })
         });
-    // Map foes near Wolf: their AI's think row, goal chain and state, scheduling level, the
+    // Map foes near Wolf: their AI's think row, goal chain and state (battle, target state 0
+    // none / 1 caution / 2 find / 3 battle, the heard AiSoundParam row), scheduling level, the
     // route point of a patrol and position, to see which stand, walk or fight and why.
     sample["foes"] = sim
         .duel
@@ -647,6 +648,8 @@ pub(super) fn observe(
                         "think": ai.map(|ai| ai.state.think.id),
                         "goals": ai.map(|ai| ai.goal_stack().join(">")),
                         "battle": ai.is_some_and(|ai| ai.state.battle),
+                        "target_state": ai.map(|ai| ai.state.target_state),
+                        "sound": ai.and_then(|ai| ai.state.sound.map(|s| s.id)),
                         "lod": format!("{:?}", foe.lod),
                         "clip": foe.report.enemy.animation,
                         "point": patrol.map(|p| p.current),
