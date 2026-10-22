@@ -276,6 +276,18 @@ The Travel screen opens on the idol Wolf prays at, its region and its row; after
 The idol menu and the Travel screen take keys, the pad and the mouse: the pointer over a row moves the cursor there and a click takes it, as in the in-game menu.
 Their key guides show the keyboard glyphs whatever the device, as the other menus do.
 
+## Rest effect at a Sculptor's Idol, issue #153
+
+Rest plays Wolf's rest clip (HKS StatueAttachRest, a000_710340), whose TAE has no effect of its own but sends SetEzStateRequestID 20 at 0.2 s.
+The idol object's TAE (o005000) has one clip with a one-shot effect beside its lit flame (1011): clip 100 spawns FFX 1022 (common effects) on dummy 100 at its start.
+FFX 1022 is a flash, rings, sound 1020 and two black sprites, a 25 m disc round the idol and a small one, that rise over 0.5 s, hold to 2.0 s and are gone at 3.0 s (the small one tails off to 6.0 s).
+We play FFX 1022 at the idol's origin 0.2 s after Rest is taken.
+That request 20 makes the idol play clip 100 is inferred from the data (no other idol clip plays a one-shot, and the warp's request is 40), not traced in the exe.
+The screen dark is the effect's own curve (the 25 m disc's, alpha up to its 0.99) on a black overlay over the HUD and under the idol menu; the game's own screen fade for the rest, if it has one beyond the effect, is not traced.
+The world resets (Vitality and the gourd refilled, the goods restocked, the foes back) the step the dark is full, 0.7 s after Rest is taken, and the dark has lifted 3.2 s after it, before the rest clip (3.77 s of flags) returns Wolf to the prayer.
+A rest cut short before the dark is full (Wolf taken off the idol) resets nothing, and the dark lifts from where it got to at the curve's own rate.
+No real-game capture of a rest was available to compare the timing against.
+
 ## Edge hold, issue #203
 
 The fall-prevention assist follows the exe's groups (see [OBJECT-COLLISION.md](OBJECT-COLLISION.md#the-fall-prevention-assist)): walking is held only by filter-28 walls and type 6 objects (group 92), and the `f` binder's bands (group 93) hold only ground actions and NPCs.

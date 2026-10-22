@@ -41,11 +41,14 @@ const EFFECT_STOP: f32 = 20.0;
 const EFFECT_DROP: f32 = 30.0;
 /// Who asked: `(actor, effect id, dummy)` for TAE events, `(2, id, serial)` for bullets,
 /// `(3, id, n)` for hits, `(HELD, id, serial)` and `(GLINTS, id, item)` for
-/// [`FxrPlayer::hold`], `(5, id, serial)` for map effects.
+/// [`FxrPlayer::hold`], `(5, id, serial)` for map effects, `(IDOL_REST, id, n)` for
+/// [`FxrPlayer::one_shot`].
 type Key = (usize, i32, i32);
 /// [`FxrPlayer::hold`] namespaces: map entities (fog walls), and the map items' glints.
 pub const HELD: usize = 4;
 pub const GLINTS: usize = 6;
+/// [`FxrPlayer::one_shot`] namespace: the burst of a rest at an idol.
+pub const IDOL_REST: usize = 7;
 
 /// A plugin-supplied bridge keeps the simulation private to the play module.
 pub fn plugin(cache: PathBuf, bridge: impl Fn(&mut App) + Send + Sync + 'static) -> impl Plugin {
@@ -338,6 +341,16 @@ impl FxrPlayer {
                 e.age = EFFECT_STOP;
             }
             _ => {}
+        }
+    }
+
+    /// Plays effect `id` once at `at`, to its own end, where it was started. `namespace` and
+    /// `serial` tell apart effects with the same id.
+    pub fn one_shot(&mut self, namespace: usize, id: i32, serial: i32, at: Transform) {
+        let key = (namespace, id, serial);
+        self.request(id, key, at, true, false);
+        if let Some(e) = self.effects.last_mut().filter(|e| e.key == key) {
+            e.follow = false;
         }
     }
 
