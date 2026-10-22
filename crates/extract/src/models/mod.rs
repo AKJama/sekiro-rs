@@ -9,6 +9,8 @@
 mod cloth;
 pub(crate) mod glb;
 mod info;
+#[cfg(test)]
+mod node_bound_tests;
 pub(crate) mod textures;
 mod tool;
 
@@ -654,6 +656,21 @@ fn build(raw: &Path, model: &Model, verbose: bool) -> Result<Vec<u8>> {
             } else {
                 0
             };
+            // Unweighted vertices are stored in the frame of the node their normal W names
+            // (`Mesh::model_space_vertices`), and the game moves them with that node. Binding
+            // each to its node with the node's inverse bind matrix puts it back in model space
+            // at rest. c7102, WP_A_0720 and the WP_A_076x_1 parts sit off their header
+            // bounds without this (issue #11).
+            let model_space = mesh.model_space_vertices(&world);
+            let rigid_bone = |k: usize| -> usize {
+                v.normal_w
+                    .get(k)
+                    .and_then(|&w| usize::try_from(w).ok())
+                    .filter(|_| !mesh.dynamic && v.normal_w.len() == count)
+                    .map(|w| mesh.palette_node(w))
+                    .filter(|&n| n < world.len())
+                    .unwrap_or(default_bone)
+            };
             let mut zero_weight = 0usize;
             let mut joint_data = Vec::with_capacity(count);
             let mut weight_data = Vec::with_capacity(count);
@@ -665,7 +682,7 @@ fn build(raw: &Path, model: &Model, verbose: bool) -> Result<Vec<u8>> {
                 let total: f32 = w.iter().sum();
                 if total <= 1e-6 {
                     zero_weight += 1;
-                    let s = slot_of(default_bone, &mut scene);
+                    let s = slot_of(rigid_bone(k), &mut scene);
                     joint_data.push([s, s, s, s]);
                     weight_data.push([1.0, 0.0, 0.0, 0.0]);
                     continue;
@@ -691,8 +708,12 @@ fn build(raw: &Path, model: &Model, verbose: bool) -> Result<Vec<u8>> {
                     part.label
                 );
             }
-            let positions: Vec<[f32; 3]> = v.positions.iter().map(|&p| mirror_point(p)).collect();
-            let normals: Vec<[f32; 3]> = v
+            let positions: Vec<[f32; 3]> = model_space
+                .positions
+                .iter()
+                .map(|&p| mirror_point(p))
+                .collect();
+            let normals: Vec<[f32; 3]> = model_space
                 .normals
                 .iter()
                 .map(|&n| {

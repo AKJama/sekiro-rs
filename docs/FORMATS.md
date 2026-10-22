@@ -105,7 +105,10 @@ This was checked on single-sided meshes (the Wolf's head renders inside-out if t
   Evidence: in 2,122 of the 2,170 object FLVERs with such vertices only the transformed vertices reproduce the header bounds (none match better untransformed); the rest are unchanged either way.
   Map pieces only name identity nodes, so they are unaffected.
   No placed piece or object in m11_00_00_00 or m11_01_00_00 has a bone palette or a Float3 normal (which has no W).
-  Character meshes are unverified: the map exporter applies this rule, the character exporter does not yet.
+  Characters and parts follow the same rule (issue #11): over all 391 unpacked chr and parts FLVERs, every one fits its header bounds within 1 cm only with the transform, and none fits worse.
+  It moves 11 of them by more than 1 cm: c7102 (its cloak, 1 m), WP_A_0720 (16 cm) and WP_A_0760_1, 0761_1, 0762_1, 0763_1 with their `_L` copies (2.3 cm).
+  The character exporter binds each unweighted vertex to its normal-W node, with that node's inverse bind matrix, so it rests in model space and follows that node when animated.
+  No unweighted chr or parts mesh has a Float3 normal.
 - Face sets: keep flags `0` (LOD0); `0x01000000`/`0x02000000` are LOD1/2 and `0x80000000` marks motion-blur copies.
   All observed sets are 16-bit triangle lists; strips with 0xFFFF restarts are unrolled anyway.
   The face set's cull flag becomes glTF `doubleSided`.
