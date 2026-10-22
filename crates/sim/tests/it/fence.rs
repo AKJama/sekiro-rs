@@ -1,10 +1,13 @@
 //! Running jumps at the fence beside the wooden gate near m11_00's start 0 (#170). A cap beam
 //! juts from the fence's top over the gate side, and its edge passes over the rim of the head
 //! of a body pressed against the fence: the rise must stop under it, or the slide shoves the
-//! head out of the beam, through the fence. Skips without the exported maps.
+//! head out of the beam, through the fence. Also the push-out of a body wedged between a wall and
+//! an overhang (#176). The gate tests skip without the exported maps.
 
 use glam::{Vec2, Vec3};
+use sekiro_formats::hknp::CollisionMesh;
 use sekiro_sim::body::Ground;
+use sekiro_sim::collision::{CollisionWorld, HEAD_TOP, RADIUS};
 use sekiro_sim::{Buttons, Character, InputFrame};
 
 use crate::movement_helpers::{DT, cache, settle};
@@ -80,4 +83,124 @@ fn running_jumps_at_the_gate_fence_stay_on_the_gate_side() {
     }
     assert!(through.is_empty(), "went through the fence: {through:?}");
     assert!(wedged > 0, "no jump reached the wedge under the cap beam");
+}
+
+/// A thin wall (0.05 m thick, its near face at z 0) and the low beam of #176 over the body's
+/// side of it, as triangles in the order given: `wall_first` puts the wall's before the beam's.
+/// The beam's front face, at z 0.25, has its lower edge 0.2 m over the head sphere's centre of
+/// a body standing 0.2 m from the wall, so that edge pushes the head towards the wall while
+/// the wall pushes both spheres away from it.
+fn wedge_world(wall_first: bool) -> CollisionWorld {
+    let beam = HEAD_TOP - RADIUS + 0.2;
+    let quad = |a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3]| [a, b, c, d];
+    let wall = [
+        quad(
+            [-3.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+            [3.0, 3.0, 0.0],
+            [-3.0, 3.0, 0.0],
+        ),
+        quad(
+            [-3.0, 0.0, -0.05],
+            [-3.0, 3.0, -0.05],
+            [3.0, 3.0, -0.05],
+            [3.0, 0.0, -0.05],
+        ),
+    ];
+    let beam = [
+        quad(
+            [-3.0, beam, 0.0],
+            [3.0, beam, 0.0],
+            [3.0, beam, 0.25],
+            [-3.0, beam, 0.25],
+        ),
+        quad(
+            [-3.0, beam, 0.25],
+            [3.0, beam, 0.25],
+            [3.0, beam + 0.2, 0.25],
+            [-3.0, beam + 0.2, 0.25],
+        ),
+    ];
+    let quads = if wall_first {
+        [wall, beam].concat()
+    } else {
+        [beam, wall].concat()
+    };
+    let mut m = CollisionMesh::default();
+    for q in quads {
+        let base = m.vertices.len() as u32;
+        m.vertices.extend_from_slice(&q);
+        m.indices.extend([0, 1, 2, 0, 2, 3].map(|i| base + i));
+        m.materials.extend([0, 0]);
+    }
+    CollisionWorld::from_mesh(&m)
+}
+
+/// A body wedged between the thin wall and the beam's edge (#176) is never pushed through the
+/// wall, whatever the order of the triangles, standing still, pressing towards the wall or
+/// moving along it; and the order changes nothing. Before, with the wall's triangles first,
+/// the beam's push came last and won, and the slide ended with the feet at z -0.45, through
+/// the wall.
+#[test]
+fn a_wedged_body_is_never_pushed_through_a_thin_wall() {
+    let feet = [0.0, 0.0, 0.2];
+    let mut failures = Vec::new();
+    for delta in [[0.0, 0.0], [0.0, -0.3], [0.5, 0.0], [0.4, -0.2]] {
+        let moved = [true, false].map(|wall_first| wedge_world(wall_first).slide(feet, delta));
+        for (wall_first, d) in [true, false].into_iter().zip(moved) {
+            if feet[2] + d[1] < 0.0 {
+                failures.push(format!(
+                    "{delta:?} wall first {wall_first}: through to z {}",
+                    feet[2] + d[1]
+                ));
+            }
+        }
+        if Vec2::from(moved[0]).distance(Vec2::from(moved[1])) > 1e-4 {
+            failures.push(format!("{delta:?}: order changes the slide {moved:?}"));
+        }
+        // Still free to move along the wall.
+        if moved[0][0] < delta[0] * 0.9 {
+            failures.push(format!("{delta:?}: stuck in the wedge {moved:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Slides of a body standing or jumping beside the gate fence, within a body radius of its face,
+/// where the cap beam's sloping underside reaches over the head while the fence touches the
+/// legs (#176): none ends through the fence, whatever the move. Before, the head's push
+/// towards the fence won over the legs' push away from it, and 1251 of these 2925 slides ended
+/// through it.
+#[test]
+fn slides_beside_the_gate_fence_never_end_through_it() {
+    let Some(world) = play_world() else {
+        return;
+    };
+    let face = FENCE[1] - FENCE[0];
+    let normal = face.perp().normalize();
+    let normal = if normal.y > 0.0 { normal } else { -normal };
+    let along = face.normalize();
+    let ground = world.floor(-141.7, -149.6, -47.0).unwrap();
+    let mut through = Vec::new();
+    for a in 1..10 {
+        for o in 0..5 {
+            let p = FENCE[0] + face * (a as f32 * 0.1) + normal * (0.2 + o as f32 * 0.05);
+            for h in 0..13 {
+                let feet = [p.x, ground + h as f32 * 0.1, p.y];
+                for delta in [Vec2::ZERO, -normal, along, -along, (along - normal) * 0.7] {
+                    let d = world.slide(feet, (delta * 0.1).to_array());
+                    let end = [feet[0] + d[0], feet[1], feet[2] + d[1]];
+                    if gate_side(end) < 0.0 {
+                        through.push((feet, delta, gate_side(end)));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        through.is_empty(),
+        "{} slides went through: {:?}",
+        through.len(),
+        &through[..through.len().min(5)]
+    );
 }

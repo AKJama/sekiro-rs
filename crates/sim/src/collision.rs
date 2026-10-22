@@ -1654,20 +1654,24 @@ impl CollisionWorld {
         cull: bool,
     ) -> [f32; 2] {
         thread_local! {
-            static SCRATCH: std::cell::RefCell<(Vec<u32>, Vec<u32>)> =
-                const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+            static SCRATCH: std::cell::RefCell<(Vec<u32>, Vec<u32>, Vec<Contact>)> =
+                const { std::cell::RefCell::new((Vec::new(), Vec::new(), Vec::new())) };
         }
         let start = Vec3::from(feet);
         let d = Vec2::from(delta);
-        SCRATCH.with_borrow_mut(|(tris, walls)| {
+        SCRATCH.with_borrow_mut(|(tris, walls, contacts)| {
             let coarse = self.gather_slide(start, d, [who, assist], tris, walls, cull);
-            self.slide_among(start, d, coarse, tris, walls)
+            self.slide_among(start, d, coarse, tris, walls, contacts)
         })
     }
 
     /// A slide of `d` from `start` against the triangles `tris` and the assist's walls `walls`
     /// that [`CollisionWorld::gather_slide`] gathered, in `coarse` sub-steps when there are no
-    /// such walls.
+    /// such walls. `contacts` is scratch for [`CollisionWorld::push_out`].
+    ///
+    /// A sub-step that wedges the body ([`CollisionWorld::push_out`] finds no push) is taken
+    /// back and replaced by the part of it that goes deeper into none of the contacts there
+    /// (#176): along the wedge, never into it, and with no push, so it never crosses a face.
     fn slide_among(
         &self,
         start: Vec3,
@@ -1675,14 +1679,21 @@ impl CollisionWorld {
         coarse: usize,
         tris: &[u32],
         walls: &[u32],
+        contacts: &mut Vec<Contact>,
     ) -> [f32; 2] {
         let steps = slide_steps(coarse, d.length(), walls.is_empty());
+        let step = d / steps as f32;
         let mut p = start;
         for _ in 0..steps {
-            p.x += d.x / steps as f32;
-            p.z += d.y / steps as f32;
+            let before = p;
+            p.x += step.x;
+            p.z += step.y;
             for _ in 0..4 {
-                let mut push = self.push_out(p, tris);
+                let Some(mut push) = self.push_out(p, tris, contacts) else {
+                    let along = wedged_move(step, contacts);
+                    p = before + Vec3::new(along.x, 0.0, along.y);
+                    break;
+                };
                 // The assist's walls last, so they hold where both push.
                 if !walls.is_empty() {
                     push += self.hold_inside(p + Vec3::new(push.x, 0.0, push.y), walls);
@@ -1733,12 +1744,16 @@ impl CollisionWorld {
     }
 
     /// Horizontal correction that takes the body's spheres out of the given triangles, which
-    /// [`CollisionWorld::gather_slide`] has already limited to the solid ones the body can touch.
-    fn push_out(&self, feet: Vec3, tris: &[u32]) -> Vec2 {
-        let mut total = Vec2::ZERO;
+    /// [`CollisionWorld::gather_slide`] has already limited to the solid ones the body can touch:
+    /// the shortest push that clears every contact of both spheres at once ([`least_push`]),
+    /// so the order of the triangles does not matter (#176). `None` when no push of at most
+    /// [`RADIUS`] clears them all: the body is wedged between faces that push opposite ways,
+    /// and pushing it out of one would take it into or through another. `contacts` is scratch
+    /// and holds the contacts afterwards.
+    fn push_out(&self, feet: Vec3, tris: &[u32], contacts: &mut Vec<Contact>) -> Option<Vec2> {
+        contacts.clear();
         for h in SPHERES {
             let centre = feet + Vec3::Y * h;
-            let mut push = Vec2::ZERO;
             for &t in tris {
                 // The horizontal grid includes stacked floors and walls from other heights.
                 // Exact sphere/AABB rejection preserves the narrow-phase result and avoids
@@ -1757,11 +1772,11 @@ impl CollisionWorld {
                 // Push horizontally only; a contact straight above or below (beam, floor) has
                 // no horizontal direction and is left to the floor query.
                 let flat = Vec2::new(away.x, away.z);
+                let n = self.normals[t as usize];
+                let nf = Vec2::new(n.x, n.z);
                 let dir = if flat.length_squared() > 1e-8 {
                     flat.normalize()
                 } else {
-                    let n = self.normals[t as usize];
-                    let nf = Vec2::new(n.x, n.z);
                     if nf.length_squared() < 1e-4 {
                         continue;
                     }
@@ -1769,17 +1784,99 @@ impl CollisionWorld {
                 };
                 // Depth along the horizontal direction needed to clear the triangle point.
                 let needed = (RADIUS * RADIUS - away.y * away.y).max(0.0).sqrt();
-                let depth = needed - flat.dot(dir);
-                if depth > push.dot(dir) {
-                    push += dir * (depth - push.dot(dir));
-                }
-            }
-            if push.length_squared() > total.length_squared() {
-                total = push;
+                // The face's own way out, seen from above, on the body's side; none for a face
+                // too flat to wall the body in (the threshold is `hold_inside`'s).
+                let face = if nf.length_squared() < 0.09 {
+                    Vec2::ZERO
+                } else {
+                    nf.normalize() * nf.dot(dir).signum()
+                };
+                contacts.push(Contact {
+                    dir,
+                    depth: needed - flat.dot(dir),
+                    face,
+                });
             }
         }
-        total
+        least_push(contacts).filter(|push| push.length_squared() <= RADIUS * RADIUS)
     }
+}
+
+/// A sphere's contact with a triangle, for [`CollisionWorld::push_out`]: the horizontal
+/// direction away from the triangle's closest point and how far along it the body must move
+/// to clear it, and the triangle's horizontal normal turned to the body's side ([`Vec2::ZERO`]
+/// for a face too flat to be a wall), for [`wedged_move`].
+#[derive(Clone, Copy, Debug)]
+struct Contact {
+    dir: Vec2,
+    depth: f32,
+    face: Vec2,
+}
+
+/// How far short of a contact's depth a push may stop and still count as clearing it.
+const PUSH_SLACK: f32 = 1e-5;
+
+/// The shortest horizontal push `p` with `p . dir >= depth` for every contact, or `None` when
+/// none exists (contacts pushing opposite ways). The constraints are half-planes, so the
+/// answer is the point of their intersection nearest the origin: the origin itself, the foot
+/// of one contact's line, or the corner of two; it is unique, so it does not depend on the
+/// contacts' order. Before, each contact was applied in turn and the last won along its own
+/// direction, so between two opposing faces the order chose the side (#176).
+fn least_push(contacts: &[Contact]) -> Option<Vec2> {
+    let clears = |p: Vec2| {
+        contacts
+            .iter()
+            .all(|c| p.dot(c.dir) >= c.depth - PUSH_SLACK)
+    };
+    if clears(Vec2::ZERO) {
+        return Some(Vec2::ZERO);
+    }
+    // The foot of a line that clears the rest is the nearest point of a superset of the
+    // intersection, so it is the answer; all such feet are equally near.
+    if let Some(c) = contacts
+        .iter()
+        .filter(|c| c.depth > 0.0)
+        .find(|c| clears(c.dir * c.depth))
+    {
+        return Some(c.dir * c.depth);
+    }
+    let mut best: Option<Vec2> = None;
+    for (i, a) in contacts.iter().enumerate() {
+        for b in &contacts[i + 1..] {
+            let det = a.dir.perp_dot(b.dir);
+            if det.abs() < 1e-6 {
+                continue;
+            }
+            // Where p . a.dir = a.depth and p . b.dir = b.depth.
+            let p = Vec2::new(
+                a.depth * b.dir.y - b.depth * a.dir.y,
+                b.depth * a.dir.x - a.depth * b.dir.x,
+            ) / det;
+            if best.is_none_or(|q| p.length_squared() < q.length_squared()) && clears(p) {
+                best = Some(p);
+            }
+        }
+    }
+    best
+}
+
+/// The part of a sub-step `step` that goes into none of the faces of `contacts`, for a body
+/// they wedge: the nearest move to `step` with `move . face >= 0` for each, which slides along
+/// the wedge and is zero when the faces surround the body. The faces' normals, not the
+/// closest-point directions, as a contact at the inner edge between two triangles of one flat
+/// face points off the face and would forbid moving along it either way.
+fn wedged_move(step: Vec2, contacts: &[Contact]) -> Vec2 {
+    let toward: Vec<Contact> = contacts
+        .iter()
+        .filter(|c| c.face != Vec2::ZERO)
+        .map(|c| Contact {
+            dir: c.face,
+            depth: -step.dot(c.face),
+            face: c.face,
+        })
+        .collect();
+    // Not moving (`-step`) always clears these, so there is an answer.
+    step + least_push(&toward).unwrap_or(-step)
 }
 
 /// The world as one kind of body sees it: which helper parts hold it.
