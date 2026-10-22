@@ -188,15 +188,17 @@ pub fn abs(left: f32, top: f32, width: f32, height: f32) -> Node {
 const GUIDE_TEXT: Color = Color::srgb(0.9, 0.87, 0.8);
 
 /// An action guide low in the middle of the screen, "[E] : `label`" (the idol's "Rest", an
-/// item's "Pick Up Item"), hidden, with `marker` on its root.
+/// item's "Pick Up Item"), hidden, with `marker` on its root. Returns its label's text, for a
+/// guide whose label changes ([`action_guide_label`]).
 pub fn spawn_action_guide(
     commands: &mut Commands,
     fonts: &GameFonts,
     art: &MenuArt,
     label: &str,
     marker: impl Bundle,
-) {
+) -> Entity {
     let text = |t: String| fonts.shadowed(t, 16.5, GUIDE_TEXT);
+    let mut label_text = Entity::PLACEHOLDER;
     commands
         .spawn((
             marker,
@@ -223,8 +225,14 @@ pub fn spawn_action_guide(
                 )),
                 None => r.spawn(text("E".into())),
             };
-            r.spawn(text(format!(" : {label}")));
+            label_text = r.spawn(text(action_guide_label(label))).id();
         });
+    label_text
+}
+
+/// An action guide's label text after its key: " : `label`".
+pub fn action_guide_label(label: &str) -> String {
+    format!(" : {label}")
 }
 
 /// A screen root that shows over the world alone.

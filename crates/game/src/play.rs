@@ -325,6 +325,30 @@ struct Sim {
     perilous_age: Option<f32>,
 }
 
+#[cfg(test)]
+impl Sim {
+    /// `duel` with no script, no foe and nothing shown yet, for system tests.
+    fn for_test(duel: Duel) -> Self {
+        Self {
+            duel,
+            last: Default::default(),
+            started: [None, None],
+            hit_log: Vec::new(),
+            script: None,
+            route: ScriptRoute::default(),
+            step: 0,
+            lock_requested: false,
+            break_posture: false,
+            passive: true,
+            enemy_present: false,
+            previous: [([0.; 3], 0.); 2],
+            clock: [0.; 2],
+            faded: [false; 2],
+            perilous_age: None,
+        }
+    }
+}
+
 fn apply_perf_tour(
     mut tour: ResMut<crate::perf_log::PerfTour>,
     mut sim: NonSendMut<Sim>,
@@ -2770,23 +2794,7 @@ mod tests {
         let mut duel = Duel::load(&cache, 4.).unwrap();
         duel.use_simple_ai();
         vacant_enemy_slot(&mut duel);
-        let sim = Sim {
-            duel,
-            last: Default::default(),
-            started: [None, None],
-            hit_log: Vec::new(),
-            script: None,
-            route: ScriptRoute::default(),
-            step: 0,
-            lock_requested: false,
-            break_posture: false,
-            passive: true,
-            enemy_present: false,
-            previous: [([0.; 3], 0.); 2],
-            clock: [0.; 2],
-            faded: [false; 2],
-            perilous_age: None,
-        };
+        let sim = Sim::for_test(duel);
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .insert_non_send(sim)

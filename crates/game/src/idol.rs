@@ -1,5 +1,6 @@
-//! Sculptor's Idols (#128): near one, the game's "Rest" guide (イベントテキスト 15000120) shows
-//! with its key; the action button (E, or Y on a pad) kneels Wolf there (`Duel::idol_input`,
+//! Sculptor's Idols (#128): near one, the game's guide shows with its key, "Commune with
+//! Sculptor's Idol" (イベントテキスト 10010182) at an idol not yet lit and "Rest" (15000120)
+//! at a lit one (`Duel::idol_lit`, #187); the action button (E, or Y on a pad) kneels Wolf there (`Duel::idol_input`,
 //! which also makes it the checkpoint), and once he prays the idol menu opens: the idol's name
 //! (BonfireWarpParam `msgId` in NTC_メニューテキスト), the game's rows with their help lines,
 //! Rest and Travel (`super::idol_travel`, #148) working and the rest greyed, and the key guide.
@@ -42,6 +43,8 @@ pub(super) const WARP_POINT: i32 = 980;
 /// イベントテキスト: "Rest" (the guide and the first row), "Travel", and the menu's rows in the
 /// game's order (each one's help line is its id + 100000) with whether they work here.
 const REST: i32 = 15000120;
+/// イベントテキスト: the guide at an idol not yet lit, "Commune with Sculptor's Idol".
+const COMMUNE: i32 = 10010182;
 pub(super) const TRAVEL: i32 = 15000150;
 const ROWS: [(i32, bool); 10] = [
     (REST, true),
@@ -223,6 +226,12 @@ pub(super) fn pointable<P: Copy + Send + Sync + 'static>(part: P) -> impl Bundle
 
 #[derive(Component)]
 struct Guide;
+/// The guide's label, with its texts at an unlit idol and a lit one.
+#[derive(Component)]
+struct GuideLabel {
+    commune: String,
+    rest: String,
+}
 #[derive(Component)]
 struct Menu;
 #[derive(Component)]
@@ -266,7 +275,7 @@ pub(super) fn install(app: &mut App, idols: Idols) {
         )
         .add_systems(
             Update,
-            (show, hold_pause, free_cursor).run_if(crate::menu::active),
+            (show, guide_label, hold_pause, free_cursor).run_if(crate::menu::active),
         );
 }
 
@@ -294,8 +303,13 @@ fn spawn(
     let event = |id: i32| events.get(&id).cloned().unwrap_or_default();
     let text = |t: String, px: f32, color: Color| fonts.shadowed(t, px, color);
 
-    // The guide, low in the middle: "[E] : Rest".
-    crate::game_ui::spawn_action_guide(&mut commands, &fonts, &art, &event(REST), Guide);
+    // The guide, low in the middle: "[E] : Rest", or "Commune with Sculptor's Idol" at an idol
+    // not yet lit (`guide_label`).
+    let label = crate::game_ui::spawn_action_guide(&mut commands, &fonts, &art, "", Guide);
+    commands.entity(label).insert(GuideLabel {
+        commune: event(COMMUNE),
+        rest: event(REST),
+    });
 
     // The menu: a dark fade on the left with the idol's name, the rows, the help line and the
     // key guide.
@@ -518,6 +532,29 @@ fn show(
     }
 }
 
+/// The guide's label for the idol in reach: "Commune with Sculptor's Idol" until it is lit,
+/// "Rest" after, as the game's kneel prompt. Logged when it changes, for live checks.
+fn guide_label(
+    sim: NonSend<Sim>,
+    mut shown: Local<Option<(usize, bool)>>,
+    mut labels: Query<(&GuideLabel, &mut Text)>,
+) {
+    let Some(i) = sim.duel.idol_in_reach() else {
+        return;
+    };
+    let lit = sim.duel.idol_lit(i);
+    if *shown == Some((i, lit)) {
+        return;
+    }
+    *shown = Some((i, lit));
+    let entity = sim.duel.idol_spots()[i].entity;
+    for (label, mut t) in &mut labels {
+        let text = if lit { &label.rest } else { &label.commune };
+        t.0 = crate::game_ui::action_guide_label(text);
+        info!("idol guide: idol {entity} lit {lit}: {text}");
+    }
+}
+
 /// Frees the mouse while the idol menu (or its Travel screen) is up, for pointing at its rows,
 /// and takes it back for the camera when the menu goes, as the pause menu does. Play does not
 /// take it back on a click meanwhile (`gather_input`, while [`crate::menu::Modal`] holds).
@@ -571,6 +608,62 @@ mod tests {
         assert_eq!(pointed.take(false), (Vec::new(), vec![2]));
         pointed.hovered.push(1);
         assert_eq!(pointed.take(true), (vec![1], Vec::new()));
+    }
+
+    #[test]
+    fn the_guide_reads_commune_at_an_unlit_idol_and_rest_once_it_is_lit() {
+        let cache = sekiro_sim::cache::root();
+        if !cache.join("anim/c0000/a000_710310.bin").exists() {
+            eprintln!("skipping: cache not extracted");
+            return;
+        }
+        let events = crate::game_ui::menu_texts(&cache, "イベントテキスト");
+        assert_eq!(events[&COMMUNE], "Commune with Sculptor's Idol");
+        assert_eq!(events[&REST], "Rest");
+        let mut duel = sekiro_sim::duel::Duel::load(&cache, 30.0).unwrap();
+        duel.enemy_present = false;
+        duel.enemy_active = false;
+        for _ in 0..60 {
+            duel.step(&sekiro_sim::InputFrame::default(), 1.0 / 60.0);
+        }
+        let here = Placement {
+            position: duel.player.body.position,
+            yaw: 0.0,
+        };
+        let entity = 1101950;
+        duel.set_idols(vec![IdolSpot {
+            kneel: here,
+            checkpoint: here,
+            entity,
+        }]);
+        assert_eq!(duel.idol_in_reach(), Some(0));
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_non_send(Sim::for_test(duel))
+            .add_systems(Update, guide_label);
+        let label = app
+            .world_mut()
+            .spawn((
+                GuideLabel {
+                    commune: events[&COMMUNE].clone(),
+                    rest: events[&REST].clone(),
+                },
+                Text::default(),
+            ))
+            .id();
+        let shown = |app: &App| app.world().get::<Text>(label).unwrap().0.clone();
+        app.update();
+        assert_eq!(shown(&app), " : Commune with Sculptor's Idol");
+        // Once lit (a first kneel, `Duel::idol_lit`), the same idol's guide reads Rest.
+        app.world_mut()
+            .non_send_mut::<Sim>()
+            .duel
+            .kit
+            .found_idols
+            .insert(entity);
+        app.update();
+        assert_eq!(shown(&app), " : Rest");
     }
 
     #[test]
