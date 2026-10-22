@@ -303,6 +303,27 @@ impl FxrPlayer {
         )
     }
 
+    /// Live particles of the camera-relative map effects within `radius` m (horizontally) of
+    /// `at`, for the `SEKIRO_FXR_LOG` weather log (#84).
+    pub(crate) fn map_particles_near(&self, id: i32, at: Vec3, radius: f32) -> usize {
+        fn near(n: &NodeInst, at: Vec3, radius: f32) -> usize {
+            n.particles
+                .iter()
+                .filter(|p| (p.pos - at).xz().length() < radius)
+                .count()
+                + n.children
+                    .iter()
+                    .map(|c| near(c, at, radius))
+                    .sum::<usize>()
+        }
+        self.effects
+            .iter()
+            .filter(|e| e.key.0 == 5 && e.key.1 == id && !e.asleep)
+            .filter_map(|e| e.root.as_ref())
+            .map(|root| near(root, at, radius))
+            .sum()
+    }
+
     pub(crate) fn reset_fight(&mut self) {
         self.effects.retain(|e| e.persistent);
         self.bullets.clear();

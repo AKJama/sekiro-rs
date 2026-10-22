@@ -101,7 +101,9 @@ Effect lights reuse a bounded pool of sixteen entities and the existing scene-to
 
 Action 10000 has a bounded CPU implementation using the authored texture, colour, size variation, velocity variation, emission volume, follow factor and duration fields.
 The integer emission/duration fields are interpreted on the FXR 30 Hz clock; the native GPU scheduler's exact count semantics remain unverified.
-The 2048-particle per-node bound can reduce dense weather emission.
+Each node keeps at most 2048 particles; when the steady population (count per emission times emissions per lifetime) is larger, every emission is thinned by the same fraction so the population stays steady (#84).
+The camera snow 839500 wants 40 flakes every 1/30 s for 6 s (7200), so it keeps about 28 percent of them.
+Before #84 the pool filled in 1.7 s and then emitted nothing until that batch expired, so a running Wolf left the snow behind for about two seconds in every six.
 This fallback does not yet reproduce GPU collision, all emitter shapes, random turns, angular motion or every acceleration/growth field.
 Camera-follow detection comes from native node movement 46 in the FXR tree, including effect references.
 

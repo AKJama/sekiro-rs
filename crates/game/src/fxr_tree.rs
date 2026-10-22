@@ -771,12 +771,17 @@ fn weather(n: &mut NodeInst, a: &Action, dt: f32, alive: bool, previous: Vec3) {
         seed: n.seed.wrapping_add(n.emissions as u32),
         k: 0,
     };
+    let interval = int(a, Field::EmissionIntervalMin, 0).max(1) as f32 / 30.;
+    let authored = int(a, Field::EmissionParticleCount, 0).max(0) as usize;
+    let thinning = pool_thinning(a, authored, interval);
     let mut guard = 0;
     while alive && n.emit_next <= n.time && guard < 4 {
-        let count = int(a, Field::EmissionParticleCount, 0).max(0) as usize;
+        // The authored count, thinned evenly over emissions when the pool cannot hold it.
+        let quota = |k: i64| (k as f64 * authored as f64 * thinning).floor() as usize;
+        let count = quota(n.emissions + 1) - quota(n.emissions);
         let size = game_vec(prop(a.get(Field::EmitterSize), 0., &mut rnd, [1.; 4]));
         let rotation = game_rot(prop(a.get(Field::EmitterRotation), 0., &mut rnd, [0.; 4]));
-        for i in 0..count.min(2048usize.saturating_sub(n.particles.len())) {
+        for i in 0..count.min(WEATHER_POOL.saturating_sub(n.particles.len())) {
             let seed = n
                 .seed
                 .wrapping_add((n.emissions as u32).wrapping_mul(4001))
@@ -806,9 +811,27 @@ fn weather(n: &mut NodeInst, a: &Action, dt: f32, alive: bool, previous: Vec3) {
             });
         }
         n.emissions += 1;
-        let interval = int(a, Field::EmissionIntervalMin, 0).max(1) as f32 / 30.;
         n.emit_next += interval;
         guard += 1;
+    }
+}
+
+/// Particles one GPUStandardParticle node keeps on the CPU.
+const WEATHER_POOL: usize = 2048;
+
+/// The fraction of each emission to keep so the steady population (count per emission times
+/// emissions per lifetime) fits [`WEATHER_POOL`]. Without it a dense emitter fills the pool in
+/// its first second and then emits nothing until that batch expires together, so the effect
+/// arrives in waves (camera snow 839500: 40 per 1/30 s for 6 s, 7200 wanted, #84).
+fn pool_thinning(a: &Action, count: usize, interval: f32) -> f64 {
+    let mut rnd = Rnd { seed: 0, k: 0 };
+    let life = int(a, Field::ParticleDuration, 30).max(1) as f32 / 30.
+        * scalar(a, Field::ParticleDurationMultiplier, 0., &mut rnd, 1.).max(0.);
+    let steady = count as f64 * (f64::from(life) / f64::from(interval)).ceil();
+    if steady > WEATHER_POOL as f64 {
+        WEATHER_POOL as f64 / steady
+    } else {
+        1.
     }
 }
 
@@ -1316,5 +1339,43 @@ mod tests {
             );
         }
         assert!(n.finished && n.particles.is_empty());
+    }
+
+    /// #84: the installed camera snow (839500) keeps falling around a camera that runs at
+    /// Wolf's 6 m/s. It used to fill its 2048-particle pool in 1.7 s, then emit nothing until
+    /// that batch expired at 6 s, leaving 2 s in every 6 with no flake within 5 m.
+    #[test]
+    fn camera_snow_falls_steadily_around_a_running_camera() {
+        fn near(n: &NodeInst, at: Vec3, out: &mut usize) {
+            *out += n
+                .particles
+                .iter()
+                .filter(|p| (p.pos - at).xz().length() < 5.)
+                .count();
+            for c in &n.children {
+                near(c, at, out);
+            }
+        }
+        let mut lib = FxrLib::scan(&sekiro_sim::cache::root());
+        let def = lib.compiled(839500).expect("camera snow 839500 installed");
+        let mut n = make_node(&mut lib, &def, 1, 0).unwrap();
+        let dt = 1. / 60.;
+        let mut counts = Vec::new();
+        for f in 0..60 * 20 {
+            let at = Vec3::new(6. * f as f32 * dt, 1.6, 0.);
+            step_node(&mut n, &mut lib, Transform::from_translation(at), dt, false);
+            if f >= 60 * 8 && f % 6 == 0 {
+                let mut c = 0;
+                near(&n, at, &mut c);
+                counts.push(c);
+            }
+        }
+        let mean = counts.iter().sum::<usize>() as f32 / counts.len() as f32;
+        let (min, max) = (counts.iter().min().unwrap(), counts.iter().max().unwrap());
+        assert!(mean > 50., "mean {mean}");
+        assert!(
+            *min as f32 > 0.6 * mean && (*max as f32) < 1.4 * mean,
+            "near counts {min}..{max}, mean {mean}"
+        );
     }
 }
