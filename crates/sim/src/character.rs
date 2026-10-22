@@ -129,6 +129,9 @@ pub struct Character {
     /// The Havok skeleton the clips animate (source space).
     pub skeleton: Arc<Skeleton>,
     pub ground: Box<dyn Ground>,
+    /// The map's navigation mesh a map foe walks on ([`crate::navmesh::NavGround`]); `None`
+    /// for Wolf, arena bosses and maps without one.
+    pub navmesh: Option<Arc<crate::navmesh::NavMesh>>,
     /// The duel owns this flag while a paired throw holds both characters.
     pub throw_ignore_walls: bool,
     /// The lower-body twist in degrees (the engine's `TwistLowerRootAngle`, positive after a
@@ -256,6 +259,7 @@ impl Character {
                 bones: Vec::new(),
             }),
             ground: Box::new(FlatGround::default()),
+            navmesh: None,
             throw_ignore_walls: false,
             twist: 0.0,
             walk_twist: 0.0,
@@ -318,6 +322,7 @@ impl Character {
             pending_damage: None,
             skeleton: load_skeleton(cache, chr),
             ground: Box::new(FlatGround::default()),
+            navmesh: None,
             throw_ignore_walls: false,
             twist: 0.0,
             walk_twist: 0.0,
@@ -1186,7 +1191,24 @@ impl Character {
             root_motion,
             self.ground.as_ref(),
         ) {
-            if body_input.water_mode.is_some() || self.wire.perch.is_none() {
+            // A foe's walk keeps to the navmesh: the NPC script asks for no fall-prevention
+            // assist in its walk and run states, which its other actions do (#227).
+            let nav = self.navmesh.as_deref().filter(|_| {
+                self.kind == ControlKind::Npc
+                    && body_input.fall_assist == 0
+                    && !body_input.ignore_walls
+                    && self.body.grounded
+            });
+            if let Some(nav) = nav {
+                self.body.step(
+                    &body_input,
+                    dt,
+                    &crate::navmesh::NavGround {
+                        terrain: self.ground.as_ref(),
+                        nav,
+                    },
+                );
+            } else if body_input.water_mode.is_some() || self.wire.perch.is_none() {
                 self.body.step(&body_input, dt, self.ground.as_ref());
             } else {
                 self.body.step(

@@ -72,6 +72,7 @@ First traced for the grapple pine in draft PR #33 (#17); the map-wall part is ap
 - `FUN_140bc68d0` casts the body along its move with that filter and cuts the move so the body stays `FallAssistMinRadius` (0.16 m, physics module `+0xaec`, constructor `FUN_140bbb010`) from a wall it heads into; a wall the body is in front of is skipped, so the walls keep a body in and let one outside walk in.
   The cast keeps only triangle hits, takes the one whose normal is closest to the move's direction (`FUN_140bbedc0`) and holds only below 90 degrees (`DAT_142dca970`); there is no check of the floor beyond the wall.
 - NPCs share `FallPreventionAssist` (`c9997.lua`), which sends only `act(3016, 1)`: enemies are held by group 93 walls (the `f` bands and collisionType 11 objects) and not by the map's group 92 cliff walls.
+  Their walk and run states do not call it, so a walking foe is held by the map's navmesh instead (`crates/sim/src/navmesh.rs`, #227).
 - Sprinting: `SPRINT_LOOP` sends no request, while the sprint-start states before it send both, so a sprint into a filter-28 wall is held until the loop starts (0.3 to 1 s at the cliff east of start 2 and the cliff north of start 0 in `edge_hold.rs`; the user saw half a second to 1.5 s in the real game, #86, #32).
 
 What the simulation does:

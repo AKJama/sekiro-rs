@@ -1,9 +1,10 @@
-//! Havok HKX (2016 tagfile) reading: skeletons and animations.
+//! Havok HKX (2016 tagfile) reading: skeletons, animations, cloth and navigation meshes.
 //!
 //! [`tagfile`] is a generic reflected-object reader; this module pulls the animation types out of
 //! it and decodes them into [`crate::anim`] types.
 
 pub mod cloth;
+pub mod navmesh;
 pub mod spline;
 pub mod tagfile;
 

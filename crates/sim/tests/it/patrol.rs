@@ -314,3 +314,73 @@ fn outskirts_guard_walks_home_after_losing_wolf() {
     }
     assert!(settled.contains("NonBattleAct>Stay"), "{settled:?}");
 }
+
+/// A guard chasing Wolf toward the Outskirts start ravine stops at the edge (#227). Wolf hangs
+/// over the drop, as he was in the #217 run. The NPC script asks for no fall-prevention assist
+/// while walking, so the `f` bands at the edge did not hold the guard, and it walked off the map
+/// near (-81.8, -51.5, -57.8) and fell for good. A foe's walk now keeps to the map's navmesh,
+/// which ends about 0.5 m before the edge.
+#[test]
+fn outskirts_guard_chasing_wolf_stops_at_the_ravine_edge() {
+    let cache = sekiro_sim::cache::root();
+    let map = "m11_00_00_00";
+    let dir = cache.join(format!("maps/{map}"));
+    let navmesh = cache.join(format!("raw/map/{map}/{map}.nvmhktbnd.d"));
+    if !dir.join("collision.bin").exists()
+        || !cache.join("anim/c1010").is_dir()
+        || !navmesh.is_dir()
+    {
+        return;
+    }
+    let mut wolf = outskirts(&cache, map, &dir);
+    fn guard(wolf: &Duel) -> &Duel {
+        wolf.population
+            .as_ref()
+            .unwrap()
+            .foes
+            .iter()
+            .find(|f| f.part == "c1010_0001")
+            .unwrap()
+            .duel
+            .as_ref()
+    }
+    let dt = 1.0 / 60.0;
+    // Wolf 4 m in front of the guard until it fights him.
+    for _ in 0..60 * 5 {
+        let body = &guard(&wolf).enemy.body;
+        let front = sekiro_sim::arena::forward(body.yaw) * 4.0;
+        wolf.player.body.position = [
+            body.position[0] + front.x,
+            body.position[1],
+            body.position[2] + front.z,
+        ];
+        wolf.step(&InputFrame::default(), dt);
+        if guard(&wolf).ai.as_ref().unwrap().state.battle {
+            break;
+        }
+    }
+    assert!(
+        guard(&wolf).ai.as_ref().unwrap().state.battle,
+        "the guard fights Wolf"
+    );
+    // Wolf over the ravine, past the edge the guard walks to (the old code dropped it there
+    // after about 10.6 s).
+    let mut nearest = f32::INFINITY;
+    let mut lowest = f32::INFINITY;
+    for _ in 0..60 * 13 {
+        wolf.player.body.position = [-83.0, -40.0, -75.0];
+        wolf.step(&InputFrame::default(), dt);
+        let at = guard(&wolf).enemy.body.position;
+        nearest = nearest.min(at[2]);
+        lowest = lowest.min(at[1]);
+    }
+    eprintln!("guard came to z {nearest:.2}, lowest y {lowest:.2}");
+    assert!(
+        nearest < -55.0,
+        "the guard chases Wolf to the edge (z {nearest:.2})"
+    );
+    assert!(
+        lowest > -49.0,
+        "the guard stays on the ground above the ravine (lowest y {lowest:.2})"
+    );
+}
