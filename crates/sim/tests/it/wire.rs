@@ -912,3 +912,78 @@ fn search_camera_follows_the_rig_and_is_pulled_in_by_walls() {
         camera.position
     );
 }
+
+/// An upward flight to a hook 10 m away and 5 m up under a plate jutting over the flight's
+/// line from the side, its edge `edge` m off it (#168): the head sphere never goes more than
+/// 1 cm into the plate, and the flight releases on meeting it. Before, the flight cast rays only
+/// along the body's centre line, which pass beside the edge.
+#[test]
+fn an_upward_flight_under_an_overhang_stops_before_the_head_enters_it() {
+    use sekiro_formats::hknp::CollisionMesh;
+    use sekiro_sim::collision::{HEAD_TOP, RADIUS};
+    // The flight with `collision`: the feet each tick until it releases or arrives.
+    let fly = |collision: Option<CollisionWorld>| {
+        let mut wire = synthetic(10.0);
+        wire.points[0].position = Some([0.0, 5.0, -10.0]);
+        let mut body = Body::default();
+        wire.search(&body, 0.0, 0.0, false);
+        wire.step(
+            &mut body,
+            Some("a000_202000"),
+            None,
+            1.0 / 60.0,
+            &FlatGround::default(),
+        );
+        wire.collision = collision;
+        let mut path = Vec::new();
+        for _ in 0..50 {
+            wire.step(
+                &mut body,
+                Some("a000_202011"),
+                Some((0.0, 0.83)),
+                1.0 / 60.0,
+                &FlatGround::default(),
+            );
+            path.push(Vec3::from(body.position));
+            if wire.active.is_none() {
+                break;
+            }
+        }
+        (path, wire.active.is_some())
+    };
+    let (free, _) = fly(None);
+    // Where the head sphere's centre passes z -5, rising.
+    let mid = free
+        .iter()
+        .find(|p| p.z < -5.0)
+        .expect("the flight passes z -5");
+    let centre = mid.y + HEAD_TOP - RADIUS;
+    for edge in [0.15, 0.3] {
+        // Over the centre's height there, so the head rises into it.
+        let y = centre + 0.2;
+        let (lo, hi) = (Vec3::new(edge, y, -7.0), Vec3::new(3.0, y, -3.0));
+        let plate = CollisionWorld::from_mesh(&CollisionMesh {
+            vertices: vec![
+                [lo.x, y, lo.z],
+                [hi.x, y, lo.z],
+                [hi.x, y, hi.z],
+                [lo.x, y, hi.z],
+            ],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            ..CollisionMesh::default()
+        });
+        let (path, flying) = fly(Some(plate));
+        let deepest = path
+            .iter()
+            .map(|feet| {
+                let head = *feet + Vec3::Y * (HEAD_TOP - RADIUS);
+                RADIUS - head.distance(head.clamp(lo, hi))
+            })
+            .fold(f32::MIN, f32::max);
+        assert!(
+            deepest <= 0.01,
+            "edge {edge}: the head went {deepest:.3} m into the plate"
+        );
+        assert!(!flying, "edge {edge}: the flight never met the plate");
+    }
+}

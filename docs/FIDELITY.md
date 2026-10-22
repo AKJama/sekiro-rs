@@ -329,3 +329,16 @@ It takes the shortest horizontal push that clears every contact of both body sph
 When no push of at most a body radius does that, the body is wedged (for example the fence beside the m11_00 gate and its cap beam's sloping underside): the sub-step is taken back and only its part along the touched faces is kept, so the body slides along the wedge but never into it and is never pushed through a face.
 A body that was already wedged before it moved (placed by a respawn, a warp or a moving part) also gets a push out, at most a body radius a sub-step: the shortest one that clears every contact when there is one, else the one that leaves the contacts equally deep, cut short so it never passes half way to any touched triangle.
 Whether the real game stops, slides or squeezes a wedged body differently was not checked.
+
+## Head against overhangs, and landing by side of approach, issue #168
+
+The game's Havok character proxy keeps the whole capsule out of the mesh, and its contact normals point from the surface to the capsule, so the underside of a roof is only ever a ceiling to it.
+The simulation still moves the body horizontally (the slide) and vertically (the rise and the fall) as separate steps; these rules are our own, built on the slide's narrow phase, not traced from the exe.
+- Rise: the head sphere is swept straight up against every flat face over it, interior, edges and corners (`first_touch`), and a touch on the sphere's cap (within 39 degrees of straight up, `CEILING_UP`) stops the rise (#160, #170).
+  A touch further out, on the head's shoulder, does not stop it: after the rise the body takes the slide's own push-out at the height it rose to, so it is pushed off the edge sideways in the same tick, as the proxy slides along such a contact.
+  A body wedged at that height (a wall at its legs, an edge at its head) takes the #176 wedge rule, so it is never pushed through the wall, but its head can stay up to a tick's rise into the edge.
+- Wire flight: besides the rays along the body's centre line, the head sphere is swept along each tick's move against every solid face near it, and a touch on its top half (the face's closest point above the sphere's centre) ends the flight there, as a ray hit does.
+  A touch on the head's side or below is still left to the rays, so a flight brushing a wall beside the centre line is not stopped by it.
+- Landing: the winding of the collision mesh does not say which side of a face is solid, so the side is the one the feet came from.
+  An airborne body lands on the highest floor up to a step above its feet unless a floor was already over its feet, within a step, where the tick began, and it had not been carried onto that floor over its edge on an earlier tick (`Body::carried_onto`); such a floor was come at from below and is skipped for the highest floor the feet passed through.
+  Whether the game then pushes the body down out of a slab it is inside, or out to the side, was not checked; here it falls.

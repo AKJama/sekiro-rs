@@ -1294,49 +1294,7 @@ impl CollisionWorld {
         if q.distance_squared(line) >= reach * reach {
             return None;
         }
-        let r2 = RADIUS * RADIUS;
-        let mut first = f32::INFINITY;
-        // The interior: from wholly below the face's plane up to touching it.
-        let n = self.normals[t as usize];
-        let n = if n.y < 0.0 { -n } else { n };
-        let below = n.dot(centre - a);
-        if below <= -RADIUS {
-            let up = (-RADIUS - below) / n.y;
-            let touch = centre + Vec3::Y * up + n * RADIUS;
-            if height_on(touch.x, touch.z, a, b, c).is_some() {
-                first = up;
-            }
-        }
-        // The edges: the vertical line meets the cylinder of RADIUS round each, between its ends.
-        for (p, e) in [(a, b - a), (b, c - b), (c, a - c)] {
-            let ee = e.length_squared();
-            let m = centre - p;
-            let m_off = m - e * (m.dot(e) / ee);
-            let y_off = Vec3::Y - e * (e.y / ee);
-            let aa = y_off.length_squared();
-            let bb = m_off.dot(y_off);
-            let disc = bb * bb - aa * (m_off.length_squared() - r2);
-            // A vertical edge is met first at a corner.
-            if aa < 1e-9 || disc <= 0.0 {
-                continue;
-            }
-            let root = disc.sqrt();
-            let up = (-bb - root) / aa;
-            let along = (m.dot(e) + up * e.y) / ee;
-            if -bb + root > 0.0 && (0.0..=1.0).contains(&along) {
-                first = first.min(up);
-            }
-        }
-        // The corners.
-        for p in [a, b, c] {
-            let d2 = (p - centre).with_y(0.0).length_squared();
-            if d2 < r2 {
-                let (dy, half) = (p.y - centre.y, (r2 - d2).sqrt());
-                if dy + half > 0.0 {
-                    first = first.min(dy - half);
-                }
-            }
-        }
+        let first = first_touch(centre, Vec3::Y, [a, b, c], self.normals[t as usize])?;
         if first >= rise {
             return None;
         }
@@ -1363,6 +1321,71 @@ impl CollisionWorld {
         let mut count = 0;
         self.ceiling_candidates(Vec3::from(feet), rise, PLAYER, |_| count += 1);
         count
+    }
+
+    /// How far a body at `feet` moves along `delta` before the top half of its head sphere
+    /// meets a face: the sphere swept along the move ([`first_touch`]) against every solid face
+    /// near it, counting a touch only where the face's closest point is above the sphere's
+    /// centre (#168). A wire flight's rays run along the body's centre line only, so a beam or
+    /// overhang whose edge is beside that line, inside the head's rim, passed into the head;
+    /// what the head meets at its side or below is left to those rays, as before. A face the
+    /// sphere is already more than [`CEILING_GRAZE`] into at the start does not count, as for the
+    /// ceiling stop: moving on carries it out. `None` when nothing is met within `delta`.
+    pub fn head_sweep(&self, feet: Vec3, delta: Vec3) -> Option<f32> {
+        let len = delta.length();
+        if len < 1e-6 || !feet.is_finite() || !delta.is_finite() {
+            return None;
+        }
+        let dir = delta / len;
+        let centre = feet + Vec3::Y * (HEAD_TOP - RADIUS);
+        let end = centre + delta;
+        let (lo, hi) = (
+            centre.min(end) - Vec3::splat(RADIUS),
+            centre.max(end) + Vec3::splat(RADIUS),
+        );
+        let (x0, z0) = cell_of(lo.x, lo.z);
+        let (x1, z1) = cell_of(hi.x, hi.z);
+        let graze = RADIUS - CEILING_GRAZE;
+        let mut best: Option<f32> = None;
+        for cx in x0..=x1 {
+            for cz in z0..=z1 {
+                let Some(column) = self.columns.get(&(cx, cz)) else {
+                    continue;
+                };
+                for list in column.once(PLAYER, band_of(lo.y), band_of(hi.y)) {
+                    visited(list.len());
+                    for &t in list {
+                        let [tlo, thi] = self.bounds[t as usize];
+                        // Each face once: in the first cell of the sweep's box that holds it.
+                        if tlo.cmpgt(hi).any()
+                            || thi.cmplt(lo).any()
+                            || cell_of(tlo.x.max(lo.x), tlo.z.max(lo.z)) != (cx, cz)
+                            || !self.solid(t)
+                            || !self.live(t, PLAYER)
+                        {
+                            continue;
+                        }
+                        let corners = self.corners(t);
+                        let Some(s) = first_touch(centre, dir, corners, self.normals[t as usize])
+                        else {
+                            continue;
+                        };
+                        if s >= len || best.is_some_and(|b| s >= b) {
+                            continue;
+                        }
+                        let s = s.max(0.0);
+                        let at = centre + dir * s;
+                        let [a, b, c] = corners;
+                        let to = closest_on_triangle(at, a, b, c) - at;
+                        let already_in = s == 0.0 && to.length_squared() < graze * graze;
+                        if !already_in && to.y > 1e-4 {
+                            best = Some(s);
+                        }
+                    }
+                }
+            }
+        }
+        best
     }
 
     /// Every surface the vertical line through `(x, z)` crosses: (height, normal y), highest
@@ -2399,6 +2422,80 @@ pub fn ray_triangle(o: Vec3, d: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> 
 /// can be: where [`CEILING_UP`] puts it on the sphere's surface.
 fn ceiling_reach() -> f32 {
     RADIUS * (1.0 - CEILING_UP * CEILING_UP).sqrt()
+}
+
+/// How far a sphere of [`RADIUS`] at `centre` moves along the unit `dir` before it first
+/// touches the triangle `corners` of plane normal `n` (either way round): the least distance
+/// at which it meets the face's interior, one of its edges or one of its corners, negative when
+/// it touches it already (where along `dir` the touch began). `None` when moving on along `dir`
+/// never touches it. The same narrow phase as [`closest_on_triangle`], swept: a straight-up
+/// sweep is the ceiling stop ([`CollisionWorld::ceiling_for`]), any other the head sweep of a
+/// wire flight ([`CollisionWorld::head_sweep`]).
+fn first_touch(centre: Vec3, dir: Vec3, corners: [Vec3; 3], n: Vec3) -> Option<f32> {
+    let [a, b, c] = corners;
+    let r2 = RADIUS * RADIUS;
+    let mut first = f32::INFINITY;
+    // The interior: from wholly behind the face's plane up to touching it.
+    let n = if n.dot(dir) < 0.0 { -n } else { n };
+    let behind = n.dot(centre - a);
+    let closing = n.dot(dir);
+    if behind <= -RADIUS && closing > 1e-6 {
+        let s = (-RADIUS - behind) / closing;
+        if in_triangle(centre + dir * s + n * RADIUS, corners, n) {
+            first = s;
+        }
+    }
+    // The edges: the line of the move meets the cylinder of RADIUS round each, between its ends.
+    for (p, e) in [(a, b - a), (b, c - b), (c, a - c)] {
+        let ee = e.length_squared();
+        let m = centre - p;
+        let m_off = m - e * (m.dot(e) / ee);
+        let d_off = dir - e * (e.dot(dir) / ee);
+        let aa = d_off.length_squared();
+        let bb = m_off.dot(d_off);
+        let disc = bb * bb - aa * (m_off.length_squared() - r2);
+        // An edge along the move is met first at a corner.
+        if aa < 1e-9 || disc <= 0.0 {
+            continue;
+        }
+        let root = disc.sqrt();
+        let s = (-bb - root) / aa;
+        let along = (m.dot(e) + s * e.dot(dir)) / ee;
+        if -bb + root > 0.0 && (0.0..=1.0).contains(&along) {
+            first = first.min(s);
+        }
+    }
+    // The corners.
+    for p in corners {
+        let m = p - centre;
+        let ahead = m.dot(dir);
+        let off2 = (m.length_squared() - ahead * ahead).max(0.0);
+        if off2 < r2 {
+            let half = (r2 - off2).sqrt();
+            if ahead + half > 0.0 {
+                first = first.min(ahead - half);
+            }
+        }
+    }
+    first.is_finite().then_some(first)
+}
+
+/// Whether `p`, on the plane of the triangle `corners` with normal `n`, lies inside it: the
+/// barycentric test of [`height_on`], on the plane seen along its normal's largest axis.
+fn in_triangle(p: Vec3, corners: [Vec3; 3], n: Vec3) -> bool {
+    let n = n.abs();
+    let flat = |v: Vec3| {
+        if n.y >= n.x && n.y >= n.z {
+            Vec3::new(v.x, v.y, v.z)
+        } else if n.x >= n.z {
+            Vec3::new(v.z, v.x, v.y)
+        } else {
+            Vec3::new(v.x, v.z, v.y)
+        }
+    };
+    let [a, b, c] = corners.map(flat);
+    let p = flat(p);
+    height_on(p.x, p.z, a, b, c).is_some()
 }
 
 /// Closest point on triangle `abc` to `p` (Ericson, Real-Time Collision Detection 5.1.5).
