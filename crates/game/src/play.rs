@@ -59,6 +59,8 @@ mod game_menu;
 mod idol;
 #[path = "idol_found.rs"]
 mod idol_found;
+#[path = "idol_rest.rs"]
+mod idol_rest;
 #[path = "idol_travel.rs"]
 mod idol_travel;
 #[path = "live_check.rs"]

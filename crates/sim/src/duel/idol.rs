@@ -13,6 +13,11 @@
 //! alone and only Rest revives them.
 //! gap: no resurrection yet to refill.
 //!
+//! Rest is not instant (#153): the rest clip plays the idol's burst and the world goes dark
+//! ([`rest_dark`]), and the reset happens only once it is fully dark ([`REST_RESET`]), so the
+//! foes reappear and the bars refill unseen; the dark then lifts while Wolf still rests.
+//! [`Duel::idol_rest`] is the effect's clock for the game's burst and fade.
+//!
 //! The first kneel at an idol lights it (#152): its bonfire entity goes into the kit's found
 //! idols (`Kit::found_idols`, #148), which a respawn keeps, and Wolf stays at the idol in
 //! [`IdolPhase::Lighting`] while the game's "SCULPTOR'S IDOL FOUND" banner plays
@@ -42,6 +47,45 @@ pub const LIGHTING_SECS: f32 = (197.0 - 1.0) / 60.0;
 /// How far into the warp clip (StatueAttachWarp, 6.3 s) Wolf leaves for the chosen idol (s):
 /// FwLo's RustSekiro `src/idol.rs` `WARP_CUT`, where the game cuts to its loading screen.
 pub const WARP_CUT: f32 = 2.0;
+
+/// When Rest's burst plays, seconds after Rest is taken: Wolf's rest clip (StatueAttachRest
+/// a000_710340) sends its TAE's SetEzStateRequestID 20 at 0.2 s, and the idol answers with its
+/// own clip 100, whose TAE spawns the one-shot FFX [`REST_FFX`] on its dummy 100 at once
+/// (docs/FIDELITY.md: the request-to-clip link is inferred, not traced in the exe).
+pub const REST_BURST: f32 = 0.2;
+/// The idol's rest burst: FFX 1022 (common effects), its flash, rings and sound 1020, and the
+/// dark around the idol.
+pub const REST_FFX: i32 = 1022;
+/// The dark's curve, seconds after the burst: FFX 1022's black sprites (its 25 m dark disc,
+/// node 1/7/0) rise from clear over 0.5 s, hold to 2.0 s and are gone at 3.0 s.
+pub const REST_DARK_IN: f32 = 0.5;
+pub const REST_DARK_HOLD: f32 = 2.0;
+pub const REST_DARK_OUT: f32 = 3.0;
+/// When the world resets, seconds after Rest is taken: the moment the dark is full.
+pub const REST_RESET: f32 = REST_BURST + REST_DARK_IN;
+/// When the rest effect is over, seconds after Rest is taken: the dark has lifted.
+pub const REST_END: f32 = REST_BURST + REST_DARK_OUT;
+
+/// How dark the rest makes the world (0 clear to 1 full), `secs` after Rest is taken.
+pub fn rest_dark(secs: f32) -> f32 {
+    let t = secs - REST_BURST;
+    if t <= 0.0 || t >= REST_DARK_OUT {
+        0.0
+    } else if t < REST_DARK_IN {
+        t / REST_DARK_IN
+    } else if t <= REST_DARK_HOLD {
+        1.0
+    } else {
+        (REST_DARK_OUT - t) / (REST_DARK_OUT - REST_DARK_HOLD)
+    }
+}
+
+/// A rest under way: seconds since Rest was taken, and whether the world has reset.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RestClock {
+    pub secs: f32,
+    pub reset: bool,
+}
 
 /// Where Wolf is at an idol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +136,8 @@ pub(super) struct Idols {
     lighting: Option<f32>,
     /// The Travel under way and the seconds since its warp began.
     travel: Option<(Destination, f32)>,
+    /// The rest under way, until its dark has lifted.
+    rest: Option<RestClock>,
     /// The idol on another map a Travel left for, until the game takes it.
     departure: Option<i32>,
     /// A Travel within the play world is arriving: the respawn it asked for resets the world
@@ -106,6 +152,7 @@ impl Duel {
         self.idols.at = None;
         self.idols.lighting = None;
         self.idols.travel = None;
+        self.idols.rest = None;
     }
 
     /// The play world's idols.
@@ -189,7 +236,11 @@ impl Duel {
             self.idols.at = None;
             self.idols.lighting = None;
             self.idols.travel = None;
+            // A rest cut short before the dark was full resets nothing; the game lifts the
+            // dark from where it got to.
+            self.idols.rest = None;
         }
+        self.step_rest(dt);
         if let Some((to, t)) = self.idols.travel.as_mut() {
             *t += dt;
             if *t >= WARP_CUT {
@@ -239,7 +290,8 @@ impl Duel {
             .filter(|_| self.idol_phase() == Some(IdolPhase::Lighting))
     }
 
-    /// Rests at the idol Wolf prays at: Vitality and the gourd refilled, the carried goods
+    /// Rests at the idol Wolf prays at: the rest clip plays the burst and the dark, and once it
+    /// is fully dark ([`REST_RESET`]) Vitality and the gourd are refilled, the carried goods
     /// restocked from the Storage, and the map's foes back.
     pub fn rest_at_idol(&mut self) {
         if self.praying()
@@ -249,9 +301,31 @@ impl Duel {
                 .runtime
                 .fire_event("W_StatueAttachRest")
         {
+            self.idols.rest = Some(RestClock {
+                secs: 0.0,
+                reset: false,
+            });
+        }
+    }
+
+    /// The rest under way, until its dark has lifted: the burst's and the fade's clock.
+    pub fn idol_rest(&self) -> Option<RestClock> {
+        self.idols.rest
+    }
+
+    /// Moves the rest on: the world resets the step the dark is full, and the clock stops once
+    /// the dark has lifted.
+    fn step_rest(&mut self, dt: f32) {
+        let Some(mut rest) = self.idols.rest else {
+            return;
+        };
+        rest.secs += dt;
+        if !rest.reset && rest.secs >= REST_RESET {
+            rest.reset = true;
             self.refresh_at_idol();
             self.idols.revive = self.population.is_some();
         }
+        self.idols.rest = (rest.secs < REST_END).then_some(rest);
     }
 
     /// What a rest gives Wolf: full Vitality, the gourd refilled and the carried goods restocked

@@ -69,6 +69,9 @@ pub(super) const CURSOR: Color = Color::srgba(0.8, 0.55, 0.3, 0.95);
 #[derive(Resource, Default)]
 pub(super) struct Idols {
     pub spots: Vec<IdolSpot>,
+    /// Each idol object's place and facing, where its effects play (dummy 100 is the model's
+    /// origin).
+    pub origins: Vec<Transform>,
     names: Vec<String>,
     pub atlas: Atlas,
 }
@@ -134,6 +137,9 @@ impl Idols {
                         }
                     }
                 };
+                idols
+                    .origins
+                    .push(Transform::from_translation(base).with_rotation(pose.rotation));
                 idols.spots.push(IdolSpot {
                     kneel: Placement {
                         position: kneel.to_array(),
@@ -239,6 +245,7 @@ pub(super) fn install(app: &mut App, idols: Idols) {
     crate::game_ui::install_cover(app);
     let events = crate::game_ui::menu_texts(&sekiro_sim::cache::root(), "イベントテキスト");
     super::idol_found::install(app, &events);
+    super::idol_rest::install(app);
     idol_travel::install(app, &events);
     app.insert_resource(idols)
         .init_resource::<Row>()
@@ -383,6 +390,7 @@ pub(super) fn menu_keys(
     mut pointed: ResMut<Pointed<usize>>,
     mut row: ResMut<Row>,
     mut travel: ResMut<idol_travel::TravelMenu>,
+    mut rested: ResMut<super::idol_rest::KitBefore>,
     idols: Res<Idols>,
     mut sim: NonSendMut<Sim>,
 ) {
@@ -410,7 +418,10 @@ pub(super) fn menu_keys(
             REST => {
                 let before = sim.duel.kit.clone();
                 sim.duel.rest_at_idol();
-                info!("idol: rest: {}", kit_change(&before, &sim.duel.kit));
+                if sim.duel.idol_rest().is_some() {
+                    info!("idol: rest taken");
+                    rested.0 = Some(before);
+                }
             }
             TRAVEL => travel.open_at(&idols, &sim.duel),
             _ => {}
@@ -424,7 +435,7 @@ pub(super) fn menu_keys(
 
 /// What a rest changed in the kit, for the log (#202): the gourd's uses, the Pellets (goods
 /// 3020) held and stored, and every other goods whose held or stored count moved.
-fn kit_change(before: &Kit, after: &Kit) -> String {
+pub(super) fn kit_change(before: &Kit, after: &Kit) -> String {
     const PELLET: i32 = 3020;
     let ids: BTreeSet<i32> = [before, after]
         .iter()

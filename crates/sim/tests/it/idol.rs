@@ -1,6 +1,9 @@
 use sekiro_sim::InputFrame;
 use sekiro_sim::deathblow::Placement;
-use sekiro_sim::duel::idol::{Destination, IdolPhase, IdolSpot, LIGHTING_SECS, WARP_CUT};
+use sekiro_sim::duel::idol::{
+    Destination, IdolPhase, IdolSpot, LIGHTING_SECS, REST_END, REST_RESET, RestClock, WARP_CUT,
+    rest_dark,
+};
 use sekiro_sim::duel::{Duel, RESPAWN_DELAY};
 
 const DT: f32 = 1.0 / 60.0;
@@ -89,7 +92,6 @@ fn wolf_kneels_rests_stands_and_comes_back_at_the_idol() {
     assert!((x - spot.kneel.position[0]).hypot(z - spot.kneel.position[2]) < 0.05);
     duel.rules.fighters[0].vitality.hp = 10;
     duel.rest_at_idol();
-    assert_eq!(duel.rules.fighters[0].vitality.hp, max);
     // Only once: the second press waits for the first.
     duel.rest_at_idol();
     let seen = run(&mut duel, 5.0, praying);
@@ -101,6 +103,7 @@ fn wolf_kneels_rests_stands_and_comes_back_at_the_idol() {
             Some(IdolPhase::Praying)
         ]
     );
+    assert_eq!(duel.rules.fighters[0].vitality.hp, max);
     duel.leave_idol();
     let seen = run(&mut duel, 3.0, |d| d.idol_phase().is_none());
     assert_eq!(
@@ -312,6 +315,73 @@ fn praying_at_one_of_two_idols(brain: bool) -> Option<(Duel, [IdolSpot; 2])> {
     Some((duel, spots))
 }
 
+/// Rest (#153): the world resets only once the burst's dark is full, the dark has lifted while
+/// Wolf still rests, and a rest cut short before the dark resets nothing.
+#[test]
+fn rest_resets_the_world_only_under_the_full_dark_and_a_cut_rest_resets_nothing() {
+    let Some((mut duel, _)) = praying_at_one_of_two_idols(false) else {
+        return;
+    };
+    let max = duel.rules.fighters[0].vitality.max_hp;
+    duel.rules.fighters[0].vitality.hp = 10;
+    duel.kit.gourd_charges = 0;
+    duel.rest_at_idol();
+    assert_eq!(
+        duel.idol_rest(),
+        Some(RestClock {
+            secs: 0.0,
+            reset: false
+        })
+    );
+    let mut reset_at = None;
+    while let Some(was) = duel.idol_rest() {
+        duel.step(&InputFrame::default(), DT);
+        let refilled = duel.rules.fighters[0].vitality.hp == max;
+        assert_eq!(refilled, duel.kit.gourd_charges == duel.kit.gourd_max);
+        match (reset_at, duel.idol_rest()) {
+            (None, Some(now)) if refilled => {
+                assert!(now.reset && !was.reset);
+                assert!(now.secs >= REST_RESET && now.secs < REST_RESET + DT);
+                assert_eq!(
+                    rest_dark(now.secs),
+                    1.0,
+                    "reset at {} s, not dark",
+                    now.secs
+                );
+                reset_at = Some(now.secs);
+            }
+            (None, Some(now)) => assert!(now.secs < REST_RESET, "no reset at {} s", now.secs),
+            (None, None) => panic!("the rest ended without a reset"),
+            (Some(_), _) => assert!(refilled),
+        }
+        assert_eq!(duel.idol_phase(), Some(IdolPhase::Resting));
+    }
+    assert!(reset_at.is_some());
+    // The clock stops as the dark has lifted, with Wolf still resting.
+    assert_eq!(rest_dark(REST_END), 0.0);
+    run(&mut duel, 2.0, |d| {
+        d.idol_phase() == Some(IdolPhase::Praying)
+    });
+
+    // Cut short: Wolf is taken off the idol mid-burst; the clock stops and nothing is reset.
+    duel.rules.fighters[0].vitality.hp = 10;
+    duel.kit.gourd_charges = 0;
+    duel.rest_at_idol();
+    run(&mut duel, 0.3, |d| {
+        d.idol_rest().is_some_and(|r| r.secs >= 0.3)
+    });
+    duel.set_idols(duel.idol_spots().to_vec());
+    assert_eq!(duel.idol_rest(), None);
+    run(&mut duel, 1.0, |d| {
+        d.idol_rest().is_none() && d.respawn_in.is_none()
+    });
+    for _ in 0..(REST_END / DT) as usize {
+        duel.step(&InputFrame::default(), DT);
+    }
+    assert_eq!(duel.rules.fighters[0].vitality.hp, 10);
+    assert_eq!(duel.kit.gourd_charges, 0);
+}
+
 #[test]
 fn travel_to_another_map_departs_with_the_kit_restocked_as_a_rest_restocks_it() {
     let Some((mut duel, _)) = praying_at_one_of_two_idols(false) else {
@@ -399,11 +469,11 @@ fn rest_travel_and_death_leave_the_storage_alone_while_every_pellet_is_carried()
     // (which restocks again, then respawns him there) moves no more.
     assert!(duel.kit.use_goods(3020));
     duel.rest_at_idol();
-    assert_eq!(pellets(&duel), (3, 1));
     run(&mut duel, 5.0, |d| {
         d.idol_phase() == Some(IdolPhase::Resting)
     });
     run(&mut duel, 5.0, praying);
+    assert_eq!(pellets(&duel), (3, 1));
     assert!(duel.travel_to_idol(Destination::Here(1)));
     run(&mut duel, WARP_CUT + 0.5, |d| d.idol_travel().is_none());
     assert_eq!(duel.player.body.position, there.checkpoint.position);
@@ -452,15 +522,15 @@ fn rest_and_death_refill_the_full_supply_goods_without_the_storage() {
     }
     duel.kit.gourd_charges = 0;
     duel.rest_at_idol();
-    assert_eq!(rice(&duel), (5, 0));
-    assert_eq!(duel.kit.count(3800), 3);
-    assert_eq!(duel.kit.gourd_charges, duel.kit.gourd_max);
     run(&mut duel, 5.0, |d| {
         d.idol_phase() == Some(IdolPhase::Resting)
     });
     run(&mut duel, 5.0, |d| {
         d.idol_phase() == Some(IdolPhase::Praying)
     });
+    assert_eq!(rice(&duel), (5, 0));
+    assert_eq!(duel.kit.count(3800), 3);
+    assert_eq!(duel.kit.gourd_charges, duel.kit.gourd_max);
 
     // Two thrown, then a death: the respawn refills them as Rest does.
     assert!(duel.kit.use_goods(3580) && duel.kit.use_goods(3580));
