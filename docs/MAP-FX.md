@@ -341,9 +341,21 @@ The cause was the emission direction, in two places.
    It was read as local forward (+Z).
    The torch effect 300163 (sparks with gravity -1 and a 5.6 degree cone, no node rotation) and the flame cores of 839530 only make sense if 6 is world up, so it is now the world up axis whatever the node tilt.
    Directions 1 to 5 are unchanged.
+   Superseded by #60 below: 6 is local north.
 
 Result at spot-056: the flame rises about 0.5 m above the coals with sparks above it, as in the reference (the coals themselves are still dark).
 At the 800140 pile the flames are about 1 m tall, which is what the data gives (height 1 to 2 times scale 0.56, plus 0.375 m/s for 1.5 s).
 Disc emitters (shape 401) still emit radially for direction 0; with the corrected rotation the 800140 smoke discs now rise through gravity and speed, the radial default is unverified.
 Open: spark sprites (width 0.05 times 0.56, texture 3000, rgb multiplier 15) are still fainter and fewer than in the reference, possibly a minimum screen size or bloom difference in the game.
 
+## Emitter direction, 2026-10-22 (#60)
+
+Symptom: at start 3 (beside the stone wall) and on the path toward the first gate, "ground steam" shot straight up, fast.
+The effect is the blowing snow 839543 (region `SFX:吹き込む雪_ID839543_1000`, near start 3) and its twin 839542 (between starts 1 and 2).
+Its streak nodes emit 16 particles every 0.2 s from a 5 x 0.25 x 1 m box at 8.3 m/s (movement 64), with direction 6 and a slight upward gravity.
+With direction 6 read as world up, a headless step measured them rising at 9.3 m/s mean and up to 67 m/s.
+The InitialDirection enum (reference/fxr, as FwLo's RustSekiro `docs/kb/fxr.md` and `src/fxr.rs` read it) is 0 by shape, 1 / 2 global up / down, 3 global north, 4 / 5 local up / down and 6 local north (the node's +Z).
+`emit_point` now follows it: 6 is the node's +Z, and 1 to 3 are world axes turned back into the node's frame.
+The snow now blows along its region's yaw at about 8 m/s, and the 6-driven fog banks (839520, 839540, 839541, 839547) drift sideways at 0.3 to 1 m/s instead of rising.
+The torch 300163 and brazier 839530 nodes that motivated the world-up reading still rise through their negative gravity; their 6 nodes are slow (0.075 to 0.4 m/s).
+Open: object dummy orientation (FLVER dummy forward / upward) is not applied to map object effects, only the dummy position; the brazier dummy 200 faces +Z with +Y up, so it does not change these effects.

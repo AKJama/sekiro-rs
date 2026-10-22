@@ -618,16 +618,18 @@ fn emit_point(c: &Config, t: f32, rnd: &mut Rnd, frame: Quat) -> (Vec3, Vec3) {
         }
         _ => (Vec3::ZERO, Vec3::Z),
     };
-    // InitialDirection: 0 by shape, 1 / 4 up, 2 / 5 down, 3 forward, 6 world up (the 6 was
-    // read from the data: see docs/MAP-FX.md, flame height).
-    // 6 is world up: the torch and brazier sparks (gravity -1, a 5.6 degree cone, no node
-    // rotation) and flame cores of the common effects only rise if it is, wherever the node
-    // is tilted.
+    // InitialDirection (reference/fxr, as FwLo's RustSekiro reads it): 0 by shape, 1 / 2 global
+    // up / down, 3 global north, 4 / 5 local up / down, 6 local north (the node's +Z). The
+    // particle direction is in the node's frame, so a global axis is turned back by its rotation.
+    // 6 was world up until #60: the Outskirts blowing snow 839542 / 839543 (8.3 m/s along the
+    // region's yaw) then shot straight up, and every 6-driven fog bank rose instead of drifting.
     let base = match dirmode {
-        1 | 4 => Vec3::Y,
-        2 | 5 => Vec3::NEG_Y,
-        6 => frame.inverse() * Vec3::Y,
-        3 => Vec3::Z,
+        1 => frame.inverse() * Vec3::Y,
+        2 => frame.inverse() * Vec3::NEG_Y,
+        3 => frame.inverse() * Vec3::Z,
+        4 => Vec3::Y,
+        5 => Vec3::NEG_Y,
+        6 => Vec3::Z,
         _ => outward,
     };
     let sp = &c.direction_spread;
@@ -1376,6 +1378,60 @@ mod tests {
         assert!(
             *min as f32 > 0.6 * mean && (*max as f32) < 1.4 * mean,
             "near counts {min}..{max}, mean {mean}"
+        );
+    }
+
+    /// #60: InitialDirection 6 is the node's local +Z and 1 is world up, whatever the node's
+    /// turn. A node yawed 90 degrees and pitched sends its 6 along its own Z and its 1 straight up.
+    #[test]
+    fn initial_direction_six_is_local_north_and_one_is_global_up() {
+        let mut rnd = Rnd { seed: 3, k: 0 };
+        let frame = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2) * Quat::from_rotation_x(0.3);
+        let world = |dir: i64, rnd: &mut Rnd| {
+            let tree = json!({"type":2200,"configs":[{"appearance":{"type":603},
+                "emitterShape":{"type":400,"direction":dir}}],"nodes":[]});
+            let node = NodeDef::new(&tree);
+            let c = node.cfg.as_ref().unwrap();
+            frame * emit_point(c, 0.0, rnd, frame).1
+        };
+        assert!(world(6, &mut rnd).distance(frame * Vec3::Z) < 1e-5);
+        assert!(world(1, &mut rnd).distance(Vec3::Y) < 1e-5);
+        assert!(world(2, &mut rnd).distance(Vec3::NEG_Y) < 1e-5);
+        assert!(world(3, &mut rnd).distance(Vec3::Z) < 1e-5);
+        assert!(world(4, &mut rnd).distance(frame * Vec3::Y) < 1e-5);
+    }
+
+    /// #60: the Outskirts blowing snow 839543 (start 3, beside the stone wall) blows its 8.3 m/s
+    /// streaks along its node's Z, not up. With direction 6 read as world up they shot straight
+    /// up at 8 to 60 m/s.
+    #[test]
+    fn blowing_snow_blows_sideways_not_up() {
+        let mut lib = FxrLib::scan(&sekiro_sim::cache::root());
+        let def = lib.compiled(839543).expect("blowing snow 839543 installed");
+        let mut n = make_node(&mut lib, &def, 1, 0).unwrap();
+        let dt = 1. / 30.;
+        let streaks = |n: &NodeInst| {
+            let s = &n.children[0].children[0];
+            s.particles
+                .iter()
+                .map(|p| (p.seed, s.world.transform_point(p.pos)))
+                .collect::<HashMap<_, _>>()
+        };
+        for _ in 0..15 {
+            step_node(&mut n, &mut lib, Transform::IDENTITY, dt, false);
+        }
+        let before = streaks(&n);
+        step_node(&mut n, &mut lib, Transform::IDENTITY, dt, false);
+        let after = streaks(&n);
+        let v: Vec<Vec3> = after
+            .iter()
+            .filter_map(|(k, p)| before.get(k).map(|q| (*p - *q) / dt))
+            .collect();
+        assert!(v.len() > 20, "{} streaks", v.len());
+        let mean = v.iter().sum::<Vec3>() / v.len() as f32;
+        assert!(
+            (7.0..10.0).contains(&mean.length()) && mean.xz().length() > 2.0 * mean.y.abs(),
+            "mean streak velocity {mean:?}"
         );
     }
 }
