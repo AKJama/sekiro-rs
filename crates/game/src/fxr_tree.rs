@@ -397,6 +397,9 @@ pub struct NodeInst {
     detached: Option<Transform>,
     /// NodeTranslation (15): the offset applied so far.
     offset: Vec3,
+    /// NodeAcceleration (1 and kin): the speed gained along Z and the downward speed, each the
+    /// running sum of its acceleration curve over the node's life.
+    gained: Vec2,
 }
 
 pub struct Config {
@@ -539,6 +542,7 @@ pub fn make_node(lib: &mut FxrLib, node: &NodeDef, seed: u32, depth: u32) -> Opt
         finished: false,
         detached: None,
         offset: Vec3::ZERO,
+        gained: Vec2::ZERO,
     })
 }
 
@@ -676,14 +680,19 @@ pub fn step_node(n: &mut NodeInst, lib: &mut FxrLib, parent: Transform, dt: f32,
         match mv[Field::Type].as_i64() {
             Some(1) | Some(106) | Some(122) | Some(83) | Some(120) => {
                 let ty = mv[Field::Type].as_i64();
+                // Accelerations are integrated, not multiplied by the age: a curve that swings
+                // between +a and -a (the unlit idol's embers 1010 bob on accelerationY +-0.25
+                // every 6 s) moves the node back and forth, where a(t) * t carried them metres
+                // up and down the wall by their 22 s end (#250). Constant ones are unchanged.
                 let v = if ty == Some(120) {
                     scalar(mv, Field::SpeedZ, 0.0, &mut rnd, 0.0)
                         * scalar(mv, Field::SpeedMultiplierZ, active_t, &mut rnd, 1.0)
                 } else {
-                    scalar(mv, Field::SpeedZ, 0.0, &mut rnd, 0.0)
-                        + scalar(mv, Field::AccelerationZ, active_t, &mut rnd, 0.0)
-                            * scalar(mv, Field::AccelerationMultiplierZ, active_t, &mut rnd, 1.0)
-                            * active_t
+                    let v = scalar(mv, Field::SpeedZ, 0.0, &mut rnd, 0.0) + n.gained.x;
+                    n.gained.x += scalar(mv, Field::AccelerationZ, active_t, &mut rnd, 0.0)
+                        * scalar(mv, Field::AccelerationMultiplierZ, active_t, &mut rnd, 1.0)
+                        * dt;
+                    v
                 };
                 // 83: a random turn of up to maxTurnAngle every turnInterval s.
                 let every = scalar(mv, Field::TurnInterval, active_t, &mut rnd, 0.0);
@@ -702,8 +711,9 @@ pub fn step_node(n: &mut NodeInst, lib: &mut FxrLib, parent: Transform, dt: f32,
                 }
                 let fwd = n.local.rotation * Vec3::Z;
                 n.local.translation += fwd * v * dt;
-                n.local.translation.y -=
-                    scalar(mv, Field::AccelerationY, active_t, &mut rnd, 0.0) * active_t * dt;
+                // accelerationY is downward.
+                n.local.translation.y -= n.gained.y * dt;
+                n.gained.y += scalar(mv, Field::AccelerationY, active_t, &mut rnd, 0.0) * dt;
             }
             Some(15) => {
                 let o = game_vec(prop(
@@ -1433,5 +1443,58 @@ mod tests {
             (7.0..10.0).contains(&mean.length()) && mean.xz().length() > 2.0 * mean.y.abs(),
             "mean streak velocity {mean:?}"
         );
+    }
+
+    /// Steps an installed effect at 30 Hz for `secs` at a yawed transform and returns the
+    /// particles' greatest height above and below the emitter and horizontal distance from it.
+    fn effect_spread(id: i64, secs: f32) -> (f32, f32, f32, usize) {
+        fn walk(n: &NodeInst, at: Vec3, out: &mut (f32, f32, f32, usize)) {
+            for p in &n.particles {
+                let w = if p.attached {
+                    n.world.transform_point(p.pos)
+                } else {
+                    p.pos
+                } - at;
+                out.0 = out.0.max(w.y);
+                out.1 = out.1.min(w.y);
+                out.2 = out.2.max(w.xz().length());
+                out.3 += 1;
+            }
+            for c in &n.children {
+                walk(c, at, out);
+            }
+        }
+        let mut lib = FxrLib::scan(&sekiro_sim::cache::root());
+        let def = lib.compiled(id).expect("effect installed");
+        let mut n = make_node(&mut lib, &def, 1, 0).unwrap();
+        let at = Vec3::new(10., 2., -5.);
+        let place = Transform::from_translation(at).with_rotation(Quat::from_rotation_y(0.7));
+        let mut out = (0f32, 0f32, 0f32, 0usize);
+        for _ in 0..(secs * 30.) as usize {
+            step_node(&mut n, &mut lib, place, 1. / 30., false);
+            walk(&n, at, &mut out);
+        }
+        out
+    }
+
+    /// #250: the unlit idol's embers (1010) bob around the idol on a looping accelerationY of
+    /// +-0.25 and stay within about 2 m of it. Read as a(t) * t, the bob grew with the 22 s
+    /// life of each ember node and carried them 6 m up and 3.6 m down the nearby wall.
+    #[test]
+    fn unlit_idol_embers_stay_at_the_idol() {
+        let (up, down, out, count) = effect_spread(1010, 40.);
+        assert!(count > 1000, "{count} particle samples");
+        assert!(
+            up < 2.5 && down > -2.0 && out < 2.0,
+            "spread {up} up, {down} down, {out} out"
+        );
+    }
+
+    #[test]
+    #[ignore = "prints the spread of a few common effects"]
+    fn print_effect_spreads() {
+        for id in [1010, 1011, 300163, 839530, 61] {
+            println!("{id}: {:?}", effect_spread(id, 40.));
+        }
     }
 }
