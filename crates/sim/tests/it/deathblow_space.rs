@@ -237,13 +237,20 @@ fn castle_case(case: &str) {
         hit |= r.deathblow.hit;
         let positions = [duel.player.body.position, duel.enemy.body.position];
         if case == "open" && r.deathblow.hit {
-            // Recorded before this fix, using these installed clips and this setup.
-            // Open-floor horizontal placement must remain unchanged for both actors.
+            // Open-floor horizontal placement must remain unchanged for both actors:
+            // the collision-safe pair placement must not move a pair that has room.
+            // Re-recorded after 86b8434 (#109): its RustSekiro root-motion blend-in and
+            // approach-side body separation start the pair 0.17 m further apart before
+            // the deathblow, so the hit lands about 0.35 m from the f99e8b7 values
+            // ([106.79679, 230.90317], [107.11729, 229.8592]); the pair placement did not change.
             for (p, expected) in positions
                 .iter()
-                .zip([[106.79679, 230.90317], [107.11729, 229.8592]])
+                .zip([[106.65166, 231.23984], [106.91727, 230.15114]])
             {
-                assert!((p[0] - expected[0]).hypot(p[2] - expected[1]) < 0.002);
+                assert!(
+                    (p[0] - expected[0]).hypot(p[2] - expected[1]) < 0.002,
+                    "open-floor hit position {p:?}, expected x/z {expected:?}"
+                );
             }
         }
         writeln!(
