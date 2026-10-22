@@ -877,7 +877,9 @@ impl CombatRules {
             attacker_posture_damage: attacker_damage,
             deflected: deflect,
             guarded: outcome.guarded(),
-            posture_broke: broke || attacker_broke,
+            // A guard break empties the defender's posture just as a direct hit's break does
+            // (`b6e6a0` keeps them as separate flags, +0x1C4 and +0x1C6, that pick the reaction code).
+            posture_broke: broke || guard_broken || attacker_broke,
             knockback,
             hit_stop,
         }

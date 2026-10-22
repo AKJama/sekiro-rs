@@ -619,7 +619,8 @@ pub struct HitResult {
     pub attacker_posture_damage: i32,
     pub deflected: bool,
     pub guarded: bool,
-    /// The defender (direct hit) or the attacker (deflected or blocked) had its posture broken.
+    /// The defender (direct hit, or a block that broke its guard) or the attacker (deflected or
+    /// blocked) had its posture broken.
     pub posture_broke: bool,
     /// The push the defender takes (see [`crate::combat::knockback`]).
     pub knockback: Option<Knockback>,
