@@ -20,6 +20,11 @@ Sight/camera rays traverse only the horizontal grid cells they cross, preserving
 Map sound rows, FMOD project metadata, active character banks and the hit-effect tables are prepared behind the loading screen; sound lookups and raw parameter data are shared across NPC rows.
 Character-bank event data follows NPC activation and is released when no actor of that kind remains active, before cue playback.
 Acquisition uses the think row's normal sight cone, collision occlusion and sight-forget duration, plus damage and nose distance.
+Once a foe has Wolf as its target it senses with the row's perceive cone instead (issue #216), as the exe's cone test `FUN_14061bb70` does when its sight context's +0x56 flag is set.
+Both cones follow the exe's geometry, ported from FwLo's RustSekiro (`src/stealth.rs`, `in_cone`): the eye is the foe's feet pushed `eye_BackOffsetDist` behind along its facing (`FUN_14061af30`), and Wolf's feet must lie from `eye_BeginDist` to `eye_dist` plus his radius from it, inside the yaw and elevation limits.
+For the Outskirts soldiers (back offset 4 m, perceive begin 3 m, +-60 degrees up and down) a fighting foe keeps Wolf in sight at arm's length and even about a metre behind it, where the old head-to-chest test lost him under about 1.5 m and dropped out of battle after 15 s.
+Still not modelled: Wolf's SpEffect sight cuts (crouch, hanging, wall hug), the around cone and its caution meter, light level, and the exact sight-ray points (the ray still runs from 0.8 of the foe's height to 1 m above Wolf's feet).
+The perceive flag is taken as "has a target", which is FwLo's reading of the exe's targeting flag 0x100000 (set in FIND and BATTLE); it was not traced further here.
 Native caution accumulation, hearing, bush concealment, navigation and platoon roles remain incomplete.
 PatrolInfo routes use FwLo's documented loop, ping-pong and one-way stepping and Lua arrival actions, but shaped arrival regions and type-5 home-pose updates remain incomplete.
 Other foes pause during a paired throw to preserve the single player's throw ownership.

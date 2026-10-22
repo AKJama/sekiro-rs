@@ -1,6 +1,58 @@
 //! Independent combat kernels sharing one authoritative Wolf, like the installed boss adds.
 use super::*;
 
+/// One NpcThinkParam sight set: `eye_*_normal`, or `eye_*_perceive` once the foe has a target.
+///
+/// The exe's cone test (FUN_14061bb70, eye point FUN_14061af30): the eye is the observer's
+/// feet pushed `back` metres behind along its facing, and the target's feet must lie from
+/// `begin` to `dist` plus the target's radius from it, within `left`/`right` degrees of yaw
+/// and `down`/`up` degrees of elevation.
+/// Ported from FwLo's RustSekiro (`src/stealth.rs`, `in_cone`), without the SpEffect sight cuts.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SightCone {
+    pub dist: f32,
+    pub begin: f32,
+    pub back: f32,
+    pub up: f32,
+    pub down: f32,
+    pub left: f32,
+    pub right: f32,
+}
+
+impl SightCone {
+    /// The `set` ("normal", "perceive" or "around") of a think row read through `field`.
+    pub fn from_think(set: &str, field: impl Fn(&str) -> f32) -> Self {
+        let get = |name: &str| field(&format!("eye_{name}_{set}"));
+        Self {
+            dist: get("dist"),
+            begin: get("BeginDist"),
+            back: get("BackOffsetDist"),
+            up: get("ang_upper"),
+            down: get("ang_bottom"),
+            left: get("ang_left"),
+            right: get("ang_right"),
+        }
+    }
+
+    /// Whether a target with its feet at `target` and physics radius `radius` is inside the
+    /// cone of an observer with its feet at `feet` facing `yaw`.
+    pub fn contains(&self, feet: glam::Vec3, yaw: f32, target: glam::Vec3, radius: f32) -> bool {
+        let fwd = crate::arena::forward(yaw);
+        let d = target - (feet - fwd * self.back);
+        let d2 = d.length_squared();
+        let far = radius + self.dist;
+        if d2 < self.begin * self.begin || d2 >= far * far {
+            return false;
+        }
+        let flat = d.with_y(0.0);
+        // Positive to the observer's left, the way yaw turns.
+        let side = flat.dot(glam::Vec3::Y.cross(fwd));
+        let yaw = side.atan2(flat.dot(fwd)).to_degrees();
+        let elevation = d.y.atan2(flat.length()).to_degrees();
+        (-self.right..=self.left).contains(&yaw) && (-self.down..=self.up).contains(&elevation)
+    }
+}
+
 /// Our scheduling policy, not a recovered engine LOD distance.
 /// Activation/deactivation still comes from NpcParam (100 m for a zero border).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -395,25 +447,24 @@ impl Duel {
                 };
                 let field =
                     |name: &str| ai.state.think.fields.get(name).copied().unwrap_or(0.0) as f32;
-                let eye = glam::Vec3::from_array(d.enemy.body.position)
-                    + glam::Vec3::Y * d.fighters[1].height * 0.8;
+                let feet = glam::Vec3::from_array(d.enemy.body.position);
+                let eye = feet + glam::Vec3::Y * d.fighters[1].height * 0.8;
                 let delta = wolf + glam::Vec3::Y - eye;
                 let horizontal = delta.x.hypot(delta.z);
-                let angle = crate::input::angle_diff(
-                    d.enemy.yaw_to(self.player.body.position),
-                    d.enemy.body.yaw,
-                );
-                let elevation = delta.y.atan2(horizontal).to_degrees();
                 foe.search_left -= dt;
                 if foe.search_left <= 0.0 {
                     // FwLo, stealth.rs:333-335 / exe FUN_140623ca0: 0.2 + rand*0.2 s.
                     // Separate sensory RNG keeps the Lua battle RNG sequence unchanged.
                     foe.search_left = 0.2 + foe.search_rng.next_f32() * 0.2;
-                    foe.sees = horizontal <= field("eye_dist_normal")
-                        && angle.to_degrees() >= -field("eye_ang_right_normal")
-                        && angle.to_degrees() <= field("eye_ang_left_normal")
-                        && elevation >= -field("eye_ang_bottom_normal")
-                        && elevation <= field("eye_ang_upper_normal")
+                    // With Wolf as its target (FIND/BATTLE) the exe senses with the perceive
+                    // set instead of the normal one (FUN_14061bb70 on sight context +0x56).
+                    let set = if foe.memory > 0.0 {
+                        "perceive"
+                    } else {
+                        "normal"
+                    };
+                    let cone = SightCone::from_think(set, field);
+                    foe.sees = cone.contains(feet, d.enemy.body.yaw, wolf, d.fighters[0].radius)
                         && world
                             .raycast(eye, delta.normalize_or_zero(), delta.length())
                             .is_none();
