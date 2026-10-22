@@ -20,7 +20,15 @@ struct Placement {
     weather: bool,
     camera_relative: bool,
     activation: Option<crate::map::visibility::VisibilityPart>,
+    /// A Sculptor's Idol's idle effect, by the idol's bonfire entity: it shows only while the
+    /// idol's lit state matches (#154).
+    idol: Option<(i32, sekiro_sim::map_effects::IdolIdle)>,
 }
+
+/// The bonfire entities of the play world's idols Wolf has lit (knelt at) so far: their unlit
+/// idle effect gives way to the lit one, the flame above the idol's hands.
+#[derive(Resource, Default)]
+pub(crate) struct FoundIdols(pub std::collections::BTreeSet<i32>);
 
 #[derive(Resource)]
 struct MapEffects {
@@ -106,6 +114,7 @@ pub(crate) fn install(app: &mut App, dir: &Path) -> Result<()> {
                 weather: weather && camera_relative,
                 camera_relative,
                 activation: p.activation.and_then(|name| parents.get(&name).cloned()),
+                idol: p.idol.map(|idle| (p.entity, idle)),
             });
         }
         fx.regions.insert(block.into(), catalog.regions);
@@ -160,6 +169,7 @@ fn update(
     clock: Res<Time<Virtual>>,
     real: Res<Time<Real>>,
     blocks: Option<Res<crate::map::visibility::VisibilityBlocks>>,
+    found: Option<Res<FoundIdols>>,
 ) {
     if clock.is_paused()
         && blocks
@@ -202,8 +212,12 @@ fn update(
                         && contains(regions, i, point, 0)
                 })
             });
+        let idle = p.idol.is_none_or(|(entity, idle)| {
+            idle.shows(found.as_ref().is_some_and(|f| f.0.contains(&entity)))
+        });
         let on = !disabled
             && p.enabled
+            && idle
             && ready
             && activation
             && !indoors

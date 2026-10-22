@@ -21,7 +21,32 @@ pub struct Placement {
     pub dummy: Option<i32>,
     pub param: Option<i32>,
     pub source: Option<EffectWrite>,
+    /// A Sculptor's Idol's idle effect: the object's idle clip (unlit or lit) plays it, so it
+    /// shows only while the idol's lit state matches.
+    pub idol: Option<IdolIdle>,
 }
+
+/// Which idle clip of a Sculptor's Idol (a registered bonfire object) plays an effect: the
+/// unlit idle ([`UNLIT_IDLE`], the embers circling the idol) or the lit one ([`LIT_IDLE`], the
+/// flame above its hands).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct IdolIdle {
+    /// The lit idle's effect (else the unlit one's).
+    pub lit: bool,
+    /// The story lights the idol already (its bonfire flag is on or it holds kindling).
+    pub lit_at_start: bool,
+}
+
+impl IdolIdle {
+    /// Whether the effect shows, `found` saying whether Wolf has lit the idol in play.
+    pub fn shows(&self, found: bool) -> bool {
+        self.lit == (self.lit_at_start || found)
+    }
+}
+
+/// The idol objects' idle clips (o005000, o005500, o115040 TAE): 1 unlit, 11 lit.
+pub const UNLIT_IDLE: i64 = 1;
+pub const LIT_IDLE: i64 = 11;
 
 #[derive(Debug, Serialize)]
 pub struct Catalog {
@@ -63,6 +88,7 @@ pub fn load(cache: &Path, map: &str, state: &WorldState) -> Result<Catalog, Stri
                 dummy: None,
                 param: None,
                 source,
+                idol: None,
             });
         }
         let mut models = BTreeMap::new();
@@ -88,6 +114,7 @@ pub fn load(cache: &Path, map: &str, state: &WorldState) -> Result<Catalog, Stri
                                     row.i32(&format!("dmypolyId_{slot}"))?,
                                     Some(row_id),
                                     None,
+                                    None,
                                 ));
                             }
                         }
@@ -109,45 +136,47 @@ pub fn load(cache: &Path, map: &str, state: &WorldState) -> Result<Catalog, Stri
                 }
             }
             for (dummy, write) in scripted {
-                requests.push((write.effect, dummy, None, Some(write)));
+                requests.push((write.effect, dummy, None, Some(write), None));
             }
             if let Some(bonfire) = state.bonfires.get(&part.entity_id) {
-                let animation = if bonfire.kindling > 0 || state.flags.contains(&bonfire.flag) {
-                    11
-                } else {
-                    1
-                };
+                let lit_at_start = bonfire.kindling > 0 || state.flags.contains(&bonfire.flag);
                 let path = cache.join(format!(
                     "raw/obj/{0}.objbnd.d/{0}.anibnd.d/{0}.tae",
                     model.name
                 ));
                 let tae = sekiro_formats::tae::parse(&std::fs::read(path)?)?;
-                if let Some(idle) = tae.animations.iter().find(|a| a.id == animation) {
+                // Both idles: lighting the idol in play swaps the unlit one for the lit one.
+                for (animation, lit) in [(UNLIT_IDLE, false), (LIT_IDLE, true)] {
+                    let Some(idle) = tae.animations.iter().find(|a| a.id == animation) else {
+                        continue;
+                    };
                     for event in idle.events.iter().filter(|e| {
                         e.start <= 0. && matches!(e.event_type, 96 | 99 | 100 | 118..=121)
                     }) {
-                        if let Some(decoded) = template.decode(event) {
-                            let int = |field| {
-                                decoded.field(field).and_then(|v| v.as_int()).unwrap_or(-1) as i32
-                            };
-                            let effect = int("FFXID");
-                            let dummy = int("DummyPolyID");
-                            if effect > 0 {
-                                requests.push((
-                                    effect,
+                        let Some(decoded) = template.decode(event) else {
+                            continue;
+                        };
+                        let int = |field| {
+                            decoded.field(field).and_then(|v| v.as_int()).unwrap_or(-1) as i32
+                        };
+                        let effect = int("FFXID");
+                        let dummy = int("DummyPolyID");
+                        if effect > 0 {
+                            requests.push((
+                                effect,
+                                dummy,
+                                None,
+                                Some(EffectWrite {
+                                    event: bonfire.event,
+                                    slot: bonfire.slot,
+                                    instruction: bonfire.instruction,
+                                    command: 200903,
+                                    entity: part.entity_id,
                                     dummy,
-                                    None,
-                                    Some(EffectWrite {
-                                        event: bonfire.event,
-                                        slot: bonfire.slot,
-                                        instruction: bonfire.instruction,
-                                        command: 200903,
-                                        entity: part.entity_id,
-                                        dummy,
-                                        effect,
-                                    }),
-                                ));
-                            }
+                                    effect,
+                                }),
+                                Some(IdolIdle { lit, lit_at_start }),
+                            ));
                         }
                     }
                 }
@@ -162,7 +191,7 @@ pub fn load(cache: &Path, map: &str, state: &WorldState) -> Result<Catalog, Stri
                 models.insert(model.name.clone(), flver::parse(&data)?);
             }
             let flver = &models[&model.name];
-            for (effect, dummy, param, source) in requests {
+            for (effect, dummy, param, source, idol) in requests {
                 let mut local = glam::Vec3::ZERO;
                 if dummy >= 0 {
                     let Some(d) = flver
@@ -208,6 +237,7 @@ pub fn load(cache: &Path, map: &str, state: &WorldState) -> Result<Catalog, Stri
                     dummy: Some(dummy),
                     param,
                     source,
+                    idol,
                 });
             }
         }

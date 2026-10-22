@@ -260,6 +260,8 @@ pub(super) fn install(app: &mut App, idols: Idols) {
         .init_resource::<Row>()
         .init_resource::<Pointed<usize>>()
         .init_resource::<crate::menu::Modal>()
+        .init_resource::<crate::map_fx::FoundIdols>()
+        .add_systems(Update, found_idols)
         .add_systems(
             Startup,
             move |commands: Commands, fonts: Res<GameFonts>, art: Res<MenuArt>| {
@@ -277,6 +279,18 @@ pub(super) fn install(app: &mut App, idols: Idols) {
             Update,
             (show, guide_label, hold_pause, free_cursor).run_if(crate::menu::active),
         );
+}
+
+/// Hands the map's effects the idols Wolf has lit, so each one's idle effect follows its
+/// state: the unlit embers, then the flame above its hands (#154). Logged when one is lit.
+fn found_idols(sim: NonSend<Sim>, mut found: ResMut<crate::map_fx::FoundIdols>) {
+    let lit = (0..sim.duel.idol_spots().len()).filter(|&i| sim.duel.idol_lit(i));
+    for i in lit {
+        let entity = sim.duel.idol_spots()[i].entity;
+        if found.0.insert(entity) {
+            info!("idol {entity}: lit, its idle effect is the lit one now");
+        }
+    }
 }
 
 /// The guide and the menu, hidden, with their texts from `events` (イベントテキスト).
