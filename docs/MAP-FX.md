@@ -345,7 +345,7 @@ The cause was the emission direction, in two places.
 
 Result at spot-056: the flame rises about 0.5 m above the coals with sparks above it, as in the reference (the coals themselves are still dark).
 At the 800140 pile the flames are about 1 m tall, which is what the data gives (height 1 to 2 times scale 0.56, plus 0.375 m/s for 1.5 s).
-Disc emitters (shape 401) still emit radially for direction 0; with the corrected rotation the 800140 smoke discs now rise through gravity and speed, the radial default is unverified.
+Disc emitters (shape 401) still emitted radially for direction 0 here; superseded by #264 below (a disk's own direction is its +Z).
 Open: spark sprites (width 0.05 times 0.56, texture 3000, rgb multiplier 15) are still fainter and fewer than in the reference, possibly a minimum screen size or bloom difference in the game.
 
 ## Emitter direction, 2026-10-22 (#60)
@@ -359,6 +359,19 @@ The InitialDirection enum (reference/fxr, as FwLo's RustSekiro `docs/kb/fxr.md` 
 The snow now blows along its region's yaw at about 8 m/s, and the 6-driven fog banks (839520, 839540, 839541, 839547) drift sideways at 0.3 to 1 m/s instead of rising.
 The torch 300163 and brazier 839530 nodes that motivated the world-up reading still rise through their negative gravity; their 6 nodes are slow (0.075 to 0.4 m/s).
 Open: object dummy orientation (FLVER dummy forward / upward) is not applied to map object effects, only the dummy position; the brazier dummy 200 faces +Z with +Y up, so it does not change these effects.
+
+## Disk emitter direction, 2026-10-22 (#264)
+
+Symptom: the night ground fire on Ashina Outskirts (`--spawn -222.37,-59.0,111.03,270,0 --hour 1`) spread its smoke flat along the ground; in the game it rises as a near-vertical column.
+The fire is the burning body pile o116060 (`o116060_2000`, ModelSfxParam 116060000, dummy 200) playing FXR 800140; the same effect is on two `SFX:焼死体の山` regions.
+Its smoke nodes are disk emitters (shape 401, radius 0.375, direction 0) turned +90 about X, with an 11.25 degree cone, 1.27 m/s and gravity -0.25 (rising), lasting 18 to 20 s.
+`emit_point` sent a disk's direction 0 out from the disk's centre, which the +90 turn lays flat, so the smoke spread sideways at 1.27 m/s.
+The reference/fxr enum (EvenTorset's fxr, `src/enums/InitialDirection.yml`) gives a point, disk or rectangle emitter's own direction as LocalNorth (+Z), a sphere's as out from its centre and a cylinder's as out from its axis.
+The disk now emits along its +Z, which the +90 turn stands upright.
+Headless, 10 s at the placement, free particles older than 1 s: before 1.9 m up for 4.3 m out from the fire; after 6.1 m up for 0.7 m out.
+The torch 300163, brazier 839530 and blowing snow 839542 do not use disk emitters and are unchanged.
+The brazier's smoke drifts 1.3 m up for 0.9 m sideways: its nodes are turned +45 about X under a node emitter (2202) with direction 3, global north, so every brazier leans the same world way; not yet compared with the game.
+Open: a box emitter's direction 0 (a random local axis inside, the face normal outside, per the same enum) is still read as +Z.
 
 ## Soft sprite pull and uniformScale, 2026-10-22 (#78)
 

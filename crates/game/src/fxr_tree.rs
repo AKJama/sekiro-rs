@@ -565,12 +565,15 @@ fn emit_point(c: &Config, t: f32, rnd: &mut Rnd, frame: Quat) -> (Vec3, Vec3) {
     let st = shape[Field::Type].as_i64().unwrap_or(400);
     let dirmode = int(shape, Field::Direction, 0);
     let s = |k: Field, d: f32, rnd: &mut Rnd| scalar(shape, k, t, rnd, d);
+    // The shape's own direction (InitialDirection 0, reference/fxr enums/InitialDirection.yml):
+    // the node's +Z (LocalNorth) for a point, disk or rectangle, out from the centre for a
+    // sphere and out from the axis for a cylinder. A disk emitted radially until #264, so the
+    // ground fire 800140's smoke discs, stood up by their +90 X turn, spread flat along the ground.
     let (pos, outward) = match st {
         401 => {
             let r = s(Field::Radius, 1.0, rnd) * rnd.next().sqrt();
             let a = rnd.next() * std::f32::consts::TAU;
-            let p = Vec3::new(a.cos() * r, a.sin() * r, 0.0);
-            (p, p.normalize_or(Vec3::Z))
+            (Vec3::new(a.cos() * r, a.sin() * r, 0.0), Vec3::Z)
         }
         403 => {
             let r = s(Field::Radius, 1.0, rnd);
@@ -1488,6 +1491,81 @@ mod tests {
             up < 2.5 && down > -2.0 && out < 2.0,
             "spread {up} up, {down} down, {out} out"
         );
+    }
+
+    /// Steps an installed effect at 30 Hz for `secs` at `place` and returns the mean offset from
+    /// the emitter of its free (unattached) particles older than 1 s, as (mean up, mean
+    /// horizontal distance, mean horizontal offset length, samples): smoke that rises has its up
+    /// well above its horizontal distance.
+    fn free_particle_drift(id: i64, secs: f32, place: Transform) -> (f32, f32, f32, usize) {
+        fn walk(n: &NodeInst, at: Vec3, sum: &mut (Vec3, f32, usize)) {
+            for p in n.particles.iter().filter(|p| !p.attached && p.age > 1.0) {
+                let w = p.pos - at;
+                sum.0 += w;
+                sum.1 += w.xz().length();
+                sum.2 += 1;
+            }
+            for c in &n.children {
+                walk(c, at, sum);
+            }
+        }
+        let mut lib = FxrLib::scan(&sekiro_sim::cache::root());
+        let def = lib.compiled(id).expect("effect installed");
+        let mut n = make_node(&mut lib, &def, 1, 0).unwrap();
+        let mut sum = (Vec3::ZERO, 0f32, 0usize);
+        for f in 0..(secs * 30.) as usize {
+            step_node(&mut n, &mut lib, place, 1. / 30., false);
+            if f % 6 == 0 {
+                walk(&n, place.translation, &mut sum);
+            }
+        }
+        let k = sum.2.max(1) as f32;
+        (sum.0.y / k, sum.1 / k, (sum.0 / k).xz().length(), sum.2)
+    }
+
+    /// The Outskirts night ground fire (o116060 dummy 200, FXR 800140) at its placement.
+    fn ground_fire_place() -> Transform {
+        Transform::from_xyz(-219.47, -59.28, 107.51)
+            .with_rotation(Quat::from_array([0.011, -0.421, -0.024, 0.907]).normalize())
+    }
+
+    /// #264: a disk emitter's own direction (InitialDirection 0) is the node's +Z, as for a
+    /// point or a rectangle, not out from the disk's centre.
+    #[test]
+    fn disk_emits_along_its_normal() {
+        let tree = json!({"type":2200,"configs":[{"appearance":{"type":603},
+            "emitterShape":{"type":401,"direction":0,"radius":2.0}}],"nodes":[]});
+        let node = NodeDef::new(&tree);
+        let c = node.cfg.as_ref().unwrap();
+        let mut rnd = Rnd { seed: 5, k: 0 };
+        for _ in 0..8 {
+            let (pos, dir) = emit_point(c, 0.0, &mut rnd, Quat::IDENTITY);
+            assert!(
+                pos.z.abs() < 1e-6 && dir.distance(Vec3::Z) < 1e-6,
+                "{pos} {dir}"
+            );
+        }
+    }
+
+    /// #264: the ground fire 800140's smoke discs (turned +90 about X to face up, 1.27 m/s,
+    /// rising gravity) climb as a column, as in the game. With the disk emitting out from its
+    /// centre they spread 4.3 m along the ground for 1.9 m of rise.
+    #[test]
+    fn ground_fire_smoke_rises() {
+        let (up, out, _, count) = free_particle_drift(800140, 10., ground_fire_place());
+        assert!(count > 500, "{count} particle samples");
+        assert!(up > 4.0 && up > 4.0 * out, "smoke {up} m up, {out} m out");
+    }
+
+    #[test]
+    #[ignore = "prints the free particles' drift of a few map effects"]
+    fn print_effect_drifts() {
+        for id in [800140, 300163, 839530, 839542, 839543] {
+            println!(
+                "{id}: {:?}",
+                free_particle_drift(id, 10., ground_fire_place())
+            );
+        }
     }
 
     #[test]
