@@ -25,7 +25,7 @@ Both cones follow the exe's geometry, ported from FwLo's RustSekiro (`src/stealt
 For the Outskirts soldiers (back offset 4 m, perceive begin 3 m, +-60 degrees up and down) a fighting foe keeps Wolf in sight at arm's length and even about a metre behind it, where the old head-to-chest test lost him under about 1.5 m and dropped out of battle after 15 s.
 Still not modelled: Wolf's SpEffect sight cuts (crouch, hanging, wall hug), the around cone and its caution meter, light level, and the exact sight-ray points (the ray still runs from 0.8 of the foe's height to 1 m above Wolf's feet).
 The perceive flag is taken as "has a target", which is FwLo's reading of the exe's targeting flag 0x100000 (set in FIND and BATTLE); it was not traced further here.
-Native caution accumulation, hearing, bush concealment, navigation and platoon roles remain incomplete.
+Native caution accumulation, bush concealment, navigation and platoon roles remain incomplete; hearing is described under issue #218 below.
 PatrolInfo routes use FwLo's documented loop, ping-pong and one-way stepping and Lua arrival actions, but shaped arrival regions and type-5 home-pose updates remain incomplete.
 Other foes pause during a paired throw to preserve the single player's throw ownership.
 Player projectiles retain per-foe contact histories rather than a shared cross-foe first-impact ordering, and population FXR presentation remains incomplete.
@@ -321,7 +321,7 @@ Our unknown-method default returned 0, so NonBattleAct queued a 20 s `WaitWithAn
 184 of the 188 Outskirts enemy parts have no small act; the other four (indices 0, 1 and 2) point at rows of a table the exe reads by index 0x14 from a per-character resource (`FUN_141094ff0`), which is not identified, so they also read -1 here, as in FwLo's `src/ai.rs`.
 `Stay(life, 0, POINT_INIT_POSE)` faces its third argument (goal parameter 1), as FwLo's `Native::Stay` reads it, not parameter 0 as `Wait` does.
 POINT_INIT_POSE is the spawn point here, not the spawn facing, and an NPC in its idle state does not turn in place (its TAE turn speed is 0), so a guard moved off its facing does not turn back to it.
-Hearing (`GetLatestSoundTargetID` reads 0) and the caution state are not implemented for map foes, so guards react only to sight, `nose_dist` and damage.
+Hearing and the caution state are described under issue #218 below.
 
 ## Walking home after losing Wolf, issue #217
 
@@ -333,9 +333,30 @@ With no current point it is the distance to the last point of an ended route, or
 The exe's first case, a segment of an active event move area (AI +0x9160, `FUN_140630550`), is not modelled.
 FwLo's `src/ai.rs` uses the flat distance from home there and marks it a gap.
 `BackToHome` (goal 4) used to run as MoveToSomewhere towards its parameter 0, which `BackToHome_With_Parry` sets to TARGET_ENE_0, so with Wolf lost it did not move.
-It now walks to the initial position and succeeds within 1 m on the ground plane, FwLo's rule from `src/ai.rs`; the exe's arrival radius and its path following are not traced.
+It now walks to the initial position and succeeds within 1 m, FwLo's rule from `src/ai.rs`; the exe's arrival radius and its path following are not traced.
+The 1 m is measured in 3D, as `GetMovePointEffectRange` measures it: on the ground plane a foe could stop just inside 1 m while a step in the floor put it just over 1 m in 3D, and NonBattleAct then sent it home again on every tick, so it stood without a goal.
 
-## Wall push-out between opposing faces, issue #176
+## Hearing and caution, issue #218
+
+Map foes hear the AI sounds Wolf's clips make and turn to caution, as the shipped logic scripts expect.
+Before, `GetLatestSoundTargetID` and `GetCurrTargetType` read 0 and `ClearSoundTarget` did nothing, so a guard reacted only to sight, `nose_dist` and damage.
+Wolf's clips emit sounds with TAE event 237 (`CreateAISound2`, field `AISoundID`), rows of AiSoundParam: walk 1000 (0.5 m), crouched walk 1001 (0.25 m), run 1010 (2 m), crouched run 1011 (0.5 m), sprint 1020 and step 1100 (4 m), jump 1300 and landing 1310 (2 m), and his attacks and hits (2000 on, rank 1 "important").
+A sound is heard when the gap between the two bodies is under its reach plus the listener's `ear_dist`, the reach being the radius times the listener's rate minus `ear_soundcut_dist`, and nothing at all when that is not positive.
+That is the exe's listener (`SprjAiSoundNormalListener`, `FUN_140610470` over `FUN_140610b30` and `FUN_140610a30`), as FwLo's RustSekiro ports it (`src/enemy.rs`, `wolf_sounds`); his values and rule are used unchanged.
+The listener's rate is the product of `1 - hearingSearchEnemyCut / 100` over its SpEffects (`FUN_140bfe590`), and a row with `bSpEffectEnable` scales the radius by the maker's `hearingSearchEnemyRate` (Covert B, 150010, halves it).
+Gaps: the exe multiplies `ear_dist` by a listener factor at +0x20, taken as 1 here; the exe's body radii (listener vfunc +0x50, maker `FUN_1409efb80`) are our capsule radii; the sound's 0.25 s `lifeFrame` is the clip's event window.
+For the Outskirts soldier c1010 (ear_dist 0.1, no cut) this means a sprint or step is heard about 4.9 m between centres, a run 2.9 m, and a crouched run 1.4 m.
+A run 3.6 m off a guard's side is not heard; the exe's ranges make only a sprint or a step carry that far.
+The heard sound becomes the foe's sound target for `SoundTargetForgetTime` (150 s for c1010); a held rank 1 sound is kept over a rank 0 one, and a new sound id raises `INTERUPT_ChangeSoundTarget` (46), FwLo's `Targeting::hear` (`src/stealth.rs`).
+The exe compares a record serial for "new"; the id stands in for it here, so a footstep refreshed every step is one sound, as in FwLo's port.
+An unaware foe with a sound target is in CAUTION (1), with none in NONE (0); a change replans unless the think row's `goalAction_ToCaution` is 0 (`FUN_1406208c0`, `FUN_14061f500`, via FwLo).
+`GetCurrTargetType` answers 3 (normal enemy) with a seen target, 4 (sound) with a sound target and 0 otherwise; the indication, memory and corpse target slots are not modelled.
+In caution the scripts play the soldier's alert anim 1010 once (`_COMMON_AddStateTransitionGoal`), then search with `_COMMON_AddCautionAndFindGoal`: walk to the sound and `ConfirmCautionTarget` (5100).
+Anim 1010 adds SpEffect 200001 (non-combat caution) in its TAE, and that mark is what keeps the scripts from replaying it: the alert anims' AI-state SpEffects (200000, 200001, 200002, 200004, effectEndurance -1) now stay on the AI until another replaces them, FwLo's `ai_sp` in `src/enemy.rs`.
+Before an anim sets one the AI has none, where the exe starts on 200000.
+`ConfirmCautionTarget` follows FwLo's trace of `FUN_1405c35a0`: CommonAttack of its anim (when set), then Wait for its time; its Terminate (`FUN_1405c3770`) clears the sound target while the foe is still in caution and heard nothing new that step, so it goes back to NonBattleAct and, with the 200001 mark, plays 101000 and walks home.
+Not modelled: the around cone and caution meter, indication targets, the corpse and memory slots, and sounds made by other characters (foes do not hear each other or their own attacks).
+
 
 The slide's push-out (`CollisionWorld::push_out` in `crates/sim/src/collision.rs`) is the simulation's own rule, not the exe's Havok character proxy, which was not traced.
 It takes the shortest horizontal push that clears every contact of both body spheres at once, so the triangles' order does not matter.

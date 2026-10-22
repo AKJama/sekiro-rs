@@ -146,6 +146,9 @@ pub enum TaeKind {
         from: f32,
         to: f32,
     },
+    /// `CreateAISound2` (237): the character makes AiSoundParam sound `0` while the event is
+    /// active (Wolf's walk, run and sprint loops carry one over their whole length).
+    AiSound(i32),
     /// `SetEzStateRequestID` (231): a message to the map's event scripts while the event is
     /// active. The scripts wait for it with `IfCharacterHasEventMessage` (EMEVD 4[8]); the Owl's
     /// first deathblow get-up raises 20, which starts his phase 2 (`docs/OWL.md`).
@@ -327,6 +330,11 @@ pub struct SpEffectInfo {
     /// `vfxId`: the SpEffectVfxParam row it shows while active (48100 is the perilous-attack
     /// kanji 危, [`crate::perilous::KANJI_VFX`]); 0 or -1 for none.
     pub vfx: i32,
+    /// `hearingSearchEnemyRate`: scales the radius of the AI sounds its bearer makes (rows with
+    /// `bSpEffectEnable`), as Covert B 150010's 0.5 ([`crate::duel::population::Hearing`]).
+    pub sound_rate: f32,
+    /// `hearingSearchEnemyCut`: percent taken off its bearer's hearing (200140 "hearing 0").
+    pub hearing_cut: f32,
 }
 
 /// A velocity change for jumps (`ChrPhysicsVelocityChangeParam`).
@@ -397,6 +405,8 @@ impl TaeDb {
                         category: row.int("spCategory").unwrap_or(0) as i32,
                         priority: row.int("categoryPriority").unwrap_or(0) as i32,
                         vfx: row.i32("vfxId").unwrap_or(0),
+                        sound_rate: row.f32("hearingSearchEnemyRate").unwrap_or(1.0),
+                        hearing_cut: row.f32("hearingSearchEnemyCut").unwrap_or(0.0),
                     },
                 );
             }
@@ -591,6 +601,7 @@ fn decode(template: &Template, e: &tae::TaeEvent) -> Option<TimedEvent> {
             }
         }
         231 => TaeKind::EzStateRequest(int("EzStateRequestID")?),
+        237 => TaeKind::AiSound(int("AISoundID")?),
         932 => TaeKind::ActionUnlock(int("Unk00")?),
         // Finishing throws raise the map's player message 10 through TAE 936.
         // Cross-checked with FwLo's MIT boss-ending notes; other 936 operations remain opaque.
@@ -675,6 +686,9 @@ pub struct TaeFrame {
     pub opacity: Option<f32>,
     /// TAE 231 messages to the event scripts, active or started this tick.
     pub ezstate_requests: Vec<i32>,
+    /// `CreateAISound2` (237) AiSoundParam ids, active or started this tick: the noise the
+    /// character makes for the AI's hearing ([`crate::duel::population::Hearing`]).
+    pub ai_sounds: Vec<i32>,
     pub action_unlocks: HashSet<i32>,
     /// TAE 760 of the first playing clip that has one.
     pub reach_target: Option<ReachTarget>,
@@ -922,6 +936,7 @@ impl TaeRuntime {
                     TaeKind::ActionUnlock(id) => {
                         f.action_unlocks.insert(*id);
                     }
+                    TaeKind::AiSound(id) => f.ai_sounds.push(*id),
                     TaeKind::EzStateRequest(id) => {
                         f.ezstate_requests.push(*id);
                         if started {
@@ -1147,6 +1162,8 @@ mod fxr_event_tests {
                 category: 0,
                 priority: 0,
                 vfx: 0,
+                sound_rate: 1.0,
+                hearing_cut: 0.0,
             },
         );
         let mut runtime = TaeRuntime::default();

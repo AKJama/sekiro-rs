@@ -79,6 +79,8 @@ The engine keeps a target state on the AI: 0 none, 1 caution, 2 find, 3 battle (
 `IsChangeState` compares that field with the previous state at +0x15C (code, `6057b0`).
 The engine also marks the state with SpEffects 200001 (non-combat caution), 200002 (combat caution) and 200004 (find or battle) (SpEffectParam names), which the scripts test with `HasSpecialEffectId`.
 Ours: a visible target moves the state to find on the next logic run and to battle on the one after; the previous state is updated after each logic run, and 200004 counts as active from find on.
+For map foes a held sound target with no seen target is caution (issue #218, docs/FIDELITY.md).
+The alert anims add these marks in their TAE (c1010's 1010 adds 200001), and the last one stays on the AI until another replaces it (`AiState::ai_mark`).
 With that, the soldier plays its notice animation 401040 once and then fights.
 An enemy whose `EnemySpec::starts_in_battle` is set (the Owl, after his opening cutscene) starts in the battle state (ours, `AiBrain::start_in_battle`).
 
@@ -86,7 +88,7 @@ An enemy whose `EnemySpec::starts_in_battle` is set (the Owl, after his opening 
 
 Events (target attacking, damage, guard results, ...) are offered to the logic's and goals' `Interrupt` functions while `IsInterupt(type)` reports the event (scripts).
 Ours: the logic is offered first (`InterruptTableLogic_Common`), then the active goals from the deepest up, until one returns true.
-Two sources are wired: the rising edge of `AiWorld::parry_timing` fires `INTERUPT_FindAttack` (1) and `INTERUPT_ParryTiming` (24), and `AiWorld::damaged` fires `INTERUPT_Damaged` (2).
+Three sources are wired: the rising edge of `AiWorld::parry_timing` fires `INTERUPT_FindAttack` (1) and `INTERUPT_ParryTiming` (24), `AiWorld::damaged` fires `INTERUPT_Damaged` (2), and a new sound target fires `INTERUPT_ChangeSoundTarget` (46).
 Parry timing is the game's own signal: the player's attack animations carry TAE action flag 63 (for Wolf's first slash `a050_300000` at 0.6 s, the frames before the blade arrives), and the duel raises `parry_timing` while that flag is active on Wolf's current clip (traced by FwLo's RustSekiro, `docs/kb/guard-deflect.md`).
 The AI reads the world before Wolf steps, so it hears the flag one step after it opens.
 There is no range or facing check on the engine side: the script makes them itself.
@@ -114,7 +116,8 @@ Ours: `INTERUPT_Inside_ObserveArea` (16) is dispatched on every step a target is
 | KeepDist | Move to bring the distance inside parameters 1..2 |
 | LeaveTarget | Back away until parameter 1 metres |
 | CommonAttack, SpinStep, Parry, ApproachStep | Face the target, request action parameter 0 until the animation plays (failing after 2 s), then wait for it to end; a combo step (CommonAttack parameter 6 true) succeeds as soon as `AiWorld::combo_window` opens |
-| Team commands, caution approaches, ConfirmCautionTarget | Succeed immediately |
+| ConfirmCautionTarget | CommonAttack of parameter 0 (when set), then Wait for parameter 2 seconds; on Terminate in caution with no new sound, the sound target is cleared (FwLo's trace) |
+| Team commands, caution approaches | Succeed immediately |
 
 ## The AI object's methods
 
@@ -178,7 +181,7 @@ Both readiness goals succeed at their 1.5 s cap.
 - Interrupts other than parry timing, FindAttack, damage, observed SpEffects and watched areas (shoot impact, guard results, item use, observe regions and dummy areas).
 - Env 124 (anti-backstab cancels).
 - `GetEventRequest` answers -1 (the map events' requests to the AI are not wired).
-- Kengeki (sword clash) acts, platoon and team behaviour, navigation, sound targets, non-battle behaviour, home return.
+- Kengeki (sword clash) acts, platoon and team behaviour, navigation, indication and memory targets, non-battle behaviour.
 - The engine's exact goal update order, lifetime rules and interrupt order are ours; checking them against the native goal classes in the executable is the next step.
 - The scripts use the engine's random numbers; ours are a seeded xorshift, so act choices differ from the game run for run.
 

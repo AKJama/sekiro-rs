@@ -41,6 +41,7 @@ mod guardian_ape;
 mod gyoubu;
 mod gyoubu_arena;
 mod headless_ape;
+mod hearing;
 mod hirata_father_arena;
 mod hirata_hall_arena;
 mod hit_filters;
