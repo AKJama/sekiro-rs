@@ -1226,3 +1226,120 @@ fn ravine_branch_perch_keeps_the_map_triggers() {
         );
     }
 }
+
+/// Grapples the synthetic duel's Wolf to its rideable hook raised to `[0, 5, -10]` and steps
+/// until he stands on the perch. `None` without the cache.
+fn perched_duel() -> Option<Duel> {
+    let mut duel = synthetic_duel()?;
+    duel.player.wire.points[0].position = Some([0.0, 5.0, -10.0]);
+    for tick in 0..240 {
+        let input = InputFrame {
+            buttons: Buttons {
+                grapple: tick == 0,
+                ..Buttons::default()
+            },
+            ..InputFrame::default()
+        };
+        duel.step(&input, 1.0 / 60.0);
+    }
+    let perch = duel
+        .player
+        .wire
+        .perch
+        .expect("Wolf did not land on the perch");
+    let feet = Vec3::from(duel.player.body.position);
+    eprintln!("perched at {feet}, perch {perch}");
+    assert!(feet.distance(Vec3::new(0.0, 5.0, -10.0)) < 0.2, "{feet}");
+    assert!(duel.player.body.grounded);
+    Some(duel)
+}
+
+/// Issue #230: once Wolf walks off a perch it is no longer ground, so a later fall through the
+/// perch point (here dropped 3 m above it) lands on the terrain below. Before, `Wire::perch`
+/// stayed set for the rest of the session and held him up 5 m in the air there.
+#[test]
+fn walking_off_a_perch_clears_it() {
+    let Some(mut duel) = perched_duel() else {
+        return;
+    };
+    let walk = InputFrame::toward_world_yaw(0.0, 1.0);
+    let mut left_at = None;
+    for tick in 0..240 {
+        duel.step(&walk, 1.0 / 60.0);
+        if left_at.is_none() && duel.player.wire.perch.is_none() {
+            left_at = Some(Vec3::from(duel.player.body.position));
+            eprintln!("perch cleared at tick {tick}, {}", left_at.unwrap());
+        }
+    }
+    for _ in 0..120 {
+        duel.step(&InputFrame::default(), 1.0 / 60.0);
+    }
+    let left_at = left_at.expect("the perch was never cleared after walking off it");
+    // Cleared as he left its 0.6 m footprint, not later.
+    let off = left_at.x.hypot(left_at.z + 10.0);
+    assert!((0.6..1.2).contains(&off), "cleared {off} m from the perch");
+    assert!(duel.player.body.grounded);
+    assert!(duel.player.body.position[1].abs() < 0.05);
+
+    // Back over the perch point from above: nothing holds him there any more.
+    duel.player.body.position = [0.0, 8.0, -10.0];
+    duel.player.body.grounded = false;
+    for _ in 0..180 {
+        duel.step(&InputFrame::default(), 1.0 / 60.0);
+    }
+    let feet = Vec3::from(duel.player.body.position);
+    eprintln!("dropped over the old perch, now at {feet}");
+    assert!(duel.player.body.grounded);
+    assert!(feet.y.abs() < 0.05, "held up at {feet}");
+}
+
+/// A jump straight up from a perch lands back on it (FwLo's RustSekiro keeps the perch through
+/// a jump while Wolf stays over it), and a new grapple shot leaves it behind.
+#[test]
+fn a_jump_keeps_the_perch_and_a_new_shot_clears_it() {
+    let Some(mut duel) = perched_duel() else {
+        return;
+    };
+    let jump = InputFrame {
+        buttons: Buttons {
+            jump: true,
+            ..Buttons::default()
+        },
+        ..InputFrame::default()
+    };
+    duel.step(&jump, 1.0 / 60.0);
+    let mut airborne = false;
+    for _ in 0..180 {
+        duel.step(&InputFrame::default(), 1.0 / 60.0);
+        airborne |= !duel.player.body.grounded;
+    }
+    let feet = Vec3::from(duel.player.body.position);
+    eprintln!("after the jump at {feet}");
+    assert!(airborne);
+    assert!(duel.player.body.grounded);
+    assert!((feet.y - 5.0).abs() < 0.1, "{feet}");
+    assert!(duel.player.wire.perch.is_some());
+
+    // A second rideable hook further on: the shot at it ends the first perch.
+    let mut second = duel.player.wire.points[0].clone();
+    second.position = Some([0.0, 5.0, -20.0]);
+    second.source_part = "second".into();
+    duel.player.wire.points.push(second);
+    let first = duel.player.wire.perch;
+    let mut cleared = false;
+    for tick in 0..240 {
+        let input = InputFrame {
+            buttons: Buttons {
+                grapple: tick == 0,
+                ..Buttons::default()
+            },
+            ..InputFrame::default()
+        };
+        duel.step(&input, 1.0 / 60.0);
+        cleared |= duel.player.wire.active.is_some() && duel.player.wire.perch.is_none();
+    }
+    let feet = Vec3::from(duel.player.body.position);
+    eprintln!("second perch {:?}, feet {feet}", duel.player.wire.perch);
+    assert!(cleared, "the first perch {first:?} outlived the shot");
+    assert!(feet.distance(Vec3::new(0.0, 5.0, -20.0)) < 0.2, "{feet}");
+}

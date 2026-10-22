@@ -1199,6 +1199,7 @@ impl Character {
                 );
             }
         }
+        self.wire.leave_perch(Vec3::from(self.body.position));
         if self.wire.active.is_none() {
             self.behavior.env.wire_action.set(false);
         }

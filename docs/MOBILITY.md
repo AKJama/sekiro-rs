@@ -603,6 +603,9 @@ The fast no-ride fixture reaches WireFallLandReady at -2078 cm/s, then LandWireM
 A ridden landing supplies a virtual perch within 0.6 m horizontally of its landing spot, because the grapple point often sits beside the object's walkable top rather than on it.
 When terrain is within 0.6 m vertically of the spot it supplies the perch height instead, so ordinary roof landings settle onto collision.
 Walking outside the perch footprint resumes falling unless there is collision under Wolf.
+The perch ends once Wolf is outside that footprint (walked or knocked off, docked, warped) or fires the next grapple shot, so it never holds him up again at that spot (#230).
+A jump straight up keeps it, since he lands back on it.
+This is FwLo's RustSekiro rule for `Player::perch`; the real game has no perch, as it stands Wolf on the ridden object's own collision.
 Since 2026-10-16 the play world also loads the placed objects' own collision (`docs/OBJECT-COLLISION.md`), so after landing on a rideable pine Wolf walks along its trunk.
 
 The model exporter now writes `cache/models/wp_a_9500.glb` and `cache/anim/wp_a_9500/` when exporting Wolf.
