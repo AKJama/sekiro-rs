@@ -22,7 +22,10 @@
 //! idols (`Kit::found_idols`, #148), which a respawn keeps, and Wolf stays at the idol in
 //! [`IdolPhase::Lighting`] while the game's "SCULPTOR'S IDOL FOUND" banner plays
 //! ([`LIGHTING_SECS`]); only then does he pray and the idol menu open. Kneeling at a lit idol
-//! goes straight to the prayer.
+//! goes straight to the prayer. The idol is lit only once the behaviour takes the kneel
+//! (#262): a press it drops leaves the idol unlit for its first real kneel.
+//! gap: c0000's graph drops W_StatueAttachStart from walk starts and quick turns
+//! (StandMoveStart, StandQuickTurnMoveStart*), so a press while walking up does nothing.
 //!
 //! Travel (#148): from the prayer, [`Duel::travel_to_idol`] plays the warp state
 //! (StatueAttachWarp a000_710360) and [`WARP_CUT`] into it Wolf leaves. To an idol of this
@@ -289,7 +292,21 @@ impl Duel {
         self.rules.fighters[0].reset();
         self.idols.at = Some(i);
         self.idols.checkpoint = Some(spot.checkpoint);
-        self.idols.lighting = self.kit.found_idols.insert(spot.entity).then_some(0.0);
+        // Only queued here: the idol is lit once the behaviour takes the kneel
+        // ([`Duel::light_idol`]), so a kneel event the graph drops spends neither the first
+        // light nor its banner (#262).
+        self.idols.lighting = (!self.kit.found_idols.contains(&spot.entity)).then_some(0.0);
+    }
+
+    /// Lights the idol Wolf was sent to kneel at once the behaviour has taken the kneel (he is
+    /// in its states): its bonfire entity goes into the found idols. Run after every step.
+    pub(super) fn light_idol(&mut self) {
+        if let Some(i) = self.idols.at
+            && self.idols.lighting.is_some()
+            && self.idol_phase().is_some()
+        {
+            self.kit.found_idols.insert(self.idols.spots[i].entity);
+        }
     }
 
     /// Seconds since Wolf lit the idol he is at, while he is [`IdolPhase::Lighting`]: the
