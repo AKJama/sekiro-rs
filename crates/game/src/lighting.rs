@@ -284,34 +284,52 @@ fn tone_correction(hue: f32, saturation: f32, value: f32, contrast: f32) -> Mat4
     matrix
 }
 
-#[derive(Component)]
-struct AppliedPost(i32, f32, String);
+/// The resolved post a camera was last given: its uniform upload and grading LUT. Cameras are
+/// keyed on these values, not on the LightSet row, hour or file that produced them, so a change
+/// to anything the post reads (a collision overlay on the same row, #42) refreshes them and a
+/// change that resolves to the same post leaves them alone.
+#[derive(Component, Clone, Debug, PartialEq)]
+struct AppliedPost(tonemap::GamePost, Option<Handle<Image>>);
+
+impl AppliedPost {
+    fn resolve(lighting: &MapLighting, effects: &MapPostEffects) -> (PostSettings, Self) {
+        let set = PostSettings::from_gparam(&lighting.gparam, lighting.light_set, lighting.hour);
+        let lut = (!effects.no_grading)
+            .then(|| set.lut.and_then(|id| effects.luts.get(&id)))
+            .flatten()
+            .cloned();
+        let post = Self(set.upload(effects), lut);
+        (set, post)
+    }
+}
 
 #[allow(clippy::type_complexity)]
 fn apply_post_effects(
     mut commands: Commands,
     lighting: Res<MapLighting>,
     effects: Res<MapPostEffects>,
+    mut resolved: Local<Option<AppliedPost>>,
     cameras: Query<(Entity, Option<&AppliedPost>, Option<&grading::GradingLut>), With<Camera3d>>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("apply_post_effects");
-    let pending: Vec<_> = cameras
-        .iter()
-        .filter(|(_, p, _)| {
-            p.is_none_or(|p| {
-                p.0 != lighting.light_set || p.1 != lighting.hour || p.2 != lighting.source
-            })
-        })
-        .collect();
-    if pending.is_empty() {
-        return;
+    // Re-resolve only when an input changed; the gparam lookups are not free every frame.
+    if resolved.is_none() || lighting.is_changed() || effects.is_changed() {
+        let (set, next) = AppliedPost::resolve(&lighting, &effects);
+        if resolved.as_ref() != Some(&next) {
+            info!(
+                "map native post: row {} at {:.1} h from {}: {set:?}, upload={:?}; CPU mappings from SHADER-INPUTS.md",
+                lighting.light_set, lighting.hour, lighting.source, next.0
+            );
+            *resolved = Some(next);
+        }
     }
-    let set = PostSettings::from_gparam(&lighting.gparam, lighting.light_set, lighting.hour);
-    info!(
-        "map native post: {set:?}, upload={:?}; CPU mappings from SHADER-INPUTS.md",
-        set.upload(&effects)
-    );
-    for (entity, applied, current_lut) in pending {
+    let Some(post) = resolved.as_ref() else {
+        return;
+    };
+    for (entity, applied, current_lut) in &cameras {
+        if applied == Some(post) {
+            continue;
+        }
         let mut camera = commands.entity(entity);
         // The view setup is per camera, not per row: re-inserting Hdr and Tonemapping at every
         // LightSet change (doorways, #15) made Bevy re-specialise the camera's view pipelines.
@@ -319,15 +337,8 @@ fn apply_post_effects(
             camera.insert((Hdr, Tonemapping::None, DebandDither::Disabled));
             camera.remove::<(AutoExposure, Bloom)>();
         }
-        camera.insert((
-            AppliedPost(lighting.light_set, lighting.hour, lighting.source.clone()),
-            ColorGrading::default(),
-            set.upload(&effects),
-        ));
-        let lut = (!effects.no_grading)
-            .then(|| set.lut.and_then(|id| effects.luts.get(&id)))
-            .flatten();
-        match lut {
+        camera.insert((post.clone(), ColorGrading::default(), post.0.clone()));
+        match &post.1 {
             Some(lut) if current_lut.is_none_or(|c| c.0 != *lut) => {
                 camera.insert(grading::GradingLut(lut.clone()));
             }
@@ -1963,6 +1974,67 @@ mod probe_tests {
         app.world_mut().resource_mut::<MapLighting>().hour = 18.;
         app.update();
         assert!(app.world().get::<grading::GradingLut>(scene).is_none());
+    }
+    /// Ashina Castle collisions h000100 and h000800 touch and share LightSet row 100, but only
+    /// h000800 layers a scene overlay (`m11_01_0800`). Crossing between them keeps the row, hour
+    /// and light file, but the overlay authors another post, so the camera must take it; an idle
+    /// frame must leave the camera's post untouched (#42).
+    #[test]
+    fn overlay_change_on_the_same_row_refreshes_the_post() {
+        use crate::lighting_selection::{LightingSelection, MapEventScene, select, sync_events};
+        let cache = sekiro_sim::cache::root();
+        let map = "m11_01_00_00";
+        let selected = select(&cache, map, None, None).unwrap();
+        let library = LightingSelection::load(&cache, map, selected, false).unwrap();
+        let mut app = App::new();
+        app.insert_resource(MapLighting {
+            gparam: Gparam::default(),
+            hour: library.initial.hour,
+            light_set: 100,
+            applied: None,
+            source: library.initial.source.clone(),
+        })
+        .insert_resource(library)
+        .init_resource::<MapEventScene>()
+        .init_resource::<MapPostEffects>()
+        .add_systems(Update, (sync_events, apply_post_effects).chain());
+        let camera = app.world_mut().spawn(Camera3d::default()).id();
+        let set_overlays = |app: &mut App, overlays: [i8; 4]| {
+            let mut selection = app.world_mut().resource_mut::<LightingSelection>();
+            LightingSelection::set_overlays(&mut selection, overlays);
+            app.update();
+        };
+        let post = |app: &App| {
+            let post = app.world().entity(camera).get_ref::<tonemap::GamePost>();
+            let post = post.unwrap();
+            let tick = post.last_changed();
+            (post.into_inner().clone(), tick)
+        };
+        let expected = |app: &App| {
+            let lighting = app.world().resource::<MapLighting>();
+            AppliedPost::resolve(lighting, app.world().resource::<MapPostEffects>())
+                .1
+                .0
+        };
+        set_overlays(&mut app, [-1, 8, -1, -1]);
+        let (overlaid, tick) = post(&app);
+        assert_eq!(overlaid, expected(&app));
+        app.update();
+        assert_eq!(
+            post(&app),
+            (overlaid.clone(), tick),
+            "idle frame re-inserted"
+        );
+        // Back onto the plain collision: same row, hour and light file, other overlay.
+        set_overlays(&mut app, [-1; 4]);
+        let (plain, _) = post(&app);
+        assert_ne!(
+            plain, overlaid,
+            "overlay 8 authors no other post at this hour"
+        );
+        assert_eq!(plain, expected(&app), "stale post after the overlay change");
+        set_overlays(&mut app, [-1, 8, -1, -1]);
+        assert_eq!(post(&app).0, overlaid);
     }
     #[test]
     fn recovered_post_preserves_authored_bounds_and_disables_stages() {
