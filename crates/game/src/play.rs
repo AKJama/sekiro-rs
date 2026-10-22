@@ -246,9 +246,9 @@ fn renderer_counts(
     );
 }
 
-/// The map's collision, for the camera; absent on the flat floor.
+/// The map's collision, for the camera and the weather's roof cover; absent on the flat floor.
 #[derive(Resource)]
-struct MapCollision(Arc<CollisionWorld>);
+pub(crate) struct MapCollision(pub(crate) Arc<CollisionWorld>);
 
 /// Where model GLBs live below the asset root.
 #[derive(Resource)]

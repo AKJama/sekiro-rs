@@ -36,10 +36,27 @@ An activation part can be a meshless helper, so effects use its authored residen
 Native Outskirts event 11105107 deletes 1108010/1108020, waits two seconds and selects ordinary snow or invasion embers using flags 8302/9100, region 1102107 and map membership.
 Castle event 11115170 deletes and restores snow entity 1114350, suppressing it for invasion, regions 1112150/1112151 and player SpEffect 110040.
 The retained region graph resolves the authored composite indoor volumes.
-These event regions are the game's whole data rule for indoor snow (#79): no param, GPARAM or FXR field occludes weather, and SpEffect 110040 in the Castle event is the underwater check (SpEffectParam "underwater judgment"), not an indoor one.
+These event regions are the game's only data rule for indoor snow (#79): no param or GPARAM names an indoor state, and SpEffect 110040 in the Castle event is the underwater check (SpEffectParam "underwater judgment"), not an indoor one.
 Outskirts region 1102107 is one 20 x 16 x 8 m box over the temple building at MSB (94.4, -52.2, -154.1), collision h023200.
-The Sculptor's hall at start 0 (collision h022400) has LightSet 110 like that building but no region, so the event keeps its snow falling; we follow the event rather than a LightSet or roof test.
-Whether the original game really shows snow inside the Sculptor's hall still needs a real-game look; if it does not, the hiding is an engine rule not yet traced in the exe.
+The Sculptor's hall at start 0 (collision h022400) has LightSet 110 like that building but no region, so the event keeps its snow on there.
+Yet in the real game no snow falls inside the hall (checked by the user, 2026-10-22), so the engine hides weather under a roof by a rule not yet traced.
+
+### Roof cover for falling weather (#79)
+
+What the exe and data show (read-only Ghidra copy, `sekiro.exe` 1.6.0.0):
+- The camera snow 839500 is one GPUStandardParticle (action 10000) node.
+  Its fields2 slot 31, named `unkHideIndoors` by the community schema, is 1; slot 30 (`shadowDarkness`) is 0 and `particleCollision` is 0.
+  The same slot is 1 on 29 of the 47 installed 10000 actions, including skill effects such as 7111240, so it is not a weather-only switch, and its runtime reader was not found within the time box.
+- The GPU particle shaders have no indoor input.
+  `CS_VFX_StandardParticleCollision` only bounces particles off the camera depth buffer (`g_csDepthMap`, shape 6, restitution in `m_HitParam`); the pixel shaders multiply colour (not alpha) by the sun shadow volume by `g_ps_BillboardShadowIntensity`.
+- `GXVfxStandardParticleAppearance` (vtable 326abc8, init 40ea70 / 40f690, field parse 40eb10) is the CPU side; the character physics debug flag `DbgCheckRoof` (menu bc0280, read only in bcae00) belongs to a character roof sphere cast, not to effects.
+- No string in the exe names weather, rain, indoor or interior effects.
+
+What we do: after each map FX step, every particle of a falling-weather placement (camera-relative 10000) that lies below the highest play collision surface over its 0.5 m column is removed (`WeatherCover` in `crates/game/src/map_fx.rs`).
+That reproduces what the game shows (no snow under the hall roof, snow in the open yard and over the roof) without claiming the engine's mechanism.
+Columns are looked up lazily from `CollisionWorld::surfaces_at` and cached until the collision world changes.
+A flake falling under an eave is removed rather than hidden; for straight-falling snow the two look the same.
+Only the play mode has the collision; the map viewer and its render gates keep uncovered snow.
 The underwater SpEffect 110040 condition is not implemented.
 The rooftop ordinary-fight and Tomoe transitions are described in LIGHTING.md's Genichiro snow audit.
 
