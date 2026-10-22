@@ -611,6 +611,8 @@ pub(super) fn observe(
     sample["step"] = serde_json::json!(sim.step);
     sample["grounded"] = serde_json::json!(body.grounded);
     let wire = &sim.duel.player.wire;
+    // The wire perch still holding Wolf up, if any (#230: it ends once he leaves it).
+    sample["perch"] = serde_json::json!(wire.perch.map(|p| p.to_array()));
     sample["grapple"] = wire
         .preview
         .as_ref()

@@ -179,10 +179,21 @@ pub struct Wire {
     clip: String,
     pub tip: Option<Vec3>,
     pub rope_dummy: Option<i16>,
-    /// Virtual support for authored rideable ornaments absent from terrain collision.
+    /// Virtual support for authored rideable ornaments absent from terrain collision. It holds
+    /// Wolf only while he stays over it: [`Self::leave_perch`] drops it once he is outside its
+    /// [`PERCH_RADIUS`] footprint, and the next grapple shot drops it too (#230).
     pub perch: Option<Vec3>,
 }
 impl Wire {
+    /// Ends the perch once the feet at `feet` are outside its footprint (walked or knocked off,
+    /// docked, warped), so it never holds Wolf up again there (#230). A jump straight up keeps
+    /// it, as he is still over it and lands back on it. FwLo's RustSekiro drops `Player::perch`
+    /// by the same rule.
+    pub fn leave_perch(&mut self, feet: Vec3) {
+        self.perch = self
+            .perch
+            .filter(|p| (p.x - feet.x).hypot(p.z - feet.z) <= PERCH_RADIUS);
+    }
     pub fn can_fire(&self) -> bool {
         self.candidate.is_some()
     }
@@ -422,6 +433,8 @@ impl Wire {
                     .is_none_or(|t| t.state == MarkerState::Ready)
             );
             self.active = self.candidate.clone();
+            // The shot leaves the perch it was fired from behind (#230).
+            self.perch = None;
             self.arrived = false;
             self.start = None;
             self.elapsed = 0.0;
@@ -626,9 +639,13 @@ impl Wire {
     }
 }
 
-/// The ridden landing spot supplies floor only inside its 0.6 m footprint. Everything else
-/// (walls, ceilings, water, triggers, fall return walls) is the terrain's, through
-/// [`Ground::inner`].
+/// How far from a ridden landing spot, horizontally, its perch holds Wolf up (m). Not traced:
+/// the real game stands him on the object's own collision; this is about a branch tip's reach.
+pub const PERCH_RADIUS: f32 = 0.6;
+
+/// The ridden landing spot supplies floor only inside its [`PERCH_RADIUS`] footprint.
+/// Everything else (walls, ceilings, water, triggers, fall return walls) is the terrain's,
+/// through [`Ground::inner`].
 pub struct PerchGround<'a> {
     pub terrain: &'a dyn Ground,
     pub perch: Option<Vec3>,
@@ -638,7 +655,7 @@ impl PerchGround<'_> {
     /// The perch's height when `(x, z)` is inside its footprint and it is no higher than `top`.
     fn perch_floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
         self.perch
-            .filter(|p| (p.x - x).hypot(p.z - z) <= 0.6 && p.y <= top)
+            .filter(|p| (p.x - x).hypot(p.z - z) <= PERCH_RADIUS && p.y <= top)
             .map(|p| p.y)
     }
 
