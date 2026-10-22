@@ -730,10 +730,15 @@ fn additive(blend: i64) -> bool {
     matches!(blend, 0 | 4 | 7)
 }
 
-/// Soft particles: pull the quad toward the camera by the particle's half size so it does not
-/// cut a hard line through the floor, and fade it where it meets the scene (the shaders,
-/// `fxr.wesl` / `fxr_multi.wesl`). Where the appearance's `depthBlend` is set: (scale, offset) are
-/// `unkDepthBlend1/2`. Returns the corners and the soft distance (0 = hard).
+/// Soft particles: pull the quad's depth toward the camera so it does not cut a hard line through
+/// the floor, and fade it where it meets the scene (the shaders, `fxr.wesl` / `fxr_multi.wesl`).
+/// Only where the appearance's `depthBlend` is set. As the game's geometry shader
+/// (`GXFfxtessellateSoftTexture.gpo`) does it: pull = `scale * size / 2 + offset` and soft
+/// distance = `scale * size / 2 + 2 * offset`. `size` is the sprite's mean side `(w + h) / 2`,
+/// which the 603 draw (`436d70`) writes as the vertex's TEXCOORD2.y. (scale, offset) are
+/// (`unkDepthBlend1`, -`unkDepthBlend2`): the draw context's `46ffb0` copies them into
+/// `softSpriteScaleOffset`, negating the offset, and `46b400` resets it to (1, 0).
+/// Returns the corners and the soft distance (0 or less = no fade, as in the shader).
 fn soften(a: &Action, size: f32, cam: &GlobalTransform, c: [Vec3; 4]) -> ([Vec3; 4], f32) {
     if a[Field::DepthBlend].as_bool() != Some(true) {
         return (c, 0.0);
@@ -743,7 +748,7 @@ fn soften(a: &Action, size: f32, cam: &GlobalTransform, c: [Vec3; 4]) -> ([Vec3;
         .get(Field::UnkDepthBlend1)
         .and_then(|v| v.as_f64())
         .unwrap_or(1.0) as f32;
-    let off = a
+    let off = -a
         .get(Field::UnkDepthBlend2)
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0) as f32;
@@ -760,7 +765,7 @@ fn soften(a: &Action, size: f32, cam: &GlobalTransform, c: [Vec3; 4]) -> ([Vec3;
         }
         eye + (p - eye) * (nw / w)
     };
-    (c.map(pull), 2.0 * off + h)
+    (c.map(pull), h + 2.0 * off)
 }
 
 fn layer_uv(a: &Action, fields: [Field; 6], age: f32, rnd: &mut Rnd) -> [[f32; 2]; 4] {
@@ -1020,13 +1025,19 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                 }
             }
             600 | 603 | 604 => {
-                let w = if at == 600 {
-                    scalar(a, Field::Size, p.age, &mut rnd, 1.0) * sx
+                let width = if at == 600 {
+                    scalar(a, Field::Size, p.age, &mut rnd, 1.0)
                 } else {
-                    scalar(a, Field::Width, p.age, &mut rnd, 1.0) * sx
+                    scalar(a, Field::Width, p.age, &mut rnd, 1.0)
                 };
-                let h = if at == 600 || a[Field::UniformScale].as_bool() == Some(true) {
+                let w = width * sx;
+                // uniformScale copies the width property into the height, but the particle's
+                // own Y scale still applies (the 603 draw `436d70`), so a wide, flat sprite
+                // stays flat.
+                let h = if at == 600 {
                     w
+                } else if a[Field::UniformScale].as_bool() == Some(true) {
+                    width * sy
                 } else {
                     scalar(a, Field::Height, p.age, &mut rnd, 1.0) * sy
                 };
@@ -1058,7 +1069,7 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                 let (hw, hh) = (r2 * w * 0.5, u2 * h * 0.5);
                 let (corners, soft) = soften(
                     a,
-                    w.abs().max(h.abs()),
+                    (w.abs() + h.abs()) * 0.5,
                     cam,
                     [
                         world - hw - hh,
@@ -2118,10 +2129,86 @@ mod tests {
         let off = serde_json::json!({});
         assert_eq!(soften(&Action::new(&off), 1.0, &cam, corners).1, 0.0);
         let on =
-            serde_json::json!({"depthBlend": true, "unkDepthBlend1": 1.0, "unkDepthBlend2": 0.5});
+            serde_json::json!({"depthBlend": true, "unkDepthBlend1": 1.0, "unkDepthBlend2": -0.5});
         let (c, soft) = soften(&Action::new(&on), 2.0, &cam, corners);
         assert!(soft > 0.0);
         assert!(c[0].z > corners[0].z, "pulled toward the camera");
+    }
+
+    /// #78: the game's soft sprite pulls by `unkDepthBlend1 * size / 2 - unkDepthBlend2` and
+    /// fades over `unkDepthBlend1 * size / 2 - 2 * unkDepthBlend2` (`softSpriteScaleOffset` is
+    /// (unkDepthBlend1, -unkDepthBlend2)). The pairs are authored ones: (0.5, -0.5) is FXR
+    /// 222001's 603 and (1.0, 0.0) the most common.
+    #[test]
+    fn soft_pull_follows_the_game_scale_and_negated_offset() {
+        let cam = GlobalTransform::IDENTITY;
+        let corners = [Vec3::new(0.0, 0.0, -10.0); 4];
+        for (scale, offset, size, pull, soft) in [
+            (0.5, -0.5, 4.0, 1.5, 2.0),
+            (1.0, 0.0, 2.0, 1.0, 1.0),
+            (0.25, 0.25, 4.0, 0.25, 0.0),
+        ] {
+            let a = serde_json::json!(
+                {"depthBlend": true, "unkDepthBlend1": scale, "unkDepthBlend2": offset}
+            );
+            let (c, s) = soften(&Action::new(&a), size, &cam, corners);
+            assert!((s - soft).abs() < 1e-5, "{scale} {offset}: soft {s}");
+            assert!(
+                (c[0].z - (-10.0 + pull)).abs() < 1e-5,
+                "{scale} {offset}: {c:?}"
+            );
+        }
+    }
+
+    /// #78: the Genichiro door's fog wall (FXR 11) is wide and flat: its 603 sprites set
+    /// uniformScale, which copies the width property into the height while the particle's own
+    /// X and Y scales (7.03 or 5.63 by 2.81) still apply, and the pull is a quarter of the
+    /// mean side over two (`unkDepthBlend1` 0.25, TEXCOORD2.y = (w + h) / 2).
+    #[test]
+    fn fog_wall_sprites_are_flat_and_pull_by_their_mean_side() {
+        let cache = sekiro_sim::cache::root();
+        if !cache
+            .join("raw/sfx/sfxbnd_commoneffects.ffxbnd.d/f000000011.fxr")
+            .exists()
+        {
+            eprintln!("skipping: cache not extracted");
+            return;
+        }
+        let mut player = FxrPlayer::new(cache);
+        player.hold(HELD, 11, 0, Transform::IDENTITY, true);
+        for _ in 0..300 {
+            player.advance(1. / 60.);
+        }
+        // Far away, so the pull barely changes the quads' projected size.
+        const D: f32 = 1000.0;
+        let cam = GlobalTransform::from(Transform::from_xyz(0., 2.5, D));
+        let mut buffers = FrameBuffers::default();
+        let mut frame = Frame {
+            cam: &cam,
+            bufs: &mut buffers.bufs,
+            multi: &mut buffers.multi,
+            lights: &mut buffers.lights,
+            distort: &mut buffers.distort,
+            trail: &mut buffers.trail,
+        };
+        for e in &player.effects {
+            collect(e.root.as_ref().unwrap(), &mut frame);
+        }
+        let mut quads = 0;
+        for b in buffers.bufs.values() {
+            for (q, t) in b.pos.chunks(6).zip(b.tan.chunks(6)) {
+                let [c0, c1, _, _, _, c3] = [0, 1, 2, 3, 4, 5].map(|i| Vec3::from(q[i]));
+                let (w, h, soft) = (c0.distance(c1), c0.distance(c3), t[0][2]);
+                assert!(h < 0.65 * w, "flat sprite: {w} by {h}");
+                let expect = 0.25 * (w + h) * 0.5 * 0.5;
+                assert!(
+                    (soft - expect).abs() < 0.01 * expect,
+                    "soft {soft}, want {expect}"
+                );
+                quads += 1;
+            }
+        }
+        assert!(quads > 2, "fog sprites drawn: {quads}");
     }
 
     /// The native deferred point-light diffuse for a surface facing the light (N.L = 1), as
