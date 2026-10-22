@@ -17,7 +17,21 @@ jobs:
     if: github.event.action != 'edited' || github.event.changes.body != null
     runs-on: ubuntu-latest
     steps:
+      # A PR merged before this run starts has already closed its issue; nothing is left to gate.
+      - name: Skip merged PRs
+        id: pr
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          URL: ${{ github.event.pull_request.url }}
+        run: |
+          set -euo pipefail
+          merged=$(gh api "$URL" --jq .merged)
+          echo "merged=$merged" >> "$GITHUB_OUTPUT"
+          if [[ $merged == true ]]; then echo "PR is already merged; skipping the checks."; fi
+
       - name: Check linked issues
+        if: steps.pr.outputs.merged != 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -44,12 +58,12 @@ jobs:
 
       # Drafts are claims and may be empty; the template is checked once the PR is ready.
       - uses: actions/checkout@v4
-        if: ${{ !github.event.pull_request.draft }}
+        if: ${{ steps.pr.outputs.merged != 'true' && !github.event.pull_request.draft }}
         with:
           sparse-checkout: .github/pull_request_template.md
           sparse-checkout-cone-mode: false
       - name: Check the PR follows the template
-        if: ${{ !github.event.pull_request.draft }}
+        if: ${{ steps.pr.outputs.merged != 'true' && !github.event.pull_request.draft }}
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
