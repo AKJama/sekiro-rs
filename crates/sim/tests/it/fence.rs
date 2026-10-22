@@ -7,7 +7,7 @@
 use glam::{Vec2, Vec3};
 use sekiro_formats::hknp::CollisionMesh;
 use sekiro_sim::body::Ground;
-use sekiro_sim::collision::{CollisionWorld, HEAD_TOP, RADIUS};
+use sekiro_sim::collision::{CollisionWorld, HEAD_TOP, RADIUS, push_checks};
 use sekiro_sim::{Buttons, Character, InputFrame};
 
 use crate::movement_helpers::{DT, cache, settle};
@@ -168,9 +168,9 @@ fn a_wedged_body_is_never_pushed_through_a_thin_wall() {
 
 /// Slides of a body standing or jumping beside the gate fence, within a body radius of its face,
 /// where the cap beam's sloping underside reaches over the head while the fence touches the
-/// legs (#176): none ends through the fence, whatever the move. Before, the head's push
-/// towards the fence won over the legs' push away from it, and 1251 of these 2925 slides ended
-/// through it.
+/// legs (#176): none ends through the fence, whatever the move, and none costs the push-out
+/// more than a bounded number of contact tests. Before, the head's push towards the fence won
+/// over the legs' push away from it, and 1251 of these 2925 slides ended through it.
 #[test]
 fn slides_beside_the_gate_fence_never_end_through_it() {
     let Some(world) = play_world() else {
@@ -181,14 +181,16 @@ fn slides_beside_the_gate_fence_never_end_through_it() {
     let normal = if normal.y > 0.0 { normal } else { -normal };
     let along = face.normalize();
     let ground = world.floor(-141.7, -149.6, -47.0).unwrap();
-    let mut through = Vec::new();
+    let (mut through, mut checks) = (Vec::new(), 0);
     for a in 1..10 {
         for o in 0..5 {
             let p = FENCE[0] + face * (a as f32 * 0.1) + normal * (0.2 + o as f32 * 0.05);
             for h in 0..13 {
                 let feet = [p.x, ground + h as f32 * 0.1, p.y];
                 for delta in [Vec2::ZERO, -normal, along, -along, (along - normal) * 0.7] {
+                    let before = push_checks();
                     let d = world.slide(feet, (delta * 0.1).to_array());
+                    checks = checks.max(push_checks() - before);
                     let end = [feet[0] + d[0], feet[1], feet[2] + d[1]];
                     if gate_side(end) < 0.0 {
                         through.push((feet, delta, gate_side(end)));
@@ -203,4 +205,54 @@ fn slides_beside_the_gate_fence_never_end_through_it() {
         through.len(),
         &through[..through.len().min(5)]
     );
+    // The push-out's own work, in contact tests (`least_push`), for the slide with the most
+    // contacts: 6,938, and 71,716 before wedges were told from the contacts' directions at
+    // once (#176 review).
+    assert!(checks < 15_000, "{checks} contact tests in one slide");
+}
+
+/// A body already deep in an acute corner, as a respawn, a warp or a moving part can leave it:
+/// clearing both walls takes a push longer than a body radius, which counts as wedged, but as
+/// it did not move in it still gets out, within a few steps and without crossing either wall
+/// (#176 review). Two 3 m walls meet at 30 degrees at the origin and open towards +z.
+#[test]
+fn a_body_deep_in_an_acute_corner_gets_out() {
+    let half = 15f32.to_radians();
+    let ends = [
+        Vec2::new(half.sin(), half.cos()),
+        Vec2::new(-half.sin(), half.cos()),
+    ];
+    let mut m = CollisionMesh::default();
+    for e in ends {
+        let (x, z) = (e.x * 5.0, e.y * 5.0);
+        let base = m.vertices.len() as u32;
+        m.vertices
+            .extend_from_slice(&[[0.0, 0.0, 0.0], [x, 0.0, z], [x, 3.0, z], [0.0, 3.0, 0.0]]);
+        m.indices.extend([0, 1, 2, 0, 2, 3].map(|i| base + i));
+        m.materials.extend([0, 0]);
+    }
+    let world = CollisionWorld::from_mesh(&m);
+    // Inside the corner, 0.155 m from each wall.
+    let mut feet = [0.0, 0.0, 0.6];
+    let clearance = |p: [f32; 3]| {
+        let p = Vec2::new(p[0], p[2]);
+        ends.map(|e| e.perp_dot(p).abs().min(p.length()))
+            .into_iter()
+            .fold(f32::MAX, f32::min)
+    };
+    let mut steps = 0;
+    while clearance(feet) < RADIUS - 1e-3 {
+        assert!(
+            steps < 5,
+            "still in the corner after {steps} steps at {feet:?}"
+        );
+        let d = world.slide(feet, [0.0, 0.0]);
+        feet = [feet[0] + d[0], feet[1], feet[2] + d[1]];
+        let p = Vec2::new(feet[0], feet[2]);
+        assert!(
+            ends.iter().all(|e| e.perp_dot(p) * e.x.signum() >= 0.0) && p.y > 0.0,
+            "crossed a wall to {feet:?}"
+        );
+        steps += 1;
+    }
 }

@@ -310,4 +310,5 @@ Hearing (`GetLatestSoundTargetID` reads 0) and the caution state are not impleme
 The slide's push-out (`CollisionWorld::push_out` in `crates/sim/src/collision.rs`) is the simulation's own rule, not the exe's Havok character proxy, which was not traced.
 It takes the shortest horizontal push that clears every contact of both body spheres at once, so the triangles' order does not matter.
 When no push of at most a body radius does that, the body is wedged (for example the fence beside the m11_00 gate and its cap beam's sloping underside): the sub-step is taken back and only its part along the touched faces is kept, so the body slides along the wedge but never into it and is never pushed through a face.
+A body that was already wedged before it moved (placed by a respawn, a warp or a moving part) also gets a push out, at most a body radius a sub-step: the shortest one that clears every contact when there is one, else the one that leaves the contacts equally deep, cut short so it never passes half way to any touched triangle.
 Whether the real game stops, slides or squeezes a wedged body differently was not checked.
