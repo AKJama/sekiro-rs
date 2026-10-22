@@ -236,7 +236,12 @@ The gourd's maximum stays at the start kit's 3 uses; Gourd Seeds are not modelle
 A Rest only moves what tops the carried count up (#202): the start kit carries the Pellets' `maxNum` of 3, so a Rest with none used leaves the Storage as it is, and one used moves exactly one.
 Restocking again straight after (a Travel or a death after a Rest) moves nothing more.
 The in-game menu's OK (E, Enter, Space, or a second click) on a consumable in Inventory uses one at once (#151), which a later Rest then refills from the Storage; the log shows both (`game menu: used goods`, `idol: rest: ...`).
-gap: goods with `isFullSuppleItem` 1 and no Storage (Five-color Rice 3580) are not refilled to `maxNum` on Rest, which FwLo's RustSekiro `refill_rested` does.
+Goods with `isFullSuppleItem` 1 that Wolf holds are set to their `maxNum` on Rest, a respawn after death and a Travel (#208), with no Storage involved, by FwLo's RustSekiro `refill_rested` rule.
+The six such rows are the "[Replenishment]" goods, all `isDeposit` 0 with `autoReplenishType` 2: the Healing Gourd 3000, the prevention goods 3300, 3310 and 3320, Five-color Rice 3580 and goods 3800.
+The gourd's row says `maxNum` 10, but its charges follow the kit's `gourd_max` (3) instead.
+The start kit carries one goods 3800 of its three, so the first Rest raises it to three.
+Each of the six has an empty twin at the next id (`isSuppleItem` 1, such as 3581) that the game shows once the last is used; the kit keeps a count of 0 instead.
+The exe's own refill code is not read; the rule is FwLo's reading of the params.
 
 ## Travel between Sculptor's Idols, issue #148
 
