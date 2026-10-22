@@ -304,3 +304,11 @@ Our unknown-method default returned 0, so NonBattleAct queued a 20 s `WaitWithAn
 `Stay(life, 0, POINT_INIT_POSE)` faces its third argument (goal parameter 1), as FwLo's `Native::Stay` reads it, not parameter 0 as `Wait` does.
 POINT_INIT_POSE is the spawn point here, not the spawn facing, and an NPC in its idle state does not turn in place (its TAE turn speed is 0), so a guard moved off its facing does not turn back to it.
 Hearing (`GetLatestSoundTargetID` reads 0) and the caution state are not implemented for map foes, so guards react only to sight, `nose_dist` and damage.
+
+## Wall push-out between opposing faces, issue #176
+
+The slide's push-out (`CollisionWorld::push_out` in `crates/sim/src/collision.rs`) is the simulation's own rule, not the exe's Havok character proxy, which was not traced.
+It takes the shortest horizontal push that clears every contact of both body spheres at once, so the triangles' order does not matter.
+When no push of at most a body radius does that, the body is wedged (for example the fence beside the m11_00 gate and its cap beam's sloping underside): the sub-step is taken back and only its part along the touched faces is kept, so the body slides along the wedge but never into it and is never pushed through a face.
+A body that was already wedged before it moved (placed by a respawn, a warp or a moving part) also gets a push out, at most a body radius a sub-step: the shortest one that clears every contact when there is one, else the one that leaves the contacts equally deep, cut short so it never passes half way to any touched triangle.
+Whether the real game stops, slides or squeezes a wedged body differently was not checked.
