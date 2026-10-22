@@ -403,6 +403,7 @@ fields! {
     UnkDs3F2_11 => "unk_ds3_f2_11",
     UnkDs3F2_12 => "unk_ds3_f2_12",
     UnkDs3F2_13 => "unk_ds3_f2_13",
+    UnkDs3P2_0 => "unk_ds3_p2_0",
     Width => "width",
     WidthMultiplier => "widthMultiplier",
     YAxis => "yAxis",
