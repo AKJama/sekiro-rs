@@ -2452,4 +2452,22 @@ mod tests {
         let floor = world.floor(-212.0, -1.0, -20.0).expect("courtyard ground");
         assert!((floor + 40.5).abs() < 0.3, "floor at {floor}");
     }
+
+    /// The live play check's own spawns (`tests/it/live_play.rs`: the grapple ledge and the
+    /// trunk walk's lower ground) stand over the play collision; a spawn over a hole makes the
+    /// game refuse to start (#231), which only that slow, ignored test would otherwise show.
+    #[test]
+    fn live_check_spawns_stand_on_the_play_collision() {
+        let Some(p) = play_world() else { return };
+        for (name, [x, y, z], ground) in [
+            ("grapple", [-136.5, -42.54, -118.0], -42.54),
+            ("trunk", [-140.0, -50.0, -132.0], -50.78),
+        ] {
+            let floor = p.world.floor(x, z, y + 1.0);
+            assert!(
+                floor.is_some_and(|f| (f - ground).abs() < 0.1),
+                "{name} spawn ({x}, {y}, {z}): floor {floor:?}, expected {ground}"
+            );
+        }
+    }
 }
