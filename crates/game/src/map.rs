@@ -72,8 +72,7 @@ mod capture;
 pub(crate) mod ready;
 
 use crate::lighting::{
-    MapLighting, MapProbes, ProbeRegion, ShadowSettings, apply_lighting, apply_probes,
-    nearest_variant, spawn_lights,
+    MapLighting, MapProbes, ProbeRegion, ShadowSettings, apply_lighting, apply_probes, spawn_lights,
 };
 
 /// Map assets, installed static batches and resident render pipelines are all ready.
@@ -787,15 +786,7 @@ pub fn add_map(
     let story = story::selection(&args);
     let mut selection = crate::lighting_selection::select(cache, &id, story.as_deref(), arena)?;
     if scene.hour.is_finite() {
-        let hour_changed = scene.hour != selection.hour;
-        selection.hour = scene.hour;
-        if !selection.fixed_environment {
-            selection.environment = nearest_variant(scene.hour);
-            // An explicit clock override chooses its matching ordinary sky.
-            if hour_changed || args.iter().any(|a| a == "--hour") {
-                selection.sky = None;
-            }
-        }
+        selection.override_hour(scene.hour, args.iter().any(|a| a == "--hour"));
     }
     let hour = selection.hour;
     info!(
