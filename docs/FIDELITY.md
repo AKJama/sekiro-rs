@@ -245,11 +245,19 @@ Wolf arrives at the idol's warp point: the c0000 MSB player part whose entity is
 All 58 rows have such a part, in the map the idol's entity names (`m{area}_{block}_00_00`), 0.9 to 7.2 m from the idol.
 That spot is also where Wolf now respawns after death, replacing the earlier guess of a point 1.5 m out from the kneeling spot.
 The warp plays HKS StatueAttachWarp (a000_710360) and moves Wolf at 2.0 s into it, FwLo's RustSekiro value (`WARP_CUT`); the screen fades to black over that time and lifts over 0.6 s, the death screen's lift.
-Travel within the play world is a teleport plus a respawn: world reset, enemies respawn, camera snaps behind Wolf, goods restock.
+A warp cut short (a hit or a death during it) lifts the black from the shade it had reached, not from full black.
+Both ways Wolf leaves as a rest leaves him: full Vitality, the gourd refilled and the goods restocked, so a kit carried to another map is a rested one.
+Travel within the play world is a teleport plus a respawn: world reset, enemies respawn, camera snaps behind Wolf.
+That respawn ends no fight: a brain's fight in progress is closed as unfinished, never recorded as Wolf's win.
 The arrival animation is not modelled; Wolf stands at the warp point.
 There is no runtime map switching, so Travel to an idol on another map ends the run and starts the game again on that map (`--map`, `--at-idol`, `--kit` with the kit as JSON), the path the start menu's map changes take.
+The new run keeps the session flags Back to start menu keeps (the window, cache, brain, enemies and render switches) and drops one-shot automation such as `--script`, `--input`, `--shots` and `--exit`.
+It is checked before this run ends, as the start menu checks its runs: its options must parse and the map's layout must hold the idol and its warp point, or the idol is greyed and refused with the reason logged.
+A partial `--kit` keeps the start kit's value for every field it leaves out.
 The game streams the other map in the same run, with a load screen; ours shows the window closing and a fresh one loading.
 Only kit state carries over: there are no saves yet, so story flags, opened doors and killed enemies of the run are not.
 An idol whose map is not extracted is listed greyed and cannot be picked.
 `grayoutEventflagId` greying, the page's area picture (`menuImageId`) and Wolf's marker in his area are not modelled.
-The idol menu and the Travel screen take keys and the pad, not the mouse.
+The Travel screen opens on the idol Wolf prays at, its region and its row; after a Travel the idol menu opens on Rest again.
+The idol menu and the Travel screen take keys, the pad and the mouse: the pointer over a row moves the cursor there and a click takes it, as in the in-game menu.
+Their key guides show the keyboard glyphs whatever the device, as the other menus do.

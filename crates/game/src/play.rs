@@ -1300,6 +1300,7 @@ fn gather_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     held: Res<crate::menu::HeldThroughMenu>,
+    modal: Option<Res<crate::menu::Modal>>,
     gamepads: Query<&Gamepad>,
     orbit: Res<Orbit>,
     mut live: ResMut<LiveInput>,
@@ -1319,11 +1320,12 @@ fn gather_input(
         capture.focus_requested = true;
     }
     // A click while the cursor is free (after Esc) takes the mouse back for the camera; that
-    // click is not an attack.
+    // click is not an attack. Not while a screen over the game (the idol menu) has the mouse.
     if !mouse.pressed(MouseButton::Left) {
         capture.grab_click = false;
     }
     if mouse.just_pressed(MouseButton::Left)
+        && !modal.is_some_and(|m| m.0)
         && let Ok((window, mut c)) = windows.single_mut()
         && window.focused
         && window.cursor_position().is_some()

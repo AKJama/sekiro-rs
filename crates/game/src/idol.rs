@@ -3,7 +3,8 @@
 //! which also makes it the checkpoint), and once he prays the idol menu opens: the idol's name
 //! (BonfireWarpParam `msgId` in NTC_メニューテキスト), the game's rows with their help lines,
 //! Rest and Travel (`super::idol_travel`, #148) working and the rest greyed, and the key guide.
-//! Esc (or B) stands him up.
+//! Esc (or B) stands him up. While the menu is up the mouse is free, as in the in-game menu
+//! (#182): the pointer over a row moves the cursor there and a click takes it, as OK does.
 //!
 //! The idols are the play world's objects whose entity is a BonfireWarpParam `bonfireEntityId`
 //! (o005000, o005500, o115040), facing their front (the object's -Z). Layout, sizes and colours
@@ -20,6 +21,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use bevy::prelude::*;
+use bevy::ui_widgets::{Activate, ActivateOnPress, Button, observe};
+use bevy::window::{CursorGrabMode, CursorMoved, CursorOptions};
 use sekiro_sim::arena::yaw_toward;
 use sekiro_sim::deathblow::Placement;
 use sekiro_sim::duel::idol::{IdolPhase, IdolSpot};
@@ -168,6 +171,49 @@ pub(super) fn int(v: &serde_json::Value) -> Option<i32> {
 #[derive(Resource, Default)]
 pub(super) struct Row(usize);
 
+/// This frame's mouse on an idol screen's parts `P`: the parts the pointer came over and the
+/// parts clicked, taken by the screen's key system.
+#[derive(Resource)]
+pub(super) struct Pointed<P> {
+    hovered: Vec<P>,
+    clicked: Vec<P>,
+}
+
+impl<P> Default for Pointed<P> {
+    fn default() -> Self {
+        Self {
+            hovered: Vec::new(),
+            clicked: Vec::new(),
+        }
+    }
+}
+
+impl<P> Pointed<P> {
+    /// Takes this frame's hovered and clicked parts. A hover counts only when the pointer
+    /// moved (`moved`): a screen built again under a still pointer, or a menu opening under
+    /// it, must not pull the cursor away from the keys' row.
+    pub fn take(&mut self, moved: bool) -> (Vec<P>, Vec<P>) {
+        let hovered = std::mem::take(&mut self.hovered);
+        let clicked = std::mem::take(&mut self.clicked);
+        (if moved { hovered } else { Vec::new() }, clicked)
+    }
+}
+
+/// What makes a part `part` of an idol screen take the mouse: the pointer coming over it and a
+/// press on it (a `Button` that activates on press, as the in-game menu's) go to [`Pointed`].
+pub(super) fn pointable<P: Copy + Send + Sync + 'static>(part: P) -> impl Bundle {
+    (
+        Button,
+        ActivateOnPress,
+        observe(move |_: On<Activate>, mut p: ResMut<Pointed<P>>| p.clicked.push(part)),
+        observe(
+            move |_: On<bevy::picking::events::PointerOver>, mut p: ResMut<Pointed<P>>| {
+                p.hovered.push(part)
+            },
+        ),
+    )
+}
+
 #[derive(Component)]
 struct Guide;
 #[derive(Component)]
@@ -195,6 +241,7 @@ pub(super) fn install(app: &mut App, idols: Idols) {
     idol_travel::install(app, &events);
     app.insert_resource(idols)
         .init_resource::<Row>()
+        .init_resource::<Pointed<usize>>()
         .init_resource::<crate::menu::Modal>()
         .add_systems(
             Startup,
@@ -206,9 +253,13 @@ pub(super) fn install(app: &mut App, idols: Idols) {
             PreUpdate,
             menu_keys
                 .after(bevy::input::InputSystems)
+                .after(bevy::picking::PickingSystems::Last)
                 .run_if(crate::menu::active),
         )
-        .add_systems(Update, (show, hold_pause).run_if(crate::menu::active));
+        .add_systems(
+            Update,
+            (show, hold_pause, free_cursor).run_if(crate::menu::active),
+        );
 }
 
 /// The guide and the menu, hidden, with their texts from `events` (イベントテキスト).
@@ -285,6 +336,7 @@ fn spawn(
                         padding: UiRect::left(percent(6.5 * 0.3)),
                         ..row
                     },
+                    pointable(i),
                     children![(Label(i), text(event(*id), 17.0, TEXT))],
                 ));
                 root.spawn((
@@ -319,28 +371,40 @@ fn fade(alpha: f32) -> Color {
     Color::BLACK.with_alpha(alpha)
 }
 
-/// The menu's keys while Wolf prays (not while a first light's banner plays): up and down pick
-/// a row, OK (Enter, Space, E, A) takes it, Esc or back (Q, B) stands him up.
+/// The menu's keys and mouse while Wolf prays (not while a first light's banner plays): up and
+/// down pick a row, OK (Enter, Space, E, A) takes it, Esc or back (Q, B) stands him up. The
+/// pointer over a row picks it and a click takes it.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn menu_keys(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
+    mut moved: MessageReader<CursorMoved>,
+    mut pointed: ResMut<Pointed<usize>>,
     mut row: ResMut<Row>,
     mut travel: ResMut<idol_travel::TravelMenu>,
     idols: Res<Idols>,
     mut sim: NonSendMut<Sim>,
 ) {
+    let (hovered, clicked) = pointed.take(moved.read().count() > 0);
     if sim.duel.idol_phase() != Some(IdolPhase::Praying) || travel.open {
         return;
     }
     let pad = |b| pads.iter().any(|p| p.just_pressed(b));
     let key = |k: &[KeyCode]| keys.any_just_pressed(k.iter().copied());
+    if let Some(&i) = hovered.last() {
+        row.0 = i;
+    }
     if key(&[KeyCode::ArrowDown, KeyCode::KeyS]) || pad(GamepadButton::DPadDown) {
         row.0 = (row.0 + 1) % ROWS.len();
     }
     if key(&[KeyCode::ArrowUp, KeyCode::KeyW]) || pad(GamepadButton::DPadUp) {
         row.0 = (row.0 + ROWS.len() - 1) % ROWS.len();
     }
-    if crate::menu::ok_pressed(&keys, &pads) {
+    let clicked = clicked.last().copied();
+    if let Some(i) = clicked {
+        row.0 = i;
+    }
+    if crate::menu::ok_pressed(&keys, &pads) || clicked.is_some() {
         match ROWS[row.0].0 {
             REST => sim.duel.rest_at_idol(),
             TRAVEL => travel.open_at(&idols, &sim.duel),
@@ -413,6 +477,29 @@ fn show(
     }
 }
 
+/// Frees the mouse while the idol menu (or its Travel screen) is up, for pointing at its rows,
+/// and takes it back for the camera when the menu goes, as the pause menu does. Play does not
+/// take it back on a click meanwhile (`gather_input`, while [`crate::menu::Modal`] holds).
+fn free_cursor(
+    sim: NonSend<Sim>,
+    mut was_open: Local<bool>,
+    mut cursors: Query<&mut CursorOptions>,
+) {
+    let open = menu_open(&sim);
+    if open == *was_open {
+        return;
+    }
+    *was_open = open;
+    for mut c in &mut cursors {
+        c.visible = open;
+        c.grab_mode = if open {
+            CursorGrabMode::None
+        } else {
+            CursorGrabMode::Locked
+        };
+    }
+}
+
 /// The pause menu stays shut while Wolf is at an idol, since Esc stands him up.
 fn hold_pause(sim: NonSend<Sim>, mut modal: ResMut<crate::menu::Modal>) {
     let at_idol = sim.duel.idol_phase().is_some();
@@ -424,6 +511,26 @@ fn hold_pause(sim: NonSend<Sim>, mut modal: ResMut<crate::menu::Modal>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_click_on_a_pointable_part_picks_it_and_hovers_need_a_moved_cursor() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::ui_widgets::ButtonPlugin))
+            .init_resource::<Pointed<usize>>();
+        let world = app.world_mut();
+        let rows: Vec<Entity> = (0..3usize)
+            .map(|i| world.spawn(pointable(i)).id())
+            .collect();
+        world.flush();
+        crate::menu::test_click(world, rows[2], rows[2]);
+        app.update();
+        let mut pointed = app.world_mut().resource_mut::<Pointed<usize>>();
+        assert_eq!(pointed.clicked, [2], "one click picks its row once");
+        pointed.hovered.push(1);
+        assert_eq!(pointed.take(false), (Vec::new(), vec![2]));
+        pointed.hovered.push(1);
+        assert_eq!(pointed.take(true), (vec![1], Vec::new()));
+    }
 
     #[test]
     fn the_idols_of_a_block_are_found_named_and_faced() {

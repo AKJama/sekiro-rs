@@ -94,6 +94,9 @@ pub(super) struct Idols {
     travel: Option<(Destination, f32)>,
     /// The idol on another map a Travel left for, until the game takes it.
     departure: Option<i32>,
+    /// A Travel within the play world is arriving: the respawn it asked for resets the world
+    /// but ends no fight (a fight's end is a death or a defeat, never a Travel).
+    pub(super) arriving: bool,
 }
 
 impl Duel {
@@ -111,7 +114,8 @@ impl Duel {
     }
 
     /// Stands Wolf at idol `i`'s warp point and makes it the checkpoint: where a run that
-    /// Travel started on another map begins (`--at-idol`).
+    /// Travel started on another map begins (`--at-idol`). It only places him: the kit that
+    /// Travel carried over (`--kit`) was restocked before it left, so nothing is given twice.
     pub fn start_at_idol(&mut self, i: usize) {
         let Some(spot) = self.idols.spots.get(i) else {
             return;
@@ -245,15 +249,24 @@ impl Duel {
                 .runtime
                 .fire_event("W_StatueAttachRest")
         {
-            self.rules.fighters[0].reset();
-            self.restock_kit();
+            self.refresh_at_idol();
             self.idols.revive = self.population.is_some();
         }
     }
 
-    /// Travels from the idol Wolf prays at to `to`: the warp clip plays, and [`WARP_CUT`] into
-    /// it he leaves. False (nothing happens) unless he prays, or when `to` is the idol he is at
-    /// or not one of this play world's.
+    /// What a rest gives Wolf: full Vitality, the gourd refilled and the carried goods restocked
+    /// from the Storage.
+    fn refresh_at_idol(&mut self) {
+        self.rules.fighters[0].reset();
+        self.restock_kit();
+    }
+
+    /// Travels from the idol Wolf prays at to `to`, an idol of this play world or one on another
+    /// map: the warp clip plays, and [`WARP_CUT`] into it he leaves. Returns false, and nothing
+    /// happens, unless he prays with no other event on its way, or when `to` is
+    /// [`Destination::Here`] the idol he is at or an index past this play world's idols. An
+    /// [`Destination::Away`] entity is not checked here: the game picks only idols whose map it
+    /// can start.
     pub fn travel_to_idol(&mut self, to: Destination) -> bool {
         if let Destination::Here(i) = to
             && (i >= self.idols.spots.len() || self.idols.at == Some(i))
@@ -283,21 +296,28 @@ impl Duel {
         self.idols.departure.take()
     }
 
-    /// The end of a Travel's warp. Here, Wolf arrives at the idol's warp point the way a
-    /// respawn after death puts him at the checkpoint (the next step resets the world: full
-    /// Vitality, the foes back, the camera behind him), and the goods are restocked as a rest
-    /// does. Away, the idol is handed over and Wolf stays in the warp until the game leaves.
+    /// The end of a Travel's warp. Both ways Wolf leaves refreshed as a rest leaves him (full
+    /// Vitality, the gourd and goods restocked). Here, he arrives at the idol's warp point the
+    /// way a respawn after death puts him at the checkpoint (this step resets the world: the
+    /// foes back, the camera behind him), without the respawn ending a fight. Away, the idol is
+    /// handed over with the restocked kit and Wolf stays in the warp until the game leaves.
     fn leave_for(&mut self, to: Destination) {
+        self.refresh_at_idol();
         match to {
             Destination::Here(i) => {
                 self.idols.checkpoint = Some(self.idols.spots[i].checkpoint);
                 self.idols.at = None;
                 self.idols.lighting = None;
+                self.idols.arriving = true;
                 self.respawn_in = Some(0.0);
-                self.restock_kit();
             }
             Destination::Away(entity) => self.idols.departure = Some(entity),
         }
+    }
+
+    /// A Travel within the play world is arriving: its respawn is no fight's end.
+    pub(crate) fn idol_arriving(&self) -> bool {
+        self.idols.arriving
     }
 
     /// Stands Wolf up from the idol he prays at.

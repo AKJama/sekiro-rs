@@ -270,3 +270,88 @@ fn a_rest_records_the_idol_and_travel_puts_wolf_at_the_other_idols_warp_point() 
     assert_eq!(duel.take_departure(), Some(1111950));
     assert_eq!(duel.take_departure(), None);
 }
+
+/// A duel without a foe, Wolf on the ground praying at the first of two idols (entities
+/// 1101951 and 1101952) 19 m apart; `None` when the cache is not extracted.
+fn praying_at_one_of_two_idols(brain: bool) -> Option<(Duel, [IdolSpot; 2])> {
+    let cache = sekiro_sim::cache::root();
+    if !cache.join("anim/c0000/a000_710360.bin").exists() {
+        eprintln!("skipping: cache not extracted");
+        return None;
+    }
+    let mut duel = Duel::load(&cache, 30.0).unwrap();
+    if brain {
+        duel.set_brain(Box::new(sekiro_sim::brain::LuaBrain), false)
+            .unwrap();
+        assert!(duel.boss_brain.is_some());
+    }
+    duel.enemy_present = false;
+    duel.enemy_active = false;
+    run(&mut duel, 1.0, |d| d.player.body.grounded);
+    let start = duel.player.body.position;
+    let spot = |dx: f32, entity: i32| IdolSpot {
+        kneel: Placement {
+            position: [start[0] + dx, start[1], start[2]],
+            yaw: 1.0,
+        },
+        checkpoint: Placement {
+            position: [start[0] + dx, start[1], start[2] + 3.0],
+            yaw: -2.0,
+        },
+        entity,
+    };
+    let spots = [spot(1.0, 1101951), spot(20.0, 1101952)];
+    duel.set_idols(spots.to_vec());
+    let mut press = InputFrame::default();
+    press.buttons.action = true;
+    duel.step(&press, DT);
+    assert_eq!(duel.idol(), Some(0));
+    run(&mut duel, LIGHTING_SECS + 1.0, |d| {
+        d.idol_phase() == Some(IdolPhase::Praying)
+    });
+    Some((duel, spots))
+}
+
+#[test]
+fn travel_to_another_map_departs_with_the_kit_restocked_as_a_rest_restocks_it() {
+    let Some((mut duel, _)) = praying_at_one_of_two_idols(false) else {
+        return;
+    };
+    // Two gourd uses spent and a hurt Wolf: the kit the next run gets is a rested one.
+    duel.kit.gourd_charges -= 2;
+    duel.rules.fighters[0].vitality.hp = 10;
+    assert!(duel.travel_to_idol(Destination::Away(1111950)));
+    // Nothing is given before he leaves.
+    duel.step(&InputFrame::default(), DT);
+    assert_eq!(duel.kit.gourd_charges, duel.kit.gourd_max - 2);
+    run(&mut duel, WARP_CUT + 0.5, |d| d.idol_travel().is_none());
+    assert_eq!(duel.take_departure(), Some(1111950));
+    assert_eq!(duel.kit.gourd_charges, duel.kit.gourd_max);
+    let v = duel.rules.fighters[0].vitality;
+    assert_eq!(v.hp, v.max_hp);
+}
+
+#[test]
+fn travel_within_the_play_world_ends_no_fight() {
+    let Some((mut duel, [_, there])) = praying_at_one_of_two_idols(true) else {
+        return;
+    };
+    let fights = |d: &Duel| d.boss_brain.as_ref().unwrap().stats.fights;
+    assert_eq!(fights(&duel), 0);
+    assert!(duel.travel_to_idol(Destination::Here(1)));
+    run(&mut duel, WARP_CUT + 0.5, |d| d.idol_travel().is_none());
+    assert_eq!(duel.respawn_in, None);
+    assert_eq!(duel.player.body.position, there.checkpoint.position);
+    // The arrival's respawn reset the world without settling a fight as Wolf's win.
+    assert_eq!(fights(&duel), 0);
+    for _ in 0..30 {
+        duel.step(&InputFrame::default(), DT);
+    }
+    assert_eq!(fights(&duel), 0);
+    // A death still ends the fight.
+    duel.rules.fighters[0].vitality.hp = 0;
+    run(&mut duel, RESPAWN_DELAY + 1.0, |d| {
+        d.respawn_in.is_none() && !d.rules.fighters[0].dead()
+    });
+    assert_eq!(fights(&duel), 1);
+}
