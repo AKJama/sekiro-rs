@@ -603,10 +603,12 @@ impl CollisionWorld {
 
     /// Adds the fall-prevention assist walls of the collision parts `keep` names
     /// (`fall_assist.bin`, a [`PartCollision`] of the map's `f` hit binder) as
-    /// [`crate::hit_filter::FALL_ASSIST_MOVE`] walls: only the assist sees them, while the
-    /// player script asks for it (`act(3016, 0)`), so they hold Wolf at every edge while he
-    /// stands, walks or runs and let a sprint or a jump go over (docs/OBJECT-COLLISION.md,
-    /// #149). Returns the triangles added.
+    /// [`crate::hit_filter::FALL_ASSIST_ACTION`] walls. The exe gives the `f` body group 93,
+    /// which only the ground actions' cast meets (`act(3016, 1)`: attacks, sprint start and
+    /// stop, and every NPC's request), so the bands keep an attack or a sprint's start from
+    /// carrying Wolf off an edge but let a walk or a run cross them, onto flat ground or over
+    /// the edge; walking is held only by the filter-28 walls (docs/OBJECT-COLLISION.md, #203).
+    /// Returns the triangles added.
     pub fn add_fall_assist(
         &mut self,
         walls: &PartCollision,
@@ -620,7 +622,7 @@ impl CollisionWorld {
             copy_part(source, part.first, part.count, &mut slot, &mut mesh)
                 .map_err(|e| format!("fall-assist part {}: {e}", part.name))?;
         }
-        let range = self.add_masked(crate::hit_filter::FALL_ASSIST_MOVE, &mesh);
+        let range = self.add_masked(crate::hit_filter::FALL_ASSIST_ACTION, &mesh);
         Ok(range.len())
     }
 

@@ -265,3 +265,12 @@ An idol whose map is not extracted is listed greyed and cannot be picked.
 The Travel screen opens on the idol Wolf prays at, its region and its row; after a Travel the idol menu opens on Rest again.
 The idol menu and the Travel screen take keys, the pad and the mouse: the pointer over a row moves the cursor there and a click takes it, as in the in-game menu.
 Their key guides show the keyboard glyphs whatever the device, as the other menus do.
+
+## Edge hold, issue #203
+
+The fall-prevention assist follows the exe's groups (see [OBJECT-COLLISION.md](OBJECT-COLLISION.md#the-fall-prevention-assist)): walking is held only by filter-28 walls and type 6 objects (group 92), and the `f` binder's bands (group 93) hold only ground actions and NPCs.
+These parts are approximations or unchecked:
+
+- Before #203 the bands held walking too, and the user's playtest of that build was taken as the real game's behaviour; whether the real game lets a walk off the roof by start 0 or the start 3 terrace was not checked in the real game.
+- The cast is the simulation's sub-stepped slide with a 0.16 m hold, not the exe's shape cast (`FUN_140bc68d0`), and it does not apply the exe's 90 degree angle limit.
+- `StandMoveStart` and `GroundStep` send only the walking request in the simulation, though their `g_paramHkbState` rows set both flags, so a walk's start or a step is not held by a band; the cause is not traced.

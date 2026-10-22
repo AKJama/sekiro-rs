@@ -1,16 +1,22 @@
-//! The fall-prevention assist walls at map edges (#119, #149, #86): the Outskirts' `h900400`
-//! part (hit filter 28) and the `f` hit binder's bands (`fall_assist.bin`) stand along cliff and
-//! roof edges, the player script asks for them in its walk and run states (`act(3016, 0)`) but
-//! not in `SprintLoop` or a jump, so walking at an edge holds Wolf, a sprint is held until the
-//! loop starts and then goes over, and a jump pressed at the edge leaves from the ground. A
-//! stair down is not an edge. Skips when the map or its `fall_assist.bin` has not been exported
+//! The fall-prevention assist walls at map edges (#119, #149, #86, #203). Two kinds stand along
+//! cliff and roof edges: the parts with hit filter 28 (`h900400`, group 92) and the `f` hit
+//! binder's bands (`fall_assist.bin`, group 93). The player script asks for the assist with
+//! `act(3016, 0)` in its walk, run and idle states and adds `act(3016, 1)` in ground actions
+//! (attacks, sprint start and stop); in the exe the first request's cast meets only group 92 and
+//! the second's also group 93. So walking at a filter-28 cliff holds Wolf, a sprint is held
+//! until its loop starts and then goes over, and a jump pressed at the edge leaves from the
+//! ground; the `f` bands hold only ground actions, so a walk crosses them, onto flat ground or
+//! off a roof. Skips when the map or its `fall_assist.bin` has not been exported
 //! (`sekiro-extract map m11_00_00_00 --fall-assist`).
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
+use glam::{Vec2, Vec3};
+use sekiro_formats::hknp::PartCollision;
+use sekiro_sim::body::Ground;
 use sekiro_sim::collision::CollisionWorld;
-use sekiro_sim::hit_filter::{self, FALL_ASSIST_MOVE};
+use sekiro_sim::hit_filter::{self, FALL_ASSIST_ACTION, FALL_ASSIST_MOVE};
 use sekiro_sim::{Buttons, Character, InputFrame};
 
 use crate::movement_helpers::{DT, cache, settle, stick};
@@ -27,7 +33,8 @@ struct Edge {
     inside: f32,
 }
 
-const EDGES: [Edge; 3] = [
+/// Cliff tops with a filter-28 wall, which holds a walk.
+const CLIFFS: [Edge; 2] = [
     // `h900400` on a cliff top 35 m east of start 2: the ground falls 7.5 m, then further.
     Edge {
         name: "cliff east of start 2",
@@ -36,15 +43,8 @@ const EDGES: [Edge; 3] = [
         top: -24.0,
         inside: 4.0,
     },
-    // The `f` band on the roof of the house by start 0 (`h022800`, 6.9 m above the ground).
-    Edge {
-        name: "start 0 roof",
-        wall: [-131.96, -193.14],
-        out: [-0.82, -0.58],
-        top: -40.5,
-        inside: 2.0,
-    },
-    // The `f` band on the cliff top 60 m north of start 0 (`h023300`, a 20 m drop).
+    // The cliff top 60 m north of start 0, by the bent pine (a 20 m drop): a filter-28 part of
+    // the `l` binder, 20 m tall, besides `h023300`'s `f` band.
     Edge {
         name: "cliff north of start 0",
         wall: [-135.21, -132.85],
@@ -53,6 +53,16 @@ const EDGES: [Edge; 3] = [
         inside: 2.0,
     },
 ];
+
+/// The `f` band on the roof of the house by start 0 (`h022800`, 6.9 m above the ground), with no
+/// filter-28 wall.
+const ROOF: Edge = Edge {
+    name: "start 0 roof",
+    wall: [-131.96, -193.14],
+    out: [-0.82, -0.58],
+    top: -40.5,
+    inside: 2.0,
+};
 
 /// The cache and the map's directory, if the map's fall-assist walls are exported.
 fn map_dir() -> Option<(PathBuf, PathBuf)> {
@@ -86,12 +96,12 @@ fn wolf_on(cache: &std::path::Path, world: Arc<CollisionWorld>, feet: [f32; 3]) 
     wolf
 }
 
-/// Wolf settled inside the edge, and the camera yaw that pushes him out.
-fn wolf_inside(edge: &Edge) -> Option<(Character, f32)> {
+/// Wolf settled `inside` metres inside the edge, and the camera yaw that pushes him out.
+fn wolf_inside(edge: &Edge, inside: f32) -> Option<(Character, f32)> {
     let (cache, world) = map()?;
     let (x, z) = (
-        edge.wall[0] - edge.out[0] * edge.inside,
-        edge.wall[1] - edge.out[1] * edge.inside,
+        edge.wall[0] - edge.out[0] * inside,
+        edge.wall[1] - edge.out[1] * inside,
     );
     let y = world
         .floor(x, z, edge.top)
@@ -116,13 +126,22 @@ struct Push {
     asked: bool,
 }
 
-/// Pushes Wolf out over the edge for `ticks`, sprinting when `sprint`, pressing jump for three
-/// ticks from `jump_at` when it is set.
+/// What Wolf does at the edge on one tick.
+#[derive(Clone, Copy)]
+enum Move {
+    Run,
+    Sprint,
+    /// Stand facing out and attack every third of a second.
+    Attack,
+}
+
+/// Pushes Wolf out over the edge for `ticks` with `how`, pressing jump for three ticks from
+/// `jump_at` when it is set.
 fn push_out(
     wolf: &mut Character,
     edge: &Edge,
     yaw: f32,
-    sprint: bool,
+    how: Move,
     jump_at: Option<usize>,
     ticks: usize,
 ) -> Push {
@@ -137,13 +156,20 @@ fn push_out(
     };
     let mut takeoff_y = 0.0;
     for tick in 0..ticks {
+        let (stick_y, dodge, attack) = match how {
+            Move::Run => (1.0, false, false),
+            Move::Sprint => (1.0, true, false),
+            // A short nudge turns him to face out; then he stands and attacks.
+            Move::Attack => (if tick < 4 { 0.2 } else { 0.0 }, false, tick % 20 < 3),
+        };
         let input = InputFrame {
             buttons: Buttons {
-                dodge: sprint,
+                dodge,
+                attack: attack && tick > 10,
                 jump: jump_at.is_some_and(|t| (t..t + 3).contains(&tick)),
                 ..Buttons::default()
             },
-            ..stick(0.0, 1.0, yaw)
+            ..stick(0.0, stick_y, yaw)
         };
         let report = wolf.tick(&input, DT);
         assert!(
@@ -171,15 +197,15 @@ fn push_out(
     push
 }
 
-/// Running at each edge for 3 s holds Wolf on top; sprinting at it holds him through the
-/// sprint's start, as the user saw in the game (0.5 to 1.5 s, #86), and then he goes over.
+/// Running at each filter-28 cliff for 3 s holds Wolf on top; sprinting at it holds him through
+/// the sprint's start, as the user saw in the game (0.5 to 1.5 s, #86), and then he goes over.
 #[test]
-fn walking_at_an_edge_holds_wolf_and_sprinting_goes_over() {
-    for edge in &EDGES {
-        let Some((mut wolf, yaw)) = wolf_inside(edge) else {
+fn walking_at_a_cliff_holds_wolf_and_sprinting_goes_over() {
+    for edge in &CLIFFS {
+        let Some((mut wolf, yaw)) = wolf_inside(edge, edge.inside) else {
             return;
         };
-        let run = push_out(&mut wolf, edge, yaw, false, None, 180);
+        let run = push_out(&mut wolf, edge, yaw, Move::Run, None, 180);
         assert!(
             run.asked,
             "{}: the run never asked for the walls",
@@ -192,7 +218,7 @@ fn walking_at_an_edge_holds_wolf_and_sprinting_goes_over() {
             run.past,
             run.fell
         );
-        let sprint = push_out(&mut wolf, edge, yaw, true, None, 240);
+        let sprint = push_out(&mut wolf, edge, yaw, Move::Sprint, None, 240);
         let over = sprint.crossed.map(|t| t as f32 * DT);
         assert!(
             over.is_some_and(|s| (0.3..1.0).contains(&s)) && sprint.past > 1.0 && sprint.fell > 3.0,
@@ -204,22 +230,49 @@ fn walking_at_an_edge_holds_wolf_and_sprinting_goes_over() {
     }
 }
 
-/// #86: jump pressed while the edge holds Wolf, from a run and in a sprint's hold, takes off
+/// #203: the `f` bands are the ground actions' walls (group 93). At the roof by start 0, which
+/// has only a band, an attack at the edge is held, while a run goes off the roof.
+#[test]
+fn a_roof_band_holds_an_attack_and_lets_a_run_off() {
+    let Some((mut wolf, yaw)) = wolf_inside(&ROOF, 0.4) else {
+        return;
+    };
+    let attack = push_out(&mut wolf, &ROOF, yaw, Move::Attack, None, 240);
+    assert!(
+        attack.past < 0.0 && attack.fell.abs() < 0.5,
+        "attacked {:.2} m past the band and fell {:.2} m",
+        attack.past,
+        attack.fell
+    );
+    let Some((mut wolf, yaw)) = wolf_inside(&ROOF, ROOF.inside) else {
+        return;
+    };
+    let run = push_out(&mut wolf, &ROOF, yaw, Move::Run, None, 120);
+    assert!(
+        run.past > 1.0 && run.fell > 3.0,
+        "ran {:.2} m past the band and fell {:.2} m",
+        run.past,
+        run.fell
+    );
+}
+
+/// #86: jump pressed while the cliff holds Wolf, from a run and in a sprint's hold, takes off
 /// from the ground within 0.5 s of the press (his feet rise after he leaves it) instead of
 /// dropping off.
 #[test]
 fn jump_pressed_at_the_edge_jumps() {
-    let edge = &EDGES[1];
+    let edge = &CLIFFS[1];
     for (sprint, at) in [(false, 150), (true, 15)] {
-        let Some((mut wolf, yaw)) = wolf_inside(edge) else {
+        let Some((mut wolf, yaw)) = wolf_inside(edge, edge.inside) else {
             return;
         };
         // Run up to the wall first, so the press lands while he is held at it.
         if sprint {
-            let run = push_out(&mut wolf, edge, yaw, false, None, 150);
+            let run = push_out(&mut wolf, edge, yaw, Move::Run, None, 150);
             assert!(run.past < 0.0, "ran {:.2} m past the wall", run.past);
         }
-        let jump = push_out(&mut wolf, edge, yaw, sprint, Some(at), at + 90);
+        let how = if sprint { Move::Sprint } else { Move::Run };
+        let jump = push_out(&mut wolf, edge, yaw, how, Some(at), at + 90);
         let left = jump.airborne.map(|t| t as f32 * DT);
         assert!(
             jump.airborne.is_some_and(|t| (at..at + 30).contains(&t)) && jump.rose,
@@ -228,6 +281,101 @@ fn jump_pressed_at_the_edge_jumps() {
             jump.rose
         );
     }
+}
+
+/// #203, the user's spot: on the snowy cliff top by the bent pine (`o003500_0004`), looking
+/// along the cliff, `h023300`'s band crosses flat ground 11 m west of the pine (4 m of floor
+/// beyond it, then a drop). Walking across it goes on, as no walk is held by an `f` band.
+#[test]
+fn walking_across_a_band_on_the_cliff_top_goes_on() {
+    let Some((cache, world)) = map() else {
+        return;
+    };
+    let (wall, inward) = ([-148.9, -51.3, -131.3], [0.90, 0.43]);
+    let start = [
+        wall[0] + inward[0] * 1.5,
+        wall[1] + 0.5,
+        wall[2] + inward[1] * 1.5,
+    ];
+    let mut wolf = wolf_on(&cache, world, start);
+    let y = wolf.body.position[1];
+    let yaw = f32::atan2(inward[0], inward[1]);
+    for _ in 0..90 {
+        let report = wolf.tick(&stick(0.0, 1.0, yaw), DT);
+        assert!(report.behavior.script_errors.is_empty());
+    }
+    let p = wolf.body.position;
+    let past = -((p[0] - wall[0]) * inward[0] + (p[2] - wall[2]) * inward[1]);
+    assert!(
+        past > 1.5 && (p[1] - y).abs() < 1.0 && wolf.body.grounded,
+        "walked {past:.2} m past the band, to {p:?} from y {y:.2}"
+    );
+}
+
+/// #203 across the map: no `f` band triangle that stands on a floor with 2 m of floor at about
+/// the same height beyond it holds a walk's slide (only the walls the walk's request meets,
+/// [`FALL_ASSIST_MOVE`]) where the map without its bands lets the walk go (81 of them share
+/// their spot with a filter-28 wall, which holds it), while the ground actions' request still
+/// stops at them.
+#[test]
+fn no_band_on_flat_ground_holds_a_walk() {
+    let Some((_, dir)) = map_dir() else {
+        return;
+    };
+    let (_, world) = map().unwrap();
+    let layout = serde_json::from_slice(&std::fs::read(dir.join("layout.json")).unwrap()).unwrap();
+    let block = sekiro_sim::lo_collision::block_collision(&dir, &layout, |_| false).unwrap();
+    let mut bare = CollisionWorld::from_mesh(&block.mesh);
+    bare.add_helpers(&block.helpers);
+    let walls =
+        PartCollision::from_bytes(&std::fs::read(dir.join("fall_assist.bin")).unwrap()).unwrap();
+    let m = &walls.mesh;
+    let (mut flat, mut walk_held, mut action_held) = (0, Vec::new(), 0);
+    for t in m.indices.as_chunks::<3>().0 {
+        let [a, b, c] = t.map(|k| Vec3::from(m.vertices[k as usize]));
+        let n = (b - a).cross(c - a);
+        let flat_n = Vec2::new(n.x, n.z);
+        if flat_n.length() < 0.5 * n.length() || n.length_squared() < 1e-12 {
+            continue;
+        }
+        // The side the wall faces, where a body it holds stands.
+        let inward = flat_n.normalize();
+        let centre = (a + b + c) / 3.0;
+        let base = a.y.min(b.y).min(c.y);
+        let floor =
+            |d: f32, top: f32| world.floor(centre.x + inward.x * d, centre.z + inward.y * d, top);
+        let Some(inner) = floor(0.4, base + 0.6).filter(|f| (f - base).abs() < 0.6) else {
+            continue;
+        };
+        if ![-1.0, -2.0]
+            .iter()
+            .all(|&d| floor(d, inner + 0.6).is_some_and(|f| f > inner - 1.0))
+        {
+            continue;
+        }
+        let feet = [centre.x + inward.x * 0.4, inner, centre.z + inward.y * 0.4];
+        let delta = [-inward.x * 1.2, -inward.y * 1.2];
+        let along = |s: [f32; 2]| -(s[0] * inward.x + s[1] * inward.y);
+        if along(bare.slide_assisted(feet, delta, FALL_ASSIST_MOVE)) < 1.0 {
+            continue;
+        }
+        flat += 1;
+        if along(world.slide_assisted(feet, delta, FALL_ASSIST_MOVE)) < 1.0 {
+            walk_held.push(centre);
+        }
+        action_held +=
+            usize::from(along(world.slide_assisted(feet, delta, FALL_ASSIST_ACTION)) < 0.6);
+    }
+    assert!(
+        walk_held.is_empty(),
+        "{} of {flat} band triangles on flat ground hold a walk, the first at {:?}",
+        walk_held.len(),
+        walk_held.first()
+    );
+    assert!(
+        flat > 1000 && action_held * 2 > flat,
+        "{action_held} of {flat} band triangles on flat ground hold a ground action"
+    );
 }
 
 /// Steers Wolf at each of `route`'s waypoints in turn, sprinting on the legs `sprint` names,
@@ -251,7 +399,8 @@ fn follow(
                 break;
             }
             let step = [dx / len * 0.1, dz / len * 0.1];
-            let walls = world.assisted_slide_cost(p, step, FALL_ASSIST_MOVE)[2];
+            let walls =
+                world.assisted_slide_cost(p, step, FALL_ASSIST_MOVE | FALL_ASSIST_ACTION)[2];
             walled += usize::from(walls > 0);
             most = most.max(walls);
             let input = InputFrame {
@@ -273,12 +422,11 @@ fn follow(
 }
 
 /// From player start 3 to the closed Ashina Castle gate and back down the long stairs, with the
-/// assist walls loaded. The start terrace's 11 m drop to the moat has a band (`f` walls of the
-/// terrace's part), so Wolf sprints off it, as walking is held there like at any edge; then he
-/// runs through the moat gate, up the stairs past the bands along the landings' sides, and back
-/// down: a stair up or down is not an edge.
+/// assist walls loaded. The start terrace's 11 m drop to the moat has only a band (`f` walls of
+/// the terrace's part), so Wolf runs off it; then he runs through the moat gate, up the stairs
+/// past the bands along the landings' sides, and back down: a stair up or down is not an edge.
 #[test]
-fn castle_gate_route_from_start_3_is_held_only_at_the_terrace_drop() {
+fn castle_gate_route_from_start_3_runs_off_the_terrace_and_up_the_stairs() {
     let Some((cache, world)) = map() else {
         return;
     };
@@ -297,13 +445,7 @@ fn castle_gate_route_from_start_3_is_held_only_at_the_terrace_drop() {
     ];
     let down: Vec<[f32; 3]> = route[3..].iter().rev().copied().collect();
     let mut wolf = wolf_on(&cache, world.clone(), [-197.45, -48.16, 150.72]);
-    // Running off the terrace is held at its band.
-    let held = follow(&mut wolf, &world, &route[..2], &[]);
-    assert!(
-        held.as_ref().is_err_and(|e| e.contains("waypoint 1")),
-        "ran off the terrace: {held:?}"
-    );
-    let up = follow(&mut wolf, &world, &route[1..], &[0]).unwrap();
+    let up = follow(&mut wolf, &world, &route, &[]).unwrap();
     let back = follow(&mut wolf, &world, &down, &[]).unwrap();
     // The bands are in reach along the way (the first landing alone has 79 triangles within
     // 4 m), so the stairs are walked with the walls tested; but a slide tests only the walls at
@@ -316,13 +458,12 @@ fn castle_gate_route_from_start_3_is_held_only_at_the_terrace_drop() {
     );
 }
 
-/// #149: the `h023300` cliff band crosses the root of the rideable pine over the start ravine
-/// (`o002500_0005`), facing the platform, as the map's bands cross every edge the map collision
-/// ends at; nothing in the data (the band's part, SpEffect 4100, HitMaterialSpecialSettingParam
-/// 8) lets a walk across it. So walking from the platform onto the trunk is held at the root,
-/// as at any edge, while walking from the trunk up onto the platform passes the one-sided band.
+/// #149, #203: the `h023300` cliff band crosses the root of the rideable pine over the start
+/// ravine (`o002500_0005`), facing the platform, as the map's bands cross every edge the map
+/// collision ends at. A band holds only ground actions, so Wolf walks from the platform onto the
+/// trunk and back.
 #[test]
-fn the_pine_root_band_holds_a_walk_onto_the_trunk_and_lets_one_off_it() {
+fn walking_onto_the_pine_trunk_crosses_its_root_band() {
     let Some((cache, dir)) = map_dir() else {
         return;
     };
@@ -341,10 +482,6 @@ fn the_pine_root_band_holds_a_walk_onto_the_trunk_and_lets_one_off_it() {
     let (platform, trunk) = ([-135.5, -42.4, -117.0], [-136.0, -43.2, -120.0]);
     let mut wolf = wolf_on(&cache, world.clone(), trunk);
     follow(&mut wolf, &world, &[platform], &[]).expect("walked off the trunk onto the platform");
-    let held = follow(&mut wolf, &world, &[[-135.9, -42.8, -118.8], trunk], &[]);
-    let p = wolf.body.position;
-    assert!(
-        held.is_err() && (-118.1..-117.7).contains(&p[2]) && wolf.body.grounded,
-        "walked onto the trunk to {p:?}: {held:?}"
-    );
+    follow(&mut wolf, &world, &[[-135.9, -42.8, -118.8], trunk], &[])
+        .expect("walked from the platform onto the trunk");
 }
