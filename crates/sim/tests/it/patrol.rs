@@ -130,3 +130,65 @@ fn outskirts(cache: &std::path::Path, map: &str, dir: &std::path::Path) -> Duel 
     wolf.set_population(population);
     wolf
 }
+
+/// An Outskirts soldier fighting Wolf at close range keeps him as its target (#216). In
+/// FIND/BATTLE the exe senses with NpcThinkParam's perceive cone from an eye set
+/// eye_BackOffsetDist_perceive (4 m) behind the soldier's feet, to Wolf's feet, so a Wolf at
+/// arm's length stays seen. The old sense used the normal cone from head height to Wolf's
+/// chest, which put him below its 15 deg downward limit under about 1.5 m, and after
+/// SightTargetForgetTime (15 s) the soldier dropped out of battle.
+#[test]
+fn outskirts_soldier_keeps_wolf_at_close_range() {
+    let cache = sekiro_sim::cache::root();
+    let map = "m11_00_00_00";
+    let dir = cache.join(format!("maps/{map}"));
+    if !dir.join("collision.bin").exists() || !cache.join("anim/c1010").is_dir() {
+        return;
+    }
+    let mut wolf = outskirts(&cache, map, &dir);
+    fn soldier(wolf: &Duel) -> &Duel {
+        wolf.population
+            .as_ref()
+            .unwrap()
+            .foes
+            .iter()
+            .find(|f| f.part == "c1010_0000")
+            .unwrap()
+            .duel
+            .as_ref()
+    }
+    // Wolf `gap` m in front of the soldier, on its ground.
+    let place = |wolf: &mut Duel, gap: f32| {
+        let body = &soldier(wolf).enemy.body;
+        let front = sekiro_sim::arena::forward(body.yaw) * gap;
+        wolf.player.body.position = [
+            body.position[0] + front.x,
+            body.position[1],
+            body.position[2] + front.z,
+        ];
+    };
+    let dt = 1.0 / 60.0;
+    place(&mut wolf, 4.0);
+    let mut engaged = false;
+    for _ in 0..60 * 5 {
+        place(&mut wolf, 4.0);
+        wolf.step(&InputFrame::default(), dt);
+        if soldier(&wolf).ai.as_ref().unwrap().state.battle {
+            engaged = true;
+            break;
+        }
+    }
+    assert!(engaged, "the soldier sees Wolf 4 m in front of it");
+    // Close range for longer than SightTargetForgetTime (15 s).
+    for step in 0..60 * 20 {
+        place(&mut wolf, 0.8);
+        wolf.step(&InputFrame::default(), dt);
+        let ai = soldier(&wolf).ai.as_ref().unwrap();
+        assert!(
+            ai.state.battle,
+            "the soldier drops out of battle {:.1} s into the close fight ({})",
+            step as f32 * dt,
+            ai.goal_stack().join(">")
+        );
+    }
+}
