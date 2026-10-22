@@ -90,8 +90,8 @@ const PAIR_SEARCH_CHECKS: usize = 20;
 /// step makes more than 4,756 ground queries in all (`step_cost`).
 const PAIR_SEARCH_MAX_QUERIES: usize = 4000;
 
-/// A [`Ground`] that counts the floor and wall queries made through it. It forwards only what
-/// [`pair_path_clear`] asks.
+/// A [`Ground`] that counts the floor and wall queries [`pair_path_clear`] makes through it.
+/// Everything else passes straight through to the ground it wraps.
 struct Counted<'a> {
     inner: &'a dyn Ground,
     queries: &'a std::cell::Cell<usize>,
@@ -104,6 +104,10 @@ impl Counted<'_> {
 }
 
 impl Ground for Counted<'_> {
+    fn inner(&self) -> Option<&dyn Ground> {
+        Some(self.inner)
+    }
+
     fn height(&self, x: f32, z: f32) -> Option<f32> {
         self.count();
         self.inner.height(x, z)
@@ -122,10 +126,6 @@ impl Ground for Counted<'_> {
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
         self.count();
         self.inner.slide(feet, delta)
-    }
-
-    fn max_step(&self) -> f32 {
-        self.inner.max_step()
     }
 }
 
@@ -2212,6 +2212,10 @@ macro_rules! ground_via_view {
                 self.$view().height(x, z)
             }
 
+            fn lowest_floor(&self, x: f32, z: f32) -> Option<f32> {
+                self.$view().lowest_floor(x, z)
+            }
+
             fn trigger_contact(&self, from: [f32; 3], to: [f32; 3]) -> Option<TriggerContact> {
                 self.$view().trigger_contact(from, to)
             }
@@ -2297,6 +2301,10 @@ impl<T: Ground + ?Sized> Ground for std::sync::Arc<T> {
     }
     fn height(&self, x: f32, z: f32) -> Option<f32> {
         (**self).height(x, z)
+    }
+
+    fn lowest_floor(&self, x: f32, z: f32) -> Option<f32> {
+        (**self).lowest_floor(x, z)
     }
 
     fn trigger_contact(&self, from: [f32; 3], to: [f32; 3]) -> Option<TriggerContact> {
@@ -2918,6 +2926,54 @@ mod tests {
         assert_eq!(add("none"), Ok(0));
         for bad in ["bad vertex", "past the end"] {
             assert!(add(bad).is_err_and(|e| e.contains(bad)), "{bad}");
+        }
+    }
+
+    /// The [`Ground`] methods `source` defines (`fn name(` at the given indentation).
+    fn ground_methods(source: &str, indent: &str) -> Vec<String> {
+        let start = format!("{indent}fn ");
+        source
+            .lines()
+            .filter_map(|line| line.strip_prefix(start.as_str()))
+            .filter_map(|rest| rest.split(['(', '<']).next())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Issue #169: the two full forwarders that cannot use [`Ground::inner`] (the views built
+    /// per query, and `Arc`, whose ground may be unsized) forward every [`Ground`] method, so a
+    /// new method cannot silently fall back to its default through them.
+    #[test]
+    fn full_ground_forwarders_forward_every_method() {
+        // Each block ends at the first line that is just a closing brace.
+        let block = |source: &'static str, from: &str| {
+            let start = source.find(from).unwrap();
+            &source[start..start + source[start..].find("\n}").unwrap()]
+        };
+        let mut methods =
+            ground_methods(block(include_str!("body.rs"), "pub trait Ground {"), "    ");
+        methods.retain(|m| m != "inner");
+        assert!(methods.len() > 10, "{methods:?}");
+        let source = include_str!("collision.rs");
+        for (name, block, indent) in [
+            (
+                "ground_via_view!",
+                block(source, "macro_rules! ground_via_view"),
+                "            ",
+            ),
+            (
+                "Arc",
+                block(
+                    source,
+                    "impl<T: Ground + ?Sized> Ground for std::sync::Arc<T>",
+                ),
+                "    ",
+            ),
+        ] {
+            let forwarded = ground_methods(block, indent);
+            for m in &methods {
+                assert!(forwarded.contains(m), "{name} does not forward Ground::{m}");
+            }
         }
     }
 }

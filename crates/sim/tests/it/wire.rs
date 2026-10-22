@@ -722,6 +722,140 @@ fn perch_support_ends_outside_point_six_metres() {
     assert_eq!(ground.floor(0.0, 0.0, 4.0), Some(0.0));
 }
 
+/// Terrain with deep water at y 0 over a lake bed at y -10, and an answer to every other
+/// [`Ground`] query that is not its default, so a wrapper that drops one is caught (#169).
+struct Lake;
+
+impl sekiro_sim::body::Ground for Lake {
+    fn height(&self, _: f32, _: f32) -> Option<f32> {
+        Some(-10.0)
+    }
+    fn water_surface(&self, _: f32, _: f32, top: f32) -> Option<sekiro_sim::body::WaterSurface> {
+        // HitMtrlParam row 22 is deep water.
+        (top >= 0.0).then_some(sekiro_sim::body::WaterSurface {
+            height: 0.0,
+            material: 22,
+        })
+    }
+    fn lowest_floor(&self, _: f32, _: f32) -> Option<f32> {
+        Some(-12.0)
+    }
+    fn trigger_contact(
+        &self,
+        _: [f32; 3],
+        to: [f32; 3],
+    ) -> Option<sekiro_sim::collision::TriggerContact> {
+        Some(sekiro_sim::collision::TriggerContact {
+            hit_filter: 13,
+            part: "event wall".into(),
+            point: to.into(),
+        })
+    }
+    fn near_trigger(&self, part: &str, _: [f32; 3]) -> bool {
+        part == "event wall"
+    }
+    fn fall_return_below(&self, _: f32, _: f32, _: f32) -> bool {
+        true
+    }
+    fn hug_floor(&self, _: f32, _: f32, top: f32) -> Option<f32> {
+        (top >= -9.0).then_some(-9.0)
+    }
+    fn ceiling(&self, feet: [f32; 3], _: f32) -> Option<f32> {
+        Some(feet[1] + 0.25)
+    }
+    fn head_contact(&self, _: [f32; 3]) -> bool {
+        false
+    }
+    fn slide(&self, _: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
+        [delta[0] * 0.5, delta[1] * 0.5]
+    }
+    fn slide_assisted(&self, _: [f32; 3], delta: [f32; 2], _: u8) -> [f32; 2] {
+        [delta[0] * 0.25, delta[1] * 0.25]
+    }
+    fn max_step(&self) -> f32 {
+        0.45
+    }
+    fn material(&self, _: f32, _: f32, _: f32) -> Option<u32> {
+        Some(4)
+    }
+    fn floor_with_material(&self, x: f32, z: f32, top: f32) -> Option<(f32, Option<u32>)> {
+        self.floor(x, z, top).map(|h| (h, Some(5)))
+    }
+}
+
+/// Issue #169: a perch only adds its floor. Water, event walls, fall return walls, ceilings,
+/// head contact, walls and materials are still the terrain's while it is set, near the perch
+/// and away from it (the wrapper used to drop the water and trigger queries, so a body on a
+/// perch could not swim or hit an event wall).
+#[test]
+fn perch_ground_keeps_every_terrain_query() {
+    use sekiro_sim::body::Ground;
+    use sekiro_sim::wire::PerchGround;
+    let ground = PerchGround {
+        terrain: &Lake,
+        perch: Some(Vec3::new(0.0, 2.0, 0.0)),
+    };
+    for [x, z] in [[0.0, 0.0], [5.0, 5.0]] {
+        let feet = [x, 2.0, z];
+        let water = ground.water_surface(x, z, f32::INFINITY);
+        assert_eq!(water.map(|w| (w.height, w.material)), Some((0.0, 22)));
+        let trigger = ground.trigger_contact([x, 3.0, z], feet);
+        assert_eq!(
+            trigger.map(|t| (t.hit_filter, t.part)),
+            Some((13, "event wall".into()))
+        );
+        assert!(ground.near_trigger("event wall", feet));
+        assert!(ground.fall_return_below(x, 2.0, z));
+        assert_eq!(ground.ceiling(feet, 1.0), Some(2.25));
+        assert!(!ground.head_contact(feet));
+        assert_eq!(ground.slide(feet, [1.0, 0.0]), [0.5, 0.0]);
+        assert_eq!(ground.slide_assisted(feet, [1.0, 0.0], 1), [0.25, 0.0]);
+        assert_eq!(ground.max_step(), 0.45);
+        assert_eq!(ground.material(x, z, 0.0), Some(4));
+        assert_eq!(ground.lowest_floor(x, z), Some(-12.0));
+    }
+    // The floor family still has the perch inside its footprint, and the terrain's own
+    // answers (wall-hug parts, material) under and beside it.
+    assert_eq!(ground.floor(0.0, 0.0, 3.0), Some(2.0));
+    assert_eq!(ground.hug_floor(0.0, 0.0, 3.0), Some(2.0));
+    assert_eq!(ground.hug_floor(5.0, 5.0, 3.0), Some(-9.0));
+    assert_eq!(
+        ground.floor_with_material(0.0, 0.0, 3.0),
+        Some((2.0, Some(4)))
+    );
+    assert_eq!(
+        ground.floor_with_material(5.0, 5.0, 3.0),
+        Some((-10.0, Some(5)))
+    );
+    assert_eq!(ground.floor(5.0, 5.0, 3.0), Some(-10.0));
+}
+
+/// Issue #169: a body dropping off a perch into deep water lands on the water, as it does
+/// without the perch, instead of sinking through to the lake bed.
+#[test]
+fn body_leaving_a_perch_lands_on_the_water() {
+    use sekiro_sim::body::BodyInput;
+    use sekiro_sim::wire::PerchGround;
+    let ground = PerchGround {
+        terrain: &Lake,
+        perch: Some(Vec3::new(0.0, 2.0, 0.0)),
+    };
+    let mut body = Body {
+        position: [3.0, 2.0, 0.0],
+        grounded: false,
+        fall_top: 2.0,
+        ..Body::default()
+    };
+    for _ in 0..120 {
+        body.step(&BodyInput::default(), 1.0 / 60.0, &ground);
+        if body.grounded {
+            break;
+        }
+    }
+    assert!(body.grounded, "never landed: {:?}", body.position);
+    assert_eq!(body.position[1], 0.0, "landed at {:?}", body.position);
+}
+
 /// A Ready hook for the view tests, with the given variation.
 fn hook(position: [f32; 3], variation: u32) -> Point {
     Point {
@@ -1047,4 +1181,48 @@ fn a_flight_away_from_a_beam_the_head_grazes_still_arrives() {
     }
     let distance = Vec3::from(body.position).distance(Vec3::new(0.0, 5.0, -10.0));
     assert!(distance < 0.2, "ended {distance:.2} m from the hook");
+}
+
+/// Issue #169 on the real map: on the Outskirts ravine branch (the perch the map tests use,
+/// `map_world::standing_part_survives_the_branch_and_follows_teleports`) the event walls and
+/// the fall return wall below are the same through the perch as without it.
+#[test]
+fn ravine_branch_perch_keeps_the_map_triggers() {
+    use sekiro_sim::body::Ground;
+    use sekiro_sim::wire::PerchGround;
+    let Some(world) = crate::step_cost::play_world() else {
+        return;
+    };
+    let world: &dyn Ground = world.as_ref();
+    for perch in [
+        Vec3::new(-137.6, -44.3, -124.5),
+        Vec3::new(-141.58, -44.26, -123.86),
+    ] {
+        let ground = PerchGround {
+            terrain: world,
+            perch: Some(perch),
+        };
+        let feet = perch.to_array();
+        let below = [perch.x, perch.y - 40.0, perch.z];
+        let direct = (
+            world.trigger_contact(feet, below).map(|t| t.part),
+            world.fall_return_below(perch.x, perch.y, perch.z),
+            world
+                .water_surface(perch.x, perch.z, f32::INFINITY)
+                .map(|w| w.height),
+        );
+        let perched = (
+            ground.trigger_contact(feet, below).map(|t| t.part),
+            ground.fall_return_below(perch.x, perch.y, perch.z),
+            ground
+                .water_surface(perch.x, perch.z, f32::INFINITY)
+                .map(|w| w.height),
+        );
+        eprintln!("{perch}: {direct:?}");
+        assert_eq!(perched, direct, "{perch}");
+        assert!(
+            direct.0.is_some() || direct.1,
+            "{perch}: no trigger below, {direct:?}"
+        );
+    }
 }

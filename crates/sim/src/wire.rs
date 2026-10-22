@@ -626,42 +626,61 @@ impl Wire {
     }
 }
 
-/// The ridden landing spot supplies floor only inside its 0.6 m footprint.
+/// The ridden landing spot supplies floor only inside its 0.6 m footprint. Everything else
+/// (walls, ceilings, water, triggers, fall return walls) is the terrain's, through
+/// [`Ground::inner`].
 pub struct PerchGround<'a> {
     pub terrain: &'a dyn Ground,
     pub perch: Option<Vec3>,
 }
-impl Ground for PerchGround<'_> {
-    fn height(&self, x: f32, z: f32) -> Option<f32> {
-        self.floor(x, z, f32::INFINITY)
-    }
-    fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
-        let terrain = self.terrain.floor(x, z, top);
-        let perch = self
-            .perch
+
+impl PerchGround<'_> {
+    /// The perch's height when `(x, z)` is inside its footprint and it is no higher than `top`.
+    fn perch_floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
+        self.perch
             .filter(|p| (p.x - x).hypot(p.z - z) <= 0.6 && p.y <= top)
-            .map(|p| p.y);
-        match (terrain, perch) {
+            .map(|p| p.y)
+    }
+
+    /// The higher of a terrain floor and the perch under `(x, z)` no higher than `top`.
+    fn with_perch(&self, terrain: Option<f32>, x: f32, z: f32, top: f32) -> Option<f32> {
+        match (terrain, self.perch_floor(x, z, top)) {
             (Some(a), Some(b)) => Some(a.max(b)),
             (a, b) => a.or(b),
         }
     }
-    fn ceiling(&self, feet: [f32; 3], rise: f32) -> Option<f32> {
-        self.terrain.ceiling(feet, rise)
+}
+
+impl Ground for PerchGround<'_> {
+    fn inner(&self) -> Option<&dyn Ground> {
+        Some(self.terrain)
     }
-    fn head_contact(&self, feet: [f32; 3]) -> bool {
-        self.terrain.head_contact(feet)
+    fn height(&self, x: f32, z: f32) -> Option<f32> {
+        self.floor(x, z, f32::INFINITY)
     }
-    fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
-        self.terrain.slide(feet, delta)
+    fn lowest_floor(&self, x: f32, z: f32) -> Option<f32> {
+        match (
+            self.terrain.lowest_floor(x, z),
+            self.perch_floor(x, z, f32::INFINITY),
+        ) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
-    fn slide_assisted(&self, feet: [f32; 3], delta: [f32; 2], walls: u8) -> [f32; 2] {
-        self.terrain.slide_assisted(feet, delta, walls)
+    fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
+        self.with_perch(self.terrain.floor(x, z, top), x, z, top)
     }
-    fn max_step(&self) -> f32 {
-        self.terrain.max_step()
+    fn hug_floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
+        self.with_perch(self.terrain.hug_floor(x, z, top), x, z, top)
     }
-    fn material(&self, x: f32, z: f32, top: f32) -> Option<u32> {
-        self.terrain.material(x, z, top)
+    fn floor_with_material(&self, x: f32, z: f32, top: f32) -> Option<(f32, Option<u32>)> {
+        let terrain = self.terrain.floor_with_material(x, z, top);
+        match self.perch_floor(x, z, top) {
+            // The perch has no collision of its own, so no material: the terrain's under it.
+            Some(p) if terrain.is_none_or(|(h, _)| p > h) => {
+                Some((p, self.terrain.material(x, z, top)))
+            }
+            _ => terrain,
+        }
     }
 }

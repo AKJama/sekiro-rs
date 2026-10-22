@@ -5,8 +5,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use sekiro_sim::body::{Ground, WaterSurface};
-use sekiro_sim::collision::{CollisionWorld, TriggerContact, triangle_visits};
+use sekiro_sim::body::Ground;
+use sekiro_sim::collision::{CollisionWorld, triangle_visits};
 
 use crate::movement_helpers::cache;
 
@@ -40,7 +40,8 @@ fn worst_slide(world: &CollisionWorld, feet: [f32; 3], reach: f32) -> usize {
         .unwrap()
 }
 
-/// A Ground that counts the floor and wall queries it forwards.
+/// A Ground that counts the floor and wall queries it forwards; the rest pass straight
+/// through ([`Ground::inner`]).
 struct Counted {
     inner: Box<dyn Ground>,
     queries: Arc<AtomicU64>,
@@ -53,8 +54,8 @@ impl Counted {
 }
 
 impl Ground for Counted {
-    fn water_surface(&self, x: f32, z: f32, top: f32) -> Option<WaterSurface> {
-        self.inner.water_surface(x, z, top)
+    fn inner(&self) -> Option<&dyn Ground> {
+        Some(self.inner.as_ref())
     }
     fn lowest_floor(&self, x: f32, z: f32) -> Option<f32> {
         self.count();
@@ -64,24 +65,18 @@ impl Ground for Counted {
         self.count();
         self.inner.height(x, z)
     }
-    fn trigger_contact(&self, from: [f32; 3], to: [f32; 3]) -> Option<TriggerContact> {
-        self.inner.trigger_contact(from, to)
-    }
-    fn near_trigger(&self, part: &str, feet: [f32; 3]) -> bool {
-        self.inner.near_trigger(part, feet)
-    }
-    fn fall_return_below(&self, x: f32, y: f32, z: f32) -> bool {
-        self.inner.fall_return_below(x, y, z)
-    }
     fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
         self.count();
         self.inner.floor(x, z, top)
+    }
+    fn hug_floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
+        self.count();
+        self.inner.hug_floor(x, z, top)
     }
     fn ceiling(&self, feet: [f32; 3], rise: f32) -> Option<f32> {
         self.count();
         self.inner.ceiling(feet, rise)
     }
-
     fn head_contact(&self, feet: [f32; 3]) -> bool {
         self.count();
         self.inner.head_contact(feet)
@@ -93,9 +88,6 @@ impl Ground for Counted {
     fn slide_assisted(&self, feet: [f32; 3], delta: [f32; 2], walls: u8) -> [f32; 2] {
         self.count();
         self.inner.slide_assisted(feet, delta, walls)
-    }
-    fn max_step(&self) -> f32 {
-        self.inner.max_step()
     }
     fn material(&self, x: f32, z: f32, top: f32) -> Option<u32> {
         self.count();

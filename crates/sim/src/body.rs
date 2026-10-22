@@ -146,12 +146,24 @@ pub const fn deep_water(material: u32) -> bool {
 
 /// Something the character can stand on.
 pub trait Ground {
-    /// Water planes above or below the body; underwater floor materials are not surfaces.
-    fn water_surface(&self, _x: f32, _z: f32, _top: f32) -> Option<WaterSurface> {
+    /// The ground this one wraps, if it is a wrapper. Every method a wrapper does not override
+    /// forwards to it, so a wrapper only writes the queries it changes and can never silently
+    /// drop one (#169). A wrapper that changes the floor ([`Ground::floor`]) must also override
+    /// the rest of the floor family ([`Ground::height`], [`Ground::lowest_floor`],
+    /// [`Ground::hug_floor`], [`Ground::floor_with_material`]), since those forward too.
+    fn inner(&self) -> Option<&dyn Ground> {
         None
+    }
+
+    /// Water planes above or below the body; underwater floor materials are not surfaces.
+    fn water_surface(&self, x: f32, z: f32, top: f32) -> Option<WaterSurface> {
+        self.inner()?.water_surface(x, z, top)
     }
     /// Lowest walkable collision at this horizontal point, for the placeholder void boundary.
     fn lowest_floor(&self, x: f32, z: f32) -> Option<f32> {
+        if let Some(inner) = self.inner() {
+            return inner.lowest_floor(x, z);
+        }
         let mut lowest = self.height(x, z)?;
         while let Some(next) = self.floor(x, z, lowest - 0.01) {
             if next >= lowest {
@@ -168,83 +180,92 @@ pub trait Ground {
     /// `to` (see [`crate::hit_filter`]); such walls are never floors or walls.
     fn trigger_contact(
         &self,
-        _from: [f32; 3],
-        _to: [f32; 3],
+        from: [f32; 3],
+        to: [f32; 3],
     ) -> Option<crate::collision::TriggerContact> {
-        None
+        self.inner()?.trigger_contact(from, to)
     }
 
     /// Whether a capsule at `feet` is still within reach of the named event wall part.
-    fn near_trigger(&self, _part: &str, _feet: [f32; 3]) -> bool {
-        false
+    fn near_trigger(&self, part: &str, feet: [f32; 3]) -> bool {
+        self.inner().is_some_and(|g| g.near_trigger(part, feet))
     }
 
     /// Whether an authored fall return wall (hit filter 15) lies below `(x, y, z)`.
-    fn fall_return_below(&self, _x: f32, _y: f32, _z: f32) -> bool {
-        false
+    fn fall_return_below(&self, x: f32, y: f32, z: f32) -> bool {
+        self.inner().is_some_and(|g| g.fall_return_below(x, y, z))
     }
 
     /// The walkable surface under `(x, z)` that is no higher than `top` (multi-level ground).
     fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
-        let _ = top;
-        self.height(x, z)
+        match self.inner() {
+            Some(inner) => inner.floor(x, z, top),
+            None => self.height(x, z),
+        }
     }
 
     /// [`Ground::floor`] for a body hugging a wall, which also stands on the wall-hug parts
     /// ([`crate::hit_filter::WALL_HUG`]). Grounds without them have just their floor.
     fn hug_floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
-        self.floor(x, z, top)
+        match self.inner() {
+            Some(inner) => inner.hug_floor(x, z, top),
+            None => self.floor(x, z, top),
+        }
     }
 
     /// The highest the feet of a body at `feet` can rise straight up, by at most `rise`, before
     /// its head meets a ceiling: below `feet[1] + rise` when `Some`, `None` when nothing stops
     /// it that soon. No ceilings by default.
     fn ceiling(&self, feet: [f32; 3], rise: f32) -> Option<f32> {
-        let _ = (feet, rise);
-        None
+        self.inner()?.ceiling(feet, rise)
     }
 
     /// Whether the head sphere of a body at `feet` touches anything, so a push-out there has
     /// work to do (the gate on [`Body`]'s push-out after a rise). True by default, so a ground
     /// that does not know always gets the push-out.
     fn head_contact(&self, feet: [f32; 3]) -> bool {
-        let _ = feet;
-        true
+        self.inner().is_none_or(|g| g.head_contact(feet))
     }
 
     /// The horizontal displacement a body at `feet` actually makes when it tries to move by
     /// `delta` (walls stop it and it slides along them). Unobstructed by default.
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
-        let _ = feet;
-        delta
+        match self.inner() {
+            Some(inner) => inner.slide(feet, delta),
+            None => delta,
+        }
     }
 
     /// [`Ground::slide`] that also stops at the fall-prevention walls in `walls`
     /// ([`crate::hit_filter::FALL_ASSIST_MOVE`], `FALL_ASSIST_ACTION` bits), for a body whose
     /// script asks for the assist. Grounds without such walls just slide.
     fn slide_assisted(&self, feet: [f32; 3], delta: [f32; 2], walls: u8) -> [f32; 2] {
-        let _ = walls;
-        self.slide(feet, delta)
+        match self.inner() {
+            Some(inner) => inner.slide_assisted(feet, delta, walls),
+            None => self.slide(feet, delta),
+        }
     }
 
     /// Highest ledge a grounded body steps onto, and the furthest it follows the floor down
     /// before it starts falling.
     fn max_step(&self) -> f32 {
-        0.3
+        self.inner().map_or(0.3, |g| g.max_step())
     }
 
     /// The hit material (HitMtrlParam row: 1 cobblestone, 4 wood, 16 tile, 28 tatami, ...) of
     /// the floor under `(x, z)` no higher than `top`, when the ground knows it. Footstep
     /// sounds are chosen by it.
     fn material(&self, x: f32, z: f32, top: f32) -> Option<u32> {
-        let _ = (x, z, top);
-        None
+        self.inner()?.material(x, z, top)
     }
 
     /// [`Ground::floor`] and the [`Ground::material`] of that same surface, from one query, so
     /// the two cannot disagree.
     fn floor_with_material(&self, x: f32, z: f32, top: f32) -> Option<(f32, Option<u32>)> {
-        self.floor(x, z, top).map(|h| (h, self.material(x, z, top)))
+        match self.inner() {
+            Some(inner) => inner.floor_with_material(x, z, top),
+            None => self.floor(x, z, top).map(|h| (h, self.material(x, z, top))),
+        }
     }
 }
 
