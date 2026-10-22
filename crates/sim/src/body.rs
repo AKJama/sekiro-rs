@@ -106,6 +106,11 @@ pub const GRAVITY: f32 = 9.8 + 13.72;
 /// `r sin 60` = 0.35 m out. The game's cliff-top fall-prevention walls stand up to about 0.2 m
 /// past the floor's end, so a point foot would drop before they hold it (#119).
 const RIM_SUPPORT: f32 = crate::collision::RADIUS * 0.866;
+/// How far above its lowest point the capsule's rounded bottom is at [`RIM_SUPPORT`] from its
+/// axis: `r - r cos 60` = 0.2 m. A floor there higher than the feet meets the bottom's side
+/// and holds the body up, as the crown of a round trunk holds Wolf while the walls keep his
+/// axis past the trunk's walkable top (#155).
+const RIM_LIFT: f32 = crate::collision::RADIUS * 0.5;
 
 /// Authored water collision, separate from supporting terrain.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -362,15 +367,42 @@ impl Body {
         !self.grounded && self.velocity[1] < 0.0
     }
 
-    /// The floor the capsule's rim still rests on when none is under its centre: the highest
-    /// of eight points [`RIM_SUPPORT`] around the feet that is no higher than them and no more
-    /// than a step below.
+    /// The feet height the capsule's rim holds the body at when no floor is under its centre,
+    /// from the highest of eight points [`RIM_SUPPORT`] around the feet within a step of them.
+    /// A floor no higher than the feet stands them on it. A higher one meets the rounded
+    /// bottom's side ([`RIM_LIFT`]): it holds the feet where they are, or lifts them until the
+    /// bottom rests on it. Before #155 only floors no higher than the feet counted, so at a
+    /// round trunk's side, where the floor under the centre had dropped down the trunk's flank
+    /// below its crown, the body fell although the walls still held it.
     fn rim_support(&self, ground: &dyn Ground) -> Option<f32> {
-        self.rim_floors(ground).map(|(h, _)| h).reduce(f32::max)
+        let y = self.position[1];
+        self.rim_floors(ground)
+            .map(|(h, _)| h)
+            .reduce(f32::max)
+            .map(|h| if h <= y { h } else { y.max(h - RIM_LIFT) })
     }
 
-    /// The floors under the [`RIM_SUPPORT`] points that are no higher than the feet and no
-    /// more than a step below, each with its material ([`Ground::floor_with_material`]).
+    /// The feet height a step down to the floor `centre` under the body's centre ends at: no
+    /// lower than where the capsule's rounded bottom still rests on the highest floor under the
+    /// [`RIM_SUPPORT`] points ([`RIM_LIFT`] below it), and no higher than the feet. On a round
+    /// trunk the floor under the centre runs down the trunk's flank while the bottom still rests
+    /// on its crown, and the feet followed it below the walls' hold (#155). A slope gentler
+    /// than 30 degrees or a stair (rim floors less than [`RIM_LIFT`] over the centre's) keeps its
+    /// step down. Only a rideable object's floor holds it ([`crate::hit_filter::rideable`]), as
+    /// in [`Self::rim_floors`]: off a map ledge the body steps down as before.
+    fn rounded_step_down(&self, centre: f32, ground: &dyn Ground) -> f32 {
+        let y = self.position[1];
+        self.rim_floors(ground)
+            .reduce(|a, b| if b.0 > a.0 { b } else { a })
+            .filter(|&(_, m)| crate::hit_filter::rideable(m))
+            .map_or(centre, |(h, _)| centre.max((h - RIM_LIFT).min(y)))
+    }
+
+    /// The floors under the [`RIM_SUPPORT`] points within a step below the feet, or within a
+    /// step above them on a rideable object ([`crate::hit_filter::rideable`]), each with its
+    /// material ([`Ground::floor_with_material`]). Only a rideable object's crown holds the
+    /// rounded bottom from above the feet (#155): a higher map floor at the rim is a ledge whose
+    /// edge is a wall, not a surface the body rests on.
     fn rim_floors<'a>(
         &self,
         ground: &'a dyn Ground,
@@ -380,7 +412,11 @@ impl Body {
         (0..8)
             .filter_map(move |i| {
                 let (s, c) = (i as f32 * std::f32::consts::FRAC_PI_4).sin_cos();
-                ground.floor_with_material(x + RIM_SUPPORT * c, z + RIM_SUPPORT * s, y + 0.05)
+                let (px, pz) = (x + RIM_SUPPORT * c, z + RIM_SUPPORT * s);
+                ground
+                    .floor_with_material(px, pz, y + step)
+                    .filter(|&(h, m)| h <= y + 0.05 || crate::hit_filter::rideable(m))
+                    .or_else(|| ground.floor_with_material(px, pz, y + 0.05))
             })
             .filter(move |(h, _)| y - h < step)
     }
@@ -578,10 +614,14 @@ impl Body {
             // Follow the floor up or down by a step, plus what a 50 degree slope rises over
             // this tick's travel, so a fast tick on a ramp or stairs keeps contact.
             let reach = step + (mx * mx + mz * mz).sqrt() * 1.2;
-            let floor = ground
+            let floor = match ground
                 .floor(self.position[0], self.position[2], self.position[1] + reach)
                 .filter(|h| self.position[1] - h < reach)
-                .or_else(|| self.rim_support(ground));
+            {
+                Some(h) if h < self.position[1] => Some(self.rounded_step_down(h, ground)),
+                Some(h) => Some(h),
+                None => self.rim_support(ground),
+            };
             match floor {
                 Some(h) => self.position[1] = h,
                 None => {

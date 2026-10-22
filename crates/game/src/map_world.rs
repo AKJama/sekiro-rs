@@ -2376,6 +2376,21 @@ mod tests {
             }
         }
         assert!(walks.len() >= 50, "only {} walks", walks.len());
+        // #155: the first trunk past the gate at start 0, where its walls lean out over its
+        // rounded flanks. East across the bend's outer corner the walls slide him onto the flank
+        // with the crown above his feet, and south-east from the tip's top the flank drops him
+        // below the south wall; a body held up only at its feet walked off both.
+        let pine = format!("{block}/o002500_0005");
+        for (x, z, dir) in [
+            (-136.61, -122.90, [1.0, 0.0]),
+            (-139.26, -123.99, [0.71, -0.71]),
+        ] {
+            let y = world
+                .floor(x, z, -40.0)
+                .expect("the trunk under the #155 spot");
+            assert_eq!(world.floor_object(x, z, -40.0), Some(pine.as_str()));
+            walks.push((pine.clone(), Vec3::new(x, y, z), dir, false));
+        }
         // Each walk loads its own Wolf, which takes most of the time: share them out.
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
         let runs: Vec<Run> = std::thread::scope(|scope| {
