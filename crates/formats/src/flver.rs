@@ -47,6 +47,26 @@ pub struct Dummy {
     pub use_upward: bool,
 }
 
+impl Dummy {
+    /// The dummy's frame in its parent node's space (source space): +Z along `forward`, +Y along
+    /// `upward` made orthogonal to it, origin at `position`. A part held on a dummy (the katana
+    /// on WepAbsorpPosParam `right_0`, its scabbard on `right_1`) has this frame as its model
+    /// space, as FwLo's MIT RustSekiro (`model.rs::dummy_frame`) found and the real game shows.
+    pub fn frame(&self) -> glam::Mat4 {
+        use glam::Vec3;
+        let z = Vec3::from(self.forward).normalize_or(Vec3::Z);
+        let up = Vec3::from(self.upward).normalize_or(Vec3::Y);
+        let x = up.cross(z).normalize_or(Vec3::X);
+        let y = z.cross(x);
+        glam::Mat4::from_cols(
+            x.extend(0.0),
+            y.extend(0.0),
+            z.extend(0.0),
+            Vec3::from(self.position).extend(1.0),
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Material {
     pub name: String,
