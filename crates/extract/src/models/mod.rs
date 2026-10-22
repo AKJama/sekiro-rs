@@ -265,15 +265,12 @@ fn npc(raw: &Path, params: &Params, id: &str, selected_row: Option<i32>) -> Resu
 /// row, the face part, and the starting katana with its scabbard.
 fn wolf(raw: &Path, params: &Params) -> Result<Model> {
     const CHARA_INIT_ROW: i32 = 10010; // "Castle": ordinary gear, katana, prosthetic
-    // Dummy poly on `R_Weapon` that the drawn katana is held at (blade along its forward).
-    const WEAPON_DUMMY: i16 = 1;
-    // Dummy poly on the c0000 `Sheath` bone where the katana scabbard hangs (left hip).
-    const SCABBARD_DUMMY: i16 = 147;
     let skeleton = read_flver(&raw.join("chr/c0000.chrbnd.d/c0000.flver"))?;
     let mut notes = Vec::new();
     let init = params.load("CharaInitParam")?;
     let prot = params.load("EquipParamProtector")?;
     let wep = params.load("EquipParamWeapon")?;
+    let absorp = params.load("WepAbsorpPosParam")?;
     let row = init
         .find(CHARA_INIT_ROW)
         .context("CharaInitParam new-game row missing")?;
@@ -322,11 +319,18 @@ fn wolf(raw: &Path, params: &Params) -> Result<Model> {
         Some(w) => {
             let model = w.int("equipModelId")?;
             let name = format!("WP_A_{model:04}");
+            // The weapon's WepAbsorpPosParam row names the body dummies its models sit on:
+            // `right_0` the blade in the hand, `right_1` the scabbard.
+            let absorp_id = w.int("absorpParamId")? as i32;
+            let place = absorp
+                .find(absorp_id)
+                .with_context(|| format!("no WepAbsorpPosParam row {absorp_id}"))?;
+            let (held, scabbard) = (place.int("right_0")?, place.int("right_1")?);
             notes.push(format!(
-                "equip_Wep_Right = weapon {wep_id} -> {name} at dummy {WEAPON_DUMMY} (R_Weapon), scabbard {name}_1 at dummy {SCABBARD_DUMMY} (Sheath bone)"
+                "equip_Wep_Right = weapon {wep_id} -> {name} at dummy {held}, scabbard {name}_1 at dummy {scabbard} (WepAbsorpPosParam {absorp_id})"
             ));
-            part_files.push((name.clone(), Some(format!("dmyblade:{WEAPON_DUMMY}"))));
-            part_files.push((format!("{name}_1"), Some(format!("dmy:{SCABBARD_DUMMY}"))));
+            part_files.push((name.clone(), Some(format!("dmy:{held}"))));
+            part_files.push((format!("{name}_1"), Some(format!("dmy:{scabbard}"))));
         }
         None => notes.push(format!(
             "equip_Wep_Right = {wep_id}: no EquipParamWeapon row"
@@ -585,16 +589,11 @@ fn build(raw: &Path, model: &Model, verbose: bool) -> Result<Vec<u8>> {
         for t in &part.tpfs {
             store.load_tpf(t)?;
         }
-        // Parts hung on a dummy poly get a node at the dummy's frame, parented to the dummy's
-        // attach bone, so they follow that bone when animated. `dmy:<id>` puts the part's +Y on
-        // the dummy's upward vector; `dmyblade:<id>` points the part's -Y (a blade) along the
-        // dummy's forward vector, which is how the hand-held katana sits (see FORMATS.md).
-        let dummy_attach = part.attach.as_deref().and_then(|a| {
-            a.strip_prefix("dmy:")
-                .map(|id| (id, false))
-                .or_else(|| a.strip_prefix("dmyblade:").map(|id| (id, true)))
-        });
-        if let Some((id, blade)) = dummy_attach
+        // Parts hung on a dummy poly (`dmy:<id>`) get a node at the dummy's frame, parented to
+        // the dummy's attach bone, so they follow that bone when animated. The part's model
+        // space is the dummy's frame (`Dummy::frame`, see FORMATS.md).
+        let dummy_attach = part.attach.as_deref().and_then(|a| a.strip_prefix("dmy:"));
+        if let Some(id) = dummy_attach
             && !scene
                 .by_name
                 .contains_key(part.attach.as_deref().unwrap_or_default())
@@ -611,12 +610,7 @@ fn build(raw: &Path, model: &Model, verbose: bool) -> Result<Vec<u8>> {
             let parent_world = usize::try_from(d.parent_bone)
                 .ok()
                 .map_or(Mat4::IDENTITY, |p| skel_world[p]);
-            let frame = parent_world
-                * if blade {
-                    blade_dummy_matrix(d)
-                } else {
-                    dummy_matrix(d)
-                };
+            let frame = parent_world * d.frame();
             let local = mirror_matrix(skel_world[bone].inverse() * frame);
             let name = part.attach.clone().unwrap_or_default();
             let n = scene.add(&name, local, Some(bone));
@@ -974,36 +968,6 @@ fn material_json(
 fn edge_cutout(mtd_name: &str) -> bool {
     let name = mtd_name.to_ascii_lowercase();
     name.contains("_e_") || name.ends_with("_e")
-}
-
-/// A dummy poly's frame in its parent node's space (FromSoftware space): +Z along `forward`,
-/// +Y along `upward`, origin at `position`.
-fn dummy_matrix(d: &flver::Dummy) -> Mat4 {
-    let z = Vec3::from(d.forward).normalize_or(Vec3::Z);
-    let up = Vec3::from(d.upward).normalize_or(Vec3::Y);
-    let x = up.cross(z).normalize_or(Vec3::X);
-    let y = z.cross(x);
-    Mat4::from_cols(
-        x.extend(0.0),
-        y.extend(0.0),
-        z.extend(0.0),
-        Vec3::from(d.position).extend(1.0),
-    )
-}
-
-/// A dummy frame for a blade: the part's -Y along `forward`, +Z toward `upward`.
-fn blade_dummy_matrix(d: &flver::Dummy) -> Mat4 {
-    let blade = Vec3::from(d.forward).normalize_or(Vec3::Z);
-    let y = -blade;
-    let up = Vec3::from(d.upward).normalize_or(Vec3::Y);
-    let z = (up - y * up.dot(y)).normalize_or(Vec3::Z);
-    let x = y.cross(z);
-    Mat4::from_cols(
-        x.extend(0.0),
-        y.extend(0.0),
-        z.extend(0.0),
-        Vec3::from(d.position).extend(1.0),
-    )
 }
 
 #[cfg(test)]

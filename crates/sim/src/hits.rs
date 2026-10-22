@@ -62,27 +62,6 @@ fn node_world(nodes: &[flver::Node]) -> Vec<Mat4> {
         .collect()
 }
 
-fn dummy_matrix(d: &flver::Dummy, blade: bool) -> Mat4 {
-    let fwd = Vec3::from(d.forward).normalize_or(Vec3::Z);
-    let up = Vec3::from(d.upward).normalize_or(Vec3::Y);
-    let (x, y, z) = if blade {
-        // The held part's -Y along the dummy's forward (how the katana sits in the hand).
-        let y = -fwd;
-        let z = (up - y * up.dot(y)).normalize_or(Vec3::Z);
-        (y.cross(z), y, z)
-    } else {
-        let z = fwd;
-        let x = up.cross(z).normalize_or(Vec3::X);
-        (x, z.cross(x), z)
-    };
-    Mat4::from_cols(
-        x.extend(0.0),
-        y.extend(0.0),
-        z.extend(0.0),
-        Vec3::from(d.position).extend(1.0),
-    )
-}
-
 fn parent_world(world: &[Mat4], d: &flver::Dummy) -> Mat4 {
     usize::try_from(d.parent_bone)
         .ok()
@@ -102,7 +81,7 @@ impl DummyRig {
                 rig.dummies
                     .entry(d.reference_id)
                     .or_default()
-                    .push((ROOT, parent_world(&world, d) * dummy_matrix(d, false)));
+                    .push((ROOT, parent_world(&world, d) * d.frame()));
                 continue;
             };
             let Some(node) = model.nodes.get(attach) else {
@@ -111,7 +90,7 @@ impl DummyRig {
             let Some(bone) = skeleton.bone_index(&node.name) else {
                 continue;
             };
-            let frame = parent_world(&world, d) * dummy_matrix(d, false);
+            let frame = parent_world(&world, d) * d.frame();
             let offset = world[attach].inverse() * frame;
             rig.dummies
                 .entry(d.reference_id)
@@ -121,8 +100,8 @@ impl DummyRig {
         rig
     }
 
-    /// Adds a held weapon's dummies: the weapon model sits at the character's dummy
-    /// `holder_dummy` (blade along its forward), following that dummy's attach bone.
+    /// Adds a held weapon's dummies: the weapon model's space is the frame of the character's
+    /// dummy `holder_dummy` (WepAbsorpPosParam `right_0`), following that dummy's attach bone.
     pub fn add_weapon(
         &mut self,
         model: &Flver,
@@ -148,10 +127,10 @@ impl DummyRig {
         else {
             return false;
         };
-        let holder = world[attach].inverse() * parent_world(&world, h) * dummy_matrix(h, true);
+        let holder = world[attach].inverse() * parent_world(&world, h) * h.frame();
         let wworld = node_world(&weapon.nodes);
         for d in &weapon.dummies {
-            let frame = parent_world(&wworld, d) * dummy_matrix(d, false);
+            let frame = parent_world(&wworld, d) * d.frame();
             self.dummies
                 .entry(d.reference_id)
                 .or_default()
@@ -357,6 +336,31 @@ pub(crate) fn load_table(
     })
 }
 
+/// Where a right-hand weapon's models sit on the body: body dummy ids from its
+/// WepAbsorpPosParam row (EquipParamWeapon `absorpParamId`). Each model's space is its
+/// dummy's frame ([`flver::Dummy::frame`]). Facts from FwLo's MIT RustSekiro (`docs/kb/visuals.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WeaponDummies {
+    /// `right_0`: the drawn blade (20, in Wolf's right hand).
+    pub held: i16,
+    /// `right_1`: the scabbard (147, on the `Sheath` bone).
+    pub scabbard: i16,
+    /// `rightHang_0`: the blade while sheathed (147, inside the scabbard).
+    pub sheathed: i16,
+}
+
+impl WeaponDummies {
+    /// The WepAbsorpPosParam row `id`, if it has a held dummy.
+    pub fn from_row(row: &Row) -> Option<Self> {
+        let get = |f: &str| row.int(f).ok().and_then(|v| i16::try_from(v).ok());
+        Some(Self {
+            held: get("right_0").filter(|&d| d > 0)?,
+            scabbard: get("right_1")?,
+            sheathed: get("rightHang_0")?,
+        })
+    }
+}
+
 /// What a character attacks with: its dummy rig, behaviour variation and body size.
 #[derive(Debug, Clone, Default)]
 pub struct Combatant {
@@ -382,6 +386,8 @@ pub struct Combatant {
     pub param_id: i32,
     /// Bullets by behaviour judge id (BehaviorParam rows with `refType` 1), with their children.
     pub bullets: HashMap<i32, Arc<crate::bullets::BulletDef>>,
+    /// Where the player's right-hand weapon sits on the body; `None` for NPCs.
+    pub weapon_dummies: Option<WeaponDummies>,
 }
 
 impl Combatant {
@@ -454,8 +460,14 @@ impl Combatant {
                 "raw/parts/{}.partsbnd.d/{name}.flver",
                 name.to_ascii_lowercase()
             ));
-            if let Some(blade) = read(&path) {
-                c.rig.add_weapon(&model, skeleton, &blade, 1);
+            let absorp = load_table(&pd, &dd, "WepAbsorpPosParam", "WepAbsorpPosParam");
+            c.weapon_dummies = w
+                .int("absorpParamId")
+                .ok()
+                .and_then(|id| absorp.as_ref()?.find(id as i32))
+                .and_then(|r| WeaponDummies::from_row(&r));
+            if let (Some(blade), Some(at)) = (read(&path), c.weapon_dummies) {
+                c.rig.add_weapon(&model, skeleton, &blade, at.held);
             }
         }
         // Rows missing for the weapon's own variation fall back to its hundred (5001 -> 5000),
@@ -820,6 +832,50 @@ impl HitDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #103: standing idle with the sword drawn, the katana points forward and a little
+    /// outward from the right hand and curves up, as in the real game. The blade sits on
+    /// WepAbsorpPosParam `right_0` (dummy 20) with the dummy's frame as its model space; it used
+    /// to hang on dummy 1 with its -Y along the dummy's forward, which pointed the same way but
+    /// rolled the blade a quarter turn, laying the curve flat out to the side.
+    #[test]
+    fn idle_katana_points_forward_and_curves_up() {
+        let cache = crate::cache::root();
+        let (Ok(skeleton), Ok(clip)) = (
+            std::fs::read(cache.join("anim/c0000/skeleton.bin")),
+            std::fs::read(cache.join("anim/c0000/a000_000000.bin")),
+        ) else {
+            eprintln!("skipping: c0000 animations are not extracted");
+            return;
+        };
+        let skeleton = Skeleton::from_bytes(&skeleton).unwrap();
+        let clip = sekiro_formats::anim::AnimClip::from_bytes(&clip).unwrap();
+        let wolf = Combatant::player(&cache, &skeleton);
+        let Some(at) = wolf.weapon_dummies else {
+            eprintln!("skipping: params are not extracted");
+            return;
+        };
+        assert_eq!((at.held, at.scabbard, at.sheathed), (20, 147, 147));
+        // Source space, character local: forward is -Z, Wolf's right is -X.
+        let model = skeleton.model_space(&clip.sample(0.0, &skeleton));
+        // Katana dummies 120 (at the guard), 110 (mid blade) and 100 (near the tip) lie along
+        // its -Y; the tip sits 5 cm off the straight line, toward the side the blade curves to.
+        let at = |id: i16| wolf.rig.positions(id, &model, Mat4::IDENTITY)[0];
+        let (guard, mid, tip) = (at(120), at(110), at(100));
+        let blade = (tip - guard).normalize();
+        let forward = blade.dot(Vec3::NEG_Z).acos().to_degrees();
+        assert!(
+            forward < 35.0,
+            "blade {blade:.2} is {forward:.0} deg off forward"
+        );
+        assert!(
+            blade.x < -0.2,
+            "blade {blade:.2} does not lean out to the right"
+        );
+        let straight = (mid - guard).normalize();
+        let curve = ((tip - guard) - straight * (tip - guard).dot(straight)).normalize();
+        assert!(curve.y > 0.7, "the blade curves toward {curve:.2}, not up");
+    }
 
     #[test]
     fn segment_distances() {

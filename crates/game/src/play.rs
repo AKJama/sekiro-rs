@@ -2589,10 +2589,20 @@ fn sheath_sword(
             .copied()
             .find(|e| names.get(*e).is_ok_and(|n| n.as_str() == name))
     };
-    let Some(blade) = find("dmyblade:1") else {
+    // The katana sits on WepAbsorpPosParam `right_0` and goes into the scabbard on `rightHang_0`.
+    let Some(at) = sim.duel.fighters[0].weapon_dummies else {
         return;
     };
-    let Some(sheath) = find("dmy:147") else {
+    let Some(blade) = find(&format!("dmy:{}", at.held)) else {
+        // Models extracted before #103 hold the katana on `dmyblade:1`, at the wrong roll.
+        if find("dmyblade:1").is_some() {
+            warn_once!(
+                "c0000.glb predates the katana fix (#103): run `sekiro-extract models c0000`"
+            );
+        }
+        return;
+    };
+    let Some(sheath) = find(&format!("dmy:{}", at.sheathed)) else {
         return;
     };
     let Ok((parent, mut local)) = attachments.get_mut(blade) else {

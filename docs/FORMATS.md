@@ -141,9 +141,9 @@ For the player, all groups show unless an equipped protector sets `invisibleFlag
 The Wolf is the c0000 skeleton plus the parts named by CharaInitParam row 10010 (Ashina Castle start: protectors 100000, 131000, 102000, 103000, weapon 5100).
 Protector models map to `BD_M_`/`AM_M_`/`LG_M_` by the body/arm/leg flags; head protector model 200 has no `HD_M_0200`, and is the face part `FC_M_0200` (head, hair, eyes, beard).
 The weapon's equipModelId gives `WP_A_0300` and its scabbard `WP_A_0300_1`, both hung on c0000 dummy polys whose attach bone they then follow.
-The katana sits on dummy 1 (attach bone `R_Weapon`) with its blade (model -Y) along the dummy's forward vector; attached straight to the `R_Weapon` bone it would point backwards in every pose.
-The scabbard sits on dummy 147 (attach bone `Sheath`, left hip) with its model +Y along the dummy's upward vector.
-The two conventions were chosen by checking the idle stance (blade forward and down) and the front deathblow (blade through the enemy); how the engine itself orients weapons on dummies is not confirmed.
+Which dummies is the weapon's WepAbsorpPosParam row (EquipParamWeapon `absorpParamId`, 5000 for the katana): `right_0` = 20 for the blade (attach bone `R_Weapon`), `right_1` = 147 for the scabbard (attach bone `Sheath`, left hip), and `rightHang_0` = 147 for the blade while sheathed.
+Each part's model space is its dummy's frame: +Z along the dummy's forward, +Y along its upward made orthogonal to forward (`flver::Dummy::frame`); facts from FwLo's RustSekiro (`docs/kb/visuals.md`, `model.rs::dummy_frame`).
+Dummy 22 has dummy 20's position and forward but the opposite upward, and dummy 1 sits at the same spot with its forward along the blade; only 20 with the plain frame matches the real game, where the idle blade points forward and slightly out and curves up (#103).
 Parts are skinned to the c0000 skeleton by bone name, each with its own inverse bind matrices; part and skeleton bind poses agree within 0.005 (matrix elements).
 
 ### Regenerate and view
