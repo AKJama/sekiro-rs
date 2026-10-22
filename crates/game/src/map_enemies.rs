@@ -222,7 +222,9 @@ fn sync(
             cloth: draw && foe.active() && full,
         };
         presentation.set_if_neq(lod);
-        visibility.set_if_neq(if draw {
+        // A foe that fell through a filter-15 event wall fades out and stays hidden (#234); the
+        // renderer has no model opacity yet, so the fade itself is not drawn.
+        visibility.set_if_neq(if draw && foe.duel.enemy_fall_opacity() > 0.0 {
             Visibility::Inherited
         } else {
             Visibility::Hidden

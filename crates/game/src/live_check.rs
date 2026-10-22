@@ -655,6 +655,9 @@ pub(super) fn observe(
                         "point": patrol.map(|p| p.current),
                         "previous": patrol.map(|p| p.previous),
                         "at": at,
+                        "hp": foe.duel.rules.fighters[1].vitality.hp,
+                        "fall_death": foe.duel.enemy_fall.death.as_ref().map(|d| format!("{d:?}")),
+                        "opacity": foe.duel.enemy_fall_opacity(),
                     }))
                 })
                 .collect::<Vec<_>>()

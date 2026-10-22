@@ -297,7 +297,7 @@ Those belong to the wall-jump work, not here.
   The script never fires the entry events of `FallHitDmgSmall/Large`, so the engine sends them from fall-damage code [I].
 - Death routing in the script (`BEH_R_DEATH`, lines 761 to 835): `damageType == 6` (`DEATH_FALLING`) fires `W_FallDeathStart`; `14` (`FALL_DEAD_RETURN`) fires `W_FallDeadReturnStart`; `15` and `16` (`LAND_DEAD_RETURN`, `LAND_DEAD`) fire the land death starts (water variants when env(3025)); free-fall styles otherwise use damage level and direction to pick `W_FallDeathDmgStart` [V].
   Return types after a fall-return death: `SAFE_POS_RETURN_TYPE_STAND/CROUCH/SWIM/DIVE` via env(3061), consumed by `InitState` (lines 175 to 200) [V].
-  How Sekiro decides a pit fall is a death (kill height, return volume) is not in the script [?].
+  How Sekiro decides a pit fall is a death is not in the script but in the exe's fall-dead routine `FUN_140b975f0`: a filter-15 event wall, or 30 s airborne, or 1500 m below the last stance; an NPC always dies of it (`docs/HIT-FILTERS.md`, #234) [V: decompiled].
 - Our current stand-in: `Duel::fall_respawn_depth` puts a character that falls a set depth below its start back at the start, standing, arena mode only (`crates/sim/src/duel.rs` lines 155 and 1397; `arena.rs` line 273) [V].
   `docs/DEATHBLOW.md` and PROGRESS.md mark Wolf death and respawn done for combat deaths; the fall path is separate.
 - The exe also has debug-menu names for air docking: `AirDockingPredictionRadius`, `AirDockingPredictionStartTime`, `DockingTranslationOffset_Hang`, `DockingTranslationOffset_Cover`, `DockingStickAngle` [V: strings.tsv; values not extracted].

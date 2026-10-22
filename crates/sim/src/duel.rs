@@ -263,6 +263,8 @@ pub struct Duel {
     touching: Vec<String>,
     /// Wolf's contacts with map action event walls (see [`crate::hit_filter`]), oldest first.
     pub helper_events: Vec<HelperEvent>,
+    /// The enemy's fall death (see [`crate::npc_fall`]).
+    pub enemy_fall: crate::npc_fall::NpcFall,
     /// The boss brain choosing the enemy's acts with its Lua AI (see [`crate::brain`]);
     /// `None` leaves the Lua AI alone.
     pub boss_brain: Option<crate::brain::BrainDriver>,
@@ -828,6 +830,7 @@ impl Duel {
             fall_return_part: None,
             touching: Vec::new(),
             helper_events: Vec::new(),
+            enemy_fall: Default::default(),
             boss_brain: None,
             god: false,
             immortal: false,
@@ -1157,6 +1160,7 @@ impl Duel {
         self.fall_return_fade = None;
         self.fall_return_part = None;
         self.touching.clear();
+        self.enemy_fall = Default::default();
         self.defender_dying = 0;
         self.last_throw_def_clip = None;
         self.paired_floor = None;
@@ -2900,8 +2904,35 @@ impl Duel {
         })
     }
 
+    /// The enemy's model opacity from its fall death's fade: 1 to 0 over
+    /// [`crate::hit_filter::FALL_RETURN_FADE`] after a filter-15 event wall, else 1.
+    pub fn enemy_fall_opacity(&self) -> f32 {
+        self.enemy_fall.opacity()
+    }
+
+    /// Kills the enemy as the exe's fall-dead routine does for an NPC (see [`crate::npc_fall`]),
+    /// and holds its body once the fade after a filter-15 event wall has ended.
+    fn kill_fallen_enemy(&mut self, before: [f32; 3], dt: f32) {
+        let enemy = &mut self.enemy;
+        let Some(death) = self
+            .enemy_fall
+            .step(&mut enemy.body, &*enemy.ground, before, dt)
+        else {
+            return;
+        };
+        eprintln!(
+            "fall death: {} at {:.2?} ({death:?})",
+            self.spec.chr, enemy.body.position
+        );
+        self.rules.fighters[1].vitality.set_hp(0);
+    }
+
     fn return_fallen_enemy(&mut self) {
-        // Keep the arena's existing NPC boundary reset; material fall death is PC-only.
+        // The arena's NPC boundary reset, for an enemy that has not died of its fall: one that
+        // has stays where it fell (see [`crate::npc_fall`]).
+        if self.enemy_fall.death.is_some() {
+            return;
+        }
         if let Some((depth, spawn)) = self.fall_respawn_depth.zip(self.spawn) {
             let start = spawn[1];
             if self.enemy.body.position[1] < start.position[1] - depth {
@@ -3463,6 +3494,7 @@ impl Duel {
         {
             self.separate([player_before, enemy_before]);
         }
+        self.kill_fallen_enemy(enemy_before, dt);
         if !self.shared_player_frame {
             self.return_fallen_enemy();
         }
