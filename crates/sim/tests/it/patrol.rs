@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use sekiro_sim::InputFrame;
 use sekiro_sim::collision::CollisionWorld;
-use sekiro_sim::duel::{Duel, population::Population};
+use sekiro_sim::duel::{
+    Duel,
+    population::{Population, SightCone},
+};
 
 /// An Outskirts ronin (c1010_0003) walks its two-point MSB route and stands for the route's
 /// arrival wait at each point, as NonBattleAct scripts it (#116): the goal parameter `false`
@@ -167,6 +170,28 @@ fn outskirts_soldier_keeps_wolf_at_close_range() {
             body.position[2] + front.z,
         ];
     };
+    // Stealth stays as the exe has it: the unalerted (normal) cone's eye sits
+    // eye_BackOffsetDist_normal (4 m) behind the soldier and starts eye_BeginDist_normal (4 m)
+    // out, so Wolf 1 m behind its feet (3 m from the eye) is unseen, and 4 m in front is seen.
+    {
+        let foe = soldier(&wolf);
+        let fields = &foe.ai.as_ref().unwrap().state.think.fields;
+        let normal = SightCone::from_think("normal", |name: &str| {
+            fields.get(name).copied().unwrap_or(0.0) as f32
+        });
+        let body = &foe.enemy.body;
+        let feet = glam::Vec3::from_array(body.position);
+        let front = sekiro_sim::arena::forward(body.yaw);
+        let radius = wolf.fighters[0].radius;
+        assert!(
+            !normal.contains(feet, body.yaw, feet - front, radius),
+            "an unalerted soldier sees Wolf 1 m behind it ({normal:?})"
+        );
+        assert!(
+            normal.contains(feet, body.yaw, feet + front * 4.0, radius),
+            "an unalerted soldier misses Wolf 4 m in front of it ({normal:?})"
+        );
+    }
     let dt = 1.0 / 60.0;
     place(&mut wolf, 4.0);
     let mut engaged = false;
