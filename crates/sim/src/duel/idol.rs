@@ -199,6 +199,16 @@ impl Duel {
             .min_by(|a, b| a.1.total_cmp(&b.1))
     }
 
+    /// Whether idol `i` of the play world is lit: Wolf has knelt at it once (its bonfire entity
+    /// is in the kit's found idols). Its guide reads "Rest" then, "Commune with Sculptor's Idol"
+    /// before (#187).
+    pub fn idol_lit(&self, i: usize) -> bool {
+        self.idols
+            .spots
+            .get(i)
+            .is_some_and(|s| self.kit.found_idols.contains(&s.entity))
+    }
+
     /// The idol Wolf kneels or prays at.
     pub fn idol(&self) -> Option<usize> {
         self.idols.at

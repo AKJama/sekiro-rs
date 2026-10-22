@@ -255,6 +255,7 @@ Each page lists its rows' idols in row id order, by `msgId` name, and only pages
 Page 0 ("Important Places", rows 100-102) repeats idols that also sit on their area pages, so an idol can be listed twice, as in the game.
 Found idols are kept in `Kit::found_idols` by `bonfireEntityId`; an idol counts as found once Wolf has lit or rested at it.
 The game records them by `eventflagId`; in the data the flag and the entity are one to one, so the entity stands in for the flag.
+The kneel guide at an idol not yet found reads "Commune with Sculptor's Idol" (イベントテキスト 10010182) and at a found one "Rest" (15000120), #187; which text the game picks is its own event script's choice, not traced, so "found" stands in for the game's lit flag.
 Wolf arrives at the idol's warp point: the c0000 MSB player part whose entity is the idol's minus 980 (idol 1101951, warp point 1100971), facing that part's yaw.
 All 58 rows have such a part, in the map the idol's entity names (`m{area}_{block}_00_00`), 0.9 to 7.2 m from the idol.
 That spot is also where Wolf now respawns after death, replacing the earlier guess of a point 1.5 m out from the kneeling spot.

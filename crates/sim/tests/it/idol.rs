@@ -230,11 +230,13 @@ fn a_rest_records_the_idol_and_travel_puts_wolf_at_the_other_idols_warp_point() 
     let (here, there) = (spot(1.0, 1101951), spot(20.0, 1101952));
     duel.set_idols(vec![here, there]);
 
-    // Kneeling at the first records it found, the other not yet.
+    // Kneeling at the first records it found (lit), the other not yet.
+    assert!(!duel.idol_lit(0) && !duel.idol_lit(1));
     let mut press = InputFrame::default();
     press.buttons.action = true;
     duel.step(&press, DT);
     assert_eq!(duel.idol(), Some(0));
+    assert!(duel.idol_lit(0) && !duel.idol_lit(1));
     assert_eq!(
         duel.kit.found_idols.iter().copied().collect::<Vec<_>>(),
         [1101951]
