@@ -322,6 +322,18 @@ Our unknown-method default returned 0, so NonBattleAct queued a 20 s `WaitWithAn
 POINT_INIT_POSE is the spawn point here, not the spawn facing, and an NPC in its idle state does not turn in place (its TAE turn speed is 0), so a guard moved off its facing does not turn back to it.
 Hearing (`GetLatestSoundTargetID` reads 0) and the caution state are not implemented for map foes, so guards react only to sight, `nose_dist` and damage.
 
+## Walking home after losing Wolf, issue #217
+
+A map foe that lost Wolf away from its post walks back to it, because `GetMovePointEffectRange` now follows the exe and `BackToHome` walks.
+NonBattleAct compares `GetMovePointEffectRange` with its walk-home distance (goal parameter 4, 1 when it is 0) and queues `BackToHome_With_Parry` when the range is larger; the stub returned 0, so a foe stood wherever it lost Wolf.
+The binding (`FUN_1405e38f0`) reads AI +0x9084, which the route manager at AI +0x9060 fills with `FUN_1405afea0` (via `FUN_1405afe80`): the 3D distance from the foe to its move point, taken from `FUN_1405b04d0`.
+That is the nearest point of the segment from the current route point to the previous one, or from the current point to the initial position (POINT_INITIAL, 100) before the first step (`FUN_1419ef320`, clamped to the segment's ends).
+With no current point it is the distance to the last point of an ended route, or to the initial position for a foe with no route.
+The exe's first case, a segment of an active event move area (AI +0x9160, `FUN_140630550`), is not modelled.
+FwLo's `src/ai.rs` uses the flat distance from home there and marks it a gap.
+`BackToHome` (goal 4) used to run as MoveToSomewhere towards its parameter 0, which `BackToHome_With_Parry` sets to TARGET_ENE_0, so with Wolf lost it did not move.
+It now walks to the initial position and succeeds within 1 m on the ground plane, FwLo's rule from `src/ai.rs`; the exe's arrival radius and its path following are not traced.
+
 ## Wall push-out between opposing faces, issue #176
 
 The slide's push-out (`CollisionWorld::push_out` in `crates/sim/src/collision.rs`) is the simulation's own rule, not the exe's Havok character proxy, which was not traced.
