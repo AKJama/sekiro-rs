@@ -780,6 +780,21 @@ impl TaeRuntime {
         self.timed.keys().copied().collect()
     }
 
+    /// Ids of the SpEffects active this frame (the clips' events and timed effects) plus the
+    /// resident ones, each once, so a rate product never counts an effect twice.
+    pub fn active_sp_effects(&self) -> Vec<i32> {
+        let mut ids: Vec<i32> = self
+            .frame
+            .sp_effects
+            .iter()
+            .chain(&self.resident)
+            .copied()
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
     /// Removes an externally applied effect when a map event clears it.
     pub fn clear_timed(&mut self, id: i32) {
         self.timed.remove(&id);
@@ -1185,5 +1200,31 @@ mod fxr_event_tests {
         assert!(!runtime.frame.effects[0].started);
         runtime.update(&db, &clip(0.9, 1.0), 0.1);
         assert!(runtime.frame.effects.is_empty());
+    }
+
+    #[test]
+    fn resident_effect_also_in_frame_counts_once() {
+        let covert = SpEffectInfo {
+            behavior_ref: 0,
+            duration: 0.0,
+            state_info: 0,
+            category: 0,
+            priority: 0,
+            vfx: 0,
+            sound_rate: 0.5,
+            hearing_cut: 0.0,
+        };
+        let mut runtime = TaeRuntime::default();
+        runtime.resident.push(150010);
+        runtime.frame.sp_effects.push(150010);
+        let ids = runtime.active_sp_effects();
+        assert_eq!(ids, [150010]);
+        let effects = std::collections::HashMap::from([(150010, covert)]);
+        let rate: f32 = ids
+            .iter()
+            .filter_map(|id| effects.get(id))
+            .map(|e| e.sound_rate)
+            .product();
+        assert_eq!(rate, 0.5);
     }
 }

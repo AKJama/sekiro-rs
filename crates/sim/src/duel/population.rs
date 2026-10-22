@@ -488,10 +488,8 @@ impl Duel {
             let tae = &self.player.tae;
             let runtime = &self.player.tae_runtime;
             let rate: f32 = runtime
-                .frame
-                .sp_effects
+                .active_sp_effects()
                 .iter()
-                .chain(&runtime.resident)
                 .filter_map(|id| tae.sp_effects.get(id))
                 .map(|e| e.sound_rate)
                 .product();
@@ -536,10 +534,8 @@ impl Duel {
                     ear: think("ear_dist") as f32,
                     cut: think("ear_soundcut_dist") as f32,
                     rate: runtime
-                        .frame
-                        .sp_effects
+                        .active_sp_effects()
                         .iter()
-                        .chain(&runtime.resident)
                         .filter_map(|id| d.enemy.tae.sp_effects.get(id))
                         .map(|e| 1.0 - e.hearing_cut.max(0.0) / 100.0)
                         .product::<f32>()

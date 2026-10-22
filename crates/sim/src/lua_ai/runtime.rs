@@ -1951,7 +1951,11 @@ fn native_update(st: &mut AiState, id: u32, n: NativeGoal) -> i32 {
             if !g.started_anim {
                 st.goal_mut(id).started_anim = true;
                 let p = |i: usize| g.params.get(i).cloned().unwrap_or(Value::Nil);
-                if g.param(0) >= 0.0 && g.params.first().and_then(Value::num).is_some() {
+                if g.params
+                    .first()
+                    .and_then(Value::num)
+                    .is_some_and(|a| a >= 0.0)
+                {
                     let look = [180.0, 1.5, 20.0].map(Value::Num);
                     let mut a = vec![Value::Num(2200.0), Value::Num(-1.0), p(0), p(1)];
                     a.push(Value::Num(9999.0));
