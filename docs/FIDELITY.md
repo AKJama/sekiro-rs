@@ -306,6 +306,19 @@ These parts are approximations or unchecked:
 - The cast is the simulation's sub-stepped slide with a 0.16 m hold, not the exe's shape cast (`FUN_140bc68d0`), and it does not apply the exe's 90 degree angle limit.
 - `StandMoveStart` and `GroundStep` send only the walking request in the simulation, though their `g_paramHkbState` rows set both flags, so a walk's start or a step is not held by a band; the cause is not traced.
 
+## Riding a round trunk, issue #155
+
+The first pine past the gate at start 0 (`o002500_0005`) let Wolf walk off its bend and its tip's south side, because the body stood on the floor under its centre as if on a point foot.
+Its walls (`o002501_0005`) lean out over the trunk's rounded flanks: the walls held his axis, but the feet followed the flank down and he dropped with the crown still under his capsule's rim, or dropped below the outward-leaning wall and walked out behind it.
+The body now rests its rounded bottom on the highest floor its rim reaches, up to a step above the feet, 0.2 m below that floor (`Body::rim_support`, `Body::rounded_step_down`).
+A rim floor above the feet counts only on a rideable object (material 8xx); a higher map floor at the rim is a ledge whose edge is a wall, and counting it held Wolf in mid-air beside the snake pit's ledge (`snake_pit_hug_exit_rests_on_the_lip`).
+Other round surfaces that are not rideable still hold only at or below the feet.
+This is the simulation's capsule shape, not a trace of the exe's ground probe, which is not traced.
+The bounded step down also applies only on a rideable object, so map stairs and ledges step down exactly as before; measured walking and running down the castle's long stairs from start 3 and off 0.25 to 0.5 m ledges, map floors match the old code tick for tick.
+On a rideable object a step off an edge keeps the feet 0.2 m below its top while the capsule's rim is over it: 3 ticks at a run, up to 10 at a slow walk.
+A sweep of walks out of every Outskirts pine's top surface in 8 directions (7748 walks that leave through a wall) found 380 that walked through on main and 245 with this change; `o002500_0005` went from 25 to 0, and 12 trees still let some through (`o002510_0001` 51, `o002530_0001` 38, `o002510_0004` 33, `o002530_0000` 29, `o002500_0003` 27, `o002510_0002` 22, `o002500_0007` 16, `o002530_0008` 16, and four more with 6 or fewer).
+Those remaining leaks are not investigated.
+
 ## Patrol walking and arrival waits, issue #116
 
 Patrolling foes walk their PatrolInfo route and play its arrival waits and animations because two Lua goal methods now follow the exe.

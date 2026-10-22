@@ -87,6 +87,8 @@ What the simulation does:
   A slide gathers only the walls within `FALL_ASSIST_RADIUS` of the feet's height and in the slide's reach: m11_00's bands fill a quarter of the occupied cells, up to 248 a cell and mostly at other storeys, and gathering them all (up to 276 a slide) made every slide near them take the fine sub-steps and test every wall.
 - The walls often stand up to 0.2 m past the floor's end, where the game's 0.4 m capsule still rests on the lip.
   A grounded body now stays on a floor its capsule rim reaches (`Body::rim_support`: eight points 0.35 m out, `RADIUS * sin 60`, the walkable slope limit), so it is held rather than dropped short of the wall.
+  The capsule's bottom is round, so a rideable object's crown at the rim holds it from above the feet too, up to a step above them: the bottom meets it at 0.2 m (`RIM_LIFT`, `r - r cos 60`) above its lowest point there, so the feet stay no lower than that floor less 0.2 m.
+  On a rideable object the same bound limits a step down onto a lower floor under the centre (`Body::rounded_step_down`), so the body does not sink down a round trunk's flank while its rim is still on the crown (#155).
 
 | collisionType | Group | Player and enemies | Camera | Outskirts objects (triangles) | Castle objects (triangles) |
 |---|---|---|---|---|---|
