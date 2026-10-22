@@ -2485,4 +2485,108 @@ mod tests {
             );
         }
     }
+
+    /// How one walk along a flight went, tick by tick.
+    struct StairWalk {
+        /// The largest height change in one tick against the walk's way (down while going up).
+        backwards: f32,
+        /// The largest height change in one tick.
+        most: f32,
+        /// The largest change of the height change from one tick to the next.
+        kink: f32,
+        /// Whether he stayed grounded on every tick.
+        stayed: bool,
+    }
+
+    /// Wolf walks (stick `push`) from `from` to `to` on `world`, measuring his feet's height.
+    fn walk_flight(
+        play: &PlayWorld,
+        world: std::sync::Arc<sekiro_sim::collision::CollisionWorld>,
+        from: [f32; 3],
+        to: [f32; 3],
+        push: f32,
+    ) -> StairWalk {
+        let mut wolf = sekiro_sim::Character::load_from_cache(&play.cache).unwrap();
+        let y = world.floor(from[0], from[2], from[1] + 1.0).unwrap();
+        wolf.ground = Box::new(world);
+        wolf.body.position = [from[0], y, from[2]];
+        wolf.settle(1.0 / 60.0, 400);
+        let up = (to[1] - from[1]).signum();
+        let mut walk = StairWalk {
+            backwards: 0.0,
+            most: 0.0,
+            kink: 0.0,
+            stayed: true,
+        };
+        let mut last = None::<f32>;
+        for _ in 0..900 {
+            let p = wolf.body.position;
+            let (dx, dz) = (to[0] - p[0], to[2] - p[2]);
+            if dx.hypot(dz) < 0.8 {
+                return walk;
+            }
+            let input = sekiro_sim::InputFrame {
+                move_stick: [0.0, push],
+                camera_yaw: (-dx).atan2(-dz),
+                ..Default::default()
+            };
+            wolf.tick(&input, 1.0 / 60.0);
+            let dy = wolf.body.position[1] - p[1];
+            walk.backwards = walk.backwards.max(-dy * up);
+            walk.most = walk.most.max(dy.abs());
+            if let Some(last) = last {
+                walk.kink = walk.kink.max((dy - last).abs());
+            }
+            last = Some(dy);
+            walk.stayed &= wolf.body.grounded;
+        }
+        panic!("never reached {to:?}, at {:?}", wolf.body.position);
+    }
+
+    /// #104: Wolf climbs and descends the long castle stairs past start 3's moat gate smoothly,
+    /// walking and running: his height changes the same way every tick, by no more than a
+    /// 23 degree flight rises over a run tick, and he never leaves the ground. The capsule meets
+    /// the `l` collision (#189), which models a flight as a ramp. Before, characters walked on
+    /// the `h` mesh, whose treads are real steps: each riser lifted him up to 0.29 m in one tick
+    /// and he dipped between them, the bounce the playtest saw. The same walk on `h` shows it.
+    #[test]
+    fn play_collision_world_walks_stairs_smoothly() {
+        let Some(play) = wolf_world() else {
+            return;
+        };
+        let (bottom, top) = ([-157.75, -52.73, 131.63], [-138.94, -45.94, 139.30]);
+        for (push, gait) in [(0.3, "walk"), (1.0, "run")] {
+            for (from, to, way) in [(bottom, top, "up"), (top, bottom, "down")] {
+                let w = walk_flight(play, play.world.clone(), from, to, push);
+                println!(
+                    "{gait} {way}: most {:.4} m a tick, backwards {:.4}, kink {:.4}, grounded {}",
+                    w.most, w.backwards, w.kink, w.stayed
+                );
+                assert!(w.stayed, "{gait} {way}: left the ground");
+                assert!(
+                    w.backwards < 1e-3,
+                    "{gait} {way}: {:.4} m back",
+                    w.backwards
+                );
+                assert!(w.most < 0.06, "{gait} {way}: {:.4} m in a tick", w.most);
+                assert!(w.kink < 0.05, "{gait} {way}: kink {:.4} m", w.kink);
+            }
+        }
+        // The `h` mesh the body walked before #189: the same run up jumps a riser in a tick.
+        let bytes = std::fs::read(
+            play.cache
+                .join("maps")
+                .join(ASHINA[0])
+                .join("collision.bin"),
+        )
+        .unwrap();
+        let mesh = sekiro_formats::hknp::CollisionMesh::from_bytes(&bytes).unwrap();
+        let h = std::sync::Arc::new(sekiro_sim::collision::CollisionWorld::from_mesh(&mesh));
+        let w = walk_flight(play, h, bottom, top, 1.0);
+        println!(
+            "h run up: most {:.4} m a tick, backwards {:.4}, kink {:.4}",
+            w.most, w.backwards, w.kink
+        );
+        assert!(w.most > 0.1 && w.kink > 0.1, "h's treads are steps");
+    }
 }
