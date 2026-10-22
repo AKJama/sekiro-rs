@@ -306,21 +306,51 @@ impl FxrPlayer {
     /// Live particles of the camera-relative map effects within `radius` m (horizontally) of
     /// `at`, for the `SEKIRO_FXR_LOG` weather log (#84).
     pub(crate) fn map_particles_near(&self, id: i32, at: Vec3, radius: f32) -> usize {
-        fn near(n: &NodeInst, at: Vec3, radius: f32) -> usize {
-            n.particles
-                .iter()
-                .filter(|p| (p.pos - at).xz().length() < radius)
-                .count()
-                + n.children
-                    .iter()
-                    .map(|c| near(c, at, radius))
-                    .sum::<usize>()
+        self.map_particles_where(id, |p| (p - at).xz().length() < radius)
+    }
+
+    /// Live particles of the camera-relative map effect `id` whose position passes `keep`.
+    pub(crate) fn map_particles_where(&self, id: i32, keep: impl Fn(Vec3) -> bool) -> usize {
+        fn count(n: &NodeInst, keep: &dyn Fn(Vec3) -> bool) -> usize {
+            n.particles.iter().filter(|p| keep(p.pos)).count()
+                + n.children.iter().map(|c| count(c, keep)).sum::<usize>()
         }
         self.effects
             .iter()
             .filter(|e| e.key.0 == 5 && e.key.1 == id && !e.asleep)
             .filter_map(|e| e.root.as_ref())
-            .map(|root| near(root, at, radius))
+            .map(|root| count(root, &keep))
+            .sum()
+    }
+
+    /// Removes the falling weather particles (GPUStandardParticle, world space) of map effect
+    /// `id` that lie under cover, so snow does not fall under a roof (#79). Returns how many.
+    pub(crate) fn cull_map_weather(
+        &mut self,
+        id: i32,
+        covered: &mut impl FnMut(Vec3) -> bool,
+    ) -> usize {
+        fn cull(n: &mut NodeInst, covered: &mut dyn FnMut(Vec3) -> bool) -> usize {
+            let mut gone = 0;
+            if n.cfg
+                .as_ref()
+                .is_some_and(|c| c.appearance[Field::Type].as_i64() == Some(10000))
+            {
+                let before = n.particles.len();
+                n.particles.retain(|p| p.attached || !covered(p.pos));
+                gone = before - n.particles.len();
+            }
+            gone + n
+                .children
+                .iter_mut()
+                .map(|c| cull(c, covered))
+                .sum::<usize>()
+        }
+        self.effects
+            .iter_mut()
+            .filter(|e| e.key.0 == 5 && e.key.1 == id && !e.asleep)
+            .filter_map(|e| e.root.as_mut())
+            .map(|root| cull(root, covered))
             .sum()
     }
 
