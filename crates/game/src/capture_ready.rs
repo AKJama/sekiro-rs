@@ -150,14 +150,15 @@ fn watch_meshes(
         Query<&mut Mesh3d>,
     )>,
     mut unchecked: Local<std::collections::HashMap<AssetId<Mesh>, Vec<Entity>>>,
-    mut removed: RemovedComponents<Mesh3d>,
+    mut refs_seen: Local<Option<Option<u64>>>,
     mut asset_events: MessageReader<bevy::asset::AssetEvent<Mesh>>,
 ) {
-    let retired = removed.read().next().is_some();
-    removed.clear();
-    let retired_assets = asset_events.read().next().is_some();
-    asset_events.clear();
-    if unchecked.is_empty() && meshes.p0().is_empty() && !retired && !retired_assets {
+    // Only a removed asset or a mesh no entity uses any more can retire a mesh. Cloth, effect
+    // batches and the sky rewrite meshes every frame (`Modified`), which retires nothing, and
+    // pruning on those rescanned every loaded mesh each frame (#70).
+    let revision = refs.as_ref().map(|r| r.revision());
+    let retired = mesh_retired(asset_events.read(), &mut refs_seen, revision);
+    if unchecked.is_empty() && meshes.p0().is_empty() && !retired {
         return;
     }
     let referenced =
@@ -175,7 +176,7 @@ fn watch_meshes(
         }
         // A static merge can retire the last entity using a source before its upload.
         // CPU fallback assets still exist, but are no longer part of the loading gate.
-        if retired || retired_assets {
+        if retired {
             state.forget_removed(referenced);
         }
         (
@@ -194,9 +195,27 @@ fn watch_meshes(
         }
     }
     // A mesh asset removed before the render world prepared it never reports back.
-    if retired || retired_assets {
+    if retired {
         unchecked.retain(|id, _| referenced(*id));
     }
+}
+
+/// Whether a mesh may have been retired since the last call: a mesh asset was removed, or the
+/// set of meshes some entity uses changed (`revision`, [`crate::mesh_residency::MeshRefs`];
+/// `None` without a map, where only removal retires a mesh). Reads every event, so none carry
+/// over to the next frame.
+fn mesh_retired<'a>(
+    events: impl Iterator<Item = &'a bevy::asset::AssetEvent<Mesh>>,
+    seen: &mut Option<Option<u64>>,
+    revision: Option<u64>,
+) -> bool {
+    // Counted rather than `any`, so the reader is drained every frame.
+    let removed = events
+        .filter(|event| matches!(event, bevy::asset::AssetEvent::Removed { .. }))
+        .count()
+        > 0;
+    let refs_changed = seen.replace(revision) != Some(revision);
+    removed || refs_changed
 }
 
 /// Render world, after specialization: sort newly reported meshes into prepared and waiting,
@@ -472,6 +491,48 @@ mod tests {
             1,
             "a mesh still in the main world keeps holding the gate until prepared"
         );
+    }
+
+    /// #70: cloth, effect batches and the sky rewrite meshes every frame. Those `Modified`
+    /// events must not rescan every loaded mesh; only a removed asset or a mesh losing its last
+    /// entity can retire one.
+    #[test]
+    fn rewritten_meshes_retire_nothing() {
+        use bevy::asset::AssetEvent;
+        let id = AssetId::<Mesh>::Uuid {
+            uuid: bevy::asset::uuid::Uuid::from_u128(1),
+        };
+        let mut seen = None;
+        assert!(
+            mesh_retired([].iter(), &mut seen, Some(0)),
+            "first frame prunes"
+        );
+        let rewrites = [AssetEvent::Modified { id }, AssetEvent::Modified { id }];
+        for _ in 0..3 {
+            assert!(!mesh_retired(rewrites.iter(), &mut seen, Some(0)));
+        }
+        assert!(mesh_retired(
+            [AssetEvent::Modified { id }, AssetEvent::Removed { id }].iter(),
+            &mut seen,
+            Some(0)
+        ));
+        assert!(
+            mesh_retired(rewrites.iter(), &mut seen, Some(1)),
+            "refs changed"
+        );
+        assert!(!mesh_retired([].iter(), &mut seen, Some(1)));
+        // Without a map there is no `MeshRefs`: only a removed asset retires a mesh.
+        let mut seen = None;
+        assert!(
+            mesh_retired([].iter(), &mut seen, None),
+            "first frame prunes"
+        );
+        assert!(!mesh_retired(rewrites.iter(), &mut seen, None));
+        assert!(mesh_retired(
+            [AssetEvent::Removed { id }].iter(),
+            &mut seen,
+            None
+        ));
     }
 
     #[test]

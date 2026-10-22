@@ -927,8 +927,7 @@ pub fn add_map(
     stage("materials and grass");
     app.insert_resource(ShadowSettings::from_args(&gparam, hour, &args)?);
     LocalLights::install(app, dir, &args)?;
-    app.add_plugins(WireframePlugin::default())
-        .insert_resource(ClearColor(SKY))
+    app.insert_resource(ClearColor(SKY))
         .insert_resource(GlobalAmbientLight {
             color: Color::srgb(0.80, 0.85, 1.0),
             brightness: crate::lighting::ENV_PER_UNIT,
@@ -1059,6 +1058,10 @@ pub fn run(options: Options) -> Result<()> {
             }),
         FrameTimeDiagnosticsPlugin::default(),
         bevy::render::diagnostic::RenderDiagnosticsPlugin,
+        // Only the viewer can show the collision wireframe (`--collision`, C). Play and sweeps
+        // never do, and the plugin's per-frame specialization check over every mesh cost
+        // about 1.8 ms of the main thread in the castle (#70).
+        WireframePlugin::default(),
     ))
     // Keep rendering at full rate when the window is not focused, so screenshots and
     // `--uncapped` measurements from a terminal are not throttled to 60 Hz.
