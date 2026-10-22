@@ -222,6 +222,7 @@ fn main() {
                 [0.0, 0.0]
             },
             camera_yaw: yaw_toward(p, e),
+            camera_pitch: 0.0,
             buttons,
         };
         let report = duel.step(&frame, dt);
