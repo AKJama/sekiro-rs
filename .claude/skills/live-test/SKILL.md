@@ -46,6 +46,11 @@ Use `--script-route x,z;x,z;...` instead: once the `--script` ends, Wolf walks t
 - After 3600 steps without finishing, the route is abandoned with a `script route abandoned` warning; treat that run as failed.
 - The live check waits for the route before it ends the run.
 
+A route only walks, so a run, sprint or jump in a set direction is a `--script` row aimed by its yaw column (format in `crates/sim/src/demo.rs`).
+- The column turns the camera, which starts at the `--spawn` yaw: a forward stick (`0 1`) goes along world yaw `spawn + column`, and `0 -1` goes the opposite way.
+- Yaw 0 faces -z and positive yaw turns left (+90 faces -x); to aim along a world direction `(dx, dz)`, use the column `atan2(-dx, -dz)` in degrees minus the spawn yaw.
+- Set `PLAY_LOG_CAMERA=1` to log each step's `cam`, `stick_yaw` and `travel` yaw, and check the travel matches before trusting the run.
+
 ## 6. Prove the target was hit
 
 The log must show the run actually tested the change, or it proves nothing.

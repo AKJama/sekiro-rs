@@ -70,6 +70,7 @@ mod posture_recovery;
 mod projectile_guard;
 mod roster;
 mod running_jump;
+mod script_yaw;
 mod senpou_screens_arena;
 mod shura_arena;
 mod silvergrass_arena;

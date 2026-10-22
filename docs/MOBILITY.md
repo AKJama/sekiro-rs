@@ -420,6 +420,7 @@ Credit the table and the air-velocity description in `CREDITS.md` and in the cod
 Order: air control and fall respawn, ledge hang, grapple, wall hug, climbing, swimming.
 Every step: keep `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --check` clean; build with `CARGO_TARGET_DIR=target/alt` and `-j 6`.
 Scripted runs: `sekiro-rs --play --map <id> --no-enemy --script FILE --shots <step>:<path> --exit`, `--spawn x,y,z,yaw,pitch`; script lines are `frames stick_x stick_y button [yaw_offset]` with buttons `jump`, `dodge`, `grapple`, and `-` for none (`crates/game/scripts/m11_ledge_jump.txt`).
+The yaw offset turns the camera, which starts at the spawn yaw, so a forward stick runs along world yaw `spawn + yaw_offset` (format and aiming rule in `crates/sim/src/demo.rs`).
 Yaw convention: forward is `(-sin yaw, -cos yaw)`, positive yaw turns left [V: `Body::forward`].
 Spawn coordinates below are Bevy-space values from `layout.json`.
 
