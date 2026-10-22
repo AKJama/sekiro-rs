@@ -37,7 +37,12 @@ impl Patrol {
     }
 
     pub fn position(&self) -> Option<[f32; 3]> {
-        let r = &self.points.get(usize::try_from(self.current).ok()?)?.1;
+        self.point(self.current)
+    }
+
+    /// World position of route point `index`.
+    pub fn point(&self, index: i32) -> Option<[f32; 3]> {
+        let r = &self.points.get(usize::try_from(index).ok()?)?.1;
         Some([-r.position[0], r.position[1], r.position[2]])
     }
 

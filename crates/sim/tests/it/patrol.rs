@@ -217,3 +217,100 @@ fn outskirts_soldier_keeps_wolf_at_close_range() {
         );
     }
 }
+
+/// An Outskirts guard with no route (c1010_0001) that chased Wolf off its post and then lost
+/// him walks back to its post (#217). NonBattleAct walks home when GetMovePointEffectRange
+/// exceeds its walk-home distance; the exe returns the distance from the foe to its move
+/// point, which for a foe with no route is its initial position (FUN_1405afea0). It used to
+/// return 0, so the guard stood wherever it lost Wolf.
+#[test]
+fn outskirts_guard_walks_home_after_losing_wolf() {
+    let cache = sekiro_sim::cache::root();
+    let map = "m11_00_00_00";
+    let dir = cache.join(format!("maps/{map}"));
+    if !dir.join("collision.bin").exists() || !cache.join("anim/c1010").is_dir() {
+        return;
+    }
+    let mut wolf = outskirts(&cache, map, &dir);
+    fn guard(wolf: &Duel) -> &Duel {
+        wolf.population
+            .as_ref()
+            .unwrap()
+            .foes
+            .iter()
+            .find(|f| f.part == "c1010_0001")
+            .unwrap()
+            .duel
+            .as_ref()
+    }
+    let flat = |a: [f32; 3], b: [f32; 3]| (a[0] - b[0]).hypot(a[2] - b[2]);
+    let post = guard(&wolf).enemy.body.position;
+    let dt = 1.0 / 60.0;
+    // Wolf 4 m in front of the guard until it fights him, then keeps backing off so the guard
+    // follows him away from its post.
+    let mut engaged = false;
+    for _ in 0..60 * 12 {
+        let body = &guard(&wolf).enemy.body;
+        let front = sekiro_sim::arena::forward(body.yaw) * 4.0;
+        wolf.player.body.position = [
+            body.position[0] + front.x,
+            body.position[1],
+            body.position[2] + front.z,
+        ];
+        wolf.step(&InputFrame::default(), dt);
+        engaged |= guard(&wolf).ai.as_ref().unwrap().state.battle;
+        if engaged && flat(guard(&wolf).enemy.body.position, post) > 8.0 {
+            break;
+        }
+    }
+    assert!(engaged, "the guard fights Wolf");
+    let lost_at = guard(&wolf).enemy.body.position;
+    let away = flat(lost_at, post);
+    assert!(
+        away > 6.0,
+        "the guard follows Wolf {away:.1} m off its post"
+    );
+    // Wolf leaves, 60 m off (out of sight in the air, within the 100 m activation range); the
+    // guard forgets him and goes back to NonBattleAct.
+    let far = [post[0] + 60.0, post[1], post[2]];
+    let mut stacks = std::collections::BTreeSet::new();
+    let mut closest = away;
+    for _ in 0..60 * 60 {
+        wolf.player.body.position = far;
+        wolf.step(&InputFrame::default(), dt);
+        let foe = guard(&wolf);
+        let ai = foe.ai.as_ref().unwrap();
+        if !ai.state.battle {
+            stacks.insert(ai.goal_stack().join(">"));
+        }
+        closest = closest.min(flat(foe.enemy.body.position, post));
+        if closest < 1.0 {
+            break;
+        }
+    }
+    eprintln!(
+        "guard lost Wolf {away:.1} m from its post, came within {closest:.1} m; goals {stacks:?}"
+    );
+    assert!(
+        closest < 1.0,
+        "the guard stays {closest:.1} m from its post after losing Wolf ({stacks:?})"
+    );
+    assert!(
+        stacks.iter().any(|s| s.contains("BackToHome")),
+        "{stacks:?}"
+    );
+    // Home again, it stands guard there.
+    let mut settled = std::collections::BTreeSet::new();
+    for _ in 0..60 * 3 {
+        wolf.player.body.position = far;
+        wolf.step(&InputFrame::default(), dt);
+        let foe = guard(&wolf);
+        settled.insert(foe.ai.as_ref().unwrap().goal_stack().join(">"));
+        let off = flat(foe.enemy.body.position, post);
+        assert!(
+            off < 1.5,
+            "the guard wanders {off:.1} m off its post ({settled:?})"
+        );
+    }
+    assert!(settled.contains("NonBattleAct>Stay"), "{settled:?}");
+}

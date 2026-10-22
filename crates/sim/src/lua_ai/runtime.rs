@@ -39,6 +39,9 @@ const PLAN_DODGE_BACK: i32 = -10003;
 const OBJ_AI: u8 = 0;
 const OBJ_GOAL: u8 = 1;
 
+/// `POINT_INITIAL` (`ai_define.lua`): where the character was placed.
+const POINT_INITIAL: i32 = 100;
+
 /// `GOAL_COMMON_Stay` (`goal_list.lua`).
 const GOAL_STAY: i32 = 2;
 
@@ -52,6 +55,8 @@ pub enum NativeGoal {
     Wait,
     /// 2019 MoveToSomewhere and its variants: move until within a distance of a target.
     MoveTo,
+    /// 4 BackToHome(life, ...): walk back to the initial position.
+    BackToHome,
     /// 2101 Guard: hold the guard action for the lifetime.
     Guard,
     /// 2017 SidewayMove and variants: strafe around the target.
@@ -74,7 +79,8 @@ impl NativeGoal {
             PLAN_DEFLECT => NativeGoal::PlanDeflect,
             PLAN_DODGE_BACK => NativeGoal::PlanDodgeBack,
             2000 | 2 | 5000 => NativeGoal::Wait,
-            2019 | 2013 | 2025 | 2026 | 2027 | 2023 | 2024 | 2028 | 4 => NativeGoal::MoveTo,
+            2019 | 2013 | 2025 | 2026 | 2027 | 2023 | 2024 | 2028 => NativeGoal::MoveTo,
+            4 => NativeGoal::BackToHome,
             2101 => NativeGoal::Guard,
             2017 | 2030 | 2036 => NativeGoal::Sideway,
             2018 => NativeGoal::KeepDist,
@@ -498,6 +504,40 @@ impl AiState {
             103 => self.patrol.as_ref().and_then(|p| p.position()),
             _ => None,
         }
+    }
+
+    /// How far I am from my move point, which NonBattleAct compares with its walk-home
+    /// distance (#217). The exe (FUN_1405afea0 over FUN_1405b04d0, stored at AI +0x9084 and
+    /// read by GetMovePointEffectRange) measures in 3D from my position to the segment between
+    /// the current route point and the previous one (or my initial position, POINT 100, before
+    /// the first step), to the last point once a route has ended, and to my initial position
+    /// with no route. Its first case, an active event move area (AI +0x9160), is not modelled.
+    fn move_point_effect_range(&self) -> f32 {
+        let me = glam::Vec3::from_array(self.world.me.position);
+        let home = self.world.home;
+        let (a, b) = match &self.patrol {
+            Some(p) if p.current >= 0 => {
+                let b = (p.previous >= 0 && p.previous != p.current)
+                    .then(|| p.point(p.previous))
+                    .flatten();
+                (p.point(p.current), Some(b.unwrap_or(home)))
+            }
+            Some(p) if p.previous >= 0 => (p.point(p.previous), None),
+            _ => (Some(home), None),
+        };
+        let a = glam::Vec3::from_array(a.unwrap_or(home));
+        let Some(b) = b.map(glam::Vec3::from_array) else {
+            return me.distance(a);
+        };
+        // FUN_1419ef320: the nearest point of the segment a..b, clamped to its ends.
+        let ab = b - a;
+        let along = ab.dot(me - a);
+        let t = if along <= 0.0 {
+            0.0
+        } else {
+            (along / ab.length_squared()).min(1.0)
+        };
+        me.distance(a + ab * t)
     }
 
     fn dist(&self, target: i32) -> f32 {
@@ -1097,6 +1137,7 @@ impl AiState {
                 .as_ref()
                 .and_then(|p| p.arrival(t(0)))
                 .map_or(0, |a| a.1) as f64),
+            "GetMovePointEffectRange" => num(self.move_point_effect_range() as f64),
             "IsRouteEnd" => boolean(self.patrol.as_ref().is_none_or(|p| p.ended())),
             // The MSB enemy's small act (its init_anim_id_type, part data +0x22) names a row
             // whose anim id GetSmallActAnimId returns; with no row (-1, as for nearly every
@@ -1150,7 +1191,6 @@ impl AiState {
             "GetTeamOrder"
             | "GetChangeBattleStateCount"
             | "GetCurrTargetType"
-            | "GetMovePointEffectRange"
             | "GetLatestSoundTargetID"
             | "GetOddsParamIdOffset" => num(0.0),
             "TurnTo" => {
@@ -1716,6 +1756,19 @@ fn native_update(st: &mut AiState, id: u32, n: NativeGoal) -> i32 {
             st.request.move_yaw = st.yaw_to(target);
             st.request.move_level = if walk { 0.5 } else { 1.0 };
             st.request.face_yaw = st.yaw_to(target);
+            RESULT_CONTINUE
+        }
+        NativeGoal::BackToHome => {
+            // BackToHome_With_Parry passes TARGET_ENE_0 as a parameter, but the goal walks to
+            // the initial position. As in FwLo's `src/ai.rs`, it arrives within 1 m on the
+            // ground plane, the distance NonBattleAct accepts as home (the exe's arrival
+            // radius is not traced, docs/FIDELITY.md).
+            if st.dist(POINT_INITIAL) <= 1.0 {
+                return RESULT_SUCCESS;
+            }
+            st.request.move_yaw = st.yaw_to(POINT_INITIAL);
+            st.request.move_level = 0.5;
+            st.request.face_yaw = st.request.move_yaw;
             RESULT_CONTINUE
         }
         NativeGoal::Guard => {
