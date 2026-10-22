@@ -258,10 +258,11 @@ fn blocked_hook_rays_test_only_their_band() {
 
 /// The wall jump's air kick into the ceiling at about (-256.25, -42.2, 11.43) took up to 30 ms
 /// a step (#161): `docking::wall_contact` probes eight 0.8 m slides from the chest, and each
-/// tested every triangle of its 4 m cells in the body's height band.
+/// tested every triangle of its 4 m cells in the body's height band. And each of the eight
+/// read and filtered the same cells again (#167): now the fan reads them once.
 #[test]
 fn wall_contact_slides_test_only_nearby_triangles() {
-    use sekiro_sim::docking::{WALL_PROBE_LIFT, WALL_REACH};
+    use sekiro_sim::docking::{WALL_PROBE_LIFT, WALL_REACH, wall_contact};
     let Some(world) = play_world() else {
         return;
     };
@@ -269,9 +270,60 @@ fn wall_contact_slides_test_only_nearby_triangles() {
     let tested = worst_slide(&world, [x, y + WALL_PROBE_LIFT, z], WALL_REACH);
     // 2,815 before the horizontal cull, about 1,100 after in 4 m cells, 787 in 2 m cells.
     assert!(tested < 2000, "{tested} triangles per push-out pass");
+    let feet = glam::Vec3::new(x, y, z);
+    let (_, fan) = visits(|| wall_contact(feet, 0.0, world.as_ref()));
+    let (_, lone) = visits(|| {
+        for k in 0..8 {
+            let a = k as f32 * std::f32::consts::FRAC_PI_4;
+            let d = [a.sin() * WALL_REACH, a.cos() * WALL_REACH];
+            world.slide([x, y + WALL_PROBE_LIFT, z], d);
+        }
+    });
+    // The same entries eight lone slides read ({lone}, 2,4xx at #167) once: about a fifth.
+    assert!(
+        fan * 3 < lone,
+        "the probe fan read {fan} grid entries, eight slides {lone}"
+    );
 }
 
-/// The horizontal cull of a slide's triangles (#161) changes no slide: at both #161 spots,
+/// The probe fan's shared gather and the push-outs' nearby list (#167) change no probe: around
+/// the air-kick spot, from the feet and the chest, eight 0.8 m probes for eight facings end bit
+/// for bit where lone slides and slides without any cull end. (Checked over 2.96 million
+/// slides at four m11_00 spots when it landed.)
+#[test]
+fn wall_contact_fan_matches_lone_slides() {
+    use sekiro_sim::docking::{WALL_PROBE_LIFT, WALL_REACH};
+    let Some(world) = play_world() else {
+        return;
+    };
+    let w: &CollisionWorld = &world;
+    let mut checked = 0;
+    for i in -3..=3 {
+        for j in -3..=3 {
+            let (x, z) = (-256.25 + i as f32 * 0.21, 11.43 + j as f32 * 0.21);
+            let floor = w.floor(x, z, -41.2).unwrap_or(-42.2);
+            for feet in [0.0, WALL_PROBE_LIFT].map(|lift| [x, floor + lift, z]) {
+                for k in 0..8 {
+                    let yaw = k as f32 * 0.8;
+                    let deltas: [[f32; 2]; 8] = std::array::from_fn(|r| {
+                        let a = yaw - r as f32 * std::f32::consts::FRAC_PI_4;
+                        [a.sin() * WALL_REACH, a.cos() * WALL_REACH]
+                    });
+                    let fan = w.slide_fan(feet, deltas);
+                    for (d, got) in deltas.into_iter().zip(fan) {
+                        assert_eq!(got, w.slide(feet, d), "lone slide {d:?} from {feet:?}");
+                        assert_eq!(got, w.slide_uncull(feet, d), "uncull {d:?} from {feet:?}");
+                        checked += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(checked, 7 * 7 * 2 * 8 * 8);
+}
+
+/// The horizontal cull of a slide's triangles (#161) and the push-outs' nearby list (#167)
+/// change no slide: at both #161 spots,
 /// moves of every length a step makes, up to 2 m along each axis into the slanted walls there,
 /// end where they end without it.
 #[test]

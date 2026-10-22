@@ -741,13 +741,18 @@ pub const WALL_TOLERANCE: f32 = 0.05;
 /// `Selector_WallContactType` (-45..45 F, beyond +-135 B, -135..-45 L, else R).
 pub fn wall_contact(feet: Vec3, yaw: f32, ground: &dyn Ground) -> Option<f32> {
     let chest = [feet.x, feet.y + WALL_PROBE_LIFT, feet.z];
+    // Ray k is k * 45 degrees to the right of the facing.
+    let dirs: [Vec3; 8] =
+        std::array::from_fn(|k| crate::arena::forward(yaw - (k as f32 * 45.0).to_radians()));
+    let slid = ground.slide_fan(
+        chest,
+        dirs.map(|dir| [dir.x * WALL_REACH, dir.z * WALL_REACH]),
+    );
     (0..8)
         .filter_map(|k| {
-            // Ray k is k * 45 degrees to the right of the facing.
             let right = k as f32 * 45.0;
-            let dir = crate::arena::forward(yaw - right.to_radians());
-            let delta = dir * WALL_REACH;
-            let slid = ground.slide(chest, [delta.x, delta.z]);
+            let dir = dirs[k];
+            let slid = slid[k];
             let shortfall = WALL_REACH - Vec3::new(slid[0], 0.0, slid[1]).dot(dir);
             let angle = if right > 180.0 { right - 360.0 } else { right };
             (shortfall > WALL_TOLERANCE).then_some((angle, shortfall))
