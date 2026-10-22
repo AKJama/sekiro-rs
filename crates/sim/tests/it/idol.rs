@@ -386,13 +386,14 @@ fn rest_travel_and_death_leave_the_storage_alone_while_every_pellet_is_carried()
     run(&mut duel, 5.0, praying);
     assert_eq!(duel.kit.gourd_charges, duel.kit.gourd_max);
     assert_eq!(pellets(&duel), (3, 2));
-    assert_eq!(
-        sekiro_sim::kit::Kit {
-            gourd_charges: before.gourd_max,
-            ..before
-        },
-        duel.kit
-    );
+    // Besides the gourd, only the start kit's one goods 3800 changes: a full-supply goods, it
+    // refills to its maxNum of 3 (#208).
+    let mut rested = before.clone();
+    rested.gourd_charges = before.gourd_max;
+    for (_, n) in rested.goods.iter_mut().filter(|(g, _)| *g == 3800) {
+        *n = 3;
+    }
+    assert_eq!(rested, duel.kit);
 
     // One used: the next Rest moves exactly one from the Storage, and a Travel after it
     // (which restocks again, then respawns him there) moves no more.
@@ -414,4 +415,59 @@ fn rest_travel_and_death_leave_the_storage_alone_while_every_pellet_is_carried()
         d.respawn_in.is_none() && !d.rules.fighters[0].dead()
     });
     assert_eq!(pellets(&duel), (3, 1));
+}
+
+#[test]
+fn rest_and_death_refill_the_full_supply_goods_without_the_storage() {
+    let Some((mut duel, _)) = praying_at_one_of_two_idols(false) else {
+        return;
+    };
+    let cache = sekiro_sim::cache::root();
+    let data = std::sync::Arc::new(sekiro_sim::items::ItemData::load(&cache).unwrap());
+    // Every isFullSuppleItem row: carried up to maxNum, no Storage (isDeposit 0).
+    let full: Vec<_> = data
+        .goods
+        .iter()
+        .filter(|(_, r)| r.refill)
+        .map(|(id, r)| (*id, r.carry, r.store))
+        .collect();
+    assert_eq!(
+        full,
+        [
+            (3000, 10, 0),
+            (3300, 5, 0),
+            (3310, 5, 0),
+            (3320, 5, 0),
+            (3580, 5, 0),
+            (3800, 3, 0)
+        ]
+    );
+    duel.set_pickups(Vec::new(), data);
+    let rice = |d: &Duel| (d.kit.count(3580), d.kit.stored(3580));
+
+    // All five Five-color Rice thrown and the gourd drunk: Rest refills both, the gourd to
+    // its gourd_max rather than its row's maxNum of 10.
+    for _ in 0..5 {
+        assert!(duel.kit.use_goods(3580));
+    }
+    duel.kit.gourd_charges = 0;
+    duel.rest_at_idol();
+    assert_eq!(rice(&duel), (5, 0));
+    assert_eq!(duel.kit.count(3800), 3);
+    assert_eq!(duel.kit.gourd_charges, duel.kit.gourd_max);
+    run(&mut duel, 5.0, |d| {
+        d.idol_phase() == Some(IdolPhase::Resting)
+    });
+    run(&mut duel, 5.0, |d| {
+        d.idol_phase() == Some(IdolPhase::Praying)
+    });
+
+    // Two thrown, then a death: the respawn refills them as Rest does.
+    assert!(duel.kit.use_goods(3580) && duel.kit.use_goods(3580));
+    duel.rules.fighters[0].vitality.hp = 0;
+    run(&mut duel, RESPAWN_DELAY + 1.0, |d| {
+        d.respawn_in.is_none() && !d.rules.fighters[0].dead()
+    });
+    assert_eq!(rice(&duel), (5, 0));
+    assert!(duel.kit.storage.is_empty());
 }

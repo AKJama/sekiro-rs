@@ -193,8 +193,18 @@ impl Kit {
     /// its carry limit, the rest left stored. EquipParamGoods `autoReplenishType` marks it
     /// ([`GoodsRule::restock`]); the exe's use of it is not read, so this takes from the Storage
     /// only what tops the carried count up, as the game behaves.
+    /// The full-supply goods held (EquipParamGoods `isFullSuppleItem` 1, [`GoodsRule::refill`],
+    /// such as Five-color Rice) are set to their carry limit from nothing, without the Storage,
+    /// as FwLo's RustSekiro `refill_rested` does (#208). The gourd's row is one too, but its
+    /// charges are kept apart and follow `gourd_max`.
     pub fn restock(&mut self, rule: impl Fn(i32) -> GoodsRule) {
         self.gourd_charges = self.gourd_charges.max(self.gourd_max);
+        for (id, n) in &mut self.goods {
+            let r = rule(*id);
+            if r.refill {
+                *n = r.carry;
+            }
+        }
         for (id, n) in std::mem::take(&mut self.storage) {
             let r = rule(id);
             let taken = if r.restock {
@@ -476,5 +486,34 @@ mod tests {
         kit.restock(pellet_rules);
         assert_eq!(kit, once);
         assert_eq!((kit.count(3020), kit.stored(3020)), (3, 1));
+    }
+
+    #[test]
+    fn rest_refills_full_supply_goods_to_their_limit_without_the_storage() {
+        // Five-color Rice 3580 (maxNum 5) and goods 3800 (maxNum 3): isFullSuppleItem 1,
+        // isDeposit 0. The gourd's row is one too (maxNum 10), but its charges follow gourd_max.
+        let full = |carry| GoodsRule {
+            store: 0,
+            refill: true,
+            ..GoodsRule::consumable(carry)
+        };
+        let rule = |id| match id {
+            3580 => full(5),
+            3800 => full(3),
+            crate::items::HEALING_GOURD => full(10),
+            _ => pellet_rules(id),
+        };
+        let mut kit = kit_with_stored_pellets();
+        for _ in 0..5 {
+            assert!(kit.use_goods(3580));
+        }
+        assert!(kit.use_goods(crate::items::HEALING_GOURD));
+        assert_eq!((kit.count(3580), kit.count(3800)), (0, 1));
+        kit.restock(rule);
+        assert_eq!((kit.count(3580), kit.count(3800)), (5, 3));
+        assert_eq!(kit.gourd_charges, kit.gourd_max);
+        // Nothing comes from or goes to the Storage for them, and the Pellets stay as they were.
+        assert_eq!(kit.storage, BTreeMap::from([(3020, 2)]));
+        assert_eq!(kit.count(3020), 3);
     }
 }

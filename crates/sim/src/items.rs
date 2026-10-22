@@ -150,6 +150,12 @@ pub struct GoodsRule {
     /// as the Healing Gourd 3000. Only isDeposit-1 rows ever reach the Storage, so those 21
     /// never restock from it.
     pub restock: bool,
+    /// `isFullSuppleItem` 1: Rest and a respawn refill the carried count to `carry` from
+    /// nothing, no Storage involved ([`crate::kit::Kit::restock`], #208). The six such rows are
+    /// the "[Replenishment]" goods, all isDeposit 0: the Healing Gourd 3000 (whose charges
+    /// follow `gourd_max` instead), the prevention goods 3300, 3310 and 3320, Five-color Rice
+    /// 3580 and goods 3800. Each has an empty twin at the next id (isSuppleItem 1).
+    pub refill: bool,
 }
 
 impl GoodsRule {
@@ -159,6 +165,7 @@ impl GoodsRule {
         carry: 99,
         store: 0,
         restock: false,
+        refill: false,
     };
 
     /// A stored, restocking consumable with this carry limit: a 9999 Storage (the
@@ -168,6 +175,7 @@ impl GoodsRule {
             carry,
             store: 9999,
             restock: true,
+            refill: false,
         }
     }
 
@@ -181,6 +189,7 @@ impl GoodsRule {
                 0
             },
             restock: int("autoReplenishType") != 0,
+            refill: int("isFullSuppleItem") == 1,
         }
     }
 }
