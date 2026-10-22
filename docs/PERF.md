@@ -34,6 +34,15 @@ The cause was the fixed simulation step, not rendering, and #159 and #161 alread
 The GPU-bound reading from #70's run (GPU 99% busy, 67 ms swapchain waits) came while another game shared the GPU; alone the corner never passed 46% GPU.
 `step_cost::fence_corner_push_is_bounded` walks Wolf into the corner with the placed objects and the hook search and bounds each step's collision work (1,282 grid entries now, under 10,000).
 
+## Wall-jump contact probe (#167, 2026-10-22)
+
+`docking::wall_contact` slides eight 0.8 m probes from the chest every airborne step in the wall-jump window.
+Each probe read and filtered the same grid cells again, and its push-outs tested every triangle the whole move could reach on every pass.
+Now `Ground::slide_fan` reads the cells once for the eight probes, and a slide's push-outs test only the triangles near the body (`Nearby`) and skip those whose plane is out of reach.
+Every probe and slide ends bit for bit where it did: 2.96 million slides at four m11_00 spots matched the old code when it landed, and `step_cost::wall_contact_fan_matches_lone_slides` keeps a compact check.
+At the air-kick spot (-256.25, -42.2, 11.43), sim only: grid entries read per probe set 2,387 to 462 (on a 9 by 9 grid of chests, eight facings, three heights), and time per probe set 241 to 187 us (interleaved, minimum of five, on a busy machine).
+What is left is real contact work: about 900 triangle contacts per probe set there, since the body is pressed into many small triangles.
+
 ## Measuring
 
 `--perf` with `PLAY_PERF_DIR=<folder>` writes the per-frame CSV outside `cache/perf`.

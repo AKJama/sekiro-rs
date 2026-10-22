@@ -236,6 +236,13 @@ pub trait Ground {
         }
     }
 
+    /// [`Ground::slide`] of each of `deltas` from the same `feet`: the probe fan of
+    /// [`crate::docking::wall_contact`]. A ground that can share the work between the slides
+    /// overrides it, with each result still exactly that slide's (#167).
+    fn slide_fan(&self, feet: [f32; 3], deltas: [[f32; 2]; 8]) -> [[f32; 2]; 8] {
+        deltas.map(|d| self.slide(feet, d))
+    }
+
     /// [`Ground::slide`] that also stops at the fall-prevention walls in `walls`
     /// ([`crate::hit_filter::FALL_ASSIST_MOVE`], `FALL_ASSIST_ACTION` bits), for a body whose
     /// script asks for the assist. Grounds without such walls just slide.

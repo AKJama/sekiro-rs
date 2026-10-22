@@ -1579,9 +1579,10 @@ impl CollisionWorld {
         self.slide_for(feet, delta, PLAYER, 0, true)
     }
 
-    /// [`CollisionWorld::slide`] without the horizontal cull of [`CollisionWorld::gather_slide`]:
-    /// every triangle of the move's cells in the body's height band. Only for the test that the
-    /// cull changes no slide (#161).
+    /// [`CollisionWorld::slide`] without the horizontal cull of [`CollisionWorld::gather_slide`]
+    /// and the push-outs' [`Nearby`] list and plane test: every triangle of the move's cells in
+    /// the body's height band, each tested in full. Only for the tests that the culls change no
+    /// slide (#161, #167).
     #[doc(hidden)]
     pub fn slide_uncull(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
         self.slide_for(feet, delta, PLAYER, 0, false)
@@ -1730,7 +1731,84 @@ impl CollisionWorld {
         let d = Vec2::from(delta);
         SCRATCH.with_borrow_mut(|(tris, walls, contacts)| {
             let coarse = self.gather_slide(start, d, [who, assist], tris, walls, cull);
-            self.slide_among(start, d, coarse, tris, walls, contacts)
+            self.slide_among(start, d, coarse, tris, walls, contacts, cull)
+        })
+    }
+
+    /// [`CollisionWorld::slide_for`] without fall-prevention walls of each of `deltas` from
+    /// `feet`, reading the cells once for all of them (#167): the fan of 0.8 m probes
+    /// `docking::wall_contact` makes every airborne step read and filtered the same cells eight
+    /// times. Each slide still tests exactly the triangles its own
+    /// [`CollisionWorld::gather_slide`] keeps, in the same order: the shared gather keeps those
+    /// any of them could (the body band is the same for all, from the same start, and the keep
+    /// box is the union of theirs), noting each cell's share, and each slide takes those of its
+    /// own cells in its own keep box. So each ends exactly where it would alone.
+    fn slide_fan_for<const N: usize>(
+        &self,
+        feet: [f32; 3],
+        deltas: [[f32; 2]; N],
+        who: u8,
+    ) -> [[f32; 2]; N] {
+        thread_local! {
+            static SCRATCH: std::cell::RefCell<FanScratch> =
+                const { std::cell::RefCell::new(FanScratch::new()) };
+        }
+        let start = Vec3::from(feet);
+        let reaches = deltas.map(|d| SlideReach::new(start, Vec2::from(d), true));
+        let Some(mut all) = reaches.first().cloned() else {
+            return deltas;
+        };
+        // One reach covering them all: the same body band and the union of the boxes.
+        for r in &reaches {
+            all.min = all.min.min(r.min);
+            all.max = all.max.max(r.max);
+            if let (Some([lo, hi]), Some([rlo, rhi])) = (all.near.as_mut(), r.near) {
+                *lo = lo.min(rlo);
+                *hi = hi.max(rhi);
+            }
+        }
+        SCRATCH.with_borrow_mut(|s| {
+            s.pool.clear();
+            s.cells.clear();
+            let (x0, z0) = cell_of(all.min.x, all.min.y);
+            let (x1, z1) = cell_of(all.max.x, all.max.y);
+            for cx in x0..=x1 {
+                for cz in z0..=z1 {
+                    let Some(column) = self.columns.get(&(cx, cz)) else {
+                        continue;
+                    };
+                    let from = s.pool.len();
+                    // As `gather_slide`: each triangle once a cell.
+                    for list in column.once(who, band_of(all.body[0]), band_of(all.body[1])) {
+                        visited(list.len());
+                        s.pool.extend(
+                            list.iter()
+                                .copied()
+                                .filter(|&t| self.slide_body_keeps(t, &all, who)),
+                        );
+                    }
+                    s.cells.push(((cx, cz), from..s.pool.len()));
+                }
+            }
+            std::array::from_fn(|i| {
+                let reach = &reaches[i];
+                let (x0, z0) = cell_of(reach.min.x, reach.min.y);
+                let (x1, z1) = cell_of(reach.max.x, reach.max.y);
+                s.tris.clear();
+                for ((cx, cz), range) in &s.cells {
+                    if (x0..=x1).contains(cx) && (z0..=z1).contains(cz) {
+                        s.tris
+                            .extend(s.pool[range.clone()].iter().copied().filter(|&t| {
+                                let [lo, hi] = self.bounds[t as usize];
+                                reach.near(lo, hi)
+                            }));
+                    }
+                }
+                s.tris.sort_unstable();
+                s.tris.dedup();
+                let d = Vec2::from(deltas[i]);
+                self.slide_among(start, d, reach.coarse, &s.tris, &[], &mut s.contacts, true)
+            })
         })
     }
 
@@ -1743,6 +1821,10 @@ impl CollisionWorld {
     /// (#176): along the wedge, never into it, and with no push, so it never crosses a face.
     /// A body that was wedged before the sub-step (placed there by a respawn, a warp or a
     /// moving part) instead also takes [`escape`]'s push, so it still gets out.
+    ///
+    /// `cull` lets the push-outs test only the triangles [`Nearby`] keeps near the body, and
+    /// skip those whose plane is out of reach; false only for [`CollisionWorld::slide_uncull`].
+    #[allow(clippy::too_many_arguments)]
     fn slide_among(
         &self,
         start: Vec3,
@@ -1751,7 +1833,9 @@ impl CollisionWorld {
         tris: &[u32],
         walls: &[u32],
         contacts: &mut Contacts,
+        cull: bool,
     ) -> [f32; 2] {
+        contacts.near.reset(cull);
         let steps = slide_steps(coarse, d.length(), walls.is_empty());
         let step = d / steps as f32;
         let mut p = start;
@@ -1833,6 +1917,9 @@ impl CollisionWorld {
     /// and holds the contacts afterwards.
     fn push_out(&self, feet: Vec3, tris: &[u32], contacts: &mut Contacts) -> Option<Vec2> {
         contacts.found.clear();
+        let mut near = std::mem::take(&mut contacts.near);
+        let cull = near.on;
+        let tris = near.around(self, feet, tris);
         for h in SPHERES {
             let centre = feet + Vec3::Y * h;
             for &t in tris {
@@ -1844,6 +1931,11 @@ impl CollisionWorld {
                     continue;
                 }
                 let [a, b, c] = self.corners(t);
+                // Nor any whose plane is a radius away (and a millimetre for roundoff): the
+                // closest point is no nearer (#167).
+                if cull && self.normals[t as usize].dot(centre - a).abs() >= RADIUS + 1e-3 {
+                    continue;
+                }
                 let q = closest_on_triangle(centre, a, b, c);
                 let away = centre - q;
                 let dist = away.length();
@@ -1880,7 +1972,72 @@ impl CollisionWorld {
                 });
             }
         }
+        contacts.near = near;
         least_push(&contacts.found, RADIUS)
+    }
+}
+
+/// How far the body may move from where [`Nearby`] last kept its triangles before it keeps
+/// them again.
+const NEARBY_MARGIN: f32 = 0.25;
+
+/// The triangles of one slide near the body, so its push-outs test only those (#167): a slide
+/// keeps every triangle its body could touch anywhere along the move ([`SlideReach`]), and a
+/// 0.8 m wall-contact probe in a dense spot kept about 800, each tested on every pass. Kept
+/// again whenever the body has moved more than [`NEARBY_MARGIN`] from where they were last
+/// kept, they are those whose box comes within [`RADIUS`] and that margin (and a millimetre
+/// for roundoff) of the segment between the body's sphere centres there. Any other triangle's
+/// box is more than [`RADIUS`] from both centres wherever the body now is, which is exactly
+/// the box test [`CollisionWorld::push_out`] skips a triangle by, so the push-outs and every
+/// slide come out bit for bit the same.
+#[derive(Default)]
+struct Nearby {
+    /// Whether to keep a nearby list at all (and test planes first, [`CollisionWorld::push_out`]).
+    on: bool,
+    /// The feet the list was kept around.
+    centre: Option<Vec3>,
+    tris: Vec<u32>,
+}
+
+impl Nearby {
+    const fn new() -> Self {
+        Self {
+            on: false,
+            centre: None,
+            tris: Vec::new(),
+        }
+    }
+
+    /// Starts a slide: its triangles are new.
+    fn reset(&mut self, on: bool) {
+        self.on = on;
+        self.centre = None;
+    }
+
+    /// The triangles of the slide's `tris` a body at `feet` can touch.
+    fn around<'a>(&'a mut self, world: &CollisionWorld, feet: Vec3, tris: &'a [u32]) -> &'a [u32] {
+        if !self.on {
+            return tris;
+        }
+        let kept = self.centre.is_some_and(|c| {
+            c.y == feet.y
+                && Vec2::new(feet.x - c.x, feet.z - c.z).length_squared()
+                    <= NEARBY_MARGIN * NEARBY_MARGIN
+        });
+        if !kept {
+            let reach = RADIUS + NEARBY_MARGIN + 0.001;
+            let [low, high] = SPHERES.map(|h| feet.y + h);
+            self.tris.clear();
+            self.tris.extend(tris.iter().copied().filter(|&t| {
+                let [min, max] = world.bounds[t as usize];
+                let gap = |v: f32, lo: f32, hi: f32| (lo - v).max(v - hi).max(0.0);
+                let dy = (min.y - high).max(low - max.y).max(0.0);
+                let [dx, dz] = [gap(feet.x, min.x, max.x), gap(feet.z, min.z, max.z)];
+                dx * dx + dy * dy + dz * dz < reach * reach
+            }));
+            self.centre = Some(feet);
+        }
+        &self.tris
     }
 }
 
@@ -1901,6 +2058,7 @@ struct Contact {
 struct Contacts {
     found: Vec<Contact>,
     toward: Vec<Contact>,
+    near: Nearby,
 }
 
 impl Contacts {
@@ -1908,6 +2066,7 @@ impl Contacts {
         Self {
             found: Vec::new(),
             toward: Vec::new(),
+            near: Nearby::new(),
         }
     }
 
@@ -2041,7 +2200,7 @@ const MAX_ARC: usize = 64;
 /// closest-point directions, as a contact at the inner edge between two triangles of one flat
 /// face points off the face and would forbid moving along it either way.
 fn wedged_move(step: Vec2, contacts: &mut Contacts) -> Vec2 {
-    let Contacts { found, toward } = contacts;
+    let Contacts { found, toward, .. } = contacts;
     toward.clear();
     toward.extend(
         found
@@ -2158,6 +2317,10 @@ impl Ground for View<'_> {
         self.world.slide_for(feet, delta, self.who, walls, true)
     }
 
+    fn slide_fan(&self, feet: [f32; 3], deltas: [[f32; 2]; 8]) -> [[f32; 2]; 8] {
+        self.world.slide_fan_for(feet, deltas, self.who)
+    }
+
     fn max_step(&self) -> f32 {
         STEP_HEIGHT
     }
@@ -2252,6 +2415,10 @@ macro_rules! ground_via_view {
                 self.$view().slide_assisted(feet, delta, walls)
             }
 
+            fn slide_fan(&self, feet: [f32; 3], deltas: [[f32; 2]; 8]) -> [[f32; 2]; 8] {
+                self.$view().slide_fan(feet, deltas)
+            }
+
             fn max_step(&self) -> f32 {
                 self.$view().max_step()
             }
@@ -2343,6 +2510,10 @@ impl<T: Ground + ?Sized> Ground for std::sync::Arc<T> {
         (**self).slide_assisted(feet, delta, walls)
     }
 
+    fn slide_fan(&self, feet: [f32; 3], deltas: [[f32; 2]; 8]) -> [[f32; 2]; 8] {
+        (**self).slide_fan(feet, deltas)
+    }
+
     fn max_step(&self) -> f32 {
         (**self).max_step()
     }
@@ -2372,7 +2543,29 @@ fn height_on(x: f32, z: f32, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
     Some(l1 * a.y + l2 * b.y + l3 * c.y)
 }
 
+/// [`CollisionWorld::slide_fan_for`]'s scratch, kept between fans so none allocates: the
+/// shared gather's triangles, each cell read with its share of them, one slide's triangles,
+/// and the push-out contacts.
+struct FanScratch {
+    pool: Vec<u32>,
+    cells: Vec<((i32, i32), std::ops::Range<usize>)>,
+    tris: Vec<u32>,
+    contacts: Contacts,
+}
+
+impl FanScratch {
+    const fn new() -> Self {
+        Self {
+            pool: Vec::new(),
+            cells: Vec::new(),
+            tris: Vec::new(),
+            contacts: Contacts::new(),
+        }
+    }
+}
+
 /// What a slide ([`CollisionWorld::gather_slide`]) can touch.
+#[derive(Clone)]
 struct SlideReach {
     /// The slide's coarse sub-step count.
     coarse: usize,
