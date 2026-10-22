@@ -649,6 +649,9 @@ impl Ground for PerchGround<'_> {
     fn ceiling(&self, feet: [f32; 3], rise: f32) -> Option<f32> {
         self.terrain.ceiling(feet, rise)
     }
+    fn head_contact(&self, feet: [f32; 3]) -> bool {
+        self.terrain.head_contact(feet)
+    }
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
         self.terrain.slide(feet, delta)
     }

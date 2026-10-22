@@ -60,6 +60,13 @@ pub const FALL_TYPES: [FallControl; 4] = [
     },
 ];
 
+/// How far a walkable floor can rise over a metre of horizontal travel: the tangent of the
+/// steepest walkable slope ([`crate::collision::MAX_SLOPE_DEGREES`]), for telling one floor a
+/// tick on from another ([`Body::carried_onto`]).
+fn max_rise_per_metre() -> f32 {
+    crate::collision::MAX_SLOPE_DEGREES.to_radians().tan()
+}
+
 /// Horizontal air integration described by FwLo's RustSekiro (MIT).
 fn air_velocity(mut v: Vec2, stick: Vec2, control: FallControl, dt: f32) -> Vec2 {
     let decay = control.horizontal_accel.abs() * dt;
@@ -195,6 +202,14 @@ pub trait Ground {
     fn ceiling(&self, feet: [f32; 3], rise: f32) -> Option<f32> {
         let _ = (feet, rise);
         None
+    }
+
+    /// Whether the head sphere of a body at `feet` touches anything, so a push-out there has
+    /// work to do (the gate on [`Body`]'s push-out after a rise). True by default, so a ground
+    /// that does not know always gets the push-out.
+    fn head_contact(&self, feet: [f32; 3]) -> bool {
+        let _ = feet;
+        true
     }
 
     /// The horizontal displacement a body at `feet` actually makes when it tries to move by
@@ -367,7 +382,9 @@ impl Body {
     /// pushed off it sideways at the height it rose to, by the slide's own push-out (a slide of
     /// nothing with the fall-prevention walls `walls`), as the proxy slides along such a contact.
     /// Before, the push waited for the next tick's slide, so a beam edge beside the head's centre
-    /// line went up to a tick's rise into the head (#168). `walls` is `None` for a move that
+    /// line went up to a tick's rise into the head (#168). The push-out runs only when the head
+    /// touches something ([`Ground::head_contact`]), so a jump in open air costs what it did
+    /// before. `walls` is `None` for a move that
     /// ignores walls.
     fn stop_rise_at_ceiling(&mut self, from: f32, ground: &dyn Ground, walls: Option<u8>) {
         let rise = self.position[1] - from;
@@ -378,7 +395,9 @@ impl Body {
             self.position[1] = top.max(from);
             self.velocity[1] = self.velocity[1].min(0.0);
         }
-        if let Some(walls) = walls {
+        if let Some(walls) = walls
+            && ground.head_contact(self.position)
+        {
             let [dx, dz] = ground.slide_assisted(self.position, [0.0, 0.0], walls);
             self.position[0] += dx;
             self.position[2] += dz;
@@ -410,7 +429,7 @@ impl Body {
         let travel = (x - start[0]).hypot(z - start[2]);
         let carried = self
             .carried_onto
-            .is_some_and(|c| (c - h).abs() <= 0.01 + travel * 1.8);
+            .is_some_and(|c| (c - h).abs() <= 0.01 + travel * max_rise_per_metre());
         let under = ground
             .floor(start[0], start[2], top)
             .is_some_and(|f| f > from + OVER);

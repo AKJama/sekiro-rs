@@ -81,6 +81,11 @@ impl Ground for Counted {
         self.count();
         self.inner.ceiling(feet, rise)
     }
+
+    fn head_contact(&self, feet: [f32; 3]) -> bool {
+        self.count();
+        self.inner.head_contact(feet)
+    }
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
         self.count();
         self.inner.slide(feet, delta)

@@ -987,3 +987,64 @@ fn an_upward_flight_under_an_overhang_stops_before_the_head_enters_it() {
         assert!(!flying, "edge {edge}: the flight never met the plate");
     }
 }
+
+/// The same flight starting with the head sphere grazing, by less than a millimetre, the lower
+/// edge of a beam behind it and just over its centre (#168 review): the flight moves away from
+/// the beam, so the head sweep does not count the graze and the flight still arrives. Before,
+/// any face over the head's centre that it already grazed stopped the flight on its first tick.
+#[test]
+fn a_flight_away_from_a_beam_the_head_grazes_still_arrives() {
+    use sekiro_formats::hknp::CollisionMesh;
+    use sekiro_sim::collision::{HEAD_TOP, RADIUS};
+    let centre = HEAD_TOP - RADIUS;
+    let (y0, y1) = (centre + 0.05, centre + 0.35);
+    // The beam's lower near edge 0.9995 radii from the head's centre.
+    let z0 = ((RADIUS * 0.9995).powi(2) - 0.05f32.powi(2)).sqrt();
+    let z1 = z0 + 0.5;
+    let mut m = CollisionMesh::default();
+    for q in [
+        [[-3.0, y0, z0], [3.0, y0, z0], [3.0, y0, z1], [-3.0, y0, z1]],
+        [[-3.0, y1, z0], [3.0, y1, z0], [3.0, y1, z1], [-3.0, y1, z1]],
+        [[-3.0, y0, z0], [3.0, y0, z0], [3.0, y1, z0], [-3.0, y1, z0]],
+        [[-3.0, y0, z1], [3.0, y0, z1], [3.0, y1, z1], [-3.0, y1, z1]],
+    ] {
+        let base = m.vertices.len() as u32;
+        m.vertices.extend_from_slice(&q);
+        m.indices.extend([0, 1, 2, 0, 2, 3].map(|i| base + i));
+        m.materials.extend([0, 0]);
+    }
+    let beam = CollisionWorld::from_mesh(&m);
+    // Grazing it, the head sweep meets the beam moving into it and not moving away or down.
+    let feet = Vec3::ZERO;
+    for (delta, meets) in [
+        (Vec3::new(0.0, 0.0, 0.2), true),
+        (Vec3::new(0.0, 0.0, -0.2), false),
+        (Vec3::new(0.0, -0.2, 0.0), false),
+        (Vec3::new(0.0, 0.2, -0.17), false),
+    ] {
+        assert_eq!(beam.head_sweep(feet, delta).is_some(), meets, "{delta}");
+    }
+    let mut wire = synthetic(10.0);
+    wire.points[0].position = Some([0.0, 5.0, -10.0]);
+    let mut body = Body::default();
+    wire.search(&body, 0.0, 0.0, false);
+    wire.step(
+        &mut body,
+        Some("a000_202000"),
+        None,
+        1.0 / 60.0,
+        &FlatGround::default(),
+    );
+    wire.collision = Some(beam);
+    for _ in 0..50 {
+        wire.step(
+            &mut body,
+            Some("a000_202011"),
+            Some((0.0, 0.83)),
+            1.0 / 60.0,
+            &FlatGround::default(),
+        );
+    }
+    let distance = Vec3::from(body.position).distance(Vec3::new(0.0, 5.0, -10.0));
+    assert!(distance < 0.2, "ended {distance:.2} m from the hook");
+}

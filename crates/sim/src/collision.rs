@@ -1330,7 +1330,9 @@ impl CollisionWorld {
     /// overhang whose edge is beside that line, inside the head's rim, passed into the head;
     /// what the head meets at its side or below is left to those rays, as before. A face the
     /// sphere is already more than [`CEILING_GRAZE`] into at the start does not count, as for the
-    /// ceiling stop: moving on carries it out. `None` when nothing is met within `delta`.
+    /// ceiling stop: moving on carries it out; nor does one the move does not close on at the
+    /// touch, such as an eave the head grazes at the start of a flight away from it. `None` when
+    /// nothing is met within `delta`.
     pub fn head_sweep(&self, feet: Vec3, delta: Vec3) -> Option<f32> {
         let len = delta.length();
         if len < 1e-6 || !feet.is_finite() || !delta.is_finite() {
@@ -1378,7 +1380,10 @@ impl CollisionWorld {
                         let [a, b, c] = corners;
                         let to = closest_on_triangle(at, a, b, c) - at;
                         let already_in = s == 0.0 && to.length_squared() < graze * graze;
-                        if !already_in && to.y > 1e-4 {
+                        // Only a move that closes on the face meets it: one grazing it at the
+                        // start and moving away or along it does not.
+                        let closing = dir.dot(to) > 1e-6;
+                        if !already_in && closing && to.y > 1e-4 {
                             best = Some(s);
                         }
                     }
@@ -1386,6 +1391,47 @@ impl CollisionWorld {
             }
         }
         best
+    }
+
+    /// Whether `who`'s head sphere at `feet` touches a solid face over its centre: the cheap
+    /// test that gates the push-out after a rise ([`Ground::head_contact`]). Only such a face
+    /// can have come into the head by the rise; one at its side was there at the slide's height
+    /// too, and the slide has cleared it already. In open air, or rising beside a wall, there is
+    /// nothing to push. It stops at the first face it finds.
+    fn head_contact_for(&self, feet: Vec3, who: u8) -> bool {
+        let centre = feet + Vec3::Y * (HEAD_TOP - RADIUS);
+        let (lo, hi) = (
+            centre - Vec3::new(RADIUS, 0.0, RADIUS),
+            centre + Vec3::splat(RADIUS),
+        );
+        let (x0, z0) = cell_of(lo.x, lo.z);
+        let (x1, z1) = cell_of(hi.x, hi.z);
+        for cx in x0..=x1 {
+            for cz in z0..=z1 {
+                let Some(column) = self.columns.get(&(cx, cz)) else {
+                    continue;
+                };
+                for list in column.once(who, band_of(lo.y), band_of(hi.y)) {
+                    visited(list.len());
+                    for &t in list {
+                        let [tlo, thi] = self.bounds[t as usize];
+                        if thi.y <= centre.y
+                            || centre.distance_squared(centre.clamp(tlo, thi)) >= RADIUS * RADIUS
+                            || !self.solid(t)
+                            || !self.live(t, who)
+                        {
+                            continue;
+                        }
+                        let [a, b, c] = self.corners(t);
+                        let to = closest_on_triangle(centre, a, b, c) - centre;
+                        if to.y > 1e-4 && to.length_squared() < RADIUS * RADIUS {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Every surface the vertical line through `(x, z)` crosses: (height, normal y), highest
@@ -2100,6 +2146,10 @@ impl Ground for View<'_> {
         self.world.ceiling_for(feet.into(), rise, self.who)
     }
 
+    fn head_contact(&self, feet: [f32; 3]) -> bool {
+        self.world.head_contact_for(feet.into(), self.who)
+    }
+
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
         self.slide_assisted(feet, delta, 0)
     }
@@ -2186,6 +2236,10 @@ macro_rules! ground_via_view {
                 self.$view().ceiling(feet, rise)
             }
 
+            fn head_contact(&self, feet: [f32; 3]) -> bool {
+                self.$view().head_contact(feet)
+            }
+
             fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
                 self.$view().slide(feet, delta)
             }
@@ -2267,6 +2321,10 @@ impl<T: Ground + ?Sized> Ground for std::sync::Arc<T> {
 
     fn ceiling(&self, feet: [f32; 3], rise: f32) -> Option<f32> {
         (**self).ceiling(feet, rise)
+    }
+
+    fn head_contact(&self, feet: [f32; 3]) -> bool {
+        (**self).head_contact(feet)
     }
 
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
