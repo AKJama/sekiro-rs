@@ -4,8 +4,8 @@
 //! the named tree of EvenTorset's FXR library (Unlicense; the same tree
 //! [`sekiro_formats::fxr_json`] builds from our own reader). Semantics follow that library's
 //! action definitions: the node tree (2000 root, 2200 basic nodes, 2001 references, 2002 levels
-//! of detail, 2202 node emitters), configs (1004 particles, 1005 child nodes), emitters (399 once, 300 periodic, 301
-//! by distance), emitter shapes (400-405), spread (500-503), particle movement
+//! of detail, 2202 node emitters), configs (1004 particles, 1005 child nodes), emitters (399
+//! once, 300 periodic, 301 by distance), emitter shapes (400-405), spread (500-503), particle movement
 //! (55/60/84/105/64/65), node movement (1/15/34/83/106/120/122), and properties over
 //! Constant0 / ParticleAge / EmissionTime / ActiveTime with Linear / Stepped / Hermite / Bezier
 //! keyframes and RandomDelta / RandomFraction / RandomRange modifiers. Hermite keyframes blend as
