@@ -355,3 +355,13 @@ The simulation still moves the body horizontally (the slide) and vertically (the
 - Landing: the winding of the collision mesh does not say which side of a face is solid, so the side is the one the feet came from.
   An airborne body lands on the highest floor up to a step above its feet unless a floor was already over its feet, within a step, where the tick began, and it had not been carried onto that floor over its edge on an earlier tick (`Body::carried_onto`); such a floor was come at from below and is skipped for the highest floor the feet passed through.
   Whether the game then pushes the body down out of a slab it is inside, or out to the side, was not checked; here it falls.
+
+## Foes keep to the navmesh while they walk, issue #227
+
+A map foe's walk and run states ask for no fall-prevention assist in `c9997.hks` (`FallPreventionAssist` is called from attacks, steps, damage, throws and other actions, never from the `Walk*` and `Run*` states), so the `f` bands at an edge do not hold a walking foe.
+What keeps it off a drop in the game is its navigation mesh, which `crates/sim/src/navmesh.rs` now loads from `map/<map>/<map>.nvmhktbnd` (one `hkaiNavMesh` per file, placed by the MSB's map offset event like the map's collision parts).
+A grounded foe on the mesh whose state asks for no assist has its move cut where it would leave the mesh, and the rest of the move kept along the face edge it met, so it stops at a drop's edge and slides along it.
+A move that only crosses a hole in the mesh (the mesh carries on within 2 m past the move's end, along it) is let through, standing in for the path the game would take round the rocks, posts and bushes the mesh leaves out.
+This is the simulation's rule, not the exe's: the AI's path search and path following over the mesh (Havok AI), the mesh's user edges between pieces, the object navmeshes (`onav`), the height tolerance (1 m here) and the hole width (2 m) were not traced.
+A foe whose target is off the mesh walks in place at the edge, which matches what players see foes do in FromSoftware games, but was not checked against a recording; the Ochimusha's ranged acts when it has no path (the Lua's navmesh queries still answer open floor) are not modelled.
+Foes knocked off the mesh, and attacks and steps (held by the `f` bands as before), move freely, and a foe that falls into the void still falls for good: the filter-15 kill plane under the ravine (`h900000`) and fall death are not applied to foes.

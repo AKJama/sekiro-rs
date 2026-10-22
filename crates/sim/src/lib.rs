@@ -44,6 +44,7 @@ pub mod lo_collision;
 pub mod lua_ai;
 pub mod map_effects;
 pub mod motion;
+pub mod navmesh;
 pub mod perf;
 pub mod perilous;
 pub mod player;

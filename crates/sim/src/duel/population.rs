@@ -162,6 +162,8 @@ impl Population {
         let (placements, excluded) = Self::starting_with(cache, map, story, &registry, &msb)?;
         let mut p = Self::load(cache, placements).map_err(|e| e.to_string())?;
         p.excluded = excluded;
+        let navmesh =
+            crate::navmesh::NavMesh::load_map(cache, map, msb.map_offsets.first())?.map(Arc::new);
         for foe in &mut p.foes {
             let part = msb.parts.iter().find(|part| part.name == foe.part).unwrap();
             if let Some(ai) = &mut foe.duel.ai {
@@ -170,6 +172,7 @@ impl Population {
                 ai.state.map_regions = Some(crate::lua_ai::regions::MapRegions::new(cache, map));
             }
             foe.duel.enemy.ground = Box::new(crate::collision::EnemyGround(world.clone()));
+            foe.duel.enemy.navmesh.clone_from(&navmesh);
             if let Some(row) = registry.npc_row(foe.duel.spec.npc_param) {
                 let border = row["activateBorderDist"].as_f64().unwrap_or(0.0) as f32;
                 // Zero delegates to an unrecovered engine default: use a documented fallback.
