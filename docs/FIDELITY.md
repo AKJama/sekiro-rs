@@ -284,9 +284,13 @@ These parts are approximations or unchecked:
 
 Patrolling foes walk their PatrolInfo route and play its arrival waits and animations because two Lua goal methods now follow the exe.
 `goal:GetLastResult` reads the result last stored in the goal's pool slot: the exe builds 32 goals once, AddGoal takes the first free slot and never resets the stored result, so a fresh NonBattleAct sees Success from the move that just ended in that slot.
-The slot list here grows on demand instead of being fixed at 32 entries, and a slot that has never updated reads -1, as the exe's goal constructor sets it.
+The pool hands out the lowest free slot, which our allocator also does: `FUN_1405ade50` scans the 32 slots from 0 for the first whose +0xa0 is -1 (`FUN_1405cff90`), and freeing a goal (`FUN_1405cedd0`) sets it back to -1.
+The slot list here grows on demand instead of being fixed at 32 entries, and a slot that has never updated reads -1, as the exe's goal constructor (`FUN_1405cd180`) sets it.
+Our slot numbers count only the goals of one AI, from its top goal at slot 0; whether the exe's pool is per AI with the top goal in its first slot was not checked.
 `goal:GetParam` returns a Lua boolean as a number, true as 1 and false as 0, because the exe stores goal parameters as floats; NonBattleAct's walk check is `GetParam(2) == 0`.
 The exact boolean-to-float rule is assumed from that float storage and was not traced in the exe.
-Native goals read a flag parameter the same way, set when its value is non-zero, so a numeric walk flag of 0 from an approach script or the brain's run tactics now runs instead of walking.
+Native goals read a flag parameter as the exe does, set when it is above 0: ApproachTarget's walk flag (param 3, `FUN_1405c7e80`) and KeepDist's (param 4, `FUN_1405c7c40`) are passed to the move request `FUN_1405e6640` as `0.0 < param`.
+MoveToSomewhere, LeaveTarget and SidewayMove's native updates were not identified; their walk flags are assumed to be read the same way.
+So a numeric walk flag of 0 from an approach script (`Approach_Act_Flex`) or the brain's run tactics (RunIn, Retreat) now runs where it walked before, which makes bosses run on far approaches.
 The brain's reach gate, which holds a planned attack whose target moved out of reach, now also covers the CommonAttack a planned table goal such as ComboAttackTunableSpin adds.
 No AI script calls `StepNextMovePoint`, so patrol stepping happens only in the move goal on arrival at point 103, as in the exe's MoveTo terminate callbacks and FwLo's `src/ai.rs`.

@@ -151,11 +151,13 @@ impl Goal {
         self.params.get(i).and_then(Value::num).unwrap_or(0.0)
     }
     /// A flag parameter as the exe reads it: goal parameters are stored as floats
-    /// (AddGoal FUN_1405ce510), so a flag is set when its stored value is non-zero. A Lua
-    /// `false` and the brain's `0.0` both read as unset.
+    /// (AddGoal FUN_1405ce510) and the native goals test a walk flag as `0.0 < param`
+    /// (ApproachTarget's param 3 in FUN_1405c7e80, KeepDist's param 4 in FUN_1405c7c40, both
+    /// passed to the move request FUN_1405e6640). A Lua `false` and the brain's `0.0` both
+    /// read as unset.
     fn param_bool(&self, i: usize) -> bool {
         match self.params.get(i) {
-            Some(Value::Num(x)) => *x != 0.0,
+            Some(Value::Num(x)) => *x > 0.0,
             Some(Value::Bool(b)) => *b,
             _ => false,
         }
@@ -446,6 +448,9 @@ impl AiState {
             face_first: false,
             plan_step: None,
         };
+        // The lowest free slot, as the exe's pool hands out goals: FUN_1405ade50 scans its 32
+        // slots from 0 for the first whose +0xa0 is -1 (FUN_1405cff90; freeing, FUN_1405cedd0,
+        // sets it back to -1). `slot_results` relies on this order.
         if let Some(i) = self.goals.iter().position(Option::is_none) {
             self.goals[i] = Some(g);
             i as u32
@@ -1909,5 +1914,64 @@ mod counter_choice_tests {
             .unwrap();
         assert_eq!(table.borrow().get(&Value::Num(14.0)).num(), Some(0.0));
         assert_eq!(table.borrow().get(&Value::Num(50.0)).num(), Some(2000.0));
+    }
+}
+
+#[cfg(test)]
+mod goal_slot_tests {
+    use super::*;
+
+    /// A move and the goal it belongs to finish in the same tick; the goal added next takes
+    /// the lowest free slot and its `GetLastResult` reads the Success that slot last stored,
+    /// as a fresh NonBattleAct does after arriving at a patrol point (#116).
+    #[test]
+    fn a_new_goal_reads_the_success_its_slot_last_stored() {
+        let mut st = AiState::new(ThinkParams::default(), HashMap::new(), 1);
+        let mut vm = Vm::new();
+        st.world.dt = 0.1;
+        let top = st.top;
+        // An empty goal (a stand-in for NonBattleAct) with one Wait (2000) child whose life
+        // ends this tick.
+        let act = st.new_goal(-7, -1.0, Vec::new(), Some(top));
+        st.goal_mut(top).subgoals.push_back(act);
+        let wait = st.new_goal(2000, 0.0, vec![Value::Num(-1.0)], Some(act));
+        st.goal_mut(act).subgoals.push_back(wait);
+        let fresh = |st: &mut AiState| {
+            let id = st.new_goal(-7, -1.0, Vec::new(), Some(top));
+            let r = st.goal_method(id, "GetLastResult", &[]).unwrap();
+            st.goals[id as usize] = None;
+            (id, r[0].num())
+        };
+        // Before any update the slot reads the constructor's -1.
+        let (id, before) = fresh(&mut st);
+        assert_eq!((id, before), (3, Some(-1.0)));
+        update(&mut vm, &mut st, top, 0);
+        assert!(st.goals[act as usize].is_none() && st.goals[wait as usize].is_none());
+        let (id, after) = fresh(&mut st);
+        assert_eq!(id, act, "the lowest free slot is reused");
+        assert_eq!(after, Some(f64::from(RESULT_SUCCESS)));
+    }
+
+    /// Flags read as the exe's float test `0.0 < param`: Lua booleans, the brain's 1.0/0.0,
+    /// and a negative value is unset.
+    #[test]
+    fn flag_parameters_are_set_only_when_positive() {
+        let mut st = AiState::new(ThinkParams::default(), HashMap::new(), 1);
+        let params = vec![
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Num(1.0),
+            Value::Num(0.0),
+            Value::Num(-1.0),
+        ];
+        let id = st.new_goal(2019, -1.0, params, None);
+        let g = st.goal(id);
+        let flags: Vec<bool> = (0..6).map(|i| g.param_bool(i)).collect();
+        assert_eq!(flags, [true, false, true, false, false, false]);
+        let read = |st: &mut AiState, i: f64| {
+            st.goal_method(id, "GetParam", &[Value::Num(i)]).unwrap()[0].num()
+        };
+        assert_eq!(read(&mut st, 0.0), Some(1.0));
+        assert_eq!(read(&mut st, 1.0), Some(0.0));
     }
 }
