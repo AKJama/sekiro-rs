@@ -39,6 +39,9 @@ const PLAN_DODGE_BACK: i32 = -10003;
 const OBJ_AI: u8 = 0;
 const OBJ_GOAL: u8 = 1;
 
+/// `GOAL_COMMON_Stay` (`goal_list.lua`).
+const GOAL_STAY: i32 = 2;
+
 /// The engine's leaf goals, by goal id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeGoal {
@@ -1095,6 +1098,14 @@ impl AiState {
                 .and_then(|p| p.arrival(t(0)))
                 .map_or(0, |a| a.1) as f64),
             "IsRouteEnd" => boolean(self.patrol.as_ref().is_none_or(|p| p.ended())),
+            // The MSB enemy's small act (its init_anim_id_type, part data +0x22) names a row
+            // whose anim id GetSmallActAnimId returns; with no row (-1, as for nearly every
+            // map enemy) it returns -1 (FUN_140604450 over FUN_14060c1b0) and the waits 0
+            // (FUN_1406044d0), so NonBattleAct stays at home instead of queueing a
+            // WaitWithAnime of anim 0. The rows' table is not identified: -1 for all
+            // (docs/FIDELITY.md), as FwLo's `src/ai.rs` returns.
+            "GetSmallActAnimId" => num(-1.0),
+            "GetSmallActPreWaitTime" | "GetSmallActPostWaitTime" => num(0.0),
             "StepNextMovePoint" => {
                 if let Some(p) = &mut self.patrol {
                     p.step(self.rng);
@@ -1673,7 +1684,10 @@ fn native_update(st: &mut AiState, id: u32, n: NativeGoal) -> i32 {
             action_update(st, id, &g)
         }
         NativeGoal::Wait => {
-            let target = g.param(0) as i32;
+            // Wait(life, turnTarget, ...) but Stay(life, ?, turnTarget): NonBattleAct's
+            // `Stay(life, 0, POINT_INIT_POSE)` turns to its post, not to TARGET_ENE_0 (FwLo's
+            // `src/ai.rs`, Native::Stay).
+            let target = g.param(if g.kind == GOAL_STAY { 1 } else { 0 }) as i32;
             if target != -1 && target != -2 {
                 st.request.face_yaw = st.yaw_to(target);
             }

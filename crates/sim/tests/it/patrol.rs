@@ -16,21 +16,7 @@ fn outskirts_patrol_walks_and_waits_at_its_points() {
     if !dir.join("collision.bin").exists() || !cache.join("anim/c1010").is_dir() {
         return;
     }
-    let mut wolf = Duel::load(&cache, 5.0).unwrap();
-    wolf.god = true;
-    // The issue's spawn, out of the ronin's sight.
-    wolf.player.body.position = [-83.0, -44.6, -37.5];
-    wolf.player.ground = Box::new(CollisionWorld::load_map(&dir).unwrap());
-    let world = Arc::new(CollisionWorld::load_map(&dir).unwrap());
-    let state = sekiro_sim::world_events::evaluate(
-        &cache,
-        map,
-        sekiro_sim::world_events::FirstVisit::for_map(map).unwrap(),
-    )
-    .unwrap();
-    let population =
-        Population::load_map(&cache, map, world, wolf.player.body.position, Some(&state)).unwrap();
-    wolf.set_population(population);
+    let mut wolf = outskirts(&cache, map, &dir);
     let ronin = |wolf: &Duel| {
         let foe = wolf
             .population
@@ -80,4 +66,67 @@ fn outskirts_patrol_walks_and_waits_at_its_points() {
         stood < 0.5,
         "the patrol leaves its point during the wait ({stood:.2} m)"
     );
+}
+
+/// An Outskirts soldier with no route and no small act (c1010_0001, MSB init_anim_id_type -1)
+/// stands guard as NonBattleAct scripts it (#115): GetSmallActAnimId is -1 there, so it Stays
+/// at its post (POINT_INIT_POSE). It used to queue a 20 s WaitWithAnime of anim 0, an
+/// AttackNonCancel of the idle it was already playing.
+#[test]
+fn outskirts_guard_stays_at_its_post() {
+    let cache = sekiro_sim::cache::root();
+    let map = "m11_00_00_00";
+    let dir = cache.join(format!("maps/{map}"));
+    if !dir.join("collision.bin").exists() || !cache.join("anim/c1010").is_dir() {
+        return;
+    }
+    let mut wolf = outskirts(&cache, map, &dir);
+    fn guard(wolf: &mut Duel) -> &mut Duel {
+        wolf.population
+            .as_mut()
+            .unwrap()
+            .foes
+            .iter_mut()
+            .find(|f| f.part == "c1010_0001")
+            .unwrap()
+            .duel
+            .as_mut()
+    }
+    let dt = 1.0 / 60.0;
+    let mut stacks = std::collections::BTreeSet::new();
+    for _ in 0..60 * 2 {
+        wolf.step(&InputFrame::default(), dt);
+        let ai = guard(&mut wolf).ai.as_ref().unwrap();
+        assert!(
+            !ai.state.battle,
+            "the guard does not see Wolf from the issue's spawn"
+        );
+        stacks.insert(ai.goal_stack().join(">"));
+    }
+    eprintln!("guard goals {stacks:?}");
+    assert!(stacks.contains("NonBattleAct>Stay"), "{stacks:?}");
+    assert!(
+        !stacks.iter().any(|s| s.contains("WaitWithAnime")),
+        "{stacks:?}"
+    );
+}
+
+/// Wolf at the issue's spawn (#116), out of the Outskirts soldiers' sight, with the map's
+/// population.
+fn outskirts(cache: &std::path::Path, map: &str, dir: &std::path::Path) -> Duel {
+    let mut wolf = Duel::load(cache, 5.0).unwrap();
+    wolf.god = true;
+    wolf.player.body.position = [-83.0, -44.6, -37.5];
+    wolf.player.ground = Box::new(CollisionWorld::load_map(dir).unwrap());
+    let world = Arc::new(CollisionWorld::load_map(dir).unwrap());
+    let state = sekiro_sim::world_events::evaluate(
+        cache,
+        map,
+        sekiro_sim::world_events::FirstVisit::for_map(map).unwrap(),
+    )
+    .unwrap();
+    let population =
+        Population::load_map(cache, map, world, wolf.player.body.position, Some(&state)).unwrap();
+    wolf.set_population(population);
+    wolf
 }
