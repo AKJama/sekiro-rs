@@ -23,6 +23,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_BODY: ${{ github.event.pull_request.body }}
           REPO: ${{ github.repository }}
+          PR_URL: ${{ github.event.pull_request.url }}
         run: |
           set -euo pipefail
           fail() {
@@ -38,7 +39,10 @@ jobs:
           while IFS= read -r number; do
             issue=$(gh api "repos/$REPO/issues/$number") || fail "Could not read issue #$number."
             jq -e 'has("pull_request") | not' <<< "$issue" > /dev/null || fail "#$number is a PR, not an issue."
-            jq -e '.state == "open"' <<< "$issue" > /dev/null || fail "Issue #$number must be open."
+            # A run that starts after a fast merge sees the issue the merge just closed.
+            jq -e '.state == "open"' <<< "$issue" > /dev/null \
+              || [[ $(gh api "$PR_URL" --jq .merged) == true ]] \
+              || fail "Issue #$number must be open."
           done <<< "$numbers"
           echo "Linked issues are open: $(echo $numbers)."
 
