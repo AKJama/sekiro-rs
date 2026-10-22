@@ -1,12 +1,9 @@
 //! Parses the player and soldier behaviour graphs. Skips when `cache/` has not been extracted.
 
 use sekiro_formats::hkb::{self, NodeKind};
-use std::path::PathBuf;
 
 fn chr(path: &str) -> Option<Vec<u8>> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../cache/raw/chr")
-        .join(path);
+    let p = sekiro_formats::cache::root().join("raw/chr").join(path);
     match std::fs::read(&p) {
         Ok(d) => Some(d),
         Err(_) => {

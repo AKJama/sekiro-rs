@@ -3,13 +3,12 @@
 
 use sekiro_sim::ai::SimpleBrain;
 use sekiro_sim::{Character, InputFrame};
-use std::path::Path;
 
 fn main() {
     let mut args = std::env::args().skip(1);
     let chr = args.next().unwrap_or_else(|| "c1010".into());
     let steps: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(900);
-    let mut npc = Character::load_npc(Path::new("cache"), &chr).expect("load npc");
+    let mut npc = Character::load_npc(&sekiro_sim::cache::root(), &chr).expect("load npc");
     let dt = 1.0 / 60.0;
     let settled = npc.settle(dt, 300);
     println!(

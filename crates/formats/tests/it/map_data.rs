@@ -9,7 +9,7 @@ use sekiro_formats::{bxf4, dcx::Oodle, hknp, hkx::Compendium, msb};
 const GAME: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Sekiro";
 
 fn map_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache/raw/map")
+    sekiro_formats::cache::root().join("raw/map")
 }
 
 fn read(path: &Path) -> Option<Vec<u8>> {

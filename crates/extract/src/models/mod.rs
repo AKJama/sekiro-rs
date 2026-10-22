@@ -1012,7 +1012,7 @@ mod tests {
 
     #[test]
     fn soldier_combat_mask_does_not_require_extracted_animations() {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_formats::cache::root();
         let source = cache.join("raw/chr/c1010.anibnd.d/c1010.tae");
         if !source.is_file() {
             eprintln!("skipping: c1010 TAE is not unpacked");

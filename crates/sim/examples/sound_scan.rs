@@ -1,6 +1,6 @@
 use sekiro_sim::tae::{TaeDb, TaeKind, sound_name};
 fn main() {
-    let cache = std::path::PathBuf::from("cache");
+    let cache = sekiro_sim::cache::root();
     let chr = std::env::args().nth(1).unwrap_or("c0000".into());
     let filter = std::env::args().nth(2).unwrap_or_default();
     let db = TaeDb::load_from_cache(&cache, &chr);

@@ -11,7 +11,9 @@ use sekiro_sim::duel::Duel;
 use sekiro_sim::sound::{HitSounds, tae_cues};
 
 fn main() {
-    let cache = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| "cache".into()));
+    let cache = std::env::args()
+        .nth(1)
+        .map_or_else(sekiro_sim::cache::root, PathBuf::from);
     let mut known = HashSet::new();
     if let Ok(dirs) = std::fs::read_dir(cache.join("sound")) {
         for d in dirs.flatten() {

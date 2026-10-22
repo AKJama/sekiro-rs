@@ -468,7 +468,7 @@ mod tests {
 
     #[test]
     fn installed_grass_tables_are_bounded() -> Result<()> {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/raw/map");
+        let cache = sekiro_formats::cache::root().join("raw/map");
         if !cache.is_dir() {
             return Ok(());
         }

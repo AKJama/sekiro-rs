@@ -8,7 +8,6 @@
 
 use sekiro_sim::duel::Duel;
 use sekiro_sim::{Buttons, InputFrame};
-use std::path::Path;
 
 const DT: f32 = 1.0 / 60.0;
 
@@ -25,7 +24,7 @@ fn input(presses: &[usize], attack_at: Option<usize>, i: usize) -> InputFrame {
 }
 
 fn duel() -> Duel {
-    let mut d = Duel::load(Path::new("cache"), 6.0).expect("cache");
+    let mut d = Duel::load(&sekiro_sim::cache::root(), 6.0).expect("cache");
     d.use_simple_ai();
     d
 }

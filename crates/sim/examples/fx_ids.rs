@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 fn main() {
     for chr in std::env::args().skip(1) {
-        let db = TaeDb::load_from_cache(std::path::Path::new("cache"), &chr);
+        let db = TaeDb::load_from_cache(&sekiro_sim::cache::root(), &chr);
         let mut ids: BTreeMap<(i32, i32), usize> = BTreeMap::new();
         for id in db.anim_ids() {
             let Some(anim) = db.anim(&tae::anim_name(id)) else {

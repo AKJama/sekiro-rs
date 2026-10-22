@@ -4,7 +4,7 @@ use sekiro_hks::{CommandId, Host, LoggingHost, PLAYER_SCRIPTS, Value, Vm};
 use std::path::{Path, PathBuf};
 
 fn script_dir() -> Option<PathBuf> {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache/raw/action/script");
+    let dir = sekiro_formats::cache::root().join("raw/action/script");
     if dir.join("c0000.hks").exists() {
         Some(dir)
     } else {

@@ -4,7 +4,7 @@ use sekiro_formats::anim::Skeleton;
 use sekiro_formats::flver;
 
 fn main() {
-    let cache = std::path::Path::new("cache");
+    let cache = &sekiro_sim::cache::root();
     let skel = Skeleton::from_bytes(&std::fs::read(cache.join("anim/c0000/skeleton.bin")).unwrap())
         .unwrap();
     let model = skel.model_space(&skel.reference_pose());

@@ -2,9 +2,8 @@
 use sekiro_sim::InputFrame;
 use sekiro_sim::duel::Duel;
 use sekiro_sim::tae::TaeKind;
-use std::path::Path;
 fn main() {
-    let mut duel = Duel::load(Path::new("cache"), 4.0).unwrap();
+    let mut duel = Duel::load(&sekiro_sim::cache::root(), 4.0).unwrap();
     let mut keys: Vec<_> = duel.fighters[0].attacks.keys().copied().collect();
     keys.sort();
     println!(

@@ -6,7 +6,7 @@ use sekiro_sim::{PlayerCharacter, demo};
 use std::path::PathBuf;
 
 fn main() {
-    let mut cache = PathBuf::from("cache");
+    let mut cache = sekiro_sim::cache::root();
     let mut script = None;
     let mut all = false;
     let mut calls: Option<(usize, usize)> = None;

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 fn script_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache/raw/action/script")
+    sekiro_formats::cache::root().join("raw/action/script")
 }
 
 #[test]

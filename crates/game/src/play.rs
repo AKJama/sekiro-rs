@@ -1506,10 +1506,7 @@ fn simulate(
             && sim.duel.spec.chr == "c7100"
             && (sim.step < 60 || std::env::var("PF_RESPAWN_PROBE").is_ok_and(|v| v == "tomoe-each"))
         {
-            let cache = PathBuf::from(
-                crate::arg_value(&std::env::args().collect::<Vec<_>>(), "--cache")
-                    .unwrap_or_else(|| "cache".into()),
-            );
+            let cache = sekiro_sim::cache::root();
             let tomoe = sekiro_sim::enemy::EnemySpec::from_cache(&cache, "c7110:71100000")
                 .expect("probe Tomoe");
             sim.duel.spec = tomoe;

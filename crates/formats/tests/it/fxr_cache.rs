@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 fn installed_fxr_coverage() {
     let root = std::env::var_os("SEKIRO_FXR_CACHE")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache/raw/sfx"));
+        .unwrap_or_else(|| sekiro_formats::cache::root().join("raw/sfx"));
     if !root.is_dir() {
         eprintln!("FXR cache unavailable: {}", root.display());
         return;

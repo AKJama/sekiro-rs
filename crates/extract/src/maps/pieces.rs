@@ -815,11 +815,10 @@ mod node_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn authored_fog_surfaces_keep_masks_coverage_and_material_inputs() {
-        let raw = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/raw");
+        let raw = sekiro_formats::cache::root().join("raw");
         if !raw.exists() {
             return;
         }
@@ -1082,7 +1081,7 @@ mod tests {
 
     #[test]
     fn cached_valley_alpha_materials_resolve_real_textures() {
-        let raw = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/raw");
+        let raw = sekiro_formats::cache::root().join("raw");
         if !raw.is_dir() {
             return;
         }

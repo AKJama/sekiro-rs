@@ -2,14 +2,11 @@
 //! Great Shinobi Owl's phase-2 event (see `docs/OWL.md`, "Phase 2"). Skips when `cache/` lacks
 //! it (`sekiro-extract unpack`).
 
-use std::path::PathBuf;
-
 use sekiro_formats::emedf::{self, Arg};
 use sekiro_formats::emevd::{Emevd, RestBehavior};
 
 fn load() -> Option<Emevd> {
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache/raw/event/m11_01_00_00.emevd");
+    let path = sekiro_formats::cache::root().join("raw/event/m11_01_00_00.emevd");
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("skipping: {} is not extracted", path.display());
         return None;

@@ -571,7 +571,7 @@ mod tests {
 
     #[test]
     fn ashina_omissions_are_authored_empty_flvers_not_export_failures() {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_formats::cache::root();
         for model in ["o110000", "o111690", "o111751"] {
             let path = object_flver(&cache.join("raw"), model);
             if !path.is_file() {

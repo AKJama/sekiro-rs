@@ -41,7 +41,7 @@ fn main() {
             duel::Duel,
             enemy::EnemySpec,
         };
-        let cache = std::path::Path::new("cache");
+        let cache = &sekiro_sim::cache::root();
         let arena = Arena::load(cache, ArenaSpec::by_name("hirata-hall").unwrap(), false).unwrap();
         let mut duel = Duel::load_with(
             cache,
@@ -125,7 +125,7 @@ fn main() {
         ] {
             println!(
                 "region {id}: {:?}",
-                sekiro_sim::events::warp_point("cache".as_ref(), 10, 0, id)
+                sekiro_sim::events::warp_point(&sekiro_sim::cache::root(), 10, 0, id)
             );
         }
         return;

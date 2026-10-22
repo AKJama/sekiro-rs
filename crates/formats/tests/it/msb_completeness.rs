@@ -197,7 +197,7 @@ fn named_metadata_keeps_conditions_signed_masks_and_index_domains_without_cache(
 
 #[test]
 fn every_cached_msbs_preserves_raw_parts_masks_and_references() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache/raw/map");
+    let dir = sekiro_formats::cache::root().join("raw/map");
     if !dir.exists() {
         eprintln!("skipping MSBS audit: map cache is not extracted");
         return;

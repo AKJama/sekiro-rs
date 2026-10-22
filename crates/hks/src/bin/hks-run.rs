@@ -22,7 +22,7 @@ const ENV_CAN_RELEASE_CROUCH: i32 = 3037;
 const ACTION_ARM_GUARD: f32 = 2.0;
 
 fn main() {
-    let mut dir = PathBuf::from("cache/raw/action/script");
+    let mut dir = sekiro_formats::cache::root().join("raw/action/script");
     let mut frames = 1usize;
     let mut state = "StandIdle".to_owned();
     let mut guard = false;

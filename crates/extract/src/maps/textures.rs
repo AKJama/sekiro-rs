@@ -436,7 +436,7 @@ mod grading_tests {
     use super::*;
     #[test]
     fn exported_strips_preserve_source_display_bytes() {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+        let cache = sekiro_formats::cache::root();
         for (area, block, map) in [
             ("m11", "m11_00", "m11_00_00_00"),
             ("m11", "m11_01", "m11_01_00_00"),

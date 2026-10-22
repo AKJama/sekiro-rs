@@ -633,7 +633,7 @@ mod tests {
 
     #[test]
     fn camera_cache() {
-        let cache = Path::new("../../cache");
+        let cache = &crate::cache::root();
         if cache.join("params/LockCamParam.json").is_file() {
             assert_eq!(CameraParams::load(cache).lock_range, 30.0);
         }
@@ -643,7 +643,7 @@ mod tests {
     /// 4.5 m from a focus 1.5 m above the feet; the other slots name their own rows.
     #[test]
     fn camera_book_slots_name_their_rows() {
-        let cache = Path::new("../../cache");
+        let cache = &crate::cache::root();
         let (pd, _) = param_dirs(cache);
         if !pd.join("CameraSetParam.param").is_file() {
             return;
