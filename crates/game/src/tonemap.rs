@@ -26,7 +26,7 @@ pub const OUTPUT_GAMMA: f32 = 2.2;
 // The native dt unit is presumed seconds; keep the assumption explicit.
 const NATIVE_DELTA_UNITS_PER_SECOND: f32 = 1.0;
 
-#[derive(Component, Clone, ExtractComponent, ShaderType, Debug)]
+#[derive(Component, Clone, ExtractComponent, ShaderType, Debug, PartialEq)]
 #[extract_app(bevy::render::RenderApp)]
 pub struct GamePost {
     // Verified 250060: 2^Exposure, shipped inverse PreExposure=1, MiddleGray, auto.

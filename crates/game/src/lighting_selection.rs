@@ -522,8 +522,13 @@ impl LightingSelection {
         }
     }
 
+    /// Whether [`Self::apply_sub`] would rebuild the stack for this sub-ID and the pending overlays.
+    pub fn needs_apply(&self, requested: Option<u8>) -> bool {
+        !self.pinned && (requested != self.current || self.overlays != self.applied_overlays)
+    }
+
     pub fn apply_sub(&mut self, requested: Option<u8>, light: &mut crate::lighting::MapLighting) {
-        if self.pinned || (requested == self.current && self.overlays == self.applied_overlays) {
+        if !self.needs_apply(requested) {
             return;
         }
         let Some(sub) = requested else {
@@ -560,7 +565,11 @@ pub fn sync_events(
 ) {
     let scene = scene.as_deref().map_or(&map_scene.0, |s| &s.0);
     let sub = scene.gparam_sub_ids.get(&selection.area).map(|s| s.0);
-    selection.apply_sub(sub, &mut light);
+    // Borrow the lighting mutably only for a rebuild, so its change ticks mean a real change:
+    // the post effects re-resolve on them (#42).
+    if selection.needs_apply(sub) {
+        selection.apply_sub(sub, &mut light);
+    }
 }
 
 #[derive(Resource, Default)]
