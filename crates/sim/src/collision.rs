@@ -438,6 +438,10 @@ pub struct CollisionWorld {
     /// Placed objects' triangle ranges ([`CollisionWorld::add_objects`]) and `<block>/<part>`
     /// names, in triangle order.
     objects: Vec<(std::ops::Range<u32>, String)>,
+    /// Placed objects the caller of [`CollisionWorld::add_map_objects`] switched off, as
+    /// `<block>/<part>`, with or without collision: the play world neither draws them nor lets
+    /// them hold anyone, and their wire hooks are not offered either (#261).
+    objects_off: std::collections::HashSet<String>,
 }
 
 /// One event wall part, kept out of the walkable grid.
@@ -896,6 +900,7 @@ impl CollisionWorld {
             swim_parts: Vec::new(),
             triggers: Vec::new(),
             objects: Vec::new(),
+            objects_off: Default::default(),
         }
     }
 
@@ -1002,7 +1007,8 @@ impl CollisionWorld {
     /// [`crate::hit_filter::object_mask`]; the fall-prevention walls of the objects in the entity
     /// groups the block's events hand to common event 20005560 only for riders, whatever the
     /// story says ([`crate::hit_filter::ride_mask`], #119); the rest only while `on` keeps them
-    /// (the story's `DeactivateObject` and the arenas' hidden parts switch objects off). With
+    /// (the story's `DeactivateObject` and the arenas' hidden parts switch objects off, and
+    /// [`CollisionWorld::object_off`] remembers them for the wire's hooks, #261). With
     /// `within` (a centre and a horizontal radius) only the objects whose bounds reach it.
     /// Breakable objects ([`breakable_models`]) do not hold enemies: the game's enemies break
     /// them with their attacks (a fence, `ObjectParam` hp 1) and the simulation does not break
@@ -1016,6 +1022,22 @@ impl CollisionWorld {
         on: impl Fn(&str) -> bool,
         within: Option<(Vec3, f32)>,
     ) -> Result<MapObjects, String> {
+        let groups = crate::hit_filter::load_ride_wall_groups(cache, block).unwrap_or_else(|e| {
+            eprintln!("collision: {block}: no ride wall groups: {e}");
+            Vec::new()
+        });
+        let riders = crate::hit_filter::ride_wall_objects(layout, &groups);
+        // Every object `on` switches off, with collision or without, so the wire leaves out the
+        // hooks on them too (#261).
+        self.objects_off.extend(
+            layout["objects"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|row| row["name"].as_str())
+                .filter(|n| !riders.contains(*n) && !on(n))
+                .map(|n| format!("{block}/{n}")),
+        );
         let dir = cache.join("maps").join(block);
         let path = dir.join("object_collision.bin");
         if !path.is_file() {
@@ -1023,11 +1045,6 @@ impl CollisionWorld {
         }
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let objects = ObjectCollision::from_bytes(&bytes).map_err(|e| e.to_string())?;
-        let groups = crate::hit_filter::load_ride_wall_groups(cache, block).unwrap_or_else(|e| {
-            eprintln!("collision: {block}: no ride wall groups: {e}");
-            Vec::new()
-        });
-        let riders = crate::hit_filter::ride_wall_objects(layout, &groups);
         let breakable = breakable_models(cache)?;
         let reaches = |part: &ObjectCollisionPart| {
             let Some((center, radius)) = within else {
@@ -1101,6 +1118,12 @@ impl CollisionWorld {
             .get(i)
             .filter(|(range, _)| range.contains(&triangle))
             .map(|(_, name)| name.as_str())
+    }
+
+    /// Whether the placed object `part` of block `block` was switched off when
+    /// [`CollisionWorld::add_map_objects`] added the block's objects (#261).
+    pub fn object_off(&self, block: &str, part: &str) -> bool {
+        self.objects_off.contains(&format!("{block}/{part}"))
     }
 
     /// The placed object whose collision is the floor [`CollisionWorld::floor`] finds, if the

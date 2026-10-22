@@ -1355,3 +1355,56 @@ fn a_jump_keeps_the_perch_and_a_new_shot_clears_it() {
     assert!(cleared, "the first perch {first:?} outlived the shot");
     assert!(feet.distance(Vec3::new(0.0, 5.0, -20.0)) < 0.2, "{feet}");
 }
+
+/// Ashina Outskirts start 3 (#261): the first-visit story switches off entity group 1106610
+/// (`docs/MAP-COMPLETENESS.md`), so the play world neither draws nor collides with its objects,
+/// among them `o115720_0000`, whose hook hangs 7 m above Wolf about 15 m south. Its hook stayed
+/// live: facing it, it was marked and the wire flew Wolf into open sky, where the perch held him
+/// on an invisible platform. Hooks of switched-off objects are not offered; every other hook
+/// keeps its place.
+#[test]
+fn outskirts_hooks_on_story_switched_off_objects_are_not_offered() {
+    let dir = cache().join("maps/m11_00_00_00");
+    if !dir.join("grapple.json").exists() || !dir.join("object_collision.bin").exists() {
+        return;
+    }
+    let layout: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("layout.json")).unwrap()).unwrap();
+    let off = sekiro_sim::world_events::first_visit_off(&cache(), "m11_00_00_00", &layout).unwrap();
+    let raw: Vec<Point> =
+        serde_json::from_slice(&std::fs::read(dir.join("grapple.json")).unwrap()).unwrap();
+    let mut wire = load_wire(&dir);
+    assert_eq!(wire.points.len(), raw.len(), "hook indices keep their rows");
+    const HOOK: usize = 354;
+    assert_eq!(wire.points[HOOK].source_part, "o115720_0000");
+    assert!(off.contains("o115720_0000"));
+    let mut dropped = 0;
+    for (p, r) in wire.points.iter().zip(&raw) {
+        if r.position.is_some() && off.contains(&r.source_part) {
+            dropped += 1;
+            assert!(p.position.is_none(), "{} is switched off", r.source_part);
+        } else {
+            assert_eq!(p.position, r.position, "{} stays", r.source_part);
+        }
+    }
+    assert_eq!(dropped, 9, "group 1106610's nine hooks");
+    // Wolf at start 3, the camera turned to the hook.
+    let feet = Vec3::new(-197.5, -48.2, 150.7);
+    let hook = Vec3::from(raw[HOOK].position.unwrap());
+    let to = hook - feet;
+    let yaw = (-to.x).atan2(-to.z);
+    let body = Body {
+        position: feet.to_array(),
+        yaw,
+        ..Body::default()
+    };
+    wire.search(&body, yaw, -0.2, false);
+    let marked = wire
+        .preview
+        .as_ref()
+        .map(|t| &wire.points[t.index].source_part);
+    assert!(
+        marked.is_none_or(|part| !off.contains(part)),
+        "a switched-off object's hook is marked: {marked:?}"
+    );
+}
