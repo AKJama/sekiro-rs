@@ -170,6 +170,7 @@ fn update(
     real: Res<Time<Real>>,
     blocks: Option<Res<crate::map::visibility::VisibilityBlocks>>,
     found: Option<Res<FoundIdols>>,
+    mut next_log: Local<f32>,
 ) {
     if clock.is_paused()
         && blocks
@@ -253,4 +254,23 @@ fn update(
         time.delta_secs()
     };
     player.advance_map(dt.min(1. / 15.));
+    // Weather density around the camera twice a second, to check it falls steadily (#84).
+    if std::env::var_os("SEKIRO_FXR_LOG").is_some() && time.elapsed_secs() >= *next_log {
+        *next_log = time.elapsed_secs() + 0.5;
+        // Counts sum every placement of an effect, so log each effect once.
+        let effects: std::collections::BTreeSet<i32> = fx
+            .placements
+            .iter()
+            .filter(|p| p.weather)
+            .map(|p| p.effect)
+            .collect();
+        for effect in effects {
+            info!(
+                "weather {} near camera {} at {:.1?}",
+                effect,
+                player.map_particles_near(effect, camera.translation(), 5.),
+                camera.translation()
+            );
+        }
+    }
 }
