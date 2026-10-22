@@ -1116,4 +1116,89 @@ mod tests {
         }
         assert_eq!(seen.len(), 2, "the event sub-ID rebuilt the bank: {seen:?}");
     }
+
+    /// A collision overlay byte 9 on m25 layers `m25_00_0900`, which authors other `ShadowParam`
+    /// cut points (5/25 m against the base stack's 10/50 m). The overlay must rebuild the sun's
+    /// cascades, a `--shadow` distance must survive it, and a LightSet row change with the same
+    /// values must leave the cascade config untouched (#65).
+    #[test]
+    fn light_file_switch_rebuilds_the_sun_cascades() {
+        use crate::lighting::{FillLight, MapLighting, ShadowSettings, Sun, apply_lighting};
+        use bevy::light::CascadeShadowConfig;
+        let map = "m25_00_00_00";
+        let none: [String; 0] = [];
+        let shadow_arg = ["--shadow".to_string(), "4,250".to_string()];
+        for args in [&none[..], &shadow_arg[..]] {
+            let selected = select(&cache(), map, None, None).unwrap();
+            let library = LightingSelection::load(&cache(), map, selected, false).unwrap();
+            let source = library.initial.source.clone();
+            let hour = library.initial.hour;
+            let gparam = library.resolve_initial(&source, library.base.clone());
+            let settings = ShadowSettings::from_args(&gparam, hour, args).unwrap();
+            let start = settings.cascade_bounds();
+            assert_eq!(&start[..2], [10., 50.], "the base file's cut points");
+            let mut app = App::new();
+            app.insert_resource(MapLighting {
+                gparam,
+                hour,
+                light_set: 0,
+                applied: None,
+                source,
+            })
+            .insert_resource(library)
+            .init_resource::<MapEventScene>()
+            .init_resource::<GlobalAmbientLight>()
+            .init_resource::<ClearColor>()
+            .insert_resource(settings)
+            .add_systems(Update, (sync_events, apply_lighting).chain());
+            let sun = app
+                .world_mut()
+                .spawn((
+                    Sun,
+                    DirectionalLight::default(),
+                    CascadeShadowConfig {
+                        bounds: start.clone(),
+                        ..default()
+                    },
+                    Transform::default(),
+                ))
+                .id();
+            app.world_mut()
+                .spawn((FillLight, DirectionalLight::default(), Transform::default()));
+            let cascades = |app: &App| {
+                let config = app.world().entity(sun).get_ref::<CascadeShadowConfig>();
+                let config = config.unwrap();
+                (config.bounds.clone(), config.last_changed())
+            };
+            let set_overlays = |app: &mut App, overlays: [i8; 4]| {
+                let mut selection = app.world_mut().resource_mut::<LightingSelection>();
+                LightingSelection::set_overlays(&mut selection, overlays);
+            };
+            app.update();
+            let (bounds, tick) = cascades(&app);
+            assert_eq!(bounds, start, "{args:?}");
+            // Same light file, another LightSet row: same values, no rebuild.
+            app.world_mut().resource_mut::<MapLighting>().light_set = 100;
+            app.update();
+            assert_eq!(cascades(&app), (start.clone(), tick), "{args:?}");
+            // The collision under the focus asks for overlay 9: m25_00_0900.
+            set_overlays(&mut app, [9, -1, -1, -1]);
+            app.update();
+            let light = app.world().resource::<MapLighting>();
+            let expected = ShadowSettings::from_args(&light.gparam, light.hour, args)
+                .unwrap()
+                .cascade_bounds();
+            let (switched, _) = cascades(&app);
+            assert_eq!(switched, expected, "{args:?}");
+            assert_eq!(&switched[..2], [5., 25.], "{args:?}");
+            if !args.is_empty() {
+                assert_eq!(switched.last(), Some(&250.), "--shadow distance survives");
+                assert_eq!(app.world().resource::<ShadowSettings>().distance, 250.);
+            }
+            // And back to the base stack.
+            set_overlays(&mut app, [-1; 4]);
+            app.update();
+            assert_eq!(cascades(&app).0, start, "{args:?}");
+        }
+    }
 }

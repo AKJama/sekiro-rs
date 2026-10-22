@@ -403,11 +403,13 @@ pub const SCENE_TO_BEVY: f32 = 3_135.61;
 /// BTL candela mapping shares the bridge; BTL native units remain open.
 pub const LOCAL_LUMENS_PER_UNIT: f32 = SCENE_TO_BEVY * 4.0 * std::f32::consts::PI;
 
-#[derive(Resource, Clone, Debug)]
+#[derive(Resource, Clone, Debug, PartialEq)]
 pub struct ShadowSettings {
     pub enabled: bool,
     pub cascades: usize,
     pub distance: f32,
+    /// `--shadow` set `distance`, so light-file changes keep it (#65).
+    pub distance_from_args: bool,
     /// `--shadow-casters` metres: map meshes farther from the focus stop casting. None leaves
     /// caster culling to Bevy's cascade frusta, so nothing gains its shadow on approach (#66).
     pub caster_distance: Option<f32>,
@@ -423,27 +425,17 @@ const NATIVE_FAR_FADE_START: f32 = 1000.;
 
 impl ShadowSettings {
     pub fn from_args(g: &Gparam, hour: f32, args: &[String]) -> anyhow::Result<Self> {
-        let shadow_param = |name: &str, fallback: f32| {
-            g.param("ShadowParam", name)
-                .and_then(|p| p.at(0, hour))
-                .and_then(|v| v.first().copied())
-                .filter(|v| v.is_finite() && *v > 0.)
-                .unwrap_or(fallback)
-        };
-        // Receivers keep the sun shadow lookup to the native far fade; see LIGHTING.md (#9).
         let mut settings = Self {
             enabled: !args.iter().any(|a| a == "--no-shadow"),
             cascades: 4,
-            distance: shadow_param("Far Fade Start", NATIVE_FAR_FADE_START),
+            distance: NATIVE_FAR_FADE_START,
+            distance_from_args: false,
             caster_distance: None,
             depth_bias: 0.02,
             normal_bias: 0.6,
-            splits: [
-                shadow_param("Cascade Dist 0->1", NATIVE_SPLITS[0]),
-                shadow_param("Cascade Dist 1->2", NATIVE_SPLITS[1]),
-                shadow_param("Cascade Dist 2->3", NATIVE_SPLITS[2]),
-            ],
+            splits: NATIVE_SPLITS,
         };
+        settings.read_shadow_param(g, hour);
         for (i, arg) in args.iter().enumerate() {
             if arg == "--shadow" {
                 let value = args
@@ -454,6 +446,7 @@ impl ShadowSettings {
                     .context("--shadow needs cascades,distance")?;
                 settings.cascades = count.parse()?;
                 settings.distance = distance.parse()?;
+                settings.distance_from_args = true;
             }
             if arg == "--shadow-casters" {
                 settings.caster_distance = Some(
@@ -495,6 +488,27 @@ impl ShadowSettings {
             "shadow bias must be finite and nonnegative"
         );
         Ok(settings)
+    }
+
+    /// Reads the cut points and far fade from the light file's `ShadowParam` at `hour`, keeping
+    /// a `--shadow` distance. Runs at start and on every light-file or hour change (#65).
+    pub fn read_shadow_param(&mut self, g: &Gparam, hour: f32) {
+        let shadow_param = |name: &str, fallback: f32| {
+            g.param("ShadowParam", name)
+                .and_then(|p| p.at(0, hour))
+                .and_then(|v| v.first().copied())
+                .filter(|v| v.is_finite() && *v > 0.)
+                .unwrap_or(fallback)
+        };
+        // Receivers keep the sun shadow lookup to the native far fade; see LIGHTING.md (#9).
+        if !self.distance_from_args {
+            self.distance = shadow_param("Far Fade Start", NATIVE_FAR_FADE_START);
+        }
+        self.splits = [
+            shadow_param("Cascade Dist 0->1", NATIVE_SPLITS[0]),
+            shadow_param("Cascade Dist 1->2", NATIVE_SPLITS[1]),
+            shadow_param("Cascade Dist 2->3", NATIVE_SPLITS[2]),
+        ];
     }
 
     /// Cascade far bounds in view depth: the native cut points below the shadow distance,
@@ -1419,7 +1433,15 @@ pub fn apply_lighting(
     mut lighting: ResMut<MapLighting>,
     mut ambient: ResMut<GlobalAmbientLight>,
     mut clear: ResMut<ClearColor>,
-    mut sun: Query<(&mut DirectionalLight, &mut Transform), (With<Sun>, Without<FillLight>)>,
+    mut shadow: Option<ResMut<ShadowSettings>>,
+    mut sun: Query<
+        (
+            &mut DirectionalLight,
+            &mut Transform,
+            Option<&mut bevy::light::CascadeShadowConfig>,
+        ),
+        (With<Sun>, Without<FillLight>),
+    >,
     mut fill: Query<(&mut DirectionalLight, &mut Transform), (With<FillLight>, Without<Sun>)>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("apply_lighting");
@@ -1445,10 +1467,28 @@ pub fn apply_lighting(
         );
     }
     lighting.applied = Some(lighting.light_set);
-    for (mut l, mut t) in &mut sun {
+    // The light file or hour may author other cascade cut points; rebuild only on a change.
+    let bounds = shadow.as_mut().map(|shadow| {
+        let mut next = (**shadow).clone();
+        next.read_shadow_param(&lighting.gparam, lighting.hour);
+        if next != **shadow {
+            **shadow = next;
+        }
+        shadow.cascade_bounds()
+    });
+    for (mut l, mut t, cascades) in &mut sun {
         l.color = set.sun_color;
         l.illuminance = set.sun_lux;
         *t = Transform::IDENTITY.looking_to(-set.sun_toward, Vec3::Y);
+        if let (Some(bounds), Some(mut cascades)) = (&bounds, cascades)
+            && cascades.bounds != *bounds
+        {
+            info!(
+                "sun shadow cascades {:?} -> {bounds:?} from {} at {:.1} h",
+                cascades.bounds, lighting.source, lighting.hour
+            );
+            cascades.bounds.clone_from(bounds);
+        }
     }
     for (mut l, mut t) in &mut fill {
         l.color = set.fill_color;

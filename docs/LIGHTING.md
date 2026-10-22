@@ -1383,6 +1383,7 @@ Map shadow casters are no longer budgeted by distance from the player: with 45 m
 Bevy already culls casters against each cascade, so the default leaves that to it; a playtest on 2026-10-17 held 60 fps with casters to 1000 m.
 `--shadow-casters <metres>` brings back a budget around the player, and offscreen captures load casters within that range, or the shadow distance by default.
 `--shadow cascades,distance` still overrides the count and range, using the native cut points below that range.
+The cut points and far fade are re-read from the light file in force whenever `apply_lighting` applies a light-file or hour change, and the sun's `CascadeShadowConfig` is rewritten only when the bounds differ; a `--shadow` range is kept across those changes (#65).
 The native far fade (10 m) and `Cascade Fade Range Scale` are not reproduced; Bevy keeps its own cascade overlap.
 
 
