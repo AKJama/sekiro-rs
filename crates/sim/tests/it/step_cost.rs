@@ -235,7 +235,7 @@ fn blocked_hook_rays_test_only_their_band() {
         return;
     };
     let cache = cache().expect("the play world loaded from it");
-    let wire = Wire::load(&cache, &cache.join("maps/m11_00_00_00")).unwrap();
+    let wire = Wire::load(&cache, &cache.join("maps/m11_00_00_00"), world.clone()).unwrap();
     let [x, y, z] = [-214.998, -38.577, 13.956];
     let feet = glam::Vec3::new(x, world.floor(x, z, y + 1.0).unwrap_or(y), z);
     let chest = feet + glam::Vec3::Y * SIGHT_LIFT;
@@ -401,21 +401,16 @@ fn fence_corner_push_is_bounded() {
     let Some(cache) = cache() else {
         return;
     };
-    let Some(mut world) = CollisionWorld::load_blocks(&cache, &["m11_00_00_00", "m11_01_00_00"])
-    else {
+    // With the placed objects ([`CollisionWorld::load_blocks`]).
+    let Some(world) = CollisionWorld::load_blocks(&cache, &["m11_00_00_00", "m11_01_00_00"]) else {
         return;
     };
     let dir = cache.join("maps/m11_00_00_00");
-    if dir.join("object_collision.bin").is_file() {
-        world
-            .add_block_objects(&dir, "m11_00_00_00", |_, who| who)
-            .unwrap();
-    }
     let world = Arc::new(world);
     let mut wolf = Character::load_from_cache(&cache).unwrap();
     wolf.ground = Box::new(world.clone());
     // The hook search's sight rays are part of every step's cost here (#161).
-    wolf.wire = sekiro_sim::wire::Wire::load(&cache, &dir).unwrap();
+    wolf.wire = sekiro_sim::wire::Wire::load(&cache, &dir, world.clone()).unwrap();
     // The last two points of the issue's route: from (-220, 9) toward (-224, 12), past the corner.
     let (x, z) = (-220.0, 9.0);
     wolf.body.position = [x, world.floor(x, z, -37.0).unwrap(), z];

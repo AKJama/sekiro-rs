@@ -572,6 +572,41 @@ pub fn triangle_visits() -> u64 {
     VISITS.with(std::cell::Cell::get)
 }
 
+/// The object models whose `ObjectParam` row gives them hit points (`hp` above 0): those that
+/// break when hit (`cache/params/ObjectParam.json`). None when the cache has no params.
+pub fn breakable_models(cache: &Path) -> Result<std::collections::HashSet<u32>, String> {
+    let path = cache.join("params/ObjectParam.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let json: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(json["rows"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|row| row["hp"].as_i64().is_some_and(|hp| hp > 0))
+        .filter_map(|row| u32::try_from(row["id"].as_u64()?).ok())
+        .collect())
+}
+
+/// The `ObjectParam` row of a placed object, from its part name (`o113415_6001` is 113415).
+fn model_id(part: &str) -> Option<u32> {
+    part.strip_prefix('o')?.split('_').next()?.parse().ok()
+}
+
+/// What [`CollisionWorld::add_map_objects`] added.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct MapObjects {
+    /// Placed objects with collision added.
+    pub parts: usize,
+    pub triangles: usize,
+    /// Objects with collision left out because `on` switched them off.
+    pub switched_off: usize,
+}
+
 impl CollisionWorld {
     /// The collision file at `path` exactly as it is, every triangle solid for every query:
     /// no helper masks and no swim hits. A map folder's `collision.bin` is the high-resolution
@@ -588,16 +623,31 @@ impl CollisionWorld {
     /// `l` mesh ([`crate::lo_collision`], `collision.bin` when the folder has no
     /// `collision_lo.bin`), with the helper parts its `layout.json` names out of the walkable mesh
     /// and joined as helpers by hit filter ([`crate::hit_filter::strip_helpers`],
-    /// [`CollisionWorld::add_helpers`]), and the fall-prevention assist walls.
+    /// [`CollisionWorld::add_helpers`]), the fall-prevention assist walls and the placed objects
+    /// ([`CollisionWorld::add_map_objects`]), less the parts and objects the map's first-visit
+    /// story switches off ([`crate::world_events::first_visit_off`]), as the play world builds a
+    /// block without `--story`.
     pub fn load_map(dir: &Path) -> Result<Self, String> {
         let path = dir.join("layout.json");
         let layout = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let layout =
             serde_json::from_slice(&layout).map_err(|e| format!("{}: {e}", path.display()))?;
-        let block = crate::lo_collision::block_collision(dir, &layout, |_| false)?;
+        // `dir` is `<cache>/maps/<block>`.
+        let place = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .zip(dir.parent().and_then(Path::parent));
+        let off = match place {
+            Some((name, cache)) => crate::world_events::first_visit_off(cache, name, &layout)?,
+            None => Default::default(),
+        };
+        let block = crate::lo_collision::block_collision(dir, &layout, |n| off.contains(n))?;
         let mut world = Self::from_mesh(&block.mesh);
         world.add_helpers(&block.helpers);
-        world.add_map_fall_assist(dir, |_| true)?;
+        world.add_map_fall_assist(dir, |n| !off.contains(n))?;
+        if let Some((name, cache)) = place {
+            world.add_map_objects(cache, name, &layout, |n| !off.contains(n), None)?;
+        }
         Ok(world)
     }
 
@@ -649,7 +699,7 @@ impl CollisionWorld {
     /// (`crates/game/src/map_world.rs` `collision_world`): each block's character mesh
     /// ([`crate::lo_collision::block_collision`]) with its helper parts stripped from the
     /// walkable mesh and added back by hit filter, the fall-prevention walls, the placed
-    /// objects. Without the story's switches and the ride walls' masks. `None` when any block's
+    /// objects ([`CollisionWorld::add_map_objects`]). Without the story's switches. `None` when any block's
     /// `collision.bin` is missing from the cache `cache`. For tests.
     #[doc(hidden)]
     pub fn load_blocks(cache: &Path, blocks: &[&str]) -> Option<Self> {
@@ -662,6 +712,7 @@ impl CollisionWorld {
         };
         let mut mesh = CollisionMesh::default();
         let mut helpers = crate::hit_filter::HelperCollision::default();
+        let mut layouts = Vec::new();
         for dir in &dirs {
             let layout: serde_json::Value =
                 serde_json::from_slice(&read(dir.join("layout.json"))).unwrap();
@@ -670,12 +721,15 @@ impl CollisionWorld {
                 .unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
             helpers.extend(part.helpers);
             mesh.extend(&part.mesh);
+            layouts.push(layout);
         }
         let mut world = Self::from_mesh(&mesh);
         world.add_helpers(&helpers);
-        for (dir, block) in dirs.iter().zip(blocks) {
+        for ((dir, block), layout) in dirs.iter().zip(blocks).zip(&layouts) {
             world.add_map_fall_assist(dir, |_| true).unwrap();
-            world.add_block_objects(dir, block, |_, who| who).unwrap();
+            world
+                .add_map_objects(cache, block, layout, |_| true, None)
+                .unwrap();
         }
         Some(world)
     }
@@ -940,6 +994,80 @@ impl CollisionWorld {
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let objects = ObjectCollision::from_bytes(&bytes).map_err(|e| e.to_string())?;
         self.add_objects(block, &objects, mask)
+    }
+
+    /// Adds the placed objects of the map block `block` (`cache/maps/<block>`, laid out by
+    /// `layout`) as every play world builds them, the map world, the arenas and
+    /// [`CollisionWorld::load_map`] alike (#18): each object's collision by its
+    /// [`crate::hit_filter::object_mask`]; the fall-prevention walls of the objects in the entity
+    /// groups the block's events hand to common event 20005560 only for riders, whatever the
+    /// story says ([`crate::hit_filter::ride_mask`], #119); the rest only while `on` keeps them
+    /// (the story's `DeactivateObject` and the arenas' hidden parts switch objects off). With
+    /// `within` (a centre and a horizontal radius) only the objects whose bounds reach it.
+    /// Breakable objects ([`breakable_models`]) do not hold enemies: the game's enemies break
+    /// them with their attacks (a fence, `ObjectParam` hp 1) and the simulation does not break
+    /// objects yet, so a boss charging Wolf would stop at one for good (Gyoubu at a fence in his
+    /// arena). They still hold Wolf and the camera, as an unbroken one does.
+    pub fn add_map_objects(
+        &mut self,
+        cache: &Path,
+        block: &str,
+        layout: &serde_json::Value,
+        on: impl Fn(&str) -> bool,
+        within: Option<(Vec3, f32)>,
+    ) -> Result<MapObjects, String> {
+        let dir = cache.join("maps").join(block);
+        let path = dir.join("object_collision.bin");
+        if !path.is_file() {
+            return Ok(MapObjects::default());
+        }
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let objects = ObjectCollision::from_bytes(&bytes).map_err(|e| e.to_string())?;
+        let groups = crate::hit_filter::load_ride_wall_groups(cache, block).unwrap_or_else(|e| {
+            eprintln!("collision: {block}: no ride wall groups: {e}");
+            Vec::new()
+        });
+        let riders = crate::hit_filter::ride_wall_objects(layout, &groups);
+        let breakable = breakable_models(cache)?;
+        let reaches = |part: &ObjectCollisionPart| {
+            let Some((center, radius)) = within else {
+                return true;
+            };
+            let (first, end) = (part.first as usize, (part.first + part.count) as usize);
+            let Some(tris) = objects.mesh.indices.get(first * 3..end * 3) else {
+                return false;
+            };
+            let (mut min, mut max) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
+            for &i in tris {
+                let v = objects.mesh.vertices[i as usize];
+                min = min.min(Vec2::new(v[0], v[2]));
+                max = max.max(Vec2::new(v[0], v[2]));
+            }
+            crate::arena::box_within(min, max, Vec2::new(center.x, center.z), radius)
+        };
+        let mut switched_off = 0;
+        let (parts, triangles) = self.add_objects(block, &objects, |part, who| {
+            if !reaches(part) {
+                return 0;
+            }
+            if riders.contains(&part.name) {
+                return crate::hit_filter::ride_mask(who);
+            }
+            let keep = on(&part.name);
+            switched_off += usize::from(!keep);
+            if !keep {
+                0
+            } else if model_id(&part.name).is_some_and(|m| breakable.contains(&m)) {
+                who & !ENEMY
+            } else {
+                who
+            }
+        })?;
+        Ok(MapObjects {
+            parts,
+            triangles,
+            switched_off,
+        })
     }
 
     /// Appends a mesh only those `mask` holds collide with ([`crate::hit_filter::PLAYER`],

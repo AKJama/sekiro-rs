@@ -694,6 +694,36 @@ pub fn first_visit(cache: &Path, map: &str) -> Result<Option<WorldState>, String
     evaluate(cache, map, fixture).map(Some)
 }
 
+/// The names of the parts of `map` (laid out by `layout`) its first-visit story ([`first_visit`])
+/// switches off; none for a map without one. What the play world leaves out of a block's
+/// collision and objects (#18, #129).
+pub fn first_visit_off(
+    cache: &Path,
+    map: &str,
+    layout: &serde_json::Value,
+) -> Result<std::collections::HashSet<String>, String> {
+    first_visit_off_of(cache, map, layout, |_| true)
+}
+
+/// [`first_visit_off`] of the parts of kind `kind` only.
+pub fn first_visit_off_of(
+    cache: &Path,
+    map: &str,
+    layout: &serde_json::Value,
+    kind: impl Fn(PartKind) -> bool,
+) -> Result<std::collections::HashSet<String>, String> {
+    Ok(first_visit(cache, map)?
+        .map(|state| {
+            state
+                .parts(layout)
+                .into_iter()
+                .filter(|p| !p.enabled && kind(p.kind))
+                .map(|p| p.name)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 pub fn evaluate(cache: &Path, map: &str, fixture: FirstVisit) -> Result<WorldState, String> {
     if !SUPPORTED_MAPS.contains(&map) {
         return Err(format!("unsupported story map {map}"));

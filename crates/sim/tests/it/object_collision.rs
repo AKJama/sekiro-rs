@@ -27,14 +27,22 @@ fn load(id: &str) -> Option<(PathBuf, ObjectCollision)> {
     Some((dir, objects))
 }
 
-/// The block's own map collision plus every placed object's. The play world
-/// (`map_world::collision_world` in the game crate, tested there on the same pine) adds the
-/// connected blocks too and leaves out the objects the story switches off.
+/// The block's own map collision plus every placed object's ([`CollisionWorld::load_map`]). The
+/// play world (`map_world::collision_world` in the game crate, tested there on the same pine)
+/// adds the connected blocks too and leaves out the objects the story switches off.
 fn world(dir: &std::path::Path) -> CollisionWorld {
-    let mut world = CollisionWorld::load_map(dir).unwrap();
-    world
-        .add_block_objects(dir, "m11_00_00_00", |_, who| who)
-        .unwrap();
+    CollisionWorld::load_map(dir).unwrap()
+}
+
+/// [`CollisionWorld::load_map`] without the placed objects: the block's character collision, its
+/// helpers and its fall-prevention walls.
+fn bare(dir: &std::path::Path) -> CollisionWorld {
+    let layout: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("layout.json")).unwrap()).unwrap();
+    let block = sekiro_sim::lo_collision::block_collision(dir, &layout, |_| false).unwrap();
+    let mut world = CollisionWorld::from_mesh(&block.mesh);
+    world.add_helpers(&block.helpers);
+    world.add_map_fall_assist(dir, |_| true).unwrap();
     world
 }
 
@@ -129,7 +137,7 @@ fn the_grapple_pine_has_a_floor_from_tip_to_platform() {
         tree.collision_type, 0,
         "the pine is an ordinary object (group 24)"
     );
-    let bare = CollisionWorld::load_map(&dir).unwrap();
+    let bare = bare(&dir);
     let world = world(&dir);
     let tip = TRUNK[0];
     let start_y = world
@@ -175,4 +183,96 @@ fn the_grapple_pine_has_a_floor_from_tip_to_platform() {
     let edge = off[fell].0;
     println!("off the tip: airborne at {edge:?}");
     assert!(edge[0] < -141.0, "fell before the tip's end at {edge:?}");
+}
+
+/// Genichiro's arena (#18): on his roof, 7.1 m from Wolf's start, stands a torch stand, a placed
+/// object (`o116100_4044`, collisionType 1: the player and enemies collide with it). Walking at it
+/// he is held at its face and slides around it; his body never overlaps it. The arena built its
+/// collision without the objects, so he walked straight through.
+#[test]
+fn wolf_cannot_walk_through_an_arena_object() {
+    use sekiro_sim::collision::RADIUS;
+    let cache = sekiro_sim::cache::root();
+    if !cache
+        .join("maps/m11_01_00_00/object_collision.bin")
+        .is_file()
+    {
+        eprintln!("skipping: m11_01_00_00 has no exported object collision");
+        return;
+    }
+    let spec = sekiro_sim::arena::ArenaSpec::by_name("genichiro").unwrap();
+    let arena = sekiro_sim::arena::Arena::load(&cache, spec, false).unwrap();
+    let start = arena.floor_at(arena.layout.wolf.position);
+    // Toward the stand, 206 degrees from +Z about +Y; knee high it is 7.15 m away.
+    let a = 206f32.to_radians();
+    let dir = glam::Vec3::new(a.sin(), 0.0, a.cos());
+    let hit = arena.world.raycast(start + glam::Vec3::Y * 0.4, dir, 12.0);
+    assert!(
+        hit.is_some_and(|d| (d - 7.15).abs() < 0.02),
+        "the stand 7.15 m ahead: {hit:?}"
+    );
+    let face = start + dir * 7.15;
+    let goal = start + dir * 10.0;
+    let path = walk(&arena.world, start.to_array(), &[[goal.x, goal.z]]);
+    let nearest = path
+        .iter()
+        .map(|(p, _)| (glam::Vec3::from(*p) - face).with_y(0.0).length())
+        .fold(f32::MAX, f32::min);
+    println!("nearest to the stand's face {nearest:.2} m (body radius {RADIUS})");
+    assert!(
+        nearest > 0.9 * RADIUS,
+        "Wolf's centre came {nearest:.2} m from the stand's face: he walked into it"
+    );
+}
+
+/// The grapple wire's sight line is blocked by placed objects (#18): on Ashina Castle, from the
+/// ground at (182.93, 141.98) looking at the pine `o002540_0001`, its hook 27 is marked through
+/// the map collision alone but `o113400_3044` stands 2.8 m in front of Wolf, in the way. The
+/// wire's world was the map's without objects, so it fired through them.
+#[test]
+fn the_wire_sight_line_is_blocked_by_an_object() {
+    use sekiro_sim::wire::{SIGHT_LIFT, Wire, sight_ray};
+    use std::sync::Arc;
+    let Some((dir, _)) = load("m11_01_00_00") else {
+        return;
+    };
+    if !dir.join("grapple.json").is_file() {
+        return;
+    }
+    let cache = sekiro_sim::cache::root();
+    let feet = glam::Vec3::new(182.92863, -20.94238, 141.97514);
+    let body = Body {
+        position: feet.to_array(),
+        yaw: 115f32.to_radians(),
+        ..Body::default()
+    };
+    // On the pine at (164.80, -18.70, 150.43).
+    const HOOK: usize = 27;
+    let search = |world: CollisionWorld| {
+        let mut wire = Wire::load(&cache, &dir, Arc::new(world)).unwrap();
+        wire.search(&body, body.yaw, 0.25, false);
+        (wire, HOOK)
+    };
+    let (open, hook) = search(bare(&dir));
+    assert_eq!(open.points[hook].source_part, "o002540_0001");
+    assert_eq!(
+        open.candidate.as_ref().map(|t| t.index),
+        Some(hook),
+        "through the map collision alone the hook is marked"
+    );
+    let (wire, _) = search(world(&dir));
+    let point = glam::Vec3::from(wire.points[hook].position.unwrap());
+    let chest = feet + glam::Vec3::Y * SIGHT_LIFT;
+    let (ray, length) = sight_ray(chest, point);
+    let world = wire.collision.as_ref().unwrap();
+    let blocked = world.raycast(chest, ray, length);
+    assert!(
+        blocked.is_some_and(|d| (d - 2.83).abs() < 0.05),
+        "the object 2.8 m ahead blocks the sight line: {blocked:?}"
+    );
+    assert_ne!(
+        wire.candidate.as_ref().map(|t| t.index),
+        Some(hook),
+        "the hook behind the object is not marked"
+    );
 }

@@ -10,6 +10,7 @@
 /// Render-only map scenery radius; collision remains ArenaSpec::radius.
 pub const ARENA_VISUAL_RADIUS: f32 = 1500.0;
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -440,6 +441,20 @@ pub struct FogWallPlace {
     pub local_max: Vec3,
 }
 
+/// The placed objects of an arena's map that its first-visit story switches off
+/// ([`crate::world_events::first_visit_off`]; none off Ashina Outskirts and Ashina Castle): the
+/// arena neither draws them nor collides with them, as the play world does on those maps (#18).
+/// Only the objects: the collision parts and map pieces stay as the arena had them (#129).
+pub fn story_objects_off(
+    cache: &Path,
+    spec: &ArenaSpec,
+    layout: &Value,
+) -> Result<HashSet<String>, String> {
+    crate::world_events::first_visit_off_of(cache, spec.map, layout, |k| {
+        k == crate::world_events::PartKind::Object
+    })
+}
+
 /// An arena ready to fight on: where both stand and the collision they stand on.
 pub struct Arena {
     pub spec: &'static ArenaSpec,
@@ -527,6 +542,28 @@ impl Arena {
             )
         };
         world.add_helpers(&helpers);
+        // The placed objects, as the map world adds them (#18), less those the arena hides:
+        // its story's hidden parts, the objects the map's first-visit story switches off and the
+        // models it does not draw.
+        let story_off = story_objects_off(cache, spec, &json)?;
+        let undrawn: HashSet<&str> = json["objects"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|row| {
+                row["model"]
+                    .as_str()
+                    .is_some_and(|m| spec.hidden_models.iter().any(|h| m.starts_with(h)))
+            })
+            .filter_map(|row| row["name"].as_str())
+            .collect();
+        world.add_map_objects(
+            cache,
+            spec.map,
+            &json,
+            |n| !hidden.contains(n) && !undrawn.contains(n) && !story_off.contains(n),
+            (!full_map).then(|| (layout.center(), spec.radius)),
+        )?;
         if let Some((part, who)) = event_collision {
             let part = if full_map {
                 part

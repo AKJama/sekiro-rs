@@ -134,11 +134,21 @@ In the live game, spawned on the lower ground south of the ravine at (-140, -50,
 - Before: Wolf landed on the perch at (-141.58, -44.26, -123.86) (spawned on the east ledge), and his first step west dropped him through `h900000` at y = -74.2 and the fall return.
 - After: he landed at (-137.09, -43.55, -121.83), stepped onto the trunk, walked down to its tip at x = -140.2 and back up to the platform at (-135.9, -42.6, -117.7), with every sample on `o002500_0005` until the platform's map collision and no fall.
 
+## One loader for every world (#18)
+
+`CollisionWorld::add_map_objects` adds a block's placed objects for every world: the play world (`collision_world`), the arenas (`Arena::load`, cropped to the arena's radius) and `CollisionWorld::load_map`.
+It gives each object its `object_mask`, the ride walls their rider-only mask (#119), and leaves out the objects the caller's story switches off.
+`CollisionWorld::load_map` applies the map's first-visit story (`world_events::first_visit_off`) to its collision parts, fall-prevention walls and objects, as the play world does without `--story`.
+The grappling wire no longer builds a world of its own: it aims through the world Wolf collides with, so objects block its line of sight in maps and arenas alike.
+Before, the arenas and the wire's world had no objects: on Genichiro's roof Wolf walked through a torch stand 7.1 m from his start (`o116100_4044`), and on Ashina Castle the wire marked a pine's hook behind a shield 2.8 m in front of him (`o113400_3044`); `object_collision.rs` tests both.
+
 ## Unresolved
 
 - The MSB scale is applied to the collision like the drawn model; whether the exe scales object physics is not traced.
 - Keyframed bodies stay in the bind pose of the hkx; the exe moves them with the object's animation (swaying trees, doors opened by their authored initial animation).
 - Broken states (`_1.hkx`), destruction at runtime and `RequestObjectDestruction` are not applied; every object is intact.
 - Convex polytope triangles have no hit material.
-- The arena worlds (`Arena::load`) and the wire's own collision (`CollisionWorld::load_map`, used for line of sight) do not load objects yet; `CollisionWorld::add_block_objects` is the call they would share.
+- Breakable objects (an `ObjectParam` row with `hp` above 0, such as fences, shields and torch stands) do not hold enemies, since nothing breaks them yet: the game's enemies break them with attacks, and a boss charging Wolf would otherwise stop at one for good (Gyoubu at a fence in his arena).
+  They still hold Wolf and the camera, as an unbroken one does.
+- Arenas on Ashina Outskirts and Ashina Castle leave out (and do not draw) the objects the map's first-visit story switches off, whatever the fight's own point in the story; their collision parts and map pieces keep the arena's own rules (#129).
 - The body's floor is a point under the feet, so on a round trunk only the top band within the 50 degree slope limit holds Wolf (about 0.6 m wide on the pine), where the exe's 0.4 m capsule rests on the curved sides too.

@@ -6,7 +6,7 @@ use crate::{
 };
 use glam::{EulerRot, Quat, Vec3};
 use serde::Deserialize;
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Point {
@@ -166,7 +166,10 @@ pub struct Wire {
     pub search: Option<Search>,
     pub variations: HashMap<u32, Variation>,
     pub offsets: HashMap<u32, Vec3>,
-    pub collision: Option<CollisionWorld>,
+    /// The collision the line of sight and the flight meet: the player's own world, shared
+    /// with his body (#18), so placed objects and the story's switches block it as they block
+    /// him.
+    pub collision: Option<Arc<CollisionWorld>>,
     /// Best usable hook, also consumed by HKS and dramatic camera angles.
     pub candidate: Option<Target>,
     /// Best Ready hook, or best Distant hook when none is usable.
@@ -201,7 +204,9 @@ impl Wire {
         (self.start.is_some() || self.arrived).then_some((self.elapsed, self.duration))
     }
 
-    pub fn load(cache: &Path, map: &Path) -> Result<Self, String> {
+    /// The hooks of the map folder `map` and the wire's params from `cache`, aimed through
+    /// `collision`, the world the player collides with.
+    pub fn load(cache: &Path, map: &Path, collision: Arc<CollisionWorld>) -> Result<Self, String> {
         let read = |p: &Path| -> Result<serde_json::Value, String> {
             serde_json::from_slice(&std::fs::read(p).map_err(|e| e.to_string())?)
                 .map_err(|e| e.to_string())
@@ -241,7 +246,7 @@ impl Wire {
             offsets,
             // The player's collision: helper parts the player passes through do not stop the
             // line of sight or the flight (`crate::hit_filter`).
-            collision: Some(CollisionWorld::load_map(map)?),
+            collision: Some(collision),
             ..Self::default()
         })
     }

@@ -288,7 +288,7 @@ fn detail_levels(path: &Path) -> Result<[bool; 3]> {
     }))
 }
 
-fn read_layout(dir: &Path) -> Result<Value> {
+pub(crate) fn read_layout(dir: &Path) -> Result<Value> {
     let mut layout: Value = serde_json::from_slice(&std::fs::read(dir.join("layout.json"))?)?;
     if layout["layout_version"].as_u64().unwrap_or(0) >= 2 {
         return Ok(layout);
@@ -464,24 +464,18 @@ pub(crate) fn collision_world(
                  {block} --fall-assist`)"
             );
         }
-        let groups =
-            sekiro_sim::hit_filter::load_ride_wall_groups(cache, block).unwrap_or_else(|e| {
-                eprintln!("collision: {block}: no ride wall groups: {e}");
-                Vec::new()
-            });
-        let riders = ride_walls(&layouts[block], &groups);
-        let mut switched_off = 0;
-        let (parts, triangles) = world
-            .add_block_objects(&cache.join("maps").join(block), block, |part, who| {
-                if riders.contains(part.name.as_str()) {
-                    return sekiro_sim::hit_filter::ride_mask(who);
-                }
-                let on = story
-                    .and_then(|s| s.part(&part.name))
-                    .is_none_or(|p| p.enabled);
-                switched_off += usize::from(!on);
-                if on { who } else { 0 }
-            })
+        let sekiro_sim::collision::MapObjects {
+            parts,
+            triangles,
+            switched_off,
+        } = world
+            .add_map_objects(
+                cache,
+                block,
+                &layouts[block],
+                |n| story.is_none_or(|s| !s.switched_off(n)),
+                None,
+            )
             .map_err(anyhow::Error::msg)?;
         if parts > 0 {
             eprintln!(
@@ -491,23 +485,6 @@ pub(crate) fn collision_world(
         }
     }
     Ok(world)
-}
-
-/// Names of a block's objects in any of `groups`, the entity groups whose fall-prevention
-/// walls common event 20005560 switches on while Wolf has SpEffect 4100
-/// ([`sekiro_sim::hit_filter::ride_wall_groups`], [`sekiro_sim::hit_filter::RIDE_ASSIST_MOVE`]).
-fn ride_walls<'a>(layout: &'a Value, groups: &[u32]) -> BTreeSet<&'a str> {
-    layout["objects"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|row| {
-            groups8(&row["entity_group_ids"])
-                .iter()
-                .any(|g| *g != 0 && groups.contains(g))
-        })
-        .filter_map(|row| row["name"].as_str())
-        .collect()
 }
 
 impl MapWorld {
@@ -2309,11 +2286,11 @@ mod tests {
         let gaps: [(&str, [f32; 2]); 1] = [("o002500_0005", [-0.77, 0.63])];
         let groups = sekiro_sim::hit_filter::load_ride_wall_groups(&play.cache, block).unwrap();
         let layout = &play.blocks[block];
-        let riders = ride_walls(layout, &groups);
+        let riders = sekiro_sim::hit_filter::ride_wall_objects(layout, &groups);
         let rows = layout["objects"].as_array().unwrap();
         let mut walks = Vec::new();
         for row in rows {
-            let Some(wall) = row["name"].as_str().filter(|n| riders.contains(n)) else {
+            let Some(wall) = row["name"].as_str().filter(|n| riders.contains(*n)) else {
                 continue;
             };
             let Some(w) = part(wall) else {
@@ -2323,7 +2300,7 @@ mod tests {
                 .iter()
                 .filter(|r| r["translation"] == row["translation"])
                 .filter_map(|r| r["name"].as_str())
-                .filter(|n| !riders.contains(n))
+                .filter(|n| !riders.contains(*n))
                 .find_map(part);
             let Some(tree) = tree else {
                 continue;
