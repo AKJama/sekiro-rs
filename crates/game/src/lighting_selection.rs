@@ -75,6 +75,24 @@ pub struct Selection {
     pub flags: Vec<i32>,
 }
 
+impl Selection {
+    /// Sets the clock (`--hour`, or an arena's story hour) in place of the story's own. The hour
+    /// lands in [`crate::lighting::MapLighting::hour`], which every later LightSet, fog and post
+    /// rebuild reads, so collision row changes at doorways keep it (#59). Unless the map's
+    /// environment is fixed, the probes follow the hour, and an explicit override or a changed
+    /// hour chooses its matching ordinary sky.
+    pub fn override_hour(&mut self, hour: f32, explicit: bool) {
+        let hour_changed = hour != self.hour;
+        self.hour = hour;
+        if !self.fixed_environment {
+            self.environment = crate::lighting::nearest_variant(hour);
+            if hour_changed || explicit {
+                self.sky = None;
+            }
+        }
+    }
+}
+
 fn profile(id: &str) -> Result<Value> {
     MAPS.iter()
         .map(|s| serde_json::from_str::<Value>(s).expect("lighting profile JSON"))
@@ -1027,5 +1045,75 @@ mod tests {
         library.apply_sub(None, &mut light);
         assert_eq!(light.source, "m11_02_0000");
         assert_eq!(light.applied, None);
+    }
+
+    /// `--hour 4` on the Outskirts, then the walk out of the start hall, back in and out again:
+    /// the collision LightSet row flips 110 inside, 100 outside (#59), and an event sub-ID
+    /// rebuilds the bank on the way. Every rebuild must light the scene at 4 h, never at the
+    /// story's 6 h morning.
+    #[test]
+    fn light_set_changes_keep_the_hour_override() {
+        use crate::lighting::{FillLight, LightSet, MapLighting, Sun, apply_lighting};
+        let map = "m11_00_00_00";
+        let mut selected = select(&cache(), map, None, None).unwrap();
+        assert_eq!(selected.hour, 6., "the story's own morning");
+        selected.override_hour(4., true);
+        assert_eq!(selected.hour, 4.);
+        assert_eq!(selected.environment, crate::lighting::nearest_variant(4.));
+        assert_eq!(
+            selected.sky, None,
+            "an explicit hour picks its ordinary sky"
+        );
+        let library = LightingSelection::load(&cache(), map, selected, false).unwrap();
+        let source = library.initial.source.clone();
+        let gparam = library.resolve_initial(&source, library.base.clone());
+        let mut app = App::new();
+        app.insert_resource(MapLighting {
+            gparam,
+            hour: library.initial.hour,
+            light_set: 0,
+            applied: None,
+            source,
+        })
+        .insert_resource(library)
+        .init_resource::<MapEventScene>()
+        .init_resource::<GlobalAmbientLight>()
+        .init_resource::<ClearColor>()
+        .add_systems(Update, (sync_events, apply_lighting).chain());
+        let sun = app
+            .world_mut()
+            .spawn((Sun, DirectionalLight::default(), Transform::default()))
+            .id();
+        app.world_mut()
+            .spawn((FillLight, DirectionalLight::default(), Transform::default()));
+        let mut seen = std::collections::BTreeSet::new();
+        for (row, sub) in [
+            (110, None),
+            (100, None),
+            (110, None),
+            (100, Some(20)),
+            (100, None),
+        ] {
+            let area = app.world().resource::<LightingSelection>().area;
+            let mut scene = app.world_mut().resource_mut::<MapEventScene>();
+            scene.0.gparam_sub_ids.clear();
+            if let Some(sub) = sub {
+                scene.0.gparam_sub_ids.insert(area, (sub, 0.));
+            }
+            app.world_mut().resource_mut::<MapLighting>().light_set = row;
+            app.update();
+            let light = app.world().resource::<MapLighting>();
+            assert_eq!(
+                (light.light_set, light.hour),
+                (row, 4.),
+                "row {row}, sub {sub:?}"
+            );
+            seen.insert(light.source.clone());
+            let at = |hour| LightSet::from_gparam(&light.gparam, row, hour).sun_color;
+            let color = app.world().get::<DirectionalLight>(sun).unwrap().color;
+            assert_eq!(color, at(4.), "row {row}, sub {sub:?}");
+            assert_ne!(color, at(6.), "row {row}, sub {sub:?} lit at 6 h");
+        }
+        assert_eq!(seen.len(), 2, "the event sub-ID rebuilt the bank: {seen:?}");
     }
 }
