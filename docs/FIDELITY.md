@@ -320,6 +320,14 @@ MoveToSomewhere, LeaveTarget and SidewayMove's native updates were not identifie
 So a numeric walk flag of 0 from an approach script (`Approach_Act_Flex`) or the brain's run tactics (RunIn, Retreat) now runs where it walked before, which makes bosses run on far approaches.
 The brain's reach gate, which holds a planned attack whose target moved out of reach, now also covers the CommonAttack a planned table goal such as ComboAttackTunableSpin adds.
 No AI script calls `StepNextMovePoint`, so patrol stepping happens only in the move goal on arrival at point 103, as in the exe's MoveTo terminate callbacks and FwLo's `src/ai.rs`.
+A test (`no_ai_script_steps_the_patrol_itself`) checks that no shipped AI script calls it, so the route cannot step twice per point (#114).
+The exe's MoveToSomewhere arrives by one rule for every target: closer than the AI's own radius plus the goal's distance, strictly (IsArrived `FUN_1405b9070`, read by the move update `FUN_1405caa00`, as FwLo's `src/ai.rs` traced it).
+The exe's GetDist subtracts the same radius (FwLo: the GetDist thunk `0x1405e2c10`), so the scripts' distances and the arrival agree.
+Our GetDist is centre to centre (apart from the Demon's `dist_offset`), so here the arrival adds the radius only for the patrol point (103), whose distance no script reads, and stays in GetDist's centre terms for every other target; both are strict (#114).
+Adding the radius for every target alone made approaches stop a body radius short of the bands the brain and scripts then test with GetDist (`brain_tactics::walk_in_and_run_in_close_to_their_band`, `projectile_guard::owl_shuriken_deflect_keeps_throwing` failed).
+Open question: moving both GetDist and the arrival to the exe's radius-based distance together, which changes every script's distance checks.
+The distance is read on the ground plane; the exe's 2D or 3D switch is not mapped, as in FwLo's port.
+The exe's second patrol test, standing inside a shaped point region (IsInsideMovePoint), is not modelled, so a foe on a shaped point still walks to its centre.
 
 ## Standing guards and small acts, issue #115
 

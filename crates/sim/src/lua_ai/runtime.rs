@@ -1851,14 +1851,22 @@ fn native_update(st: &mut AiState, id: u32, n: NativeGoal) -> i32 {
             let target = g.param(0) as i32;
             let dist = g.param(2) as f32;
             let walk = g.param_bool(4);
-            if st.dist(target)
-                <= dist.max(0.0)
-                    + if target == 103 {
-                        st.world.hit_radius
-                    } else {
-                        0.0
-                    }
-            {
+            // The exe's IsArrived (FUN_1405b9070, read by the move update FUN_1405caa00, as
+            // FwLo's `src/ai.rs` traced it) arrives closer than my own radius plus the goal's
+            // distance, strictly, for every target; its GetDist subtracts the same radius, so
+            // the scripts' distances agree with it. Our GetDist is centre to centre (bar
+            // `dist_offset`), so the radius is added here only for the patrol point, whose
+            // distance no script reads; for other targets the arrival stays in GetDist's terms
+            // (docs/FIDELITY.md, #114). A negative distance counts as 0 (not traced), so the
+            // goal can still end. Reaching the patrol point steps the route, as the exe's move
+            // goals do in their terminate callbacks; no AI script calls StepNextMovePoint, so
+            // this is the route's only step.
+            let radius = if target == 103 {
+                st.world.hit_radius
+            } else {
+                0.0
+            };
+            if st.dist(target) < dist.max(0.0) + radius {
                 if target == 103
                     && let Some(p) = &mut st.patrol
                 {
@@ -2160,6 +2168,75 @@ mod goal_slot_tests {
         let (id, after) = fresh(&mut st);
         assert_eq!(id, act, "the lowest free slot is reused");
         assert_eq!(after, Some(f64::from(RESULT_SUCCESS)));
+    }
+
+    /// MoveToSomewhere arrives strictly closer than the goal's distance, plus the AI's own
+    /// radius for the patrol point (103) only, the target whose distance no script reads
+    /// (#114). It used to accept equality.
+    #[test]
+    fn move_to_arrives_strictly_and_adds_the_radius_for_the_patrol_point() {
+        let arrives = |target: i32, gap: f32| {
+            let mut st = AiState::new(ThinkParams::default(), HashMap::new(), 1);
+            st.world.hit_radius = 0.5;
+            st.world.home = [0.0, 0.0, gap];
+            st.patrol = Some(super::super::patrol::Patrol::from_points(
+                0,
+                &[[0.0, 0.0, gap], [5.0, 0.0, 0.0]],
+            ));
+            let params = vec![
+                Value::Num(f64::from(target)),
+                Value::Num(0.0),
+                Value::Num(1.0),
+            ];
+            let id = st.new_goal(2019, -1.0, params, None);
+            native_update(&mut st, id, NativeGoal::MoveTo) == RESULT_SUCCESS
+        };
+        assert!(arrives(103, 1.4));
+        assert!(!arrives(103, 1.5), "the patrol point arrives at its edge");
+        assert!(arrives(100, 0.9));
+        assert!(
+            !arrives(100, 1.0),
+            "the initial position arrives at its edge"
+        );
+        assert!(!arrives(100, 1.4), "the initial position adds the radius");
+    }
+
+    /// A patrol visits every point in order, none skipped (#114): arriving at the current
+    /// point steps the route once, and an update short of the point does not step it.
+    #[test]
+    fn a_patrol_visits_every_point_in_order() {
+        let mut st = AiState::new(ThinkParams::default(), HashMap::new(), 1);
+        st.world.hit_radius = 0.4;
+        let points = [
+            [0.0, 0.0, 0.0],
+            [4.0, 0.0, 0.0],
+            [4.0, 0.0, 4.0],
+            [0.0, 0.0, 4.0],
+        ];
+        st.patrol = Some(super::super::patrol::Patrol::from_points(0, &points));
+        let mut visited = Vec::new();
+        for _ in 0..8 {
+            let p = st.patrol.as_ref().unwrap();
+            let (cur, at) = (p.current, p.position().unwrap());
+            let params = vec![Value::Num(103.0), Value::Num(0.0), Value::Num(0.0)];
+            let id = st.new_goal(2019, -1.0, params, None);
+            // On the way: 2 m short of the point.
+            st.world.me.position = [at[0], at[1], at[2] - 2.0];
+            assert_eq!(
+                native_update(&mut st, id, NativeGoal::MoveTo),
+                RESULT_CONTINUE
+            );
+            assert_eq!(st.patrol.as_ref().unwrap().current, cur);
+            // There.
+            st.world.me.position = at;
+            assert_eq!(
+                native_update(&mut st, id, NativeGoal::MoveTo),
+                RESULT_SUCCESS
+            );
+            st.goals[id as usize] = None;
+            visited.push(st.patrol.as_ref().unwrap().previous);
+        }
+        assert_eq!(visited, [0, 1, 2, 3, 0, 1, 2, 3]);
     }
 
     /// Flags read as the exe's float test `0.0 < param`: Lua booleans, the brain's 1.0/0.0,

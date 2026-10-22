@@ -36,6 +36,40 @@ impl Patrol {
         })
     }
 
+    /// A route through world-space `points` (one region each, no arrival entries), for tests.
+    #[cfg(test)]
+    pub fn from_points(kind: i32, points: &[[f32; 3]]) -> Self {
+        let points = points
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let region = MapRegion {
+                    name: String::new(),
+                    kind: 0,
+                    entity_id: -1,
+                    activation_part: -1,
+                    position: [-p[0], p[1], p[2]],
+                    rotation: [0.0; 3],
+                    shape: 0,
+                    dimensions: Vec::new(),
+                    children: Vec::new(),
+                    effect: None,
+                    start_disabled: false,
+                };
+                (i as i16, region)
+            })
+            .collect::<Vec<_>>();
+        let current = if points.is_empty() { -1 } else { 0 };
+        Self {
+            kind,
+            points,
+            arrivals: Vec::new(),
+            current,
+            previous: -1,
+            back: false,
+        }
+    }
+
     pub fn position(&self) -> Option<[f32; 3]> {
         self.point(self.current)
     }
