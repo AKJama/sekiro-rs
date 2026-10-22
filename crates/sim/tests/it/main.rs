@@ -62,6 +62,7 @@ mod owl_grab;
 mod owl_phase2;
 mod owl_tools;
 mod owl_warp;
+mod patrol;
 mod perilous;
 mod player_guard;
 mod population;

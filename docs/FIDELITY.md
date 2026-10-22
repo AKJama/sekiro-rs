@@ -279,3 +279,14 @@ These parts are approximations or unchecked:
 - Before #203 the bands held walking too, and the user's playtest of that build was taken as the real game's behaviour; whether the real game lets a walk off the roof by start 0 or the start 3 terrace was not checked in the real game.
 - The cast is the simulation's sub-stepped slide with a 0.16 m hold, not the exe's shape cast (`FUN_140bc68d0`), and it does not apply the exe's 90 degree angle limit.
 - `StandMoveStart` and `GroundStep` send only the walking request in the simulation, though their `g_paramHkbState` rows set both flags, so a walk's start or a step is not held by a band; the cause is not traced.
+
+## Patrol walking and arrival waits, issue #116
+
+Patrolling foes walk their PatrolInfo route and play its arrival waits and animations because two Lua goal methods now follow the exe.
+`goal:GetLastResult` reads the result last stored in the goal's pool slot: the exe builds 32 goals once, AddGoal takes the first free slot and never resets the stored result, so a fresh NonBattleAct sees Success from the move that just ended in that slot.
+The slot list here grows on demand instead of being fixed at 32 entries, and a slot that has never updated reads -1, as the exe's goal constructor sets it.
+`goal:GetParam` returns a Lua boolean as a number, true as 1 and false as 0, because the exe stores goal parameters as floats; NonBattleAct's walk check is `GetParam(2) == 0`.
+The exact boolean-to-float rule is assumed from that float storage and was not traced in the exe.
+Native goals read a flag parameter the same way, set when its value is non-zero, so a numeric walk flag of 0 from an approach script or the brain's run tactics now runs instead of walking.
+The brain's reach gate, which holds a planned attack whose target moved out of reach, now also covers the CommonAttack a planned table goal such as ComboAttackTunableSpin adds.
+No AI script calls `StepNextMovePoint`, so patrol stepping happens only in the move goal on arrival at point 103, as in the exe's MoveTo terminate callbacks and FwLo's `src/ai.rs`.

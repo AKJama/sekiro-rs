@@ -150,8 +150,15 @@ impl Goal {
     fn param(&self, i: usize) -> f64 {
         self.params.get(i).and_then(Value::num).unwrap_or(0.0)
     }
+    /// A flag parameter as the exe reads it: goal parameters are stored as floats
+    /// (AddGoal FUN_1405ce510), so a flag is set when its stored value is non-zero. A Lua
+    /// `false` and the brain's `0.0` both read as unset.
     fn param_bool(&self, i: usize) -> bool {
-        self.params.get(i).is_some_and(Value::truthy)
+        match self.params.get(i) {
+            Some(Value::Num(x)) => *x != 0.0,
+            Some(Value::Bool(b)) => *b,
+            _ => false,
+        }
     }
 }
 
@@ -290,6 +297,11 @@ pub struct AiState {
     pub table_goals: HashSet<i32>,
     pub combo_cancel: HashSet<i32>,
     pub goals: Vec<Option<Goal>>,
+    /// Each goal slot's last update result, kept when the slot is freed and reused: the
+    /// exe's 32 pooled goals (FUN_1405ad1d0) keep +0x1f8 across AddGoal (FUN_1405ce510 never
+    /// resets it), so `goal:GetLastResult` (FUN_1405fa890) in a fresh goal's Activate reads
+    /// the result its slot last stored; -1 before the slot's first update (FUN_1405cd180).
+    pub slot_results: Vec<i32>,
     pub top: u32,
     pub replan: bool,
     pub world: AiWorld,
@@ -349,6 +361,7 @@ impl AiState {
             table_goals: HashSet::new(),
             combo_cancel: HashSet::new(),
             goals: Vec::new(),
+            slot_results: Vec::new(),
             top: 0,
             replan: false,
             world: AiWorld::default(),
@@ -888,11 +901,18 @@ impl AiState {
                 }
                 vec![]
             }
-            // Unset parameters read as 0, like the engine's zero-filled parameter array.
+            // Unset parameters read as 0, like the engine's zero-filled parameter array. The exe
+            // stores goal parameters as floats (AddGoal FUN_1405ce510, GetParam FUN_1405cfb00),
+            // so a Lua boolean comes back as a number: NonBattleAct's walk test
+            // `GetParam(2) == 0` holds for the `false` _COMMON_AddNonBattleGoal passes.
             "GetParam" => vec![match self.goal(id).params.get(n(0) as usize) {
                 None | Some(Value::Nil) => Value::Num(0.0),
+                Some(Value::Bool(b)) => Value::Num(if *b { 1.0 } else { 0.0 }),
                 Some(v) => v.clone(),
             }],
+            "GetLastResult" => num(f64::from(
+                self.slot_results.get(id as usize).copied().unwrap_or(-1),
+            )),
             "GetLife" => num(self.goal(id).life as f64),
             "GetSubGoalNum" => num(self.goal(id).subgoals.len() as f64),
             "GetNumber" => num(*self.goal(id).numbers.get(&(n(0) as i32)).unwrap_or(&0.0)),
@@ -1423,8 +1443,19 @@ fn terminate(vm: &mut Vm, st: &mut AiState, id: u32) {
     st.goals[id as usize] = None;
 }
 
-/// Updates goal `id` (activating it first) and returns its result.
+/// Updates goal `id` (activating it first) and returns its result, which its slot keeps
+/// (`AiState::slot_results`; the exe writes goal +0x1f8 on every update, FUN_1405d06c0).
 fn update(vm: &mut Vm, st: &mut AiState, id: u32, depth: usize) -> i32 {
+    let result = update_goal(vm, st, id, depth);
+    let slot = id as usize;
+    if st.slot_results.len() <= slot {
+        st.slot_results.resize(slot + 1, -1);
+    }
+    st.slot_results[slot] = result;
+    result
+}
+
+fn update_goal(vm: &mut Vm, st: &mut AiState, id: u32, depth: usize) -> i32 {
     if depth > 24 {
         return RESULT_FAILED;
     }
@@ -1755,7 +1786,11 @@ fn action_update(st: &mut AiState, id: u32, g: &Goal) -> i32 {
     }
     let playing = st.world.current_anim == Some(action);
     if !g.started_anim {
-        if g.plan_step.is_some()
+        // The plan step can be a table goal (ComboAttackTunableSpin) whose script adds this
+        // CommonAttack, so the step is looked up through the parents.
+        let in_plan = std::iter::successors(Some(g), |g| g.parent.map(|p| st.goal(p)))
+            .any(|g| g.plan_step.is_some());
+        if in_plan
             && st
                 .act_hook
                 .as_ref()

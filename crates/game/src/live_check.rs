@@ -7,9 +7,10 @@
 //! map asset loaded. Once the player can move it samples Wolf at 4 Hz: the collision floor
 //! under him and whether a drawn map triangle lies on it (a ground hole is a grounded sample
 //! with collision but no drawn ground), plus how much of the collision floor within 20 m lies
-//! inside drawn map mesh bounds. Frame times are taken after a settle period. Without a map
-//! (`--play` with no `--map`, the flat-floor fight) samples and stops record Wolf's position,
-//! grounded state and step only.
+//! inside drawn map mesh bounds, and each patrolling foe within 60 m (route point and
+//! position). Frame times are taken after a settle period. Without a map (`--play` with no
+//! `--map`, the flat-floor fight) samples and stops record Wolf's position, grounded state and
+//! step only.
 //!
 //! `--live-tour x,y,z;x,y,z;...` (or `starts` for every player start of the map) moves Wolf to
 //! each point in turn once play has started, waits three seconds and records a stop sample;
@@ -45,6 +46,8 @@ const GROUND_TOLERANCE: f32 = 1.0;
 const TOUR_WAIT: f32 = 3.0;
 /// Seconds at a `drop:x,y,z` tour stop: a 30 m fall, the fall return's fade and the return.
 const DROP_WAIT: f32 = 8.0;
+/// Patrolling foes within this distance of Wolf are listed in each sample.
+const PATROL_RADIUS: f32 = 60.0;
 /// Degrees between `--live-orbit` screenshots.
 const ORBIT_SHOT_DEGREES: f32 = 45.0;
 
@@ -619,6 +622,32 @@ pub(super) fn observe(
                 "can_fire": wire.can_fire(),
             })
         });
+    // Patrolling foes near Wolf: their route point and position, to read walk pace and the
+    // arrival waits from the samples.
+    sample["patrols"] = sim
+        .duel
+        .population
+        .as_ref()
+        .map(|population| {
+            population
+                .foes
+                .iter()
+                .filter_map(|foe| {
+                    let patrol = foe.duel.ai.as_ref()?.state.patrol.as_ref()?;
+                    let at = foe.duel.enemy.body.position;
+                    (Vec3::from_array(at).distance(Vec3::from_array(body.position)) < PATROL_RADIUS)
+                        .then(|| {
+                            serde_json::json!({
+                                "part": foe.part,
+                                "point": patrol.current,
+                                "previous": patrol.previous,
+                                "at": at,
+                            })
+                        })
+                })
+                .collect::<Vec<_>>()
+        })
+        .into();
     info!("live check: sample {sample}");
     check.samples.push(sample);
     // The last stop's screenshot is written before the run ends.
