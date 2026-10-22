@@ -1291,8 +1291,20 @@ fn detail_requests(part: &DetailPart, distance: f32, weights: [f32; 3]) -> [bool
     requested
 }
 
+/// [`update_detail`]'s per-thread finds: parts whose level weights or readiness changed, and
+/// level scenes to request.
+#[derive(Default)]
+pub(crate) struct DetailScratch {
+    changed: bevy::utils::Parallel<Vec<(Entity, f32, DetailApplied)>>,
+    requests: bevy::utils::Parallel<Vec<(bool, f32, Entity, usize)>>,
+}
+
 fn prioritize_detail_requests(requests: &mut Vec<(bool, f32, Entity, usize)>) {
-    requests.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
+    requests.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.total_cmp(&b.1))
+            .then_with(|| (a.2, a.3).cmp(&(b.2, b.3)))
+    });
     let demanded = requests.partition_point(|r| !r.0);
     requests.truncate(demanded + DETAIL_SCENES_PER_FRAME);
 }
@@ -1326,16 +1338,14 @@ pub(crate) fn update_detail(
         ),
         Without<Camera3d>,
     >,
-    mut slots: Query<(
-        &mut Visibility,
-        &mut DetailWeight,
-        Option<&WorldAssetRoot>,
-        Option<&WorldInstance>,
-    )>,
+    mut slots: Query<(&mut Visibility, &mut DetailWeight)>,
+
+    roots: Query<(Option<&WorldAssetRoot>, Option<&WorldInstance>)>,
     children: Query<&Children>,
     meshes: Query<Option<&MeshTag>, With<Mesh3d>>,
     wolf: Query<&Transform, (With<PlayerFocus>, Without<Camera3d>)>,
     mut debug: Local<Option<bool>>,
+    mut found: Local<DetailScratch>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("update_detail");
     let Some(camera) = cameras.iter().next() else {
@@ -1343,77 +1353,104 @@ pub(crate) fn update_detail(
     };
     let debug = *debug.get_or_insert_with(|| std::env::args().any(|a| a == "--lod-debug"));
     let wolf = wolf.iter().next().map(|t| t.translation);
-    let mut requests = Vec::new();
-    for (part_entity, transform, identity, msb, mut part) in &mut parts {
-        let distance =
-            super::lod::bounds_distance(camera.translation, transform, part.min, part.max);
-        let rule = part.rule;
-        let scales = part.scales;
-        let available = part.available;
-        let mut state = part.state;
-        let weights = if groups.mode == GroupMode::Off {
-            let mut weights = [0.; 3];
-            if let Some(first) = available.iter().position(|&v| v) {
-                weights[first] = 1.;
-            }
-            weights
-        } else {
-            state.update(rule, scales, distance, time.delta_secs(), available)
-        };
-        crate::change::set(&mut part, |p| &mut p.state, state);
-        let selected = dominant(weights);
-        // Every level with weight gets its scene, so a crossfade's incoming level exists before
-        // it dominates. Every level lives in the same GLB, so once the stream has requested it
-        // the scene comes from that load; before then the current level stays, keeping the
-        // stream's order and in-flight limit.
-        let wanted = if part.stream.is_none()
-            || part
-                .available
-                .iter()
-                .zip(part.spawned)
-                .all(|(&exists, spawned)| !exists || spawned)
-        {
-            [false; 3]
-        } else if groups.mode == GroupMode::Off {
-            weights.map(|w| w > 0.)
-        } else {
-            detail_requests(&part, distance, weights)
-        };
-        for (level, &wanted) in wanted.iter().enumerate() {
-            if wanted
-                && !part.spawned[level]
-                && part.slots[level].is_some()
-                && part
-                    .stream
-                    .and_then(|index| pending.requested(index))
-                    .is_some()
-            {
-                requests.push((weights[level] == 0., distance, part_entity, level));
-            }
-        }
-        // A level is ready once its scene has spawned its meshes, so a switch never leaves a
-        // gap. Capture scenes are spawned synchronously.
-        let ready: [bool; 3] = std::array::from_fn(|level| {
-            weights[level] > 0.
-                && part.slots[level].is_some_and(|entity| {
-                    part.stream.is_none()
-                        || slots.get(entity).is_ok_and(|(_, _, root, instance)| {
-                            root.is_some()
-                                && instance.is_some_and(|i| instances.instance_is_ready(**i))
+    let groups_off = groups.mode == GroupMode::Off;
+    let delta = time.delta_secs();
+    // Every part's distance, weights and scene readiness, on all cores: a castle frame walks
+    // over 10,000 parts, and on one thread this took about 2 ms of the main schedule (#70).
+    // Only parts whose levels must change come back for the writes below.
+    let DetailScratch { changed, requests } = &mut *found;
+    {
+        let pending = &*pending;
+        parts
+            .par_iter_mut()
+            .for_each(|(part_entity, transform, _, _, mut part)| {
+                let distance =
+                    super::lod::bounds_distance(camera.translation, transform, part.min, part.max);
+                let available = part.available;
+                let mut state = part.state;
+                let weights = if groups_off {
+                    let mut weights = [0.; 3];
+                    if let Some(first) = available.iter().position(|&v| v) {
+                        weights[first] = 1.;
+                    }
+                    weights
+                } else {
+                    state.update(part.rule, part.scales, distance, delta, available)
+                };
+                crate::change::set(&mut part, |p| &mut p.state, state);
+                // Every level with weight gets its scene, so a crossfade's incoming level
+                // exists before it dominates. Every level lives in the same GLB, so once the
+                // stream has requested it the scene comes from that load; before then the
+                // current level stays, keeping the stream's order and in-flight limit.
+                let wanted = if part.stream.is_none()
+                    || part
+                        .available
+                        .iter()
+                        .zip(part.spawned)
+                        .all(|(&exists, spawned)| !exists || spawned)
+                {
+                    [false; 3]
+                } else if groups_off {
+                    weights.map(|w| w > 0.)
+                } else {
+                    detail_requests(&part, distance, weights)
+                };
+                for (level, &wanted) in wanted.iter().enumerate() {
+                    if wanted
+                        && !part.spawned[level]
+                        && part.slots[level].is_some()
+                        && part
+                            .stream
+                            .and_then(|index| pending.requested(index))
+                            .is_some()
+                    {
+                        requests.borrow_local_mut().push((
+                            weights[level] == 0.,
+                            distance,
+                            part_entity,
+                            level,
+                        ));
+                    }
+                }
+                // A level is ready once its scene has spawned its meshes, so a switch never
+                // leaves a gap. Capture scenes are spawned synchronously.
+                let ready: [bool; 3] = std::array::from_fn(|level| {
+                    weights[level] > 0.
+                        && part.slots[level].is_some_and(|entity| {
+                            part.stream.is_none()
+                                || roots.get(entity).is_ok_and(|(root, instance)| {
+                                    root.is_some()
+                                        && instance
+                                            .is_some_and(|i| instances.instance_is_ready(**i))
+                                })
                         })
-                })
-        });
-        // Settled levels still check distance and scene readiness, but need no slot writes.
-        // Finish clearing a fade's mesh tags before taking this path.
-        let applied = DetailApplied {
-            weights,
-            ready,
-            slots: part.slots,
-            stream: part.stream,
-        };
-        if !part.fading && part.applied.as_ref() == Some(&applied) {
+                });
+                // Settled levels still check distance and scene readiness, but need no slot
+                // writes. Finish clearing a fade's mesh tags before taking this path.
+                let applied = DetailApplied {
+                    weights,
+                    ready,
+                    slots: part.slots,
+                    stream: part.stream,
+                };
+                if part.fading || part.applied.as_ref() != Some(&applied) {
+                    changed
+                        .borrow_local_mut()
+                        .push((part_entity, distance, applied));
+                }
+            });
+    }
+    let mut changed_parts = Vec::new();
+    changed.drain_into(&mut changed_parts);
+    // The threads' finds come back in no fixed order.
+    changed_parts.sort_unstable_by_key(|(entity, _, _)| *entity);
+    for (part_entity, distance, applied) in changed_parts {
+        let Ok((_, transform, identity, msb, mut part)) = parts.get_mut(part_entity) else {
             continue;
-        }
+        };
+        let (weights, ready) = (applied.weights, applied.ready);
+        let rule = part.rule;
+        let selected = dominant(weights);
         part.applied = Some(applied);
         if part.shown != selected && ready[selected] {
             part.shown = selected;
@@ -1432,7 +1469,7 @@ pub(crate) fn update_detail(
             let Some(entity) = *entity else {
                 continue;
             };
-            if let Ok((mut visibility, mut weight, _, _)) = slots.get_mut(entity) {
+            if let Ok((mut visibility, mut weight)) = slots.get_mut(entity) {
                 let desired = if tags[level].is_some() {
                     Visibility::Inherited
                 } else {
@@ -1488,6 +1525,8 @@ pub(crate) fn update_detail(
     }
     // Current demand wins over speculative warm-up, then nearest bounds first. Deferred
     // requests are reconsidered next frame, so movement cannot leave a stale backlog.
+    let mut requests = Vec::new();
+    found.requests.drain_into(&mut requests);
     prioritize_detail_requests(&mut requests);
     for (_, _, entity, level) in requests {
         let (_, _, _, _, mut part) = parts.get_mut(entity).expect("queried detail part");

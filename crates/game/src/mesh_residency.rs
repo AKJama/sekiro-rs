@@ -49,6 +49,11 @@ impl MeshRefs {
         self.counts.contains_key(&id)
     }
 
+    /// Changes whenever a mesh gains its first or loses its last entity.
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
     fn remove(&mut self, entity: Entity) {
         if let Some(id) = self.entities.remove(&entity) {
             let count = self.counts.get_mut(&id).unwrap();
@@ -180,8 +185,7 @@ fn extract(
 ) {
     let ready = warmup.is_none_or(|warmup| warmup.ready());
     let changed = resident.revision != Some(refs.revision);
-    let asset_event = events.read().next().is_some();
-    events.clear();
+    let asset_event = asset_set_changed(events.read());
     let suspended = resident.suspended.len();
     if changed {
         resident.revision = Some(refs.revision);
@@ -226,6 +230,17 @@ fn extract(
         ready,
     );
     resident.publish |= changed || start_retirement || resident.suspended.len() != suspended;
+}
+
+/// Whether any mesh asset was added, removed or dropped. Meshes rewritten every frame (cloth,
+/// effect batches, the sky) only send `Modified`, which neither adds nor removes an asset, so
+/// they need no reconcile pass over the suspended set (#70). Reads every event, so none carry
+/// over to the next frame.
+fn asset_set_changed<'a>(events: impl Iterator<Item = &'a bevy::asset::AssetEvent<Mesh>>) -> bool {
+    events
+        .filter(|event| !matches!(event, bevy::asset::AssetEvent::Modified { .. }))
+        .count()
+        > 0
 }
 
 fn reconcile(
@@ -275,6 +290,27 @@ fn reconcile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #70: meshes rewritten every frame must not trigger the reconcile pass.
+    #[test]
+    fn rewritten_meshes_do_not_reconcile() {
+        use bevy::asset::AssetEvent;
+        let id = AssetId::<Mesh>::Uuid {
+            uuid: bevy::asset::uuid::Uuid::from_u128(1),
+        };
+        let rewrites = [AssetEvent::Modified { id }, AssetEvent::Modified { id }];
+        assert!(!asset_set_changed(rewrites.iter()));
+        assert!(!asset_set_changed([].iter()));
+        for event in [
+            AssetEvent::Added { id },
+            AssetEvent::Removed { id },
+            AssetEvent::Unused { id },
+        ] {
+            assert!(asset_set_changed(
+                [AssetEvent::Modified { id }, event].iter()
+            ));
+        }
+    }
 
     #[test]
     fn references_change_revision_only_when_membership_changes() {
