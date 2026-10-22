@@ -407,10 +407,17 @@ pub(crate) fn load_map_asset<A: Asset>(
     path: impl Into<bevy::asset::AssetPath<'static>>,
     unapproved: bool,
 ) -> Handle<A> {
+    // Every load of a map GLB (scenes, the GLTF, its materials) goes through here with the same
+    // settings: the first load of a path decides them for all its labels.
+    let builder = assets
+        .load_builder()
+        .with_settings(|s: &mut bevy::gltf::GltfLoaderSettings| {
+            s.mesh_compression = Some(map_mesh_compression());
+        });
     if unapproved {
-        assets.load_builder().override_unapproved().load(path)
+        builder.override_unapproved().load(path)
     } else {
-        assets.load(path)
+        builder.load(path)
     }
 }
 
@@ -1152,14 +1159,32 @@ pub(crate) fn layered_gltf_plugin() -> bevy::gltf::GltfPlugin {
     }
     // gltf-json strips the leading underscore before Bevy looks up custom semantics.
     .add_custom_vertex_attribute("MAP_BLEND2", ATTR_MAP_BLEND2)
-    .add_custom_vertex_attribute(
-        "MAP_COLOR1",
-        bevy::mesh::MeshVertexAttribute::new(
-            "MapColor1",
-            0x5ec1_0a03,
-            bevy::render::render_resource::VertexFormat::Float32x4,
-        ),
-    )
+    .add_custom_vertex_attribute("MAP_COLOR1", ATTR_MAP_COLOR1)
+}
+
+/// The FLVER's second vertex colour on layered map pieces (`_MAP_COLOR1`).
+const ATTR_MAP_COLOR1: bevy::mesh::MeshVertexAttribute = bevy::mesh::MeshVertexAttribute::new(
+    "MapColor1",
+    0x5ec1_0a03,
+    bevy::render::render_resource::VertexFormat::Float32x4,
+);
+
+/// How map GLBs are packed on load. Sekiro's map FLVERs keep 16-bit indices and their colours
+/// and blend streams as UByte4Norm, which the export widens to floats: 16-bit indices (where a
+/// primitive has under 65536 vertices) and Unorm8 for those streams give back the game's own
+/// precision, with no shader change.
+pub(crate) fn map_mesh_compression() -> bevy::mesh::MeshCompressionArgs {
+    use bevy::mesh::AttributeQuantization::Unorm8;
+    bevy::mesh::MeshCompressionArgs {
+        compress_indices: true,
+        quantize_attributes: vec![
+            (Mesh::ATTRIBUTE_COLOR.id, Unorm8),
+            (ATTR_MAP_BLEND2.id, Unorm8),
+            (ATTR_MAP_COLOR1.id, Unorm8),
+        ]
+        .into(),
+        compress_attributes: bevy::mesh::MeshAttributeCompressionFlags::empty(),
+    }
 }
 
 fn setup_view(mut commands: Commands, start: Vec3) {
