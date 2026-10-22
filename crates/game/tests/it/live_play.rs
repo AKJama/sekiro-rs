@@ -95,6 +95,43 @@ fn run(root: &Path, out: &Path, name: &str, extra: &[&str]) -> Value {
     serde_json::from_slice(&std::fs::read(&summary).expect("live check summary")).unwrap()
 }
 
+/// `--play` with no `--map` is the flat-floor fight (`docs/GETTING-STARTED.md`). It panicked
+/// at startup on a map-only resource (issue #139); the fight must load and play for 10 s.
+#[test]
+#[ignore = "slow: opens a game window for about 25 s; needs a GPU and the extracted cache"]
+fn flat_floor_fight_starts_without_a_map() {
+    let cache = sekiro_sim::cache::root();
+    if !cache.join("models").is_dir() {
+        eprintln!("skipped: no extracted cache");
+        return;
+    }
+    let out = std::env::temp_dir().join(format!("sekiro-live-floor-{}", std::process::id()));
+    std::fs::create_dir_all(&out).unwrap();
+    let summary = out.join("floor.json");
+    let status = Command::new(env!("CARGO_BIN_EXE_sekiro-rs"))
+        .args(["--play", "--passive", "--break-posture", "--lock-on"])
+        .arg("--cache")
+        .arg(&cache)
+        .arg("--live-check")
+        .arg(&summary)
+        .args(["--live-seconds", "10"])
+        .status()
+        .expect("start the game");
+    assert!(status.success(), "the game exited with {status}");
+    let s: Value = serde_json::from_slice(&std::fs::read(&summary).unwrap()).unwrap();
+    let samples = s["samples"].as_array().expect("samples");
+    assert!(
+        samples.len() >= 30 && samples.iter().all(|v| v["grounded"] == true),
+        "Wolf did not stand on the floor for 10 s of play: {s:#}"
+    );
+    println!(
+        "floor: ready {:.1} s, {} samples, frames median {:.1} ms",
+        number(&s, "play_ready_s"),
+        samples.len(),
+        number(&s, "frame_ms_median")
+    );
+}
+
 fn number(summary: &Value, key: &str) -> f64 {
     summary[key]
         .as_f64()

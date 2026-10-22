@@ -136,11 +136,15 @@ impl LateMeshes {
 /// Main world: report new mesh entities and mark entities changed once their late mesh is
 /// prepared. Entities are kept only until the render world has checked their mesh; a mesh
 /// handle swapped on an existing entity counts as new too.
+///
+/// Mesh residency ([`crate::mesh_residency`]) is installed only with a map. Without it (the
+/// flat-floor fight of `--play` with no `--map`) nothing retires meshes from the GPU, so every
+/// mesh asset still in the main world counts as referenced.
 #[allow(clippy::type_complexity)]
 fn watch_meshes(
     late: Res<LateMeshes>,
     assets: Res<Assets<Mesh>>,
-    refs: Res<crate::mesh_residency::MeshRefs>,
+    refs: Option<Res<crate::mesh_residency::MeshRefs>>,
     mut meshes: ParamSet<(
         Query<(Entity, &Mesh3d, Has<RuntimeMesh>), Changed<Mesh3d>>,
         Query<&mut Mesh3d>,
@@ -156,6 +160,8 @@ fn watch_meshes(
     if unchecked.is_empty() && meshes.p0().is_empty() && !retired && !retired_assets {
         return;
     }
+    let referenced =
+        |id: AssetId<Mesh>| assets.contains(id) && refs.as_ref().is_none_or(|r| r.contains(id));
     let (on_time, ready) = {
         let mut state = late.0.lock().unwrap();
         for (entity, mesh, runtime) in &meshes.p0() {
@@ -170,7 +176,7 @@ fn watch_meshes(
         // A static merge can retire the last entity using a source before its upload.
         // CPU fallback assets still exist, but are no longer part of the loading gate.
         if retired || retired_assets {
-            state.forget_removed(|id| assets.contains(id) && refs.contains(id));
+            state.forget_removed(referenced);
         }
         (
             std::mem::take(&mut state.on_time),
@@ -189,7 +195,7 @@ fn watch_meshes(
     }
     // A mesh asset removed before the render world prepared it never reports back.
     if retired || retired_assets {
-        unchecked.retain(|id, _| assets.contains(*id) && refs.contains(*id));
+        unchecked.retain(|id, _| referenced(*id));
     }
 }
 
@@ -438,6 +444,34 @@ mod tests {
         state.check(|id| on_gpu.contains(&id));
         assert_eq!(state.loading.len(), 0);
         assert!(state.waiting.contains(&map));
+    }
+
+    /// `--play` without `--map` installs the ready gate but not the map's mesh residency
+    /// (issue #139): the gate must run on its own, including when meshes are retired.
+    #[test]
+    fn gate_runs_without_map_mesh_residency() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<Mesh>();
+        install(&mut app);
+        assert!(
+            !app.world()
+                .contains_resource::<crate::mesh_residency::MeshRefs>()
+        );
+        let mesh = app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(Cuboid::default());
+        let entity = app.world_mut().spawn(Mesh3d(mesh.clone())).id();
+        app.update();
+        assert_eq!(app.world().resource::<LateMeshes>().loading(), 1);
+        app.world_mut().despawn(entity);
+        app.update();
+        assert_eq!(
+            app.world().resource::<LateMeshes>().loading(),
+            1,
+            "a mesh still in the main world keeps holding the gate until prepared"
+        );
     }
 
     #[test]

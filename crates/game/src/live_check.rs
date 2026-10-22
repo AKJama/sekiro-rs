@@ -7,7 +7,9 @@
 //! map asset loaded. Once the player can move it samples Wolf at 4 Hz: the collision floor
 //! under him and whether a drawn map triangle lies on it (a ground hole is a grounded sample
 //! with collision but no drawn ground), plus how much of the collision floor within 20 m lies
-//! inside drawn map mesh bounds. Frame times are taken after a settle period.
+//! inside drawn map mesh bounds. Frame times are taken after a settle period. Without a map
+//! (`--play` with no `--map`, the flat-floor fight) samples and stops record Wolf's position,
+//! grounded state and step only.
 //!
 //! `--live-tour x,y,z;x,y,z;...` (or `starts` for every player start of the map) moves Wolf to
 //! each point in turn once play has started, waits three seconds and records a stop sample;
@@ -516,7 +518,15 @@ pub(super) fn observe(
             check.longest_start_ms = check.longest_start_ms.max(ms);
         }
     }
-    let Some(collision) = collision else { return };
+    // Without a map (the flat-floor fight) there is no collision or map ground to survey;
+    // samples, stops and the end of the run still work, with position only.
+    let ground = |p: Vec3| match &collision {
+        Some(collision) => {
+            let drawn = drawn_map_meshes(p, SURVEY_RADIUS, &meshes, &parents, &roots);
+            sample_ground(collision, &drawn, &mesh_assets, p)
+        }
+        None => serde_json::json!({ "position": p.to_array() }),
+    };
     let p = Vec3::from_array(sim.duel.player.body.position);
     // Tour: move Wolf to the next point, wait, then sample it.
     if check.sim_started.is_some() && check.tour_index < check.tour.len() {
@@ -524,13 +534,12 @@ pub(super) fn observe(
         let wait = if drop { DROP_WAIT } else { TOUR_WAIT };
         match check.tour_arrived {
             None => {
-                let y = if drop {
-                    target.y
-                } else {
-                    collision
+                let y = match &collision {
+                    Some(collision) if !drop => collision
                         .0
                         .floor(target.x, target.z, target.y + 1.0)
-                        .unwrap_or(target.y)
+                        .unwrap_or(target.y),
+                    _ => target.y,
                 };
                 let body = &mut sim.duel.player.body;
                 body.position = [target.x, y, target.z];
@@ -544,8 +553,7 @@ pub(super) fn observe(
                 sim.duel.helper_events.clear();
             }
             Some(arrived) if arrived.elapsed().as_secs_f32() >= wait => {
-                let drawn = drawn_map_meshes(p, SURVEY_RADIUS, &meshes, &parents, &roots);
-                let mut stop = sample_ground(&collision, &drawn, &mesh_assets, p);
+                let mut stop = ground(p);
                 stop["stop"] = serde_json::json!(check.tour_index);
                 stop["t"] = serde_json::json!(now);
                 stop["grounded"] = serde_json::json!(sim.duel.player.body.grounded);
@@ -578,8 +586,7 @@ pub(super) fn observe(
     }
     check.last_sample = Some(Instant::now());
     check.sampled = true;
-    let drawn = drawn_map_meshes(p, SURVEY_RADIUS, &meshes, &parents, &roots);
-    let mut sample = sample_ground(&collision, &drawn, &mesh_assets, p);
+    let mut sample = ground(p);
     let drawn_ground = sample["ground_drawn"].as_bool() == Some(true);
     if drawn_ground && check.ground_drawn.is_none() {
         check.ground_drawn = Some(now);
