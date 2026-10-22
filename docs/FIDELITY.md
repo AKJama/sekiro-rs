@@ -233,6 +233,10 @@ A respawn after death restocks the goods and refills the gourd as Rest does.
 No data or RE note covers it (FwLo's RustSekiro kb only records that Rest refills the gourd); it follows the game's well-known behaviour that dying refills consumables like resting.
 A goods with no EquipParamGoods row, or with the params missing, is carried up to 99 but never stored or restocked.
 The gourd's maximum stays at the start kit's 3 uses; Gourd Seeds are not modelled.
+A Rest only moves what tops the carried count up (#202): the start kit carries the Pellets' `maxNum` of 3, so a Rest with none used leaves the Storage as it is, and one used moves exactly one.
+Restocking again straight after (a Travel or a death after a Rest) moves nothing more.
+The in-game menu's OK (E, Enter, Space, or a second click) on a consumable in Inventory uses one at once (#151), which a later Rest then refills from the Storage; the log shows both (`game menu: used goods`, `idol: rest: ...`).
+gap: goods with `isFullSuppleItem` 1 and no Storage (Five-color Rice 3580) are not refilled to `maxNum` on Rest, which FwLo's RustSekiro `refill_rested` does.
 
 ## Travel between Sculptor's Idols, issue #148
 

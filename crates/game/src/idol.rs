@@ -17,7 +17,7 @@
 //! the 58 BonfireWarpParam rows has one in its own map, 1 to 7 m in front of the idol, with the
 //! facing Wolf takes there (docs/FIDELITY.md).
 //! gap: the menu's stats plate, Purchase Spirit Emblems, skills and forms (#73, #96).
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 use bevy::prelude::*;
@@ -26,6 +26,7 @@ use bevy::window::{CursorGrabMode, CursorMoved, CursorOptions};
 use sekiro_sim::arena::yaw_toward;
 use sekiro_sim::deathblow::Placement;
 use sekiro_sim::duel::idol::{IdolPhase, IdolSpot};
+use sekiro_sim::kit::Kit;
 
 use super::Sim;
 use super::idol_travel::{self, Atlas};
@@ -406,7 +407,11 @@ pub(super) fn menu_keys(
     }
     if crate::menu::ok_pressed(&keys, &pads) || clicked.is_some() {
         match ROWS[row.0].0 {
-            REST => sim.duel.rest_at_idol(),
+            REST => {
+                let before = sim.duel.kit.clone();
+                sim.duel.rest_at_idol();
+                info!("idol: rest: {}", kit_change(&before, &sim.duel.kit));
+            }
             TRAVEL => travel.open_at(&idols, &sim.duel),
             _ => {}
         }
@@ -415,6 +420,31 @@ pub(super) fn menu_keys(
     if key(&[KeyCode::Escape, KeyCode::Backspace]) || crate::menu::back_pressed(&keys, &pads) {
         sim.duel.leave_idol();
     }
+}
+
+/// What a rest changed in the kit, for the log (#202): the gourd's uses, the Pellets (goods
+/// 3020) held and stored, and every other goods whose held or stored count moved.
+fn kit_change(before: &Kit, after: &Kit) -> String {
+    const PELLET: i32 = 3020;
+    let ids: BTreeSet<i32> = [before, after]
+        .iter()
+        .flat_map(|k| {
+            k.goods
+                .iter()
+                .map(|(id, _)| *id)
+                .chain(k.storage.keys().copied())
+        })
+        .chain([sekiro_sim::items::SPIRIT_EMBLEM, PELLET])
+        .collect();
+    let counts = |k: &Kit, id| (k.count(id), k.stored(id));
+    let mut out = format!("gourd {}->{}", before.gourd_charges, after.gourd_charges);
+    for id in ids {
+        let (b, a) = (counts(before, id), counts(after, id));
+        if b != a || id == PELLET {
+            out += &format!(", goods {id} held {}->{} stored {}->{}", b.0, a.0, b.1, a.1);
+        }
+    }
+    out
 }
 
 /// The idol menu is up while Wolf prays and through a rest.
