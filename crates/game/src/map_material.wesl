@@ -254,9 +254,12 @@ fn base_lighting_input(pbr: PbrInput) -> LightingInput {
 }
 
 // Native deferred point/spot light (GXLightAcc_DPointLight1 / DSpotLight1 pixel shaders).
-// With b = DiffColor.w = 1/range (builder 3892e0 offset 0x4c) and x = d^2/R^2 = (d*b)^2:
-//   diffuse = Diff * saturate(1-x) * max(t^2+(1-t^2)*N.L,0) / (1+0.7x), t = 1.4/(1.4+d*b)
-//   specular = Spec * F0 * 2.5/(1+x) * D * N.L / (max(N.V,N.L)*(1-a/2)+a/2) * saturate(1-x)
+// With b = DiffColor.w = 1/falloff (builders 388130 / 3892e0 offset 0x4c: 1 / object +0x90),
+// x = (d*b)^2 and fall = saturate(1 - d^2/R^2) (PositionAndRange.w = 1/R^2):
+//   diffuse = Diff * fall * max(t^2+(1-t^2)*N.L,0) / (1+0.7x), t = 1.4/(1.4+d*b)
+//   specular = Spec * F0 * 2.5/(1+x) * D * N.L / (max(N.V,N.L)*(1-a/2)+a/2) * fall
+// FXR 609 lights carry the falloff distance (`unk_ds3_p2_0`) in Bevy's light radius; BTL lights
+// have radius 0 and keep falloff = R, whose source field is not traced (#141).
 // Spot lights also multiply by max(1-(tan/tan_outer)^2,0). Bevy's premultiplied colour is
 // Diff * SCENE_TO_BEVY, so the result matches the directional path in native_direct.
 // Not traced: TransLightParam (cb1[3], backlight) and the G-buffer translucency term, both 0 here.
@@ -265,8 +268,10 @@ fn native_clustered_light(light_id: u32, pbr: PbrInput, li: LightingInput, spot:
     let light = &clustered_lights.data[light_id];
     let to_light = (*light).position_radius.xyz - pbr.world_position.xyz;
     let d2 = dot(to_light,to_light);
-    let x = d2*(*light).color_inverse_square_range.w;
-    var fall = saturate(1.0-x);
+    var fall = saturate(1.0-d2*(*light).color_inverse_square_range.w);
+    let falloff = (*light).position_radius.w;
+    var x = d2*(*light).color_inverse_square_range.w;
+    if falloff>0.0 { x = d2/(falloff*falloff); }
     if fall<=0.0 { return vec3(0.0); }
     let l = to_light*inverseSqrt(max(d2,1e-8));
     if spot {

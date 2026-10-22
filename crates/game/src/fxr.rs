@@ -806,16 +806,46 @@ struct Frame<'a> {
     cam: &'a GlobalTransform,
     bufs: &'a mut HashMap<(i64, bool), Buf>,
     multi: &'a mut HashMap<MultiKey, MultiBuf>,
-    lights: &'a mut Vec<(Vec3, Color, f32, f32)>,
+    lights: &'a mut Vec<FxLight>,
     distort: &'a mut HashMap<i64, Buf>,
     trail: &'a mut Vec<(Vec3, Vec3, f32)>,
+}
+
+/// One FXR 609 point light of this frame.
+#[derive(Clone, Copy, Debug)]
+struct FxLight {
+    position: Vec3,
+    /// Squared diffuse colour.
+    color: Color,
+    /// Diffuse multiplier times the colour alpha and the view fade, in native units.
+    intensity: f32,
+    /// `radius`: the light ends here (`saturate(1 - d^2 / R^2)`).
+    range: f32,
+    /// `unk_ds3_p2_0`: the distance in the native `1 / (1 + 0.7 (d / falloff)^2)` term.
+    falloff: f32,
+}
+
+impl FxLight {
+    /// The Bevy light. `PointLight::radius` carries the falloff distance to the native map
+    /// shader (`native_clustered_light` in `map_material.wesl`); FXR lights cast no shadows,
+    /// so Bevy reads it only for its own specular sphere, which that shader subtracts again.
+    fn point_light(&self) -> PointLight {
+        PointLight {
+            color: self.color,
+            intensity: self.intensity * crate::lighting::LOCAL_LUMENS_PER_UNIT,
+            range: self.range,
+            radius: self.falloff,
+            shadow_maps_enabled: false,
+            ..default()
+        }
+    }
 }
 
 #[derive(Default)]
 struct FrameBuffers {
     bufs: HashMap<(i64, bool), Buf>,
     multi: HashMap<MultiKey, MultiBuf>,
-    lights: Vec<(Vec3, Color, f32, f32)>,
+    lights: Vec<FxLight>,
     distort: HashMap<i64, Buf>,
     trail: Vec<(Vec3, Vec3, f32)>,
 }
@@ -948,19 +978,24 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                 let intensity =
                     scalar(a, Field::DiffuseMultiplier, active_t, &mut rnd, 1.) * color[3].max(0.);
                 let radius = scalar(a, Field::Radius, active_t, &mut rnd, 0.);
-                if radius > 0. && intensity > 0. {
-                    f.lights.push((
-                        world,
+                // The light object's falloff distance (object +0x90, 1.0 by default in
+                // 20d5f0); the builders store 1 / it as the diffuse w the shader's
+                // `1 / (1 + 0.7 (d / falloff)^2)` term uses (#141).
+                let falloff = scalar(a, Field::UnkDs3P2_0, active_t, &mut rnd, 1.);
+                if radius > 0. && intensity > 0. && falloff > 0. {
+                    f.lights.push(FxLight {
+                        position: world,
                         // 3892e0 (reached from 210e00 with the 609 property block) squares the
                         // diffuse RGB before the colour alpha and multiplier scale it.
-                        Color::linear_rgb(
+                        color: Color::linear_rgb(
                             color[0] * color[0],
                             color[1] * color[1],
                             color[2] * color[2],
                         ),
-                        intensity * fade,
-                        radius,
-                    ));
+                        intensity: intensity * fade,
+                        range: radius,
+                        falloff,
+                    });
                 }
             }
             600 | 603 | 604 => {
@@ -1702,23 +1737,18 @@ fn render(
     // The 16 nearest the camera (many alike, such as item glints, would tie on brightness).
     let eye = frame.cam.translation();
     frame.lights.sort_by(|a, b| {
-        a.0.distance_squared(eye)
-            .total_cmp(&b.0.distance_squared(eye))
-            .then(b.2.total_cmp(&a.2))
+        a.position
+            .distance_squared(eye)
+            .total_cmp(&b.position.distance_squared(eye))
+            .then(b.intensity.total_cmp(&a.intensity))
     });
     frame.lights.truncate(16);
     while lights.len() > frame.lights.len() {
         commands.entity(lights.pop().unwrap()).despawn();
     }
-    for (i, &(position, color, intensity, range)) in frame.lights.iter().enumerate() {
-        let light = PointLight {
-            color,
-            intensity: intensity * crate::lighting::LOCAL_LUMENS_PER_UNIT,
-            range,
-            shadow_maps_enabled: false,
-            ..default()
-        };
-        let transform = Transform::from_translation(position);
+    for (i, fx_light) in frame.lights.iter().enumerate() {
+        let light = fx_light.point_light();
+        let transform = Transform::from_translation(fx_light.position);
         if let Some(&entity) = lights.get(i) {
             commands.entity(entity).insert((light, transform));
         } else {
@@ -2071,5 +2101,62 @@ mod tests {
         let (c, soft) = soften(&Action::new(&on), 2.0, &cam, corners);
         assert!(soft > 0.0);
         assert!(c[0].z > corners[0].z, "pulled toward the camera");
+    }
+
+    /// The native deferred point-light diffuse for a surface facing the light (N.L = 1), as
+    /// `native_clustered_light` in `map_material.wesl` computes it.
+    fn native_diffuse(light: &FxLight, d: f32) -> f32 {
+        let fall = (1. - (d / light.range).powi(2)).clamp(0., 1.);
+        let x = (d / light.falloff).powi(2);
+        light.intensity * fall / (1. + 0.7 * x)
+    }
+
+    /// #141: the item glint (FFX 61) lights a small spot, not a 1.5 m pool, while a typical
+    /// fire light (radius 5, falloff 2.5, the most common pair) still reaches the walls.
+    #[test]
+    fn item_glint_light_falls_off_within_half_a_metre() {
+        let cache = sekiro_sim::cache::root();
+        if !cache
+            .join("raw/sfx/sfxbnd_commoneffects.ffxbnd.d/f000000061.fxr")
+            .exists()
+        {
+            eprintln!("skipping: cache not extracted");
+            return;
+        }
+        let mut player = FxrPlayer::new(cache);
+        player.hold(GLINTS, 61, 0, Transform::IDENTITY, true);
+        for _ in 0..90 {
+            player.advance(1. / 60.);
+        }
+        let cam = GlobalTransform::from(Transform::from_xyz(0., 1.5, 3.));
+        let mut buffers = FrameBuffers::default();
+        let mut frame = Frame {
+            cam: &cam,
+            bufs: &mut buffers.bufs,
+            multi: &mut buffers.multi,
+            lights: &mut buffers.lights,
+            distort: &mut buffers.distort,
+            trail: &mut buffers.trail,
+        };
+        for e in &player.effects {
+            collect(e.root.as_ref().unwrap(), &mut frame);
+        }
+        let [glint] = buffers.lights[..] else {
+            panic!("one glint light, got {:?}", buffers.lights);
+        };
+        // Authored: radius 1.5, falloff 0.25, multiplier 0 to 6.4 over the first second.
+        assert!((glint.range - 1.5).abs() < 1e-4);
+        assert!((glint.falloff - 0.25).abs() < 1e-4);
+        assert!((glint.intensity - 6.4).abs() < 1e-3, "{}", glint.intensity);
+        assert_eq!(glint.point_light().radius, glint.falloff);
+        let centre = native_diffuse(&glint, 0.);
+        assert!(native_diffuse(&glint, 0.5) < 0.3 * centre);
+        assert!(native_diffuse(&glint, 1.0) < 0.1 * centre);
+        let fire = FxLight {
+            range: 5.,
+            falloff: 2.5,
+            ..glint
+        };
+        assert!(native_diffuse(&fire, 2.) > 0.5 * native_diffuse(&fire, 0.));
     }
 }
