@@ -167,14 +167,15 @@ pub(super) fn sweep_base(world: &World, entity: Entity) -> Option<SweepMaterial>
     })
 }
 
+/// The map's material count; zero without a map, where the material is not registered.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct MaterialStats<'w> {
-    materials: Res<'w, Assets<LayeredMaterial>>,
+    materials: Option<Res<'w, Assets<LayeredMaterial>>>,
 }
 
 impl MaterialStats<'_> {
     pub(crate) fn count(&self) -> usize {
-        self.materials.len()
+        self.materials.as_ref().map_or(0, |m| m.len())
     }
 }
 

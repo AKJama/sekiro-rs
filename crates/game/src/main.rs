@@ -244,6 +244,19 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
         .filter(|v| !v.starts_with("--"))
         .map(|name| sekiro_sim::arena::ArenaSpec::by_name(&name).map_err(anyhow::Error::msg))
         .transpose()?;
+    // Without a map the fight is on the flat floor, which has no player starts, idols or
+    // coordinates to spawn at: say so instead of ignoring the flag.
+    let map_id = arg_value(args, "--map");
+    for flag in ["--start", "--at-idol"] {
+        anyhow::ensure!(
+            map_id.is_some() || !args.iter().any(|a| a == flag),
+            "{flag} needs --map <id>"
+        );
+    }
+    anyhow::ensure!(
+        map_id.is_some() || boss_arena.is_some() || !args.iter().any(|a| a == "--spawn"),
+        "--spawn needs --map <id> or --arena <name>"
+    );
     let screenshots = arg_list(args, "--shots")
         .into_iter()
         .map(|s| {
@@ -421,7 +434,7 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
             )
         },
         opponent,
-        map: arg_value(args, "--map"),
+        map: map_id,
         start: arg_f32(args, "--start", 0.0)? as usize,
         spawn: map::parse_camera(arg_value(args, "--spawn").as_deref())?
             .map(|[x, y, z, yaw, _]| [x, y, z, yaw]),
@@ -455,4 +468,30 @@ fn main() -> anyhow::Result<()> {
     dispatch()?;
     menu::relaunch()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// Map-only placement flags without `--map` used to be ignored silently on the flat floor.
+    #[test]
+    fn placement_flags_without_a_map_fail_clearly() {
+        for (extra, message) in [
+            (&["--start", "3"][..], "--start needs --map <id>"),
+            (&["--at-idol", "1111950"], "--at-idol needs --map <id>"),
+            (
+                &["--spawn", "0,0,0,0,0"],
+                "--spawn needs --map <id> or --arena <name>",
+            ),
+        ] {
+            let args: Vec<String> = ["sekiro-rs", "--play"]
+                .iter()
+                .chain(extra)
+                .map(|s| s.to_string())
+                .collect();
+            let error = super::play_options_with(&args, std::path::Path::new("logs/datasets"))
+                .err()
+                .map(|e| e.to_string());
+            assert_eq!(error.as_deref(), Some(message), "{extra:?}");
+        }
+    }
 }

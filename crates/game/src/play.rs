@@ -219,8 +219,9 @@ fn renderer_counts(
     materials: Res<Assets<StandardMaterial>>,
     layered: crate::map::MaterialStats,
     fx: Res<crate::fxr::FxrPlayer>,
-    lighting: Res<crate::lighting::MapLighting>,
-    probe: Res<crate::perf_log::RenderProbe>,
+    // Map-only (`MapLighting`) and `--perf`-only (`RenderProbe`) resources.
+    lighting: Option<Res<crate::lighting::MapLighting>>,
+    probe: Option<Res<crate::perf_log::RenderProbe>>,
     mut last: Local<usize>,
 ) {
     if sim.step == 0 || sim.step % 60 != 59 || *last == sim.step {
@@ -238,8 +239,8 @@ fn renderer_counts(
         cameras.iter().count(),
         rigs.iter().count(),
         fx.live_counts(),
-        lighting.hour,
-        probe.0.lock().map_or(0, |p| p.draw_batches)
+        lighting.map_or(f32::NAN, |l| l.hour),
+        probe.map_or(0, |p| p.0.lock().map_or(0, |p| p.draw_batches))
     );
 }
 
