@@ -111,7 +111,8 @@ The summary also lists every connected block's request state change after play s
 Every measurement is also logged as a `live check:` line, and the loading stages are logged as `startup:`, `map setup:`, `loading:` and `play ready:` lines.
 Building with `--features profile-spans` times every Bevy system through its tracing span and logs `span profile` (mean ms per frame) and `span stall` (longest single run) lines every five seconds.
 
-Play starts only when loading has finished (`crates/game/src/play_gate.rs`): Wolf's model is bound, every map GLB and texture has loaded and spawned, no pipeline is compiling, the collision floor under Wolf exists, every image has been uploaded, every spawned mesh entity's mesh has been prepared by the render world, and the drawn meshes within 60 m have their textures, and then 60 consecutive frames stay within 1/30 s.
+Play starts only when loading has finished (`crates/game/src/play_gate.rs`): Wolf's model is bound, every map GLB and texture has loaded and spawned, no pipeline is compiling, every image has been uploaded, every spawned mesh entity's mesh has been prepared by the render world, and the drawn meshes within 60 m have their textures, and then 60 consecutive frames stay within 1/30 s.
+A start with no collision floor under Wolf (a `--spawn` over a hole) cannot become playable, so the game exits with an error naming the position before loading instead of holding the loading screen (#231).
 Play starts on the next frame: a further 2.5 s settle made no difference to the first frames of play (about 80 ms worst frame either way, `longest_start_frame_ms` in the summary).
 The check skips the frames that pay for its own 4 Hz ground samples when it collects play frame times.
 Until then an opaque loading screen with a progress bar covers the view and the simulation does not step.

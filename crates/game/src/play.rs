@@ -598,6 +598,12 @@ pub fn run(options: Options) -> Result<()> {
         on_map = Some((dir, id.clone(), world));
         map::raise_io_stack();
     }
+    if let Some((_, id, world)) = &on_map {
+        require_floor(duel.player.body.position, |x, z, top| {
+            world.floor(x, z, top)
+        })
+        .with_context(|| format!("{id}: Wolf's start"))?;
+    }
     if let Some(kit) = &options.kit {
         duel.kit = kit.clone();
     }
@@ -1187,7 +1193,20 @@ fn setup(
     ));
 }
 
-/// Two lights and a checkered floor, so movement and speed are visible off the map.
+/// Fails when no collision floor lies under `position`, as `floor(x, z, top)` finds it from
+/// 1 m above. The play gate waits for that floor before play starts, and neither the collision
+/// world nor Wolf changes while loading, so a start over a hole (a `--spawn` whose ground moved,
+/// #231) would hold the loading screen forever.
+fn require_floor(position: [f32; 3], floor: impl Fn(f32, f32, f32) -> Option<f32>) -> Result<()> {
+    let [x, y, z] = position;
+    if floor(x, z, y + 1.0).is_none() {
+        anyhow::bail!(
+            "no collision floor under ({x:.2}, {y:.2}, {z:.2}); play would never start (pick a --spawn over the map's ground)"
+        );
+    }
+    Ok(())
+}
+
 /// Puts Wolf at `start` facing `yaw` and the enemy `distance` metres in front of him, facing
 /// him, both on the floor `floor_at(x, z, near_y)` finds.
 fn place_pair(
@@ -1209,6 +1228,7 @@ fn place_pair(
     enemy.fall_top = enemy.position[1];
 }
 
+/// Two lights and a checkered floor, so movement and speed are visible off the map.
 fn spawn_floor_stage(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -2692,6 +2712,19 @@ fn grapple_marker(
 mod tests {
     use super::*;
     use sekiro_sim::fight::FighterKind;
+
+    #[test]
+    fn a_start_over_a_hole_fails_instead_of_loading_forever() {
+        // Ground only west of x = -134 and no higher than -42.5, like the Outskirts ledge.
+        let floor = |x: f32, _z: f32, top: f32| (x < -134.0 && top >= -42.5).then_some(-42.5);
+        assert!(require_floor([-136.5, -42.54, -118.0], floor).is_ok());
+        let err = require_floor([-132.3, -42.0, -123.9], floor).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("no collision floor under (-132.30, -42.00, -123.90)"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn default_keys_crouch_lock_on_and_use_the_prosthetic() {

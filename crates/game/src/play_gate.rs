@@ -3,16 +3,16 @@
 //! Like the game's own loading screen, an opaque screen with a progress bar covers the view and
 //! the simulation does not step (so the player cannot move) until loading has finished: Wolf's
 //! model is bound, every map GLB and texture has loaded and every scene has spawned
-//! ([`crate::map::Pending::loaded`]), no render pipeline is still compiling, the collision
-//! floor under Wolf exists, every image and spawned mesh is prepared on the GPU and the
-//! drawn meshes within 60 m have their textures ([`check_render`]), and then 60 consecutive
-//! frames are steady ([`FrameSettle`]), so uploads and first-use work that follow loading also
+//! ([`crate::map::Pending::loaded`]), no render pipeline is still compiling, every image and
+//! spawned mesh is prepared on the GPU and the drawn meshes within 60 m have their textures
+//! ([`check_render`]), and then 60 consecutive frames are steady ([`FrameSettle`]), so uploads and first-use work that follow loading also
 //! finish behind the screen. Steady is relative to the area's own frame times so an area that
 //! is simply slow to draw (the Genichiro arena at about 47 ms, #75) starts once it is steady
 //! instead of at the timeout. Scripted, replayed and interactive runs all wait for the whole
 //! map. The time to that point is logged as `play ready`; a machine that never settles starts
-//! after 60 s with a warning instead of waiting forever.
-use super::{Actor, MapCollision, Sim};
+//! after 60 s with a warning instead of waiting forever. A start with no collision floor under
+//! Wolf fails before loading (`play::require_floor`), as it could never become playable.
+use super::{Actor, Sim};
 use crate::character::Rig;
 use bevy::prelude::*;
 use std::collections::VecDeque;
@@ -240,14 +240,12 @@ type CharacterRigs = Or<(With<Actor>, With<super::map_enemies::FoeActor>)>;
 pub(super) fn update(
     mut commands: Commands,
     mut gate: ResMut<PlayGate>,
-    sim: NonSend<Sim>,
     time: Res<Time<Real>>,
     rigs: Query<&Rig, CharacterRigs>,
     pending: Option<Res<crate::map::Pending>>,
     pipelines: Option<Res<crate::map::ready::Pipelines>>,
     warmup: Option<Res<crate::pipeline_warmup::PipelineWarmup>>,
     batches: Option<Res<crate::map::StaticBatches>>,
-    collision: Option<Res<MapCollision>>,
     screens: Query<Entity, With<LoadingScreen>>,
     mut bars: Query<&mut Node, With<LoadingBar>>,
 ) {
@@ -264,14 +262,10 @@ pub(super) fn update(
             let status = p.status();
             status.pending == 0 && status.ready > 0
         });
-        let p = sim.duel.player.body.position;
-        let floor = collision
-            .as_ref()
-            .is_none_or(|c| c.0.floor(p[0], p[2], p[1] + 1.0).is_some());
         // GPU uploads trail the CPU load; then uploads, scene spawning and shader compiles show
         // up as slow frames, so the area is ready once the world is drawable and frames are
         // steady.
-        if !(rigs_bound && map && compiled && floor) {
+        if !(rigs_bound && map && compiled) {
             // A late shader compile or a dropped readiness signal restarts the count.
             gate.settle = FrameSettle::default();
         } else {
