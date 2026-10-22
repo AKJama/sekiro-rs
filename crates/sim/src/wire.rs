@@ -10,6 +10,8 @@ use std::{collections::HashMap, path::Path, sync::Arc};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Point {
+    /// Where the hook is in the world; `None` for a map piece's point the export did not place
+    /// and for a hook on an object the world switched off ([`Wire::load`], #261).
     pub position: Option<[f32; 3]>,
     pub variation: u32,
     pub model: String,
@@ -238,9 +240,20 @@ impl Wire {
                 ),
             );
         }
+        let mut points: Vec<Point> =
+            serde_json::from_value(read(&map.join("grapple.json"))?).map_err(|e| e.to_string())?;
+        // A hook on a placed object the world switched off (the story's `DeactivateObject`, an
+        // arena's hidden parts) is not offered: the object is neither drawn nor collides, so its
+        // hook would hang in open sky with the perch for an invisible platform (#261). Its row
+        // stays, unplaced, so hook indices keep matching `grapple.json`.
+        let block = map.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        for p in &mut points {
+            if collision.object_off(block, &p.source_part) {
+                p.position = None;
+            }
+        }
         Ok(Self {
-            points: serde_json::from_value(read(&map.join("grapple.json"))?)
-                .map_err(|e| e.to_string())?,
+            points,
             search: Some(serde_json::from_value(search).map_err(|e| e.to_string())?),
             variations: variations.into_iter().map(|v| (v.id, v)).collect(),
             offsets,

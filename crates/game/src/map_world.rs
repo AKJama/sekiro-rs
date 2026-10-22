@@ -2443,6 +2443,11 @@ mod tests {
         // Inside h003401's footprint, 5.7 m above the courtyard: the floor is the ground.
         let floor = world.floor(-212.0, -1.0, -20.0).expect("courtyard ground");
         assert!((floor + 40.5).abs() < 0.3, "floor at {floor}");
+        // #261: the play world remembers the objects the story switches off, with their hooks,
+        // so the wire does not offer the hook on o115720_0000 (group 1106610) in open sky.
+        assert!(stories.maps[ASHINA[0]].switched_off("o115720_0000"));
+        assert!(world.object_off(ASHINA[0], "o115720_0000"));
+        assert!(!world.object_off(ASHINA[0], "o002500_0005"));
     }
 
     /// The live play check's own spawns (`tests/it/live_play.rs`: the grapple ledge and the

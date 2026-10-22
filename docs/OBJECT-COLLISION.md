@@ -141,6 +141,9 @@ It gives each object its `object_mask`, the ride walls their rider-only mask (#1
 `CollisionWorld::load_map` applies the map's first-visit story (`world_events::first_visit_off`) to its collision parts, fall-prevention walls and objects, as the play world does without `--story`.
 The grappling wire no longer builds a world of its own: it aims through the world Wolf collides with, so objects block its line of sight in maps and arenas alike.
 Before, the arenas and the wire's world had no objects: on Genichiro's roof Wolf walked through a torch stand 7.1 m from his start (`o116100_4044`), and on Ashina Castle the wire marked a pine's hook behind a shield 2.8 m in front of him (`o113400_3044`); `object_collision.rs` tests both.
+The world also remembers every object its caller switched off, with collision or without (`CollisionWorld::object_off`), and the wire does not offer the hooks on them (#261).
+On Ashina Outskirts the first-visit story switches off group 1106610, whose nine hooks on `o115720` and `o115730` hung in open sky near start 3: the wire flew Wolf there and the perch held him on an invisible platform.
+Their rows stay in the wire's points, unplaced, so hook indices still match `grapple.json` (`outskirts_hooks_on_story_switched_off_objects_are_not_offered` in `crates/sim/tests/it/wire.rs`).
 
 ## Unresolved
 
