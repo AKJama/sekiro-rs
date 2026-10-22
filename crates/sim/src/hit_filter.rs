@@ -81,9 +81,9 @@ pub const WALL_HUG: u8 = 128;
 /// solid whatever the material), and in `l` many shore and pool-bed triangles carry it (#189).
 pub const SWIM_FILTER: u8 = 27;
 /// The fall-prevention assist walls (落下防止アシストヒット): group 92 for ground movement and
-/// ground actions, group 93 for ground actions only. No capsule collides with them; the
-/// assist's sphere casts do (groups 94 and 96 meet 92, 95 and 96 meet 93), and only while the
-/// player script asks for the assist ([`fall_assist_walls`]).
+/// ground actions, group 93 (the `f` binder's bands) for ground actions only. No capsule
+/// collides with them; the assist's sphere casts do (groups 94 and 96 meet 92, 95 and 96 meet
+/// 93), and only while the player script asks for the assist ([`fall_assist_walls`]).
 pub const FALL_ASSIST_MOVE: u8 = 8;
 pub const FALL_ASSIST_ACTION: u8 = 16;
 /// [`FALL_ASSIST_MOVE`] and [`FALL_ASSIST_ACTION`] walls that are on only while the body stands
@@ -187,9 +187,12 @@ pub fn riding_walls(walls: u8, riding: bool) -> u8 {
 /// The fall-prevention walls the assist tests for HKS `act(3016, arg)`. The script
 /// (`_UpdateFallProtection`) sends arg 0 in states whose `ENABLE_FALL_PROTECT_WALL_STRONG` is
 /// set (standing, walking, running, dodges, landings) and arg 1 where
-/// `ENABLE_FALL_PROTECT_WALL_WEAK` is set (ground actions), every frame. `FUN_140bc6800` picks
-/// the sphere cast's group from the two request bits: bit 0 alone casts with group 94, bit 1
-/// alone with 95, both with 96.
+/// `ENABLE_FALL_PROTECT_WALL_WEAK` is set (ground actions), every frame. The act's handler
+/// (`FUN_140b32410`, case 3016) sets bit `arg` of the request word (`1 << arg`, in the module
+/// `FUN_140b34de0` returns), and `FUN_140bc6800` picks the sphere cast's group from the two
+/// request bits: bit 0 alone casts with group 94, which meets only group 92 (filter 28, object
+/// type 6), bit 1 alone with 95, which meets only 93 (the `f` bands, object type 11), both with
+/// 96, which meets both.
 pub fn fall_assist_walls(arg: i32) -> u8 {
     match arg {
         0 => FALL_ASSIST_MOVE,
