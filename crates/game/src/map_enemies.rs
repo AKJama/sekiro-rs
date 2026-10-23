@@ -27,9 +27,25 @@ struct Mark(usize);
 #[derive(Resource)]
 struct Libraries(HashMap<String, AnimLibrary>);
 
-pub(super) fn install(app: &mut App, cache: &Path) -> Result<()> {
-    let assets = app.world().resource::<AssetServer>().clone();
-    let sim = app.world().non_send::<Sim>();
+/// The population's systems; its actors come with the simulation ([`insert`]), which the start
+/// menu's app gets only once an area is picked.
+pub(super) fn install(app: &mut App) {
+    app.add_systems(Startup, spawn_gauges.before(crate::map::MapSpawn))
+        .add_systems(Update, sound_banks.before(crate::audio::play_cues))
+        .add_systems(
+            Update,
+            (
+                sync.before(crate::character::animate)
+                    .after(crate::character::bind_rigs),
+                gauges.after(super::follow_camera),
+            ),
+        );
+}
+
+/// Spawns the population's actors from the inserted [`Sim`], with their animations and sounds.
+pub(super) fn insert(world: &mut World, cache: &Path) -> Result<()> {
+    let assets = world.resource::<AssetServer>().clone();
+    let sim = world.non_send::<Sim>();
     let population = sim.duel.population.as_ref().unwrap();
     let roster = population.registry.as_ref().unwrap();
     let mut libraries = HashMap::new();
@@ -89,24 +105,13 @@ pub(super) fn install(app: &mut App, cache: &Path) -> Result<()> {
         ));
     }
     for actor in actors {
-        app.world_mut().spawn(actor);
+        world.spawn(actor);
     }
-    crate::audio::prepare_population(app, &sound_foes);
-    app.world_mut()
-        .resource_scope(|world, mut fx: Mut<crate::fxr::FxrPlayer>| {
-            fx.ensure_tables(&world.non_send::<Sim>().duel);
-        });
-    app.insert_resource(Libraries(libraries))
-        .add_systems(Startup, spawn_gauges.before(crate::map::MapSpawn))
-        .add_systems(Update, sound_banks.before(crate::audio::play_cues))
-        .add_systems(
-            Update,
-            (
-                sync.before(crate::character::animate)
-                    .after(crate::character::bind_rigs),
-                gauges.after(super::follow_camera),
-            ),
-        );
+    crate::audio::prepare_population(world, &sound_foes);
+    world.resource_scope(|world, mut fx: Mut<crate::fxr::FxrPlayer>| {
+        fx.ensure_tables(&world.non_send::<Sim>().duel);
+    });
+    world.insert_resource(Libraries(libraries));
     Ok(())
 }
 
@@ -402,5 +407,19 @@ fn gauges(
             set(&mut node, |n| &mut n.left, px(screen.x - 8.0));
             set(&mut node, |n| &mut n.top, px(screen.y - 8.0));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The start menu's app installs the population before any simulation exists; its actors
+    /// spawn once one is inserted (#8).
+    #[test]
+    fn installs_before_the_simulation_exists() {
+        let mut app = App::new();
+        install(&mut app);
+        assert!(app.world().get_non_send::<Sim>().is_none());
     }
 }

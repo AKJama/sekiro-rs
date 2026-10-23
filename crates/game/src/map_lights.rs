@@ -20,17 +20,24 @@ pub(super) struct LocalLights {
 
 impl LocalLights {
     pub(super) fn install(app: &mut App, dir: &Path, args: &[String]) -> Result<()> {
+        let lights = match app.world().get_resource::<world::MapWorld>() {
+            Some(world) => Self::load_world(dir, args, world)?,
+            None => Self::load(dir, args)?,
+        };
+        app.insert_resource(lights);
+        Ok(())
+    }
+
+    /// The lights of `dir` and of the connected `world`'s other blocks.
+    pub(super) fn load_world(dir: &Path, args: &[String], world: &world::MapWorld) -> Result<Self> {
         let mut lights = Self::load(dir, args)?;
-        if !crate::lighting::legacy_map_lights()
-            && let Some(world) = app.world().get_resource::<world::MapWorld>()
-        {
+        if !crate::lighting::legacy_map_lights() {
             for id in world.blocks.keys().filter(|id| *id != &world.primary) {
                 let neighbour = dir.parent().context("map parent")?.join(id);
                 lights.lights.extend(Self::load(&neighbour, args)?.lights);
             }
         }
-        app.insert_resource(lights);
-        Ok(())
+        Ok(lights)
     }
 
     pub(super) fn load(dir: &Path, args: &[String]) -> Result<Self> {

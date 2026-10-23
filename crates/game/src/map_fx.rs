@@ -52,7 +52,33 @@ impl MapEffects {
     }
 }
 
-pub(crate) fn install(app: &mut App, dir: &Path) -> Result<()> {
+/// The map's effects; `deferred` (the start menu's app, whose connected world comes later)
+/// registers their systems only, and [`insert`] adds the effects with the world.
+pub(crate) fn install(app: &mut App, dir: &Path, deferred: bool) -> Result<()> {
+    let primary = dir.file_name().and_then(|s| s.to_str()).context("map ID")?;
+    if !sekiro_sim::world_events::SUPPORTED_MAPS.contains(&primary) {
+        return Ok(());
+    }
+    let cache = dir
+        .parent()
+        .and_then(Path::parent)
+        .context("cache directory")?;
+    if !app.world().contains_resource::<FxrPlayer>() {
+        app.add_plugins(crate::fxr::plugin(cache.to_owned(), |_| {}));
+    }
+    if !deferred {
+        insert(app.world_mut(), dir)?;
+    }
+    app.add_systems(
+        PostUpdate,
+        update.after(bevy::transform::TransformSystems::Propagate),
+    );
+    Ok(())
+}
+
+/// Reads the effects of the map in `dir` and, once it is loaded, of its connected world's
+/// blocks, with their story states.
+pub(crate) fn insert(world: &mut World, dir: &Path) -> Result<()> {
     let primary = dir.file_name().and_then(|s| s.to_str()).context("map ID")?;
     if !sekiro_sim::world_events::SUPPORTED_MAPS.contains(&primary) {
         return Ok(());
@@ -65,15 +91,11 @@ pub(crate) fn install(app: &mut App, dir: &Path) -> Result<()> {
         placements: Vec::new(),
         regions: BTreeMap::new(),
     };
-    if !app.world().contains_resource::<FxrPlayer>() {
-        app.add_plugins(crate::fxr::plugin(cache.to_owned(), |_| {}));
-    }
     for block in sekiro_sim::world_events::SUPPORTED_MAPS {
-        if block != primary && app.world().get_resource::<MapWorld>().is_none() {
+        if block != primary && world.get_resource::<MapWorld>().is_none() {
             continue;
         }
-        let state = app
-            .world()
+        let state = world
             .get_resource::<MapStory>()
             .and_then(|s| s.maps.get(block))
             .map(|s| s.state.clone())
@@ -86,8 +108,8 @@ pub(crate) fn install(app: &mut App, dir: &Path) -> Result<()> {
         let catalog =
             sekiro_sim::map_effects::load(cache, block, &state).map_err(anyhow::Error::msg)?;
         let fallback;
-        let layout = if let Some(world) = app.world().get_resource::<MapWorld>() {
-            &world.blocks.get(block).context("FX map block")?.json
+        let layout = if let Some(map) = world.get_resource::<MapWorld>() {
+            &map.blocks.get(block).context("FX map block")?.json
         } else {
             fallback = serde_json::from_slice::<serde_json::Value>(&std::fs::read(
                 cache.join(format!("maps/{block}/layout.json")),
@@ -114,10 +136,8 @@ pub(crate) fn install(app: &mut App, dir: &Path) -> Result<()> {
             catalog.placements.iter().filter(|p| p.enabled).count()
         );
         for p in catalog.placements {
-            let (camera_relative, weather) = app
-                .world_mut()
-                .resource_mut::<FxrPlayer>()
-                .map_actions(p.effect);
+            let (camera_relative, weather) =
+                world.resource_mut::<FxrPlayer>().map_actions(p.effect);
             fx.placements.push(Placement {
                 block: block.into(),
                 effect: p.effect,
@@ -135,13 +155,7 @@ pub(crate) fn install(app: &mut App, dir: &Path) -> Result<()> {
         }
         fx.regions.insert(block.into(), catalog.regions);
     }
-    if !app.world().contains_resource::<FxrPlayer>() {
-        app.add_plugins(crate::fxr::plugin(cache.to_owned(), |_| {}));
-    }
-    app.insert_resource(fx).add_systems(
-        PostUpdate,
-        update.after(bevy::transform::TransformSystems::Propagate),
-    );
+    world.insert_resource(fx);
     Ok(())
 }
 

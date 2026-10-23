@@ -292,15 +292,15 @@ struct StreamRequest {
 /// Every GLB handle the map needs, to know when loading is done.
 /// Map GLBs are requested nearest-first from the start position, a few at a time
 /// ([`stream_assets`]), so the area around the player loads first.
-#[derive(Resource)]
+#[derive(Resource, Default)]
 pub struct Pending {
     handles: Vec<UntypedHandle>,
     /// Map piece scene instances spawned, and how many have finished spawning.
     instances: usize,
     ready: usize,
     ready_roots: std::collections::HashSet<Entity>,
-    /// When [`add_map`] was called, for the load time in the log.
-    added_at: Instant,
+    /// When the map spawned and its load started ([`spawn_map`]); nothing has loaded before.
+    started_at: Option<Instant>,
     loaded_at: Option<Instant>,
     /// GLBs in load order, the next one to request, and the GLBs requested but not finished.
     stream: Vec<StreamRequest>,
@@ -309,24 +309,13 @@ pub struct Pending {
     in_flight: Vec<UntypedHandle>,
 }
 
-impl Default for Pending {
-    fn default() -> Self {
-        Self {
-            handles: Vec::new(),
-            instances: 0,
-            ready: 0,
-            ready_roots: std::collections::HashSet::new(),
-            added_at: Instant::now(),
-            loaded_at: None,
-            stream: Vec::new(),
-            stream_index: std::collections::HashMap::new(),
-            next: 0,
-            in_flight: Vec::new(),
-        }
-    }
-}
-
 impl Pending {
+    /// The map has spawned, and every GLB it queued is requested and every scene instance
+    /// spawned. Before the map spawns nothing is queued yet, which is not loaded (#8).
+    fn streamed(&self) -> bool {
+        self.started_at.is_some() && self.next >= self.stream.len() && self.ready >= self.instances
+    }
+
     /// Every map piece and texture has loaded.
     pub fn loaded(&self) -> bool {
         self.loaded_at.is_some()
@@ -604,6 +593,105 @@ fn cinematic_gparam(id: &str) -> Option<String> {
     ))
 }
 
+/// Marks an app whose connected world loads after the app is built (the start menu's, #8):
+/// [`add_map`] registers the world's systems without its data, and [`DeferredMap`] brings the
+/// data, loaded on a thread, once an area is picked.
+#[derive(Resource)]
+pub struct DeferredWorld;
+
+/// A connected world loaded for an app built with [`DeferredWorld`]: its blocks, their stories
+/// and their local lights.
+pub struct DeferredMap {
+    world: world::MapWorld,
+    stories: story::MapStory,
+    lights: LocalLights,
+}
+
+impl DeferredMap {
+    /// Loads the world of `dir` and its lights (`Send`, so on a loading thread beside the
+    /// collision); its stories come from the collision's ([`Self::add_stories`]).
+    pub fn load(dir: &Path) -> Result<Self> {
+        let id = dir
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let cache = dir
+            .parent()
+            .and_then(Path::parent)
+            .context("map folder has no cache above it")?;
+        let world = world::MapWorld::load(cache, &id, &format!("maps/{id}/"))?;
+        let args: Vec<String> = std::env::args().collect();
+        let lights = LocalLights::load_world(dir, &args, &world)?;
+        Ok(Self {
+            world,
+            stories: story::MapStory::default(),
+            lights,
+        })
+    }
+
+    /// Takes the `stories` already loaded for the collision and loads only the blocks' others.
+    pub fn add_stories(&mut self, cache: &Path, stories: story::MapStory) -> Result<()> {
+        self.stories = block_stories(cache, &self.world, stories)?;
+        Ok(())
+    }
+
+    /// Inserts the world, then the map effects that read it.
+    pub fn insert(self, world: &mut World, dir: &Path) -> Result<()> {
+        world.insert_resource(self.stories);
+        world.insert_resource(self.world);
+        world.insert_resource(self.lights);
+        crate::map_fx::insert(world, dir)
+    }
+}
+
+/// The connected world around `id` and every block's story, `stories` holding those already
+/// loaded.
+fn connected_world(
+    cache: &Path,
+    id: &str,
+    prefix: &str,
+    stories: story::MapStory,
+) -> Result<(world::MapWorld, story::MapStory)> {
+    let world = world::MapWorld::load(cache, id, prefix)?;
+    let stories = block_stories(cache, &world, stories)?;
+    Ok((world, stories))
+}
+
+/// Every block's story of `world`: those of `stories` it holds, and the others loaded.
+fn block_stories(
+    cache: &Path,
+    world: &world::MapWorld,
+    mut stories: story::MapStory,
+) -> Result<story::MapStory> {
+    stories
+        .maps
+        .retain(|block, _| world.blocks.contains_key(block));
+    for (block, layout) in &world.blocks {
+        if !stories.maps.contains_key(block)
+            && let Some(state) = story::load(cache, block, &layout.json)?
+        {
+            stories.maps.insert(block.clone(), state);
+        }
+        if let Some(state) = stories.maps.get(block) {
+            info!(
+                "{block}: offline story, {} parts, {} unsupported predicates",
+                state.parts.len(),
+                state.state.unsupported.len()
+            );
+        }
+    }
+    Ok(stories)
+}
+
+/// Moves where the map's pieces stream outwards from ([`MapScene::focus`]) before it spawns:
+/// the start menu builds the map before Wolf's start is picked.
+pub fn refocus(world: &mut World, focus: Vec3) {
+    if let Some(mut layout) = world.get_resource_mut::<Layout>() {
+        layout.scene.focus = Some(focus);
+    }
+}
+
 /// The entity whose position picks the draw groups (the free camera, or the player).
 #[derive(Component)]
 pub struct MapFocus;
@@ -657,12 +745,7 @@ pub fn player_start(dir: &Path, index: usize) -> Result<(Vec3, f32)> {
 /// [`run`]'s own: in play Q crouches. A connected world uses the block `stories` already loaded
 /// (the play world's collision, [`world::collision_world`]) and loads the rest; a map shown
 /// alone uses none.
-pub fn add_map(
-    app: &mut App,
-    dir: &Path,
-    scene: MapScene,
-    mut stories: story::MapStory,
-) -> Result<()> {
+pub fn add_map(app: &mut App, dir: &Path, scene: MapScene, stories: story::MapStory) -> Result<()> {
     let stage = |name: &str| info!("map setup: {name} at {:.1} s", crate::since_start());
     let json: Value = serde_json::from_slice(
         &std::fs::read(dir.join("layout.json")).context("reading layout.json")?,
@@ -719,29 +802,15 @@ pub fn add_map(
         && scene.within.is_none()
         && !app.world().contains_resource::<world::ArenaMap>()
         && !std::env::args().any(|a| a == "--arena");
+    // Only a connected world loads later; a map alone loads here as on the command line.
+    let deferred = connected && app.world().contains_resource::<DeferredWorld>();
     if connected {
-        let world = world::MapWorld::load(cache, &id, &scene.prefix)?;
-        stories
-            .maps
-            .retain(|block, _| world.blocks.contains_key(block));
-        for (block, layout) in &world.blocks {
-            if !stories.maps.contains_key(block)
-                && let Some(state) = story::load(cache, block, &layout.json)?
-            {
-                stories.maps.insert(block.clone(), state);
-            }
-            if let Some(state) = stories.maps.get(block) {
-                info!(
-                    "{block}: offline story, {} parts, {} unsupported predicates",
-                    state.parts.len(),
-                    state.state.unsupported.len()
-                );
-            }
+        if !deferred {
+            let (world, stories) = connected_world(cache, &id, &scene.prefix, stories)?;
+            app.insert_resource(stories).insert_resource(world);
+            stage("connected world and story");
         }
-        app.insert_resource(stories);
-        stage("connected world and story");
         app.add_plugins(visibility::MapVisibilityPlugin)
-            .insert_resource(world)
             .add_systems(
                 Update,
                 (world::update, world::update_detail)
@@ -782,7 +851,7 @@ pub fn add_map(
         }
     }
     app.init_resource::<crate::lighting::fog::FogSelection>();
-    crate::map_fx::install(app, dir)?;
+    crate::map_fx::install(app, dir, deferred)?;
     app.init_resource::<crate::lighting_selection::RegionSelection>();
     let args: Vec<_> = std::env::args().collect();
     let arena_name = crate::arg_value(&args, "--arena");
@@ -930,7 +999,9 @@ pub fn add_map(
     crate::map_grass::install(app, dir, &scene.prefix)?;
     stage("materials and grass");
     app.insert_resource(ShadowSettings::from_args(&gparam, hour, &args)?);
-    LocalLights::install(app, dir, &args)?;
+    if !deferred {
+        LocalLights::install(app, dir, &args)?;
+    }
     app.insert_resource(ClearColor(SKY))
         .insert_resource(GlobalAmbientLight {
             color: Color::srgb(0.80, 0.85, 1.0),
@@ -1223,6 +1294,7 @@ fn spawn_map(
     connected: Option<ResMut<world::MapWorld>>,
 ) {
     spawn_lights(&mut commands, &shadow);
+    pending.started_at = Some(Instant::now());
 
     let scene = &layout.scene;
     let far_enabled = !std::env::args().any(|a| a == "--no-far-scenery");
@@ -1865,7 +1937,7 @@ fn track_loading(
     if pending.loaded_at.is_some() {
         return;
     }
-    if pending.next < pending.stream.len() || pending.ready < pending.instances {
+    if !pending.streamed() {
         return;
     }
     // A GLTF scene contains nested node worlds. The outer scene's Ready event
@@ -1883,9 +1955,11 @@ fn track_loading(
         .all(|h| asset_finished(&assets, h.id()));
     if done {
         info!(
-            "all map assets loaded ({} instances) {:.1} s after the map was added",
+            "all map assets loaded ({} instances) {:.1} s after the map spawned",
             pending.instances,
-            pending.added_at.elapsed().as_secs_f32()
+            pending
+                .started_at
+                .map_or(0.0, |t| t.elapsed().as_secs_f32())
         );
         pending.loaded_at = Some(Instant::now());
     }
@@ -1987,6 +2061,18 @@ pub fn parse_camera(arg: Option<&str>) -> Result<Option<[f32; 5]>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The start menu builds the map before an area is picked: its empty stream until the map
+    /// spawns is not a finished load, or the loading bar would jump and the gate open early (#8).
+    #[test]
+    fn nothing_is_streamed_before_the_map_spawns() {
+        let mut pending = Pending::default();
+        assert!(!pending.streamed());
+        pending.started_at = Some(Instant::now());
+        assert!(pending.streamed());
+        pending.queue("a.glb", None, false, (Entity::PLACEHOLDER, 0));
+        assert!(!pending.streamed());
+    }
 
     #[test]
     fn cached_index_tracks_names_and_reordering() {

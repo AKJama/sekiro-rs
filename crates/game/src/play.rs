@@ -115,7 +115,7 @@ pub struct Options {
     pub break_posture: bool,
     /// Who chooses a boss's acts (`--brain`) and whether its decisions are logged
     /// to `cache/brain_logs/` (`--brain-log`); see `docs/BRAIN.md`.
-    pub brain: crate::BrainOptions,
+    pub brain: Option<crate::BrainOptions>,
     pub brain_log: bool,
     /// The boss brain's memory file across fights and sessions (`--brain-memory`; by default
     /// `logs/memory/<chr>.json` for hosted brains, none for the others).
@@ -402,21 +402,68 @@ struct Captures {
     exit_after_script: bool,
 }
 
-pub fn run(options: Options) -> Result<()> {
+/// The map half of [`Loaded`]: its folder, collision world and what stands on it, and where
+/// Wolf starts.
+struct MapLoad {
+    dir: PathBuf,
+    id: String,
+    stories: map::story::MapStory,
+    world: Arc<CollisionWorld>,
+    foot_ground: Option<crate::foot_ik::FootGround>,
+    idols: idol::Idols,
+    pickups: Vec<sekiro_sim::items::MapPickup>,
+    start: Vec3,
+    yaw: f32,
+    at_idol: Option<usize>,
+}
+
+/// What a session reads from the cache before its simulation is assembled: the roster, the
+/// animations and the collision world. Every part is `Send`, so the start menu loads it on a
+/// thread behind the loading screen; the simulation itself (`Duel`, not `Send`) is built on
+/// the main thread from it ([`assemble`]).
+pub(crate) struct Loaded {
+    /// The connected world, when the app was built without it (the start menu's).
+    deferred: Option<map::DeferredMap>,
+    opponent: EnemySpec,
+    libraries: [AnimLibrary; 2],
+    enemy_draw_groups: Option<[bool; 32]>,
+    /// The arena and how long it took to load, for its log line.
+    arena: Option<(Arena, std::time::Duration)>,
+    map: Option<MapLoad>,
+}
+
+/// A session ready to insert into the app ([`Prepared::insert`]).
+struct Prepared {
+    duel: Duel,
+    libraries: [AnimLibrary; 2],
+    enemy_draw_groups: Option<[bool; 32]>,
+    start_yaw: f32,
+    fog_walls: Vec<sekiro_sim::arena::FogWallPlace>,
+    within: Option<(Vec3, f32)>,
+    on_map: Option<(PathBuf, String, Arc<CollisionWorld>)>,
+    stories: map::story::MapStory,
+    foot_ground: Option<crate::foot_ik::FootGround>,
+    idols: idol::Idols,
+    has_pickups: bool,
+    script: Option<Vec<InputFrame>>,
+    replay: Option<crate::input_replay::InputReplay>,
+}
+
+/// Checks the options and the extracted data a session needs before anything loads.
+fn validate(options: &Options, cache: &Path) -> Result<()> {
     anyhow::ensure!(
         !options.map_enemies || (options.map.is_some() && options.arena.is_none()),
         "--map-enemies requires --play --map and cannot be combined with a boss arena"
     );
-    let cache = options.cache.canonicalize().context("cache directory")?;
     if let Some(arena) = options.arena {
-        let missing_b = sekiro_sim::arena_b::missing_models(&cache, arena);
+        let missing_b = sekiro_sim::arena_b::missing_models(cache, arena);
         anyhow::ensure!(
             missing_b.is_empty(),
             "arena {}: missing extracted data: {}",
             arena.name,
             missing_b.join(", ")
         );
-        let missing_c = sekiro_sim::arena_c::missing_models(&cache, arena);
+        let missing_c = sekiro_sim::arena_c::missing_models(cache, arena);
         anyhow::ensure!(
             missing_c.is_empty(),
             "arena {}: missing extracted data: {}",
@@ -424,7 +471,7 @@ pub fn run(options: Options) -> Result<()> {
             missing_c.join(", ")
         );
         let missing =
-            sekiro_sim::arenas_a::missing_models(&cache, arena).map_err(anyhow::Error::msg)?;
+            sekiro_sim::arenas_a::missing_models(cache, arena).map_err(anyhow::Error::msg)?;
         anyhow::ensure!(
             missing.is_empty(),
             "arena {}: missing extracted data: {}",
@@ -432,24 +479,120 @@ pub fn run(options: Options) -> Result<()> {
             missing.join(", ")
         );
     }
-    // Seconds since launch at each loading stage, for load-time reports.
-    let stage = |name: &str| eprintln!("startup: {name} at {:.1} s", crate::since_start());
-    let roster = sekiro_sim::registry::Registry::load(&cache).map_err(anyhow::Error::msg)?;
+    Ok(())
+}
+
+/// Seconds since launch at each loading stage, for load-time reports.
+fn stage(name: &str) {
+    eprintln!("startup: {name} at {:.1} s", crate::since_start());
+}
+
+/// Loads the `Send` part of a session ([`Loaded`]).
+fn load(
+    options: &Options,
+    cache: &Path,
+    item_data: &Arc<sekiro_sim::items::ItemData>,
+) -> Result<Loaded> {
+    let roster = sekiro_sim::registry::Registry::load(cache).map_err(anyhow::Error::msg)?;
     // Duel has two mandatory slots; exploration uses an unoccupied soldier slot, never a boss
     // encounter, and does not spawn its model or controller.
     let opponent = if options.enemy_present {
         options.opponent.clone()
     } else {
-        EnemySpec::from_cache(&cache, "soldier").map_err(anyhow::Error::msg)?
+        EnemySpec::from_cache(cache, "soldier").map_err(anyhow::Error::msg)?
     };
     let anim_chr = roster.anim_chr(&opponent.chr, opponent.npc_param);
-    let enemy_draw_groups = roster.draw_mask(&cache, &options.opponent);
+    let enemy_draw_groups = roster.draw_mask(cache, &options.opponent);
     let libraries = [
-        AnimLibrary::load(&cache, "c0000")?,
-        AnimLibrary::load(&cache, &anim_chr)?,
+        AnimLibrary::load(cache, "c0000")?,
+        AnimLibrary::load(cache, &anim_chr)?,
     ];
     stage("roster and animations");
-    let mut duel = Duel::load_with(&cache, 6.0, opponent)
+    let mut arena = None;
+    let mut on_map = None;
+    if let Some(spec) = options.arena {
+        let t = std::time::Instant::now();
+        let loaded = Arena::load(cache, spec, options.full_map).map_err(|e| {
+            anyhow::anyhow!(
+                "arena {}: {e} (run `sekiro-extract map {}`)",
+                spec.name,
+                spec.map
+            )
+        })?;
+        arena = Some((loaded, t.elapsed()));
+    } else if let Some(id) = &options.map {
+        let dir = map::map_dir(cache, id)?;
+        let blocks = map::world::play_blocks(cache, id)?;
+        let mut stories = map::story::MapStory::default();
+        // A connected world's stories, loaded once for its objects' collision and the map.
+        if map::world::connects(id) {
+            stories = map::story::load_blocks(cache, &blocks)?;
+        }
+        let world = Arc::new(map::world::collision_world(cache, &blocks, &stories)?);
+        stage("collision world");
+        // Wolf's feet meet `h` (#276), built on a thread while the rest loads; `--no-foot-ik`
+        // draws them on the play collision, for comparison.
+        let foot_ground = (!std::env::args().any(|a| a == "--no-foot-ik"))
+            .then(|| crate::foot_ik::FootGround::load(cache, &blocks, &stories, world.clone()));
+        let idols = idol::Idols::load(cache, &blocks, |x, z, y| world.floor(x, z, y + 1.0));
+        let pickups = pickup::load(cache, &blocks, item_data);
+        let at_idol = options.at_idol.and_then(|e| {
+            let i = idols.index(e);
+            if i.is_none() {
+                warn!("--at-idol {e}: no such idol on {id}");
+            }
+            i
+        });
+        let (start, yaw_degrees) = match (at_idol, options.spawn) {
+            (Some(i), _) => {
+                let p = idols.spots[i].checkpoint;
+                (Vec3::from(p.position), p.yaw.to_degrees())
+            }
+            (None, Some([x, y, z, yaw])) => {
+                let y = world.floor(x, z, y + 1.0).unwrap_or(y);
+                (Vec3::new(x, y, z), yaw)
+            }
+            (None, None) => map::player_start(&dir, options.start)?,
+        };
+        on_map = Some(MapLoad {
+            dir,
+            id: id.clone(),
+            stories,
+            world,
+            foot_ground,
+            idols,
+            pickups,
+            start,
+            yaw: yaw_degrees.to_radians(),
+            at_idol,
+        });
+    }
+    Ok(Loaded {
+        deferred: None,
+        opponent,
+        libraries,
+        enemy_draw_groups,
+        arena,
+        map: on_map,
+    })
+}
+
+/// Builds the simulation from `loaded` on the main thread.
+fn assemble(
+    options: &mut Options,
+    cache: &Path,
+    item_data: &Arc<sekiro_sim::items::ItemData>,
+    loaded: Loaded,
+) -> Result<Prepared> {
+    let Loaded {
+        deferred: _,
+        opponent,
+        libraries,
+        enemy_draw_groups,
+        arena,
+        map: map_load,
+    } = loaded;
+    let mut duel = Duel::load_with(cache, 6.0, opponent)
         .map_err(|e| anyhow::anyhow!("loading the simulation: {e}"))?;
     stage("simulation");
     duel.rules
@@ -462,7 +605,11 @@ pub fn run(options: Options) -> Result<()> {
     if options.simple_ai || !options.enemy_present {
         duel.use_simple_ai();
     } else {
-        let brain = options.brain.build()?;
+        let brain = options
+            .brain
+            .take()
+            .context("the brain options are used once")?
+            .build()?;
         let brain_name = brain.name();
         let log = duel
             .set_brain(brain, options.brain_log)
@@ -483,7 +630,8 @@ pub fn run(options: Options) -> Result<()> {
             driver.brain_move_every = options.brain_move_every;
             driver.coach_review_every = options.coach_review_every;
         }
-        if let (Some(path), Some(driver)) = (options.brain_memory, duel.boss_brain.as_mut()) {
+        if let (Some(path), Some(driver)) = (options.brain_memory.take(), duel.boss_brain.as_mut())
+        {
             driver.use_player_memory(path, &options.player);
         }
     }
@@ -492,20 +640,11 @@ pub fn run(options: Options) -> Result<()> {
     let mut stories = map::story::MapStory::default();
     let mut start_yaw = 0.0;
     let mut idols = idol::Idols::default();
-    // The item params, shared by the sim (pickups, Storage, restock) and the game menu.
-    let item_data = pickup::item_data(&cache);
     let mut pickups = Vec::new();
     let mut within = None;
     let mut fog_walls = Vec::new();
-    if let Some(spec) = options.arena {
-        let t = std::time::Instant::now();
-        let arena = Arena::load(&cache, spec, options.full_map).map_err(|e| {
-            anyhow::anyhow!(
-                "arena {}: {e} (run `sekiro-extract map {}`)",
-                spec.name,
-                spec.map
-            )
-        })?;
+    if let Some((arena, took)) = arena {
+        let spec = arena.spec;
         arena.place(&mut duel);
         fog_walls.clone_from(&arena.fog_walls);
         start_yaw = arena.layout.wolf.yaw;
@@ -536,64 +675,29 @@ pub fn run(options: Options) -> Result<()> {
             } else {
                 format!(" within {} m", spec.radius)
             },
-            t.elapsed().as_secs_f32()
+            took.as_secs_f32()
         );
         on_map = Some((
-            map::map_dir(&cache, spec.map)?,
+            map::map_dir(cache, spec.map)?,
             spec.map.to_string(),
             arena.world.clone(),
         ));
-        map::raise_io_stack();
-    } else if let Some(id) = &options.map {
-        let dir = map::map_dir(&cache, id)?;
-        let blocks = map::world::play_blocks(&cache, id)?;
-        // A connected world's stories, loaded once for its objects' collision and the map.
-        if map::world::connects(id) {
-            stories = map::story::load_blocks(&cache, &blocks)?;
-        }
-        let world = Arc::new(map::world::collision_world(&cache, &blocks, &stories)?);
-        stage("collision world");
-        // Wolf's feet meet `h` (#276), built on a thread while the rest loads; `--no-foot-ik`
-        // draws them on the play collision, for comparison.
-        if !std::env::args().any(|a| a == "--no-foot-ik") {
-            foot_ground = Some(crate::foot_ik::FootGround::load(
-                &cache,
-                &blocks,
-                &stories,
-                world.clone(),
-            ));
-        }
-        idols = idol::Idols::load(&cache, &blocks, |x, z, y| world.floor(x, z, y + 1.0));
-        duel.set_idols(idols.spots.clone());
-        pickups = pickup::load(&cache, &blocks, &item_data);
-        let at_idol = options.at_idol.and_then(|e| {
-            let i = idols.index(e);
-            if i.is_none() {
-                warn!("--at-idol {e}: no such idol on {id}");
-            }
-            i
-        });
-        let (start, yaw_degrees) = match (at_idol, options.spawn) {
-            (Some(i), _) => {
-                let p = idols.spots[i].checkpoint;
-                (Vec3::from(p.position), p.yaw.to_degrees())
-            }
-            (None, Some([x, y, z, yaw])) => {
-                let y = world.floor(x, z, y + 1.0).unwrap_or(y);
-                (Vec3::new(x, y, z), yaw)
-            }
-            (None, None) => map::player_start(&dir, options.start)?,
-        };
-        let yaw = yaw_degrees.to_radians();
-        start_yaw = yaw;
+    } else if let Some(m) = map_load {
+        let world = m.world;
+        duel.set_idols(m.idols.spots.clone());
+        idols = m.idols;
+        pickups = m.pickups;
+        foot_ground = m.foot_ground;
+        stories = m.stories;
+        start_yaw = m.yaw;
         place_pair(
             &mut duel,
-            start,
-            yaw,
+            m.start,
+            m.yaw,
             options.enemy_distance,
             |x, z, near| world.floor(x, z, near + 1.0).unwrap_or(near),
         );
-        if let Some(i) = at_idol {
+        if let Some(i) = m.at_idol {
             duel.start_at_idol(i);
         }
         duel.player.ground = Box::new(world.clone());
@@ -601,13 +705,13 @@ pub fn run(options: Options) -> Result<()> {
         // Placeholder until the map's authored void return volumes are decoded.
         duel.fall_respawn_depth = Some(40.0);
         eprintln!(
-            "{id}: start {} at {:?}, {} collision triangles",
+            "{}: start {} at {:?}, {} collision triangles",
+            m.id,
             options.start,
             duel.player.body.position,
             world.triangle_count()
         );
-        on_map = Some((dir, id.clone(), world));
-        map::raise_io_stack();
+        on_map = Some((m.dir, m.id, world));
     }
     if let Some((_, id, world)) = &on_map {
         require_floor(duel.player.body.position, |x, z, top| {
@@ -631,7 +735,7 @@ pub fn run(options: Options) -> Result<()> {
     {
         // The wire aims through the world Wolf collides with (#18).
         duel.player.wire =
-            sekiro_sim::wire::Wire::load(&cache, dir, world.clone()).map_err(anyhow::Error::msg)?;
+            sekiro_sim::wire::Wire::load(cache, dir, world.clone()).map_err(anyhow::Error::msg)?;
     }
     if !options.enemy_present {
         vacant_enemy_slot(&mut duel);
@@ -639,7 +743,7 @@ pub fn run(options: Options) -> Result<()> {
     if options.map_enemies {
         let (_, id, world) = on_map.as_ref().context("--map-enemies requires a map")?;
         let mut population = sekiro_sim::duel::population::Population::load_map(
-            &cache,
+            cache,
             id,
             world.clone(),
             duel.player.body.position,
@@ -678,7 +782,6 @@ pub fn run(options: Options) -> Result<()> {
             .map_err(anyhow::Error::msg)?,
         ),
     };
-    let scripted = script.is_some();
     let replay = match options.input.as_deref() {
         None => None,
         Some(path) => Some(crate::input_replay::InputReplay::new(
@@ -688,16 +791,340 @@ pub fn run(options: Options) -> Result<()> {
             .map_err(anyhow::Error::msg)?,
         )),
     };
+    stage("traversal data");
+    Ok(Prepared {
+        duel,
+        libraries,
+        enemy_draw_groups,
+        start_yaw,
+        fog_walls,
+        within,
+        on_map,
+        stories,
+        foot_ground,
+        idols,
+        has_pickups,
+        script,
+        replay,
+    })
+}
+
+impl Prepared {
+    /// Inserts the session's resources and its simulation; the caller takes `stories` and
+    /// `replay` first, for the app's build.
+    fn insert(self, world: &mut World, cache: &Path, options: &Options) -> Result<()> {
+        let duel = self.duel;
+        world.insert_resource(Libraries(self.libraries));
+        world.insert_resource(EnemyScene {
+            cache: cache.to_path_buf(),
+            spec: duel.spec.clone(),
+        });
+        world.insert_resource(EnemyDrawGroups(self.enemy_draw_groups));
+        world.insert_resource(Orbit {
+            focus: Vec3::from_array(duel.player.body.position)
+                + Vec3::Y * duel.camera.chr_org_offset_y,
+            // Behind Wolf, so scripted "forward" is the way he faces.
+            yaw: self.start_yaw,
+            pitch: 0.25,
+            distance: duel.camera.cam_dist,
+            look: Default::default(),
+        });
+        world.insert_resource(FogWalls(self.fog_walls));
+        if let Some(ground) = self.foot_ground {
+            world.insert_resource(ground);
+        }
+        // Even with none: the start menu's app runs the idol systems for any area it may load.
+        world.insert_resource(self.idols);
+        if let Some((_, _, collision)) = self.on_map {
+            world.insert_resource(MapCollision(collision));
+        }
+        world.insert_non_send(Sim {
+            last: DuelReport::default(),
+            duel,
+            started: [None, None],
+            hit_log: Vec::new(),
+            script: self.script,
+            route: ScriptRoute::parse(&std::env::args().collect::<Vec<_>>())?,
+            step: 0,
+            lock_requested: options.lock_on && (options.enemy_present || options.map_enemies),
+            break_posture: options.break_posture,
+            passive: !options.enemy,
+            enemy_present: options.enemy_present,
+            previous: [([0.0; 3], 0.0); 2],
+            clock: [0.0; 2],
+            faded: [false; 2],
+            perilous_age: None,
+        });
+        // The map's population draws from the simulation, so it spawns once that is in.
+        if options.map_enemies {
+            map_enemies::insert(world, cache)?;
+        }
+        Ok(())
+    }
+}
+
+/// What the app's shape depends on beyond the options: known after loading on the command
+/// line, taken from the options under the start menu (which loads the session later).
+struct Shape {
+    focus: Vec3,
+    within: Option<(Vec3, f32)>,
+    stories: map::story::MapStory,
+    idols: bool,
+    pickups: bool,
+    scripted: bool,
+    /// Built under the start menu ([`crate::title`]): the window opens on it and the session
+    /// loads when an area is picked.
+    title: bool,
+}
+
+impl Options {
+    /// The session is on a map (an arena is one too), so the asset root is the cache.
+    fn on_map(&self) -> bool {
+        self.arena.is_some() || self.map.is_some()
+    }
+
+    /// The map the session plays on, an arena's included.
+    fn map_id(&self) -> Option<String> {
+        self.arena
+            .map(|a| a.map.to_string())
+            .or_else(|| self.map.clone())
+    }
+}
+
+/// `--play` and its arena and map modes: loads the session, then opens its window.
+pub fn run(mut options: Options) -> Result<()> {
+    let cache = options.cache.canonicalize().context("cache directory")?;
+    validate(&options, &cache)?;
+    // The item params, shared by the sim (pickups, Storage, restock) and the game menu.
+    let item_data = pickup::item_data(&cache);
+    let loaded = load(&options, &cache, &item_data)?;
+    let mut prepared = assemble(&mut options, &cache, &item_data, loaded)?;
+    if options.on_map() {
+        map::raise_io_stack();
+    }
     for (_, path) in &options.screenshots {
         if path.exists() {
             std::fs::remove_file(path)?;
         }
     }
+    let replay = prepared.replay.take();
+    let shape = Shape {
+        focus: Vec3::from_array(prepared.duel.player.body.position),
+        within: prepared.within,
+        stories: std::mem::take(&mut prepared.stories),
+        idols: !prepared.idols.spots.is_empty(),
+        pickups: prepared.has_pickups,
+        scripted: prepared.script.is_some() || replay.is_some(),
+        title: false,
+    };
+    let (mut app, _) = build(&mut options, &cache, item_data, shape, replay)?;
+    prepared.insert(app.world_mut(), &cache, &options)?;
+    app.run();
+    Ok(())
+}
 
-    stage("traversal data");
-    // Map GLBs stream outwards from here.
-    let start_position = Vec3::from_array(duel.player.body.position);
+/// The start menu's session: the window opens at once on the menu ([`crate::title`]) with
+/// `options` for New Game; picking an area sets the start and loads the session behind the
+/// loading screen, in the same window.
+pub fn run_title(mut options: Options) -> Result<()> {
+    let cache = options.cache.canonicalize().context("cache directory")?;
+    validate(&options, &cache)?;
+    stage("start menu options");
+    let item_data = pickup::item_data(&cache);
+    stage("item params");
+    map::raise_io_stack();
+    let id = options.map.clone().context("the start menu needs a map")?;
+    let dir = map::map_dir(&cache, &id)?;
+    let shape = Shape {
+        focus: map::player_start(&dir, options.start)?.0,
+        within: None,
+        stories: map::story::MapStory::default(),
+        idols: true,
+        pickups: true,
+        scripted: false,
+        title: true,
+    };
+    let (mut app, startup) = build(&mut options, &cache, item_data.clone(), shape, None)?;
+    app.world_mut().remove_resource::<map::DeferredWorld>();
+    app.world_mut()
+        .resource_mut::<crate::menu::PanelState>()
+        .title = true;
+    app.insert_non_send(TitleLoad {
+        options: Some(options),
+        cache,
+        item_data,
+        thread: None,
+        startup,
+        picked_at: None,
+    })
+    .set_error_handler(skip_until_play)
+    .add_systems(Update, finish_title_load);
+    crate::title::install(&mut app, &dir);
+    stage("start menu built");
+    app.run();
+    Ok(())
+}
+
+/// Set once the start menu's session has loaded; until then a system whose resources the
+/// session has not inserted yet is skipped instead of failing.
+static PLAYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The start menu's error handler: systems that wait for the session's resources are skipped
+/// while it loads ([`PLAYING`]); every other error is handled as usual.
+fn skip_until_play(error: BevyError, ctx: bevy::ecs::error::ErrorContext) {
+    if !PLAYING.load(std::sync::atomic::Ordering::Relaxed)
+        && error
+            .downcast_ref::<bevy::ecs::system::SystemParamValidationError>()
+            .is_some()
+    {
+        return;
+    }
+    bevy::ecs::error::match_severity(error, ctx);
+}
+
+/// The start menu's session while it loads.
+struct TitleLoad {
+    options: Option<Options>,
+    cache: PathBuf,
+    item_data: Arc<sekiro_sim::items::ItemData>,
+    thread: Option<std::thread::JoinHandle<(Options, Result<Loaded>)>>,
+    startup: Option<Schedule>,
+    picked_at: Option<std::time::Instant>,
+}
+
+/// The area the start menu picked: the map's player start. Inserted by [`crate::title`].
+#[derive(Resource)]
+pub(crate) struct TitlePick(pub usize);
+
+/// The loading screen, for the start menu to show when an area is picked.
+pub(crate) fn spawn_loading_screen(commands: Commands) {
+    play_gate::spawn_screen(commands);
+}
+
+/// Starts loading the picked area on a thread, then builds the session on the main thread,
+/// inserts it and runs its Startup systems, all behind the loading screen.
+fn finish_title_load(world: &mut World) {
+    let Some(start) = world.get_resource::<TitlePick>().map(|p| p.0) else {
+        return;
+    };
+    let Some(mut title) = world.remove_non_send::<TitleLoad>() else {
+        return;
+    };
+    if let Some(mut options) = title.options.take() {
+        options.start = start;
+        title.picked_at = Some(std::time::Instant::now());
+        stage(&format!("start {start} picked, loading"));
+        let cache = title.cache.clone();
+        let items = title.item_data.clone();
+        title.thread = Some(std::thread::spawn(move || {
+            // The drawn world (its blocks and lights) loads beside the collision, and takes the
+            // stories the collision loaded.
+            let world = options
+                .map
+                .clone()
+                .filter(|id| map::world::connects(id))
+                .map(|id| {
+                    let cache = cache.clone();
+                    std::thread::spawn(move || {
+                        let world = map::DeferredMap::load(&map::map_dir(&cache, &id)?);
+                        stage("connected world and lights");
+                        world
+                    })
+                });
+            let loaded = load(&options, &cache, &items).and_then(|mut loaded| {
+                if let Some(world) = world {
+                    let mut world = world
+                        .join()
+                        .map_err(|_| anyhow::anyhow!("the world loading thread panicked"))??;
+                    let stories = loaded
+                        .map
+                        .as_mut()
+                        .map(|m| std::mem::take(&mut m.stories))
+                        .unwrap_or_default();
+                    world.add_stories(&cache, stories)?;
+                    loaded.deferred = Some(world);
+                }
+                anyhow::Ok(loaded)
+            });
+            (options, loaded)
+        }));
+    }
+    if !title.thread.as_ref().is_some_and(|t| t.is_finished()) {
+        world.insert_non_send(title);
+        return;
+    }
+    let Ok((mut options, loaded)) = title.thread.take().expect("checked above").join() else {
+        eprintln!("loading the picked area: the loading thread panicked");
+        world.write_message(AppExit::error());
+        return;
+    };
+    let result = loaded.and_then(|mut loaded| {
+        if let (Some(deferred), Some(m)) = (loaded.deferred.take(), &loaded.map) {
+            deferred.insert(world, &m.dir)?;
+        }
+        // The stories went to the connected world above; a map alone uses none.
+        let prepared = assemble(&mut options, &title.cache, &title.item_data, loaded)?;
+        map::refocus(world, Vec3::from_array(prepared.duel.player.body.position));
+        prepared.insert(world, &title.cache, &options)
+    });
+    if let Err(error) = result {
+        eprintln!("loading the picked area: {error:#}");
+        world.write_message(AppExit::error());
+        return;
+    }
+    world.remove_resource::<TitlePick>();
+    crate::title::leave(world);
+    PLAYING.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Some(mut startup) = title.startup.take() {
+        startup.run(world);
+    }
+    stage(&format!(
+        "session built {:.1} s after the pick",
+        title.picked_at.map_or(0.0, |t| t.elapsed().as_secs_f32())
+    ));
+}
+
+/// Sets aside the Startup systems added so far (Bevy's own, such as picking's mouse pointer),
+/// so the ones added next form the session's own Startup ([`take_session_startup`]).
+fn set_engine_startup_aside(app: &mut App) -> Schedule {
+    app.world_mut()
+        .resource_mut::<Schedules>()
+        .remove(Startup)
+        .unwrap_or_else(|| Schedule::new(Startup))
+}
+
+/// Takes out the Startup systems added since [`set_engine_startup_aside`], the session's own,
+/// and puts the `engine`'s back to run on the first frame.
+fn take_session_startup(app: &mut App, engine: Schedule) -> Schedule {
+    let mut schedules = app.world_mut().resource_mut::<Schedules>();
+    let session = schedules
+        .remove(Startup)
+        .unwrap_or_else(|| Schedule::new(Startup));
+    schedules.insert(engine);
+    session
+}
+
+/// Builds the play app from the options and the session's [`Shape`]; the session itself is
+/// inserted by the caller. Under the start menu it also returns the session's Startup systems:
+/// they spawn from the session's data, so they run once it has loaded ([`finish_title_load`]),
+/// while Bevy's own run on the first frame.
+fn build(
+    options: &mut Options,
+    cache: &Path,
+    item_data: Arc<sekiro_sim::items::ItemData>,
+    shape: Shape,
+    replay: Option<crate::input_replay::InputReplay>,
+) -> Result<(App, Option<Schedule>)> {
+    let on_map = options.on_map();
+    let scripted = shape.scripted;
+    let map_dir = options
+        .map_id()
+        .map(|id| map::map_dir(cache, &id).map(|dir| (dir, id)))
+        .transpose()?;
     let mut app = App::new();
+    if shape.title {
+        app.insert_resource(map::DeferredWorld);
+    }
     #[cfg(feature = "profile-spans")]
     let defaults = DefaultPlugins.set(bevy::log::LogPlugin {
         custom_layer: crate::span_profile::layer,
@@ -715,15 +1142,16 @@ pub fn run(options: Options) -> Result<()> {
                     resolution: options.window_size.into(),
                     present_mode: crate::presentation::requested_mode(),
                     // Make the first input frame's request a false -> true transition.
-                    // Bevy's winit backend only calls focus_window on that transition.
-                    focused: false,
+                    // Bevy's winit backend only calls focus_window on that transition. The
+                    // start menu is used first, so its window opens focused.
+                    focused: shape.title,
                     ..default()
                 }),
                 // The input system requests focus and cursor lock on the first frame;
                 // initial scripted/replay settings remain useful before that system runs.
                 primary_cursor_options: Some(CursorOptions {
-                    visible: scripted || replay.is_some(),
-                    grab_mode: if scripted || replay.is_some() {
+                    visible: scripted || shape.title,
+                    grab_mode: if scripted || shape.title {
                         CursorGrabMode::None
                     } else {
                         CursorGrabMode::Locked
@@ -734,198 +1162,175 @@ pub fn run(options: Options) -> Result<()> {
             })
             .set(AssetPlugin {
                 // On a map the asset root is the cache, so models and map pieces both load.
-                file_path: if on_map.is_some() {
+                file_path: if on_map {
                     cache.to_string_lossy().into_owned()
                 } else {
                     cache.join("models").to_string_lossy().into_owned()
                 },
                 ..default()
             }),
-    )
-    .insert_resource(ModelPath(if on_map.is_some() { "models/" } else { "" }))
-    .insert_resource(ClearColor(Color::srgb(0.52, 0.60, 0.70)))
-    .insert_resource(GlobalAmbientLight {
-        color: Color::srgb(0.95, 0.95, 1.0),
-        brightness: 450.0,
-        ..default()
-    })
-    .insert_resource(bevy::winit::WinitSettings::continuous())
-    .insert_resource(crate::map::upload_budget())
-    .insert_resource(Time::<Fixed>::from_hz(STEP_HZ))
-    .add_systems(Startup, cap_catch_up)
-    .insert_resource(Libraries(libraries))
-    .insert_resource(EnemyScene {
-        cache: cache.clone(),
-        spec: duel.spec.clone(),
-    })
-    .insert_resource(EnemyDrawGroups(enemy_draw_groups))
-    .insert_resource(LiveInput::default())
-    .insert_resource(DebugHud(options.enemy_present))
-    .insert_resource(Orbit {
-        focus: Vec3::from_array(duel.player.body.position) + Vec3::Y * duel.camera.chr_org_offset_y,
-        // Behind Wolf, so scripted "forward" is the way he faces.
-        yaw: start_yaw,
-        pitch: 0.25,
-        distance: duel.camera.cam_dist,
-        look: Default::default(),
-    })
-    .insert_resource(Captures {
-        pending: options.screenshots,
-        in_flight: Vec::new(),
-        exit_after_script: options.exit_after_script,
-    })
-    .insert_non_send(Sim {
-        last: DuelReport::default(),
-        duel,
-        started: [None, None],
-        hit_log: Vec::new(),
-        script,
-        route: ScriptRoute::parse(&std::env::args().collect::<Vec<_>>())?,
-        step: 0,
-        lock_requested: options.lock_on && (options.enemy_present || options.map_enemies),
-        break_posture: options.break_posture,
-        passive: !options.enemy,
-        enemy_present: options.enemy_present,
-        previous: [([0.0; 3], 0.0); 2],
-        clock: [0.0; 2],
-        faded: [false; 2],
-        perilous_age: None,
-    })
-    .init_resource::<combat_hud::Gauges>()
-    .add_plugins(grapple_hud::plugin)
-    .insert_resource(crate::brain_overlay::RecordingBrain {
-        enabled: options.brain_overlay && options.enemy_present,
-        mode: options.brain_label,
-        player: options.player,
-        view: Default::default(),
-        unicode_font: false,
-    })
-    .init_resource::<crate::bullet_fx::BulletFx>()
-    .add_plugins(crate::decals::DecalPlugin {
-        cache: cache.clone(),
-    })
-    .add_plugins(crate::fxr::plugin(cache.clone(), |app| {
-        app.add_systems(
-            FixedUpdate,
-            (|sim: NonSend<Sim>,
-              mut fx: ResMut<crate::fxr::FxrPlayer>,
-              mut resets: MessageWriter<crate::decals::ClearStains>,
-              mut stains: MessageWriter<crate::decals::Stain>| {
-                if sim.last.respawned {
-                    fx.reset_fight();
-                    resets.write(crate::decals::ClearStains);
-                }
-                fx.observe(&sim.duel);
-                crate::decals::forward(&mut fx, &sim.duel, &sim.last, &mut stains);
-                if std::env::var_os("PF_RESPAWN_PROBE").is_some() && sim.step % 60 == 10 {
-                    for _ in 0..16 {
-                        stains.write(crate::decals::Stain {
-                            id: 50010,
-                            at: Vec3::from_array(sim.duel.player.body.position) + Vec3::Y,
-                            floor: sim.duel.player.body.position[1],
-                            blow: None,
-                        });
-                    }
-                }
-            })
-            .after(simulate)
-            .run_if(crate::menu::active),
-        );
-    }))
-    .add_plugins(cinematic_fade::CinematicFadePlugin)
-    .add_plugins(crate::cloth::plugin(cache.clone()))
-    .add_plugins(crate::audio::GameAudioPlugin {
-        cache: cache.clone(),
-        map: on_map.as_ref().map(|(_, id, _)| id.clone()),
-        enemy: options
-            .enemy_present
-            .then(|| (options.opponent.chr.clone(), options.opponent.npc_param)),
-    })
-    // Wolf's and the enemy's models load before the map's GLBs are queued.
-    .add_systems(Startup, setup.before(map::MapSpawn))
-    .init_resource::<play_gate::PlayGate>()
-    .add_systems(Startup, play_gate::spawn_screen)
-    .add_systems(Startup, combat_hud::spawn_reward)
-    .add_systems(
-        Update,
-        (play_gate::check_render, play_gate::update)
-            .chain()
-            .run_if(play_gate::loading),
-    )
-    .insert_resource(rope::RopeCache(cache.clone()))
-    .add_systems(
-        Startup,
-        crate::brain_overlay::spawn.run_if({
-            let present = options.enemy_present;
-            move || present
-        }),
-    )
-    .insert_resource(FogWalls(fog_walls))
-    .add_systems(FixedUpdate, simulate.run_if(crate::menu::active))
-    .add_systems(
-        FixedUpdate,
-        hold_fog_walls.after(simulate).run_if(crate::menu::active),
-    )
-    .add_systems(
-        Update,
-        (
-            // The camera turns first, so the stick read this frame is relative to the camera
-            // that is drawn.
-            orbit_camera.run_if(crate::menu::active),
-            gather_input.run_if(crate::menu::active),
-            brain_report,
-            recording_brain,
-            reload_enemy,
-            bind_rigs,
-            apply_draw_masks,
-            // The map's standing probe reads Wolf's drawn feet of this frame.
-            sync_actors.before(map::world::update),
-            sync_arena_scene,
-            sync_bullets,
-            sync_lightning_tint,
-            (
-                rope::pose,
-                animate,
-                gate_foot_ik,
-                crate::foot_ik::pose,
-                rope::draw,
-                sheath_sword,
-            )
-                .chain(),
-            follow_camera,
-            crate::brain_overlay::update,
-            hud,
-            grapple_marker,
-            (
-                combat_hud::update,
-                combat_hud::update_status,
-                combat_hud::update_perilous,
-                combat_hud::update_reward,
-            )
-                .chain(),
-            log_camera,
-        )
-            .chain(),
     );
-    if let Some(ground) = foot_ground {
-        app.insert_resource(ground);
+    stage("default plugins");
+    let engine_startup = shape.title.then(|| set_engine_startup_aside(&mut app));
+    app.insert_resource(ModelPath(if on_map { "models/" } else { "" }))
+        .insert_resource(ClearColor(Color::srgb(0.52, 0.60, 0.70)))
+        .insert_resource(GlobalAmbientLight {
+            color: Color::srgb(0.95, 0.95, 1.0),
+            brightness: 450.0,
+            ..default()
+        })
+        .insert_resource(bevy::winit::WinitSettings::continuous())
+        .insert_resource(crate::map::upload_budget())
+        .insert_resource(Time::<Fixed>::from_hz(STEP_HZ))
+        .add_systems(Startup, cap_catch_up)
+        .insert_resource(LiveInput::default())
+        .insert_resource(DebugHud(options.enemy_present))
+        .insert_resource(Captures {
+            pending: std::mem::take(&mut options.screenshots),
+            in_flight: Vec::new(),
+            exit_after_script: options.exit_after_script,
+        })
+        .init_resource::<combat_hud::Gauges>()
+        .add_plugins(grapple_hud::plugin)
+        .insert_resource(crate::brain_overlay::RecordingBrain {
+            enabled: options.brain_overlay && options.enemy_present,
+            mode: options.brain_label.clone(),
+            player: options.player.clone(),
+            view: Default::default(),
+            unicode_font: false,
+        })
+        .init_resource::<crate::bullet_fx::BulletFx>()
+        .add_plugins(crate::decals::DecalPlugin {
+            cache: cache.to_path_buf(),
+        })
+        .add_plugins(crate::fxr::plugin(cache.to_path_buf(), |app| {
+            app.add_systems(
+                FixedUpdate,
+                (|sim: NonSend<Sim>,
+                  mut fx: ResMut<crate::fxr::FxrPlayer>,
+                  mut resets: MessageWriter<crate::decals::ClearStains>,
+                  mut stains: MessageWriter<crate::decals::Stain>| {
+                    if sim.last.respawned {
+                        fx.reset_fight();
+                        resets.write(crate::decals::ClearStains);
+                    }
+                    fx.observe(&sim.duel);
+                    crate::decals::forward(&mut fx, &sim.duel, &sim.last, &mut stains);
+                    if std::env::var_os("PF_RESPAWN_PROBE").is_some() && sim.step % 60 == 10 {
+                        for _ in 0..16 {
+                            stains.write(crate::decals::Stain {
+                                id: 50010,
+                                at: Vec3::from_array(sim.duel.player.body.position) + Vec3::Y,
+                                floor: sim.duel.player.body.position[1],
+                                blow: None,
+                            });
+                        }
+                    }
+                })
+                .after(simulate)
+                .run_if(crate::menu::active),
+            );
+        }))
+        .add_plugins(cinematic_fade::CinematicFadePlugin)
+        .add_plugins(crate::cloth::plugin(cache.to_path_buf()))
+        .add_plugins(crate::audio::GameAudioPlugin {
+            cache: cache.to_path_buf(),
+            map: options.map_id(),
+            enemy: options
+                .enemy_present
+                .then(|| (options.opponent.chr.clone(), options.opponent.npc_param)),
+        })
+        // Wolf's and the enemy's models load before the map's GLBs are queued.
+        .add_systems(Startup, setup.before(map::MapSpawn))
+        .init_resource::<play_gate::PlayGate>()
+        .add_systems(Startup, combat_hud::spawn_reward)
+        .add_systems(
+            Update,
+            (play_gate::check_render, play_gate::update)
+                .chain()
+                .run_if(play_gate::loading),
+        )
+        .insert_resource(rope::RopeCache(cache.to_path_buf()))
+        .add_systems(
+            Startup,
+            crate::brain_overlay::spawn.run_if({
+                let present = options.enemy_present;
+                move || present
+            }),
+        )
+        .add_systems(FixedUpdate, simulate.run_if(crate::menu::active))
+        .add_systems(
+            FixedUpdate,
+            hold_fog_walls.after(simulate).run_if(crate::menu::active),
+        )
+        .add_systems(
+            Update,
+            (
+                // The camera turns first, so the stick read this frame is relative to the camera
+                // that is drawn.
+                orbit_camera.run_if(crate::menu::active),
+                gather_input.run_if(crate::menu::active),
+                brain_report,
+                recording_brain,
+                reload_enemy,
+                bind_rigs,
+                apply_draw_masks,
+                // The map's standing probe reads Wolf's drawn feet of this frame.
+                sync_actors.before(map::world::update),
+                sync_arena_scene,
+                sync_bullets,
+                sync_lightning_tint,
+                (
+                    rope::pose,
+                    animate,
+                    gate_foot_ik,
+                    crate::foot_ik::pose,
+                    rope::draw,
+                    sheath_sword,
+                )
+                    .chain(),
+                follow_camera,
+                crate::brain_overlay::update,
+                hud,
+                grapple_marker,
+                (
+                    combat_hud::update,
+                    combat_hud::update_status,
+                    combat_hud::update_perilous,
+                    combat_hud::update_reward,
+                )
+                    .chain(),
+                log_camera,
+            )
+                .chain(),
+        );
+    stage("effects, cloth and audio plugins");
+    // The start menu shows the loading screen when an area is picked.
+    if !shape.title {
+        app.add_systems(Startup, play_gate::spawn_screen);
     }
     crate::menu::install(&mut app);
     // First of the screens, so its extra menu atlases load with theirs in one read.
-    game_menu::install(&mut app, options.attack_power.value(), item_data);
+    let title_art: &[&'static str] = if shape.title {
+        &[crate::title::TITLE_ATLAS]
+    } else {
+        &[]
+    };
+    game_menu::install(&mut app, options.attack_power.value(), item_data, title_art);
     crate::death_screen::install(&mut app);
-    idol::install(&mut app, idols);
-    pickup::install(&mut app, has_pickups);
+    idol::install(&mut app, shape.idols);
+    pickup::install(&mut app, shape.pickups);
     if options.enemy_present {
-        arena_d_scene::install(&mut app, &cache, options.arena, options.objects)?;
-        arena_c_scene::install(&mut app, &cache, options.arena)?;
+        arena_d_scene::install(&mut app, cache, options.arena, options.objects)?;
+        arena_c_scene::install(&mut app, cache, options.arena)?;
     }
+    stage("menus and screens");
     crate::perf_log::register!(app);
     #[cfg(feature = "profile-spans")]
     app.add_systems(Last, crate::span_profile::report);
     if let Some(check) = live_check::LiveCheck::from_args(
         &std::env::args().collect::<Vec<_>>(),
-        on_map.as_ref().map(|(dir, _, _)| dir.as_path()),
+        map_dir.as_ref().map(|(dir, _)| dir.as_path()),
     )? {
         app.insert_resource(check).add_systems(
             Last,
@@ -943,16 +1348,16 @@ pub fn run(options: Options) -> Result<()> {
             crate::input_replay::inject.before(bevy::input::InputSystems),
         );
     }
-    if let Some((dir, id, world)) = on_map {
+    if let Some((dir, id)) = map_dir {
         // What the arena leaves out of its collision it does not draw either (#18).
         let arena_hidden = options
             .arena
             .map(|a| {
                 let layout = map::world::read_layout(&dir)?;
                 let mut hidden =
-                    sekiro_sim::arenas_a::hidden_parts(&cache, a).map_err(anyhow::Error::msg)?;
+                    sekiro_sim::arenas_a::hidden_parts(cache, a).map_err(anyhow::Error::msg)?;
                 hidden.extend(
-                    sekiro_sim::arena::story_objects_off(&cache, a, &layout)
+                    sekiro_sim::arena::story_objects_off(cache, a, &layout)
                         .map_err(anyhow::Error::msg)?,
                 );
                 anyhow::Ok(hidden)
@@ -987,24 +1392,24 @@ pub fn run(options: Options) -> Result<()> {
                 markers: false,
                 hour: options.hour,
                 gparam: options.gparam.clone(),
-                within,
-                focus: Some(start_position),
+                within: shape.within,
+                focus: Some(shape.focus),
             },
-            stories,
+            shape.stories,
         )?;
-        app.insert_resource(MapCollision(world));
+        stage("map");
         if options.arena.is_some() && options.enemy_present {
-            crate::arena_b::install(&mut app, &cache, &id)?;
+            crate::arena_b::install(&mut app, cache, &id)?;
         }
     }
     if options.map_enemies {
-        map_enemies::install(&mut app, &cache)?;
+        map_enemies::install(&mut app);
     }
     map::ready::install(&mut app);
     app.add_plugins(crate::presentation::PresentationPlugin)
         .add_systems(Last, (capture, exit_fast).chain());
-    app.run();
-    Ok(())
+    let session_startup = engine_startup.map(|engine| take_session_startup(&mut app, engine));
+    Ok((app, session_startup))
 }
 
 /// Ends a play session as soon as anything asks the app to exit (closing the window, the pause
@@ -2772,6 +3177,37 @@ fn grapple_marker(
 mod tests {
     use super::*;
     use sekiro_sim::fight::FighterKind;
+
+    /// Under the start menu the session's systems wait for its resources instead of failing,
+    /// and its Startup runs only when the session is inserted, while the engine's own Startup
+    /// (picking's mouse pointer, which the menu's clicks need) runs on the first frame (#8).
+    #[test]
+    fn start_menu_app_waits_for_the_session() {
+        #[derive(Resource)]
+        struct Session(u32);
+        #[derive(Resource, Default)]
+        struct Seen(Vec<u32>);
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .set_error_handler(skip_until_play)
+            .init_resource::<Seen>()
+            .add_systems(Startup, |mut seen: ResMut<Seen>| seen.0.push(0));
+        let engine = set_engine_startup_aside(&mut app);
+        app.add_systems(Startup, |s: Res<Session>, mut seen: ResMut<Seen>| {
+            seen.0.push(s.0)
+        })
+        .add_systems(Update, |s: Res<Session>, mut seen: ResMut<Seen>| {
+            seen.0.push(s.0 + 100)
+        });
+        let mut startup = take_session_startup(&mut app, engine);
+        app.update();
+        app.update();
+        assert_eq!(app.world().resource::<Seen>().0, [0]);
+        app.world_mut().insert_resource(Session(1));
+        startup.run(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<Seen>().0, [0, 1, 101]);
+    }
 
     #[test]
     fn lightning_tint_marks_a_material_modified_only_when_it_changes() {

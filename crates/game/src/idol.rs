@@ -244,9 +244,10 @@ struct Label(usize);
 #[derive(Component)]
 struct HelpLine(Vec<String>);
 
-/// The idol guide and menu; nothing when the play world has no idols.
-pub(super) fn install(app: &mut App, idols: Idols) {
-    if idols.spots.is_empty() {
+/// The idol guide and menu; nothing when the play world has no idols (`any`). The session
+/// inserts its [`Idols`].
+pub(super) fn install(app: &mut App, any: bool) {
+    if !any {
         return;
     }
     GameFonts::insert(app);
@@ -256,8 +257,7 @@ pub(super) fn install(app: &mut App, idols: Idols) {
     super::idol_found::install(app, &events);
     super::idol_rest::install(app);
     idol_travel::install(app, &events);
-    app.insert_resource(idols)
-        .init_resource::<Row>()
+    app.init_resource::<Row>()
         .init_resource::<Pointed<usize>>()
         .init_resource::<crate::menu::Modal>()
         .init_resource::<crate::map_fx::FoundIdols>()
