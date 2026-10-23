@@ -276,6 +276,11 @@ fn attach(world: &mut World, block: &mut Block, parent: Entity, part_index: usiz
     let Some(surfaces) = block.parts.get(&part_index) else {
         return true;
     };
+    // Disconnected loaders spawn the part root with only a Transform; it gains Visibility when
+    // its scene streams in, which can be after the clumps arrive (Bevy B0004 otherwise).
+    world
+        .entity_mut(parent)
+        .insert_if_new(Visibility::default());
     for name in surfaces {
         let model = block.manifest["surfaces"][name.as_str()]["model"]
             .as_str()
@@ -436,7 +441,8 @@ mod tests {
                     .id()
             })
             .collect();
-        // Legacy loaders tag their roots with the MSB part instead.
+        // Legacy loaders tag their roots with the MSB part instead, and spawn them with only a
+        // Transform until their scene streams in.
         roots.push(
             world
                 .spawn((
@@ -445,7 +451,6 @@ mod tests {
                         part_index: 4,
                     },
                     Transform::default(),
-                    Visibility::Hidden,
                 ))
                 .id(),
         );
@@ -490,6 +495,12 @@ mod tests {
         assert_eq!(children.len(), 3);
         let parents: HashSet<_> = children.iter().map(|c| c.0.parent()).collect();
         assert_eq!(parents, roots.iter().copied().collect());
+        // Every clump parent carries the visibility hierarchy (no Bevy B0004 warning).
+        assert!(
+            parents
+                .iter()
+                .all(|&p| world.get::<InheritedVisibility>(p).is_some())
+        );
         assert!(
             children
                 .iter()
