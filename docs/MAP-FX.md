@@ -121,7 +121,7 @@ SEKIRO_NO_MAP_FX disables this module at runtime while retaining the same execut
 Effects farther than 120 metres sleep and submit no particles or lights; sleeping trees can be evicted when the shared 192-effect budget fills.
 The player retains its global particle budget and per-node pool bounds.
 Effect meshes remain transparent, omit prepass/shadow rendering and stay off the geometry/collision diagnostic layers.
-Effect lights reuse a bounded pool of sixteen entities and the existing scene-to-lumens bridge.
+Effect lights reuse a pool of entities and the existing scene-to-lumens bridge, with no count cap: Bevy's clustered culling bounds the cost, and the former nearest-16 cap made farther lights pop in on approach (#83).
 
 Action 10000 has a bounded CPU implementation using the authored texture, colour, size variation, velocity variation, emission volume, follow factor and duration fields.
 The integer emission/duration fields are interpreted on the FXR 30 Hz clock; the native GPU scheduler's exact count semantics remain unverified.
@@ -299,7 +299,9 @@ w   = 1 / R
 
 `c` and `power` are the diffuse colour and its alpha (property block offsets 0x70 and 0x7c).
 `blink` is object offset 0x258 (spot) or 0x1dc (point), constructed as 1.0 and rewritten by the effect's flicker (FXR 609 `flickerBrightness`, `flickerIntervalMin/Max`).
-`distFade` is `20d9c0`: 1 inside the view distance, a linear ramp to 0 at `ViewDist`.
+`distFade` is `20d9c0`: 1 while `depth - radius` is within the view distance (object +0xbc, FXR 609 `maxViewDistance`), then a linear ramp to 0 over `min(0.07 * ViewDist, 10)` metres (`.rdata` 0x32890bc and 0x32892a0).
+`depth` is a dot product with a camera plane, taken to be the view axis (inferred, not traced).
+Until #83 effect lights were cut off hard at `maxViewDistance` from the camera, so the Outskirts lanterns (839531, 50 m) switched on as Wolf walked toward them; `light_view_fade` in `fxr.rs` now applies this ramp.
 Offsets 0xf8 (`ScatteringScale`, FXR `volumeDensity`) and 0xfc (`ScatteringBlinkInfluence`) are read only when the first flag is set, which is the volumetric-fog scattering pass; the deferred pass never uses them.
 Offset 0x108 is `AntiExposureRate` (FXR `adaptationExponent`, default 0, 0 in 800140, 800150 and the brazier effects).
 The factor is `powf(2, -(rate * ctx[0x458]))`; `ctx[0x458]` is the scene EV, which `SHADER-INPUTS.md` records as 0 in shipped builds (`SC_PreExposure = 2^EV = 1`).
