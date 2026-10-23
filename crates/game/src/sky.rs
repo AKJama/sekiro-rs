@@ -36,6 +36,10 @@ pub(crate) struct SkyOverride(pub Option<&'static str>);
 #[derive(Resource, Default, Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SkyGlowScale(pub Vec3);
 
+/// The dome update that writes [`SkyGlowScale`]; its readers run after it.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct SkyUpdate;
+
 /// `g_GlowScale.rgb * saturate(g_GlowScale.w)` of a sky material row.
 fn glow_scale(row: &Value) -> Vec3 {
     let v: Vec<f32> = row["params"]["g_GlowScale"]
@@ -604,7 +608,7 @@ pub(super) fn install(app: &mut App, cache: &Path, id: &str, hour: f32) -> Resul
         .init_resource::<SkyGlowScale>()
         .init_resource::<SkyOverride>()
         .insert_resource(SkyEnabled)
-        .add_systems(Update, update);
+        .add_systems(Update, update.in_set(SkyUpdate));
     Ok(())
 }
 

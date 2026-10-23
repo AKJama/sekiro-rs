@@ -385,6 +385,7 @@ Two details are stand-ins, not traced:
 - The CPU-generated 13-tap `Sample13WeightforGlow` weights are replaced by a standard 13-tap separable Gaussian with sigma 2 texels at every level.
 
 `--no-sun-glow` turns the pass off.
+The glow reaches the scene only through the glare, times the bloom's final colour, so a camera with no bloom (`--no-bloom`, or an authored bloom gain of 0) gets no glow pass and no depth sampling for it.
 
 ## Verification
 

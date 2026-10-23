@@ -304,18 +304,25 @@ fn native_post(
             let level = &mut b.levels[i - 1];
             std::mem::swap(&mut level.1, &mut level.3);
         }
-        // The Glow Filter lands in the glare accumulation after the bloom (255c90).
-        if let (Some((glow, glow_index)), Some(glow_pipeline), Some(glow_binding), Some(depth_view)) = (
+        // The Glow Filter lands in the glare accumulation after the bloom (255c90), so it is
+        // seen only through the bloom's final colour: `sun_glow::configure` attaches it only to
+        // cameras whose bloom gain is above 0.
+        if let (
+            Some((glow, glow_index)),
+            Some(glow_pipeline),
+            Some(glow_uniforms),
+            Some(depth_view),
+        ) = (
             glow_view,
             glow_pipeline.as_deref(),
-            glow_uniforms
-                .as_deref()
-                .and_then(|u| u.uniforms().binding()),
+            glow_uniforms.as_deref().map(|u| u.uniforms()),
             depth.attachment.depth_stencil_views().depth_only_view(),
-        ) && depth
-            .texture()
-            .usage()
-            .contains(TextureUsages::TEXTURE_BINDING)
+        ) && let (Some(glow_binding), Some(glow_buffer)) =
+            (glow_uniforms.binding(), glow_uniforms.buffer())
+            && depth
+                .texture()
+                .usage()
+                .contains(TextureUsages::TEXTURE_BINDING)
         {
             sun_glow::draw(
                 glow_pipeline,
@@ -326,6 +333,7 @@ fn native_post(
                     entity,
                     settings: glow,
                     uniform: glow_binding,
+                    uniform_buffer: glow_buffer.id(),
                     index: glow_index.index(),
                     scene: post.source,
                     depth: depth_view,

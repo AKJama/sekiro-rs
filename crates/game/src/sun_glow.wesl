@@ -65,7 +65,8 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
             + glow.params.x * textureSampleLevel(b, linear_sampler, in.uv, 0.0).rgb, 1.0);
     }
     @if(COMPOSITE) {
-        // GlowCompositeSinglePS: FinalColorScale * fade / sum s^i, alpha 1 (added ONE+ONE).
-        return vec4(textureSampleLevel(a, linear_sampler, in.uv, 0.0).rgb * glow.params.y, 0.0);
+        // GlowCompositeSinglePS: FinalColorScale * fade / sum s^i, alpha 1 (added ONE+ONE; the
+        // tone pass reads only the glare's rgb).
+        return vec4(textureSampleLevel(a, linear_sampler, in.uv, 0.0).rgb * glow.params.y, 1.0);
     }
 }

@@ -47,6 +47,8 @@ See [EXPOSURE.md](EXPOSURE.md) for the native evidence and measured limits.
 The Glow Filter port takes its GPARAM fields and normaliser from the exe (see [LIGHTING.md](LIGHTING.md#glow-filter-sun-glow-halo-288-2026-10-23)).
 Untraced stand-ins: additive ONE+ONE for the final add into the glare, and a standard 13-tap Gaussian (sigma 2 texels) in place of the game's 13-tap glow weights.
 Only the sky dome feeds the glow: sky pixels (depth at infinity) of the fogged HDR scene times the dome's `g_GlowScale`, so clouds and fog in-scatter in front of the dome leak in at the dome's weight, and emissive map materials do not glow yet.
+Known gap: alpha-blended draws that write no depth (FXR sparks and fire, blended foliage) over the sky also pass the depth test and feed the glow at the dome's weight.
+The game avoids this because only materials with a glow output write its glow target; the port has no such target yet, and the cheap fix (reading the scene before the transparent pass) needs a copy of the HDR target per frame.
 The global fade is taken as 1, and each glow level halves the previous one; the downsample helper 1ca700's sizes are not traced.
 
 ## Distant mountain materials

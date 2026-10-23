@@ -19,8 +19,10 @@
 //!
 //! Approximations of this port: only the sky dome feeds the glow (sky pixels, depth at
 //! infinity, times the dome's `g_GlowScale`), read from the fogged HDR scene, so cloud and fog
-//! in-scatter colour leak in at the dome's weight. The global fade is taken as 1, and each level
-//! halves the previous one (the helper 1ca700's sizes are not traced).
+//! in-scatter colour leak in at the dome's weight, and so do alpha-blended draws that write no
+//! depth over the sky (FXR sparks, fire, blended foliage; a known gap in docs/FIDELITY.md).
+//! The global fade is taken as 1, and each level halves the previous one (the helper 1ca700's
+//! sizes are not traced).
 use bevy::asset::{embedded_asset, load_embedded_asset};
 use bevy::core_pipeline::FullscreenShader;
 use bevy::prelude::*;
@@ -115,11 +117,11 @@ impl Plugin for SunGlowPlugin {
         ))
         .add_systems(
             Update,
-            (configure, keep_depth_sampling)
-                .chain()
-                .after(super::apply_lighting),
-        )
-        .add_observer(release_depth_sampling);
+            configure
+                .after(super::apply_lighting)
+                .after(super::apply_post_effects)
+                .after(crate::map::sky::SkyUpdate),
+        );
         if let Some(render) = app.get_sub_app_mut(RenderApp) {
             render
                 .init_resource::<GlowViews>()
@@ -134,13 +136,16 @@ impl Plugin for SunGlowPlugin {
 
 type ConfigureKey = (i32, f32, String, u32, Vec3);
 
+/// Gives each post-processed scene camera the resolved Glow Filter, or takes it away.
+/// The glow only reaches the scene through the glare accumulation, times the bloom's final
+/// colour (255c90 in the tone-map job), so a camera whose bloom gain is 0 (`--no-bloom`, or an
+/// authored zero) gets no glow and no depth sampling for it; `depth_sampling` owns that bit.
 fn configure(
     mut commands: Commands,
     lighting: Res<super::MapLighting>,
     sky: Option<Res<crate::map::sky::SkyGlowScale>>,
-    cameras: Query<Entity, With<Camera3d>>,
-    added: Query<(), Added<Camera3d>>,
-    mut last: Local<Option<ConfigureKey>>,
+    cameras: Query<(Entity, &super::tonemap::GamePost, Option<&GameGlow>)>,
+    mut last: Local<Option<(ConfigureKey, Option<GameGlow>)>>,
 ) {
     let sky = sky.map_or(Vec3::ZERO, |s| s.0);
     let key = (
@@ -150,63 +155,26 @@ fn configure(
         lighting.revision,
         sky,
     );
-    let unchanged = last.as_ref() == Some(&key);
-    if unchanged && added.is_empty() {
-        return;
+    if last.as_ref().is_none_or(|(last, _)| last != &key) {
+        let value = (!std::env::args().any(|a| a == "--no-sun-glow"))
+            .then(|| GameGlow::from_gparam(&lighting.gparam, key.0, key.1, sky))
+            .flatten();
+        if lighting.fade.is_none() {
+            info!("sun glow filter: {value:?}");
+        }
+        *last = Some((key, value));
     }
-    let value = (!std::env::args().any(|a| a == "--no-sun-glow"))
-        .then(|| GameGlow::from_gparam(&lighting.gparam, key.0, key.1, sky))
-        .flatten();
-    if !unchanged && lighting.fade.is_none() {
-        info!("sun glow filter: {value:?}");
-    }
-    *last = Some(key);
-    for entity in &cameras {
-        if let Some(value) = &value {
+    let value = last.as_ref().and_then(|(_, value)| value.as_ref());
+    for (entity, post, current) in &cameras {
+        let wanted = value.filter(|_| post.bloom.y > 0.);
+        if wanted == current {
+            continue;
+        }
+        if let Some(value) = wanted {
             commands.entity(entity).insert(value.clone());
         } else {
             commands.entity(entity).remove::<GameGlow>();
         }
-    }
-}
-
-/// Marks a camera whose depth sampling the glow switched on.
-#[derive(Component)]
-struct GlowDepthSampling;
-
-fn keep_depth_sampling(
-    mut commands: Commands,
-    mut cameras: Query<(Entity, &mut Camera3d), With<GameGlow>>,
-) {
-    for (entity, mut camera) in &mut cameras {
-        let usages = TextureUsages::from(camera.depth_texture_usages);
-        if !usages.contains(TextureUsages::TEXTURE_BINDING) {
-            camera.depth_texture_usages = (usages | TextureUsages::TEXTURE_BINDING).into();
-            commands.entity(entity).insert(GlowDepthSampling);
-        }
-    }
-}
-
-/// Retires the depth sampling the glow added, unless fog or the depth of field still read it
-/// (a sampleable depth left behind lost FwLo's Vulkan device, #94).
-#[allow(clippy::type_complexity)]
-fn release_depth_sampling(
-    event: On<Remove<GameGlow>>,
-    mut commands: Commands,
-    mut cameras: Query<
-        &mut Camera3d,
-        (
-            With<GlowDepthSampling>,
-            Without<super::fog::GameFog>,
-            Without<super::lens_dof::GameDof>,
-        ),
-    >,
-) {
-    if let Ok(mut camera) = cameras.get_mut(event.entity) {
-        let mut depth = TextureUsages::from(camera.depth_texture_usages);
-        depth.remove(TextureUsages::TEXTURE_BINDING);
-        camera.depth_texture_usages = depth.into();
-        commands.entity(event.entity).remove::<GlowDepthSampling>();
     }
 }
 
@@ -283,10 +251,18 @@ fn init_pipeline(
     commands.insert_resource(GlowPipeline { variants, sampler });
 }
 
+/// Most bind groups a view keeps before the cache is dropped and refilled (a guard against
+/// inputs that change identity every frame; a steady view needs about 4 per level).
+const MAX_BIND_GROUPS: usize = 64;
+
 struct GlowLevels {
     size: UVec2,
-    /// Per level: result and blur scratch.
+    /// Per level: result and blur scratch (the scratch then holds the folded result).
     levels: Vec<(TextureView, TextureView)>,
+    /// Stage bind groups by their two input views, valid for [`Self::inputs`].
+    bind_groups: HashMap<(TextureViewId, TextureViewId), BindGroup>,
+    /// Depth view, uniform buffer and depth multisampling the bind groups were built with.
+    inputs: Option<(TextureViewId, BufferId, bool)>,
 }
 
 #[derive(Resource, Default)]
@@ -323,6 +299,8 @@ fn level_views(
     GlowLevels {
         size,
         levels: (0..count).map(|i| (make(i), make(i))).collect(),
+        bind_groups: HashMap::new(),
+        inputs: None,
     }
 }
 
@@ -331,6 +309,7 @@ pub(crate) struct GlowInputs<'a> {
     pub entity: Entity,
     pub settings: &'a GameGlow,
     pub uniform: BindingResource<'a>,
+    pub uniform_buffer: BufferId,
     pub index: u32,
     pub scene: &'a TextureView,
     pub depth: &'a TextureView,
@@ -365,27 +344,61 @@ pub(crate) fn draw(
     if b.size != input.size || b.levels.len() != count {
         *b = level_views(input.size, count, ctx.render_device());
     }
+    let inputs = (input.depth.id(), input.uniform_buffer, input.multisampled);
+    if b.inputs != Some(inputs) || b.bind_groups.len() > MAX_BIND_GROUPS {
+        b.bind_groups.clear();
+        b.inputs = Some(inputs);
+    }
+    let GlowLevels {
+        levels,
+        bind_groups,
+        ..
+    } = b;
+    // EmissiveToGlowPS, then each level: downsample and the stand-in Gaussian.
+    let mut stages: Vec<(usize, &TextureView, &TextureView, &TextureView)> = Vec::new();
+    for i in 0..count {
+        let (step, source) = if i == 0 {
+            (0, input.scene)
+        } else {
+            (1, &levels[i - 1].0)
+        };
+        stages.push((step, source, source, &levels[i].0));
+        stages.push((2, &levels[i].0, &levels[i].0, &levels[i].1));
+        stages.push((3, &levels[i].1, &levels[i].1, &levels[i].0));
+    }
+    // Fold back from the smallest with constant (Smoothness, 1): L_i + s * up(acc_{i+1}),
+    // into each level's scratch, so the views a stage reads stay the same every frame.
+    let folded = |i: usize| {
+        if i + 1 == count {
+            &levels[i].0
+        } else {
+            &levels[i].1
+        }
+    };
+    for i in (1..count).rev() {
+        stages.push((4, &levels[i - 1].0, folded(i), &levels[i - 1].1));
+    }
+    // GlowCompositeSinglePS into the glare accumulation, additive (stand-in blend).
+    stages.push((5, folded(0), folded(0), glare));
     let layout = cache.get_bind_group_layout(&variant.layout);
     use bevy::render::diagnostic::RecordDiagnostics;
     let diagnostics = ctx.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();
     let span = diagnostics.time_span(ctx.command_encoder(), "sun_glow");
-    let run = |ctx: &mut RenderContext,
-               pass: usize,
-               a: &TextureView,
-               other: &TextureView,
-               target: &TextureView| {
-        let bindings = ctx.render_device().create_bind_group(
-            "sun glow",
-            &layout,
-            &BindGroupEntries::sequential((
-                a,
-                other,
-                &pipeline.sampler,
-                input.depth,
-                input.uniform.clone(),
-            )),
-        );
+    for (pass, a, other, target) in stages {
+        let bindings = bind_groups.entry((a.id(), other.id())).or_insert_with(|| {
+            ctx.render_device().create_bind_group(
+                "sun glow",
+                &layout,
+                &BindGroupEntries::sequential((
+                    a,
+                    other,
+                    &pipeline.sampler,
+                    input.depth,
+                    input.uniform.clone(),
+                )),
+            )
+        });
         let mut rp = ctx.begin_tracked_render_pass(RenderPassDescriptor {
             label: Some("sun glow stage"),
             color_attachments: &[Some(RenderPassColorAttachment {
@@ -400,34 +413,9 @@ pub(crate) fn draw(
             ..default()
         });
         rp.set_render_pipeline(passes[pass]);
-        rp.set_bind_group(0, &bindings, &[input.index]);
+        rp.set_bind_group(0, &*bindings, &[input.index]);
         rp.draw(0..3, 0..1);
-    };
-    // EmissiveToGlowPS, then each level: downsample and the stand-in Gaussian.
-    for i in 0..count {
-        let (step, source) = if i == 0 {
-            (0, input.scene)
-        } else {
-            (1, &b.levels[i - 1].0)
-        };
-        run(ctx, step, source, source, &b.levels[i].0);
-        run(ctx, 2, &b.levels[i].0, &b.levels[i].0, &b.levels[i].1);
-        run(ctx, 3, &b.levels[i].1, &b.levels[i].1, &b.levels[i].0);
     }
-    // Fold back from the smallest with constant (Smoothness, 1): L_i + s * up(acc_{i+1}).
-    for i in (1..count).rev() {
-        run(
-            ctx,
-            4,
-            &b.levels[i - 1].0,
-            &b.levels[i].0,
-            &b.levels[i - 1].1,
-        );
-        let level = &mut b.levels[i - 1];
-        std::mem::swap(&mut level.0, &mut level.1);
-    }
-    // GlowCompositeSinglePS into the glare accumulation, additive (stand-in blend).
-    run(ctx, 5, &b.levels[0].0, &b.levels[0].0, glare);
     span.end(ctx.command_encoder());
 }
 
@@ -465,6 +453,63 @@ mod tests {
             ("New Glow Filter-Glow - FinalColorScale", Value::Float(1.)),
             ("Glow Filter-Glow - Blur RgbScale", Value::Float(1.5)),
         ]
+    }
+
+    fn post(bloom_gain: f32) -> super::super::tonemap::GamePost {
+        super::super::tonemap::GamePost {
+            exposure: Vec4::ZERO,
+            adaptation: Vec4::ZERO,
+            bloom: Vec4::new(0., bloom_gain, 0., 1.),
+            transfer: Vec4::ZERO,
+            controls: Vec4::ZERO,
+            curve: Vec4::ZERO,
+            reinhard: Vec4::ZERO,
+            colour: Mat4::IDENTITY,
+        }
+    }
+
+    #[test]
+    fn glow_goes_only_to_post_cameras_whose_bloom_reaches_the_scene() {
+        let mut app = App::new();
+        app.insert_resource(super::super::MapLighting {
+            gparam: gparam(&mapbase()),
+            hour: 7.,
+            light_set: 0,
+            applied: None,
+            source: String::new(),
+            fade: None,
+            revision: 0,
+        })
+        .insert_resource(crate::map::sky::SkyGlowScale(Vec3::splat(0.2)))
+        .add_systems(Update, configure);
+        let scene = app.world_mut().spawn((Camera3d::default(), post(0.5))).id();
+        let no_bloom = app.world_mut().spawn((Camera3d::default(), post(0.))).id();
+        let hud = app.world_mut().spawn(Camera3d::default()).id();
+        app.update();
+        assert!(app.world().get::<GameGlow>(scene).is_some());
+        assert!(
+            app.world().get::<GameGlow>(no_bloom).is_none(),
+            "--no-bloom"
+        );
+        assert!(
+            app.world().get::<GameGlow>(hud).is_none(),
+            "not a post camera"
+        );
+        // Bloom switched off later takes the glow away; back on brings it back.
+        app.world_mut()
+            .get_mut::<super::super::tonemap::GamePost>(scene)
+            .unwrap()
+            .bloom
+            .y = 0.;
+        app.update();
+        assert!(app.world().get::<GameGlow>(scene).is_none());
+        app.world_mut()
+            .get_mut::<super::super::tonemap::GamePost>(scene)
+            .unwrap()
+            .bloom
+            .y = 0.5;
+        app.update();
+        assert!(app.world().get::<GameGlow>(scene).is_some());
     }
 
     #[test]
