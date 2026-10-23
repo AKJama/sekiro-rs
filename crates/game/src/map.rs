@@ -372,14 +372,15 @@ impl Pending {
         }
     }
 
-    /// Fraction of the map's GLBs (with textures) loaded and of its scene instances spawned.
-    pub fn progress(&self) -> f32 {
-        if self.loaded() {
-            return 1.0;
-        }
-        let glbs = (self.next - self.in_flight.len()) as f32 / self.stream.len().max(1) as f32;
-        let spawned = self.ready.min(self.instances) as f32 / self.instances.max(1) as f32;
-        (0.7 * glbs + 0.3 * spawned).min(0.99)
+    /// The map's GLBs (with textures) loaded, of those queued so far, for the loading bar.
+    pub(crate) fn glbs(&self) -> (usize, usize) {
+        (self.next - self.in_flight.len(), self.stream.len())
+    }
+
+    /// The map's scene instances spawned, of those queued so far, for the loading bar. The
+    /// total grows during the load as spawned scenes add instances (a third more on m11_00).
+    pub(crate) fn spawned(&self) -> (usize, usize) {
+        (self.ready, self.instances)
     }
 
     /// The GLB of stream request `index` once the stream has requested it, with its override.
