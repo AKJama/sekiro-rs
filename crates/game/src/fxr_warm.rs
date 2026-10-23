@@ -1,6 +1,6 @@
 //! Effect warm-up (#313): the effects a fight's timelines can spawn are parsed, compiled and their
-//! textures decoded on a background thread, so an effect's first spawn (Wolf's first landing
-//! after a fall cost 22 ms) reads no files in the frame.
+//! textures decoded on a background thread, so an effect's first spawn (a parse costs 5-6 ms, a texture decode
+//! 6-43 ms) reads no files in the frame.
 //! An effect spawned before its warm-up arrives is parsed in the frame as before.
 
 use std::sync::Arc;
