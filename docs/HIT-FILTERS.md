@@ -49,7 +49,10 @@ So the player walks on the low-resolution binder in the exe, and so does the sim
 The helper parts keep their fixed groups whichever binder their body comes from, so their `l` copies are the ones characters meet, and the story's part removal and the helper stripping read the parts' ranges in `collision_lo.bin`.
 `l` models a flight of stairs as a ramp where `h` has real treads, so Wolf rises and descends a flight smoothly (#104).
 On the long castle stairs past start 3's moat gate his height changes by at most 0.047 m a tick at a run and never against the way he walks; on `h` a riser lifted him up to 0.29 m in one tick (`play_collision_world_walks_stairs_smoothly`).
-In the exe the treads are left to foot IK, which meets `h`; the simulation has no foot IK, so on stairs the feet are drawn at the ramp.
+In the exe the treads are left to foot IK, which meets `h`.
+The game draws the same (#276, `crates/game/src/foot_ik.rs`): the body stays on `l`, and each drawn foot is cast down onto the `h` floors of the tiles around Wolf, the pose drops by the lower foot's offset and two-bone IK bends each leg.
+On the Stairway idol platform (start 3) `l` is one flat 24-triangle slab of part `h007600` at y -48.026, while `h` and the drawn ground dip up to 0.22 m below it; with foot IK the idle feet meet `h` within 2 cm (`foot_ik_puts_the_feet_on_the_idol_platform_craters`).
+The gains are c0000's `hkbFootIkControlsModifier` (on/off 0.2, ground ascending 0.2, descending 1); its `hkbFootIkDriverInfo` (ray lengths, leg limits) is not in the behbnd, so those are chosen.
 A block exported before `collision_lo.bin` existed falls back to `collision.bin`, with a log line naming `sekiro-extract map <block> --lo-collision`.
 Parts with an `h` model and no `l` model, m11_00's `h900700` and m11_01's `h012400`, are met by no character and no camera in the exe and get an empty range; m11_00's `h009500` has no model in either binder.
 

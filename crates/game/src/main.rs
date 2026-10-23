@@ -41,6 +41,7 @@ mod death_screen;
 mod deathblow_demo;
 mod decals;
 mod draw_mask;
+mod foot_ik;
 mod fxr;
 mod fxr_tree;
 mod game_ui;
@@ -205,7 +206,7 @@ fn dispatch() -> anyhow::Result<()> {
         "usage: sekiro-rs --play [--attack-power 1..99] [--progression castle-roof] [--script FILE|builtin] [--shots step:path,...] [--exit]"
     );
     eprintln!(
-        "                 [--map <id> [--start <n> | --spawn x,y,z,yaw,0 | --at-idol <entity>]] [--kit <json>] [--no-enemy] [--lock-on]"
+        "                 [--map <id> [--start <n> | --spawn x,y,z,yaw,0 | --at-idol <entity>]] [--kit <json>] [--no-enemy] [--lock-on] [--no-foot-ik]"
     );
     eprintln!(
         "                 [--checkpoint local|decisions|off] [--brain-moves local|off] [--brain-move-every 1|2|3] [--coach-review-every <n>] (local defaults; review 5, 0 disables)"

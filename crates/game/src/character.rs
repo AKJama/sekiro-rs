@@ -424,19 +424,25 @@ pub fn animate(
         let pose = anim.sample_pose(&rig.skeleton, t, clock_dt);
         let mut model = rig.skeleton.model_space(&pose);
         apply_walk_twist(&rig.skeleton, &mut model, anim.walk_twist);
-        for (i, joint) in rig.joints.iter().enumerate() {
-            let Some((entity, parent)) = joint else {
-                continue;
-            };
-            let local = match parent {
-                Some(p) => model[*p].inverse() * model[i],
-                None => model[i],
-            };
-            if let Ok(mut tf) = joints.get_mut(*entity) {
-                *tf = Transform::from_matrix(local);
-            }
-        }
         rig.model = model;
+        write_joints(&rig, &mut joints);
+    }
+}
+
+/// Gives each glTF joint of `rig` its transform relative to its glTF parent from `rig.model`.
+pub(crate) fn write_joints(rig: &Rig, joints: &mut Query<&mut Transform, Without<Rig>>) {
+    let model = &rig.model;
+    for (i, joint) in rig.joints.iter().enumerate() {
+        let Some((entity, parent)) = joint else {
+            continue;
+        };
+        let local = match parent {
+            Some(p) => model[*p].inverse() * model[i],
+            None => model[i],
+        };
+        if let Ok(mut tf) = joints.get_mut(*entity) {
+            *tf = Transform::from_matrix(local);
+        }
     }
 }
 
@@ -470,7 +476,7 @@ fn apply_walk_twist(skeleton: &Skeleton, model: &mut [Mat4], degrees: f32) {
 
 /// Applies the model-space transform `by` to bone `root` and everything under it (parents
 /// always precede their children in the skeleton).
-fn turn_subtree(skeleton: &Skeleton, model: &mut [Mat4], root: usize, by: Mat4) {
+pub(crate) fn turn_subtree(skeleton: &Skeleton, model: &mut [Mat4], root: usize, by: Mat4) {
     let mut inside = vec![false; skeleton.bones.len()];
     for (i, bone) in skeleton.bones.iter().enumerate().skip(root) {
         inside[i] = i == root || bone.parent.is_some_and(|p| inside[p as usize]);
