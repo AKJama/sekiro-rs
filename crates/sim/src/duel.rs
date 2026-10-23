@@ -722,6 +722,19 @@ fn anim_id(clip: &str) -> Option<i32> {
 }
 
 impl Duel {
+    /// `world` as the enemy collides with it: enemy-only walls and water, and its own map body,
+    /// NpcParam `hitRadius` by `hitHeight` (#191).
+    pub fn enemy_ground(
+        &self,
+        world: &std::sync::Arc<crate::collision::CollisionWorld>,
+    ) -> crate::collision::EnemyGround {
+        let hit = &self.fighters[1];
+        crate::collision::EnemyGround(
+            world.clone(),
+            crate::collision::BodySize::of_npc(hit.radius, hit.height),
+        )
+    }
+
     /// Wolf at the origin facing -Z and an Ashina soldier (`c1010`, NpcParam 10100000) `distance`
     /// metres in front of him, facing him.
     pub fn load(cache: &Path, distance: f32) -> Result<Self, LoadError> {

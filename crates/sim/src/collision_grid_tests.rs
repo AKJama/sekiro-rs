@@ -270,10 +270,10 @@ fn banded_grid_reads_what_a_brute_force_scan_keeps() {
             );
             let rise = rng.range(0.0, 3.0);
             let mut swept = Vec::new();
-            world.ceiling_candidates(feet, rise, who, |t| swept.push(t));
+            world.ceiling_candidates(feet, rise, who, BodySize::WOLF, |t| swept.push(t));
             // Not deduplicated: each must come once.
             swept.sort_unstable();
-            let sweep = CeilingSweep::new(feet, rise);
+            let sweep = CeilingSweep::new(feet, rise, BodySize::WOLF);
             let brute: Vec<u32> = cells
                 .between(sweep.min, sweep.max)
                 .into_iter()

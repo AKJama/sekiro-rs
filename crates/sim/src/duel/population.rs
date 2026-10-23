@@ -187,16 +187,6 @@ pub struct Excluded {
 pub type PlacedFoes = Vec<(EnemySpec, crate::registry::Placement)>;
 pub type StartingPlacements = (PlacedFoes, Vec<Excluded>);
 
-/// An NPC's map body (#191): NpcParam `hitRadius` wide and `hitHeight` tall, as the exe builds
-/// its map proxy; Wolf's for a row without them.
-fn npc_body_size(row: &serde_json::Value) -> crate::collision::BodySize {
-    let f = |k: &str| row[k].as_f64().unwrap_or(0.0) as f32;
-    match (f("hitRadius"), f("hitHeight")) {
-        (r, h) if r > 0.0 && h > 0.0 => crate::collision::BodySize::new(r, h),
-        _ => crate::collision::BodySize::WOLF,
-    }
-}
-
 impl Population {
     pub fn load_map(
         cache: &Path,
@@ -219,13 +209,9 @@ impl Population {
                 foe.initial_patrol.clone_from(&ai.state.patrol);
                 ai.state.map_regions = Some(crate::lua_ai::regions::MapRegions::new(cache, map));
             }
-            let row = registry.npc_row(foe.duel.spec.npc_param);
-            foe.duel.enemy.ground = Box::new(crate::collision::EnemyGround(
-                world.clone(),
-                row.map_or(crate::collision::BodySize::WOLF, npc_body_size),
-            ));
+            foe.duel.enemy.ground = Box::new(foe.duel.enemy_ground(&world));
             foe.duel.enemy.navmesh.clone_from(&navmesh);
-            if let Some(row) = row {
+            if let Some(row) = registry.npc_row(foe.duel.spec.npc_param) {
                 let border = row["activateBorderDist"].as_f64().unwrap_or(0.0) as f32;
                 // Zero delegates to an unrecovered engine default: use a documented fallback.
                 foe.activation = if border > 0.0 { border } else { 100.0 };
