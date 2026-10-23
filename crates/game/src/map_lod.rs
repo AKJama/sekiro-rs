@@ -28,7 +28,30 @@ pub struct LodRule {
 
 pub struct LodTable {
     rows: HashMap<i32, LodRule>,
+    draws: HashMap<i32, DrawRange>,
     pub platform_scale: [f32; 2],
+}
+
+/// A row's draw distance: hidden beyond `draw_BorderDist`, with `draw_PlayDist` as the
+/// hysteresis band on either side (the same shape as the level switches in [`LodRule::select`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DrawRange {
+    pub border: f32,
+    pub play: f32,
+}
+
+impl DrawRange {
+    /// Whether something `distance` metres from the camera is drawn, given whether it was drawn
+    /// last frame: drawn things hide past `border + play`, hidden ones return inside
+    /// `border - play`.
+    pub fn keeps(self, was_drawn: bool, distance: f32) -> bool {
+        distance
+            < if was_drawn {
+                self.border + self.play
+            } else {
+                self.border - self.play
+            }
+    }
 }
 
 impl LodTable {
@@ -63,9 +86,18 @@ impl LodTable {
             float(p, "lv01_BorderDist_Scale")?,
             float(p, "lv12_BorderDist_Scale")?,
         ];
+        let draw_scale = float(p, "draw_BorderDist_Scale")?;
         let mut result = HashMap::new();
+        let mut draws = HashMap::new();
         for row in rows(&param)? {
             let id = row["id"].as_i64().context("LOD row missing ID")? as i32;
+            draws.insert(
+                id,
+                DrawRange {
+                    border: float(row, "draw_BorderDist")? * draw_scale,
+                    play: float(row, "draw_PlayDist")?,
+                },
+            );
             result.insert(
                 id,
                 LodRule {
@@ -84,8 +116,21 @@ impl LodTable {
         }
         Ok(Self {
             rows: result,
+            draws,
             platform_scale,
         })
+    }
+
+    /// A character's draw distance from its NpcParam `defaultLodParamId` (every Enemy part in
+    /// the shipped MSBs authors LOD ID 255, which defers to this model-side default).
+    /// Negative IDs use row 0 like map pieces do; that fallback is untraced for characters,
+    /// and row 0 never hides (9999 m).
+    pub fn character(&self, default_lod: i64) -> Result<DrawRange> {
+        let id = default_lod.max(0) as i32;
+        self.draws
+            .get(&id)
+            .copied()
+            .with_context(|| format!("LodParam row {id} absent"))
     }
 
     pub fn map_piece(&self, authored: u8) -> Result<LodRule> {
@@ -458,6 +503,28 @@ mod tests {
                 0
             );
             assert!(table.map_piece(127).is_err());
+            // NpcParam's common "medium character" row: hidden from 80 m (+-2 m).
+            assert_eq!(
+                table.character(11).unwrap(),
+                DrawRange {
+                    border: 80.,
+                    play: 2.
+                }
+            );
+            assert_eq!(table.character(-1).unwrap().border, 9999.);
+            assert_eq!(table.character(10).unwrap().border, 50.);
         }
+    }
+
+    #[test]
+    fn draw_range_hides_past_the_border_with_hysteresis() {
+        let range = DrawRange {
+            border: 80.,
+            play: 2.,
+        };
+        assert!(range.keeps(true, 81.));
+        assert!(!range.keeps(true, 82.5));
+        assert!(!range.keeps(false, 79.));
+        assert!(range.keeps(false, 77.5));
     }
 }
