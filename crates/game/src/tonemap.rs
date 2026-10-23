@@ -19,6 +19,9 @@ use bevy::render::{
 };
 
 use bevy::render::renderer::RenderContext;
+use bevy::render::view::ViewDepthStencilTexture;
+
+use super::sun_glow::{self, GameGlow, GlowPipeline, GlowViews};
 
 // Native renderer-global quality scale is unresolved; constructor G is one.
 pub const BLOOM_QUALITY_SCALE: f32 = 1.0;
@@ -175,20 +178,30 @@ fn prune_views(mut buffers: ResMut<PostViews>, views: Query<(), With<GamePost>>)
     buffers.0.retain(|entity, _| views.contains(*entity));
 }
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn native_post(
     view: ViewQuery<(
         Entity,
         &ViewTarget,
         &GamePost,
         &DynamicUniformIndex<GamePost>,
+        Option<(&GameGlow, &DynamicUniformIndex<GameGlow>)>,
+        &ViewDepthStencilTexture,
+        &Msaa,
     )>,
     pipeline: Res<PostPipeline>,
     cache: Res<PipelineCache>,
     uniforms: Res<ComponentUniforms<GamePost>>,
     mut buffers: ResMut<PostViews>,
+    glow: (
+        Option<Res<GlowPipeline>>,
+        Option<Res<ComponentUniforms<GameGlow>>>,
+        ResMut<GlowViews>,
+    ),
     mut ctx: RenderContext,
 ) {
-    let (entity, target, settings, index) = view.into_inner();
+    let (entity, target, settings, index, glow_view, depth, msaa) = view.into_inner();
+    let (glow_pipeline, glow_uniforms, mut glow_views) = glow;
     let (Some(meter), Some(binding)) = (
         cache.get_compute_pipeline(pipeline.meter),
         uniforms.uniforms().binding(),
@@ -290,6 +303,37 @@ fn native_post(
             draw(&mut ctx, passes[5], &bindings, index.index(), &level.3);
             let level = &mut b.levels[i - 1];
             std::mem::swap(&mut level.1, &mut level.3);
+        }
+        // The Glow Filter lands in the glare accumulation after the bloom (255c90).
+        if let (Some((glow, glow_index)), Some(glow_pipeline), Some(glow_binding), Some(depth_view)) = (
+            glow_view,
+            glow_pipeline.as_deref(),
+            glow_uniforms
+                .as_deref()
+                .and_then(|u| u.uniforms().binding()),
+            depth.attachment.depth_stencil_views().depth_only_view(),
+        ) && depth
+            .texture()
+            .usage()
+            .contains(TextureUsages::TEXTURE_BINDING)
+        {
+            sun_glow::draw(
+                glow_pipeline,
+                &cache,
+                &mut glow_views,
+                &mut ctx,
+                sun_glow::GlowInputs {
+                    entity,
+                    settings: glow,
+                    uniform: glow_binding,
+                    index: glow_index.index(),
+                    scene: post.source,
+                    depth: depth_view,
+                    multisampled: msaa.samples() > 1,
+                    size,
+                },
+                &b.levels[0].1,
+            );
         }
     }
     let bindings = ctx.render_device().create_bind_group(

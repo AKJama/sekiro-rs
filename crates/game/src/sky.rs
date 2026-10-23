@@ -30,6 +30,26 @@ pub(crate) struct SkyEnabled;
 #[derive(Resource, Default)]
 pub(crate) struct SkyOverride(pub Option<&'static str>);
 
+/// The selected dome's `g_GlowScale` folded as `rgb * saturate(w)`: the factor its forward
+/// shader applies to the colour it writes to the glow target (see `sun_glow.rs`).
+/// Zero when no sky is installed or the dome's material has no `g_GlowScale`.
+#[derive(Resource, Default, Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SkyGlowScale(pub Vec3);
+
+/// `g_GlowScale.rgb * saturate(g_GlowScale.w)` of a sky material row.
+fn glow_scale(row: &Value) -> Vec3 {
+    let v: Vec<f32> = row["params"]["g_GlowScale"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|v| v.as_f64().unwrap_or(0.) as f32)
+        .collect();
+    if v.len() < 4 {
+        return Vec3::ZERO;
+    }
+    Vec3::new(v[0], v[1], v[2]) * v[3].clamp(0., 1.)
+}
+
 #[derive(Clone, ShaderType, Debug)]
 struct SkyInputs {
     colors: [Vec4; 11],
@@ -113,6 +133,7 @@ struct Library {
     id: String,
     meshes: BTreeMap<String, Handle<Mesh>>,
     materials: BTreeMap<String, Handle<SkyMaterial>>,
+    glow: BTreeMap<String, Vec3>,
     current: String,
     groups: BTreeMap<i32, String>,
     clouds: BTreeMap<String, CloudLayer>,
@@ -412,6 +433,7 @@ pub(super) fn install(app: &mut App, cache: &Path, id: &str, hour: f32) -> Resul
         id: id.into(),
         meshes: BTreeMap::new(),
         materials: BTreeMap::new(),
+        glow: BTreeMap::new(),
         current: selection(id, hour).into(),
         groups: BTreeMap::new(),
         clouds: BTreeMap::new(),
@@ -453,6 +475,7 @@ pub(super) fn install(app: &mut App, cache: &Path, id: &str, hour: f32) -> Resul
                 write_depth: false,
             });
         library.materials.insert(name.into(), material);
+        library.glow.insert(name.into(), glow_scale(row));
         library.meshes.insert(
             name.into(),
             app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh(
@@ -578,6 +601,7 @@ pub(super) fn install(app: &mut App, cache: &Path, id: &str, hour: f32) -> Resul
     ));
     info!("authored sky {} for {id} at {hour}h", library.current);
     app.insert_resource(library)
+        .init_resource::<SkyGlowScale>()
         .init_resource::<SkyOverride>()
         .insert_resource(SkyEnabled)
         .add_systems(Update, update);
@@ -612,6 +636,7 @@ fn update(
     lighting: Res<crate::lighting::MapLighting>,
     time: Res<Time>,
     mut library: ResMut<Library>,
+    mut glow: ResMut<SkyGlowScale>,
     mut materials: ResMut<Assets<SkyMaterial>>,
     mut domes: Query<(&mut Mesh3d, &mut MeshMaterial3d<SkyMaterial>), With<Dome>>,
     mut clouds: Clouds<'_, '_>,
@@ -661,6 +686,10 @@ fn update(
             material.0 = library.materials[&selected].clone();
         }
         library.current.clone_from(&selected);
+    }
+    let scale = library.glow.get(&selected).copied().unwrap_or_default();
+    if glow.0 != scale {
+        glow.0 = scale;
     }
     let set =
         crate::lighting::LightSet::from_gparam(&lighting.gparam, lighting.light_set, lighting.hour);
@@ -729,6 +758,7 @@ mod tests {
             id: id.into(),
             meshes: BTreeMap::new(),
             materials: BTreeMap::new(),
+            glow: BTreeMap::new(),
             current: story.initial.sky.clone().unwrap(),
             groups: BTreeMap::new(),
             clouds: BTreeMap::new(),
@@ -766,6 +796,7 @@ mod tests {
             library
                 .materials
                 .insert(name.clone(), materials.add(material(row)));
+            library.glow.insert(name.clone(), glow_scale(row));
             if !row["cloud"].is_null() {
                 library.clouds.insert(
                     name.clone(),
@@ -814,12 +845,27 @@ mod tests {
         })
         .insert_resource(story)
         .insert_resource(library)
+        .init_resource::<SkyGlowScale>()
         .insert_resource(materials)
         .insert_resource(Time::<()>::default())
         .init_resource::<SkyOverride>()
         .init_resource::<crate::lighting_selection::MapEventScene>()
         .add_systems(Update, update);
         app
+    }
+
+    #[test]
+    fn dome_glow_scale_folds_the_authored_weight() {
+        let json: Value = serde_json::from_slice(
+            &std::fs::read(sekiro_sim::cache::root().join("maps/m89_00_00_99/sky.json")).unwrap(),
+        )
+        .unwrap();
+        let scale = |name: &str| glow_scale(&json["models"][name]);
+        // Morning Ver2 dome: g_GlowScale (1, 1, 1, 0.2); afternoon (1, 1, 1, 1).
+        assert!((scale("m900000") - Vec3::splat(0.2)).abs().max_element() < 1e-6);
+        assert_eq!(scale("m900010"), Vec3::ONE);
+        // A material without g_GlowScale writes no glow.
+        assert_eq!(scale("m900090"), Vec3::ZERO);
     }
 
     #[test]
