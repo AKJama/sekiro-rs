@@ -30,6 +30,10 @@ use bevy::post_process::{auto_exposure::AutoExposure, bloom::Bloom};
 use bevy::render::view::ColorGrading;
 use bevy::render::view::{DebandDither, Tonemapping};
 
+#[path = "depth_sampling.rs"]
+pub(crate) mod depth_sampling;
+#[path = "sun_glow.rs"]
+pub(crate) mod sun_glow;
 #[path = "tonemap.rs"]
 pub(crate) mod tonemap;
 
@@ -49,8 +53,10 @@ impl Plugin for PostEffectsPlugin {
             grading::GradingPlugin,
             fog::FogPlugin,
             lens_dof::LensDofPlugin,
+            sun_glow::SunGlowPlugin,
             tonemap::NativePostPlugin,
-        ));
+        ))
+        .add_systems(PostUpdate, depth_sampling::sync_depth_sampling);
     }
 }
 

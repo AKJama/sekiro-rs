@@ -369,6 +369,24 @@ All eight requested-name PNGs are ready under `target/alt-gi/captures/2026-10-15
 Copying them to `D:/sekiro-rs-media/progress/2026-10-15/` was denied by filesystem permissions, so that export remains blocked.
 Comparison against the read-only retail pairs confirms L1's hard blue-white illumination, cold cast and dark shrine/hall remain; this optimisation does not close L1 or justify an exposure/tint adjustment.
 
+## Glow Filter (sun glow halo, #288), 2026-10-23
+
+The game's `GXGlowFilter` blurs a second "glow" colour that forward materials write and adds it to the glare before tone mapping; `crates/game/src/sun_glow.rs` ports it for the sky dome.
+Traced from the exe (RVAs, image base 0x140000000):
+- `GXGlowFilterParam` (binder 3b7a10, constructor 3b7820) holds Enable, NumLevels (1 to 8), Blur Smoothness, FinalColorScale, SampleScale, RgbScale and AlphaScale.
+- The exe defaults are NumLevels 6, Smoothness 1 and FinalColorScale 10; the GPARAM files override them (`default.gparam` FinalColorScale 0.1, `mapbase.gparam` 1.0).
+- The scheduler 2d7bb0 forces SampleScale, RgbScale and AlphaScale to 1, so mapbase's Blur RgbScale 1.5 has no effect.
+- Forward materials write `colour * g_GlowScale.rgb * saturate(g_GlowScale.w)` to the glow target; the morning dome m900000 has w 0.2, afternoon m900010 has 1.
+- `GXGlowFilter::Draw` 2451f0: `EmissiveToGlowPS` premultiplies by alpha and zeroes NaNs, NumLevels downsamples follow, the levels fold back from the smallest with blend constant (Smoothness, 1), and `GlowCompositeSinglePS` scales level 0 by `FinalColorScale * fade / sum_{i<NumLevels} s^i`.
+- The tone-map job (helper 255c90, called at 251a8d in 2508b0) draws the result into the glare accumulation, which reaches the scene as `glare * g_GlareLuminance` like the bloom.
+
+Two details are stand-ins, not traced:
+- The composite's blend Dest/Op (blend state +0x380, built at 24f03f) is taken as additive ONE+ONE.
+- The CPU-generated 13-tap `Sample13WeightforGlow` weights are replaced by a standard 13-tap separable Gaussian with sigma 2 texels at every level.
+
+`--no-sun-glow` turns the pass off.
+The glow reaches the scene only through the glare, times the bloom's final colour, so a camera with no bloom (`--no-bloom`, or an authored bloom gain of 0) gets no glow pass and no depth sampling for it.
+
 ## Verification
 
 ### Shared sky selection correction (2026-10-15)

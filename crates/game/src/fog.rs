@@ -48,23 +48,6 @@ pub struct GameFog {
     radiance_scale: Vec4,
 }
 
-/// Only retire depth sampling when this effect introduced the usage bit.
-#[derive(Component)]
-struct FogDepthSampling;
-
-fn release_depth_sampling(
-    event: On<Remove<GameFog>>,
-    mut commands: Commands,
-    mut cameras: Query<&mut Camera3d, With<FogDepthSampling>>,
-) {
-    if let Ok(mut camera) = cameras.get_mut(event.entity) {
-        let mut depth = TextureUsages::from(camera.depth_texture_usages);
-        depth.remove(TextureUsages::TEXTURE_BINDING);
-        camera.depth_texture_usages = depth.into();
-        commands.entity(event.entity).remove::<FogDepthSampling>();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,7 +534,10 @@ mod tests {
         })
         .init_resource::<FogSelection>()
         .add_systems(Update, configure)
-        .add_observer(release_depth_sampling);
+        .add_systems(
+            PostUpdate,
+            super::super::depth_sampling::sync_depth_sampling,
+        );
         let first = app
             .world_mut()
             .spawn((Camera3d::default(), Msaa::Sample4))
@@ -1029,7 +1015,6 @@ impl Plugin for FogPlugin {
             ExtractComponentPlugin::<GameFog>::default(),
             UniformComponentPlugin::<GameFog>::default(),
         ))
-        .add_observer(release_depth_sampling)
         .add_systems(Update, configure.after(super::apply_lighting))
         .add_systems(PostUpdate, update_background);
         if let Some(render) = app.get_sub_app_mut(RenderApp) {
@@ -1050,7 +1035,7 @@ type ConfigureKey = (i32, f32, i32, String, u32);
 fn configure(
     mut commands: Commands,
     lighting: Res<super::MapLighting>,
-    cameras: Query<(Entity, &Camera3d)>,
+    cameras: Query<Entity, With<Camera3d>>,
     mut last: Local<Option<ConfigureKey>>,
     added: Query<(), Added<Camera3d>>,
     selection: Res<FogSelection>,
@@ -1099,19 +1084,8 @@ fn configure(
     if settled {
         info!("shader fog: {value:?}");
     }
-    for (entity, camera) in &cameras {
-        let mut depth = TextureUsages::from(camera.depth_texture_usages);
-        if value.is_some() && !depth.contains(TextureUsages::TEXTURE_BINDING) {
-            depth.insert(TextureUsages::TEXTURE_BINDING);
-            commands.entity(entity).insert(FogDepthSampling);
-        }
-        // Only new cameras need this; re-inserting Camera3d at every LightSet change (#15)
-        // marked the view changed and rebuilt its depth texture.
-        if TextureUsages::from(camera.depth_texture_usages) != depth {
-            let mut camera = camera.clone();
-            camera.depth_texture_usages = depth.into();
-            commands.entity(entity).insert(camera);
-        }
+    // The depth the pass samples is switched on and off by `depth_sampling` for all readers.
+    for entity in &cameras {
         if let Some(value) = &value {
             commands.entity(entity).insert(value.clone());
         } else {
