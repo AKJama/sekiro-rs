@@ -78,6 +78,8 @@ mod tests {
             hour: 12.,
             light_set: 0,
             applied: Some(0),
+            fade: None,
+            revision: 0,
         };
         // Installed region 2002880 is a bottom-centred box in the hidden temple.
         for (position, sub) in [(inside, 0), (outside, 10), (inside, 0)] {

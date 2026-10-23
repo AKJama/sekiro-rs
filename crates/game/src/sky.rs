@@ -801,6 +801,8 @@ mod tests {
             light_set: 0,
             applied: None,
             source: String::new(),
+            fade: None,
+            revision: 0,
         })
         .insert_resource(story)
         .insert_resource(library)

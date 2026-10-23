@@ -1347,7 +1347,7 @@ Priority table (`0x142b54500`, indexed by the file kind of `143b146f0`), lowest 
 - Layer 0 of a block is the file `m<area>_<block>_<d><sub>` named by the story sub-ID.
   Layers 1 to 4 take the four signed bytes of the collision `SceneGparam` struct as the hundreds digit `d` of the same family: `number = (d - base / 100) * 100 + base`, so `m11_00_0000` with byte 5 selects `m11_00_0500` and `m11_02_0930` with byte 5 selects `m11_02_0530`.
   A byte outside 0 to 9 (-1 in all installed data) leaves the layer empty; it does not keep the previous overlay.
-  The fourth `SceneGparam` float is the fade time between old and new overlays; the loader switches at once (open).
+  The fourth `SceneGparam` float is the fade time between old and new overlays; it is applied since 2026-10-23 (see [Doorway fade](#doorway-fade-2026-10-23)).
 - `mapoverride_0000` to `_0003` use GPARAM game id 3 (value ids without times).
   They parse now.
   Their LightSet group is empty and they would sit at priority 10, but the block field that selects `MapOverride_NNNN` was not found (no event instruction sets it), so they are not applied.
@@ -1402,3 +1402,32 @@ The collision row still drives post, fog, sky and the shadowed sun direction, wh
 Parts authoring a set above 0 probably use their own row natively; we give them the collision row for now.
 
 `SEKIRO_ABLATE=scenelight` restores the old single scene set, and `SEKIRO_LIGHT_SET=<id>` now forces that row on every surface.
+
+## Doorway fade, 2026-10-23
+
+Playtest (#52, #81): at the Sculptor's hall (Outskirts start 0) the lighting switched in one frame when Wolf stepped out or back in.
+The real game fades it: leaving, the change is practically invisible; entering, a slight change fades in.
+
+What the data says about that doorway:
+
+- The hall floor `h022400` selects row 110 with overlay layer 1 = file 1 (`m11_00_0100`), transition 1 s.
+- The porch around it, `h022500`, selects row 100 with layer 1 = file 1 and layer 2 = file 5 (`m11_00_0500`), transition 1 s; the yard `h022600` keeps the same layers.
+- So the interior overlay stays on outside, and stepping out only adds `0500`.
+- Only the LightSet group authors rows 100 to 130; every post, fog and grading group in the block, overlay and `mapbase` files authors row 0 only, so those come from the overlays, not from the row.
+- At hour 6, `0100` gives map pieces (row 0) a sun of W 1.25 and exposure 1.2 EV; `0500` raises the sun to W 2.5 and lowers exposure to 0.4 EV.
+  Sunlit outdoor surfaces therefore change little (twice the sun, 0.8 EV less exposure), while shade and the interior darken by about 0.8 EV.
+
+The fade (`MapLighting::fade_to`, `gparam::blend`):
+
+- A change of the collision row, or of the overlays, fades from what is shown to the new stack over the new collision's authored `SceneGparam` transition time.
+- Floats and vectors are interpolated in authored space, as the LightSet A/B blend `310630` does; integers, switches and bytes switch at once.
+- The new row starts from the old row's values, so characters fade from the interior row to the outdoor one.
+- A change during a fade starts from the blend shown at that moment.
+- An authored 0 switches at once; a negative time (unset on most collisions) uses 1 s, which is inferred, not traced.
+- The first selection after a load, and story sub-ID changes, switch at once.
+- Paused game time holds a fade where it is.
+- The map sweep and render gate jump between views with time held, so they insert `InstantLighting` and every change there switches at once.
+- `SEKIRO_ABLATE=nofade` restores the old switch.
+
+Open (#81): whether the native game also changes exposure and the row-0 sun for the outdoor geometry seen from inside.
+Our steady states follow the data above, which applies `0500` to the whole frame once Wolf is on the porch; the native rule for what a camera inside sees was not traced.

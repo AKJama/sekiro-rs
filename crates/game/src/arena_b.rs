@@ -198,6 +198,8 @@ mod tests {
                 light_set: 0,
                 applied: Some(0),
                 source: String::new(),
+                fade: None,
+                revision: 0,
             })
             .insert_resource(crate::lighting::MapProbes {
                 regions: vec![],

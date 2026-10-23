@@ -316,10 +316,13 @@ fn apply_post_effects(
     if resolved.is_none() || lighting.is_changed() || effects.is_changed() {
         let (set, next) = AppliedPost::resolve(&lighting, &effects);
         if resolved.as_ref() != Some(&next) {
-            info!(
-                "map native post: row {} at {:.1} h from {}: {set:?}, upload={:?}; CPU mappings from SHADER-INPUTS.md",
-                lighting.light_set, lighting.hour, lighting.source, next.0
-            );
+            // Logged once a fade settles, not on every blended frame.
+            if lighting.fade.is_none() {
+                info!(
+                    "map native post: row {} at {:.1} h from {}: {set:?}, upload={:?}; CPU mappings from SHADER-INPUTS.md",
+                    lighting.light_set, lighting.hour, lighting.source, next.0
+                );
+            }
             *resolved = Some(next);
         }
     }
@@ -1216,14 +1219,125 @@ pub struct Sun;
 #[derive(Component)]
 pub struct FillLight;
 
-#[derive(Resource)]
+#[derive(Resource, Default)]
 pub struct MapLighting {
+    /// The draw params shown: the resolved stack, or a blend toward it while a fade runs.
     pub gparam: Gparam,
     pub hour: f32,
     /// Light set id in force (from the collision under the focus), and the one last applied.
     pub light_set: i32,
     pub applied: Option<i32>,
     pub source: String,
+    /// A change of draw params still fading in (#52).
+    pub fade: Option<LightFade>,
+    /// Bumped whenever [`Self::gparam`] or [`Self::light_set`] changes through a fade, so users
+    /// keyed on their inputs read the blend again.
+    pub revision: u32,
+}
+
+impl MapLighting {
+    /// Moves from what is shown now to the draw params `to` (the current target when `None`) and
+    /// the row `row` over `seconds` of game time; at once when `seconds` is not positive.
+    ///
+    /// The collision `SceneGparam` transition time is the fade between the old and new layer
+    /// stacks (`1410a8110`, docs/LIGHTING.md). A change during a fade starts from the blend shown
+    /// at that moment, so nothing jumps.
+    pub fn fade_to(&mut self, to: Option<Gparam>, row: i32, seconds: f32) {
+        let to = match (to, self.fade.take()) {
+            (Some(to), _) => to,
+            (None, Some(fade)) => fade.to,
+            (None, None) => self.gparam.clone(),
+        };
+        let from_row = self.light_set;
+        self.light_set = row;
+        self.applied = None;
+        self.revision = self.revision.wrapping_add(1);
+        if seconds > 0. && !ablate("nofade") {
+            info!("lighting fade: row {from_row} -> {row} over {seconds} s");
+            let from = std::mem::take(&mut self.gparam);
+            self.gparam = sekiro_formats::gparam::blend(&from, from_row, &to, row, self.hour, 0.);
+            self.fade = Some(LightFade {
+                from,
+                from_row,
+                to,
+                elapsed: 0.,
+                seconds,
+            });
+        } else {
+            self.gparam = to;
+        }
+    }
+
+    /// Moves a fade on by `seconds` of game time.
+    pub fn advance_fade(&mut self, seconds: f32) {
+        // Paused time holds the blend where it is, with nothing to rebuild.
+        let Some(fade) = self.fade.as_mut().filter(|_| seconds > 0.) else {
+            return;
+        };
+        fade.elapsed += seconds;
+        let weight = fade.elapsed / fade.seconds;
+        self.applied = None;
+        self.revision = self.revision.wrapping_add(1);
+        if weight >= 1. {
+            if let Some(fade) = self.fade.take() {
+                self.gparam = fade.to;
+            }
+        } else {
+            self.gparam = sekiro_formats::gparam::blend(
+                &fade.from,
+                fade.from_row,
+                &fade.to,
+                self.light_set,
+                self.hour,
+                weight,
+            );
+        }
+    }
+}
+
+/// A change of draw params in progress: from what was shown to the newly resolved stack.
+pub struct LightFade {
+    from: Gparam,
+    from_row: i32,
+    to: Gparam,
+    elapsed: f32,
+    seconds: f32,
+}
+
+/// Fade time used when a collision leaves its `SceneGparam` transition time unset (negative, as
+/// most Outskirts collisions do). The engine default was not traced; the 1 s of the interior
+/// thresholds is assumed (inferred). An authored 0 switches at once.
+pub const DEFAULT_FADE_SECONDS: f32 = 1.;
+
+/// Fade time for a collision's authored `SceneGparam` transition time.
+pub fn fade_seconds(transition: f32) -> f32 {
+    if transition < 0. {
+        DEFAULT_FADE_SECONDS
+    } else {
+        transition
+    }
+}
+
+/// Makes every lighting change switch at once: the map sweep and render gate jump the camera
+/// between views with time held, so a doorway fade there would never finish.
+#[derive(Resource)]
+pub struct InstantLighting;
+
+/// Moves the draw-param fade on each frame, before anything reads the lighting.
+pub fn advance_lighting_fade(
+    time: Res<Time>,
+    instant: Option<Res<InstantLighting>>,
+    mut lighting: ResMut<MapLighting>,
+) {
+    if lighting.fade.is_some() {
+        let _timer = crate::perf_log::SystemTimer::start("advance_lighting_fade");
+        let seconds = if instant.is_some() {
+            f32::INFINITY
+        } else {
+            time.delta_secs()
+        };
+        lighting.advance_fade(seconds);
+    }
 }
 
 /// One light set at one time of day, in Bevy terms.
@@ -1471,7 +1585,8 @@ pub fn apply_lighting(
             lighting.light_set, lighting.source
         );
     }
-    if lighting.applied != Some(lighting.light_set) {
+    // Logged once a fade settles, not on every blended frame.
+    if lighting.fade.is_none() {
         info!(
             "light set {} at {:.1} h from {}: {set:?}",
             lighting.light_set, lighting.hour, lighting.source
@@ -1947,6 +2062,8 @@ mod probe_tests {
             light_set: 0,
             applied: None,
             source: "fixture".into(),
+            fade: None,
+            revision: 0,
         })
         .insert_resource(MapPostEffects {
             luts: [(30, lut)].into(),
@@ -1993,6 +2110,8 @@ mod probe_tests {
             light_set: 100,
             applied: None,
             source: library.initial.source.clone(),
+            fade: None,
+            revision: 0,
         })
         .insert_resource(library)
         .init_resource::<MapEventScene>()
@@ -2001,7 +2120,7 @@ mod probe_tests {
         let camera = app.world_mut().spawn(Camera3d::default()).id();
         let set_overlays = |app: &mut App, overlays: [i8; 4]| {
             let mut selection = app.world_mut().resource_mut::<LightingSelection>();
-            LightingSelection::set_overlays(&mut selection, overlays);
+            LightingSelection::set_overlays(&mut selection, overlays, 0.);
             app.update();
         };
         let post = |app: &App| {
@@ -2035,6 +2154,94 @@ mod probe_tests {
         assert_eq!(plain, expected(&app), "stale post after the overlay change");
         set_overlays(&mut app, [-1, 8, -1, -1]);
         assert_eq!(post(&app).0, overlaid);
+    }
+
+    /// Stepping out of the Sculptor's hall (h022400: row 110, overlay 1; porch h022500: row 100,
+    /// overlays 1 and 5, both authoring a 1 s transition) fades the post and the scene light set
+    /// over that second instead of switching in one frame (#52).
+    #[test]
+    fn doorway_change_fades_over_the_collision_transition_time() {
+        use crate::lighting_selection::{LightingSelection, MapEventScene, select, sync_events};
+        let cache = sekiro_sim::cache::root();
+        let map = "m11_00_00_00";
+        let selected = select(&cache, map, None, None).unwrap();
+        let library = LightingSelection::load(&cache, map, selected, false).unwrap();
+        let hour = library.initial.hour;
+        let mut app = App::new();
+        app.insert_resource(MapLighting {
+            hour,
+            light_set: 110,
+            source: library.initial.source.clone(),
+            ..default()
+        })
+        .insert_resource(library)
+        .init_resource::<Time>()
+        .init_resource::<MapEventScene>()
+        .init_resource::<MapPostEffects>()
+        .add_systems(
+            Update,
+            (sync_events, advance_lighting_fade, apply_post_effects).chain(),
+        );
+        let camera = app.world_mut().spawn(Camera3d::default()).id();
+        let step = |app: &mut App, seconds: f32| {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(seconds));
+            app.update();
+            let exposure = app
+                .world()
+                .entity(camera)
+                .get::<tonemap::GamePost>()
+                .unwrap()
+                .exposure
+                .x;
+            let lighting = app.world().resource::<MapLighting>();
+            let sun = LightSet::from_gparam(&lighting.gparam, lighting.light_set, hour).sun_lux;
+            (exposure, sun)
+        };
+        let enter = |app: &mut App, row: i32, overlays: [i8; 4]| {
+            let mut selection = app.world_mut().resource_mut::<LightingSelection>();
+            LightingSelection::set_overlays(&mut selection, overlays, 1.);
+            let mut lighting = app.world_mut().resource_mut::<MapLighting>();
+            if lighting.light_set != row {
+                lighting.fade_to(None, row, 1.);
+            }
+        };
+        // The first selection at load switches at once.
+        enter(&mut app, 110, [1, -1, -1, -1]);
+        let inside = step(&mut app, 0.);
+        assert_eq!(step(&mut app, 2.), inside, "load selection faded");
+        enter(&mut app, 100, [1, 5, -1, -1]);
+        let first = step(&mut app, 0.);
+        let half = step(&mut app, 0.5);
+        let outside = step(&mut app, 0.6);
+        assert!(app.world().resource::<MapLighting>().fade.is_none());
+        assert_ne!(
+            inside.0, outside.0,
+            "the porch overlay authors another exposure"
+        );
+        assert_ne!(inside.1, outside.1, "row 100 authors another sun");
+        assert_eq!(first, inside, "the step out showed the porch at once");
+        for (i, mid) in [half.0, half.1].into_iter().enumerate() {
+            let (a, b) = [(inside.0, outside.0), (inside.1, outside.1)][i];
+            let (lo, hi) = (a.min(b), a.max(b));
+            assert!(
+                lo < mid && mid < hi,
+                "value {i} at half time: {mid} not in ({lo}, {hi})"
+            );
+        }
+        // Held time holds the blend without rebuilding; a sweep's jump switches at once.
+        enter(&mut app, 110, [1, -1, -1, -1]);
+        step(&mut app, 0.);
+        let revision = app.world().resource::<MapLighting>().revision;
+        step(&mut app, 0.);
+        assert_eq!(
+            app.world().resource::<MapLighting>().revision,
+            revision,
+            "held time rebuilt the lighting"
+        );
+        app.insert_resource(InstantLighting);
+        assert_eq!(step(&mut app, 0.), inside, "a sweep jump faded");
     }
     #[test]
     fn recovered_post_preserves_authored_bounds_and_disables_stages() {

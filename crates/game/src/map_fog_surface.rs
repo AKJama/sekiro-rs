@@ -426,6 +426,8 @@ mod tests {
                 light_set: 0,
                 applied: None,
                 source: String::new(),
+                fade: None,
+                revision: 0,
             })
             .init_resource::<bevy::light::GlobalAmbientLight>()
             .add_systems(Update, update_lighting);
