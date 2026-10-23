@@ -163,7 +163,7 @@ mod tests {
                 Some("genichiro-defeated"),
                 Some("m900010"),
             ),
-            // The opening, as in the real-game reference shots: before Gyoubu, morning sky.
+            // The opening (before Gyoubu, morning sky), the state a new play session starts in.
             (
                 "--render-gate --map m11_00_00_00 --gate-fixture opening",
                 Some("morning"),
