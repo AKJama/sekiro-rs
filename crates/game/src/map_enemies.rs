@@ -321,13 +321,13 @@ fn sync(
     }
 }
 
-#[allow(clippy::type_complexity)]
 /// Past the game's draw distance a foe is neither drawn nor skinned, even beside Wolf
 /// (#312); inside it, foes near Wolf or in view are. The simulation keeps running either way.
 fn shown(in_range: bool, near: bool, in_view: bool) -> bool {
     in_range && (near || in_view)
 }
 
+#[allow(clippy::type_complexity)]
 fn gauges(
     sim: NonSend<Sim>,
     camera: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
