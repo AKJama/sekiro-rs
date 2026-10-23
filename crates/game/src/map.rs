@@ -55,6 +55,8 @@ mod mesh_merge;
 pub(crate) use mesh_merge::{merge_meshes, opaque};
 
 pub(crate) use map_material::{ATTR_MAP_BLEND2, LayeredMaterial, MaterialStats};
+#[cfg(test)]
+pub(crate) use map_material::{clustered_light_residual, native_point_light_scale};
 #[path = "sky.rs"]
 pub(crate) mod sky;
 #[path = "map_sweep.rs"]

@@ -1297,7 +1297,7 @@ No L1 or E1 spot count is declared resolved from this limited camera sample.
 Map point and spot lights (BTL and FXR 609) no longer use Bevy's inverse-square response in `map_material.wgsl`.
 The native deferred shaders use `saturate(1 - d^2/R^2) * max(t^2 + (1 - t^2) N.L, 0) / (1 + 0.7 d^2/R^2)` with `t = 1.4/(1.4 + d/R)`, and the spot adds `max(1 - (tan/tan_outer)^2, 0)`.
 `DiffColor.w` is `1/range` (builder `3892e0` offset 0x4c), so the light range already carried by Bevy is the only extra input.
-The full derivation, the specular term, the untraced inputs and the traced unit factor `NATIVE_LIGHT_BUFFER_SCALE` (1.0) with the separate `NATIVE_POINT_LIGHT_UNEXPLAINED_RESIDUAL` are in `docs/MAP-FX.md` ("Native point-light falloff and flame colour").
+The full derivation, the specular term, the untraced inputs and the traced unit factor `NATIVE_LIGHT_BUFFER_SCALE` (1.0) with the separate BTL-only `BTL_POINT_LIGHT_UNEXPLAINED_RESIDUAL` (#323) are in `docs/MAP-FX.md` ("Native point-light falloff and flame colour").
 FXR 609 diffuse colour is squared like the BTL colour, because both go through `3892e0`.
 `SEKIRO_MAP_POINT_LIGHTS_BEVY=1` restores the previous curve for matched-camera controls and `SEKIRO_MAP_POINT_LIGHT_SCALE` overrides the unit constant.
 

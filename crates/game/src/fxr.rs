@@ -2481,4 +2481,49 @@ mod tests {
         };
         assert!(native_diffuse(&fire, 2.) > 0.5 * native_diffuse(&fire, 0.));
     }
+
+    /// #323: the Outskirts gatehouse torches (brazier 839530 on `o116000`) light a warm pool on
+    /// the ground below the flame. Their own falloff (0.625 m) is traced, so the BTL by-eye
+    /// residual, fitted when every light used `b = 1/R`, must not dim them a second time: with
+    /// it the ground 1.3 m under the flame got 0.53 native units, without it 1.48.
+    #[test]
+    fn torch_light_lights_the_ground_below_its_flame() {
+        let cache = sekiro_sim::cache::root();
+        if !cache
+            .join("raw/sfx/sfxbnd_commoneffects.ffxbnd.d/f000839530.fxr")
+            .exists()
+        {
+            eprintln!("skipping: cache not extracted");
+            return;
+        }
+        let mut player = FxrPlayer::new(cache);
+        player.hold(HELD, 839530, 0, Transform::IDENTITY, true);
+        for _ in 0..180 {
+            player.advance(1. / 60.);
+        }
+        let cam = GlobalTransform::from(Transform::from_xyz(0., 1.5, 8.));
+        let mut buffers = FrameBuffers::default();
+        let mut frame = Frame {
+            cam: &cam,
+            bufs: &mut buffers.bufs,
+            multi: &mut buffers.multi,
+            lights: &mut buffers.lights,
+            distort: &mut buffers.distort,
+            trail: &mut buffers.trail,
+        };
+        for e in &player.effects {
+            collect(e.root.as_ref().unwrap(), &mut frame);
+        }
+        let [torch] = buffers.lights[..] else {
+            panic!("one torch light, got {:?}", buffers.lights);
+        };
+        // Authored: radius 5, falloff 0.625, multiplier 0 to 6.4 over the first two seconds.
+        assert!((torch.range - 5.).abs() < 1e-4);
+        assert!((torch.falloff - 0.625).abs() < 1e-4);
+        assert!((torch.intensity - 6.4).abs() < 1e-3, "{}", torch.intensity);
+        let scale = crate::map::native_point_light_scale()
+            * crate::map::clustered_light_residual(torch.point_light().radius);
+        let ground = native_diffuse(&torch, 1.3) * scale;
+        assert!(ground > 1.2, "ground under the torch gets {ground}");
+    }
 }
