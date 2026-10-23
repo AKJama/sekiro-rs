@@ -39,7 +39,7 @@ impl Bird {
     }
 
     pub fn place(&mut self, world: &Arc<crate::collision::CollisionWorld>) {
-        self.duel.enemy.ground = Box::new(crate::collision::EnemyGround(world.clone()));
+        self.duel.enemy.ground = Box::new(self.duel.enemy_ground(world));
     }
 
     pub fn command(&mut self, command: &EventCommand, dt: f32) {

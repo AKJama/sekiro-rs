@@ -597,7 +597,7 @@ pub fn run(options: Options) -> Result<()> {
             duel.start_at_idol(i);
         }
         duel.player.ground = Box::new(world.clone());
-        duel.enemy.ground = Box::new(sekiro_sim::collision::EnemyGround(world.clone()));
+        duel.enemy.ground = Box::new(duel.enemy_ground(&world));
         // Placeholder until the map's authored void return volumes are decoded.
         duel.fall_respawn_depth = Some(40.0);
         eprintln!(

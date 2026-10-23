@@ -169,7 +169,7 @@ fn deathblow_pair_search_is_bounded() {
         queries: queries.clone(),
     });
     duel.enemy.ground = Box::new(Counted {
-        inner: Box::new(sekiro_sim::collision::EnemyGround(world.clone())),
+        inner: Box::new(sekiro_sim::collision::EnemyGround::new(world.clone())),
         queries: queries.clone(),
     });
     let heading = 270.0f32.to_radians();
