@@ -420,7 +420,8 @@ Threshold i is where child i starts: in all 117 such nodes of the installed effe
 FwLo's RustSekiro reads them the same way (`lod_level`, docs/kb/fxr.md, 2026-10-23).
 Common values: 800140 ground fire 1 / 165 / 200, 839530 brazier 1 / 35 / 100, 61 item glint 1 / 50 / 150; `threshold1` is 10 to 400 m over all effects.
 `show_level` (fxr_tree.rs) picks the level each step by the camera's distance to the 2002 node; a newly shown level starts fresh, and the one it replaces stops emitting and ends once its particles have.
-The camera is the one the effects draw for (`FxrLib::eye`, set by `fxr::render`); with none (headless runs) the detailed level shows.
+The camera is the map effects' camera (`FxrPlayer::set_eye`, set each frame by `map_fx` before it steps the effects); with none (arenas without map effects, headless tests) the detailed level shows.
+With the clock stopped (render gates, a paused game) the old level goes at once and the new one is warmed up for 2 s, as a newly woken map effect is; without that, the Outskirts render gate's view 3 lost an effect's near glow.
 Not known from the data or the exe: hysteresis (none is applied, the switch is at the threshold itself) and whether the game fades the outgoing level or cuts it.
 Map effects wake only within 120 m of the camera, so the ground fire's 165 m switch is never seen on the map; the brazier's 35 m one is.
 `SEKIRO_FXR_LOG=1` logs each switch (`FXR level of detail at ...`).

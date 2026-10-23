@@ -710,7 +710,7 @@ pub fn step_node(n: &mut NodeInst, lib: &mut FxrLib, parent: Transform, dt: f32,
         None => parent * n.local,
     };
     if !stop {
-        show_level(n, lib);
+        show_level(n, lib, dt);
     }
     if n.time < n.delay {
         n.time += dt;
@@ -826,8 +826,9 @@ pub fn step_node(n: &mut NodeInst, lib: &mut FxrLib, parent: Transform, dt: f32,
 /// Shows a LevelsOfDetail node's (2002) level for the camera's distance to the node. A newly
 /// shown level starts fresh; the one it replaces emits no more and ends once its particles have.
 /// The switch is at the thresholds themselves, with no hysteresis: none is known from the data or
-/// the exe.
-fn show_level(n: &mut NodeInst, lib: &mut FxrLib) {
+/// the exe. With the clock stopped (`dt` 0, render gates and paused map effects) nothing would
+/// age, so the old level goes at once and the new one is warmed up as a new map effect is.
+fn show_level(n: &mut NodeInst, lib: &mut FxrLib, dt: f32) {
     let Some(lod) = &mut n.lod else { return };
     let dist = lib.eye.map_or(0.0, |eye| eye.distance(n.world.translation));
     let level = lod_level(&lod.thresholds, lod.levels.len(), dist);
@@ -851,6 +852,14 @@ fn show_level(n: &mut NodeInst, lib: &mut FxrLib) {
         .and_then(|def| make_node(lib, def, seed, lod.depth))
     {
         n.children.push(c);
+    }
+    if dt == 0. {
+        n.children.retain(|c| !c.retired);
+        for c in &mut n.children {
+            for _ in 0..60 {
+                step_node(c, lib, n.world, 1. / 30., false);
+            }
+        }
     }
 }
 
@@ -1719,6 +1728,15 @@ mod tests {
         assert!(gone.iter().all(|d| d.0 == 0), "{gone:?}");
         let back = run(&mut lib, 20., 300);
         assert!(detailed(&back), "{back:?}");
+        // With the clock stopped (render gates) the old level goes at once and the new one is
+        // warmed up.
+        run(&mut lib, 180., 0);
+        step_node(&mut n, &mut lib, place, 0., false);
+        let paused = drawn(&n);
+        assert!(
+            !detailed(&paused) && paused.iter().any(|d| d.1 == 6),
+            "{paused:?}"
+        );
     }
 
     #[test]
