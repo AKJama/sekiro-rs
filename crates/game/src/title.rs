@@ -283,13 +283,15 @@ fn draw_rows(
         commands.entity(*child).despawn();
     }
     let rows = title.rows();
-    // The Chapter list shows a window of rows around the cursor.
+    // The Chapter list shows a window of rows around the cursor, short enough to stay above
+    // the FromSoftware mark.
+    const SHOWN: usize = 5;
     let first = title
         .selected
-        .saturating_sub(4)
-        .min(rows.len().saturating_sub(9));
+        .saturating_sub(SHOWN / 2)
+        .min(rows.len().saturating_sub(SHOWN));
     commands.entity(list).with_children(|list| {
-        for (i, label) in rows.iter().enumerate().skip(first).take(9) {
+        for (i, label) in rows.iter().enumerate().skip(first).take(SHOWN) {
             let chosen = i == title.selected;
             list.spawn((
                 Button,
