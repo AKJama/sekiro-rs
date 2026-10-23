@@ -13,8 +13,10 @@ import uuid
 from pathlib import Path
 
 if __package__:
+    from . import collection
     from .match_poses import Renderer, make_pair, write_json
 else:
+    import collection
     from match_poses import Renderer, make_pair, write_json
 
 
@@ -26,10 +28,12 @@ def main():
     parser.add_argument('--annotations', type=Path, required=True)
     parser.add_argument('--poses', type=Path)
     parser.add_argument('--maps', type=Path, default=Path('cache/maps'))
-    parser.add_argument('--story', default='genichiro-defeated')
+    parser.add_argument('--story', help='Defaults to the collection.json story of --reference (genichiro-defeated without one)')
     parser.add_argument('--only-spots', help='Comma-separated spot IDs for diagnostic subsets')
     args = parser.parse_args()
     args.render_arg = []
+    args.story = collection.story(args.reference, args.story)
+    source = collection.images(args.reference).resolve()
     args.output = args.output.resolve()
     repo = Path(__file__).resolve().parents[2]
     if args.output == repo or repo in args.output.parents or args.output == args.reference.resolve():
@@ -63,7 +67,7 @@ def main():
                 stem = f'{pose["spot"]}-shot-{pose["shot"]:03}'
                 image = renderer.directory / f'{request["id"]:07}.png'
                 shutil.copyfile(image, args.output / f'{stem}-ours.png')
-                make_pair(args.reference / 'm11_00' / pose['file'], image,
+                make_pair(source / pose['file'], image,
                           args.output / f'{stem}.png', f'{stem} | {args.story} | exact saved camera')
                 write_json(args.output / f'{stem}.visibility.json', records[request['id']])
                 updated = dict(pose, pair=f'{stem}.png', visibility=f'{stem}.visibility.json',
@@ -76,6 +80,7 @@ def main():
         finally:
             renderer.close()
     write_json(args.output / 'poses.json', completed)
+    write_json(args.output / 'collection.json', dict(story=args.story, images=str(source)))
     write_json(args.output / 'triage.json', reviews)
     write_json(args.output / 'replay.json', dict(story=args.story, renderer_sha256=digest,
                poses=len(completed), camera_policy='Exact saved view, player and FOV; no rematching',

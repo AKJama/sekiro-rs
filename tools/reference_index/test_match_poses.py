@@ -5,12 +5,14 @@ import threading
 import time
 import uuid
 import json
+import tempfile
 from unittest.mock import Mock, patch
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance
 
+from tools.reference_index import collection
 from tools.reference_index.match_poses import camera, coarse_similarity, features, remove_candidate, similarity
 from tools.reference_index.pose_collision import CameraCollision
 from tools.reference_index.report_parity import report
@@ -25,6 +27,24 @@ class PoseScoring(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'regenerate pairs'):
                 report(Path('historical-captures'), output)
         output.write_text.assert_not_called()
+
+    def test_collection_declares_its_own_story_and_image_folder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original, opening = Path(directory) / 'reference', Path(directory) / 'reference-opening'
+            original.mkdir()
+            opening.mkdir()
+            (opening / 'collection.json').write_text(json.dumps({'story': 'morning', 'images': '../reference/m11_00'}))
+            for root, override, story, images in [
+                (original, None, 'genichiro-defeated', original / 'm11_00'),
+                (opening, None, 'morning', original / 'm11_00'),
+                (opening, 'night', 'night', original / 'm11_00'),
+            ]:
+                self.assertEqual(collection.story(root, override), story)
+                self.assertEqual(collection.images(root).resolve(), images.resolve())
+            # A report on the morning collection expects morning captures without being told.
+            (opening / 'poses.json').write_text(json.dumps([{'render_settings': {'story': 'genichiro-defeated'}}]))
+            with self.assertRaisesRegex(ValueError, 'Expected morning captures'):
+                report(opening, opening / 'summary.md')
 
     def test_camera_orbit_pulls_in_at_a_wall_and_ignores_other_side(self):
         wall = np.array([[[-3, -3, 2], [3, -3, 2], [3, 3, 2]],
