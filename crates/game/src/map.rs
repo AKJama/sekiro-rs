@@ -114,9 +114,10 @@ pub struct Options {
 }
 
 /// How map pieces are culled by draw groups. In the game, the hit collision the player stands
-/// on selects which pieces draw, which swaps distant stand-ins for detailed geometry; `Display`
-/// uses the collision's display groups (word block 0 of the MSB mask struct), `Draw` its draw
-/// groups (block 1), matched against each piece's draw groups (block 1).
+/// on selects which pieces draw, which swaps distant stand-ins for detailed geometry. `Draw`
+/// (the game's rule) uses the collision's DispGroups plus its Condition bit, `Display` the
+/// first word block of its MSB mask struct (a diagnostic); both are matched against each
+/// piece's loader-resolved draw mask (`piece_groups`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GroupMode {
     Off,
@@ -239,6 +240,31 @@ pub(crate) struct Groups {
     active: Option<[u32; 8]>,
     checked_at: Option<Vec3>,
     dirty: bool,
+}
+
+/// The groups a collision part asks to draw when the player stands on it: its DispGroups plus
+/// its Condition bit, as the exe's display-mask accessor reads them
+/// (`docs/MAP-COMPLETENESS.md`, questions 1 and 4); the editor's DrawGroups for old layouts.
+fn collision_demand(row: &Value) -> [u32; 8] {
+    if row["display_group"].is_object() {
+        world::display_mask(row)
+    } else {
+        groups8(&row["draw_groups"])
+    }
+}
+
+/// A map piece's or object's draw mask after the exe loader's selector preprocessing and
+/// all-bit fallback (`docs/MAP-COMPLETENESS.md`, question 1); the editor's DrawGroups for
+/// old layouts.
+fn piece_groups(row: &Value) -> [u32; 8] {
+    match visibility::SourceMasks::from_row(row) {
+        Ok(source) => {
+            source
+                .effective(row["kind"].as_str().unwrap_or("MapPiece"))
+                .draw
+        }
+        Err(_) => groups8(&row["draw_groups"]),
+    }
 }
 
 fn groups8(v: &Value) -> [u32; 8] {
@@ -691,7 +717,7 @@ pub fn add_map(
                 min,
                 max,
                 display: groups8(&row["display_groups"]),
-                draw: groups8(&row["draw_groups"]),
+                draw: collision_demand(row),
                 light_set: row["light_set"].as_i64().unwrap_or(-1) as i32,
                 fog_set: row["fog_set"].as_i64().unwrap_or(-1) as i32,
                 scattering_set: row["scattering_set"].as_i64().unwrap_or(-1) as i32,
@@ -1285,7 +1311,12 @@ fn spawn_map(
                     !sekiro_sim::arena::box_within(lo, hi, center.xz(), radius)
                 })
             });
-            let mut entity = commands.spawn((DrawGroups(groups8(&row["draw_groups"])), transform));
+            // Visible from the start, so `apply_groups` reaches the root before its scene streams.
+            let mut entity = commands.spawn((
+                DrawGroups(piece_groups(row)),
+                transform,
+                Visibility::default(),
+            ));
             pending.queue(&glb, None, false, (entity.id(), 0));
             if far_scenery {
                 entity.insert(FarScenery);
@@ -1716,10 +1747,14 @@ fn vertical_hit(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
     Some(p.y - (l1 * a.y + l2 * b.y + l3 * c.y))
 }
 
+/// The last logged `apply_groups` outcome: groups in force, hidden roots, all roots.
+type GroupLog = (Option<[u32; 8]>, usize, usize);
+
 fn apply_groups(
     mut groups: ResMut<Groups>,
     mut pieces: Query<(&DrawGroups, &mut Visibility), LegacyPieceFilter>,
     added: Query<(), Added<DrawGroups>>,
+    mut logged: Local<Option<GroupLog>>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("apply_groups");
     if !groups.dirty && added.is_empty() {
@@ -1730,8 +1765,10 @@ fn apply_groups(
         GroupMode::Off => None,
         _ => groups.active,
     };
+    let mut hidden = 0;
     for (g, mut v) in &mut pieces {
         let show = active.is_none_or(|a| a.iter().zip(g.0).any(|(x, y)| x & y != 0));
+        hidden += usize::from(!show);
         let want = if show {
             Visibility::Inherited
         } else {
@@ -1740,6 +1777,18 @@ fn apply_groups(
         if *v != want {
             *v = want;
         }
+    }
+    let state = (active, hidden, pieces.iter().count());
+    if *logged != Some(state) {
+        *logged = Some(state);
+        let standing = groups
+            .current
+            .and_then(|i| groups.parts.get(i))
+            .map_or("none", |p| p.name.as_str());
+        info!(
+            "draw groups {active:08x?} from {standing}: {hidden}/{} map roots hidden",
+            state.2
+        );
     }
 }
 
@@ -2280,6 +2329,50 @@ mod tests {
                 ids[1]
             );
         }
+    }
+
+    /// #301: the collision under the player draws the pieces whose loader-resolved draw mask
+    /// meets its DispGroups plus Condition bit; the editor DrawGroups arrays say otherwise here.
+    #[test]
+    fn legacy_roots_follow_the_collision_display_mask() {
+        use serde_json::json;
+        let display = |first: u32, second: u32| {
+            json!({"kind": "MapPiece", "display_data": {
+                "display_groups": [first, 0, 0, 0, 0, 0, 0, 0],
+                "draw_groups": [second, 0, 0, 0, 0, 0, 0, 0],
+                "collision_mask": vec![0; 32], "condition1": 0, "condition2": 0}})
+        };
+        let collision = json!({
+            "display_group": {"condition": 5, "disp_groups": [0, 0, 0, 0, 0, 0, 0, 0]},
+            "draw_groups": [1, 0, 0, 0, 0, 0, 0, 0],
+        });
+        let mut app = App::new();
+        app.insert_resource(Groups {
+            mode: GroupMode::Draw,
+            parts: vec![],
+            current: None,
+            active: Some(collision_demand(&collision)),
+            checked_at: None,
+            dirty: true,
+        })
+        .add_systems(Update, apply_groups);
+        let mut spawn = |row: &Value| {
+            app.world_mut()
+                .spawn((
+                    DrawGroups(piece_groups(row)),
+                    Transform::default(),
+                    Visibility::default(),
+                ))
+                .id()
+        };
+        let inside = spawn(&display(1 << 5, 0));
+        let outside = spawn(&display(1 << 6, 1));
+        let ungrouped = spawn(&display(0, 0));
+        app.update();
+        let visibility = |e| *app.world().get::<Visibility>(e).unwrap();
+        assert_eq!(visibility(inside), Visibility::Inherited);
+        assert_eq!(visibility(outside), Visibility::Hidden);
+        assert_eq!(visibility(ungrouped), Visibility::Inherited);
     }
 
     #[test]
