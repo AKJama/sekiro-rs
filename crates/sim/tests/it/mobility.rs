@@ -171,3 +171,38 @@ fn a_fall_into_the_void_returns_wolf_to_where_he_last_stood() {
     assert!(d.player.body.grounded);
     d.player.ground = Box::new(FlatGround::default());
 }
+
+/// #201: a ledge Wolf lands on for fewer than the exe's 5 grounded ticks on the way down is not
+/// where a fall into the void returns him: he comes back to the cliff top.
+#[test]
+fn a_ledge_touched_on_the_way_down_is_not_the_return_point() {
+    struct Void;
+    impl Ground for Void {
+        fn height(&self, _: f32, _: f32) -> Option<f32> {
+            None
+        }
+    }
+    let Some(mut d) = duel() else {
+        return;
+    };
+    for _ in 0..10 {
+        d.step(&InputFrame::default(), DT);
+    }
+    let top = d.player.body.position;
+    d.player.ground = Box::new(FlatGround { height: -5.0 });
+    d.player.body.position[1] = -5.0;
+    for _ in 0..2 {
+        d.step(&InputFrame::default(), DT);
+    }
+    d.player.ground = Box::new(Void);
+    d.fall_respawn_depth = Some(40.0);
+    d.player.body.position[1] = -46.0;
+    d.player.body.grounded = false;
+    d.step(&InputFrame::default(), DT);
+    assert!(
+        (d.player.body.position[1] - top[1]).abs() < 0.01,
+        "back at {:?}, the cliff top is {top:?}",
+        d.player.body.position
+    );
+    d.player.ground = Box::new(FlatGround::default());
+}
