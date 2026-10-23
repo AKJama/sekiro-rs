@@ -411,7 +411,19 @@ The smoke colour data itself was read right: grey 0.5 times colour3 2.0 to 0.05,
 The lit additive layer 31421 (blend 4, rgbMultiplier 15) still adds a faint orange at the column's foot; the real light term of lit particles stays open, as in FwLo's notes.
 Effects touched: 62 common effects have a 2002 node with more than one level and 100 a 2202 node with more than one template, among them the brazier 839530 (its own 609 light, sparks and smoke now emit; before, the far level's light stood in for them) and the item glint 61 (no longer doubled by its far level).
 The torch 300163, the fog wall 11 and the snow 839500 have neither and are unchanged.
-Open: the LOD switch distances (`threshold0` is 1 in all 62 effects, `threshold1` 10 to 165) are not applied; the near level is drawn at every distance.
+The LOD switch distances were applied later (#273, below).
+
+## Level of detail distances, 2026-10-23 (#273)
+
+A LevelsOfDetail node's (2002) config (1002) holds LevelsOfDetailThresholds (action 133), `threshold0` to `threshold4`, integer metres, one per child ("distance threshold for child node i" in EvenTorset's fxr).
+Threshold i is where child i starts: in all 117 such nodes of the installed effects `threshold0` is 1 and the first child is the detailed one, and the unused tail is 1000 over near-empty children (read the other way, the detailed level would show only within 1 m).
+FwLo's RustSekiro reads them the same way (`lod_level`, docs/kb/fxr.md, 2026-10-23).
+Common values: 800140 ground fire 1 / 165 / 200, 839530 brazier 1 / 35 / 100, 61 item glint 1 / 50 / 150; `threshold1` is 10 to 400 m over all effects.
+`show_level` (fxr_tree.rs) picks the level each step by the camera's distance to the 2002 node; a newly shown level starts fresh, and the one it replaces stops emitting and ends once its particles have.
+The camera is the one the effects draw for (`FxrLib::eye`, set by `fxr::render`); with none (headless runs) the detailed level shows.
+Not known from the data or the exe: hysteresis (none is applied, the switch is at the threshold itself) and whether the game fades the outgoing level or cuts it.
+Map effects wake only within 120 m of the camera, so the ground fire's 165 m switch is never seen on the map; the brazier's 35 m one is.
+`SEKIRO_FXR_LOG=1` logs each switch (`FXR level of detail at ...`).
 
 ## Soft sprite pull and uniformScale, 2026-10-22 (#78)
 

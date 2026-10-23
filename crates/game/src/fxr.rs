@@ -1782,6 +1782,8 @@ fn render(
     let Some(cam) = camera.iter().next() else {
         return;
     };
+    // The levels of detail pick by this camera from the next step on.
+    player.lib.eye = Some(cam.translation());
     let _timer = crate::perf_log::SystemTimer::start("fxr");
     let white = white
         .get_or_insert_with(|| {

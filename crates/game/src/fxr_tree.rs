@@ -210,6 +210,8 @@ pub struct FxrLib {
     textures: HashMap<i64, PathBuf>,
     cache: HashMap<i64, Option<Arc<Value>>>,
     compiled: HashMap<i64, Arc<NodeDef>>,
+    /// The camera's position, for the levels of detail (the nearest level when unknown).
+    pub eye: Option<Vec3>,
 }
 
 impl FxrLib {
@@ -400,6 +402,32 @@ pub struct NodeInst {
     /// NodeAcceleration (1 and kin): the speed gained along Z and the downward speed, each the
     /// running sum of its acceleration curve over the node's life.
     gained: Vec2,
+    /// A LevelsOfDetail node (2002): its levels and the one shown; `children` holds that level
+    /// and any earlier ones still dying out.
+    lod: Option<Lod>,
+    /// A level its LevelsOfDetail parent no longer shows: it emits no more and ends once its
+    /// particles have.
+    retired: bool,
+}
+
+struct Lod {
+    thresholds: Arc<[f32]>,
+    levels: Vec<Arc<NodeDef>>,
+    shown: Option<usize>,
+    /// The levels' depth in the tree.
+    depth: u32,
+}
+
+/// The level of a LevelsOfDetail node (2002) `dist` metres from the camera: child i shows from
+/// threshold i to threshold i + 1 (reference/fxr LevelsOfDetailThresholds, "distance threshold
+/// for child node i"). In every installed effect threshold 0 is 1 m and the detailed level is
+/// the first, so nearer than 1 m is the first level too. The ground fire 800140 (1, 165, 200,
+/// 1000, 1000) shows its detailed level to 165 m, a lighter one to 200 m, then empty levels.
+fn lod_level(thresholds: &[f32], levels: usize, dist: f32) -> usize {
+    thresholds[..levels.min(thresholds.len())]
+        .iter()
+        .rposition(|&t| dist >= t)
+        .unwrap_or(0)
 }
 
 pub struct Config {
@@ -441,6 +469,10 @@ pub struct NodeDef {
     reference: i64,
     cfg: Option<Arc<Config>>,
     children: Vec<Arc<NodeDef>>,
+    /// A LevelsOfDetail node's (2002) level distances in metres, one per child: its 1002
+    /// config's LevelsOfDetailThresholds (133) `threshold0..4` (10000, the schema default, when
+    /// missing).
+    lod: Option<Arc<[f32]>>,
 }
 
 impl NodeDef {
@@ -451,24 +483,26 @@ impl NodeDef {
             .and_then(Value::as_u64)
             .unwrap_or(0) as usize;
         let kind = node["type"].as_i64().unwrap_or(0);
+        let config = node["configs"].as_array().and_then(|c| c.get(i));
+        // A LevelsOfDetail node (2002) keeps every level and shows one at a time by camera
+        // distance (`lod_level`); a NodeEmitter (2202) keeps every child as a template.
+        let lod = (kind == 2002).then(|| {
+            let t = &config.unwrap_or(&Value::Null)["levelsOfDetailThresholds"];
+            (0..5)
+                .map(|k| t[format!("threshold{k}")].as_f64().unwrap_or(10_000.) as f32)
+                .collect()
+        });
         Self {
             kind,
             reference: node["sfx"].as_i64().unwrap_or(-1),
-            cfg: node["configs"]
-                .as_array()
-                .and_then(|c| c.get(i))
-                .map(|c| Arc::new(Config::new(c))),
+            cfg: config.map(|c| Arc::new(Config::new(c))),
             children: node["nodes"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                // A LevelsOfDetail node (2002) shows one child at a time by camera distance
-                // (reference/fxr NodeType); the first, nearest level is the one drawn (FwLo's
-                // RustSekiro rule). Running every level drew the far ones over the near one.
-                // A NodeEmitter (2202) keeps all its children: they are its templates.
-                .take(if kind == 2002 { 1 } else { usize::MAX })
                 .map(|n| Arc::new(Self::new(n)))
                 .collect(),
+            lod,
         }
     }
 }
@@ -511,7 +545,17 @@ pub fn make_node(lib: &mut FxrLib, node: &NodeDef, seed: u32, depth: u32) -> Opt
     }
     let is_node_emitter = cfg.as_ref().is_some_and(|c| c.kind == Some(1005));
     let kids = &node.children;
-    let (children, templates) = if is_node_emitter {
+    // A LevelsOfDetail node builds its shown level when it is first stepped, where the camera's
+    // distance is known.
+    let lod = node.lod.as_ref().map(|thresholds| Lod {
+        thresholds: thresholds.clone(),
+        levels: kids.clone(),
+        shown: None,
+        depth: depth + 1,
+    });
+    let (children, templates) = if lod.is_some() {
+        (Vec::new(), Vec::new())
+    } else if is_node_emitter {
         (Vec::new(), kids.clone())
     } else {
         (
@@ -547,6 +591,8 @@ pub fn make_node(lib: &mut FxrLib, node: &NodeDef, seed: u32, depth: u32) -> Opt
         detached: None,
         offset: Vec3::ZERO,
         gained: Vec2::ZERO,
+        lod,
+        retired: false,
     })
 }
 
@@ -663,10 +709,13 @@ pub fn step_node(n: &mut NodeInst, lib: &mut FxrLib, parent: Transform, dt: f32,
         Some(w) => w * n.local,
         None => parent * n.local,
     };
+    if !stop {
+        show_level(n, lib);
+    }
     if n.time < n.delay {
         n.time += dt;
         for c in &mut n.children {
-            step_node(c, lib, n.world, dt, stop);
+            step_node(c, lib, n.world, dt, stop || c.retired);
         }
         return;
     }
@@ -764,7 +813,7 @@ pub fn step_node(n: &mut NodeInst, lib: &mut FxrLib, parent: Transform, dt: f32,
     n.time += dt;
     let world = n.world;
     for ch in &mut n.children {
-        step_node(ch, lib, world, dt, stop || !alive);
+        step_node(ch, lib, world, dt, stop || !alive || ch.retired);
     }
     n.children.retain(|c| !c.finished);
     let emitting = alive && n.cfg.is_some();
@@ -772,6 +821,37 @@ pub fn step_node(n: &mut NodeInst, lib: &mut FxrLib, parent: Transform, dt: f32,
         && n.particles.is_empty()
         && n.children.is_empty()
         && (stop || n.duration >= 0.0 && n.time - n.delay >= n.duration || n.cfg.is_none());
+}
+
+/// Shows a LevelsOfDetail node's (2002) level for the camera's distance to the node. A newly
+/// shown level starts fresh; the one it replaces emits no more and ends once its particles have.
+/// The switch is at the thresholds themselves, with no hysteresis: none is known from the data or
+/// the exe.
+fn show_level(n: &mut NodeInst, lib: &mut FxrLib) {
+    let Some(lod) = &mut n.lod else { return };
+    let dist = lib.eye.map_or(0.0, |eye| eye.distance(n.world.translation));
+    let level = lod_level(&lod.thresholds, lod.levels.len(), dist);
+    if lod.shown == Some(level) {
+        return;
+    }
+    if std::env::var_os("SEKIRO_FXR_LOG").is_some() {
+        info!(
+            "FXR level of detail at {:.1}: level {level} (was {:?}) at {dist:.1} m",
+            n.world.translation, lod.shown
+        );
+    }
+    for c in &mut n.children {
+        c.retired = true;
+    }
+    lod.shown = Some(level);
+    let seed = n.seed.wrapping_mul(31).wrapping_add(level as u32 + 1);
+    if let Some(c) = lod
+        .levels
+        .get(level)
+        .and_then(|def| make_node(lib, def, seed, lod.depth))
+    {
+        n.children.push(c);
+    }
 }
 
 /// CPU fallback for GPUStandardParticle. Integer durations/intervals use the FXR 30 Hz clock.
@@ -1569,6 +1649,25 @@ mod tests {
     /// fire sheet.
     #[test]
     fn ground_fire_draws_one_level_with_every_template() {
+        let mut lib = FxrLib::scan(&sekiro_sim::cache::root());
+        let def = lib.compiled(800140).expect("effect installed");
+        let mut n = make_node(&mut lib, &def, 1, 0).unwrap();
+        let place = ground_fire_place();
+        for _ in 0..300 {
+            step_node(&mut n, &mut lib, place, 1. / 30., false);
+        }
+        let drawn = drawn(&n);
+        let glows = drawn.iter().filter(|d| d.0 == 603 && d.2 == 1000).count();
+        assert_eq!(glows, 1, "ground glows drawn: {drawn:?}");
+        assert!(
+            !drawn.iter().any(|d| d.1 == 6),
+            "far level drawn: {drawn:?}"
+        );
+        assert!(drawn.iter().any(|d| d.0 == 604), "no fire sheet: {drawn:?}");
+    }
+
+    /// The (appearance type, blend mode, texture) of every node with live particles.
+    fn drawn(n: &NodeInst) -> Vec<(i64, i64, i64)> {
         fn walk(n: &NodeInst, out: &mut Vec<(i64, i64, i64)>) {
             if let Some(c) = n.cfg.as_ref().filter(|_| !n.particles.is_empty()) {
                 let a = &c.appearance;
@@ -1582,22 +1681,44 @@ mod tests {
                 walk(ch, out);
             }
         }
+        let mut out = Vec::new();
+        walk(n, &mut out);
+        out
+    }
+
+    /// #273: the ground fire 800140's LevelsOfDetail node (2002, thresholds 1, 165, 200, 1000,
+    /// 1000 m) draws its detailed level near the camera (its 609 light and 604 fire sheet), its
+    /// lighter second level from 165 m (the glow and the blend 6 smoke only), nothing from 200 m,
+    /// and the detailed level again once the camera comes back. Before, the detailed level drew
+    /// at every distance.
+    #[test]
+    fn ground_fire_level_follows_the_camera_distance() {
+        let t = [1., 165., 200., 1000., 1000.];
+        let levels = [0.5, 20., 170., 250., 1500.].map(|d| lod_level(&t, 5, d));
+        assert_eq!(levels, [0, 0, 1, 2, 4]);
         let mut lib = FxrLib::scan(&sekiro_sim::cache::root());
         let def = lib.compiled(800140).expect("effect installed");
-        let mut n = make_node(&mut lib, &def, 1, 0).unwrap();
         let place = ground_fire_place();
-        for _ in 0..300 {
-            step_node(&mut n, &mut lib, place, 1. / 30., false);
-        }
-        let mut drawn = Vec::new();
-        walk(&n, &mut drawn);
-        let glows = drawn.iter().filter(|d| d.0 == 603 && d.2 == 1000).count();
-        assert_eq!(glows, 1, "ground glows drawn: {drawn:?}");
+        let mut n = make_node(&mut lib, &def, 1, 0).unwrap();
+        let mut run = |lib: &mut FxrLib, dist: f32, steps: usize| {
+            lib.eye = Some(place.translation + Vec3::new(dist, 1.6, 0.));
+            for _ in 0..steps {
+                step_node(&mut n, lib, place, 1. / 30., false);
+            }
+            drawn(&n)
+        };
+        let detailed = |d: &[(i64, i64, i64)]| d.iter().any(|d| d.0 == 604 || d.0 == 609);
+        let near = run(&mut lib, 20., 300);
         assert!(
-            !drawn.iter().any(|d| d.1 == 6),
-            "far level drawn: {drawn:?}"
+            detailed(&near) && !near.iter().any(|d| d.1 == 6),
+            "{near:?}"
         );
-        assert!(drawn.iter().any(|d| d.0 == 604), "no fire sheet: {drawn:?}");
+        let far = run(&mut lib, 180., 600);
+        assert!(!detailed(&far) && far.iter().any(|d| d.1 == 6), "{far:?}");
+        let gone = run(&mut lib, 400., 600);
+        assert!(gone.iter().all(|d| d.0 == 0), "{gone:?}");
+        let back = run(&mut lib, 20., 300);
+        assert!(detailed(&back), "{back:?}");
     }
 
     #[test]
