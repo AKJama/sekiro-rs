@@ -510,11 +510,6 @@ impl FxrPlayer {
         }
     }
 
-    /// Where the camera is, for the effects' levels of detail (#273).
-    pub(crate) fn set_camera(&mut self, at: Vec3) {
-        self.lib.cam = Some(at);
-    }
-
     pub(crate) fn advance_map(&mut self, dt: f32) {
         self.advance_selected(dt, true);
     }
@@ -1018,7 +1013,7 @@ fn collect(n: &NodeInst, f: &mut Frame) {
     if let Some(c) = &n.cfg {
         collect_node(n, c, f);
     }
-    for ch in n.children.iter().filter(|c| !c.hidden) {
+    for ch in &n.children {
         collect(ch, f);
     }
 }
@@ -1864,6 +1859,8 @@ fn render(
     let Some(cam) = camera.iter().next() else {
         return;
     };
+    // The levels of detail of the next steps (#273).
+    player.lib.cam = Some(cam.translation());
     let _timer = crate::perf_log::SystemTimer::start("fxr");
     let white = white
         .get_or_insert_with(|| {

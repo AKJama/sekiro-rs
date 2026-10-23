@@ -212,8 +212,9 @@ pub struct FxrLib {
     compiled: HashMap<i64, Arc<NodeDef>>,
     /// Effect files read and parsed by this library (not adopted ones).
     pub parses: usize,
-    /// The camera's position, for the levels of detail ([`lod_level`]); none draws the nearest.
-    pub cam: Option<Vec3>,
+    /// The camera's position, for the levels of detail ([`lod_level`]), as of the last drawn
+    /// frame; none shows the first level.
+    pub(crate) cam: Option<Vec3>,
 }
 
 impl FxrLib {
@@ -471,12 +472,19 @@ pub struct NodeInst {
     /// NodeAcceleration (1 and kin): the speed gained along Z and the downward speed, each the
     /// running sum of its acceleration curve over the node's life.
     gained: Vec2,
-    /// A LevelsOfDetail node's (2002) level distances, one per child ([`lod_level`]).
-    lod: Option<Arc<[f32]>>,
-    /// The level this child is under its LevelsOfDetail parent.
-    level: Option<usize>,
-    /// Not its parent's level for the camera's distance: neither stepped nor drawn.
-    pub hidden: bool,
+    /// A LevelsOfDetail node's (2002) levels, of which only the shown one is built.
+    lod: Option<Lod>,
+}
+
+/// A LevelsOfDetail node's (2002) levels: the one for the camera's distance ([`lod_level`]) is
+/// built as the node's only child, and replaced when the distance reaches another level. Once
+/// that level ends, or the node stops, it keeps what it has and no other level is built.
+struct Lod {
+    thresholds: Arc<[f32]>,
+    levels: Vec<Arc<NodeDef>>,
+    shown: Option<usize>,
+    seed: u32,
+    depth: u32,
 }
 
 /// The level of a LevelsOfDetail node (2002) `dist` metres from the camera: child i covers
@@ -541,23 +549,7 @@ impl NodeDef {
             .unwrap_or(0) as usize;
         let kind = node["type"].as_i64().unwrap_or(0);
         let config = node["configs"].as_array().and_then(|c| c.get(i));
-        // Its config's LevelsOfDetailThresholds action (133): threshold0 .. threshold4 (a
-        // missing one is the library's default, 10000).
-        let lod = (kind == 2002).then(|| {
-            let action = config
-                .and_then(Value::as_object)
-                .and_then(|c| c.values().find(|a| a["type"].as_i64() == Some(133)));
-            match action {
-                Some(a) => (0..5)
-                    .map(|i| {
-                        a[format!("threshold{i}")]
-                            .as_f64()
-                            .map_or(10_000., |t| t as f32)
-                    })
-                    .collect(),
-                None => Arc::from([0.0]),
-            }
-        });
+        let lod = (kind == 2002).then(|| lod_thresholds(config));
         Self {
             kind,
             lod,
@@ -567,13 +559,35 @@ impl NodeDef {
                 .as_array()
                 .into_iter()
                 .flatten()
-                // A LevelsOfDetail node (2002) keeps every level and shows one at a time by
-                // the camera's distance ([`lod_level`], `step_node`); a NodeEmitter (2202) keeps
-                // all its children: they are its templates.
+                // A LevelsOfDetail node (2002) builds one level at a time ([`Lod`]); a
+                // NodeEmitter (2202) keeps all its children: they are its templates.
                 .map(|n| Arc::new(Self::new(n)))
                 .collect(),
         }
     }
+}
+
+/// A LevelsOfDetail node's (2002) level distances: its config's LevelsOfDetailThresholds (133)
+/// `threshold0..4`, a missing one the library's default 10 000; only the first level without
+/// the action.
+fn lod_thresholds(config: Option<&Value>) -> Arc<[f32]> {
+    let Some(slot) = config
+        .map(|c| &c["levelsOfDetailThresholds"])
+        .filter(|s| s.is_object())
+    else {
+        return Arc::from([0.0]);
+    };
+    let a = Action::new(slot);
+    Arc::from(
+        [
+            Field::Threshold0,
+            Field::Threshold1,
+            Field::Threshold2,
+            Field::Threshold3,
+            Field::Threshold4,
+        ]
+        .map(|f| a[f].as_f64().map_or(10_000., |t| t as f32)),
+    )
 }
 
 pub fn make_node(lib: &mut FxrLib, node: &NodeDef, seed: u32, depth: u32) -> Option<NodeInst> {
@@ -616,20 +630,19 @@ pub fn make_node(lib: &mut FxrLib, node: &NodeDef, seed: u32, depth: u32) -> Opt
     let kids = &node.children;
     let (children, templates) = if is_node_emitter {
         (Vec::new(), kids.clone())
+    } else if node.lod.is_some() {
+        (Vec::new(), Vec::new())
     } else {
         (
             kids.iter()
                 .enumerate()
                 .filter_map(|(i, k)| {
-                    let mut c = make_node(
+                    make_node(
                         lib,
                         k,
                         seed.wrapping_mul(31).wrapping_add(i as u32 + 1),
                         depth + 1,
-                    )?;
-                    c.level = node.lod.is_some().then_some(i);
-                    c.hidden = node.lod.is_some() && i > 0;
-                    Some(c)
+                    )
                 })
                 .collect(),
             Vec::new(),
@@ -653,9 +666,13 @@ pub fn make_node(lib: &mut FxrLib, node: &NodeDef, seed: u32, depth: u32) -> Opt
         detached: None,
         offset: Vec3::ZERO,
         gained: Vec2::ZERO,
-        lod: node.lod.clone(),
-        level: None,
-        hidden: false,
+        lod: node.lod.clone().map(|thresholds| Lod {
+            thresholds,
+            levels: kids.clone(),
+            shown: None,
+            seed,
+            depth,
+        }),
     })
 }
 
@@ -772,16 +789,23 @@ pub fn step_node(n: &mut NodeInst, lib: &mut FxrLib, parent: Transform, dt: f32,
         Some(w) => w * n.local,
         None => parent * n.local,
     };
-    if let Some(thresholds) = &n.lod {
+    if let Some(lod) = &mut n.lod {
         let dist = lib.cam.map_or(0., |c| c.distance(n.world.translation));
-        let level = lod_level(thresholds, dist);
-        for c in &mut n.children {
-            c.hidden = c.level != Some(level);
+        let level = lod_level(&lod.thresholds, dist);
+        if lod.shown != Some(level) {
+            lod.shown = Some(level);
+            let seed = lod.seed.wrapping_mul(31).wrapping_add(level as u32 + 1);
+            n.children = lod
+                .levels
+                .get(level)
+                .and_then(|def| make_node(lib, def, seed, lod.depth + 1))
+                .into_iter()
+                .collect();
         }
     }
     if n.time < n.delay {
         n.time += dt;
-        for c in n.children.iter_mut().filter(|c| !c.hidden) {
+        for c in &mut n.children {
             step_node(c, lib, n.world, dt, stop);
         }
         return;
@@ -879,12 +903,15 @@ pub fn step_node(n: &mut NodeInst, lib: &mut FxrLib, parent: Transform, dt: f32,
     }
     n.time += dt;
     let world = n.world;
-    for ch in n.children.iter_mut().filter(|c| !c.hidden) {
+    for ch in &mut n.children {
         step_node(ch, lib, world, dt, stop || !alive);
     }
-    // A stopped effect's other levels end with it.
-    n.children
-        .retain(|c| !c.finished && !(c.hidden && (stop || !alive)));
+    let had = !n.children.is_empty();
+    n.children.retain(|c| !c.finished);
+    // A level that ended, or a stopped node, builds no other level ([`Lod`]).
+    if stop || !alive || had && n.children.is_empty() {
+        n.lod = None;
+    }
     let emitting = alive && n.cfg.is_some();
     n.finished = !emitting
         && n.particles.is_empty()
@@ -1727,12 +1754,11 @@ mod tests {
             [0., 50., 170., 250., 1500.].map(|d| lod_level(&[1., 165., 200., 1000., 1000.], d)),
             [0, 0, 1, 2, 4]
         );
-        fn shown(n: &NodeInst) -> Option<Vec<usize>> {
-            if n.lod.is_some() {
-                let levels = n.children.iter().filter(|c| !c.hidden);
-                return Some(levels.filter_map(|c| c.level).collect());
+        fn shown(n: &NodeInst) -> Option<(Option<usize>, usize)> {
+            match &n.lod {
+                Some(lod) => Some((lod.shown, n.children.len())),
+                None => n.children.iter().find_map(shown),
             }
-            n.children.iter().find_map(shown)
         }
         let mut lib = FxrLib::scan(&sekiro_sim::cache::root());
         let Some(def) = lib.compiled(800140) else {
@@ -1743,8 +1769,27 @@ mod tests {
         for (d, want) in [(20., 0), (180., 1), (400., 2)] {
             lib.cam = Some(place.translation + Vec3::Z * d);
             step_node(&mut n, &mut lib, place, 1. / 30., false);
-            assert_eq!(shown(&n), Some(vec![want]), "at {d} m");
+            assert_eq!(shown(&n), Some((Some(want), 1)), "at {d} m");
         }
+    }
+
+    /// #273: a level that ends is not replaced by another when the camera moves: a one-shot
+    /// effect with a LevelsOfDetail node ends instead of living on, or replaying at the next
+    /// level.
+    #[test]
+    fn an_ended_level_is_not_replaced() {
+        let mut lib = FxrLib::default();
+        let node = json!({
+            "type": 2002,
+            "configs": [{"levelsOfDetailThresholds": {"threshold0": 1.0, "threshold1": 10.0}}],
+            "nodes": [{"type": 2000}, {"type": 2000}],
+        });
+        let mut n = make_node(&mut lib, &NodeDef::new(&node), 1, 0).unwrap();
+        step_node(&mut n, &mut lib, Transform::IDENTITY, 1. / 30., false);
+        assert!(n.lod.is_none() && n.children.is_empty());
+        lib.cam = Some(Vec3::Z * 20.);
+        step_node(&mut n, &mut lib, Transform::IDENTITY, 1. / 30., false);
+        assert!(n.children.is_empty());
     }
 
     #[test]

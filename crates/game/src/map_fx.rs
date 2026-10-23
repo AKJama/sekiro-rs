@@ -348,7 +348,6 @@ fn update(
     } else {
         time.delta_secs()
     };
-    player.set_camera(camera.translation());
     player.advance_map(dt.min(1. / 15.));
     let culled = collision.as_ref().map_or(0, |collision| {
         let _timer = crate::perf_log::SystemTimer::start("weather cover");
