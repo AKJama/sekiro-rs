@@ -226,6 +226,8 @@ struct CollisionPart {
     env_map: i32,
     /// `SceneGparam` event bytes: the family file index of layers 1 to 4 (-1: none).
     layers: [i8; 4],
+    /// `SceneGparam` transition time in seconds (negative: unset).
+    transition: f32,
 }
 
 #[derive(Resource)]
@@ -695,6 +697,7 @@ pub fn add_map(
                 scattering_set: row["scattering_set"].as_i64().unwrap_or(-1) as i32,
                 env_map: row["env_map"].as_i64().unwrap_or(-1) as i32,
                 layers: scene_layers(&row["scene_gparam"]),
+                transition: scene_transition(&row["scene_gparam"]),
             });
         }
     }
@@ -944,6 +947,8 @@ pub fn add_map(
             light_set: 0,
             applied: None,
             source: stem,
+            fade: None,
+            revision: 0,
         })
         .init_resource::<Pending>()
         .add_observer(map_scene_ready)
@@ -955,7 +960,14 @@ pub fn add_map(
                 (stream_assets, track_loading).chain(),
                 budget_map_shadows,
                 update_local_lights.after(world::update),
-                (pick_groups, apply_groups, apply_lighting, apply_probes).chain(),
+                (
+                    pick_groups,
+                    apply_groups,
+                    crate::lighting::advance_lighting_fade,
+                    apply_lighting,
+                    apply_probes,
+                )
+                    .chain(),
             ),
         );
     Ok(())
@@ -1516,6 +1528,11 @@ fn apply_fly(fly: Res<Fly>, mut camera: Query<&mut Transform, With<Camera3d>>) {
 }
 
 /// The four layer file indices of a collision's `SceneGparam` (-1 where absent).
+/// The authored fade time of a collision's `SceneGparam` (-1 when absent).
+fn scene_transition(scene_gparam: &Value) -> f32 {
+    scene_gparam["transition_time"].as_f64().unwrap_or(-1.) as f32
+}
+
 fn scene_layers(scene_gparam: &Value) -> [i8; 4] {
     std::array::from_fn(|i| {
         scene_gparam["event_ids"][i]
@@ -1567,6 +1584,7 @@ fn pick_groups(
     focus: Query<&Transform, With<MapFocus>>,
     connected: Option<Res<world::MapWorld>>,
     mut selected_row: Local<Option<usize>>,
+    mut settled: Local<bool>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("pick_groups");
     if let Some(world) = connected {
@@ -1586,13 +1604,15 @@ fn pick_groups(
                 crate::lighting_selection::LightingSelection::set_overlays(
                     &mut selection.reborrow(),
                     scene_layers(&row["scene_gparam"]),
+                    scene_transition(&row["scene_gparam"]),
                 );
             }
             if config[0] >= 0 {
-                crate::change::set(
-                    &mut lighting.reborrow(),
-                    |l| &mut l.light_set,
-                    crate::lighting::forced_light_set().unwrap_or(config[0]),
+                select_light_set(
+                    &mut lighting,
+                    config[0],
+                    scene_transition(&row["scene_gparam"]),
+                    &mut settled,
                 );
             }
             if config[1] >= 0 {
@@ -1637,11 +1657,12 @@ fn pick_groups(
         GroupMode::Display => part.display,
         _ => part.draw,
     };
-    let light_set = part.light_set;
+    let (light_set, transition) = (part.light_set, part.transition);
     if let Some(selection) = selection.as_mut() {
         crate::lighting_selection::LightingSelection::set_overlays(
             &mut selection.reborrow(),
             part.layers,
+            part.transition,
         );
     }
     let mut next_region = *region;
@@ -1652,16 +1673,32 @@ fn pick_groups(
     }
     crate::change::set(&mut groups.reborrow(), |g| &mut g.current, Some(pi));
     if light_set >= 0 {
-        crate::change::set(
-            &mut lighting.reborrow(),
-            |l| &mut l.light_set,
-            crate::lighting::forced_light_set().unwrap_or(light_set),
-        );
+        select_light_set(&mut lighting, light_set, transition, &mut settled);
     }
     // A collision with no groups leaves the previous selection in force.
     if g.iter().any(|&w| w != 0) && groups.active != Some(g) {
         groups.active = Some(g);
         groups.dirty = true;
+    }
+}
+
+/// Moves the scene to the collision's light set row, fading over its authored transition time;
+/// the first selection (at load) switches at once.
+fn select_light_set(
+    lighting: &mut ResMut<MapLighting>,
+    row: i32,
+    transition: f32,
+    settled: &mut bool,
+) {
+    let row = crate::lighting::forced_light_set().unwrap_or(row);
+    let seconds = if *settled {
+        crate::lighting::fade_seconds(transition)
+    } else {
+        0.
+    };
+    *settled = true;
+    if lighting.light_set != row {
+        lighting.fade_to(None, row, seconds);
     }
 }
 
@@ -2178,6 +2215,7 @@ mod tests {
                 scattering_set: config[2],
                 env_map: config[3],
                 layers: [-1; 4],
+                transition: -1.,
             })
             .collect();
         let mut app = App::new();
@@ -2214,6 +2252,8 @@ mod tests {
                 light_set: 0,
                 applied: None,
                 source: String::new(),
+                fade: None,
+                revision: 0,
             })
             .init_resource::<crate::lighting::fog::FogSelection>()
             .init_resource::<crate::lighting_selection::RegionSelection>()

@@ -562,6 +562,8 @@ mod tests {
                 light_set: 0,
                 applied: None,
                 source: String::new(),
+                fade: None,
+                revision: 0,
             })
             .insert_resource(bevy::light::GlobalAmbientLight::default())
             .insert_resource(LayerSettings {
@@ -712,6 +714,8 @@ mod tests {
                 light_set: 110,
                 applied: None,
                 source: String::new(),
+                fade: None,
+                revision: 0,
             })
             .insert_resource(bevy::light::GlobalAmbientLight::default())
             .add_systems(Update, update_hemisphere);
@@ -931,12 +935,15 @@ pub(super) fn install(app: &mut App, prefix: &str, dir: &std::path::Path, args: 
     .add_systems(PostUpdate, sync_actor_materials);
 }
 
+/// Light set, hour, ambient on, gparam source and lighting revision of the last upload.
+type HemisphereKey = (i32, f32, bool, String, u32);
+
 fn update_hemisphere(
     lighting: Res<crate::lighting::MapLighting>,
     ambient: Res<bevy::light::GlobalAmbientLight>,
     light: Res<MapLightBuffer>,
     mut buffers: ResMut<Assets<bevy::render::storage::ShaderBuffer>>,
-    mut last: Local<Option<(i32, f32, bool, String)>>,
+    mut last: Local<Option<HemisphereKey>>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("update_hemisphere");
     let key = (
@@ -944,6 +951,7 @@ fn update_hemisphere(
         lighting.hour,
         ambient.brightness > 0.,
         lighting.source.clone(),
+        lighting.revision,
     );
     if last.as_ref() == Some(&key) {
         return;

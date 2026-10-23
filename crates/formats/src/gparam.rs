@@ -6,6 +6,8 @@
 //! selected elsewhere) and, in Sekiro, a time of day in hours. [`Param::at`] interpolates the
 //! values of one id over the time of day.
 
+use std::collections::BTreeMap;
+
 use crate::reader::{Reader, Result, bail, utf16z};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -245,6 +247,77 @@ pub fn layer(layers: &[(u8, &Gparam)], defaults: Option<&Gparam>) -> Gparam {
     out
 }
 
+/// The draw params part way through a fade from `from` (row `from_row` selected) to `to` (row
+/// `to_row`) at `hour`, with `weight` 0 giving `from` and 1 giving `to`.
+///
+/// The result keeps the groups, params and value ids of `to`, so its rows and
+/// [`Gparam::light_row`] stay those of the target, with one key per id at `hour`.
+/// Floats and vectors are interpolated in authored space, as the LightSet A/B blend of `310630`
+/// does; integers, switches and bytes take the target at once.
+/// The target row starts from the old row's values, so a change of the selected row fades from
+/// what was shown rather than from the new row's own earlier values.
+pub fn blend(
+    from: &Gparam,
+    from_row: i32,
+    to: &Gparam,
+    to_row: i32,
+    hour: f32,
+    weight: f32,
+) -> Gparam {
+    let weight = weight.clamp(0., 1.);
+    let (from_row, to_row) = (from.light_row(from_row), to.light_row(to_row));
+    let mut out = to.clone();
+    for group in &mut out.groups {
+        let old_group = from.groups.iter().find(|g| g.name == group.name);
+        for param in &mut group.params {
+            let old = old_group.and_then(|g| g.params.iter().find(|p| p.name == param.name));
+            let mut kinds: BTreeMap<i32, Value> = BTreeMap::new();
+            for e in &param.entries {
+                kinds.entry(e.id).or_insert_with(|| e.value.clone());
+            }
+            let mut entries = Vec::with_capacity(kinds.len());
+            for (id, kind) in kinds {
+                let Some(target) = param.at(id, hour) else {
+                    continue;
+                };
+                let source = if id == to_row { from_row } else { id };
+                let start = old
+                    .and_then(|p| p.at(source, hour))
+                    .filter(|v| v.len() == target.len());
+                let continuous = matches!(
+                    kind,
+                    Value::Float(_) | Value::Vec2(_) | Value::Vec3(_) | Value::Vec4(_)
+                );
+                let mixed: Vec<f32> = match start {
+                    Some(start) if continuous => start
+                        .iter()
+                        .zip(&target)
+                        .map(|(a, b)| a + (b - a) * weight)
+                        .collect(),
+                    _ => target,
+                };
+                let get = |i: usize| mixed.get(i).copied().unwrap_or(0.);
+                let value = match kind {
+                    Value::Int(_) => Value::Int(get(0).round() as i32),
+                    Value::Float(_) => Value::Float(get(0)),
+                    Value::Bool(_) => Value::Bool(get(0) != 0.),
+                    Value::Vec2(_) => Value::Vec2([get(0), get(1)]),
+                    Value::Vec3(_) => Value::Vec3([get(0), get(1), get(2)]),
+                    Value::Vec4(_) => Value::Vec4([get(0), get(1), get(2), get(3)]),
+                    Value::Bytes(_) => Value::Bytes(std::array::from_fn(|i| get(i) as u8)),
+                };
+                entries.push(Entry {
+                    id,
+                    time: hour.rem_euclid(24.),
+                    value,
+                });
+            }
+            param.entries = entries;
+        }
+    }
+    out
+}
+
 pub fn parse(data: &[u8]) -> Result<Gparam> {
     let mut r = Reader::new(data);
     if data.starts_with(b"f\0i\0l\0t\0") {
@@ -392,6 +465,37 @@ mod tests {
 
     fn at(g: &Gparam, name: &str, id: i32) -> f32 {
         g.param("LightSet", name).unwrap().at(id, 0.).unwrap()[0]
+    }
+
+    #[test]
+    fn blend_fades_each_row_and_the_selected_row_from_the_old_one() {
+        let from = file(
+            "LightSet",
+            &[("Angle0", &[(0, 6., 1.), (100, 6., 10.), (110, 6., 20.)])],
+        );
+        let to = file(
+            "LightSet",
+            &[("Angle0", &[(0, 6., 3.), (100, 6., 30.), (110, 6., 40.)])],
+        );
+        // Moving from row 110 to row 100: row 100 starts from what row 110 showed.
+        let half = blend(&from, 110, &to, 100, 6., 0.5);
+        assert_eq!(
+            half.param("LightSet", "Angle0").unwrap().at(0, 6.),
+            Some(vec![2.])
+        );
+        assert_eq!(
+            half.param("LightSet", "Angle0").unwrap().at(100, 6.),
+            Some(vec![25.])
+        );
+        assert_eq!(
+            blend(&from, 110, &to, 100, 6., 0.).rows("LightSet"),
+            to.rows("LightSet")
+        );
+        let done = blend(&from, 110, &to, 100, 6., 1.);
+        assert_eq!(
+            done.param("LightSet", "Angle0").unwrap().at(100, 6.),
+            Some(vec![30.])
+        );
     }
 
     #[test]

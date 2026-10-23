@@ -438,6 +438,10 @@ pub struct LightingSelection {
     /// last resolved into the lighting.
     overlays: [i8; 4],
     applied_overlays: [i8; 4],
+    /// The `SceneGparam` transition time of the collision that chose `overlays`.
+    transition: f32,
+    /// Whether a collision has chosen overlays yet; the first choice (at load) does not fade.
+    settled: bool,
 }
 
 impl LightingSelection {
@@ -496,6 +500,8 @@ impl LightingSelection {
             layers,
             overlays: [-1; 4],
             applied_overlays: [-1; 4],
+            transition: -1.,
+            settled: false,
         })
     }
 
@@ -509,9 +515,15 @@ impl LightingSelection {
         }
     }
 
-    /// The overlay layers of the collision under the focus; applied on the next `sync_events`.
-    pub fn set_overlays(selection: &mut Mut<Self>, overlays: [i8; 4]) {
-        crate::change::set(selection, |s| &mut s.overlays, overlays);
+    /// The overlay layers of the collision under the focus and its authored transition time;
+    /// applied on the next `sync_events`, fading over that time.
+    pub fn set_overlays(selection: &mut Mut<Self>, overlays: [i8; 4], transition: f32) {
+        let first = !selection.settled;
+        selection.bypass_change_detection().settled = true;
+        if selection.overlays != overlays {
+            selection.overlays = overlays;
+            selection.transition = if first { 0. } else { transition };
+        }
     }
 
     pub fn environment_for_hour(&self, hour: f32) -> u32 {
@@ -531,20 +543,27 @@ impl LightingSelection {
         if !self.needs_apply(requested) {
             return;
         }
+        // A collision's overlays fade over its transition time; a story sub-ID change switches
+        // at once (its event fade time is not applied, docs/FIDELITY.md).
+        let fade = if requested == self.current {
+            crate::lighting::fade_seconds(self.transition)
+        } else {
+            0.
+        };
         let Some(sub) = requested else {
-            light.gparam = self
+            let to = self
                 .layers
                 .compose(&self.initial.source, &self.base, self.overlays);
+            light.fade_to(Some(to), light.light_set, fade);
             light.source.clone_from(&self.initial.source);
-            light.applied = None;
             self.current = None;
             self.applied_overlays = self.overlays;
             return;
         };
         if let Some((source, g)) = self.files.get(&sub) {
-            light.gparam = self.layers.compose(source, g, self.overlays);
+            let to = self.layers.compose(source, g, self.overlays);
+            light.fade_to(Some(to), light.light_set, fade);
             light.source.clone_from(source);
-            light.applied = None;
             self.current = Some(sub);
             self.applied_overlays = self.overlays;
             info!(
@@ -1048,6 +1067,8 @@ mod tests {
             hour: 0.,
             light_set: 0,
             applied: Some(0),
+            fade: None,
+            revision: 0,
         };
         library.apply_sub(Some(30), &mut light);
         assert_eq!(light.source, "m11_02_0930");
@@ -1083,6 +1104,8 @@ mod tests {
             light_set: 0,
             applied: None,
             source,
+            fade: None,
+            revision: 0,
         })
         .insert_resource(library)
         .init_resource::<MapEventScene>()
@@ -1153,6 +1176,8 @@ mod tests {
                 light_set: 0,
                 applied: None,
                 source,
+                fade: None,
+                revision: 0,
             })
             .insert_resource(library)
             .init_resource::<MapEventScene>()
@@ -1181,7 +1206,7 @@ mod tests {
             };
             let set_overlays = |app: &mut App, overlays: [i8; 4]| {
                 let mut selection = app.world_mut().resource_mut::<LightingSelection>();
-                LightingSelection::set_overlays(&mut selection, overlays);
+                LightingSelection::set_overlays(&mut selection, overlays, 0.);
             };
             app.update();
             let (bounds, tick) = cascades(&app);

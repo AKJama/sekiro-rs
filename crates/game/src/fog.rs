@@ -276,6 +276,8 @@ mod tests {
             light_set: 0,
             applied: None,
             source: String::new(),
+            fade: None,
+            revision: 0,
         })
         .init_resource::<FogSelection>()
         .init_resource::<Assets<Mesh>>()
@@ -544,6 +546,8 @@ mod tests {
             light_set: 0,
             applied: None,
             source: String::new(),
+            fade: None,
+            revision: 0,
         })
         .init_resource::<FogSelection>()
         .add_systems(Update, configure)
@@ -1040,24 +1044,36 @@ impl Plugin for FogPlugin {
     }
 }
 
+/// Light set, hour, fog id, gparam source and lighting revision of the last configure.
+type ConfigureKey = (i32, f32, i32, String, u32);
+
 fn configure(
     mut commands: Commands,
     lighting: Res<super::MapLighting>,
     cameras: Query<(Entity, &Camera3d)>,
-    mut last: Local<Option<(i32, f32, i32, String)>>,
+    mut last: Local<Option<ConfigureKey>>,
     added: Query<(), Added<Camera3d>>,
     selection: Res<FogSelection>,
     mut banks: Local<FogBanks>,
 ) {
     let key = (lighting.light_set, lighting.hour);
-    let unchanged = last.as_ref().is_some_and(|(set, hour, fog, source)| {
-        (*set, *hour, *fog) == (key.0, key.1, selection.0) && source == &lighting.source
-    });
+    let unchanged = last
+        .as_ref()
+        .is_some_and(|(set, hour, fog, source, revision)| {
+            (*set, *hour, *fog, *revision) == (key.0, key.1, selection.0, lighting.revision)
+                && source == &lighting.source
+        });
     if unchanged && added.is_empty() {
         return;
     }
     if !unchanged {
-        *last = Some((key.0, key.1, selection.0, lighting.source.clone()));
+        *last = Some((
+            key.0,
+            key.1,
+            selection.0,
+            lighting.source.clone(),
+            lighting.revision,
+        ));
     }
     // Preserve the independent MSB FogParamID. No separate Fog formula was recovered.
     // Inspect selected authored rows rather than silently aliasing this ID to LightSetID.
@@ -1068,15 +1084,21 @@ fn configure(
         .filter(|g| g.name.contains("Fog") && !g.name.contains("VolumetricFog"))
         .flat_map(|g| g.params.iter().map(|p| (&p.name, p.at(selection.0, key.1))))
         .collect();
-    info!(
-        "MSB FogParamID {}: separate Fog rows {legacy:?}",
-        selection.0
-    );
+    // Logged once a lighting fade settles, not on every blended frame.
+    let settled = lighting.fade.is_none();
+    if settled {
+        info!(
+            "MSB FogParamID {}: separate Fog rows {legacy:?}",
+            selection.0
+        );
+    }
     let direction = banks.direction(&lighting.gparam, &lighting.source, key.0, key.1);
     let value = (!std::env::args().any(|a| a == "--no-fog"))
         .then(|| GameFog::from_gparam(&lighting.gparam, key.0, key.1, direction))
         .flatten();
-    info!("shader fog: {value:?}");
+    if settled {
+        info!("shader fog: {value:?}");
+    }
     for (entity, camera) in &cameras {
         let mut depth = TextureUsages::from(camera.depth_texture_usages);
         if value.is_some() && !depth.contains(TextureUsages::TEXTURE_BINDING) {
