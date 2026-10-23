@@ -2,6 +2,7 @@
 use super::Sim;
 use crate::character::{AnimLibrary, Animator, PoseDormant, PresentationLod, Rig};
 use crate::draw_mask::{DrawMask, MaskSource};
+use crate::map::lod::{DrawRange, LodTable};
 use anyhow::Result;
 use bevy::camera::primitives::{Frustum, Sphere};
 use bevy::camera::visibility::{DynamicSkinnedMeshBounds, NoFrustumCulling};
@@ -18,6 +19,9 @@ pub(super) struct FoeActor {
     meshes: Vec<Entity>,
     posed_clock: f32,
     drawn: bool,
+    /// The game's character draw distance (#312): LodParam row NpcParam `defaultLodParamId`.
+    range: DrawRange,
+    in_range: bool,
     donor: String,
 }
 #[derive(Component)]
@@ -51,6 +55,7 @@ pub(super) fn insert(world: &mut World, cache: &Path) -> Result<()> {
     let mut libraries = HashMap::new();
     let mut actors = Vec::new();
     let mut sound_foes = Vec::new();
+    let lod = LodTable::load(cache, 6)?;
     for (index, foe) in population.foes.iter().enumerate() {
         let spec = &foe.duel.spec;
         let donor = roster.anim_chr(&spec.chr, spec.npc_param);
@@ -68,6 +73,11 @@ pub(super) fn insert(world: &mut World, cache: &Path) -> Result<()> {
             "map enemies: missing model {}",
             spec.chr
         );
+        let default_lod = roster
+            .npc_row(spec.npc_param)
+            .and_then(|row| row["defaultLodParamId"].as_i64())
+            .unwrap_or(-1);
+        let range = lod.character(default_lod)?;
         let mut idle = Animator::new(lib.clip("a000_000000")?, false);
         idle.apply_root_motion = false;
         idle.speed = 0.0;
@@ -78,6 +88,8 @@ pub(super) fn insert(world: &mut World, cache: &Path) -> Result<()> {
                 meshes: Vec::new(),
                 posed_clock: f32::NAN,
                 drawn: false,
+                range,
+                in_range: true,
                 donor,
             },
             WorldAssetRoot(
@@ -204,16 +216,22 @@ fn sync(
         let position = Vec3::from_array(foe.duel.enemy.body.position);
         let radius = (foe.duel.fighters[1].height * 2.0).max(8.0);
         let near = position.distance(Vec3::from_array(sim.duel.player.body.position)) <= 20.0;
-        let draw = near
-            || cameras.iter().next().is_none_or(|(frustum, _)| {
-                frustum.intersects_sphere(
-                    &Sphere {
-                        center: (position + Vec3::Y * (radius * 0.5)).into(),
-                        radius,
-                    },
-                    true,
-                )
-            });
+        let camera = cameras.iter().next();
+        actor.in_range = camera.is_none_or(|(_, cam)| {
+            actor
+                .range
+                .keeps(actor.in_range, position.distance(cam.translation()))
+        });
+        let in_view = camera.is_none_or(|(frustum, _)| {
+            frustum.intersects_sphere(
+                &Sphere {
+                    center: (position + Vec3::Y * (radius * 0.5)).into(),
+                    radius,
+                },
+                true,
+            )
+        });
+        let draw = shown(actor.in_range, near, in_view);
         let full = foe.lod == sekiro_sim::duel::population::Lod::Full;
         let pose =
             draw && ((foe.active() && (full || actor.posed_clock != foe.clock)) || !actor.drawn);
@@ -301,6 +319,12 @@ fn sync(
         }
         anim.time = super::drawn_clip_time(r, alpha);
     }
+}
+
+/// Past the game's draw distance a foe is neither drawn nor skinned, even beside Wolf
+/// (#312); inside it, foes near Wolf or in view are. The simulation keeps running either way.
+fn shown(in_range: bool, near: bool, in_view: bool) -> bool {
+    in_range && (near || in_view)
 }
 
 #[allow(clippy::type_complexity)]
@@ -421,5 +445,20 @@ mod tests {
         let mut app = App::new();
         install(&mut app);
         assert!(app.world().get_non_send::<Sim>().is_none());
+    }
+
+    #[test]
+    fn foes_past_the_draw_distance_are_not_drawn_or_skinned() {
+        // c1010's usual NpcParam row: LodParam 11, hidden from 80 m.
+        let range = DrawRange {
+            border: 80.,
+            play: 2.,
+        };
+        let inside = range.keeps(true, 40.);
+        let beyond = range.keeps(true, 120.);
+        assert!(shown(inside, false, true));
+        assert!(shown(inside, true, false));
+        assert!(!shown(beyond, false, true));
+        assert!(!shown(beyond, true, true));
     }
 }

@@ -13,6 +13,8 @@ Our scheduling policy keeps near (20 m), engaged and locked foes at the full fix
 Engagement wakes immediately without a backlog step; the LOD thresholds and rate are our policy, not recovered engine values.
 Sight rays run at FwLo's recovered 0.2 + rand*0.2 second search interval (FUN_140623ca0), with damage and nose distance checked immediately.
 Population presentation skips far offscreen pose/cloth uploads, updates distant visible poses with their simulation, and limits foe shadows to 30 m from the camera.
+Each foe is hidden and unskinned past its LodParam `draw_BorderDist` from the camera (row = NpcParam `defaultLodParamId`, since every shipped Enemy part authors LOD ID 255), with `draw_PlayDist` as hysteresis (#312); its simulation keeps running.
+That the distance is measured from the camera, and the row-0 fallback for a negative ID, follow the map-piece LOD rule and are not traced for characters.
 Cloth uses the 15 m camera range from FwLo's RustSekiro (`SHINOBI_CLOTH_RANGE`), is carried in its restart pose outside that range, and runs one parallel task per character.
 CPU cloth writes its actual output bounds; other foe meshes use dynamic skinned bounds when the pose changes.
 Compiled Lua script prototypes and model mesh/material handles are shared across actors; mutable VM globals and cloth buffers remain separate.
