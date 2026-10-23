@@ -25,7 +25,7 @@ use sekiro_formats::gparam::Gparam;
 #[derive(Resource, Default)]
 pub(crate) struct FogSelection(pub i32);
 
-#[derive(Component, Clone, ExtractComponent, ShaderType, Debug, PartialEq)]
+#[derive(Component, Clone, Default, ExtractComponent, ShaderType, Debug, PartialEq)]
 #[extract_app(bevy::render::RenderApp)]
 pub struct GameFog {
     // fixed density, height coefficient, height density, affine height offset.

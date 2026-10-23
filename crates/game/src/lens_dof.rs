@@ -97,7 +97,8 @@ impl Plugin for LensDofPlugin {
             (configure, keep_depth_sampling)
                 .chain()
                 .after(super::apply_lighting),
-        );
+        )
+        .add_observer(release_depth_sampling);
         if let Some(render) = app.get_sub_app_mut(RenderApp) {
             render
                 .add_systems(RenderStartup, init_pipeline)
@@ -147,13 +148,36 @@ fn configure(
     }
 }
 
+/// Marks a camera whose depth sampling the depth of field switched on.
+#[derive(Component)]
+struct DofDepthSampling;
+
 /// The pass reads depth; fog may add and later retire that usage bit on its own.
-fn keep_depth_sampling(mut cameras: Query<&mut Camera3d, With<GameDof>>) {
-    for mut camera in &mut cameras {
+fn keep_depth_sampling(
+    mut commands: Commands,
+    mut cameras: Query<(Entity, &mut Camera3d), With<GameDof>>,
+) {
+    for (entity, mut camera) in &mut cameras {
         let usages = TextureUsages::from(camera.depth_texture_usages);
         if !usages.contains(TextureUsages::TEXTURE_BINDING) {
             camera.depth_texture_usages = (usages | TextureUsages::TEXTURE_BINDING).into();
+            commands.entity(entity).insert(DofDepthSampling);
         }
+    }
+}
+
+/// Turns depth sampling off again when the depth of field that switched it on goes, unless fog
+/// still reads depth: a sampleable depth left behind is what lost FwLo's Vulkan device (#94).
+fn release_depth_sampling(
+    event: On<Remove<GameDof>>,
+    mut commands: Commands,
+    mut cameras: Query<&mut Camera3d, (With<DofDepthSampling>, Without<super::fog::GameFog>)>,
+) {
+    if let Ok(mut camera) = cameras.get_mut(event.entity) {
+        let mut depth = TextureUsages::from(camera.depth_texture_usages);
+        depth.remove(TextureUsages::TEXTURE_BINDING);
+        camera.depth_texture_usages = depth.into();
+        commands.entity(event.entity).remove::<DofDepthSampling>();
     }
 }
 
@@ -317,6 +341,49 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn depth_sampling_goes_with_the_depth_of_field_unless_fog_reads_depth() {
+        let mut app = App::new();
+        app.add_systems(Update, keep_depth_sampling)
+            .add_observer(release_depth_sampling);
+        let dof = GameDof {
+            far: Vec4::new(100., 500., 0.1, 0.75),
+            blur: Vec4::ZERO,
+        };
+        let plain = app
+            .world_mut()
+            .spawn((Camera3d::default(), dof.clone()))
+            .id();
+        let fogged = app
+            .world_mut()
+            .spawn((
+                Camera3d::default(),
+                dof,
+                super::super::fog::GameFog::default(),
+            ))
+            .id();
+        app.update();
+        let sampled = |app: &App, entity| {
+            TextureUsages::from(
+                app.world()
+                    .get::<Camera3d>(entity)
+                    .unwrap()
+                    .depth_texture_usages,
+            )
+            .contains(TextureUsages::TEXTURE_BINDING)
+        };
+        assert!(sampled(&app, plain) && sampled(&app, fogged));
+        for entity in [plain, fogged] {
+            app.world_mut().entity_mut(entity).remove::<GameDof>();
+        }
+        app.update();
+        assert!(
+            !sampled(&app, plain),
+            "left sampleable after the depth of field went"
+        );
+        assert!(sampled(&app, fogged), "fog still reads depth");
     }
 
     #[test]
