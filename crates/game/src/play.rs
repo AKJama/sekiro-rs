@@ -1971,12 +1971,23 @@ fn sync_lightning_tint(
             .entry(material.0.id())
             .or_insert((mat.base_color, mat.emissive));
         let status = &sim.duel.rules.fighters[i].status;
-        if status.has(9445) || status.has(9492) {
-            mat.base_color = Color::srgb(0.25, 0.65, 1.0);
-            mat.emissive = LinearRgba::rgb(0.15, 0.4, 0.9);
+        let tint = if status.has(9445) || status.has(9492) {
+            (
+                Color::srgb(0.25, 0.65, 1.0),
+                LinearRgba::rgb(0.15, 0.4, 0.9),
+            )
         } else {
-            (mat.base_color, mat.emissive) = *saved;
-        }
+            *saved
+        };
+        write_tint(&mut mat, tint);
+    }
+}
+
+/// Writes only a changed tint: a mutable deref marks the material modified, which re-prepares its
+/// bind group, so an unconditional write re-uploads every actor part every frame (#44).
+fn write_tint(mat: &mut bevy::asset::AssetMut<'_, StandardMaterial>, tint: (Color, LinearRgba)) {
+    if (mat.base_color, mat.emissive) != tint {
+        (mat.base_color, mat.emissive) = tint;
     }
 }
 
@@ -2761,6 +2772,37 @@ fn grapple_marker(
 mod tests {
     use super::*;
     use sekiro_sim::fight::FighterKind;
+
+    #[test]
+    fn lightning_tint_marks_a_material_modified_only_when_it_changes() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<StandardMaterial>();
+        let handle = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let tint = |app: &mut App, tint| {
+            let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+            write_tint(&mut materials.get_mut(&handle).unwrap(), tint);
+            app.update();
+            app.world_mut()
+                .resource_mut::<Messages<AssetEvent<StandardMaterial>>>()
+                .drain()
+                .filter(|e| matches!(e, AssetEvent::Modified { .. }))
+                .count()
+        };
+        let plain = (Color::WHITE, LinearRgba::BLACK);
+        let lit = (
+            Color::srgb(0.25, 0.65, 1.0),
+            LinearRgba::rgb(0.15, 0.4, 0.9),
+        );
+        tint(&mut app, plain);
+        assert_eq!(tint(&mut app, plain), 0);
+        assert_eq!(tint(&mut app, lit), 1);
+        assert_eq!(tint(&mut app, lit), 0);
+        assert_eq!(tint(&mut app, plain), 1);
+    }
 
     #[test]
     fn a_start_over_a_hole_fails_instead_of_loading_forever() {
