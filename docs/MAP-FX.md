@@ -411,7 +411,11 @@ The smoke colour data itself was read right: grey 0.5 times colour3 2.0 to 0.05,
 The lit additive layer 31421 (blend 4, rgbMultiplier 15) still adds a faint orange at the column's foot; the real light term of lit particles stays open, as in FwLo's notes.
 Effects touched: 62 common effects have a 2002 node with more than one level and 100 a 2202 node with more than one template, among them the brazier 839530 (its own 609 light, sparks and smoke now emit; before, the far level's light stood in for them) and the item glint 61 (no longer doubled by its far level).
 The torch 300163, the fog wall 11 and the snow 839500 have neither and are unchanged.
-Open: the LOD switch distances (`threshold0` is 1 in all 62 effects, `threshold1` 10 to 165) are not applied; the near level is drawn at every distance.
+The switch distances apply since #273: child i shows from its LevelsOfDetailThresholds (133) `threshold<i>` to the next, by the camera's distance to the node (`fxr_tree::lod_level`; `threshold0` is 1 in all 62 effects, `threshold1` 10 to 165).
+So 800140 draws its detail to 165 m, a lighter level to 200 m and nothing past, and the far-only glow 811052 appears from 400 m.
+The camera position comes from the map FX step before it advances (`FxrPlayer::set_eye`), so an effect built at load starts on its right level.
+A level the camera leaves retires: it emits no more and its particles die out (the ground fire's glows live 18 to 20 s), so a fire does not vanish and restart at a threshold.
+With the clock stopped (render gates, a paused map) the old level goes at once and the new one is warmed up for 2 s, as a new map effect is.
 
 ## Soft sprite pull and uniformScale, 2026-10-22 (#78)
 

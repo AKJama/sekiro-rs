@@ -510,6 +510,11 @@ impl FxrPlayer {
         }
     }
 
+    /// The camera position the levels of detail pick by (#273).
+    pub(crate) fn set_eye(&mut self, eye: Vec3) {
+        self.lib.eye = Some(eye);
+    }
+
     pub(crate) fn advance_map(&mut self, dt: f32) {
         self.advance_selected(dt, true);
     }
@@ -1859,6 +1864,8 @@ fn render(
     let Some(cam) = camera.iter().next() else {
         return;
     };
+    // The levels of detail of the next steps (#273).
+    player.set_eye(cam.translation());
     let _timer = crate::perf_log::SystemTimer::start("fxr");
     let white = white
         .get_or_insert_with(|| {
