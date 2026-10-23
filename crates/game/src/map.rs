@@ -170,14 +170,23 @@ pub(crate) fn world_bounds(transform: &GlobalTransform, aabb: &Aabb) -> (Vec3, V
 #[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MapSpawn;
 
-/// A piece's draw groups.
+/// A piece's draw groups. Every map root also carries a [`PartLightSet`], row 0 unless its
+/// spawn sets the authored one.
 #[derive(Component)]
+#[require(PartLightSet)]
 pub(crate) struct DrawGroups([u32; 8]);
 
 /// A map part's raw MSB light set id (GparamConfig light set, -1 when absent), next to its
 /// [`DrawGroups`]; its surfaces are lit with that LightSet row (#30, #67).
 #[derive(Component)]
 pub(crate) struct PartLightSet(pub(crate) i32);
+
+/// The ordinary map row, which nearly every piece and object authors.
+impl Default for PartLightSet {
+    fn default() -> Self {
+        Self(0)
+    }
+}
 
 /// A layout part row's MSB GparamConfig ids (light, fog, scattering, env map), -1 when absent.
 fn gparam_config(row: &Value) -> [i32; 4] {

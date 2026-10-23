@@ -972,8 +972,8 @@ struct LayerSettings {
 #[derive(bevy::ecs::system::SystemParam)]
 struct MapEnvironment<'w, 's> {
     parents: Query<'w, 's, &'static ChildOf>,
-    roots: Query<'w, 's, (), With<super::DrawGroups>>,
-    part_light_sets: Query<'w, 's, &'static super::PartLightSet>,
+    /// Map part roots and their own light set row (#67).
+    roots: Query<'w, 's, &'static super::PartLightSet, With<super::DrawGroups>>,
     actors: Query<'w, 's, (), With<crate::character::Rig>>,
     no_shadow: Query<'w, 's, (), With<super::world::AuthoredNoShadow>>,
     irradiance: Option<Res<'w, crate::lighting::MapIrradiance>>,
@@ -1122,7 +1122,6 @@ fn replace_materials(
     let MapEnvironment {
         parents,
         roots,
-        part_light_sets,
         actors,
         no_shadow,
         irradiance,
@@ -1160,7 +1159,7 @@ fn replace_materials(
         let own = if actor_surface {
             None
         } else {
-            crate::lighting::own_light_set(part_light_sets.get(ancestor).ok().map(|p| p.0))
+            crate::lighting::own_light_set(roots.get(ancestor).ok().map(|p| p.0))
         };
         let key = (original.0.id(), own, actor_surface);
         let handle = if let Some(handle) = settings.materials.get(&key) {
