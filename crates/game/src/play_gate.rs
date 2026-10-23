@@ -32,8 +32,10 @@ pub(crate) struct PlayGate {
     /// not move before play).
     near: Option<Vec<Entity>>,
     last_log: Option<Instant>,
-    /// The fullest bar shown so far, so the bar never goes back. Each load (a map change
-    /// relaunches the process) starts with a fresh gate.
+    /// The loading steps whose totals grow or whose counts restart while they run.
+    gauges: Gauges,
+    /// The fullest bar shown so far, a last guard so the bar never goes back. Each load (a map
+    /// change relaunches the process) starts with a fresh gate.
     shown: f32,
 }
 
@@ -45,6 +47,51 @@ pub(crate) fn fraction(done: usize, total: usize) -> f32 {
     } else {
         done.min(total) as f32 / total as f32
     }
+}
+
+/// Progress from 0 to 1 through work whose total is only discovered as it runs (map scenes
+/// queue more instances as they spawn, merges are planned as parts arrive) or whose count
+/// restarts (the steady-frame count after a hitch, #37). Each finished unit fills its share of
+/// what is left of the gauge, spread over the work left at that moment, so more work found
+/// later slows the gauge instead of pulling it back. With a fixed total it reads `done / total`
+/// exactly, and it reaches 1 when the work runs out.
+#[derive(Clone, Copy, Debug, Default)]
+struct Gauge {
+    shown: f32,
+    /// The count at the last update.
+    done: usize,
+}
+
+impl Gauge {
+    /// Takes the latest `done` of `total` and returns the gauge. A `done` below the last one
+    /// is a restarted count: what is shown stays, and the gauge fills from there as it counts
+    /// up again. A total of 0 (nothing found yet) leaves the gauge where it is.
+    fn update(&mut self, done: usize, total: usize) -> f32 {
+        if done > self.done && total > self.done {
+            let left = (total - self.done) as f32;
+            let finished = (done.min(total) - self.done) as f32;
+            self.shown += (1.0 - self.shown) * finished / left;
+        }
+        self.done = done;
+        self.shown
+    }
+
+    /// The step has finished, whatever its counts said.
+    fn finish(&mut self) -> f32 {
+        self.shown = 1.0;
+        self.shown
+    }
+}
+
+/// The gauges of the loading steps (see [`Steps`]).
+#[derive(Default)]
+struct Gauges {
+    glbs: Gauge,
+    spawned: Gauge,
+    merges: Gauge,
+    rigs: Gauge,
+    compiles: Gauge,
+    settle: Gauge,
 }
 
 /// What the GPU still waits for before the world is drawable.
@@ -125,11 +172,6 @@ impl FrameSettle {
     fn settled(&self) -> bool {
         self.stable >= STABLE_FRAMES
     }
-
-    /// How far through the settling wait, from 0 to 1 (the gate opens when it reaches 1).
-    fn progress(&self) -> f32 {
-        self.stable as f32 / STABLE_FRAMES as f32
-    }
 }
 
 impl PlayGate {
@@ -145,19 +187,22 @@ impl PlayGate {
     }
 }
 
-/// How far each loading step is, from 0 to 1, for the bar.
+/// How far each loading step is, from 0 to 1, for the bar. Every step only rises during a
+/// load: steps whose totals grow or whose counts restart go through a [`Gauge`].
 #[derive(Clone, Copy, Debug, Default)]
 struct Steps {
-    /// Map GLBs, textures and scene instances ([`crate::map::Pending::progress`]).
+    /// Map GLBs with their textures, then scene instances spawned ([`crate::map::Pending`]).
     map: f32,
-    /// Static map merges installed ([`crate::map::StaticBatches::progress`]).
+    /// Static map merges installed ([`crate::map::StaticBatches::merged`]).
     batches: f32,
     /// Resident pipeline warmup ([`crate::pipeline_warmup::PipelineWarmup::progress`]).
     warmup: f32,
-    rigs: bool,
-    /// No render pipeline is compiling, counted only once the map is ready: before the warmup
-    /// queues its compiles nothing is compiling either, and the bar must not count that.
-    compiled: bool,
+    /// Character rigs bound.
+    rigs: f32,
+    /// Render pipelines compiled, counted only once the map is ready: before the warmup queues
+    /// its compiles nothing is compiling either, and the bar must not count that.
+    compiled: f32,
+    /// Steady frames counted towards [`STABLE_FRAMES`].
     settle: f32,
 }
 
@@ -168,9 +213,56 @@ impl Steps {
         0.8 * self.map
             + 0.03 * self.batches
             + 0.07 * self.warmup
-            + 0.04 * f32::from(u8::from(self.rigs))
-            + 0.03 * f32::from(u8::from(self.compiled))
+            + 0.04 * self.rigs
+            + 0.03 * self.compiled
             + 0.03 * self.settle
+    }
+
+    /// Reads every step from the loading state, through the gate's gauges.
+    fn read(
+        gauges: &mut Gauges,
+        pending: Option<&crate::map::Pending>,
+        batches: Option<&crate::map::StaticBatches>,
+        warmup: Option<&crate::pipeline_warmup::PipelineWarmup>,
+        rigs: (usize, usize),
+        compiles: Option<(usize, usize)>,
+        stable: u32,
+    ) -> Self {
+        let map = match pending {
+            None => 1.0,
+            Some(p) if p.loaded() => {
+                gauges.glbs.finish();
+                gauges.spawned.finish()
+            }
+            Some(p) => {
+                let (glbs, total) = p.glbs();
+                let (spawned, instances) = p.spawned();
+                // Nested scenes may still be creating their meshes once the counts are full.
+                (0.7 * gauges.glbs.update(glbs, total)
+                    + 0.3 * gauges.spawned.update(spawned, instances))
+                .min(0.99)
+            }
+        };
+        let batches = match batches {
+            None => 1.0,
+            Some(b) if b.ready() => gauges.merges.finish(),
+            Some(b) => {
+                let (merged, planned) = b.merged();
+                gauges.merges.update(merged, planned)
+            }
+        };
+        Self {
+            map,
+            batches,
+            warmup: warmup.map_or(1.0, |w| w.progress()),
+            rigs: gauges.rigs.update(rigs.0, rigs.1),
+            compiled: compiles.map_or(gauges.compiles.shown, |(done, total)| {
+                gauges.compiles.update(done, total)
+            }),
+            settle: gauges
+                .settle
+                .update(stable as usize, STABLE_FRAMES as usize),
+        }
     }
 }
 
@@ -299,19 +391,28 @@ pub(super) fn update(
                 }
             }
         }
-        Steps {
-            map: pending.as_ref().map_or(1.0, |p| p.progress()),
-            batches: batches.as_ref().map_or(1.0, |b| b.progress()),
-            warmup: warmup.as_ref().map_or(1.0, |w| w.progress()),
-            rigs: rigs_bound,
-            compiled: map && compiled,
-            settle: gate.settle.progress(),
-        }
+        let compiles = map.then(|| {
+            pipelines.as_ref().map_or((1, 1), |p| {
+                let status = p.status();
+                let total = status.ready + status.pending + status.failed;
+                (total - status.pending, total)
+            })
+        });
+        let stable = gate.settle.stable;
+        Steps::read(
+            &mut gate.gauges,
+            pending.as_deref(),
+            batches.as_deref(),
+            warmup.as_deref(),
+            (rigs.iter().filter(|r| r.bound).count(), rigs.iter().count()),
+            compiles,
+            stable,
+        )
         .bar()
     } else {
         1.0
     };
-    // The steps can dip (a late plan adds merges, a late compile starts), but the bar only rises.
+    // Every step only rises; this is a last guard against a step added without a gauge.
     let progress = progress.max(gate.shown);
     gate.shown = progress;
     let width = percent(progress * 100.0);
@@ -461,7 +562,7 @@ mod tests {
         let mut states = Vec::new();
         for map in [0.0, 0.5, 0.99] {
             s.map = map;
-            s.rigs = map > 0.4;
+            s.rigs = if map > 0.4 { 1.0 } else { 0.0 };
             states.push(s);
         }
         s.map = 1.0;
@@ -475,7 +576,7 @@ mod tests {
             states.push(s);
         }
         let warmup_end = states.len() - 1;
-        s.compiled = true;
+        s.compiled = 1.0;
         for step in [0.0, 0.5, 1.0] {
             s.settle = step;
             states.push(s);
@@ -488,6 +589,38 @@ mod tests {
             bars[warmup_end] - bars[warmup_start - 1] >= 0.05,
             "{bars:?}"
         );
+    }
+
+    #[test]
+    fn gauge_only_rises_as_work_is_found_and_counts_restart() {
+        // (done, total): m11_00's scene instances, whose total grows by a third while they
+        // spawn, then a steady-frame count that a hitch restarts.
+        let spawned = [
+            (0, 16903),
+            (6914, 20118),
+            (9001, 20788),
+            (9010, 21521),
+            (24668, 24668),
+        ];
+        let settle = [(0, 60), (30, 60), (0, 60), (1, 60), (40, 60), (60, 60)];
+        for counts in [&spawned[..], &settle[..]] {
+            let naive: Vec<f32> = counts.iter().map(|&(d, t)| fraction(d, t)).collect();
+            assert!(
+                naive.windows(2).any(|w| w[1] < w[0]),
+                "the plain fraction dips here: {naive:?}"
+            );
+            let mut gauge = Gauge::default();
+            let shown: Vec<f32> = counts.iter().map(|&(d, t)| gauge.update(d, t)).collect();
+            assert!(shown.windows(2).all(|w| w[1] >= w[0]), "{shown:?}");
+            assert!((shown[shown.len() - 1] - 1.0).abs() < 1e-6, "{shown:?}");
+        }
+        // With a total known up front it is the plain fraction.
+        let mut gauge = Gauge::default();
+        for done in [0, 3, 7, 10] {
+            assert!((gauge.update(done, 10) - fraction(done, 10)).abs() < 1e-6);
+        }
+        // Nothing found yet leaves the gauge empty.
+        assert_eq!(Gauge::default().update(0, 0), 0.0);
     }
 
     #[test]
