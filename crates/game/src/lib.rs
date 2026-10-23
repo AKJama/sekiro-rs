@@ -71,7 +71,7 @@ use std::path::PathBuf;
 
 /// Controller construction is deferred until play, so menu validation and tests
 /// never start workers or open hosted telemetry files.
-pub struct BrainOptions {
+pub(crate) struct BrainOptions {
     name: String,
     model: Option<String>,
     chr: String,
