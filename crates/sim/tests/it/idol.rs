@@ -596,3 +596,103 @@ fn rest_and_death_refill_the_full_supply_goods_without_the_storage() {
     assert_eq!(rice(&duel), (5, 0));
     assert!(duel.kit.storage.is_empty());
 }
+
+/// Wolf rested at a lit idol and was just told to stand up (the stand-up's event is queued).
+fn rested_and_standing_up(cache: &std::path::Path) -> Duel {
+    let mut duel = Duel::load(cache, 30.0).unwrap();
+    duel.enemy_present = false;
+    duel.enemy_active = false;
+    run(&mut duel, 1.0, |d| d.player.body.grounded);
+    let start = duel.player.body.position;
+    let spot = IdolSpot {
+        kneel: Placement {
+            position: [start[0] + 1.0, start[1], start[2]],
+            yaw: 1.0,
+        },
+        checkpoint: Placement {
+            position: [start[0] + 1.0, start[1], start[2] + 0.5],
+            yaw: -2.0,
+        },
+        entity: 1101950,
+    };
+    duel.kit.found_idols.insert(spot.entity);
+    duel.set_idols(vec![spot]);
+    let mut press = InputFrame::default();
+    press.buttons.action = true;
+    duel.step(&press, DT);
+    let praying = |d: &Duel| d.idol_phase() == Some(IdolPhase::Praying);
+    run(&mut duel, 5.0, praying);
+    duel.rest_at_idol();
+    run(&mut duel, 0.5, |d| {
+        d.idol_phase() == Some(IdolPhase::Resting)
+    });
+    run(&mut duel, 5.0, praying);
+    duel.leave_idol();
+    duel
+}
+
+#[test]
+fn each_move_is_taken_the_first_frame_the_stand_up_allows_it() {
+    let cache = sekiro_sim::cache::root();
+    if !cache.join("anim/c0000/a000_710330.bin").exists() {
+        eprintln!("skipping: cache not extracted");
+        return;
+    }
+    // Tried from the first frame of the stand-up (StatueAttachEnd a000_710330) on: the stick
+    // held, the buttons pressed every other frame. Its TAE opens every cancel window (move,
+    // step, jump, attack, ...) at 0.8 s, well before the clip ends at 1.33 s (#277).
+    type Try = fn(&mut InputFrame, bool);
+    let moves: [(&str, Try, &str); 5] = [
+        ("walk", |i, _| i.move_stick = [0.0, 1.0], "StandMoveStart"),
+        (
+            "walk away",
+            |i, _| i.move_stick = [0.0, -1.0],
+            "StandMoveStart",
+        ),
+        (
+            "step",
+            |i, tap| {
+                i.move_stick = [0.0, 1.0];
+                i.buttons.dodge = tap;
+            },
+            "GroundStep",
+        ),
+        ("jump", |i, tap| i.buttons.jump = tap, "GroundJumpReady"),
+        (
+            "attack",
+            |i, tap| i.buttons.attack = tap,
+            "GroundAttackCombo1",
+        ),
+    ];
+    for (name, set, state) in moves {
+        let mut duel = rested_and_standing_up(&cache);
+        let mut opened = None;
+        for f in 0..120 {
+            let mut input = InputFrame::default();
+            set(&mut input, f % 2 == 0);
+            duel.step(&input, DT);
+            let now = duel.player.behavior.runtime.main_state_name().to_string();
+            let Some(open) = opened else {
+                assert_eq!(
+                    now, "StatueAttachEnd",
+                    "{name}: frame {f}, before the window"
+                );
+                if duel.player.tae_frame().flag(sekiro_sim::tae::cancel::MOVE) {
+                    opened = Some(f);
+                }
+                continue;
+            };
+            // The behaviour reads the window the step after the animation opened it.
+            assert_eq!(
+                now, state,
+                "{name}: frame {f}, the window opened on frame {open}"
+            );
+            break;
+        }
+        let open = opened.unwrap_or_else(|| panic!("{name}: the stand-up's window never opened"));
+        assert!(
+            ((open + 1) as f32 * DT - 0.8).abs() < 2.0 * DT,
+            "{name}: the window opened at frame {open}"
+        );
+    }
+}

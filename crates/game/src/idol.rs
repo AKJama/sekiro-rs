@@ -594,15 +594,38 @@ fn free_cursor(
 
 /// The pause menu stays shut while Wolf is at an idol, since Esc stands him up.
 fn hold_pause(sim: NonSend<Sim>, mut modal: ResMut<crate::menu::Modal>) {
-    let at_idol = sim.duel.idol_phase().is_some();
+    let at_idol = screen_over_game(sim.duel.idol_phase());
     if modal.0 != at_idol {
         modal.0 = at_idol;
     }
 }
 
+/// Whether the idol takes the keys over the game in `phase`: all the way from the kneel, but no
+/// longer once Wolf stands up (#277). The stand-up's cancel windows let him move before it ends,
+/// and keys pressed during a screen over the game are ignored until released
+/// (`menu::HeldThroughMenu`), so a key pressed while he stood up would not move him.
+fn screen_over_game(phase: Option<IdolPhase>) -> bool {
+    phase.is_some_and(|p| p != IdolPhase::Leaving)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_pressed_while_wolf_stands_up_reach_him() {
+        for phase in [
+            IdolPhase::Kneeling,
+            IdolPhase::Lighting,
+            IdolPhase::Praying,
+            IdolPhase::Resting,
+            IdolPhase::Traveling,
+        ] {
+            assert!(screen_over_game(Some(phase)), "{phase:?}");
+        }
+        assert!(!screen_over_game(Some(IdolPhase::Leaving)));
+        assert!(!screen_over_game(None));
+    }
 
     #[test]
     fn a_click_on_a_pointable_part_picks_it_and_hovers_need_a_moved_cursor() {

@@ -4,8 +4,8 @@
 //! Rest to the Loop, and from End to standing, by itself.
 //!
 //! The action button at an idol's kneeling spot kneels Wolf there (unless a map item is nearer,
-//! `super::pickup`); while he is at it his own
-//! input is held. Kneeling refills Vitality and makes the idol the checkpoint: the next respawn
+//! `super::pickup`); while he is at it his own input is held, until he stands up (#277).
+//! Kneeling refills Vitality and makes the idol the checkpoint: the next respawn
 //! puts Wolf at its warp point ([`IdolSpot::checkpoint`]). Rest refills him again, refills the
 //! Healing Gourd and restocks the carried goods from the Storage (`Kit::restock`, #186; a
 //! respawn after death does too) and brings the map's foes back on the next step.
@@ -268,8 +268,13 @@ impl Duel {
         // The press step keeps his own input (#266): held at once, a walk's or a quick turn's
         // update in c0000.hks reads no stick and sends its stop (W_StandRunStop) after the
         // queued W_StatueAttachStart, which takes him back out of the kneel. The hold starts
-        // the step after, once the kneel is under way.
-        let held = self.idols.at;
+        // the step after, once the kneel is under way. It ends as he stands up (#277): the
+        // stand-up's TAE (a000_710330) buffers presses from 0.4 s and opens every cancel window
+        // at 0.8 s, before its clip ends at 1.33 s, and c0000.hks takes the moves from there.
+        let held = self
+            .idols
+            .at
+            .filter(|_| self.idol_phase() != Some(IdolPhase::Leaving));
         if pressed {
             match self.action_target() {
                 Some(ActionTarget::Idol(i)) => self.kneel_at(i),
