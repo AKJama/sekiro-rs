@@ -610,6 +610,13 @@ pub(super) fn observe(
     sample["t"] = serde_json::json!(now);
     sample["step"] = serde_json::json!(sim.step);
     sample["grounded"] = serde_json::json!(body.grounded);
+    // The riding state the floor gives (SpEffect 4100), which switches the trees' walls (#134).
+    sample["riding"] = serde_json::json!(
+        sim.duel
+            .player
+            .tae_runtime
+            .has_timed(sekiro_sim::hit_filter::RIDING_SP_EFFECT)
+    );
     let wire = &sim.duel.player.wire;
     // The wire perch still holding Wolf up, if any (#230: it ends once he leaves it).
     sample["perch"] = serde_json::json!(wire.perch.map(|p| p.to_array()));

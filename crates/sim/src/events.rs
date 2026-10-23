@@ -304,6 +304,31 @@ impl EventScripts {
         })
     }
 
+    /// Common event `id` from `common` (`common_func.emevd`), once for each start of it in `map`
+    /// (a block's script), with that start's arguments: the block's own copies of a shared
+    /// event, such as 20005560 switching the Outskirts trees' fall-prevention walls on while Wolf
+    /// has SpEffect 4100 ([`crate::hit_filter::RIDE_WALL_EVENT`]).
+    pub fn common(map: &Emevd, common: &Emevd, id: i64) -> Result<Self, String> {
+        let event = common
+            .event(id)
+            .ok_or_else(|| format!("common event {id} is not in the script"))?;
+        let mut scripts = Self::new(&Emevd::default(), &[])?;
+        for start in map.starts_of(id).into_iter().filter(|s| s.common) {
+            scripts.running.push(Running {
+                finished_groups: HashMap::new(),
+                staged: false,
+                id,
+                code: event.resolve(&start.args),
+                entry: 0,
+                pc: 0,
+                wait: None,
+                groups: HashMap::new(),
+                ended: false,
+            });
+        }
+        Ok(scripts)
+    }
+
     /// [`EventScripts::new`] from `cache/raw/event/<map>.emevd`.
     pub fn load(cache: &Path, map: &str, entries: &[EventEntry]) -> Result<Self, String> {
         let path = cache.join(format!("raw/event/{map}.emevd"));
