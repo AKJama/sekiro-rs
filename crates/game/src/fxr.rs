@@ -151,8 +151,8 @@ pub struct FxrPlayer {
     cache: PathBuf,
     /// The background warm-up of the fight's effects, while it runs.
     warm: Option<std::sync::Mutex<std::sync::mpsc::Receiver<warm::Warmed>>>,
-    /// The timelines (player, enemy) the last warm-up was for.
-    warmed_for: [usize; 2],
+    /// The characters (player and enemy chr ids) the last warm-up was for.
+    warmed_for: [String; 2],
     /// Warmed textures not yet added to the image assets.
     ready_images: HashMap<i64, Image>,
 }
@@ -208,7 +208,7 @@ impl FxrPlayer {
             steps: 0,
             cache,
             warm: None,
-            warmed_for: [0; 2],
+            warmed_for: Default::default(),
             ready_images: HashMap::new(),
         }
     }
@@ -254,9 +254,9 @@ impl FxrPlayer {
             self.hit_fx =
                 sekiro_sim::hit_fx::HitFx::load_from_cache(&self.cache, duel.spec.npc_param);
         }
-        let taes = [&duel.player.tae, &duel.enemy.tae].map(|t| std::sync::Arc::as_ptr(t) as usize);
-        if taes != self.warmed_for {
-            self.warmed_for = taes;
+        let chrs = [&duel.player.chr, &duel.enemy.chr];
+        if chrs != [&self.warmed_for[0], &self.warmed_for[1]] {
+            self.warmed_for = chrs.map(String::clone);
             let ids = duel
                 .player
                 .tae

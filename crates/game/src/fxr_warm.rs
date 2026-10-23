@@ -3,7 +3,6 @@
 //! after a fall cost 22 ms) reads no files in the frame.
 //! An effect spawned before its warm-up arrives is parsed in the frame as before.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -34,29 +33,33 @@ pub(super) fn start(index: FxrLib, ids: Vec<i64>) -> Receiver<Warmed> {
 
 fn warm(mut lib: FxrLib, ids: Vec<i64>, tx: &Sender<Warmed>) {
     let started = std::time::Instant::now();
-    let mut sent = HashSet::new();
-    let mut textures = HashSet::new();
+    // Parse every effect first (compiling the effects each references), then send them in one
+    // pass, then decode the textures, the slow part.
+    let mut textures = Vec::new();
     for id in &ids {
-        let wanted = lib.texture_ids(*id);
-        let parsed: Vec<_> = lib.parsed().filter(|(e, ..)| sent.insert(*e)).collect();
-        for (effect, tree, node) in parsed {
-            if tx.send(Warmed::Effect(effect, tree, node)).is_err() {
-                return;
-            }
-        }
-        for texture in wanted {
-            if textures.insert(texture)
-                && let Some(image) = super::load_texture(&lib, texture, false)
-                && tx.send(Warmed::Texture(texture, Box::new(image))).is_err()
-            {
-                return;
+        for texture in lib.texture_ids(*id) {
+            if !textures.contains(&texture) {
+                textures.push(texture);
             }
         }
     }
+    let mut effects = 0;
+    for (effect, tree, node) in lib.parsed() {
+        effects += 1;
+        if tx.send(Warmed::Effect(effect, tree, node)).is_err() {
+            return;
+        }
+    }
+    for &texture in &textures {
+        if let Some(image) = super::load_texture(&lib, texture, false)
+            && tx.send(Warmed::Texture(texture, Box::new(image))).is_err()
+        {
+            return;
+        }
+    }
     bevy::log::info!(
-        "FXR warm-up: {} effects ({} with references), {} textures in {:.2} s",
+        "FXR warm-up: {} effects ({effects} with references), {} textures in {:.2} s",
         ids.len(),
-        sent.len(),
         textures.len(),
         started.elapsed().as_secs_f32()
     );
