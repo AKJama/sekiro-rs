@@ -192,7 +192,12 @@ pub fn load(cache: &Path, map: &str, state: &WorldState) -> Result<Catalog, Stri
             }
             let flver = &models[&model.name];
             for (effect, dummy, param, source, idol) in requests {
-                let mut local = glam::Vec3::ZERO;
+                // The effect's frame in the model: a dummy's own frame (its position, +Z along its
+                // forward, +Y along its upward) under its parent nodes, else the model's origin.
+                // An effect on a dummy takes the dummy's facing: the idols' dummy 100 faces the
+                // model's -Z, where the hands are, so the lit flame's +Z node offset lands above
+                // them (#278).
+                let mut local = glam::Mat4::IDENTITY;
                 if dummy >= 0 {
                     let Some(d) = flver
                         .dummies
@@ -201,7 +206,7 @@ pub fn load(cache: &Path, map: &str, state: &WorldState) -> Result<Catalog, Stri
                     else {
                         continue;
                     };
-                    local = d.position.into();
+                    local = d.frame();
                     let mut parent = d.parent_bone;
                     for _ in 0..flver.nodes.len() {
                         let Some(node) = usize::try_from(parent)
@@ -210,11 +215,13 @@ pub fn load(cache: &Path, map: &str, state: &WorldState) -> Result<Catalog, Stri
                         else {
                             break;
                         };
-                        local = node.local_matrix().transform_point3(local);
+                        local = node.local_matrix() * local;
                         parent = node.parent;
                     }
                 }
-                let p = part.matrix().transform_point3(local);
+                let mirror = glam::Mat4::from_scale(glam::Vec3::new(-1.0, 1.0, 1.0));
+                let (_, rotation, p) =
+                    (mirror * part.matrix() * local * mirror).to_scale_rotation_translation();
                 let enabled = state
                     .visibility
                     .iter()
@@ -230,8 +237,8 @@ pub fn load(cache: &Path, map: &str, state: &WorldState) -> Result<Catalog, Stri
                     name: part.name.clone(),
                     entity: part.entity_id,
                     effect,
-                    position: [-p.x, p.y, p.z],
-                    rotation: mirror_rotation(part.rotation),
+                    position: p.to_array(),
+                    rotation: rotation.to_array(),
                     enabled,
                     activation: Some(part.name.clone()),
                     dummy: Some(dummy),
