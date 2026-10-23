@@ -1211,20 +1211,18 @@ fn setup(
             ));
         }
     }
-    commands.spawn((
-        Hud,
-        Text::new(""),
-        TextFont {
-            font_size: bevy::text::FontSize::Px(15.0),
-            ..default()
-        },
-        Node {
-            position_type: PositionType::Absolute,
-            top: px(12),
-            left: px(12),
-            ..default()
-        },
-    ));
+    commands
+        .spawn(combat_hud::debug_text_area())
+        .with_children(|area| {
+            area.spawn((
+                Hud,
+                Text::new(""),
+                TextFont {
+                    font_size: bevy::text::FontSize::Px(15.0),
+                    ..default()
+                },
+            ));
+        });
 }
 
 /// Fails when no collision floor lies under `position`, as `floor(x, z, top)` finds it from
