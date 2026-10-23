@@ -663,6 +663,11 @@ fn solve_bend_stiffness(
     }
 }
 
+/// One distance link. The exported standard and bend link stiffness is already the user
+/// stiffness over `invMassA + invMassB` (Owl's ponytail 4.375 = 0.7 / 0.16, Wolf's coat 0.089 at
+/// inverse masses near 5.6), so it applies as stored; dividing it again made Wolf's links ~10x
+/// too soft and the Owl's ponytail overshoot ~4x per solve and flail (#39). Stretch link
+/// stiffness is stored plain. Found by FwLo (RustSekiro docs/kb/visuals.md, 2026-10-16).
 fn solve_link(x: &mut [Vec3], w: &[f32], l: &Link, stretch_only: bool) {
     let (wa, wb) = (w[l.a], w[l.b]);
     if wa + wb <= 0.0 {
@@ -673,7 +678,12 @@ fn solve_link(x: &mut [Vec3], w: &[f32], l: &Link, stretch_only: bool) {
     if len < 1e-6 || (stretch_only && len <= l.rest) {
         return;
     }
-    let corr = d * ((len - l.rest) / len * l.stiffness / (wa + wb));
+    let k = if stretch_only {
+        l.stiffness / (wa + wb)
+    } else {
+        l.stiffness
+    };
+    let corr = d * ((len - l.rest) / len * k);
     x[l.a] += corr * wa;
     x[l.b] -= corr * wb;
 }
@@ -1360,12 +1370,13 @@ mod tests {
         let x: Vec<Vec3> = (0..n).map(|i| Vec3::new(i as f32, 0.0, 0.0)).collect();
         let mut w = vec![1.0; n];
         w[0] = 0.0;
+        // Full strength, stored as the data stores it: over the pair's inverse masses.
         let links = (0..n - 1)
             .map(|i| Link {
                 a: i,
                 b: i + 1,
                 rest: 1.0,
-                stiffness: 1.0,
+                stiffness: 1.0 / (w[i] + w[i + 1]),
             })
             .collect();
         (x, w, links)
@@ -1439,6 +1450,76 @@ mod tests {
         for (i, p) in x.iter().enumerate().skip(1) {
             assert!(p.y < -0.5 * i as f32, "particle {i} at {p:?}");
             assert!((p.distance(x[i - 1]) - 1.0).abs() < 1e-2);
+        }
+    }
+
+    /// Three seconds of an idle character at 60 fps, the skeleton held in its bind pose: every
+    /// cloth settles. With the link stiffness divided twice the Owl's ponytail still moved at
+    /// ~37 m/s after two seconds, its links stretched to twice their length (#39); now the
+    /// fastest is the undamped haori at ~0.4 m/s.
+    #[test]
+    fn idle_cloth_settles() {
+        for id in ["c5060", "c0000"] {
+            let path = sekiro_sim::cache::root().join(format!("models/{id}.cloth.bin"));
+            let Ok(bytes) = std::fs::read(&path) else {
+                eprintln!("skipping: {} is not extracted", path.display());
+                continue;
+            };
+            let defs: Arc<Vec<ClothDef>> = Arc::new(
+                data::ClothSet::from_bytes(&bytes)
+                    .unwrap()
+                    .cloths
+                    .iter()
+                    .map(ClothDef::new)
+                    .collect(),
+            );
+            for (which, def) in defs.iter().enumerate() {
+                // In the bind pose the reference vertices sit on their particles.
+                let mut refs: Vec<Option<(Vec3, Vec3)>> = vec![None; def.refs.len()];
+                let ranged = def.sets.iter().flat_map(|s| match s {
+                    Set::LocalRange { items, .. } => {
+                        items.iter().map(|&(p, r, ..)| (r, p)).collect()
+                    }
+                    _ => Vec::new(),
+                });
+                for (r, p) in def.moves.iter().copied().chain(ranged) {
+                    if let (Some(slot), Some(&q)) = (refs.get_mut(r), def.rest.get(p)) {
+                        slot.get_or_insert((q, Vec3::ZERO));
+                    }
+                }
+                let mut c = ClothInst {
+                    owner: Entity::PLACEHOLDER,
+                    def: Arc::clone(&defs),
+                    which,
+                    ref_ents: Vec::new(),
+                    capsule_ents: Vec::new(),
+                    bone_ents: Vec::new(),
+                    displays: Vec::new(),
+                    x: def.rest.clone(),
+                    prev: def.rest.clone(),
+                    started: true,
+                    last_h: 0.0,
+                    blowups: 0,
+                    rigid: false,
+                    out: ClothOut::default(),
+                };
+                // The fastest particle over the last second.
+                let mut speed = 0f32;
+                for frame in 0..180 {
+                    let before = c.x.clone();
+                    solve(&mut c, &refs, &[], 1.0 / 60.0, false, frame == 0);
+                    if frame >= 120 {
+                        for (a, b) in before.iter().zip(&c.x) {
+                            speed = speed.max(a.distance(*b) * 60.0);
+                        }
+                    }
+                }
+                assert!(
+                    speed < 1.0,
+                    "{id} {}: still moving at {speed:.2} m/s after two idle seconds",
+                    def.name
+                );
+            }
         }
     }
 }
