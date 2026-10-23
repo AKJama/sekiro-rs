@@ -6,7 +6,7 @@
 //! Named reference progression adds known boss defeats to the first-visit fixture.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use bevy::prelude::Resource;
@@ -27,12 +27,40 @@ pub struct StoryMap {
     by_name: HashMap<String, usize>,
 }
 
+/// `--story`, else the story a render/reference gate's fixture declares (the canonical
+/// reference story when it declares none), else None for the map's own default.
 pub fn selection(args: &[String]) -> Option<String> {
     crate::arg_value(args, "--story").or_else(|| {
-        args.iter()
-            .any(|a| a == "--render-gate" || a == "--reference-gate")
-            .then(|| REFERENCE_STORY.into())
+        let story = std::fs::read(gate_fixture(args)?)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|gate| gate["story"].as_str().map(String::from));
+        Some(story.unwrap_or_else(|| REFERENCE_STORY.into()))
     })
+}
+
+/// The checked-in fixture a `--render-gate` or `--reference-gate` run compares against:
+/// `tests/data/<map>[.<--gate-fixture>].<render|reference>.json`.
+pub(crate) fn gate_fixture(args: &[String]) -> Option<PathBuf> {
+    let kind = if args.iter().any(|a| a == "--reference-gate") {
+        "reference"
+    } else if args.iter().any(|a| a == "--render-gate") {
+        "render"
+    } else {
+        return None;
+    };
+    let map = crate::arg_value(args, "--map")?;
+    let variant = gate_variant(args).map_or(String::new(), |v| format!("{v}."));
+    Some(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("tests/data/{map}.{variant}{kind}.json")),
+    )
+}
+
+/// `--gate-fixture <name>`: a named variant of a map's gate fixture, such as `opening`.
+pub(crate) fn gate_variant(args: &[String]) -> Option<String> {
+    crate::arg_value(args, "--gate-fixture")
+        .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
 }
 
 impl StoryMap {
@@ -115,4 +143,57 @@ pub fn load(cache: &Path, map: &str, layout: &Value) -> Result<Option<StoryMap>>
         parts,
         by_name,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_gate_runs_the_story_its_fixture_declares() {
+        let args = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        for (command, story, sky) in [
+            (
+                "--render-gate --map m11_00_00_00",
+                Some("genichiro-defeated"),
+                Some("m900010"),
+            ),
+            (
+                "--render-gate --map m11_01_00_00",
+                Some("genichiro-defeated"),
+                Some("m900010"),
+            ),
+            // The opening (before Gyoubu, morning sky), the state a new play session starts in.
+            (
+                "--render-gate --map m11_00_00_00 --gate-fixture opening",
+                Some("morning"),
+                Some("m900000"),
+            ),
+            (
+                "--reference-gate --map m11_00_00_00",
+                Some(REFERENCE_STORY),
+                None,
+            ),
+            (
+                "--render-gate --map m11_00_00_00 --story night",
+                Some("night"),
+                None,
+            ),
+            ("--play --map m11_00_00_00", None, None),
+        ] {
+            let args = args(command);
+            assert_eq!(selection(&args).as_deref(), story, "{command}");
+            if let Some(sky) = sky {
+                assert!(gate_fixture(&args).unwrap().is_file(), "{command}");
+                let lit = crate::lighting_selection::select(
+                    &sekiro_sim::cache::root(),
+                    &crate::arg_value(&args, "--map").unwrap(),
+                    story,
+                    None,
+                )
+                .unwrap();
+                assert_eq!(lit.sky.as_deref(), Some(sky), "{command}");
+            }
+        }
+    }
 }

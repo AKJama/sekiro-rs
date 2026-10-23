@@ -108,41 +108,41 @@ impl Options {
             while i < args.len() {
                 i += match args[i].as_str() {
                     "--render-gate" | "--reference-gate" | "--sweep" => 1,
-                    "--map" | "--cache" | "--sweep-out" => 2,
+                    "--map" | "--cache" | "--sweep-out" | "--gate-fixture" => 2,
                     flag => anyhow::bail!(
                         "render gate requires canonical material/story/camera settings, rejected {flag}; use --sweep-views for diagnostic controls"
                     ),
                 };
             }
         }
+        let variant = super::story::gate_variant(args);
+        anyhow::ensure!(
+            variant.is_some() || crate::arg_value(args, "--gate-fixture").is_none(),
+            "--gate-fixture takes a name of letters, digits and dashes"
+        );
         let objects = render_gate || args.iter().any(|a| a == "--objects");
         let out = PathBuf::from(
             crate::arg_value(args, "--sweep-out").unwrap_or_else(|| "target/alt-hs/sweep".into()),
         )
-        .join(&map)
+        .join(variant.map_or_else(|| map.clone(), |v| format!("{map}.{v}")))
         .join(if objects { "objects" } else { "pieces" });
         let gate = if render_gate {
             anyhow::ensure!(
                 matches!(map.as_str(), "m11_00_00_00" | "m11_01_00_00"),
                 "render gate supports the two Ashina areas"
             );
-            Some(serde_json::from_slice::<Value>(&std::fs::read(
-                Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
-                    "tests/data/{map}.{}.json",
-                    if reference_gate {
-                        "reference"
-                    } else {
-                        "render"
-                    }
-                )),
-            )?)?)
+            let fixture = super::story::gate_fixture(args).context("gate fixture")?;
+            let bytes = std::fs::read(&fixture)
+                .with_context(|| format!("reading {}", fixture.display()))?;
+            Some(serde_json::from_slice::<Value>(&bytes)?)
         } else {
             None
         };
         if !reference_gate && let Some(gate) = &gate {
+            // The fixture's story is the run's story (`story::selection`), so it must name one.
             anyhow::ensure!(
-                gate["story"].as_str() == Some(super::story::REFERENCE_STORY),
-                "render fixture story must match the canonical reference preset"
+                gate["story"].is_string(),
+                "render fixture must declare its story"
             );
         }
         Ok(Self {

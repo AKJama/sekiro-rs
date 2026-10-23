@@ -74,7 +74,7 @@ Builds and tests are most of a PR's time, so the implementing agent tests as lit
 It does not run the full suite, and does not rerun tests while iterating.
 - When it only needs to know whether something works in the game, it builds the release binary once and stops.
 It reports 1 to 3 specific things for the user to try, and the user playtests; the user is quicker than an agent game run.
-- The main session runs the full checks (step 4) once at the end: fmt, clippy, the workspace tests, both render gates and the live test.
+- The main session runs the full checks (step 4) once at the end: fmt, clippy, the workspace tests, the three render gates and the live test.
 
 The fast commands, from PowerShell in the repo root:
 
@@ -136,11 +136,12 @@ cargo test --release --workspace
 ```
 
 The workspace tests include the data gate.
-For any change that can affect rendering, also build the release binary and run both render gates (see `docs/MAP-COMPLETENESS-SWEEP.md`):
+For any change that can affect rendering, also build the release binary and run the three render gates, two noon and one opening (see `docs/MAP-COMPLETENESS-SWEEP.md`):
 
 ```bash
 target/release/sekiro-rs.exe --render-gate --map m11_00_00_00 --sweep-out target/render-gate
 target/release/sekiro-rs.exe --render-gate --map m11_01_00_00 --sweep-out target/render-gate
+target/release/sekiro-rs.exe --render-gate --map m11_00_00_00 --gate-fixture opening --sweep-out target/render-gate
 ```
 
 Then test the change in the live game with the [`live-test`](../live-test/SKILL.md) skill: ask the user to playtest first, and if an agent runs it, wait for the full load, steer with a route and prove the target was hit.

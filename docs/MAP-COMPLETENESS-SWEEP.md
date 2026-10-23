@@ -19,13 +19,18 @@ cargo test --release --offline -p sekiro-game -j 4 map_data_gate -- --nocapture
 cargo build --release --offline -p sekiro-game -j 4
 & target/alt-gt/release/sekiro-rs.exe --render-gate --map m11_00_00_00 --sweep-out target/alt-gt/render-gate
 & target/alt-gt/release/sekiro-rs.exe --render-gate --map m11_01_00_00 --sweep-out target/alt-gt/render-gate
+& target/alt-gt/release/sekiro-rs.exe --render-gate --map m11_00_00_00 --gate-fixture opening --sweep-out target/alt-gt/render-gate
 ```
 
-Run both render commands serially before reviewing a commit.
+Run the three render commands serially before reviewing a commit.
 Each command starts one windowless process, loads the area and its bounded neighbourhood once, and renders every fixed view in that process.
 The numeric `<map>.render.json` fixtures hold width, height and `[x,y,z,yaw,pitch,void,depth_gap,untextured,grey,pop_in]` rows, in Bevy world coordinates.
 The canonical Ashina gate uses ordinary Objects, the named post-Genichiro reference progression and native material settings, and rejects diagnostic overrides.
-Each render fixture declares `story: genichiro-defeated`, which must agree with the canonical selection policy.
+Each render fixture declares the story its run uses (`--story` is rejected by the gate).
+The two noon fixtures `<map>.render.json` declare `genichiro-defeated` (12 h, sky m900010).
+The opening fixture `m11_00_00_00.opening.render.json`, selected with `--gate-fixture opening`, declares `morning`: before Gyoubu, 6 h, sky m900000, the same six cameras with their own baselines.
+A `--gate-fixture <name>` run reads `<map>.<name>.render.json` and writes under `<sweep-out>/<map>.<name>/`.
+A reference fixture without a story uses the noon reference story.
 Ordinary exploration and unqualified broad surveys keep their first-visit default.
 `report.json` retains all measurements, selected collisions and visible-part manifests; `gate.json` records pass/fail details.
 Every category is checked separately at every view, with a tolerance of 16 pixels or 1% of that view's baseline, whichever is greater.
@@ -38,7 +43,7 @@ Layer textures resolve from their owning GLB in production, preserving the block
 Use `--test-primary-material-prefix` with an ordinary `--sweep` control to reproduce the former wrong-folder requests; canonical gates reject that diagnostic flag.
 The loader now waits for nested scene readiness and the texture diagnostic recognizes images already uploaded to the GPU after their CPU assets retire.
 
-The required gates are the normal CPU data gate and the two six-view render commands above.
+The required gates are the normal CPU data gate and the three six-view render commands above.
 The optional reference tool is not yet reliable and is excluded from required gates.
 Its supplementary fixture adds 150 distinct poses from the external screenshot index, at 256 x 144 pixels, with a separate 900-second budget.
 The earlier first-visit repeat failed four tolerances: pop-in at views 57, 61 and 62, and grey at view 66.
