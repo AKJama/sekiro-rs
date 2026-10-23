@@ -59,6 +59,13 @@ That reproduces what the game shows (no snow under the hall roof, snow in the op
 Columns are looked up lazily from `CollisionWorld::surfaces_at` and cached until the collision world changes.
 A flake falling under an eave is removed rather than hidden; for straight-falling snow the two look the same.
 Only the play mode has the collision; the map viewer and its render gates keep uncovered snow.
+Seen from under a roof, the open sky keeps its snow (#281).
+The camera snow's emitter is a 15 x 15 x 5 m box (emitterSize, turned 90 degrees about X) centred on the camera, its flakes live 6 s and fall at about 1 m/s, so every flake is within about 8.5 m of the camera horizontally.
+From start 0 in the Sculptor's hall the whole box is under the roof, while the door seen to the right of the start view opens on the yard 15 m away, so no snow fell there (measured: 0 flakes per square metre of open yard 16 to 23 m ahead, against 7.9 within 5 m of a camera standing in the yard).
+While the camera is under cover, `SkyFill` in `crates/game/src/map_fx.rs` places one more instance of the same effect, fixed in the world, 7.5 m past the first uncovered column straight ahead (snapped to a 7.5 m grid), primed six seconds so it appears full; its flakes inside the camera's own box are removed, so the two never overlap, and the roof cover applies as before (now 7.1 per square metre in that yard).
+Turning away puts that instance to sleep (up to six are kept to wake again); stepping into the open retires it, so its flakes fall out over 6 s instead of vanishing.
+Open sky is judged by the same play collision, so a room whose roof has no collision counts as open (the lower room south of the hall start, with the carved statues, has none over it).
+This is our approximation; how the game shows snow beyond the camera box is not traced.
 The underwater SpEffect 110040 condition is not implemented.
 The rooftop ordinary-fight and Tomoe transitions are described in LIGHTING.md's Genichiro snow audit.
 

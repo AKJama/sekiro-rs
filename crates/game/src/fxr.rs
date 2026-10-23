@@ -122,6 +122,8 @@ struct Effect {
     root: Option<NodeInst>,
     age: f32,
     asleep: bool,
+    /// A map effect to run to its steady state when its tree is made ([`FxrPlayer::map_effect_primed`]).
+    prime: bool,
 }
 
 /// A stain a hit asks for: DecalParam row, contact point, blow direction on the floor plane.
@@ -365,6 +367,7 @@ impl FxrPlayer {
             root: None,
             age: 0.0,
             asleep: false,
+            prime: false,
         });
     }
 
@@ -397,11 +400,12 @@ impl FxrPlayer {
     }
 
     /// Removes the falling weather particles (GPUStandardParticle, world space) of map effect
-    /// `id` that lie under cover, so snow does not fall under a roof (#79). Returns how many.
+    /// `id` that `covered(serial, position)` says lie under cover, so snow does not fall under a
+    /// roof (#79). Returns how many.
     pub(crate) fn cull_map_weather(
         &mut self,
         id: i32,
-        covered: &mut impl FnMut(Vec3) -> bool,
+        covered: &mut impl FnMut(i32, Vec3) -> bool,
     ) -> usize {
         fn cull(n: &mut NodeInst, covered: &mut dyn FnMut(Vec3) -> bool) -> usize {
             let mut gone = 0;
@@ -422,8 +426,11 @@ impl FxrPlayer {
         self.effects
             .iter_mut()
             .filter(|e| e.key.0 == 5 && e.key.1 == id && !e.asleep)
-            .filter_map(|e| e.root.as_mut())
-            .map(|root| cull(root, covered))
+            .filter_map(|e| {
+                let serial = e.key.2;
+                Some((serial, e.root.as_mut()?))
+            })
+            .map(|(serial, root)| cull(root, &mut |p| covered(serial, p)))
             .sum()
     }
 
@@ -489,6 +496,13 @@ impl FxrPlayer {
     ) {
         let key = (5, id, serial);
         if let Some(e) = self.effects.iter_mut().find(|e| e.key == key) {
+            if awake && e.stop {
+                // Retired by [`Self::retire_map_effect`] and asked for again: start it afresh.
+                e.root = None;
+                e.age = 0.;
+                e.stop = false;
+                e.persistent = true;
+            }
             if frozen && awake && at.translation != e.at.translation {
                 e.root = None;
                 e.age = 0.;
@@ -508,6 +522,30 @@ impl FxrPlayer {
                 e.persistent = true;
             }
         }
+    }
+
+    /// [`Self::map_effect`] for an effect that, when its tree is made, runs six seconds (the falling
+    /// snow's particle lifetime) before it is first drawn, so it appears already full.
+    pub(crate) fn map_effect_primed(&mut self, id: i32, serial: i32, at: Transform, frozen: bool) {
+        self.map_effect(id, serial, at, true, frozen);
+        if let Some(e) = self.effects.iter_mut().find(|e| e.key == (5, id, serial)) {
+            e.prime = true;
+        }
+    }
+
+    /// Lets map effect `id`/`serial` stop emitting and end once its particles have expired.
+    pub(crate) fn retire_map_effect(&mut self, id: i32, serial: i32) {
+        if let Some(e) = self.effects.iter_mut().find(|e| e.key == (5, id, serial)) {
+            e.persistent = false;
+            e.stop = true;
+            e.asleep = false;
+            e.age = e.age.max(EFFECT_STOP);
+        }
+    }
+
+    /// Removes map effect `id`/`serial` at once.
+    pub(crate) fn drop_map_effect(&mut self, id: i32, serial: i32) {
+        self.effects.retain(|e| e.key != (5, id, serial));
     }
 
     pub(crate) fn advance_map(&mut self, dt: f32) {
@@ -683,10 +721,11 @@ impl FxrPlayer {
                     .wrapping_add(self.steps as u32 * 31);
                 e.root = make_node(lib, &def, seed, 0);
                 if map
-                    && dt == 0.
+                    && (dt == 0. || e.prime)
                     && let Some(root) = &mut e.root
                 {
-                    for _ in 0..60 {
+                    // Two seconds, or six for a primed effect (the falling snow's lifetime).
+                    for _ in 0..if e.prime { 180 } else { 60 } {
                         step_node(root, lib, e.at, 1. / 30., false);
                     }
                     e.age = 2.;
