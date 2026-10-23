@@ -867,6 +867,36 @@ struct Frame<'a> {
     trail: &'a mut Vec<(Vec3, Vec3, f32)>,
 }
 
+/// The native view-distance fade of a local light (`20d9c0`, called by the point and spot light
+/// builders): full while the light's near edge (`depth - radius`, `depth` along the camera's
+/// view axis) is within `view_distance`, then a linear ramp to zero over 7 percent of it, at
+/// most 10 m (`.rdata` 0.07 and 10.0). A light without a view distance never fades (#83).
+fn light_view_fade(view_distance: f32, depth: f32, radius: f32) -> f32 {
+    if view_distance <= 0. {
+        return 1.;
+    }
+    let ramp = (view_distance * 0.07).min(10.);
+    ((view_distance + ramp - (depth - radius)) / ramp).clamp(0., 1.)
+}
+
+/// Shows every effect light of this frame, reusing the pooled entities. There is no count cap:
+/// Bevy's clustered culling bounds the cost, as for the BTL lights, and a nearest-N cap made
+/// farther lights pop in as nearer ones went out of range (#83).
+fn sync_lights(commands: &mut Commands, pool: &mut Vec<Entity>, lights: &[FxLight]) {
+    while pool.len() > lights.len() {
+        commands.entity(pool.pop().unwrap()).despawn();
+    }
+    for (i, fx_light) in lights.iter().enumerate() {
+        let light = fx_light.point_light();
+        let transform = Transform::from_translation(fx_light.position);
+        if let Some(&entity) = pool.get(i) {
+            commands.entity(entity).insert((light, transform));
+        } else {
+            pool.push(commands.spawn((light, transform)).id());
+        }
+    }
+}
+
 /// One FXR 609 point light of this frame.
 #[derive(Clone, Copy, Debug)]
 struct FxLight {
@@ -1027,13 +1057,12 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
             }
             609 => {
                 let limit = scalar(a, Field::MaxViewDistance, active_t, &mut rnd, -1.);
-                if limit > 0. && world.distance_squared(cam.translation()) > limit * limit {
-                    continue;
-                }
                 let color = prop(a.get(Field::DiffuseColor), p.age, &mut rnd, [1.; 4]);
                 let intensity =
                     scalar(a, Field::DiffuseMultiplier, active_t, &mut rnd, 1.) * color[3].max(0.);
                 let radius = scalar(a, Field::Radius, active_t, &mut rnd, 0.);
+                let depth = (world - cam.translation()).dot(cam.forward().as_vec3());
+                let intensity = intensity * light_view_fade(limit, depth, radius);
                 // The light object's falloff distance (object +0x90, 1.0 by default in
                 // 20d5f0); the builders store 1 / it as the diffuse w the shader's
                 // `1 / (1 + 0.7 (d / falloff)^2)` term uses (#141).
@@ -1796,27 +1825,7 @@ fn render(
             collect(root, &mut frame);
         }
     }
-    // The 16 nearest the camera (many alike, such as item glints, would tie on brightness).
-    let eye = frame.cam.translation();
-    frame.lights.sort_by(|a, b| {
-        a.position
-            .distance_squared(eye)
-            .total_cmp(&b.position.distance_squared(eye))
-            .then(b.intensity.total_cmp(&a.intensity))
-    });
-    frame.lights.truncate(16);
-    while lights.len() > frame.lights.len() {
-        commands.entity(lights.pop().unwrap()).despawn();
-    }
-    for (i, fx_light) in frame.lights.iter().enumerate() {
-        let light = fx_light.point_light();
-        let transform = Transform::from_translation(fx_light.position);
-        if let Some(&entity) = lights.get(i) {
-            commands.entity(entity).insert((light, transform));
-        } else {
-            lights.push(commands.spawn((light, transform)).id());
-        }
-    }
+    sync_lights(&mut commands, &mut lights, frame.lights);
     let (bufs, multi) = (frame.bufs, frame.multi);
     for key in frame.distort.keys() {
         if player.distort_batches.contains_key(key) {
@@ -2239,6 +2248,75 @@ mod tests {
             }
         }
         assert!(quads > 2, "fog sprites drawn: {quads}");
+    }
+
+    /// #83: the Outskirts lantern light (839531: radius 3, maxViewDistance 50) stays at full
+    /// power until its near edge is 50 m deep in the view, then fades out over 3.5 m, instead of
+    /// switching on at 50 m from the camera.
+    #[test]
+    fn lantern_light_fades_out_past_its_view_distance() {
+        let cache = sekiro_sim::cache::root();
+        if !cache
+            .join("raw/sfx/sfxbnd_commoneffects.ffxbnd.d/f000839531.fxr")
+            .exists()
+        {
+            eprintln!("skipping: cache not extracted");
+            return;
+        }
+        let mut player = FxrPlayer::new(cache);
+        player.hold(HELD, 839531, 0, Transform::IDENTITY, true);
+        for _ in 0..120 {
+            player.advance(1. / 60.);
+        }
+        let shown = |depth: f32| {
+            let cam = GlobalTransform::from(
+                Transform::from_xyz(0., 0., depth).looking_at(Vec3::ZERO, Vec3::Y),
+            );
+            let mut buffers = FrameBuffers::default();
+            let mut frame = Frame {
+                cam: &cam,
+                bufs: &mut buffers.bufs,
+                multi: &mut buffers.multi,
+                lights: &mut buffers.lights,
+                distort: &mut buffers.distort,
+                trail: &mut buffers.trail,
+            };
+            for e in &player.effects {
+                collect(e.root.as_ref().unwrap(), &mut frame);
+            }
+            buffers.lights.iter().map(|l| l.intensity).sum::<f32>()
+        };
+        // Authored multiplier 2.5 and colour alpha 1.
+        for (depth, want) in [(40., 2.5), (53., 2.5), (54.75, 2.5 * 0.5), (57., 0.)] {
+            let got = shown(depth);
+            assert!(
+                (got - want).abs() < 1e-3,
+                "depth {depth}: {got}, want {want}"
+            );
+        }
+    }
+
+    /// #83: every effect light gets an entity; a nearest-16 cap made farther lights beyond the
+    /// start-3 gate pop in as Wolf walked toward them.
+    #[test]
+    fn every_effect_light_is_shown() {
+        let lights: Vec<_> = (0..40)
+            .map(|i| FxLight {
+                position: Vec3::new(i as f32 * 5., 0., 0.),
+                color: Color::WHITE,
+                intensity: 1.,
+                range: 5.,
+                falloff: 1.,
+            })
+            .collect();
+        let mut world = World::new();
+        let mut pool = Vec::new();
+        sync_lights(&mut world.commands(), &mut pool, &lights);
+        world.flush();
+        assert_eq!(world.query::<&PointLight>().iter(&world).count(), 40);
+        sync_lights(&mut world.commands(), &mut pool, &lights[..3]);
+        world.flush();
+        assert_eq!(world.query::<&PointLight>().iter(&world).count(), 3);
     }
 
     /// The native deferred point-light diffuse for a surface facing the light (N.L = 1), as
