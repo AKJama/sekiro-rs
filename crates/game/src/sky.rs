@@ -693,11 +693,19 @@ fn update(
     }
     for (mut mesh, mut handle, mut visibility) in &mut horizons {
         if let Some(layer) = library.horizons.get(&selected) {
-            mesh.0 = layer.mesh.clone();
-            handle.0 = layer.material.clone();
+            if mesh.0 != layer.mesh {
+                mesh.0 = layer.mesh.clone();
+            }
+            if handle.0 != layer.material {
+                handle.0 = layer.material.clone();
+            }
             *visibility = Visibility::Inherited;
-            if let Some(mut material) = materials.get_mut(&handle.0) {
-                material.inputs.sun = set.sun_toward.extend(0.);
+            // Only the sun is written here; an unchanged write would still re-prepare the bind group.
+            let sun = set.sun_toward.extend(0.);
+            if let Some(mut material) = materials.get_mut(&handle.0)
+                && material.inputs.sun != sun
+            {
+                material.inputs.sun = sun;
             }
         } else {
             *visibility = Visibility::Hidden;
