@@ -307,11 +307,6 @@ pub struct Body {
     pub fall_top: f32,
     /// Height fallen on the last landing (env 224).
     pub last_fall_height: f32,
-    /// Seconds left of the riding state (SpEffect 4100): reset to
-    /// [`crate::hit_filter::SP_EFFECT_4100_ENDURANCE`] on each fall-assisted tick that starts
-    /// on a rideable floor, counted down otherwise. While above 0 the rideable objects'
-    /// fall-prevention walls hold the body ([`crate::hit_filter::riding_walls`]).
-    pub riding: f32,
     /// The height of a floor over the feet of an airborne body that they came onto over its
     /// edge, from the side, and that it is still landing on ([`Body::landing_floor`]).
     pub carried_onto: Option<f32>,
@@ -328,7 +323,6 @@ impl Default for Body {
             grounded: true,
             fall_top: 0.0,
             last_fall_height: 0.0,
-            riding: 0.0,
             carried_onto: None,
         }
     }
@@ -344,6 +338,12 @@ pub struct BodyInput {
     /// The fall-prevention walls this tick's HKS `act(3016)` asked for
     /// ([`crate::hit_filter::fall_assist_walls`]); 0 moves freely past them.
     pub fall_assist: u8,
+    /// True while the character has the riding state, SpEffect 4100
+    /// ([`crate::hit_filter::RIDING_SP_EFFECT`], which [`crate::character::Character`] keeps in
+    /// its timed SpEffect store from the floor under it): the rideable objects' fall-prevention
+    /// walls hold the body too ([`crate::hit_filter::riding_walls`]), the walls common event
+    /// 20005560 switches on while Wolf has it.
+    pub ride_walls: bool,
     /// World-space horizontal movement stick, with magnitude at most one.
     pub stick: Vec2,
     /// Root-motion delta in the character's local source space: `[x, y, z, yaw]`.
@@ -421,11 +421,16 @@ impl Body {
             .filter(move |(h, _)| y - h < step)
     }
 
-    /// True while the surface holding the body up is rideable ([`crate::hit_filter::rideable`]):
-    /// the floor under its centre when that is within a step, otherwise the highest rim floor,
-    /// the one [`Self::rim_support`] stands it on. Held by the fall-prevention walls at a
-    /// branch's edge, the centre is often past the branch while the rim still rests on it.
-    fn on_rideable(&self, ground: &dyn Ground) -> bool {
+    /// The collision material of the surface holding the body up, the one whose special setting
+    /// gives it a floor SpEffect ([`crate::tae::TaeDb::floor_effect`]): the floor under its
+    /// centre when that is within a step, otherwise the highest rim floor, the one
+    /// [`Self::rim_support`] stands it on. Held by the fall-prevention walls at a branch's edge,
+    /// the centre is often past the branch while the rim still rests on it. `None` off the
+    /// ground or over a floor without a material.
+    pub fn standing_material(&self, ground: &dyn Ground) -> Option<u32> {
+        if !self.grounded {
+            return None;
+        }
         let [x, y, z] = self.position;
         ground
             .floor_with_material(x, z, y + 0.1)
@@ -434,7 +439,7 @@ impl Body {
                 self.rim_floors(ground)
                     .reduce(|best, p| if p.0 > best.0 { p } else { best })
             })
-            .is_some_and(|(_, m)| crate::hit_filter::rideable(m))
+            .and_then(|(_, m)| m)
     }
 
     /// Stops a rise from the feet height `from` to the current one where the head meets a
@@ -551,16 +556,9 @@ impl Body {
             travel[0] += self.velocity[0] * dt;
             travel[1] += self.velocity[2] * dt;
         }
-        // Only an assisted slide reads the riding state, so only its ticks look for it.
-        let assisted = input.fall_assist != 0 && !input.ignore_walls;
-        self.riding = if assisted && self.grounded && self.on_rideable(ground) {
-            crate::hit_filter::SP_EFFECT_4100_ENDURANCE
-        } else {
-            (self.riding - dt).max(0.0)
-        };
         // The fall-prevention walls this tick's moves keep to; `None` when they ignore walls.
         let walls = (!input.ignore_walls)
-            .then(|| crate::hit_filter::riding_walls(input.fall_assist, self.riding > 0.0));
+            .then(|| crate::hit_filter::riding_walls(input.fall_assist, input.ride_walls));
         // Where the feet were before this tick's move, for the landing (#168).
         let start = self.position;
         let [mx, mz] = match walls {

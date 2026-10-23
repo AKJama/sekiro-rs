@@ -1060,6 +1060,15 @@ impl Character {
                 self.motion_blend = None;
             }
         }
+        // The floor under the feet gives its SpEffect (HitMaterialSpecialSettingParam) for as long
+        // as its endurance after the last tick on it, into the timed store `has_sp_effect` reads.
+        if let Some((id, seconds)) = self
+            .body
+            .standing_material(self.ground.as_ref())
+            .and_then(|m| self.tae.floor_effect(m, dt))
+        {
+            self.tae_runtime.keep_timed(id, seconds);
+        }
         let tae = &self.tae_runtime.frame;
         // TAE 760: lengthen or shorten the attack's travel so it arrives at its target.
         let target = self.attack_target();
@@ -1113,6 +1122,9 @@ impl Character {
             ignore_walls: self.throw_ignore_walls,
             water_mode: self.behavior.env.water_mode.get(),
             fall_assist: self.behavior.env.fall_assist.get(),
+            ride_walls: self
+                .tae_runtime
+                .has_timed(crate::hit_filter::RIDING_SP_EFFECT),
             stick: if self.kind == ControlKind::Player {
                 self.input
                     .stick_world_yaw()

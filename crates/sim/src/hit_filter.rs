@@ -98,13 +98,11 @@ pub const RIDE_ASSIST_ACTION: u8 = FALL_ASSIST_ACTION << 2;
 /// floors 204 and 504 (wood, rows 2 and 5).
 pub const RIDEABLE_SPECIAL: u32 = 8;
 
-/// How long SpEffect 4100 ("Hit material judgment _ Riding object", the riding state
-/// [`RIDEABLE_SPECIAL`] floors give) lasts after the last tick on such a floor: its
-/// SpEffectParam effectEndurance, 0.06 s. A thin map floor poking through a branch, or a tick
-/// over a gap in the trunk's surface, so does not drop the [`RIDE_ASSIST_MOVE`] walls.
-pub const SP_EFFECT_4100_ENDURANCE: f32 = 0.06;
-
-/// The riding state's SpEffect, which [`RIDE_WALL_EVENT`] waits on.
+/// The riding state's SpEffect ("Hit material judgment _ Riding object"), which
+/// [`RIDEABLE_SPECIAL`] floors give ([`crate::tae::TaeDb::floor_effect`]) and
+/// [`RIDE_WALL_EVENT`] waits on. It lasts its SpEffectParam effectEndurance, 0.06 s, after the
+/// last tick on such a floor, so a thin map floor poking through a branch, or a tick over a gap
+/// in the trunk's surface, does not drop the [`RIDE_ASSIST_MOVE`] walls.
 pub const RIDING_SP_EFFECT: i32 = 4100;
 
 /// Common event that switches its entity group argument's objects on while Wolf has
@@ -488,6 +486,90 @@ mod tests {
             load_ride_wall_groups(&cache, "m11_01_00_00").unwrap(),
             Vec::<u32>::new()
         );
+    }
+
+    /// The floor SpEffects come from HitMaterialSpecialSettingParam and their endurance from
+    /// SpEffectParam: a tree trunk's 808 gives 4100 for 0.06 s (skipped without the params).
+    #[test]
+    fn floor_materials_give_their_param_sp_effects() {
+        let cache = crate::cache::root();
+        let db = crate::tae::TaeDb::load_from_cache(&cache, "c0000");
+        if db.floor_effects.is_empty() {
+            return;
+        }
+        let rows: std::collections::BTreeMap<u32, i32> =
+            db.floor_effects.iter().map(|(&k, &v)| (k, v)).collect();
+        assert_eq!(
+            rows,
+            [
+                (6, 108_010),
+                (7, 108_020),
+                (RIDEABLE_SPECIAL, RIDING_SP_EFFECT)
+            ]
+            .into()
+        );
+        let dt = 1.0 / 30.0;
+        assert_eq!(db.floor_effect(808, dt), Some((RIDING_SP_EFFECT, 0.06)));
+        // 108010 has no endurance: it lasts while the floor gives it.
+        assert_eq!(db.floor_effect(604, dt), Some((108_010, 1.5 * dt)));
+        assert_eq!(db.floor_effect(204, dt), None);
+    }
+
+    /// Common event 20005560, as m11_00 starts it, switches the Outskirts trees' walls (group
+    /// 1106200) on once Wolf has SpEffect 4100 in his timed store, and off again when it runs
+    /// out 0.06 s after he leaves the rideable floor (skipped without `cache/raw`).
+    #[test]
+    fn ride_wall_event_follows_the_riding_sp_effect() {
+        struct Wolf(crate::tae::TaeRuntime);
+        impl crate::events::EventHost for Wolf {
+            fn has_sp_effect(&self, entity: i32, id: i32) -> Option<bool> {
+                (entity == 10_000).then(|| self.0.has_timed(id))
+            }
+            fn has_event_message(&self, _: i32, _: i32) -> Option<bool> {
+                None
+            }
+            fn is_dead(&self, _: i32) -> Option<bool> {
+                Some(false)
+            }
+            fn hp(&self, _: i32) -> Option<i32> {
+                Some(1)
+            }
+        }
+        let cache = crate::cache::root();
+        let db = crate::tae::TaeDb::load_from_cache(&cache, "c0000");
+        let read = |name: &str| {
+            std::fs::read(cache.join(format!("raw/event/{name}.emevd")))
+                .ok()
+                .map(|b| sekiro_formats::emevd::Emevd::parse(&b).unwrap())
+        };
+        let (Some(map), Some(common)) = (read("m11_00_00_00"), read("common_func")) else {
+            return;
+        };
+        if db.floor_effects.is_empty() {
+            return;
+        }
+        let mut scripts =
+            crate::events::EventScripts::common(&map, &common, RIDE_WALL_EVENT).unwrap();
+        let mut wolf = Wolf(crate::tae::TaeRuntime::default());
+        let dt = 1.0 / 30.0;
+        let walls = |s: &crate::events::EventScripts| s.cast_scene.enabled.get(&1_106_200).copied();
+        scripts.step(dt, &wolf);
+        assert_eq!(walls(&scripts), Some(false), "off until Wolf rides");
+        // A tick on a trunk (808).
+        let (id, seconds) = db.floor_effect(808, dt).unwrap();
+        wolf.0.keep_timed(id, seconds);
+        scripts.step(dt, &wolf);
+        assert_eq!(walls(&scripts), Some(true), "on while he has 4100");
+        // Off the trunk: 4100 lasts its 0.06 s, then the walls go.
+        let mut off = 0;
+        while wolf.0.has_timed(RIDING_SP_EFFECT) {
+            wolf.0.update(&db, &[], dt);
+            scripts.step(dt, &wolf);
+            off += 1;
+        }
+        assert_eq!(off, 2, "0.06 s is two 30 Hz ticks");
+        scripts.step(dt, &wolf);
+        assert_eq!(walls(&scripts), Some(false), "off once 4100 runs out");
     }
 
     #[test]

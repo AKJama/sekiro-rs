@@ -360,6 +360,10 @@ pub struct TaeDb {
     anims: HashMap<i64, TaeAnim>,
     pub sp_effects: HashMap<i32, SpEffectInfo>,
     pub velocity_changes: HashMap<i32, VelocityChange>,
+    /// HitMaterialSpecialSettingParam: the SpEffect a floor of each special setting gives the
+    /// character standing on it (`SpEffectId`; rows without one are left out). Row 8, "objects
+    /// that can be ridden", gives 4100, 6 (steep slope) 108010 and 7 (deep waterside) 108020.
+    pub floor_effects: HashMap<u32, i32>,
 }
 
 impl TaeDb {
@@ -414,6 +418,21 @@ impl TaeDb {
         if let Some(t) = load_table(
             param_dir,
             defs_dir,
+            "HitMaterialSpecialSettingParam",
+            "HitMaterialSpecialSettingParam",
+        ) {
+            for row in t.rows() {
+                if let (Ok(special), Some(id)) = (
+                    u32::try_from(row.id()),
+                    row.i32("SpEffectId").ok().filter(|&id| id > 0),
+                ) {
+                    db.floor_effects.insert(special, id);
+                }
+            }
+        }
+        if let Some(t) = load_table(
+            param_dir,
+            defs_dir,
             "ChrPhysicsVelocityChangeParam",
             "ChrPhysicsVelocityChangeParam",
         ) {
@@ -432,6 +451,18 @@ impl TaeDb {
             }
         }
         db
+    }
+
+    /// The SpEffect a floor of collision material `material` gives the character standing on it,
+    /// and how long one tick on it keeps it: the material's special setting is `material / 100`
+    /// ([`crate::body::hit_mtrl_row`]), looked up in [`Self::floor_effects`], and the effect
+    /// lasts its `effectEndurance` (4100's 0.06 s). An effect with no endurance (108010, 108020)
+    /// lasts while the floor gives it: one and a half ticks, so it is in the next tick's frame and
+    /// gone the tick after the character leaves the floor.
+    pub fn floor_effect(&self, material: u32, dt: f32) -> Option<(i32, f32)> {
+        let id = *self.floor_effects.get(&(material / 100))?;
+        let endurance = self.sp_effects.get(&id).map_or(0.0, |e| e.duration);
+        Some((id, endurance.max(1.5 * dt)))
     }
 
     /// Loads from the standard cache layout.
@@ -770,6 +801,23 @@ impl TaeRuntime {
         self.applied.push(id);
     }
 
+    /// Keeps a SpEffect that a lasting condition (the floor under the character) gives every
+    /// tick: as [`Self::add_timed`], but only its first tick counts as an application for
+    /// [`Self::take_applied`], so a character standing on the floor does not pile up one a tick.
+    pub fn keep_timed(&mut self, id: i32, seconds: f32) {
+        if let Some(r) = self.timed.get_mut(&id) {
+            *r = r.max(seconds);
+        } else {
+            self.add_timed(id, seconds);
+        }
+    }
+
+    /// True while timed SpEffect `id` is running ([`Self::add_timed`], [`Self::keep_timed`]),
+    /// already in the tick it is applied, before the next [`Self::update`] adds it to the frame.
+    pub fn has_timed(&self, id: i32) -> bool {
+        self.timed.contains_key(&id)
+    }
+
     /// The effects applied (and still running) since the last call.
     pub fn take_applied(&mut self) -> Vec<i32> {
         std::mem::take(&mut self.applied)
@@ -1001,6 +1049,47 @@ impl TaeRuntime {
 #[cfg(test)]
 mod fxr_event_tests {
     use super::*;
+
+    /// A floor's SpEffect lasts its endurance after the last tick on the floor, each tick on it
+    /// refreshes it, and only the first tick counts as an application.
+    #[test]
+    fn floor_effects_run_out_after_their_endurance() {
+        let mut db = TaeDb::default();
+        db.floor_effects.insert(8, 4100);
+        db.sp_effects.insert(
+            4100,
+            SpEffectInfo {
+                behavior_ref: 0,
+                duration: 0.06,
+                state_info: 0,
+                category: 20,
+                priority: 0,
+                vfx: -1,
+                sound_rate: 1.0,
+                hearing_cut: 0.0,
+            },
+        );
+        let dt = 1.0 / 60.0;
+        assert_eq!(db.floor_effect(808, dt), Some((4100, 0.06)));
+        assert_eq!(db.floor_effect(204, dt), None);
+        let mut runtime = TaeRuntime::default();
+        for _ in 0..5 {
+            runtime.update(&db, &[], dt);
+            let (id, seconds) = db.floor_effect(808, dt).unwrap();
+            runtime.keep_timed(id, seconds);
+            assert!(runtime.has_timed(4100));
+        }
+        assert_eq!(runtime.take_applied(), [4100], "applied once, then kept");
+        assert!(runtime.frame.sp_effects.contains(&4100));
+        // Off the floor: 0.06 s is three 60 Hz ticks.
+        let mut ticks = 0;
+        while runtime.has_timed(4100) {
+            runtime.update(&db, &[], dt);
+            ticks += 1;
+        }
+        assert_eq!(ticks, 4, "on for 3 ticks after the last, gone on the 4th");
+        assert!(!runtime.frame.sp_effects.contains(&4100));
+    }
 
     #[test]
     fn turn_speed_lock_check_survives_decoding() {
