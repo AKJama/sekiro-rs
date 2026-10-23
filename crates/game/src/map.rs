@@ -1020,8 +1020,10 @@ fn viewer_eye(pos: Vec3, eye: Vec3, collision: &sekiro_formats::hknp::CollisionM
 
 /// Setup another crate adds to the `--map` app (a game library on top of the map): the first
 /// runs before `DefaultPlugins` (asset sources), the second after the map's own plugins.
-pub static APP_HOOKS: std::sync::OnceLock<(fn(&mut App), fn(&mut App))> =
-    std::sync::OnceLock::new();
+pub static APP_HOOKS: std::sync::OnceLock<(AppHook, AppHook)> = std::sync::OnceLock::new();
+
+/// One setup step another crate adds to the `--map` app ([`APP_HOOKS`]).
+pub type AppHook = fn(&mut App);
 
 pub fn run(options: Options) -> Result<()> {
     let dir = map_dir(&options.cache, &options.id)?;
