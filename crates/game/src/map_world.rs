@@ -147,6 +147,86 @@ pub(crate) enum RequestState {
     Retiring,
 }
 
+/// Retail WorldBackRead retirement interval (constructor `0x14081d460`, state machine
+/// `0x14081eae0`, `docs/MAP-COMPLETENESS.md` section 3): a block whose demand is gone stays
+/// retiring this long, and demand returning within it brings it straight back.
+pub(crate) const RETIRE_SECONDS: f32 = 3.0;
+
+/// What a block's request-state step asks of its parts and assets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Residency {
+    Keep,
+    /// Retired for [`RETIRE_SECONDS`]: despawn its parts and drop its strong handles.
+    Free,
+    /// Requested again after it was freed: queue its parts again, nearest first.
+    Respawn,
+}
+
+/// The retirement timer and whether the block's parts are spawned.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Lifecycle {
+    /// Seconds in [`RequestState::Retiring`].
+    retiring: f32,
+    /// Reached Ready since its parts were spawned. Only such a block is freed when it retires;
+    /// blocks pre-warmed at startup and never demanded stay warm (#271 follow-up).
+    was_ready: bool,
+    /// Its parts were despawned and its handles dropped.
+    freed: bool,
+}
+
+impl Lifecycle {
+    /// One frame of the request state machine: `demanded` from the masks, `assets_ready` once
+    /// every GLB of the block has loaded, and `can_free` while freeing is allowed (after the
+    /// first full load and only in play: never in the viewer, captures or with draw groups off).
+    pub(crate) fn step(
+        &mut self,
+        state: RequestState,
+        demanded: bool,
+        assets_ready: bool,
+        can_free: bool,
+        delta: f32,
+    ) -> (RequestState, Residency) {
+        if demanded {
+            self.retiring = 0.0;
+            if self.freed {
+                self.freed = false;
+                return (RequestState::Requested, Residency::Respawn);
+            }
+            if assets_ready {
+                self.was_ready = true;
+                return (RequestState::Ready, Residency::Keep);
+            }
+            return (RequestState::Requested, Residency::Keep);
+        }
+        match state {
+            RequestState::Ready | RequestState::Requested => {
+                self.retiring = 0.0;
+                (RequestState::Retiring, Residency::Keep)
+            }
+            RequestState::Retiring => {
+                self.retiring += delta;
+                if self.retiring < RETIRE_SECONDS {
+                    (RequestState::Retiring, Residency::Keep)
+                } else if !self.was_ready {
+                    (RequestState::Dormant, Residency::Keep)
+                } else if can_free {
+                    self.was_ready = false;
+                    self.freed = true;
+                    (RequestState::Dormant, Residency::Free)
+                } else {
+                    (RequestState::Retiring, Residency::Keep)
+                }
+            }
+            RequestState::Dormant => (RequestState::Dormant, Residency::Keep),
+        }
+    }
+}
+
+/// A freed block's parts were all despawned and its handles dropped, for caches that hold
+/// per-block assets (grass merges, single-placement batch groups).
+#[derive(Message, Clone, Debug)]
+pub(crate) struct BlockFreed(pub(crate) String);
+
 pub(crate) struct Block {
     pub(crate) id: String,
     pub(crate) prefix: String,
@@ -161,7 +241,7 @@ pub(crate) struct Block {
     glb_total: usize,
     warm_mask: Mask,
     collisions: Vec<Surface>,
-    retire_frames: u8,
+    lifecycle: Lifecycle,
     detail: BTreeMap<String, [bool; 3]>,
 }
 
@@ -206,6 +286,10 @@ pub(crate) struct MapWorld {
     /// Fixed offscreen captures need only geometry intersecting their camera volumes
     /// and shadow casters within the sun's caster range. Interactive worlds never set this.
     pub(crate) capture_views: Option<CaptureViews>,
+    /// Residency changes [`update`] found this frame, for [`residency`].
+    changes: Vec<(String, Residency)>,
+    /// How the parts were spawned, to spawn a freed block's parts again.
+    scene: Option<super::MapScene>,
 }
 
 pub(crate) struct CaptureViews {
@@ -679,7 +763,7 @@ impl MapWorld {
                     assets_ready: false,
                     glb_total: 0,
                     warm_mask: [0; 8],
-                    retire_frames: 0,
+                    lifecycle: Lifecycle::default(),
                     detail,
                 },
             );
@@ -746,6 +830,8 @@ impl MapWorld {
             requests: BTreeMap::new(),
             lod,
             capture_views: None,
+            changes: Vec::new(),
+            scene: None,
         })
     }
 
@@ -923,9 +1009,13 @@ impl MapWorld {
 /// Map demand from the [`MapFocus`]: the collision part a [`PlayerFocus`] stands on (kept
 /// while he is off map collision), else the parts under the free camera. Other cameras never
 /// take part: in play the orbit camera swinging out over a ravine must not retire the map.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn update(
     mut world: ResMut<MapWorld>,
     assets: Res<AssetServer>,
+    time: Res<Time>,
+    pending: Res<Pending>,
+    groups: Res<super::Groups>,
     focus: Query<(&Transform, Option<&PlayerFocus>), With<MapFocus>>,
     mut last: Local<Option<Vec<(Vec3, bool)>>>,
     story: Res<super::story::MapStory>,
@@ -946,6 +1036,14 @@ pub(crate) fn update(
         }
         *last = Some(positions);
     }
+    // Only play frees blocks: the viewer, sweeps and render gates keep everything they loaded.
+    let playing = focus.iter().any(|(_, player)| player.is_some());
+    let can_free = playing
+        && pending.loaded()
+        && world.capture_views.is_none()
+        && groups.mode != GroupMode::Off;
+    let delta = time.delta_secs();
+    let world = &mut *world;
     for block in world.blocks.values_mut() {
         // Streaming requests a block's GLBs over time; it is ready once every one has loaded.
         block.assets_ready = block.assets_ready
@@ -955,22 +1053,13 @@ pub(crate) fn update(
                     .iter()
                     .all(|h| assets.is_loaded_with_dependencies(h.id())));
         let demanded = block.normal != [0; 8] || block.additional != [0; 8];
-        let next = if demanded {
-            block.retire_frames = 0;
-            if block.assets_ready {
-                RequestState::Ready
-            } else {
-                RequestState::Requested
-            }
-        } else if matches!(block.state, RequestState::Ready | RequestState::Requested) {
-            block.retire_frames = 2;
-            RequestState::Retiring
-        } else if block.retire_frames > 0 {
-            block.retire_frames -= 1;
-            RequestState::Retiring
-        } else {
-            RequestState::Dormant
-        };
+        let (next, change) =
+            block
+                .lifecycle
+                .step(block.state, demanded, block.assets_ready, can_free, delta);
+        if change != Residency::Keep {
+            world.changes.push((block.id.clone(), change));
+        }
         if next != block.state {
             info!(
                 "block {} {:?} -> {:?}, normal={:08x?}, additional={:08x?}",
@@ -1074,6 +1163,21 @@ pub(crate) fn spawn(
     scene: &super::MapScene,
     pending: &mut Pending,
 ) {
+    world.scene = Some(scene.clone());
+    spawn_blocks(commands, assets, world, scene, pending, None, scene.focus);
+}
+
+/// [`spawn`] for every block, or `only` one block (a freed block requested again), queued
+/// nearest-first from `focus`.
+fn spawn_blocks(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    world: &mut MapWorld,
+    scene: &super::MapScene,
+    pending: &mut Pending,
+    only: Option<&str>,
+    focus: Option<Vec3>,
+) {
     if scene.no_pieces {
         return;
     }
@@ -1084,6 +1188,9 @@ pub(crate) fn spawn(
     // Nearest first across every block, so the stream loads outwards from the start.
     let mut order = Vec::new();
     for (id, block) in &world.blocks {
+        if only.is_some_and(|only| only != id) {
+            continue;
+        }
         for (index, row) in block.json["parts"]
             .as_array()
             .into_iter()
@@ -1093,7 +1200,7 @@ pub(crate) fn spawn(
             let Some(transform) = super::row_transform(row) else {
                 continue;
             };
-            let distance = match (scene.focus, row["model"].as_str()) {
+            let distance = match (focus, row["model"].as_str()) {
                 (Some(focus), Some(model)) => {
                     super::placed_distance(&block.json["models"][model], focus, &transform)
                 }
@@ -1185,7 +1292,9 @@ pub(crate) fn spawn(
         {
             // A sweep's legacy asset root is the primary map folder. Its bounded,
             // inventory-validated sibling paths are explicitly allowed to load.
-            pending.handles.push(handle.clone().untyped());
+            pending
+                .handles
+                .push((Some(block.id.clone()), handle.clone().untyped()));
             block.handles.push(handle.clone());
         }
         let source = match visibility::SourceMasks::from_row(row) {
@@ -1242,7 +1351,7 @@ pub(crate) fn spawn(
             };
             // The level the first update selects; capture views and the file-order fallback
             // keep the first available level.
-            let initial = match scene.focus {
+            let initial = match focus {
                 Some(focus) if capture_handle.is_none() => {
                     let distance = super::lod::bounds_distance(focus, &transform, min, max);
                     let weights = super::lod::LodState::default()
@@ -1308,6 +1417,9 @@ pub(crate) fn spawn(
         spawned += 1;
     }
     for block in world.blocks.values_mut() {
+        if only.is_some_and(|only| only != block.id) {
+            continue;
+        }
         block.glb_total = seen.get(&block.id).map_or(0, BTreeSet::len);
         info!(
             "{} warm models {}, skipped render reasons {:?}",
@@ -1320,6 +1432,112 @@ pub(crate) fn spawn(
         "spawned {spawned} connected map piece and ordinary Object instances, {} GLBs queued nearest-first",
         pending.streaming()
     );
+}
+
+/// Main-thread time per frame for despawning freed blocks' part roots (each with its level
+/// scenes, grass and merged batches), so leaving a block of several thousand parts spreads its
+/// teardown over many frames.
+const TEARDOWN_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
+
+/// Freed blocks whose part roots are still being despawned, oldest first.
+#[derive(Resource, Default)]
+pub(crate) struct Teardown {
+    queue: std::collections::VecDeque<(String, Vec<Entity>, std::time::Instant)>,
+}
+
+/// Apply [`update`]'s residency changes: a block retired for [`RETIRE_SECONDS`] drops its strong
+/// GLB handles at once and despawns its part roots over the next frames; a freed block requested
+/// again queues its parts nearest-first from the player through the same stream as at startup.
+/// Collision is one world and stays.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn residency(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    mut world: ResMut<MapWorld>,
+    mut pending: ResMut<Pending>,
+    parts: Query<(Entity, &BlockPart)>,
+    focus: Query<(&Transform, Has<PlayerFocus>), With<MapFocus>>,
+    mut teardown: ResMut<Teardown>,
+) {
+    let _timer = crate::perf_log::SystemTimer::start("block residency");
+    if !world.changes.is_empty() {
+        let changes = std::mem::take(&mut world.changes);
+        for (id, change) in changes {
+            match change {
+                Residency::Keep => {}
+                Residency::Free => {
+                    let roots: Vec<_> = parts
+                        .iter()
+                        .filter(|(_, part)| part.block == id)
+                        .map(|(entity, _)| entity)
+                        .collect();
+                    let released = pending.release_block(&id);
+                    let block = world.blocks.get_mut(&id).expect("changed block");
+                    let glbs = block.handles.len();
+                    block.handles.clear();
+                    block.assets_ready = false;
+                    info!(
+                        "block {id} freed: dropped {glbs} GLB handles ({released} stream handles), despawning {} part roots",
+                        roots.len()
+                    );
+                    teardown
+                        .queue
+                        .push_back((id, roots, std::time::Instant::now()));
+                }
+                Residency::Respawn => {
+                    let Some(scene) = world.scene.clone() else {
+                        continue;
+                    };
+                    let at = focus
+                        .iter()
+                        .max_by_key(|(_, player)| *player)
+                        .map(|(t, _)| t.translation);
+                    let before = pending.streaming();
+                    spawn_blocks(
+                        &mut commands,
+                        &assets,
+                        &mut world,
+                        &scene,
+                        &mut pending,
+                        Some(&id),
+                        at,
+                    );
+                    info!(
+                        "block {id} requested again: {} GLBs queued nearest-first",
+                        pending.streaming() - before
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Despawn queued part roots of freed blocks for [`TEARDOWN_BUDGET`] each frame.
+pub(crate) fn teardown(world: &mut World) {
+    if world.resource::<Teardown>().queue.is_empty() {
+        return;
+    }
+    let _timer = crate::perf_log::SystemTimer::start("block teardown");
+    let started = std::time::Instant::now();
+    let mut queue = std::mem::take(&mut world.resource_mut::<Teardown>().queue);
+    while started.elapsed() < TEARDOWN_BUDGET
+        && let Some((_, roots, _)) = queue.front_mut()
+    {
+        if let Some(entity) = roots.pop()
+            && let Ok(entity) = world.get_entity_mut(entity)
+        {
+            entity.despawn();
+        }
+        if roots.is_empty() {
+            let (id, _, since) = queue.pop_front().expect("front");
+            info!(
+                "block {id} teardown done in {:.2} s",
+                since.elapsed().as_secs_f32()
+            );
+            world.write_message(BlockFreed(id));
+        }
+    }
+    world.resource_mut::<Teardown>().queue = queue;
 }
 
 /// `--lod-debug` logs detail-level changes only for parts this close to Wolf (bounds distance),
@@ -1659,6 +1877,67 @@ struct HierarchyReported;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retired_block_frees_after_three_seconds_unless_demand_returns() {
+        use super::{Lifecycle, RequestState as S, Residency as R};
+        // (demanded, assets ready, can free, seconds) per frame, and the state and residency
+        // change expected after it.
+        type Frame = (bool, bool, bool, f32, S, R);
+        let cases: [(&str, &[Frame]); 4] = [
+            (
+                "retires for 3 s, then frees; demand again respawns",
+                &[
+                    (true, true, true, 0.1, S::Ready, R::Keep),
+                    (false, true, true, 0.1, S::Retiring, R::Keep),
+                    (false, true, true, 2.9, S::Retiring, R::Keep),
+                    (false, true, true, 0.2, S::Dormant, R::Free),
+                    (false, false, true, 5.0, S::Dormant, R::Keep),
+                    (true, false, true, 0.1, S::Requested, R::Respawn),
+                    (true, false, true, 0.1, S::Requested, R::Keep),
+                    (true, true, true, 0.1, S::Ready, R::Keep),
+                ],
+            ),
+            (
+                "demand back within 3 s keeps it",
+                &[
+                    (true, true, true, 0.1, S::Ready, R::Keep),
+                    (false, true, true, 0.1, S::Retiring, R::Keep),
+                    (false, true, true, 2.5, S::Retiring, R::Keep),
+                    (true, true, true, 0.1, S::Ready, R::Keep),
+                    (false, true, true, 0.1, S::Retiring, R::Keep),
+                    (false, true, true, 2.5, S::Retiring, R::Keep),
+                ],
+            ),
+            (
+                "never ready (pre-warmed or still streaming) stays warm",
+                &[
+                    (true, false, true, 0.1, S::Requested, R::Keep),
+                    (false, false, true, 0.1, S::Retiring, R::Keep),
+                    (false, true, true, 4.0, S::Dormant, R::Keep),
+                ],
+            ),
+            (
+                "waits to free until freeing is allowed",
+                &[
+                    (true, true, false, 0.1, S::Ready, R::Keep),
+                    (false, true, false, 0.1, S::Retiring, R::Keep),
+                    (false, true, false, 4.0, S::Retiring, R::Keep),
+                    (false, true, true, 0.1, S::Dormant, R::Free),
+                ],
+            ),
+        ];
+        for (name, frames) in cases {
+            let mut life = Lifecycle::default();
+            let mut state = S::Dormant;
+            for (i, &(demanded, ready, can_free, delta, want, change)) in frames.iter().enumerate()
+            {
+                let (next, got) = life.step(state, demanded, ready, can_free, delta);
+                assert_eq!((next, got), (want, change), "{name}: frame {i}");
+                state = next;
+            }
+        }
+    }
+
     #[test]
     fn detail_spawn_budget_caps_only_prefetch_and_keeps_all_demand() {
         let mut requests: Vec<_> = [
@@ -2124,6 +2403,15 @@ mod tests {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, AssetPlugin::default()))
             .init_resource::<super::super::story::MapStory>()
+            .init_resource::<Pending>()
+            .insert_resource(crate::map::Groups {
+                mode: GroupMode::Off,
+                parts: Vec::new(),
+                current: None,
+                active: None,
+                checked_at: None,
+                dirty: false,
+            })
             .insert_resource(world)
             .add_systems(Update, update);
         let wolf = app

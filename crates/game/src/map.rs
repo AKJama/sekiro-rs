@@ -285,6 +285,9 @@ struct StreamRequest {
     unapproved: bool,
     /// Entities that get this GLB's scene (`level`) once it is requested.
     targets: Vec<(Entity, usize)>,
+    /// Its block was freed ([`Pending::release_block`]): a tombstone the stream skips, kept so
+    /// stream indices held by [`world::DetailPart`] stay valid.
+    released: bool,
 }
 
 /// Every GLB handle the map needs, to know when loading is done.
@@ -292,7 +295,8 @@ struct StreamRequest {
 /// ([`stream_assets`]), so the area around the player loads first.
 #[derive(Resource)]
 pub struct Pending {
-    handles: Vec<UntypedHandle>,
+    /// Every requested GLB, with the connected-world block that owns it.
+    handles: Vec<(Option<String>, UntypedHandle)>,
     /// Map piece scene instances spawned, and how many have finished spawning.
     instances: usize,
     ready: usize,
@@ -353,6 +357,7 @@ impl Pending {
                     block: block.map(str::to_string),
                     unapproved,
                     targets: Vec::new(),
+                    released: false,
                 });
                 self.stream_index
                     .insert(glb.to_string(), self.stream.len() - 1);
@@ -360,8 +365,41 @@ impl Pending {
             }
         };
         self.stream[index].targets.push(target);
-        self.instances += 1;
+        // A block queued again after the load (it was freed and is requested again) does not
+        // count toward the loading screen, which is already done.
+        if self.loaded_at.is_none() {
+            self.instances += 1;
+        }
         index
+    }
+
+    /// Drop every strong GLB handle owned by `block` and turn its stream requests into
+    /// tombstones, so queueing its parts again requests the GLBs afresh. Returns how many
+    /// handles were dropped.
+    pub(crate) fn release_block(&mut self, block: &str) -> usize {
+        for (index, request) in self.stream.iter_mut().enumerate() {
+            if request.block.as_deref() != Some(block) || request.released {
+                continue;
+            }
+            request.released = true;
+            request.targets.clear();
+            if self.stream_index.get(&request.glb) == Some(&index) {
+                self.stream_index.remove(&request.glb);
+            }
+        }
+        let before = self.handles.len();
+        self.handles
+            .retain(|(owner, _)| owner.as_deref() != Some(block));
+        before - self.handles.len()
+    }
+
+    /// Strong GLB handles `block` holds through the stream.
+    #[cfg(test)]
+    pub(crate) fn block_handles(&self, block: &str) -> usize {
+        self.handles
+            .iter()
+            .filter(|(owner, _)| owner.as_deref() == Some(block))
+            .count()
     }
 
     /// A scene instance attached outside the stream (a capture scene, or a level of detail
@@ -448,6 +486,9 @@ fn stream_assets(
         let index = pending.next;
         pending.next += 1;
         let request = &pending.stream[index];
+        if request.released {
+            continue;
+        }
         let handle: Handle<Gltf> = load_map_asset(&assets, request.glb.clone(), request.unapproved);
         for &(entity, level) in &request.targets {
             commands.entity(entity).insert(WorldAssetRoot(scene_handle(
@@ -457,12 +498,13 @@ fn stream_assets(
                 request.unapproved,
             )));
         }
-        if let (Some(block), Some(world)) = (request.block.clone(), world.as_mut())
-            && let Some(block) = world.blocks.get_mut(&block)
+        let owner = request.block.clone();
+        if let (Some(block), Some(world)) = (owner.as_ref(), world.as_mut())
+            && let Some(block) = world.blocks.get_mut(block)
         {
             block.handles.push(handle.clone());
         }
-        pending.handles.push(handle.clone().untyped());
+        pending.handles.push((owner, handle.clone().untyped()));
         pending.in_flight.push(handle.untyped());
     }
 }
@@ -741,7 +783,12 @@ pub fn add_map(
             .insert_resource(world)
             .add_systems(
                 Update,
-                (world::update, world::update_detail)
+                (
+                    world::update,
+                    world::residency,
+                    world::teardown,
+                    world::update_detail,
+                )
                     .chain()
                     .after(track_loading)
                     .after(apply_groups),
@@ -917,6 +964,8 @@ pub fn add_map(
     map_material::install(app, &scene.prefix, dir, &args);
     crate::vram::install(app);
     crate::map_fog_surface::install(app, &scene.prefix);
+    app.add_message::<world::BlockFreed>()
+        .init_resource::<world::Teardown>();
     crate::map_grass::install(app, dir, &scene.prefix)?;
     stage("materials and grass");
     app.insert_resource(ShadowSettings::from_args(&gparam, hour, &args)?);
@@ -1888,7 +1937,7 @@ fn track_loading(
     let done = pending
         .handles
         .iter()
-        .all(|h| asset_finished(&assets, h.id()));
+        .all(|(_, h)| asset_finished(&assets, h.id()));
     if done {
         info!(
             "all map assets loaded ({} instances) {:.1} s after the map was added",
@@ -1995,6 +2044,34 @@ pub fn parse_camera(arg: Option<&str>) -> Result<Option<[f32; 5]>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn freed_block_drops_its_handles_and_queues_again() {
+        let mut pending = Pending::default();
+        let a = Entity::from_raw_u32(1).unwrap();
+        let b = Entity::from_raw_u32(2).unwrap();
+        let first = pending.queue("m11_00/a.glb", Some("m11_00"), true, (a, 0));
+        pending.queue("m11_01/b.glb", Some("m11_01"), true, (b, 0));
+        pending.next = 2;
+        for block in ["m11_00", "m11_01"] {
+            let handle: Handle<Gltf> = Handle::default();
+            pending.handles.push((Some(block.into()), handle.untyped()));
+        }
+        pending.loaded_at = Some(Instant::now());
+        assert_eq!(pending.release_block("m11_00"), 1);
+        assert_eq!(pending.block_handles("m11_00"), 0);
+        assert_eq!(pending.block_handles("m11_01"), 1);
+        assert!(pending.stream[first].released && pending.stream[first].targets.is_empty());
+        // Queued again it is a new request the stream reaches, and the done load stays done.
+        let again = pending.queue("m11_00/a.glb", Some("m11_00"), true, (a, 0));
+        assert_eq!(again, 2);
+        assert_eq!(pending.streaming(), 1);
+        assert_eq!(pending.instances, 2);
+        assert_eq!(
+            pending.queue("m11_00/a.glb", Some("m11_00"), true, (b, 0)),
+            again
+        );
+    }
 
     #[test]
     fn cached_collision_selection_tracks_names_and_layout_changes() {
