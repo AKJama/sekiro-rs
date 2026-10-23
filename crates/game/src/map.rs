@@ -907,6 +907,13 @@ pub fn add_map(
         }
         app.add_systems(Update, visual_stats);
     }
+    // `--perf` CSVs carry each pass's GPU time (`gpu render/<pass>/elapsed_gpu`), so the
+    // timestamp queries must run with it too, not only under `--profile-systems`.
+    if crate::perf_log::enabled()
+        && !app.is_plugin_added::<bevy::render::diagnostic::RenderDiagnosticsPlugin>()
+    {
+        app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin);
+    }
     if args.iter().any(|a| a == "--profile-systems") {
         app.add_plugins((
             bevy::diagnostic::EntityCountDiagnosticsPlugin::default(),

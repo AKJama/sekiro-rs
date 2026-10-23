@@ -838,6 +838,7 @@ fn tick(world: &mut World) {
         world.entity_mut(e).remove::<(
             crate::lighting::tonemap::GamePost,
             crate::lighting::fog::GameFog,
+            crate::lighting::lens_dof::GameDof,
             crate::lighting::grading::GradingLut,
             bevy::light::Skybox,
         )>();

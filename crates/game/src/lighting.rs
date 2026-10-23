@@ -18,6 +18,8 @@ use anyhow::Context as ContextExt;
 use bevy::light::{EnvironmentMapLight, GlobalAmbientLight, Skybox};
 #[path = "fog.rs"]
 pub(crate) mod fog;
+#[path = "lens_dof.rs"]
+pub(crate) mod lens_dof;
 use bevy::prelude::*;
 use sekiro_formats::gparam::Gparam;
 
@@ -46,6 +48,7 @@ impl Plugin for PostEffectsPlugin {
         app.add_plugins((
             grading::GradingPlugin,
             fog::FogPlugin,
+            lens_dof::LensDofPlugin,
             tonemap::NativePostPlugin,
         ));
     }
