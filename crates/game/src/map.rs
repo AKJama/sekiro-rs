@@ -275,6 +275,8 @@ struct Hud;
 /// Eight keeps the loaders busy (the same total load time as 32 in the Outskirts) while
 /// fewer assets finish in one frame: the longest loading frame fell from 3.2-5.2 s to 2.2-2.4 s.
 const STREAM_IN_FLIGHT: usize = 8;
+/// GLBs loading at a time once the map has loaded in play (a freed block requested again).
+const RESTREAM_IN_FLIGHT: usize = 2;
 
 /// One map GLB to load and the scene instances that wait for it.
 struct StreamRequest {
@@ -373,10 +375,10 @@ impl Pending {
         index
     }
 
-    /// Drop every strong GLB handle owned by `block` and turn its stream requests into
-    /// tombstones, so queueing its parts again requests the GLBs afresh. Returns how many
-    /// handles were dropped.
-    pub(crate) fn release_block(&mut self, block: &str) -> usize {
+    /// Hand back every strong GLB handle owned by `block`, for the caller to drop a few at a
+    /// time, and turn its stream requests into tombstones, so queueing its parts again requests
+    /// the GLBs afresh.
+    pub(crate) fn release_block(&mut self, block: &str) -> Vec<UntypedHandle> {
         for (index, request) in self.stream.iter_mut().enumerate() {
             if request.block.as_deref() != Some(block) || request.released {
                 continue;
@@ -387,10 +389,11 @@ impl Pending {
                 self.stream_index.remove(&request.glb);
             }
         }
-        let before = self.handles.len();
-        self.handles
-            .retain(|(owner, _)| owner.as_deref() != Some(block));
-        before - self.handles.len()
+        let (released, kept) = std::mem::take(&mut self.handles)
+            .into_iter()
+            .partition(|(owner, _)| owner.as_deref() == Some(block));
+        self.handles = kept;
+        released.into_iter().map(|(_, handle)| handle).collect()
     }
 
     /// Strong GLB handles `block` holds through the stream.
@@ -482,7 +485,14 @@ fn stream_assets(
     pending
         .in_flight
         .retain(|h| !asset_finished(&assets, h.id()));
-    while pending.in_flight.len() < STREAM_IN_FLIGHT && pending.next < pending.stream.len() {
+    // A block requested again in play streams behind the player's back: fewer GLBs at a time
+    // keep its scene spawns and uploads from stalling frames (#271).
+    let limit = if pending.loaded() && world.as_ref().is_some_and(|w| w.capture_views.is_none()) {
+        RESTREAM_IN_FLIGHT
+    } else {
+        STREAM_IN_FLIGHT
+    };
+    while pending.in_flight.len() < limit && pending.next < pending.stream.len() {
         let index = pending.next;
         pending.next += 1;
         let request = &pending.stream[index];
@@ -1185,6 +1195,10 @@ const SKY: Color = Color::srgb(0.62, 0.68, 0.74);
 /// every mesh and texture that finished loading in one frame, stalling for seconds (Windows
 /// then reports the window as not responding).
 pub(crate) const UPLOAD_BYTES_PER_FRAME: usize = 96 << 20;
+
+/// GPU upload budget per frame once the map has loaded in play, where a block requested again
+/// streams in while the player moves (#271).
+pub(crate) const RESTREAM_UPLOAD_BYTES_PER_FRAME: usize = 16 << 20;
 
 pub(crate) fn upload_budget() -> bevy::render::render_asset::RenderAssetBytesPerFrame {
     bevy::render::render_asset::RenderAssetBytesPerFrame::new(UPLOAD_BYTES_PER_FRAME)
@@ -2058,7 +2072,7 @@ mod tests {
             pending.handles.push((Some(block.into()), handle.untyped()));
         }
         pending.loaded_at = Some(Instant::now());
-        assert_eq!(pending.release_block("m11_00"), 1);
+        assert_eq!(pending.release_block("m11_00").len(), 1);
         assert_eq!(pending.block_handles("m11_00"), 0);
         assert_eq!(pending.block_handles("m11_01"), 1);
         assert!(pending.stream[first].released && pending.stream[first].targets.is_empty());
