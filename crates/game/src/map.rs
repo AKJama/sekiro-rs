@@ -1549,7 +1549,7 @@ fn cycle_groups(keys: Res<ButtonInput<KeyCode>>, mut groups: ResMut<Groups>) {
     }
 }
 
-/// Reuse the row index only while the current layout still names the selected collision there.
+/// Reuse the part index only while the parts still name the selected collision there.
 fn cached_index<T>(
     parts: &[T],
     cached: Option<usize>,
@@ -1558,15 +1558,6 @@ fn cached_index<T>(
     cached
         .filter(|&i| parts.get(i).is_some_and(&matches))
         .or_else(|| parts.iter().position(matches))
-}
-
-fn selected_collision_row<'a>(
-    parts: &'a [Value],
-    collision: &str,
-    cached: &mut Option<usize>,
-) -> Option<&'a Value> {
-    *cached = cached_index(parts, *cached, |p| p["name"].as_str() == Some(collision));
-    cached.and_then(|i| parts.get(i))
 }
 
 /// Finds the collision part under the camera (the nearest surface below, else the nearest
@@ -1581,18 +1572,14 @@ fn pick_groups(
     mut selection: Option<ResMut<crate::lighting_selection::LightingSelection>>,
     focus: Query<&Transform, With<MapFocus>>,
     connected: Option<Res<world::MapWorld>>,
-    mut selected_row: Local<Option<usize>>,
     mut settled: Local<bool>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("pick_groups");
     if let Some(world) = connected {
         if let Some((block, collision)) = &world.selected
-            && let Some(row) = world.blocks[block].json["parts"]
-                .as_array()
-                .and_then(|parts| selected_collision_row(parts, collision, &mut selected_row))
-            && row["gparam"].is_array()
+            && let Some(light) = world.selected_lighting
         {
-            let config = gparam_config(row);
+            let config = light.gparam;
             let mut next_region = *region;
             next_region.enter(config);
             region.set_if_neq(next_region);
@@ -1601,17 +1588,12 @@ fn pick_groups(
             {
                 crate::lighting_selection::LightingSelection::set_overlays(
                     &mut selection.reborrow(),
-                    crate::lighting_selection::scene_overlays(&row["scene_gparam"]),
-                    scene_transition(&row["scene_gparam"]),
+                    light.overlays,
+                    light.transition,
                 );
             }
             if config[0] >= 0 {
-                select_light_set(
-                    &mut lighting,
-                    config[0],
-                    scene_transition(&row["scene_gparam"]),
-                    &mut settled,
-                );
+                select_light_set(&mut lighting, config[0], light.transition, &mut settled);
             }
             if config[1] >= 0 {
                 crate::change::set(&mut fog.reborrow(), |f| &mut f.0, config[1]);
@@ -2005,31 +1987,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cached_collision_selection_tracks_names_and_layout_changes() {
-        let mut parts = vec![
-            serde_json::json!({"name": "h0", "gparam": [0, 1, 2, 3]}),
-            serde_json::json!({"name": "h1", "gparam": [4, 5, 6, 7]}),
-        ];
+    fn cached_index_tracks_names_and_reordering() {
+        let mut parts = vec!["h0", "h1"];
         let mut cached = None;
         for name in ["h0", "h0", "h1", "missing", "h0"] {
-            assert_eq!(
-                selected_collision_row(&parts, name, &mut cached),
-                parts.iter().find(|p| p["name"] == name),
-            );
+            cached = cached_index(&parts, cached, |p| *p == name);
+            assert_eq!(cached, parts.iter().position(|p| *p == name));
         }
         parts.swap(0, 1);
-        assert_eq!(
-            selected_collision_row(&parts, "h0", &mut cached),
-            Some(&parts[1])
-        );
-        // Another block or a replaced layout can reuse the name with different configuration.
-        parts[1]["gparam"] = serde_json::json!([8, 9, 10, 11]);
-        assert_eq!(
-            gparam_config(selected_collision_row(&parts, "h0", &mut cached).unwrap()),
-            [8, 9, 10, 11],
-        );
+        assert_eq!(cached_index(&parts, cached, |p| *p == "h0"), Some(1));
         parts.clear();
-        assert!(selected_collision_row(&parts, "h0", &mut cached).is_none());
+        assert_eq!(cached_index(&parts, cached, |p| *p == "h0"), None);
+    }
+
+    /// #311: a collision's lighting is read from its layout row once, at load.
+    #[test]
+    fn collision_lighting_reads_the_row_once() {
+        let row = serde_json::json!({
+            "name": "h022500",
+            "gparam": [100, 0, 0, 0],
+            "scene_gparam": {"event_ids": [1, 5, 0, -1], "transition_time": 1.0},
+        });
+        assert_eq!(
+            world::CollisionLighting::from_row(&row),
+            Some(world::CollisionLighting {
+                gparam: [100, 0, 0, 0],
+                // A byte of 0 selects no layer (#287).
+                overlays: [1, 5, -1, -1],
+                transition: 1.,
+            })
+        );
+        let unset = serde_json::json!({"name": "h0", "gparam": [7, -1, -1, -1]});
+        assert_eq!(
+            world::CollisionLighting::from_row(&unset).map(|l| (l.overlays, l.transition)),
+            Some(([-1; 4], -1.))
+        );
+        assert_eq!(
+            world::CollisionLighting::from_row(&serde_json::json!({"name": "h1"})),
+            None
+        );
+    }
+
+    /// #311: moving onto a part with the light set already in force starts no fade and leaves
+    /// the lighting unchanged; another light set fades over the authored time.
+    #[test]
+    fn same_light_set_starts_no_fade() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.insert_resource(MapLighting {
+            light_set: 100,
+            ..default()
+        });
+        let select = |row: i32| {
+            move |mut lighting: ResMut<MapLighting>, mut settled: Local<bool>| {
+                *settled = true;
+                select_light_set(&mut lighting, row, 1., &mut settled);
+            }
+        };
+        world.run_system_once(select(100)).unwrap();
+        let lighting = world.resource::<MapLighting>();
+        assert!(lighting.fade.is_none());
+        assert_eq!((lighting.light_set, lighting.revision), (100, 0));
+        world.run_system_once(select(110)).unwrap();
+        let lighting = world.resource::<MapLighting>();
+        assert_eq!(lighting.light_set, 110);
+        assert!(lighting.fade.is_some());
     }
 
     /// #46: the map's far plane must not reset a camera's field of view (it forced 60 degrees on
