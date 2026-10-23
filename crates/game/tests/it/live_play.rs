@@ -16,7 +16,8 @@ const LOADING_FRAME_MS: f64 = 2000.0;
 const FRAME_MEDIAN_MS: f64 = 20.0;
 const FRAME_P95_MS: f64 = 40.0;
 /// Frame drops in play (#10): the walk's p99 and worst frame after play starts. The Outskirts
-/// walk with map enemies measured p99 36.5 ms and worst 45.8 ms (profile-spans build, 2026-10-23).
+/// walk with map enemies measured p99 26.8 ms and worst 86.8 ms (one main-thread hitch) on
+/// 2026-10-23.
 const FRAME_P99_MS: f64 = 45.0;
 const FRAME_MAX_MS: f64 = 100.0;
 
