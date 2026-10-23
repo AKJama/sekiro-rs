@@ -170,23 +170,32 @@ pub(crate) fn world_bounds(transform: &GlobalTransform, aabb: &Aabb) -> (Vec3, V
 #[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MapSpawn;
 
-/// A piece's draw groups.
+/// A piece's draw groups. Every map root also carries a [`PartLightSet`], row 0 unless its
+/// spawn sets the authored one.
 #[derive(Component)]
+#[require(PartLightSet)]
 pub(crate) struct DrawGroups([u32; 8]);
 
-/// A map part whose MSB authors a light set other than the ordinary row 0: it is lit with
-/// the collision-selected light set, as characters are (#30).
+/// A map part's raw MSB light set id (GparamConfig light set, -1 when absent), next to its
+/// [`DrawGroups`]; its surfaces are lit with that LightSet row (#30, #67).
 #[derive(Component)]
-pub(crate) struct FollowsSceneLight;
+pub(crate) struct PartLightSet(pub(crate) i32);
+
+/// The ordinary map row, which nearly every piece and object authors.
+impl Default for PartLightSet {
+    fn default() -> Self {
+        Self(0)
+    }
+}
 
 /// A layout part row's MSB GparamConfig ids (light, fog, scattering, env map), -1 when absent.
 fn gparam_config(row: &Value) -> [i32; 4] {
     std::array::from_fn(|i| row["gparam"][i].as_i64().unwrap_or(-1) as i32)
 }
 
-/// Whether a layout part row authors its own light set (MSB GparamConfig light set id > 0).
-pub(crate) fn follows_scene_light(row: &Value) -> bool {
-    crate::lighting::part_follows_scene(gparam_config(row)[0])
+/// A layout part row's MSB light set.
+pub(crate) fn part_light_set(row: &Value) -> PartLightSet {
+    PartLightSet(gparam_config(row)[0])
 }
 
 /// Distant render-only scenery is independent of the local collision's draw groups.
@@ -1360,13 +1369,14 @@ fn spawn_map(
                     !sekiro_sim::arena::box_within(lo, hi, center.xz(), radius)
                 })
             });
-            let mut entity = commands.spawn((DrawGroups(groups8(&row["draw_groups"])), transform));
+            let mut entity = commands.spawn((
+                DrawGroups(groups8(&row["draw_groups"])),
+                part_light_set(row),
+                transform,
+            ));
             pending.queue(&glb, None, false, (entity.id(), 0));
             if far_scenery {
                 entity.insert(FarScenery);
-            }
-            if follows_scene_light(row) {
-                entity.insert(FollowsSceneLight);
             }
             if let Some(part) = MsbPart::from_row(&layout.id, row) {
                 entity.insert(part);

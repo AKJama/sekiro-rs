@@ -392,18 +392,14 @@ impl MapLight {
         encoded.into_inner()
     }
 
-    /// `follows_scene` selects the collision row (characters, parts authoring their own set)
-    /// instead of the map parts' row; see [`crate::lighting::part_light_set`].
+    /// `own` is the surface's own row, `None` for the collision-selected row; see
+    /// [`crate::lighting::own_light_set`].
     fn new(
         lighting: &crate::lighting::MapLighting,
         ambient: &bevy::light::GlobalAmbientLight,
-        follows_scene: bool,
+        own: Option<i32>,
     ) -> Self {
-        let set = crate::lighting::LightSet::from_gparam(
-            &lighting.gparam,
-            crate::lighting::part_light_set(lighting.light_set, follows_scene),
-            lighting.hour,
-        );
+        let set = lighting.surface_light(own);
         let mut direct = set.direct;
         direct[12].y = f32::from(native_point_lights() && direct[12].x > 0.);
         direct[12].z = native_point_light_scale();
@@ -424,26 +420,26 @@ impl MapLight {
     }
 }
 
-/// The two shared light buffers, indexed by whether the surface follows the collision row:
-/// map pieces and objects on the ordinary MSB light set, then characters and parts that
-/// follow the collision-selected row.
-#[derive(Resource)]
-struct MapLightBuffer([Handle<bevy::render::storage::ShaderBuffer>; 2]);
+/// One shared light buffer per LightSet row in use, keyed by the surface's own row: `None` for
+/// characters on the collision-selected row, `Some(row)` for map parts (#30, #67).
+#[derive(Resource, Default)]
+struct MapLightBuffer(HashMap<Option<i32>, Handle<bevy::render::storage::ShaderBuffer>>);
 
 impl MapLightBuffer {
-    fn get(&self, follows_scene: bool) -> Handle<bevy::render::storage::ShaderBuffer> {
-        self.0[follows_scene as usize].clone()
-    }
-}
-
-impl FromWorld for MapLightBuffer {
-    fn from_world(world: &mut World) -> Self {
-        let mut buffers = world.resource_mut::<Assets<bevy::render::storage::ShaderBuffer>>();
-        Self([(); 2].map(|()| {
-            buffers.add(bevy::render::storage::ShaderBuffer::from(
-                MapLight::default().encoded(),
-            ))
-        }))
+    /// The buffer for `own`, added on first use; [`update_hemisphere`] fills it that frame.
+    fn get(
+        &mut self,
+        own: Option<i32>,
+        buffers: &mut Assets<bevy::render::storage::ShaderBuffer>,
+    ) -> Handle<bevy::render::storage::ShaderBuffer> {
+        self.0
+            .entry(own)
+            .or_insert_with(|| {
+                buffers.add(bevy::render::storage::ShaderBuffer::from(
+                    MapLight::default().encoded(),
+                ))
+            })
+            .clone()
     }
 }
 
@@ -738,8 +734,13 @@ mod tests {
             })
             .insert_resource(bevy::light::GlobalAmbientLight::default())
             .add_systems(Update, update_hemisphere);
-        let buffers =
-            [false, true].map(|scene| app.world().resource::<MapLightBuffer>().get(scene));
+        let rows = [None, Some(0), Some(110)];
+        let buffers = app
+            .world_mut()
+            .resource_scope(|world, mut light: Mut<MapLightBuffer>| {
+                let mut assets = world.resource_mut::<Assets<ShaderBuffer>>();
+                rows.map(|own| light.get(own, &mut assets))
+            });
         app.world_mut()
             .resource_mut::<Assets<LayeredMaterial>>()
             .add(ExtendedMaterial {
@@ -750,7 +751,7 @@ mod tests {
         let expected = |app: &App| {
             let lighting = app.world().resource::<crate::lighting::MapLighting>();
             let ambient = app.world().resource::<bevy::light::GlobalAmbientLight>();
-            [false, true].map(|scene| MapLight::new(lighting, ambient, scene).encoded())
+            rows.map(|own| MapLight::new(lighting, ambient, own).encoded())
         };
         let written = |app: &App| {
             buffers.clone().map(|buffer| {
@@ -784,6 +785,92 @@ mod tests {
             0,
             "a LightSet change touched map materials"
         );
+    }
+
+    /// A part authoring light set 110 reads row 110 while Wolf stands on a row-100 collision,
+    /// and its row-0 neighbour reads row 0; Wolf reads the collision row (#67).
+    #[test]
+    fn map_parts_read_their_own_light_set_row() {
+        use bevy::render::storage::ShaderBuffer;
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<StandardMaterial>()
+            .init_asset::<LayeredMaterial>()
+            .init_asset::<ShaderBuffer>()
+            .init_resource::<MapLightBuffer>()
+            .insert_resource(crate::lighting::MapLighting {
+                gparam: crate::lighting::sun_rows(&[(0, 1.), (100, 2.), (110, 3.)]),
+                hour: 12.,
+                light_set: 100,
+                ..default()
+            })
+            .insert_resource(bevy::light::GlobalAmbientLight::default())
+            .insert_resource(LayerSettings {
+                prefix: String::new(),
+                primary_texture_prefix: false,
+                enabled: true,
+                debug: false,
+                materials: HashMap::new(),
+                interned: MaterialInterner::default(),
+                camera_fade: camera_fade::CameraFade::load(std::path::Path::new(""), false),
+            })
+            .add_systems(
+                Update,
+                (release_materials, replace_materials, update_hemisphere).chain(),
+            );
+        let source = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let part = |app: &mut App, id| {
+            app.world_mut()
+                .spawn((
+                    super::super::DrawGroups([0; 8]),
+                    super::super::PartLightSet(id),
+                ))
+                .id()
+        };
+        let roots = [
+            part(&mut app, 110),
+            part(&mut app, 0),
+            app.world_mut()
+                .spawn(crate::character::Rig::new(std::sync::Arc::new(
+                    sekiro_formats::anim::Skeleton {
+                        name: String::new(),
+                        bones: vec![],
+                    },
+                )))
+                .id(),
+        ];
+        let surfaces = roots.map(|root| {
+            app.world_mut()
+                .spawn((MeshMaterial3d(source.clone()), ChildOf(root)))
+                .id()
+        });
+        app.update();
+        let read = |app: &App, entity| {
+            let world = app.world();
+            let material = &world
+                .get::<MeshMaterial3d<LayeredMaterial>>(entity)
+                .unwrap()
+                .0;
+            let light = &world
+                .resource::<Assets<LayeredMaterial>>()
+                .get(material)
+                .unwrap()
+                .extension
+                .light;
+            let data = world.resource::<Assets<ShaderBuffer>>().get(light).unwrap();
+            data.cast_slice::<u8>().unwrap().to_vec()
+        };
+        let lighting = app.world().resource::<crate::lighting::MapLighting>();
+        let ambient = app.world().resource::<bevy::light::GlobalAmbientLight>();
+        let expected = [Some(110), Some(0), None].map(|own| MapLight::new(lighting, ambient, own));
+        assert_ne!(expected[0].direct[1], expected[2].direct[1]);
+        assert_ne!(expected[1].direct[1], expected[2].direct[1]);
+        for (surface, expected) in surfaces.into_iter().zip(expected) {
+            assert_eq!(read(&app, surface), expected.encoded());
+        }
     }
 }
 
@@ -875,8 +962,9 @@ struct LayerSettings {
     primary_texture_prefix: bool,
     enabled: bool,
     debug: bool,
-    /// Wrappers by source material and whether they read the scene light buffer.
-    materials: HashMap<(AssetId<StandardMaterial>, bool, bool), Handle<LayeredMaterial>>,
+    /// Wrappers by source material, own light set row (`None`: the collision row) and whether
+    /// they draw an actor.
+    materials: HashMap<(AssetId<StandardMaterial>, Option<i32>, bool), Handle<LayeredMaterial>>,
     interned: MaterialInterner,
     camera_fade: camera_fade::CameraFade,
 }
@@ -884,12 +972,13 @@ struct LayerSettings {
 #[derive(bevy::ecs::system::SystemParam)]
 struct MapEnvironment<'w, 's> {
     parents: Query<'w, 's, &'static ChildOf>,
-    roots: Query<'w, 's, (), With<super::DrawGroups>>,
-    scene_parts: Query<'w, 's, (), With<super::FollowsSceneLight>>,
+    /// Map part roots and their own light set row (#67).
+    roots: Query<'w, 's, &'static super::PartLightSet, With<super::DrawGroups>>,
     actors: Query<'w, 's, (), With<crate::character::Rig>>,
     no_shadow: Query<'w, 's, (), With<super::world::AuthoredNoShadow>>,
     irradiance: Option<Res<'w, crate::lighting::MapIrradiance>>,
-    light: Option<Res<'w, MapLightBuffer>>,
+    light: Option<ResMut<'w, MapLightBuffer>>,
+    buffers: Option<ResMut<'w, Assets<bevy::render::storage::ShaderBuffer>>>,
 }
 
 /// Retain actor material sources for gameplay tint, while drawing the native ambient wrapper.
@@ -954,8 +1043,9 @@ pub(super) fn install(app: &mut App, prefix: &str, dir: &std::path::Path, args: 
     .add_systems(PostUpdate, sync_actor_materials);
 }
 
-/// Light set, hour, ambient on, gparam source and lighting revision of the last upload.
-type HemisphereKey = (i32, f32, bool, String, u32);
+/// Light set, hour, ambient on, gparam source, lighting revision and buffer count of the last
+/// upload.
+type HemisphereKey = (i32, f32, bool, String, u32, usize);
 
 fn update_hemisphere(
     lighting: Res<crate::lighting::MapLighting>,
@@ -971,16 +1061,17 @@ fn update_hemisphere(
         ambient.brightness > 0.,
         lighting.source.clone(),
         lighting.revision,
+        light.0.len(),
     );
     if last.as_ref() == Some(&key) {
         return;
     }
     *last = Some(key);
     // Same size every write, so Bevy rewrites the GPU buffer in place and no bind group changes.
-    for follows_scene in [false, true] {
-        if let Some(mut buffer) = buffers.get_mut(&light.get(follows_scene)) {
+    for (&own, handle) in &light.0 {
+        if let Some(mut buffer) = buffers.get_mut(handle) {
             buffer.clear();
-            buffer.extend_from_slice(&MapLight::new(&lighting, &ambient, follows_scene).encoded());
+            buffer.extend_from_slice(&MapLight::new(&lighting, &ambient, own).encoded());
         }
     }
 }
@@ -1031,11 +1122,11 @@ fn replace_materials(
     let MapEnvironment {
         parents,
         roots,
-        scene_parts,
         actors,
         no_shadow,
         irradiance,
-        light,
+        mut light,
+        mut buffers,
     } = environment;
     for (entity, original, extras, name) in &meshes {
         // Map and rig descendants share spatial lighting. Actor tint proxies retain
@@ -1063,9 +1154,14 @@ fn replace_materials(
         let Some(base) = materials.get(&original.0) else {
             continue;
         };
-        // Characters and parts authoring their own set follow the collision row (#30).
-        let follows_scene = actor_surface || scene_parts.contains(ancestor);
-        let key = (original.0.id(), follows_scene, actor_surface);
+        // Map parts are lit with their own MSB light set row, characters with the collision
+        // row (#30, #67).
+        let own = if actor_surface {
+            None
+        } else {
+            crate::lighting::own_light_set(roots.get(ancestor).ok().map(|p| p.0))
+        };
+        let key = (original.0.id(), own, actor_surface);
         let handle = if let Some(handle) = settings.materials.get(&key) {
             handle.clone()
         } else {
@@ -1213,8 +1309,9 @@ fn replace_materials(
                 diffuse: irradiance.as_ref().map(|i| i.diffuse.clone()),
                 voxels: irradiance.as_ref().map(|i| i.voxels.clone()),
                 light: light
-                    .as_ref()
-                    .map(|l| l.get(follows_scene))
+                    .as_mut()
+                    .zip(buffers.as_mut())
+                    .map(|(l, b)| l.get(own, b))
                     .unwrap_or_default(),
             };
             let material = ExtendedMaterial {

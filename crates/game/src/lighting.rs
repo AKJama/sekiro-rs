@@ -362,24 +362,36 @@ fn apply_post_effects(
     }
 }
 
-/// The LightSet row map pieces and objects authoring MSB light set 0 are drawn with.
-/// Native lights each instance with its own light set; collision rows (100, 110, ...) light
-/// the characters. See docs/LIGHTING.md, "Per-part light sets" (#30).
-pub const MAP_PART_LIGHT_SET: i32 = 0;
-
-/// Whether a map part with this MSB light set id follows the collision-selected row.
-pub fn part_follows_scene(msb_light_set: i32) -> bool {
-    msb_light_set > MAP_PART_LIGHT_SET
+/// A surface's own LightSet row: the MSB light set id its map part authors (0 on nearly every
+/// piece and object, 100 to 130 on a few). Native lights each instance with its own row; see
+/// docs/LIGHTING.md, "Per-part light sets" (#30, #67).
+/// `None` for characters and parts authoring none (-1), which follow the collision-selected
+/// row, and for every surface under `SEKIRO_ABLATE=scenelight` or `SEKIRO_LIGHT_SET`.
+pub fn own_light_set(msb_light_set: Option<i32>) -> Option<i32> {
+    msb_light_set.filter(|&id| id >= 0 && !ablate("scenelight") && forced_light_set().is_none())
 }
 
-/// The LightSet row a map surface is drawn with: row 0 for the ordinary MSB light set 0, or
-/// the collision-selected `scene` row for characters and for the few parts that author another
-/// set. `SEKIRO_ABLATE=scenelight` and `SEKIRO_LIGHT_SET` put every surface on the scene row.
-pub fn part_light_set(scene: i32, follows_scene: bool) -> i32 {
-    if follows_scene || ablate("scenelight") || forced_light_set().is_some() {
-        scene
-    } else {
-        MAP_PART_LIGHT_SET
+/// A LightSet whose rows each author only a sun of their own power `W`, for tests.
+#[cfg(test)]
+pub(crate) fn sun_rows(rows: &[(i32, f32)]) -> Gparam {
+    use sekiro_formats::gparam::{Entry, Group, Param, Value};
+    Gparam {
+        groups: vec![Group {
+            name: "LightSet".into(),
+            display_name: String::new(),
+            params: vec![Param {
+                name: "DiffColor0".into(),
+                display_name: String::new(),
+                entries: rows
+                    .iter()
+                    .map(|&(id, w)| Entry {
+                        id,
+                        time: 12.,
+                        value: Value::Vec4([1., 1., 1., w]),
+                    })
+                    .collect(),
+            }],
+        }],
     }
 }
 
@@ -1277,6 +1289,27 @@ impl MapLighting {
         }
     }
 
+    /// The light set a surface is drawn with now: its own row (see [`own_light_set`]), or the
+    /// collision-selected row for `None`.
+    ///
+    /// A part's own row is a fixed record, so a doorway fade only blends it between the old and
+    /// new layer stacks. Only the collision row starts from the old row's values, which is what
+    /// characters see; a part authoring that same row does not (#67).
+    pub fn surface_light(&self, own: Option<i32>) -> LightSet {
+        let row = own.unwrap_or(self.light_set);
+        if let Some(fade) = self
+            .fade
+            .as_ref()
+            .filter(|f| own.is_some() && row == self.light_set && f.from_row != row)
+        {
+            let weight = fade.elapsed / fade.seconds;
+            let g =
+                sekiro_formats::gparam::blend(&fade.from, row, &fade.to, row, self.hour, weight);
+            return LightSet::from_gparam(&g, row, self.hour);
+        }
+        LightSet::from_gparam(&self.gparam, row, self.hour)
+    }
+
     /// Moves a fade on by `seconds` of game time.
     pub fn advance_fade(&mut self, seconds: f32) {
         // Paused time holds the blend where it is, with nothing to rebuild.
@@ -1875,28 +1908,27 @@ mod probe_tests {
         };
         let msb = sekiro_formats::msb::parse(&msb).unwrap();
         let g = sekiro_formats::gparam::parse(&gparam).unwrap();
-        assert_eq!(part_light_set(100, false), MAP_PART_LIGHT_SET);
-        let (mut own, mut scene) = (0, 0);
+        let mut rows = std::collections::BTreeMap::<i32, usize>::new();
         for p in &msb.parts {
-            if !matches!(
+            if matches!(
                 p.kind,
                 sekiro_formats::msb::PartKind::MapPiece | sekiro_formats::msb::PartKind::Object
             ) {
-                continue;
-            }
-            let id = p.gparam.map_or(-1, |g| g[0]);
-            if part_follows_scene(id) {
-                scene += 1;
-            } else {
-                assert_eq!(id, MAP_PART_LIGHT_SET, "{}", p.name);
-                own += 1;
+                let own = own_light_set(Some(p.gparam.map_or(-1, |g| g[0])));
+                *rows
+                    .entry(own.expect("map parts author a light set"))
+                    .or_default() += 1;
             }
         }
-        assert!(own > 5_000 && scene <= 4, "own {own}, scene {scene}");
+        // Nearly every part authors row 0; two author 100 and two 110 (#67).
+        assert!(rows[&0] > 5_000, "{rows:?}");
+        assert_eq!((rows.len(), rows[&100], rows[&110]), (3, 2, 2), "{rows:?}");
+        assert_eq!(own_light_set(Some(-1)), None);
+        assert_eq!(own_light_set(None), None);
         // Hour 6 outside the shack: the collision row 100 carries bright local lights, the map
         // parts' row 0 authors them with W 0 (#30).
-        let part = LightSet::from_gparam(&g, part_light_set(100, false), 6.);
-        let collision = LightSet::from_gparam(&g, part_light_set(100, true), 6.);
+        let part = LightSet::from_gparam(&g, 0, 6.);
+        let collision = LightSet::from_gparam(&g, 100, 6.);
         for slot in [7, 10] {
             assert_eq!(part.direct[slot].xyz(), Vec3::ZERO, "slot {slot}");
         }
@@ -2251,6 +2283,35 @@ mod probe_tests {
         );
         app.insert_resource(InstantLighting);
         assert_eq!(step(&mut app, 0.), inside, "a sweep jump faded");
+    }
+    /// Walking from a row-100 collision onto a row-110 one, characters fade from the row-100
+    /// sun; parts keep their own records, including the part authoring 110 itself (#67).
+    #[test]
+    fn parts_keep_their_own_row_through_a_collision_row_fade() {
+        let g = sun_rows(&[(0, 1.), (100, 2.), (110, 3.)]);
+        let mut lighting = MapLighting {
+            gparam: g.clone(),
+            hour: 12.,
+            light_set: 100,
+            ..default()
+        };
+        let sun = |l: &MapLighting, own| l.surface_light(own).direct[1];
+        let row = |id| LightSet::from_gparam(&g, id, 12.).direct[1];
+        lighting.fade_to(None, 110, 1.);
+        assert_eq!(
+            sun(&lighting, None),
+            row(100),
+            "characters start from the old row"
+        );
+        for id in [0, 100, 110] {
+            assert_eq!(sun(&lighting, Some(id)), row(id), "row {id}");
+        }
+        lighting.advance_fade(0.5);
+        assert_ne!(sun(&lighting, None), row(110));
+        assert_eq!(sun(&lighting, Some(110)), row(110));
+        lighting.advance_fade(0.6);
+        assert!(lighting.fade.is_none());
+        assert_eq!(sun(&lighting, None), row(110));
     }
     #[test]
     fn recovered_post_preserves_authored_bounds_and_disables_stages() {

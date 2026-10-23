@@ -1244,13 +1244,11 @@ pub(crate) fn spawn(
                     part_index: row["part_index"].as_u64().unwrap_or(0) as usize,
                 },
                 super::DrawGroups(draw),
+                super::part_light_set(row),
                 transform,
                 Visibility::Hidden,
             ))
             .id();
-        if super::follows_scene_light(row) {
-            commands.entity(root).insert(super::FollowsSceneLight);
-        }
         if row["entity_data"]["is_shadow_src"].as_bool() == Some(false) {
             commands.entity(root).insert(AuthoredNoShadow);
         }
