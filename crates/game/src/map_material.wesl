@@ -103,6 +103,8 @@ import sekiro_rs::map_bindings::{
     wet,
     wet_sampler,
     map_light,
+    metal,
+    metal_sampler,
 };
 
 struct GiScatter { FssEss: vec3<f32>, FmsEms: vec3<f32>, Edss: vec3<f32>, }
@@ -481,6 +483,12 @@ return textureSample(bindless_textures_2d[layer_indices[slot].wet], bindless_sam
 @if(!BINDLESS)
 return textureSample(wet, wet_sampler, uv);
 }
+fn sample_metal(uv: vec2<f32>, slot: u32) -> vec4<f32> {
+@if(BINDLESS)
+return textureSample(bindless_textures_2d[layer_indices[slot].metal], bindless_samplers_filtering[layer_indices[slot].metal_sampler], uv);
+@if(!BINDLESS)
+return textureSample(metal, metal_sampler, uv);
+}
 fn sample_base_albedo(uv: vec2<f32>, slot: u32) -> vec4<f32> {
 @if(BINDLESS)
 return textureSample(bindless_textures_2d[material_indices[slot].base_color_texture], bindless_samplers_filtering[material_indices[slot].base_color_sampler], uv);
@@ -720,6 +728,14 @@ fn game_layers(in: VertexOutput, b: vec4<f32>, b2: vec4<f32>, uv_scale: f32, is_
     }
     pbr_input.material.base_color = vec4(a, alpha);
     pbr_input.material.perceptual_roughness = clamp(1.0 - saturate(gloss), 0.089, 1.0);
+    if !ground && has(4096u, map_game) {
+        // Multiple variant 18 (#43): the slot-17 mask's R (base, uv * float2_10) and G (overlay,
+        // uv * float2_11) mixed by the overlay weight give a metalness; native writes albedo
+        // * (1 - metal) and F0 = lerp(0.03, albedo, metal), which is Bevy's metallic model.
+        let metal_base = sample_metal(uvs * p[16].xy * map_game.tiling[12].xy, slot).r;
+        let metal_overlay = sample_metal(uvs * p[16].zw * map_game.tiling[12].xy, slot).g;
+        pbr_input.material.metallic = saturate(mix(metal_base, metal_overlay, wOv));
+    }
 @if(VERTEX_TANGENTS)
     pbr_input.N = layer_world_normal(nt, in.world_normal, in.world_tangent, is_front);
     return pbr_input;

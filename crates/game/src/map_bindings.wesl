@@ -1,5 +1,5 @@
 struct GiivBuffer { words: array<u32>, }
-struct MapGame { flags: vec4<u32>, p: array<vec4<f32>, 16>, tiling: array<vec4<f32>, 12>, }
+struct MapGame { flags: vec4<u32>, p: array<vec4<f32>, 17>, tiling: array<vec4<f32>, 13>, }
 struct Layers {
     enabled: vec4<f32>,
     albedo_enabled: vec4<f32>,
@@ -48,6 +48,8 @@ struct MapLight {
         wet: u32,
         wet_sampler: u32,
         light: u32,
+        metal: u32,
+        metal_sampler: u32,
     }
     @group(constants::MATERIAL_BIND_GROUP) @binding(102) var<storage, read> giiv_buffers: binding_array<GiivBuffer>;
     @group(constants::MATERIAL_BIND_GROUP) @binding(103) var<storage, read> light_buffers: binding_array<MapLight>;
@@ -86,5 +88,7 @@ struct MapLight {
     @group(constants::MATERIAL_BIND_GROUP) @binding(78) var wet: texture_2d<f32>;
     @group(constants::MATERIAL_BIND_GROUP) @binding(79) var wet_sampler: sampler;
     @group(constants::MATERIAL_BIND_GROUP) @binding(80) var<storage, read> map_light: MapLight;
+    @group(constants::MATERIAL_BIND_GROUP) @binding(81) var metal: texture_2d<f32>;
+    @group(constants::MATERIAL_BIND_GROUP) @binding(82) var metal_sampler: sampler;
 }
 

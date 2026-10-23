@@ -107,6 +107,7 @@ pub(super) fn sweep_base(world: &World, entity: Entity) -> Option<SweepMaterial>
                 &layer.detail,
                 &layer.mask_l,
                 &layer.wet,
+                &layer.metal,
             ]
             .into_iter()
             .filter_map(|h| h.as_ref()),
@@ -205,7 +206,7 @@ fn release_materials(
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
 #[bind_group_data(MapPipelineKey)]
 #[data(50, MapLayersUniform, binding_array(101))]
-#[bindless(index_table(range(50..81), binding(100)))]
+#[bindless(index_table(range(50..83), binding(100)))]
 pub(crate) struct MapLayers {
     // xyz: enabled albedo layers; w: mask present.
     enabled: Vec4,
@@ -262,13 +263,17 @@ pub(crate) struct MapLayers {
     /// The shared [`MapLightBuffer`], so a LightSet change rewrites one buffer, not every material.
     #[storage(80, read_only, binding_array(103))]
     light: Handle<bevy::render::storage::ShaderBuffer>,
+    /// Multiple variant 18's slot-17 metal mask (#43).
+    #[texture(81)]
+    #[sampler(82)]
+    metal: Option<Handle<Image>>,
 }
 
 #[derive(ShaderType, Reflect, Debug, Clone, Default)]
 struct MapGame {
     flags: UVec4,
-    p: [Vec4; 16],
-    tiling: [Vec4; 12],
+    p: [Vec4; sekiro_formats::map_layers::PARAM_ROWS],
+    tiling: [Vec4; 13],
 }
 
 pub(crate) const ATTR_MAP_BLEND2: bevy::mesh::MeshVertexAttribute =
@@ -535,7 +540,7 @@ mod tests {
             surface(1, 0).perceptual_roughness,
             base.perceptual_roughness
         );
-        assert_eq!(surface(1, 18).reflectance, base.reflectance);
+        assert_eq!(surface(1, 18).reflectance, NATIVE_LAYERED_REFLECTANCE);
         assert_eq!(surface(2, 18).reflectance, NATIVE_LAYERED_REFLECTANCE);
         assert_eq!(surface(0, 0).reflectance, base.reflectance);
         assert_eq!(
@@ -978,11 +983,9 @@ fn native_surface(base: &StandardMaterial, data: &Value) -> StandardMaterial {
         return base;
     }
     let kind = data["kind"].as_u64().unwrap_or(0);
-    // Slot 17 (only Multiple variant 18) writes a textured F0 instead of the constant; the slot
-    // is not sampled yet, so it keeps Bevy's default for now (#43).
-    let variant = data["variant"].as_u64().unwrap_or(0) as usize;
-    let textured_f0 = sekiro_formats::map_layers::slots(kind as u8, variant).contains(&17);
-    if (1..=3).contains(&kind) && !textured_f0 {
+    // Multiple variant 18 writes lerp(0.03, albedo, metal) from its slot-17 mask, which the
+    // shader feeds to Bevy's metallic, so its dielectric F0 is the same constant (#43).
+    if (1..=3).contains(&kind) {
         base.reflectance = NATIVE_LAYERED_REFLECTANCE;
     }
     // Mountain writes gloss 0 and the shader's Mountain path leaves roughness to the base.
@@ -1114,6 +1117,7 @@ fn replace_materials(
                     "detail",
                     "mask_l",
                     "wet",
+                    "metal",
                 ]
                 .into_iter()
                 .enumerate()
@@ -1137,6 +1141,7 @@ fn replace_materials(
                     ("detail", 256),
                     ("mask_l", 512),
                     ("wet", 1024),
+                    ("metal", 4096),
                 ] {
                     if present(key) > 0. {
                         game.flags.x |= bit;
@@ -1185,6 +1190,7 @@ fn replace_materials(
                 detail: load("detail", false),
                 mask_l: load("mask_l", false),
                 wet: load("wet", false),
+                metal: load("metal", false),
                 irradiance: irradiance
                     .as_ref()
                     .map(|i| i.buffer.clone())
