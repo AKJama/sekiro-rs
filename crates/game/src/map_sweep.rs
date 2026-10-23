@@ -411,6 +411,8 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
     embedded_asset!(&mut app, "map_sweep.wesl");
     app.add_plugins(MaterialPlugin::<DiagnosticMaterial>::default());
     super::capture::install(&mut app);
+    // Each view is a jump with time held, so lighting switches there at once.
+    app.insert_resource(crate::lighting::InstantLighting);
     // Keep scrolling water/clouds identical in the normal/all comparison.
     // Advance once per pose to allow the shared 0.5 s local-light selection to run.
     let mut clock = app.world_mut().resource_mut::<Time<Virtual>>();

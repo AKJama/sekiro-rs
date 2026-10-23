@@ -1270,7 +1270,8 @@ impl MapLighting {
 
     /// Moves a fade on by `seconds` of game time.
     pub fn advance_fade(&mut self, seconds: f32) {
-        let Some(fade) = self.fade.as_mut() else {
+        // Paused time holds the blend where it is, with nothing to rebuild.
+        let Some(fade) = self.fade.as_mut().filter(|_| seconds > 0.) else {
             return;
         };
         fade.elapsed += seconds;
@@ -1317,11 +1318,25 @@ pub fn fade_seconds(transition: f32) -> f32 {
     }
 }
 
+/// Makes every lighting change switch at once: the map sweep and render gate jump the camera
+/// between views with time held, so a doorway fade there would never finish.
+#[derive(Resource)]
+pub struct InstantLighting;
+
 /// Moves the draw-param fade on each frame, before anything reads the lighting.
-pub fn advance_lighting_fade(time: Res<Time>, mut lighting: ResMut<MapLighting>) {
+pub fn advance_lighting_fade(
+    time: Res<Time>,
+    instant: Option<Res<InstantLighting>>,
+    mut lighting: ResMut<MapLighting>,
+) {
     if lighting.fade.is_some() {
         let _timer = crate::perf_log::SystemTimer::start("advance_lighting_fade");
-        lighting.advance_fade(time.delta_secs());
+        let seconds = if instant.is_some() {
+            f32::INFINITY
+        } else {
+            time.delta_secs()
+        };
+        lighting.advance_fade(seconds);
     }
 }
 
@@ -2215,6 +2230,18 @@ mod probe_tests {
                 "value {i} at half time: {mid} not in ({lo}, {hi})"
             );
         }
+        // Held time holds the blend without rebuilding; a sweep's jump switches at once.
+        enter(&mut app, 110, [1, -1, -1, -1]);
+        step(&mut app, 0.);
+        let revision = app.world().resource::<MapLighting>().revision;
+        step(&mut app, 0.);
+        assert_eq!(
+            app.world().resource::<MapLighting>().revision,
+            revision,
+            "held time rebuilt the lighting"
+        );
+        app.insert_resource(InstantLighting);
+        assert_eq!(step(&mut app, 0.), inside, "a sweep jump faded");
     }
     #[test]
     fn recovered_post_preserves_authored_bounds_and_disables_stages() {

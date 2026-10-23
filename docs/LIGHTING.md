@@ -1425,6 +1425,8 @@ The fade (`MapLighting::fade_to`, `gparam::blend`):
 - A change during a fade starts from the blend shown at that moment.
 - An authored 0 switches at once; a negative time (unset on most collisions) uses 1 s, which is inferred, not traced.
 - The first selection after a load, and story sub-ID changes, switch at once.
+- Paused game time holds a fade where it is.
+- The map sweep and render gate jump between views with time held, so they insert `InstantLighting` and every change there switches at once.
 - `SEKIRO_ABLATE=nofade` restores the old switch.
 
 Open (#81): whether the native game also changes exposure and the row-0 sun for the outdoor geometry seen from inside.
