@@ -346,13 +346,27 @@ fn sky_model(cache: &Path, scene: &SceneState) -> Result<Option<String>> {
         }))
 }
 
+/// Overlay layers 1 to 4 of a collision's `SceneGparam` (`event_ids` in the layout), -1 for none.
+///
+/// The executable's layer reader `1410a8110` returns "no file" for a byte of 0 as well as for
+/// -1, so 0 never selects the family's `_0<sub>` file (#287).
+pub fn scene_overlays(scene_gparam: &Value) -> [i8; 4] {
+    std::array::from_fn(|i| {
+        scene_gparam["event_ids"][i]
+            .as_i64()
+            .and_then(|v| i8::try_from(v).ok())
+            .filter(|&v| v != 0)
+            .unwrap_or(-1)
+    })
+}
+
 /// Stem of the family file that holds layer `index` of the block whose layer 0 is `stem`.
 ///
 /// A block loads ten files `m<area>_<block>_<d><sub>`; the executable derives the number of the
 /// file for index `d` as `(d - base / 100) * 100 + base` (`ed5cd0`), where `base` is the number
 /// of the layer-0 file.
-/// Layers 1 to 4 take `d` from the four signed bytes of the collision `SceneGparam` struct, and
-/// a byte outside `0..=9` leaves the layer empty.
+/// Layers 1 to 4 take `d` from the four signed bytes of the collision `SceneGparam` struct
+/// ([`scene_overlays`]), and a byte outside `0..=9` leaves the layer empty.
 pub fn family_stem(stem: &str, index: i8) -> Option<String> {
     let (prefix, number) = stem.split_at_checked(stem.len().checked_sub(4)?)?;
     let valid = prefix.len() == 7
@@ -878,6 +892,22 @@ mod tests {
         read_gparam(&cache(), stem).unwrap().unwrap()
     }
 
+    #[test]
+    fn overlay_byte_zero_selects_no_file() {
+        let scene = serde_json::json!({"event_ids": [0, 1, -1, -1], "transition_time": -1.0});
+        assert_eq!(scene_overlays(&scene), [-1, 1, -1, -1]);
+        assert_eq!(scene_overlays(&serde_json::json!({})), [-1; 4]);
+        // Castle collision h022410 under the sub-ID file 0720: a 0 read as file 0 would lay
+        // `m11_01_0020` over the sub-ID file and undo it.
+        let stem = "m11_01_0720";
+        let library = LayerFiles::load(&cache(), &[stem]).unwrap();
+        let own = drawparam(stem);
+        let stack = |layers| format!("{:?}", library.compose(stem, &own, layers));
+        let fixed = stack(scene_overlays(&scene));
+        assert_eq!(fixed, stack([-1, 1, -1, -1]));
+        assert_ne!(fixed, stack([0, 1, -1, -1]));
+    }
+
     fn value(g: &Gparam, name: &str, row: i32, hour: f32) -> Vec<f32> {
         g.param("LightSet", name)
             .and_then(|p| p.at(g.light_row(row), hour))
@@ -1030,12 +1060,7 @@ mod tests {
             )
             .unwrap();
             for part in layout["collisions"].as_array().unwrap() {
-                let layers = [0, 1, 2, 3].map(|i| {
-                    part["scene_gparam"]["event_ids"][i]
-                        .as_i64()
-                        .map_or(-1, |v| v as i8)
-                });
-                let g = library.compose(&stem, &own, layers);
+                let g = library.compose(&stem, &own, scene_overlays(&part["scene_gparam"]));
                 let row = part["light_set"].as_i64().unwrap() as i32;
                 // Every field of every light slot has a value for the row, from some layer.
                 for name in [

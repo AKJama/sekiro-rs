@@ -696,7 +696,7 @@ pub fn add_map(
                 fog_set: row["fog_set"].as_i64().unwrap_or(-1) as i32,
                 scattering_set: row["scattering_set"].as_i64().unwrap_or(-1) as i32,
                 env_map: row["env_map"].as_i64().unwrap_or(-1) as i32,
-                layers: scene_layers(&row["scene_gparam"]),
+                layers: crate::lighting_selection::scene_overlays(&row["scene_gparam"]),
                 transition: scene_transition(&row["scene_gparam"]),
             });
         }
@@ -1527,19 +1527,9 @@ fn apply_fly(fly: Res<Fly>, mut camera: Query<&mut Transform, With<Camera3d>>) {
     }
 }
 
-/// The four layer file indices of a collision's `SceneGparam` (-1 where absent).
 /// The authored fade time of a collision's `SceneGparam` (-1 when absent).
 fn scene_transition(scene_gparam: &Value) -> f32 {
     scene_gparam["transition_time"].as_f64().unwrap_or(-1.) as f32
-}
-
-fn scene_layers(scene_gparam: &Value) -> [i8; 4] {
-    std::array::from_fn(|i| {
-        scene_gparam["event_ids"][i]
-            .as_i64()
-            .and_then(|v| i8::try_from(v).ok())
-            .unwrap_or(-1)
-    })
 }
 
 /// Viewer key G: the next group mode.
@@ -1603,7 +1593,7 @@ fn pick_groups(
             {
                 crate::lighting_selection::LightingSelection::set_overlays(
                     &mut selection.reborrow(),
-                    scene_layers(&row["scene_gparam"]),
+                    crate::lighting_selection::scene_overlays(&row["scene_gparam"]),
                     scene_transition(&row["scene_gparam"]),
                 );
             }
