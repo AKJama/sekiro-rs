@@ -1185,7 +1185,7 @@ fn update_background(
 }
 
 #[derive(Resource)]
-struct FogPipeline(Vec<Option<FogVariant>>);
+pub(crate) struct FogPipeline(Vec<Option<FogVariant>>);
 struct FogVariant {
     layout: BindGroupLayoutDescriptor,
     pipelines: Vec<CachedRenderPipelineId>,
@@ -1288,7 +1288,7 @@ fn init_pipeline(
         .collect();
     commands.insert_resource(FogPipeline(variants));
 }
-fn fog(
+pub(crate) fn fog(
     view: ViewQuery<(
         &ViewTarget,
         &ViewDepthStencilTexture,

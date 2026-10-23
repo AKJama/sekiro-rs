@@ -1431,3 +1431,28 @@ The fade (`MapLighting::fade_to`, `gparam::blend`):
 
 Open (#81): whether the native game also changes exposure and the row-0 sun for the outdoor geometry seen from inside.
 Our steady states follow the data above, which applies `0500` to the whole frame once Wolf is on the porch; the native rule for what a camera inside sees was not traced.
+
+## Distance depth of field, 2026-10-23
+
+Issue #99: past about 50 m the cliffs, buildings and far hills were sharper in our renders than in the real game.
+At the Outskirts cliff ledge (reference shot 34, spot 009), haze already matched; the remaining gap was blur.
+The reference's own Advanced Settings shot has Depth of Field at Max.
+
+What the data says:
+
+- `default.gparam` leaves `[GS]Lens Simulation` off; `mapbase.gparam` turns it on with a linear far circle of confusion (CoC).
+- `mapbase` sets FarStart 100 m, FarEnd 500 m, `LinearCoCFactorFar` 0.1, `SkyMaskRate` 0.25; the Outskirts base file `m11_00_0000` keeps them.
+- Block file 2 (`m11_00_0200`, `m11_01_0200`) overrides them to 50 m, 500 m and 0.5, but no Outskirts collision selects overlay 2, so our stack does not use it.
+- `LensSimu2_ComputeCoC` (disassembled with `d3dcompiler_47`) computes the far CoC as `saturate(saturate((z - FarStart) / (FarEnd - FarStart)) * LinearCoCFactorFar)` in view depth.
+- `LensSimu2_MakeBlurBuffer` multiplies the sky's far CoC by `1 - SkyMaskRate`, skips radii under a quarter pixel and averages 16 taps at the radius and 8 at half of it.
+
+The pass (`lens_dof.rs`, `lens_dof.wesl`) runs in HDR after fog and before bloom and tone mapping, at full resolution.
+Taps nearer than the pixel only count as far as their own blur reaches, so sharp outlines do not bleed into the distance behind them.
+The near CoC (physical lens mode, focus 6 m on the camera target) and the native half-resolution buffers and composite are not ported.
+`--no-dof` turns the pass off.
+
+The scale from CoC to pixels comes from the CPU constant `g_vSampleScale`, which is not traced.
+`MAX_RADIUS` (30 px at 1440 lines for CoC 1) is fitted to reference shot 34, not traced.
+On a far-hill patch (2560x1440, X 1330-1550, Y 330-450) the edge-filter spread is 5.4 in retail (snowflakes included), 22.8 before, and 11.9, 9.5, 8.2 and 7.2 at radii 8, 12, 20 and 30.
+The patch's luminance mean and contrast stay within 2 percent and 7 percent of before.
+If the game does use block file 2 here, the CoC is five times larger and the true scale correspondingly smaller; the blur at this spot would be the same.
