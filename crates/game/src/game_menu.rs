@@ -449,9 +449,10 @@ struct Entry {
 
 /// Installs the display over the existing pause state, with the kit and its item params
 /// (`items`) owned by the sim.
-pub(super) fn install(app: &mut App, attack: u8, items: Arc<ItemData>) {
+/// The in-game menu; `more` atlases (the title's) load in the same read of the menu texture.
+pub(super) fn install(app: &mut App, attack: u8, items: Arc<ItemData>, more: &[&'static str]) {
     GameFonts::insert(app);
-    MenuArt::insert_with(app, &[&ICONS[..], &STORIES[..], &["SB_FE"]].concat());
+    MenuArt::insert_with(app, &[&ICONS[..], &STORIES[..], &["SB_FE"], more].concat());
     game_ui::install_cover(app);
     app.insert_resource(Book::load(&sekiro_sim::cache::root(), attack, items))
         .init_resource::<GameMenu>()

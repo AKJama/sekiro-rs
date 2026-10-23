@@ -427,7 +427,8 @@ pub(crate) struct Loaded {
     opponent: EnemySpec,
     libraries: [AnimLibrary; 2],
     enemy_draw_groups: Option<[bool; 32]>,
-    arena: Option<Arena>,
+    /// The arena and how long it took to load, for its log line.
+    arena: Option<(Arena, std::time::Duration)>,
     map: Option<MapLoad>,
 }
 
@@ -510,13 +511,15 @@ fn load(
     let mut arena = None;
     let mut on_map = None;
     if let Some(spec) = options.arena {
-        arena = Some(Arena::load(cache, spec, options.full_map).map_err(|e| {
+        let t = std::time::Instant::now();
+        let loaded = Arena::load(cache, spec, options.full_map).map_err(|e| {
             anyhow::anyhow!(
                 "arena {}: {e} (run `sekiro-extract map {}`)",
                 spec.name,
                 spec.map
             )
-        })?);
+        })?;
+        arena = Some((loaded, t.elapsed()));
     } else if let Some(id) = &options.map {
         let dir = map::map_dir(cache, id)?;
         let blocks = map::world::play_blocks(cache, id)?;
@@ -640,7 +643,7 @@ fn assemble(
     let mut pickups = Vec::new();
     let mut within = None;
     let mut fog_walls = Vec::new();
-    if let Some(arena) = arena {
+    if let Some((arena, took)) = arena {
         let spec = arena.spec;
         arena.place(&mut duel);
         fog_walls.clone_from(&arena.fog_walls);
@@ -659,7 +662,7 @@ fn assemble(
             within = Some((arena.layout.center(), spec.radius));
         }
         eprintln!(
-            "arena {} on {}: {} at {:?}, Wolf ({}) at {:?}; {} collision triangles{}",
+            "arena {} on {}: {} at {:?}, Wolf ({}) at {:?}; {} collision triangles{} in {:.2} s",
             spec.name,
             spec.map,
             spec.boss_part,
@@ -672,6 +675,7 @@ fn assemble(
             } else {
                 format!(" within {} m", spec.radius)
             },
+            took.as_secs_f32()
         );
         on_map = Some((
             map::map_dir(cache, spec.map)?,
@@ -829,9 +833,8 @@ impl Prepared {
         if let Some(ground) = self.foot_ground {
             world.insert_resource(ground);
         }
-        if !self.idols.spots.is_empty() {
-            world.insert_resource(self.idols);
-        }
+        // Even with none: the start menu's app runs the idol systems for any area it may load.
+        world.insert_resource(self.idols);
         if let Some((_, _, collision)) = self.on_map {
             world.insert_resource(MapCollision(collision));
         }
@@ -852,6 +855,10 @@ impl Prepared {
             faded: [false; 2],
             perilous_age: None,
         });
+        // The map's population draws from the simulation, so it spawns once that is in.
+        if options.map_enemies {
+            map_enemies::insert(world, cache)?;
+        }
         Ok(())
     }
 }
@@ -910,7 +917,7 @@ pub fn run(mut options: Options) -> Result<()> {
         scripted: prepared.script.is_some() || replay.is_some(),
         title: false,
     };
-    let mut app = build(&mut options, &cache, item_data, shape, replay)?;
+    let (mut app, _) = build(&mut options, &cache, item_data, shape, replay)?;
     prepared.insert(app.world_mut(), &cache, &options)?;
     app.run();
     Ok(())
@@ -937,21 +944,17 @@ pub fn run_title(mut options: Options) -> Result<()> {
         scripted: false,
         title: true,
     };
-    let mut app = build(&mut options, &cache, item_data.clone(), shape, None)?;
+    let (mut app, startup) = build(&mut options, &cache, item_data.clone(), shape, None)?;
     app.world_mut().remove_resource::<map::DeferredWorld>();
-    // Startup is what the session's systems spawn from its data: it runs once the session has
-    // loaded ([`finish_title_load`]); the menu brings its own.
-    let startup = app
-        .world_mut()
-        .resource_mut::<Schedules>()
-        .remove(Startup)
-        .context("the app has a Startup schedule")?;
+    app.world_mut()
+        .resource_mut::<crate::menu::PanelState>()
+        .title = true;
     app.insert_non_send(TitleLoad {
         options: Some(options),
         cache,
         item_data,
         thread: None,
-        startup: Some(startup),
+        startup,
         picked_at: None,
     })
     .set_error_handler(skip_until_play)
@@ -1014,7 +1017,8 @@ fn finish_title_load(world: &mut World) {
         let cache = title.cache.clone();
         let items = title.item_data.clone();
         title.thread = Some(std::thread::spawn(move || {
-            // The drawn world (its blocks, stories and lights) loads beside the collision.
+            // The drawn world (its blocks and lights) loads beside the collision, and takes the
+            // stories the collision loaded.
             let world = options
                 .map
                 .clone()
@@ -1022,19 +1026,22 @@ fn finish_title_load(world: &mut World) {
                 .map(|id| {
                     let cache = cache.clone();
                     std::thread::spawn(move || {
-                        let world = map::DeferredMap::load(
-                            &map::map_dir(&cache, &id)?,
-                            map::story::MapStory::default(),
-                        );
-                        stage("connected world, stories and lights");
+                        let world = map::DeferredMap::load(&map::map_dir(&cache, &id)?);
+                        stage("connected world and lights");
                         world
                     })
                 });
             let loaded = load(&options, &cache, &items).and_then(|mut loaded| {
                 if let Some(world) = world {
-                    let world = world
+                    let mut world = world
                         .join()
                         .map_err(|_| anyhow::anyhow!("the world loading thread panicked"))??;
+                    let stories = loaded
+                        .map
+                        .as_mut()
+                        .map(|m| std::mem::take(&mut m.stories))
+                        .unwrap_or_default();
+                    world.add_stories(&cache, stories)?;
                     loaded.deferred = Some(world);
                 }
                 anyhow::Ok(loaded)
@@ -1055,10 +1062,9 @@ fn finish_title_load(world: &mut World) {
         if let (Some(deferred), Some(m)) = (loaded.deferred.take(), &loaded.map) {
             deferred.insert(world, &m.dir)?;
         }
-        let mut prepared = assemble(&mut options, &title.cache, &title.item_data, loaded)?;
+        // The stories went to the connected world above; a map alone uses none.
+        let prepared = assemble(&mut options, &title.cache, &title.item_data, loaded)?;
         map::refocus(world, Vec3::from_array(prepared.duel.player.body.position));
-        // The map loads its own stories ([`map::add_map`]).
-        drop(std::mem::take(&mut prepared.stories));
         prepared.insert(world, &title.cache, &options)
     });
     if let Err(error) = result {
@@ -1072,24 +1078,43 @@ fn finish_title_load(world: &mut World) {
     if let Some(mut startup) = title.startup.take() {
         startup.run(world);
     }
-    if let Some(mut state) = world.get_resource_mut::<crate::menu::PanelState>() {
-        state.paused = false;
-    }
     stage(&format!(
         "session built {:.1} s after the pick",
         title.picked_at.map_or(0.0, |t| t.elapsed().as_secs_f32())
     ));
 }
 
+/// Sets aside the Startup systems added so far (Bevy's own, such as picking's mouse pointer),
+/// so the ones added next form the session's own Startup ([`take_session_startup`]).
+fn set_engine_startup_aside(app: &mut App) -> Schedule {
+    app.world_mut()
+        .resource_mut::<Schedules>()
+        .remove(Startup)
+        .unwrap_or_else(|| Schedule::new(Startup))
+}
+
+/// Takes out the Startup systems added since [`set_engine_startup_aside`], the session's own,
+/// and puts the `engine`'s back to run on the first frame.
+fn take_session_startup(app: &mut App, engine: Schedule) -> Schedule {
+    let mut schedules = app.world_mut().resource_mut::<Schedules>();
+    let session = schedules
+        .remove(Startup)
+        .unwrap_or_else(|| Schedule::new(Startup));
+    schedules.insert(engine);
+    session
+}
+
 /// Builds the play app from the options and the session's [`Shape`]; the session itself is
-/// inserted by the caller.
+/// inserted by the caller. Under the start menu it also returns the session's Startup systems:
+/// they spawn from the session's data, so they run once it has loaded ([`finish_title_load`]),
+/// while Bevy's own run on the first frame.
 fn build(
     options: &mut Options,
     cache: &Path,
     item_data: Arc<sekiro_sim::items::ItemData>,
     shape: Shape,
     replay: Option<crate::input_replay::InputReplay>,
-) -> Result<App> {
+) -> Result<(App, Option<Schedule>)> {
     let on_map = options.on_map();
     let scripted = shape.scripted;
     let map_dir = options
@@ -1146,6 +1171,7 @@ fn build(
             }),
     );
     stage("default plugins");
+    let engine_startup = shape.title.then(|| set_engine_startup_aside(&mut app));
     app.insert_resource(ModelPath(if on_map { "models/" } else { "" }))
         .insert_resource(ClearColor(Color::srgb(0.52, 0.60, 0.70)))
         .insert_resource(GlobalAmbientLight {
@@ -1285,7 +1311,12 @@ fn build(
     }
     crate::menu::install(&mut app);
     // First of the screens, so its extra menu atlases load with theirs in one read.
-    game_menu::install(&mut app, options.attack_power.value(), item_data);
+    let title_art: &[&'static str] = if shape.title {
+        &[crate::title::TITLE_ATLAS]
+    } else {
+        &[]
+    };
+    game_menu::install(&mut app, options.attack_power.value(), item_data, title_art);
     crate::death_screen::install(&mut app);
     idol::install(&mut app, shape.idols);
     pickup::install(&mut app, shape.pickups);
@@ -1372,12 +1403,13 @@ fn build(
         }
     }
     if options.map_enemies {
-        map_enemies::install(&mut app, cache)?;
+        map_enemies::install(&mut app);
     }
     map::ready::install(&mut app);
     app.add_plugins(crate::presentation::PresentationPlugin)
         .add_systems(Last, (capture, exit_fast).chain());
-    Ok(app)
+    let session_startup = engine_startup.map(|engine| take_session_startup(&mut app, engine));
+    Ok((app, session_startup))
 }
 
 /// Ends a play session as soon as anything asks the app to exit (closing the window, the pause
@@ -3147,7 +3179,8 @@ mod tests {
     use sekiro_sim::fight::FighterKind;
 
     /// Under the start menu the session's systems wait for its resources instead of failing,
-    /// and its Startup runs only when the session is inserted (#8).
+    /// and its Startup runs only when the session is inserted, while the engine's own Startup
+    /// (picking's mouse pointer, which the menu's clicks need) runs on the first frame (#8).
     #[test]
     fn start_menu_app_waits_for_the_session() {
         #[derive(Resource)]
@@ -3158,24 +3191,22 @@ mod tests {
         app.add_plugins(MinimalPlugins)
             .set_error_handler(skip_until_play)
             .init_resource::<Seen>()
-            .add_systems(Startup, |s: Res<Session>, mut seen: ResMut<Seen>| {
-                seen.0.push(s.0)
-            })
-            .add_systems(Update, |s: Res<Session>, mut seen: ResMut<Seen>| {
-                seen.0.push(s.0 + 100)
-            });
-        let mut startup = app
-            .world_mut()
-            .resource_mut::<Schedules>()
-            .remove(Startup)
-            .unwrap();
+            .add_systems(Startup, |mut seen: ResMut<Seen>| seen.0.push(0));
+        let engine = set_engine_startup_aside(&mut app);
+        app.add_systems(Startup, |s: Res<Session>, mut seen: ResMut<Seen>| {
+            seen.0.push(s.0)
+        })
+        .add_systems(Update, |s: Res<Session>, mut seen: ResMut<Seen>| {
+            seen.0.push(s.0 + 100)
+        });
+        let mut startup = take_session_startup(&mut app, engine);
         app.update();
         app.update();
-        assert!(app.world().resource::<Seen>().0.is_empty());
+        assert_eq!(app.world().resource::<Seen>().0, [0]);
         app.world_mut().insert_resource(Session(1));
         startup.run(app.world_mut());
         app.update();
-        assert_eq!(app.world().resource::<Seen>().0, [1, 101]);
+        assert_eq!(app.world().resource::<Seen>().0, [0, 1, 101]);
     }
 
     #[test]

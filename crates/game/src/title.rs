@@ -17,6 +17,8 @@ use bevy::ui_widgets::{Activate, ActivateOnPress, Button};
 
 use crate::game_ui::{GameFonts, MenuArt};
 
+/// The title art's atlas in `menu/hi/01_common.tpf`.
+pub(crate) const TITLE_ATLAS: &str = "SB_Title";
 /// The title screen's rows.
 const MAIN_ROWS: [&str; 3] = ["New Game", "Chapter", "Exit"];
 /// The text colours of a row: chosen and not.
@@ -36,6 +38,8 @@ pub(crate) struct Title {
     /// Rows clicked this frame.
     clicked: Vec<usize>,
     picked: bool,
+    /// Play has taken over the window ([`leave`]).
+    left: bool,
 }
 
 /// What a menu action does.
@@ -56,7 +60,14 @@ impl Title {
             script,
             clicked: Vec::new(),
             picked: false,
+            left: false,
         }
+    }
+
+    /// A title with one start, for other modules' tests.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self::new(vec!["Start 0".into()], Vec::new())
     }
 
     /// The rows of the list that is open.
@@ -148,7 +159,8 @@ pub(crate) fn install(app: &mut App, dir: &Path) {
     let args: Vec<String> = std::env::args().collect();
     let script = read_script(crate::arg_value(&args, "--title-script").map(PathBuf::from));
     GameFonts::insert(app);
-    MenuArt::add(app, &["SB_Title"]);
+    // The app's menus already read it with their atlases (`crate::game_menu::install`).
+    MenuArt::add(app, &[TITLE_ATLAS]);
     app.insert_resource(Title::new(chapter_rows(dir), script))
         .add_systems(Startup, spawn)
         .add_systems(
@@ -160,9 +172,18 @@ pub(crate) fn install(app: &mut App, dir: &Path) {
         .add_systems(Update, draw_rows);
 }
 
+/// Run condition: the title, or the loading after its pick, is up; play's own pause
+/// ([`crate::menu`]) waits until play takes over.
+pub(crate) fn up(title: Option<Res<Title>>) -> bool {
+    title.is_some_and(|t| !t.left)
+}
+
 /// Removes the menu's camera once the session's own takes over; the menu itself went when the
 /// area was picked.
 pub(crate) fn leave(world: &mut World) {
+    if let Some(mut title) = world.get_resource_mut::<Title>() {
+        title.left = true;
+    }
     let entities: Vec<Entity> = world
         .query_filtered::<Entity, Or<(With<TitleCamera>, With<TitleRoot>)>>()
         .iter(world)
@@ -179,7 +200,7 @@ fn spawn(mut commands: Commands, fonts: Res<GameFonts>, art: Res<MenuArt>) {
     );
     commands.spawn((TitleCamera, Camera2d));
     let sprite = |name: &str, height: f32| {
-        art.sprite("SB_Title", name).map(|(image, aspect)| {
+        art.sprite(TITLE_ATLAS, name).map(|(image, aspect)| {
             (
                 image,
                 Node {

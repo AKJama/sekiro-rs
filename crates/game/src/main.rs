@@ -124,11 +124,12 @@ fn dispatch() -> anyhow::Result<()> {
     if args.iter().any(|a| a == "--menu") {
         return menu::run(&args);
     }
-    // The start menu (#8): no area flag opens the game on its title, New Game's options with
-    // the kept flags (`--perf`, `--cache`, the window), in the window play then loads in.
+    // The start menu (#8): a launch with no arguments, or `--title` with any kept flags
+    // (`--perf`, `--cache`, the window), opens the game on its title. New Game plays the default
+    // choices on an extracted map, with those flags, in the same window.
     if args.len() == 1 || args.iter().any(|a| a == "--title") {
         let mut title = vec![args[0].clone()];
-        title.extend(menu::Choices::default().args());
+        title.extend(menu::Choices::for_title(&sekiro_sim::cache::root()).args());
         title.extend(menu::kept_args(&args[1..]));
         return play::run_title(play_options(&title)?);
     }
