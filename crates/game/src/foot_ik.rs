@@ -23,6 +23,7 @@
 
 use bevy::prelude::*;
 use sekiro_formats::anim::Skeleton;
+use sekiro_formats::hknp::CollisionMesh;
 use sekiro_sim::collision::CollisionWorld;
 use std::sync::{Arc, Mutex};
 
@@ -200,7 +201,7 @@ fn turn_about(skeleton: &Skeleton, model: &mut [Mat4], root: usize, pivot: Vec3,
     crate::character::turn_subtree(skeleton, model, root, by);
 }
 
-/// Side of the square tiles [`Floors`] indexes its triangles by, metres.
+/// Side of the square tiles the floors are found by, metres.
 pub const TILE: f32 = 32.0;
 
 /// The tile `(x, z)` is in.
@@ -208,70 +209,174 @@ pub fn tile_of(x: f32, z: f32) -> (i32, i32) {
     ((x / TILE).floor() as i32, (z / TILE).floor() as i32)
 }
 
-/// The `h` floors of the play blocks ([`crate::map::world::foot_ik_ground`]) indexed by tile and
-/// kept compact: the two Ashina blocks hold about 8 million floor triangles, which as one
-/// [`CollisionWorld`] cost 1.3 GB, so the feet query a world of the tiles around Wolf only
-/// ([`Floors::world_around`]).
-#[derive(Default)]
-pub struct Floors {
-    vertices: Vec<[f32; 3]>,
-    triangles: Vec<[u32; 3]>,
+/// Triangles per chunk of [`BlockFloors`]' index.
+const CHUNK: u32 = 1024;
+
+/// Whether a triangle faces within 73 degrees of up (either way): the ground the feet meet.
+fn is_floor([a, b, c]: [Vec3; 3]) -> bool {
+    (b - a).cross(c - a).normalize_or_zero().y.abs() >= 0.3
+}
+
+/// Reads a postcard varint (LEB128) `u32` at `*at`.
+fn varint(bytes: &[u8], at: &mut usize) -> Option<u32> {
+    let mut value = 0u32;
+    for shift in (0..35).step_by(7) {
+        let byte = *bytes.get(*at)?;
+        *at += 1;
+        value |= u32::from(byte & 0x7f).checked_shl(shift)?;
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// One block's `h` collision (`collision.bin`, a postcard [`CollisionMesh`]) read in place from
+/// the mapped file, so its millions of triangles cost no memory of their own (#285).
+/// The index keeps, per [`TILE`], the chunks of [`CHUNK`] triangles that hold a floor there,
+/// and the byte offset of each chunk's indices, since the indices are varints.
+///
+/// [`CollisionMesh`]: sekiro_formats::hknp::CollisionMesh
+pub struct BlockFloors {
+    map: memmap2::Mmap,
+    /// Byte offset of the first vertex (three `f32`s each) and the vertex count.
+    vertices: (usize, u32),
+    triangles: u32,
+    /// Byte offset of the indices of triangle `CHUNK * k`.
+    chunks: Vec<usize>,
+    /// Triangle ranges that are not ground: parts the story switches off and helper parts the
+    /// player does not collide with. Sorted and disjoint.
+    skip: Vec<std::ops::Range<u32>>,
     tiles: std::collections::HashMap<(i32, i32), Vec<u32>>,
 }
 
-impl Floors {
-    /// Adds the floors of `mesh`: its triangles facing within 73 degrees of up (either way).
-    pub fn add(&mut self, mesh: &sekiro_formats::hknp::CollisionMesh) {
-        let mut remap = vec![u32::MAX; mesh.vertices.len()];
-        for tri in mesh.indices.as_chunks::<3>().0 {
-            let corners = tri.map(|i| Vec3::from(mesh.vertices[i as usize]));
-            let [a, b, c] = corners;
-            if (b - a).cross(c - a).normalize_or_zero().y.abs() < 0.3 {
+impl BlockFloors {
+    /// Maps `path` and indexes its floors outside `skip` (sorted and disjoint).
+    pub fn open(path: &std::path::Path, skip: Vec<std::ops::Range<u32>>) -> anyhow::Result<Self> {
+        let file = std::fs::File::open(path)?;
+        // SAFETY: the cache is written only by the extractor, never while the game runs.
+        let map = unsafe { memmap2::Mmap::map(&file)? };
+        let bad = || anyhow::anyhow!("{}: not a collision mesh", path.display());
+        let mut at = 0;
+        let count = varint(&map, &mut at).ok_or_else(bad)?;
+        let vertices = (at, count);
+        at += count as usize * 12;
+        let indices = varint(&map, &mut at).ok_or_else(bad)?;
+        if at > map.len() || indices % 3 != 0 {
+            return Err(bad());
+        }
+        let mut block = Self {
+            map,
+            vertices,
+            triangles: indices / 3,
+            chunks: Vec::new(),
+            skip,
+            tiles: Default::default(),
+        };
+        let mut skip = 0;
+        for t in 0..block.triangles {
+            if t % CHUNK == 0 {
+                block.chunks.push(at);
+            }
+            let tri = block.triangle(&mut at).ok_or_else(bad)?;
+            while block.skip.get(skip).is_some_and(|r| r.end <= t) {
+                skip += 1;
+            }
+            if block.skip.get(skip).is_some_and(|r| r.contains(&t)) || !is_floor(tri) {
                 continue;
             }
-            let t = self.triangles.len() as u32;
-            let lo = corners.into_iter().reduce(Vec3::min).unwrap_or_default();
-            let hi = corners.into_iter().reduce(Vec3::max).unwrap_or_default();
-            let (lo, hi) = (tile_of(lo.x, lo.z), tile_of(hi.x, hi.z));
+            let (lo, hi) = bounds(tri);
+            let chunk = t / CHUNK;
             for x in lo.0..=hi.0 {
                 for z in lo.1..=hi.1 {
-                    self.tiles.entry((x, z)).or_default().push(t);
+                    let chunks = block.tiles.entry((x, z)).or_default();
+                    if chunks.last() != Some(&chunk) {
+                        chunks.push(chunk);
+                    }
                 }
             }
-            let vertices = &mut self.vertices;
-            self.triangles.push(tri.map(|i| {
-                let slot = &mut remap[i as usize];
-                if *slot == u32::MAX {
-                    *slot = vertices.len() as u32;
-                    vertices.push(mesh.vertices[i as usize]);
-                }
-                *slot
-            }));
         }
+        block.tiles.shrink_to_fit();
+        Ok(block)
     }
 
-    pub fn triangle_count(&self) -> usize {
-        self.triangles.len()
+    /// The corners of the triangle whose indices start at `*at`, moving `*at` past them.
+    fn triangle(&self, at: &mut usize) -> Option<[Vec3; 3]> {
+        let mut corners = [Vec3::ZERO; 3];
+        for corner in &mut corners {
+            let i = varint(&self.map, at)?;
+            if i >= self.vertices.1 {
+                return None;
+            }
+            let start = self.vertices.0 + i as usize * 12;
+            let xyz = self.map.get(start..start + 12)?;
+            let f = |k: usize| f32::from_le_bytes([xyz[k], xyz[k + 1], xyz[k + 2], xyz[k + 3]]);
+            *corner = Vec3::new(f(0), f(4), f(8));
+        }
+        Some(corners)
     }
 
-    /// The floors of `tile` and the eight around it, so a point within [`TILE`] of `tile`
-    /// finds its ground.
-    pub fn world_around(&self, tile: (i32, i32)) -> CollisionWorld {
-        let mut ids: Vec<u32> = (-1..=1)
-            .flat_map(|dx| (-1..=1).map(move |dz| (tile.0 + dx, tile.1 + dz)))
-            .filter_map(|t| self.tiles.get(&t))
+    /// Appends to `mesh` the floors of this block over the tiles `lo..=hi`.
+    pub(crate) fn floors_in(&self, lo: (i32, i32), hi: (i32, i32), mesh: &mut CollisionMesh) {
+        let mut chunks: Vec<u32> = (lo.0..=hi.0)
+            .flat_map(|x| (lo.1..=hi.1).map(move |z| (x, z)))
+            .filter_map(|tile| self.tiles.get(&tile))
             .flatten()
             .copied()
             .collect();
-        ids.sort_unstable();
-        ids.dedup();
-        let mut mesh = sekiro_formats::hknp::CollisionMesh::default();
-        for id in ids {
-            let base = mesh.vertices.len() as u32;
-            let tri = self.triangles[id as usize];
-            mesh.vertices.extend(tri.map(|i| self.vertices[i as usize]));
-            mesh.indices.extend([base, base + 1, base + 2]);
-            mesh.materials.push(u32::MAX);
+        chunks.sort_unstable();
+        chunks.dedup();
+        for chunk in chunks {
+            let first = chunk * CHUNK;
+            let mut at = self.chunks[chunk as usize];
+            let mut skip = self.skip.partition_point(|r| r.end <= first);
+            for t in first..(first + CHUNK).min(self.triangles) {
+                let Some(tri) = self.triangle(&mut at) else {
+                    return;
+                };
+                while self.skip.get(skip).is_some_and(|r| r.end <= t) {
+                    skip += 1;
+                }
+                if self.skip.get(skip).is_some_and(|r| r.contains(&t)) || !is_floor(tri) {
+                    continue;
+                }
+                let (a, b) = bounds(tri);
+                if a.0 > hi.0 || a.1 > hi.1 || b.0 < lo.0 || b.1 < lo.1 {
+                    continue;
+                }
+                let base = mesh.vertices.len() as u32;
+                mesh.vertices.extend(tri.map(<[f32; 3]>::from));
+                mesh.indices.extend([base, base + 1, base + 2]);
+                mesh.materials.push(u32::MAX);
+            }
+        }
+    }
+}
+
+/// The tiles a triangle's bounding box spans.
+fn bounds(tri: [Vec3; 3]) -> ((i32, i32), (i32, i32)) {
+    let lo = tri.into_iter().reduce(Vec3::min).unwrap_or_default();
+    let hi = tri.into_iter().reduce(Vec3::max).unwrap_or_default();
+    (tile_of(lo.x, lo.z), tile_of(hi.x, hi.z))
+}
+
+/// The `h` floors of the play blocks ([`crate::map::world::foot_ik_ground`]). The two Ashina
+/// blocks hold about 8 million floor triangles, 1.3 GB as one [`CollisionWorld`] and 350 MB as
+/// a compact index, so they stay in the mapped cache files ([`BlockFloors`]) and the feet query
+/// a world of the tiles around Wolf only ([`Floors::world_around`]).
+#[derive(Default)]
+pub struct Floors {
+    pub blocks: Vec<BlockFloors>,
+}
+
+impl Floors {
+    /// The floors of `tile` and the eight around it, so a point within [`TILE`] of `tile`
+    /// finds its ground.
+    pub fn world_around(&self, tile: (i32, i32)) -> CollisionWorld {
+        let (lo, hi) = ((tile.0 - 1, tile.1 - 1), (tile.0 + 1, tile.1 + 1));
+        let mut mesh = CollisionMesh::default();
+        for block in &self.blocks {
+            block.floors_in(lo, hi, &mut mesh);
         }
         CollisionWorld::from_mesh(&mesh)
     }
@@ -280,9 +385,10 @@ impl Floors {
 /// The world of the floors around one tile.
 type Local = ((i32, i32), Arc<CollisionWorld>);
 
-/// The ground the feet meet: the `h` floors of the tiles around Wolf ([`Floors`], built on a
-/// thread at load, and again on that thread whenever he enters another tile; no IK until the
-/// first is ready), and the placed objects of the play collision, which `h` lacks.
+/// The ground the feet meet: the `h` floors of the tiles around Wolf ([`Floors`], indexed on a
+/// thread at load, and read on that thread whenever he enters another tile, dropping the old
+/// ones; no IK until the first is ready), and the placed objects of the play collision, which
+/// `h` lacks.
 #[derive(Resource)]
 pub struct FootGround {
     local: Arc<Mutex<Option<Local>>>,
@@ -292,7 +398,7 @@ pub struct FootGround {
 }
 
 impl FootGround {
-    /// Builds the `h` floors of `layouts` on a thread, which then builds the world around each
+    /// Indexes the `h` floors of `layouts` on a thread, which then builds the world around each
     /// tile [`FootGround::follow`] asks for.
     pub fn load(
         cache: &std::path::Path,
@@ -325,21 +431,22 @@ impl FootGround {
                     }
                 };
                 drop((rows, off));
-                info!(
-                    "foot IK ground: {} h floor triangles in {:.0} ms",
-                    floors.triangle_count(),
-                    t.elapsed().as_secs_f64() * 1e3
-                );
+                // Told with the first tile: this can finish before the log is set up.
+                let mut indexed = Some((floors.blocks.len(), t.elapsed()));
                 while let Ok(mut tile) = asks.recv() {
                     while let Ok(newer) = asks.try_recv() {
                         tile = newer;
                     }
                     let t = std::time::Instant::now();
                     let world = Arc::new(floors.world_around(tile));
-                    debug!(
-                        "foot IK ground: tile {tile:?}, {} triangles in {:.1} ms",
+                    info!(
+                        "foot IK ground: tile {tile:?}, {} triangles in {:.1} ms{}",
                         world.triangle_count(),
-                        t.elapsed().as_secs_f64() * 1e3
+                        t.elapsed().as_secs_f64() * 1e3,
+                        indexed.take().map_or(String::new(), |(n, t)| format!(
+                            " ({n} h blocks indexed in {:.0} ms)",
+                            t.as_secs_f64() * 1e3
+                        ))
                     );
                     if let Ok(mut slot) = slot.lock() {
                         *slot = Some((tile, world));

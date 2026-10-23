@@ -431,7 +431,8 @@ pub(crate) fn story_off_parts(
 /// The ground Wolf's feet meet (#276): each block's high-resolution `h` collision
 /// (`collision.bin`), which foot IK rays meet in the exe while the capsule meets `l`
 /// (`docs/HIT-FILTERS.md`), without the parts `off` names and the helper parts the player does
-/// not collide with, and only its floors ([`crate::foot_ik::Floors::add`]).
+/// not collide with ([`sekiro_sim::hit_filter::strip_helpers`]), read in place from the cache
+/// ([`crate::foot_ik::BlockFloors`]).
 pub(crate) fn foot_ik_ground(
     cache: &Path,
     layouts: &BTreeMap<String, Value>,
@@ -443,18 +444,41 @@ pub(crate) fn foot_ik_ground(
             .join("maps")
             .join(block)
             .join(sekiro_sim::lo_collision::HIGH_FILE);
-        let Ok(bytes) = std::fs::read(&path) else {
+        if !path.is_file() {
             continue;
-        };
-        let mut mesh = CollisionMesh::from_bytes(&bytes)
-            .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
-        drop(bytes);
+        }
         let off = off.get(block);
-        sekiro_sim::arenas_a::remove_hidden_collision(&mut mesh, layout, |n| {
-            off.is_some_and(|o| o.contains(n))
-        });
-        sekiro_sim::hit_filter::strip_helpers(&mut mesh, layout);
-        floors.add(&mesh);
+        let mut skip: Vec<std::ops::Range<u32>> = layout["collisions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|row| {
+                let hidden = row["name"]
+                    .as_str()
+                    .is_some_and(|n| off.is_some_and(|o| o.contains(n)));
+                let helper = sekiro_sim::hit_filter::row_filter(row).is_some_and(|f| {
+                    f == sekiro_sim::hit_filter::SWIM_FILTER
+                        || !sekiro_sim::hit_filter::player_collides(f)
+                });
+                hidden || helper
+            })
+            .filter_map(|row| {
+                let first = u32::try_from(row["triangles"][0].as_u64()?).ok()?;
+                let count = u32::try_from(row["triangles"][1].as_u64()?).ok()?;
+                Some(first..first.saturating_add(count))
+            })
+            .collect();
+        skip.sort_unstable_by_key(|r| r.start);
+        let mut merged: Vec<std::ops::Range<u32>> = Vec::with_capacity(skip.len());
+        for r in skip {
+            match merged.last_mut() {
+                Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+                _ => merged.push(r),
+            }
+        }
+        floors
+            .blocks
+            .push(crate::foot_ik::BlockFloors::open(&path, merged)?);
     }
     Ok(floors)
 }
@@ -2648,6 +2672,38 @@ mod tests {
         let idle = library.clip("a000_000000").unwrap();
         let model = skeleton.model_space(&idle.sample(0.0, &skeleton));
         let legs = crate::foot_ik::legs(&skeleton).unwrap();
+        // The mapped floors are the floors of the decoded mesh, hidden and helper parts removed.
+        let block = "m11_00_00_00";
+        let bytes =
+            std::fs::read(play.cache.join("maps").join(block).join("collision.bin")).unwrap();
+        let mut mesh = CollisionMesh::from_bytes(&bytes).unwrap();
+        let layout = &play.blocks[block];
+        sekiro_sim::arenas_a::remove_hidden_collision(&mut mesh, layout, |n| {
+            off.get(block).is_some_and(|o| o.contains(n))
+        });
+        sekiro_sim::hit_filter::strip_helpers(&mut mesh, layout);
+        let lo = Vec2::new(tile.0 as f32 - 1.0, tile.1 as f32 - 1.0) * crate::foot_ik::TILE;
+        let hi = lo + 3.0 * crate::foot_ik::TILE;
+        let decoded = mesh
+            .indices
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|t| t.map(|i| Vec3::from(mesh.vertices[i as usize])))
+            .filter(|&[a, b, c]| (b - a).cross(c - a).normalize_or_zero().y.abs() >= 0.3)
+            .filter(|t| {
+                let min = t.iter().copied().reduce(Vec3::min).unwrap();
+                let max = t.iter().copied().reduce(Vec3::max).unwrap();
+                max.x >= lo.x && max.z >= lo.y && min.x < hi.x && min.z < hi.y
+            })
+            .count();
+        let mut mapped = CollisionMesh::default();
+        floors.blocks[0].floors_in(
+            (tile.0 - 1, tile.1 - 1),
+            (tile.0 + 1, tile.1 + 1),
+            &mut mapped,
+        );
+        assert_eq!(mapped.triangle_count(), decoded);
         let mut most_float = 0.0_f32;
         for (dx, dz) in [
             (-3.0, -4.0),
