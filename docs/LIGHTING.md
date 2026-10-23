@@ -1417,7 +1417,16 @@ Every cached map authors light set 0 on its map pieces and objects, -1 on enemie
 In the Outskirts at hour 6, row 0 authors its LocalLight colours with W 0 and half the row-100 sun.
 We now draw map pieces and objects with row 0, and characters and the few parts authoring another set with the collision-selected row.
 The collision row still drives post, fog, sky and the shadowed sun direction, which matches row 0 at hour 6.
-Parts authoring a set above 0 probably use their own row natively; we give them the collision row for now.
+
+Since #67 every map part uses its own row, including the few authoring a set above 0, by the same per-instance rule:
+
+- m11_00 has two parts on 100 (`m605100_6000`, the empty `o110000_4000`) and two on 110 (`m015012_6000`, `o115120_1800`); m11_01 has one on 100 (`m500010_5900`) and three on 110 (`m002152_5000`, `m012610_6700`, `m610100_6700`).
+- Each part root carries its raw MSB light set id (`PartLightSet`), and the map material keeps one shared light buffer per row in use.
+- Authored fog cards (`map_fog_surface.rs`) read their part's row too, so fog over the Outskirts terrain is lit with row 0 like the ground under it, not the collision row.
+- Characters and parts authoring -1 keep the collision row.
+- In a doorway fade (#52) only the collision row starts from the old row's values, which is what characters see.
+  A part's own row is a fixed record, so it only blends between the old and new layer stacks, also when it is the row being entered.
+  This follows from the per-instance rule above; the native fade itself was not traced per instance.
 
 `SEKIRO_ABLATE=scenelight` restores the old single scene set, and `SEKIRO_LIGHT_SET=<id>` now forces that row on every surface.
 
