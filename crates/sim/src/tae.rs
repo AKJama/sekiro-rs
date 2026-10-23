@@ -499,6 +499,18 @@ impl TaeDb {
         self.anims.keys().copied()
     }
 
+    /// Every FXR effect id the timelines can spawn (events 96, 99, 100, 118-121).
+    pub fn effect_ids(&self) -> HashSet<i32> {
+        self.anims
+            .values()
+            .flat_map(|a| a.events.iter())
+            .filter_map(|e| match &e.kind {
+                TaeKind::Effect(fx) => Some(fx.id),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Crossfade length into `name`: the end of its `Blend` event that starts at 0, if any.
     pub fn blend_in(&self, name: &str) -> Option<f32> {
         self.anim(name)?

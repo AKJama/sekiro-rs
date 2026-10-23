@@ -32,9 +32,13 @@ use crate::fxr_tree::{
 
 #[path = "fxr_stream.rs"]
 mod stream;
+#[path = "fxr_warm.rs"]
+mod warm;
 
 /// Live effects and particles are bounded so a runaway effect cannot sink the frame.
 const EFFECT_CAP: usize = 192;
+/// Warmed textures added to the image assets per frame.
+const WARM_UPLOADS: usize = 4;
 const PARTICLE_CAP: usize = 8000;
 /// An effect with no end is stopped after this long, and dropped after [`EFFECT_DROP`].
 const EFFECT_STOP: f32 = 20.0;
@@ -145,6 +149,12 @@ pub struct FxrPlayer {
     preview: Option<i32>,
     steps: usize,
     cache: PathBuf,
+    /// The background warm-up of the fight's effects, while it runs.
+    warm: Option<std::sync::Mutex<std::sync::mpsc::Receiver<warm::Warmed>>>,
+    /// The timelines (player, enemy) the last warm-up was for.
+    warmed_for: [usize; 2],
+    /// Warmed textures not yet added to the image assets.
+    ready_images: HashMap<i64, Image>,
 }
 
 impl FxrPlayer {
@@ -197,6 +207,9 @@ impl FxrPlayer {
                 .and_then(|a| a[1].parse().ok()),
             steps: 0,
             cache,
+            warm: None,
+            warmed_for: [0; 2],
+            ready_images: HashMap::new(),
         }
     }
 
@@ -230,12 +243,72 @@ impl FxrPlayer {
         )
     }
 
-    /// Loads the hit tables (effects, stains) for this fight's NPC when they are not loaded yet.
+    /// Loads the hit tables (effects, stains) for this fight's NPC when they are not loaded yet,
+    /// and warms the effects the fighters' timelines can spawn.
     pub(crate) fn ensure_tables(&mut self, duel: &Duel) {
-        if self.enabled && (self.hit_fx.is_none() || self.npc_param != duel.spec.npc_param) {
+        if !self.enabled {
+            return;
+        }
+        if self.hit_fx.is_none() || self.npc_param != duel.spec.npc_param {
             self.npc_param = duel.spec.npc_param;
             self.hit_fx =
                 sekiro_sim::hit_fx::HitFx::load_from_cache(&self.cache, duel.spec.npc_param);
+        }
+        let taes = [&duel.player.tae, &duel.enemy.tae].map(|t| std::sync::Arc::as_ptr(t) as usize);
+        if taes != self.warmed_for {
+            self.warmed_for = taes;
+            let ids = duel
+                .player
+                .tae
+                .effect_ids()
+                .into_iter()
+                .chain(duel.enemy.tae.effect_ids())
+                .map(i64::from)
+                .collect();
+            self.warm_up(ids);
+        }
+        self.adopt_warmed(false);
+    }
+
+    /// Starts warming these effects on a background thread (see `fxr_warm.rs`), in place of any
+    /// warm-up still running.
+    fn warm_up(&mut self, mut ids: Vec<i64>) {
+        ids.retain(|&id| id > 0 && !self.lib.is_compiled(id));
+        ids.sort_unstable();
+        ids.dedup();
+        self.warm = Some(std::sync::Mutex::new(warm::start(self.lib.index(), ids)));
+    }
+
+    /// Takes what the warm-up has finished; `wait` blocks until it is done.
+    fn adopt_warmed(&mut self, wait: bool) {
+        let Some(rx) = self.warm.as_mut() else {
+            return;
+        };
+        let rx = rx
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            let next = if wait {
+                rx.recv().ok()
+            } else {
+                match rx.try_recv() {
+                    Ok(warmed) => Some(warmed),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+                }
+            };
+            match next {
+                Some(warm::Warmed::Effect(id, tree, node)) => self.lib.adopt(id, tree, node),
+                Some(warm::Warmed::Texture(id, image)) => {
+                    if !self.textures.contains_key(&id) {
+                        self.ready_images.insert(id, *image);
+                    }
+                }
+                None => {
+                    self.warm = None;
+                    return;
+                }
+            }
         }
     }
 
@@ -1562,7 +1635,11 @@ fn texture_handle(
     // The effect shaders sample the DDS as plain UNORM (BC1 and BC7 UNORM, never *_SRGB) and
     // square the texture colour themselves, so decoding it as sRGB first applied the gamma twice
     // and starved the soft body of every flame sprite, leaving only the over-bright core.
-    let handle = match load_texture(&player.lib, id, false) {
+    let image = player
+        .ready_images
+        .remove(&id)
+        .or_else(|| load_texture(&player.lib, id, false));
+    let handle = match image {
         Some(image) => images.add(image),
         None => {
             warn!("FXR texture {id} is not installed or cannot be decoded");
@@ -1798,6 +1875,16 @@ fn render(
             ))
         })
         .clone();
+    // A few warmed textures a frame, so their uploads do not all land in one frame.
+    let ready: Vec<i64> = player
+        .ready_images
+        .keys()
+        .take(WARM_UPLOADS)
+        .copied()
+        .collect();
+    for id in ready {
+        texture_handle(&mut player, &mut images, id, &white);
+    }
     let FrameBuffers {
         bufs,
         multi,
@@ -1831,9 +1918,7 @@ fn render(
         if player.distort_batches.contains_key(key) {
             continue;
         }
-        let texture = load_texture(&player.lib, *key, false)
-            .map(|image| images.add(image))
-            .unwrap_or_else(|| white.clone());
+        let texture = texture_handle(&mut player, &mut images, *key, &white);
         let material = distort_materials.add(DistortMaterial { texture });
         let batch = new_batch(&mut commands, &mut meshes);
         commands
@@ -2100,6 +2185,27 @@ mod tests {
         let t = frame_transform([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
         assert!((t.rotation * Vec3::Z - Vec3::X).length() < 1e-5);
         assert!((t.rotation * Vec3::X - Vec3::NEG_Z).length() < 1e-5);
+    }
+
+    /// #313: a warmed effect's first spawn reads and parses no file in the frame, and its
+    /// textures wait decoded for the renderer.
+    #[test]
+    fn a_warmed_effect_spawns_without_parsing_in_the_frame() {
+        let cache = sekiro_sim::cache::root();
+        if !cache.join("raw/sfx").is_dir() {
+            eprintln!("skipped: no extracted cache");
+            return;
+        }
+        let mut player = FxrPlayer::new(cache);
+        // Wolf's footstep dust (400) and step effect (410), both in his TAE.
+        player.warm_up(vec![400, 410]);
+        player.adopt_warmed(true);
+        assert!(player.warm.is_none(), "the warm-up did not finish");
+        player.request(400, (0, 400, 0), Transform::IDENTITY, true, false);
+        player.advance(1.0 / 60.0);
+        assert!(player.effects[0].root.is_some(), "effect 400 did not start");
+        assert_eq!(player.lib.parses, 0, "the first spawn parsed effect files");
+        assert!(!player.ready_images.is_empty(), "no warmed textures");
     }
 
     #[test]
