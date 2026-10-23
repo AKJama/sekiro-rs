@@ -488,6 +488,7 @@ pub fn run(options: Options) -> Result<()> {
         }
     }
     let mut on_map = None;
+    let mut foot_ground = None;
     let mut stories = map::story::MapStory::default();
     let mut start_yaw = 0.0;
     let mut idols = idol::Idols::default();
@@ -552,6 +553,16 @@ pub fn run(options: Options) -> Result<()> {
         }
         let world = Arc::new(map::world::collision_world(&cache, &blocks, &stories)?);
         stage("collision world");
+        // Wolf's feet meet `h` (#276), built on a thread while the rest loads; `--no-foot-ik`
+        // draws them on the play collision, for comparison.
+        if !std::env::args().any(|a| a == "--no-foot-ik") {
+            foot_ground = Some(crate::foot_ik::FootGround::load(
+                &cache,
+                &blocks,
+                &stories,
+                world.clone(),
+            ));
+        }
         idols = idol::Idols::load(&cache, &blocks, |x, z, y| world.floor(x, z, y + 1.0));
         duel.set_idols(idols.spots.clone());
         pickups = pickup::load(&cache, &blocks, &item_data);
@@ -872,7 +883,15 @@ pub fn run(options: Options) -> Result<()> {
             sync_arena_scene,
             sync_bullets,
             sync_lightning_tint,
-            (rope::pose, animate, rope::draw, sheath_sword).chain(),
+            (
+                rope::pose,
+                animate,
+                gate_foot_ik,
+                crate::foot_ik::pose,
+                rope::draw,
+                sheath_sword,
+            )
+                .chain(),
             follow_camera,
             crate::brain_overlay::update,
             hud,
@@ -888,6 +907,9 @@ pub fn run(options: Options) -> Result<()> {
         )
             .chain(),
     );
+    if let Some(ground) = foot_ground {
+        app.insert_resource(ground);
+    }
     crate::menu::install(&mut app);
     // First of the screens, so its extra menu atlases load with theirs in one read.
     game_menu::install(&mut app, options.attack_power.value(), item_data);
@@ -1185,6 +1207,7 @@ fn setup(
                 PlayerFocus {
                     grounded: sim.duel.player.body.grounded,
                 },
+                crate::foot_ik::FootIk::default(),
             ));
         }
     }
@@ -1757,6 +1780,13 @@ fn simulate(
     }
     sim.last = report;
     sim.step += 1;
+}
+
+/// Wolf's foot IK is on while he stands on the ground ([`sekiro_sim::Character::foot_ik_allowed`]).
+fn gate_foot_ik(sim: NonSend<Sim>, mut q: Query<&mut crate::foot_ik::FootIk>) {
+    for mut ik in &mut q {
+        ik.enabled = sim.duel.player.foot_ik_allowed();
+    }
 }
 
 fn sync_actors(

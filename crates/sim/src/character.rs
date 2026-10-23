@@ -1324,6 +1324,18 @@ impl Character {
         self.behavior.runtime.main_state_name()
     }
 
+    /// Whether the drawn feet may follow the ground with foot IK (#276): standing on it, not
+    /// swimming, perched on an ornament, flying on the grappling hook or docked to a ledge or
+    /// wall, the states in which the game's `hkbFootIkControlsModifier` is not on the ground.
+    pub fn foot_ik_allowed(&self) -> bool {
+        self.body.grounded
+            && !self.behavior.env.in_water
+            && self.behavior.env.water_mode.get().is_none()
+            && self.wire.perch.is_none()
+            && self.wire.active.is_none()
+            && self.docking.active.is_none()
+    }
+
     /// Steps without input until the character stands idle (`StandIdle` for the player, an
     /// idle state for NPCs), up to `max_steps`.
     pub fn settle(&mut self, dt: f32, max_steps: usize) -> usize {
