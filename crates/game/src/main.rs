@@ -64,6 +64,7 @@ mod presentation;
 mod span_profile;
 mod split_sun_cascades;
 mod texture_residency;
+mod title;
 mod viewer;
 mod vram;
 
@@ -119,8 +120,17 @@ fn dispatch() -> anyhow::Result<()> {
     {
         return map::sweep::run(&args);
     }
-    if args.len() == 1 || args.iter().any(|a| a == "--menu") {
+    // The developer start panel (enemies, arenas, brains); it launches `--play`.
+    if args.iter().any(|a| a == "--menu") {
         return menu::run(&args);
+    }
+    // The start menu (#8): no area flag opens the game on its title, New Game's options with
+    // the kept flags (`--perf`, `--cache`, the window), in the window play then loads in.
+    if args.len() == 1 || args.iter().any(|a| a == "--title") {
+        let mut title = vec![args[0].clone()];
+        title.extend(menu::Choices::default().args());
+        title.extend(menu::kept_args(&args[1..]));
+        return play::run_title(play_options(&title)?);
     }
     for flag in [
         "--attack-power",
@@ -397,7 +407,7 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
             .transpose()
             .map_err(|e| anyhow::anyhow!("--force-act wants an action id: {e}"))?,
         break_posture: args.iter().any(|a| a == "--break-posture"),
-        brain: BrainOptions {
+        brain: Some(BrainOptions {
             name: brain_name.clone(),
             model: arg_value(args, "--brain-model"),
             chr: opponent.chr.clone(),
@@ -417,7 +427,7 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
                 model: arg_value(args, "--coach-model"),
                 effort: arg_value(args, "--coach-effort"),
             },
-        },
+        }),
         coach_interval: arg_f32(args, "--coach-interval", 30.0)?.max(0.0),
         brain_moves: brain_moves == "local",
         brain_move_every: move_every,

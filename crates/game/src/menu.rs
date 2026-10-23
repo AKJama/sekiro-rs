@@ -273,9 +273,10 @@ mod tests {
             (a.enemy, a.enemy_present, a.god, a.immortal, a.attack_power),
             (b.enemy, b.enemy_present, b.god, b.immortal, b.attack_power)
         );
+        let (a_brain, b_brain) = (a.brain.unwrap(), b.brain.unwrap());
         assert_eq!(
-            (a.brain.name, a.brain_label, a.brain_overlay, a.player),
-            (b.brain.name, b.brain_label, b.brain_overlay, b.player)
+            (a_brain.name, a.brain_label, a.brain_overlay, a.player),
+            (b_brain.name, b.brain_label, b.brain_overlay, b.player)
         );
         assert_eq!(
             (a.window_size, a.coach_interval),
@@ -323,23 +324,23 @@ mod tests {
             (a.spawn, a.enemy_distance, a.gparam),
             (b.spawn, b.enemy_distance, b.gparam)
         );
-        assert_eq!((a.brain.model, a.brain.chr), (b.brain.model, b.brain.chr));
+        assert_eq!((a_brain.model, a_brain.chr), (b_brain.model, b_brain.chr));
         assert_eq!(
             (
-                a.brain.coach.backend,
-                a.brain.coach.model,
-                a.brain.coach.effort,
-                a.brain.coach.checkpoint,
-                a.brain.coach.budget_usd,
-                a.brain.coach.token_budget
+                a_brain.coach.backend,
+                a_brain.coach.model,
+                a_brain.coach.effort,
+                a_brain.coach.checkpoint,
+                a_brain.coach.budget_usd,
+                a_brain.coach.token_budget
             ),
             (
-                b.brain.coach.backend,
-                b.brain.coach.model,
-                b.brain.coach.effort,
-                b.brain.coach.checkpoint,
-                b.brain.coach.budget_usd,
-                b.brain.coach.token_budget
+                b_brain.coach.backend,
+                b_brain.coach.model,
+                b_brain.coach.effort,
+                b_brain.coach.checkpoint,
+                b_brain.coach.budget_usd,
+                b_brain.coach.token_budget
             )
         );
         match (a.brain_memory, b.brain_memory) {

@@ -604,6 +604,89 @@ fn cinematic_gparam(id: &str) -> Option<String> {
     ))
 }
 
+/// Marks an app whose connected world loads after the app is built (the start menu's, #8):
+/// [`add_map`] registers the world's systems without its data, and [`DeferredMap`] brings the
+/// data, loaded on a thread, once an area is picked.
+#[derive(Resource)]
+pub struct DeferredWorld;
+
+/// A connected world loaded for an app built with [`DeferredWorld`]: its blocks, their stories
+/// and their local lights.
+pub struct DeferredMap {
+    world: world::MapWorld,
+    stories: story::MapStory,
+    lights: LocalLights,
+}
+
+impl DeferredMap {
+    /// Loads the world of `dir` with the `stories` already loaded for its collision (`Send`, so
+    /// on the loading thread).
+    pub fn load(dir: &Path, stories: story::MapStory) -> Result<Self> {
+        let id = dir
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let cache = dir
+            .parent()
+            .and_then(Path::parent)
+            .context("map folder has no cache above it")?;
+        let (world, stories) = connected_world(cache, &id, &format!("maps/{id}/"), stories)?;
+        let args: Vec<String> = std::env::args().collect();
+        let lights = LocalLights::load_world(dir, &args, &world)?;
+        Ok(Self {
+            world,
+            stories,
+            lights,
+        })
+    }
+
+    /// Inserts the world, then the map effects that read it.
+    pub fn insert(self, world: &mut World, dir: &Path) -> Result<()> {
+        world.insert_resource(self.stories);
+        world.insert_resource(self.world);
+        world.insert_resource(self.lights);
+        crate::map_fx::insert(world, dir)
+    }
+}
+
+/// The connected world around `id` and every block's story, `stories` holding those already
+/// loaded.
+fn connected_world(
+    cache: &Path,
+    id: &str,
+    prefix: &str,
+    mut stories: story::MapStory,
+) -> Result<(world::MapWorld, story::MapStory)> {
+    let world = world::MapWorld::load(cache, id, prefix)?;
+    stories
+        .maps
+        .retain(|block, _| world.blocks.contains_key(block));
+    for (block, layout) in &world.blocks {
+        if !stories.maps.contains_key(block)
+            && let Some(state) = story::load(cache, block, &layout.json)?
+        {
+            stories.maps.insert(block.clone(), state);
+        }
+        if let Some(state) = stories.maps.get(block) {
+            info!(
+                "{block}: offline story, {} parts, {} unsupported predicates",
+                state.parts.len(),
+                state.state.unsupported.len()
+            );
+        }
+    }
+    Ok((world, stories))
+}
+
+/// Moves where the map's pieces stream outwards from ([`MapScene::focus`]) before it spawns:
+/// the start menu builds the map before Wolf's start is picked.
+pub fn refocus(world: &mut World, focus: Vec3) {
+    if let Some(mut layout) = world.get_resource_mut::<Layout>() {
+        layout.scene.focus = Some(focus);
+    }
+}
+
 /// The entity whose position picks the draw groups (the free camera, or the player).
 #[derive(Component)]
 pub struct MapFocus;
@@ -657,12 +740,7 @@ pub fn player_start(dir: &Path, index: usize) -> Result<(Vec3, f32)> {
 /// [`run`]'s own: in play Q crouches. A connected world uses the block `stories` already loaded
 /// (the play world's collision, [`world::collision_world`]) and loads the rest; a map shown
 /// alone uses none.
-pub fn add_map(
-    app: &mut App,
-    dir: &Path,
-    scene: MapScene,
-    mut stories: story::MapStory,
-) -> Result<()> {
+pub fn add_map(app: &mut App, dir: &Path, scene: MapScene, stories: story::MapStory) -> Result<()> {
     let stage = |name: &str| info!("map setup: {name} at {:.1} s", crate::since_start());
     let json: Value = serde_json::from_slice(
         &std::fs::read(dir.join("layout.json")).context("reading layout.json")?,
@@ -719,29 +797,14 @@ pub fn add_map(
         && scene.within.is_none()
         && !app.world().contains_resource::<world::ArenaMap>()
         && !std::env::args().any(|a| a == "--arena");
+    let deferred = app.world().contains_resource::<DeferredWorld>();
     if connected {
-        let world = world::MapWorld::load(cache, &id, &scene.prefix)?;
-        stories
-            .maps
-            .retain(|block, _| world.blocks.contains_key(block));
-        for (block, layout) in &world.blocks {
-            if !stories.maps.contains_key(block)
-                && let Some(state) = story::load(cache, block, &layout.json)?
-            {
-                stories.maps.insert(block.clone(), state);
-            }
-            if let Some(state) = stories.maps.get(block) {
-                info!(
-                    "{block}: offline story, {} parts, {} unsupported predicates",
-                    state.parts.len(),
-                    state.state.unsupported.len()
-                );
-            }
+        if !deferred {
+            let (world, stories) = connected_world(cache, &id, &scene.prefix, stories)?;
+            app.insert_resource(stories).insert_resource(world);
+            stage("connected world and story");
         }
-        app.insert_resource(stories);
-        stage("connected world and story");
         app.add_plugins(visibility::MapVisibilityPlugin)
-            .insert_resource(world)
             .add_systems(
                 Update,
                 (world::update, world::update_detail)
@@ -782,7 +845,7 @@ pub fn add_map(
         }
     }
     app.init_resource::<crate::lighting::fog::FogSelection>();
-    crate::map_fx::install(app, dir)?;
+    crate::map_fx::install(app, dir, deferred)?;
     app.init_resource::<crate::lighting_selection::RegionSelection>();
     let args: Vec<_> = std::env::args().collect();
     let arena_name = crate::arg_value(&args, "--arena");
@@ -930,7 +993,9 @@ pub fn add_map(
     crate::map_grass::install(app, dir, &scene.prefix)?;
     stage("materials and grass");
     app.insert_resource(ShadowSettings::from_args(&gparam, hour, &args)?);
-    LocalLights::install(app, dir, &args)?;
+    if !deferred {
+        LocalLights::install(app, dir, &args)?;
+    }
     app.insert_resource(ClearColor(SKY))
         .insert_resource(GlobalAmbientLight {
             color: Color::srgb(0.80, 0.85, 1.0),
