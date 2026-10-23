@@ -80,13 +80,25 @@ fn highest_drawn_node(cache: &std::path::Path, id: i32) -> glam::Vec3 {
 
 /// #154: an idol's idle effect follows its lit state. Unlit, its unlit idle (embers circling
 /// it) shows; once Wolf lights it, or when the story has it lit, only the lit idle shows, whose
-/// flame sits just above the idol's hands, at the idol's dummy 100 (its origin).
+/// flame sits just above the idol's hands, at the idol's dummy 100 (its origin) turned to the
+/// dummy's facing (#278: without the turn the flame hung 0.25 m behind the hands).
 #[test]
 fn every_idol_shows_its_flame_above_its_hands_once_lit() {
     let cache = sekiro_sim::cache::root();
     if !cache.join("maps/m11_00_00_00/layout.json").exists() {
         return;
     }
+    // The lit flame's anchor (the effect's highest drawn node) of each Outskirts idol.
+    const PINNED: [(i32, f32, f32, f32); 7] = [
+        (1101950, -139.213, -49.471, -162.099),
+        (1101951, -164.308, -28.072, 23.050),
+        (1101952, -197.433, -46.892, 152.531),
+        (1101953, -44.009, -58.931, 135.630),
+        (1101954, 27.884, -73.271, -29.765),
+        (1101956, -103.133, -30.188, -59.578),
+        (1101957, 124.990, -70.733, 0.819),
+    ];
+    let mut pinned = 0;
     for map in ["m11_00_00_00", "m11_01_00_00"] {
         let state = world_events::first_visit(&cache, map).unwrap().unwrap();
         let catalog = map_effects::load(&cache, map, &state).unwrap();
@@ -135,23 +147,46 @@ fn every_idol_shows_its_flame_above_its_hands_once_lit() {
                     .unwrap(),
             )
             .unwrap();
+            // The idol's hands: its highest vertices (they hold the flame up), placed in the
+            // world like its mesh (the part's matrix, then X mirrored).
+            let top = flver.bbox_max[1];
+            let raised: Vec<glam::Vec3> = flver
+                .meshes
+                .iter()
+                .flat_map(|m| &m.vertices.positions)
+                .map(|&v| glam::Vec3::from(v))
+                .filter(|v| v.y > top - 0.1)
+                .collect();
+            let hands = raised.iter().sum::<glam::Vec3>() / raised.len() as f32;
+            let hands = part.matrix().transform_point3(hands) * glam::Vec3::new(-1.0, 1.0, 1.0);
             let origin = glam::Vec3::new(-part.position[0], part.position[1], part.position[2]);
             for p in idle.iter().filter(|p| p.idol.unwrap().lit) {
-                // Dummy 100 is the idol's origin; the flame's height is the effect's own.
+                // Dummy 100 is the idol's origin; the flame's offset is the effect's own, in the
+                // dummy's frame, which faces the hands (#278).
                 assert_eq!(p.dummy, Some(100));
                 assert!(glam::Vec3::from_array(p.position).distance(origin) < 1e-3);
-                let flame = highest_drawn_node(&cache, p.effect);
-                let top = flver.bbox_max[1];
+                let node = highest_drawn_node(&cache, p.effect);
+                let flame = glam::Vec3::from_array(p.position)
+                    + glam::Quat::from_array(p.rotation) * (node * glam::Vec3::new(-1.0, 1.0, 1.0));
+                let off = flame - hands;
                 assert!(
-                    glam::Vec2::new(flame.x, flame.z).length() < 0.25
-                        && flame.y > top - 0.1
-                        && flame.y < top + 0.4,
-                    "{map} idol {} ({model}, top {top:.2} m): FFX {} flame at {flame:.2?}",
+                    off.with_y(0.0).length() < 0.06 && off.y > 0.0 && off.y < 0.3,
+                    "{map} idol {} ({model}): FFX {} flame at {flame:.3}, {off:.3} from the hands at {hands:.3}",
                     part.entity_id,
                     p.effect
                 );
+                // Pinned for Outskirts (game x mirrored, m): the flame's anchor stays put.
+                if let Some(&(_, x, y, z)) = PINNED.iter().find(|r| r.0 == part.entity_id) {
+                    pinned += 1;
+                    assert!(
+                        flame.distance(glam::Vec3::new(x, y, z)) < 0.01,
+                        "{map} idol {}: flame at {flame:.3}",
+                        part.entity_id
+                    );
+                }
             }
         }
         assert!(idols >= 7, "{map}: {idols} idols");
     }
+    assert_eq!(pinned, PINNED.len());
 }

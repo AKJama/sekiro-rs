@@ -29,6 +29,8 @@ Their settled lit/unlit presentation reads the object's own TAE idle animation 1
 Both idles are inventoried for every idol, tagged lit or unlit (`IdolIdle`), and only the one matching the idol's state shows: lit when the story lights it (bonfire flag or kindling) or once Wolf has lit it in play (`Kit::found_idols`), #154.
 The unlit idle (FFX 1010) is embers circling the idol 0.6 m out at 0.75 m up; the lit one (FFX 1011, 1012 at the temple's o115040) is the flame 1.1 m up, just above the hands.
 Before #154 the inventory held only the first-visit idle, so an idol Wolf lit kept its circling embers instead of the flame.
+An effect on a dummy takes the dummy's frame (its forward and upward), not only its position, as held weapons do (#278).
+The idols' dummy 100 faces the model's -Z, where the raised hands are, so FFX 1011's flame node at +Z 0.125 m lands above the hands; placed with the part's facing alone it hung 0.25 m behind the head.
 The animation-selection bridge is an explicit approximation until the native bonfire controller is traced; the FXR IDs and dummy locations themselves come from TAE.
 The inventory encodes this provenance with command 200903, distinguishing registration-driven TAE from explicit 2006 object FX commands.
 An activation part can be a meshless helper, so effects use its authored residency demand and story enablement instead of requiring that a mesh was rendered.
