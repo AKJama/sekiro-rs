@@ -589,7 +589,7 @@ impl Arena {
     /// Puts Wolf and the boss on their spots, on the arena's collision, with the fall respawn.
     /// The boss stands on what enemies collide with ([`crate::collision::EnemyGround`]).
     pub fn place(&self, duel: &mut Duel) {
-        let enemy = crate::collision::EnemyGround(self.world.clone());
+        let enemy = crate::collision::EnemyGround::new(self.world.clone());
         for (c, spot, ground) in [
             (
                 &mut duel.player,

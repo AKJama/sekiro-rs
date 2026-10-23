@@ -155,7 +155,7 @@ impl Encounter {
     pub fn place(&mut self, world: &Arc<crate::collision::CollisionWorld>) {
         self.world = Some(world.clone());
         for monkey in &mut self.monkeys {
-            monkey.duel.enemy.ground = Box::new(crate::collision::EnemyGround(world.clone()));
+            monkey.duel.enemy.ground = Box::new(crate::collision::EnemyGround::new(world.clone()));
             monkey.duel.fall_respawn_depth = Some(crate::arena::FALL_RESPAWN_DEPTH);
         }
     }
@@ -188,7 +188,7 @@ impl Encounter {
                 duel.ai.as_mut().unwrap().state.map_regions =
                     Some(crate::lua_ai::regions::MapRegions::new(&self.cache, MAP));
                 if let Some(world) = &self.world {
-                    duel.enemy.ground = Box::new(crate::collision::EnemyGround(world.clone()));
+                    duel.enemy.ground = Box::new(crate::collision::EnemyGround::new(world.clone()));
                 }
                 Ok(Monkey {
                     entity,

@@ -130,7 +130,7 @@ impl Encounter {
     pub fn place(&mut self, world: &Arc<crate::collision::CollisionWorld>) {
         self.world = Some(world.clone());
         for actor in &mut self.actors {
-            actor.duel.enemy.ground = Box::new(crate::collision::EnemyGround(world.clone()));
+            actor.duel.enemy.ground = Box::new(crate::collision::EnemyGround::new(world.clone()));
         }
     }
 

@@ -213,7 +213,12 @@ fn banded_grid_reads_what_a_brute_force_scan_keeps() {
                 );
                 // A body's five points, read in one pass.
                 const R: f32 = 0.08;
-                let a = View { world, who }.floor_triangle(x, z, top);
+                let a = View {
+                    world,
+                    who,
+                    size: BodySize::WOLF,
+                }
+                .floor_triangle(x, z, top);
                 let b = [(0.0, 0.0), (R, 0.0), (-R, 0.0), (0.0, R), (0.0, -R)]
                     .into_iter()
                     .filter_map(|(dx, dz)| cells.floor(x + dx, z + dz, top, who))
@@ -237,8 +242,16 @@ fn banded_grid_reads_what_a_brute_force_scan_keeps() {
             ]);
             let cull = i % 8 != 0;
             let (mut body, mut walls) = (Vec::new(), Vec::new());
-            world.gather_slide(feet, d, [who, assist], &mut body, &mut walls, cull);
-            let reach = SlideReach::new(feet, d, cull);
+            world.gather_slide(
+                feet,
+                d,
+                [who, assist],
+                &mut body,
+                &mut walls,
+                cull,
+                BodySize::WOLF,
+            );
+            let reach = SlideReach::new(feet, d, cull, BodySize::WOLF);
             let near = cells.between(reach.min, reach.max);
             let keep = |f: &dyn Fn(u32) -> bool| -> Vec<u32> {
                 near.iter().copied().filter(|&t| f(t)).collect()
@@ -308,7 +321,12 @@ fn banded_grid_reads_what_a_brute_force_scan_keeps() {
                     Some(WaterSurface { height, material })
                 })
                 .max_by(|a, b| a.height.total_cmp(&b.height));
-            let banded = View { world, who }.water_surface(x, z, y);
+            let banded = View {
+                world,
+                who,
+                size: BodySize::WOLF,
+            }
+            .water_surface(x, z, y);
             check("water", banded == brute, format!("{banded:?} vs {brute:?}"));
             if i % 16 == 0 {
                 let mut brute: Vec<(f32, f32)> = here
