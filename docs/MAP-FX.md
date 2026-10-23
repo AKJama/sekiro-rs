@@ -307,7 +307,7 @@ Offset 0x108 is `AntiExposureRate` (FXR `adaptationExponent`, default 0, 0 in 80
 The factor is `powf(2, -(rate * ctx[0x458]))`; `ctx[0x458]` is the scene EV, which `SHADER-INPUTS.md` records as 0 in shipped builds (`SC_PreExposure = 2^EV = 1`).
 So the native buffer is in the same units as the directional light and the unit factor is exactly 1 (`NATIVE_LIGHT_BUFFER_SCALE`).
 The FXR 800140 light also ramps its multiplier from 0 to 19.2 over 2 s, and the flicker (brightness 0.75 to 1 every 0.125 to 0.25 s) is not modelled; both only lower the mean.
-Nothing traced explains the 3 to 5 times excess at the former 4500 bridge, so the earlier by-eye 0.25 stays as `NATIVE_POINT_LIGHT_UNEXPLAINED_RESIDUAL` (override `SEKIRO_MAP_POINT_LIGHT_SCALE` for the total).
+Nothing traced explains the 3 to 5 times excess at the former 4500 bridge, so the earlier by-eye 0.25 stays as `BTL_POINT_LIGHT_UNEXPLAINED_RESIDUAL`, for BTL lights only since #323 (see "Torch pools" below; `SEKIRO_MAP_POINT_LIGHT_SCALE` overrides the unit factor).
 The bridge itself is now traced as `pi / exposure = 3135.61` (see [EXPOSURE.md](EXPOSURE.md#brightness-audit-2026-10-15)), which is 0.697 of 4500, so the constant is rewritten as 0.25 * 4500 / 3135.61 = 0.359 to keep the same by-eye total.
 The same audit found the sun, fill and local directional slots 4 to 7 times too bright against retail, so the point-light residual is probably the same unexplained direct-light factor rather than a point-light unit.
 
@@ -341,7 +341,7 @@ For FXR 609 lights `+0x90` is taken to be the property `unk_ds3_p2_0`: across al
 The glint has R 1.5 and falloff 0.25, so its `1 / (1 + 0.7 (d/0.25)^2)` term drops to 0.26 at 0.5 m and 0.08 at 1 m, where `b = 1/R` gave 0.86 and 0.76.
 `fxr.rs` now reads the falloff and passes it in Bevy's `PointLight::radius`; `native_clustered_light` uses it for `b` when it is positive.
 BTL lights keep radius 0 and therefore `b = 1/R`; which BTL field feeds `+0x90` is not traced.
-Fire lights also fall off faster now (brazier 839530: R 5, falloff 0.625; ground fire 800140: R 5, falloff 1.25), so `NATIVE_POINT_LIGHT_UNEXPLAINED_RESIDUAL`, fitted by eye with `b = 1/R`, may need refitting at spot-022 and spot-056.
+Fire lights also fall off faster now (brazier 839530: R 5, falloff 0.625; ground fire 800140: R 5, falloff 1.25), so `NATIVE_POINT_LIGHT_UNEXPLAINED_RESIDUAL`, fitted by eye with `b = 1/R`, may need refitting at spot-022 and spot-056 (done in #323: FXR lights no longer take it).
 The other unused 609 fields do not explain the pool: `adaptationExponent` (0.6 here) scales by `2^(-rate * EV)` with EV 0 in shipped builds, `volumeDensity` is read only in the volumetric scattering pass, and the flicker (`flickerBrightness` 0.5 every 2 to 2.5 s) only lowers the mean; flicker is still not modelled.
 Live check at Item_宝_02 (`--hour 1`): mean pixel value of the lantern base 1 m from the item fell from 108 to 53 and of the plants from 123 to 52 (ambient), and the item itself from 193 to 118.
 Fire check at spot-022 (ground fire 800140, `--hour 1`, mean red): the ground at the fire went from 223 to 140, the ground between the fire and Wolf from 167 to 55, the dark side stayed at 28 to 26.
@@ -350,6 +350,18 @@ The residual is left unchanged: the remaining gap is mostly our darker ambient (
 The light radius also feeds Bevy's sphere-light model, but only its specular (roughness widening and a solid-angle term); diffuse uses the light centre.
 Map pieces and characters (both `LayeredMaterial` with `NATIVE_DIRECT`, on by default) subtract Bevy's own point-light term with the same radius and add the native one, so it cancels there.
 Only plain `StandardMaterial` meshes (blood decals, debug markers, the arena floor) see it: for the glint (radius 0.25) at 1 m with roughness 0.7 the specular peak drops to 0.63 of a point light with a wider lobe, which is not visible.
+
+## Torch pools: the residual no longer dims FXR lights (#323), 2026-10-23
+
+At the Outskirts gatehouse (opening shots 29 and 31, morning) the real torches throw strong warm pools on the gate wall and the ground; ours barely lit anything.
+The torches are brazier 839530 on the `o116000` stands (ModelSfxParam 116000000, dummy 200); there is no BTL light near the gatehouse.
+A light log at the matched camera showed every torch light spawned and drawn at full strength: multiplier 6.4, radius 5, falloff 0.625, squared colour (1, 0.40, 0.14), with the left torch's flame 1.3 m above its stand's base.
+So the data and the spawn are right, and the weak pool came from the scale.
+The 0.25 residual was fitted by eye at spot-056 on this same brazier while every light used `b = 1/R`, which gives 0.84 at 2 m where the traced falloff gives 0.12.
+It therefore made up for the over-wide falloff, and since #141 it dimmed the FXR lights a second time: the ground 1.3 m under the torch got 0.53 native units instead of 1.48.
+FXR lights now take the traced unit factor alone; BTL lights, which still use the untraced `b = 1/R`, keep the residual (`clustered_light_residual` in `map_material.rs`, mirrored in `native_point_lights`).
+The falloff mapping itself was checked again: `unk_ds3_p2_0` is a distance, not a ratio, since it scales with the radius across the map effects (R 40 with 10, R 640 with 320), and EvenTorset's FXR notes describe it as making the falloff stronger below 1 and the surface normal matter less above it, which is what the `t` wrap term does.
+The candle-lamp glow next to the left torch in shot 31 is not fixed: no light, effect or emissive object was found for it within the time-box.
 
 ## Flame height and rising sparks, 2026-10-15
 

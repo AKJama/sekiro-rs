@@ -324,8 +324,10 @@ fn point_light_shadow(light_id: u32, pbr: PbrInput, spot: bool) -> f32 {
 
 // Replaces Bevy's inverse-square point/spot response with the native one: Bevy's own
 // contribution (same inputs as apply_pbr_lighting's loops) is subtracted, the native one added.
+// A light without its own falloff distance (BTL) also takes the by-eye `btl_residual`; an FXR
+// light carries one and takes the traced `scale` alone (`clustered_light_residual`, #323).
 @if(NATIVE_DIRECT)
-fn native_point_lights(pbr: PbrInput, scale: f32) -> vec3<f32> {
+fn native_point_lights(pbr: PbrInput, scale: f32, btl_residual: f32) -> vec3<f32> {
     var li = base_lighting_input(pbr);
     let view_z = (view.view_from_world*pbr.world_position).z;
     var ranges = unpack_clusterable_object_index_ranges(view_fragment_cluster_index(pbr.frag_coord.xy,view_z,pbr.is_orthographic));
@@ -336,7 +338,8 @@ fn native_point_lights(pbr: PbrInput, scale: f32) -> vec3<f32> {
         var bevy = vec3(0.0);
         if spot { bevy = native_lighting::spot_light(light_id,&li,true); }
         else { bevy = native_lighting::point_light(light_id,&li,true,true); }
-        correction += (native_clustered_light(light_id,pbr,li,spot)*scale-bevy)*point_light_shadow(light_id,pbr,spot);
+        let residual = select(btl_residual,1.0,clustered_lights.data[light_id].position_radius.w>0.0);
+        correction += (native_clustered_light(light_id,pbr,li,spot)*scale*residual-bevy)*point_light_shadow(light_id,pbr,spot);
     }
     return correction*view.exposure;
 }
@@ -838,7 +841,7 @@ vertex: VertexOutput,
         if !unlit && light.direct[12].x>0.0 {
             out.color = vec4(out.color.rgb+native_direct(pbr,light),out.color.a);
             if light.direct[12].y>0.0 {
-                out.color = vec4(out.color.rgb+native_point_lights(pbr,light.direct[12].z),out.color.a);
+                out.color = vec4(out.color.rgb+native_point_lights(pbr,light.direct[12].z,light.direct[12].w),out.color.a);
             }
         }
     }

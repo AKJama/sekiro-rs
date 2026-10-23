@@ -329,23 +329,36 @@ fn native_point_lights() -> bool {
 /// as the directional light and the factor is exactly 1.
 const NATIVE_LIGHT_BUFFER_SCALE: f32 = 1.0;
 
-/// The remaining, untraced gap between the native curve and the references. The earlier by-eye
-/// value 0.25 was fitted at the former 4500 lux per unit bridge; the bridge is now traced
-/// (`SCENE_TO_BEVY = pi / exposure`, 0.697 of 4500), so the same total is kept as 0.25 * 4500 /
-/// `SCENE_TO_BEVY`. It is not a measurement. The 2026-10-15 brightness audit found the same order
-/// of excess (0.15 to 0.35 of the traced native value) on the sun, fill and local directional
-/// slots, so this is probably one shared unexplained direct-light factor, see EXPOSURE.md.
-const NATIVE_POINT_LIGHT_UNEXPLAINED_RESIDUAL: f32 = 0.25 * 4_500. / crate::lighting::SCENE_TO_BEVY;
+/// A by-eye factor for the BTL lights only (`direct[12].w`), which still use `b = 1/R` because
+/// the BTL source of the falloff distance (object `+0x90`) is not traced. The value 0.25 was
+/// fitted at the brazier 839530 (spot-056) when every light used `b = 1/R`, at the former 4500
+/// bridge, and is kept as the same total 0.25 * 4500 / `SCENE_TO_BEVY`. That fit made up for the
+/// over-wide `b = 1/R` falloff (0.84 against the traced 0.12 at 2 m for that brazier), so FXR
+/// lights, which carry their own falloff distance since #141, take the traced unit alone (#323).
+const BTL_POINT_LIGHT_UNEXPLAINED_RESIDUAL: f32 = 0.25 * 4_500. / crate::lighting::SCENE_TO_BEVY;
 
-fn native_point_light_scale() -> f32 {
+/// The native unit scale of the clustered lights (`direct[12].z`), applied to every light.
+/// `SEKIRO_MAP_POINT_LIGHT_SCALE` overrides it for A/B captures.
+pub(crate) fn native_point_light_scale() -> f32 {
     static SCALE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
     *SCALE.get_or_init(|| {
         std::env::var("SEKIRO_MAP_POINT_LIGHT_SCALE")
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
             .filter(|v| v.is_finite() && *v >= 0.)
-            .unwrap_or(NATIVE_LIGHT_BUFFER_SCALE * NATIVE_POINT_LIGHT_UNEXPLAINED_RESIDUAL)
+            .unwrap_or(NATIVE_LIGHT_BUFFER_SCALE)
     })
+}
+
+/// The extra factor for a clustered light by its falloff distance (`PointLight::radius`, the
+/// shader's `position_radius.w`): BTL lights have none and take the by-eye residual, FXR lights
+/// have their own and take none. `native_point_lights` in `map_material.wesl` mirrors this.
+pub(crate) fn clustered_light_residual(falloff: f32) -> f32 {
+    if falloff > 0. {
+        1.
+    } else {
+        BTL_POINT_LIGHT_UNEXPLAINED_RESIDUAL
+    }
 }
 
 impl From<&MapLayers> for MapLayersUniform {
@@ -394,6 +407,7 @@ impl MapLight {
         let mut direct = set.direct;
         direct[12].y = f32::from(native_point_lights() && direct[12].x > 0.);
         direct[12].z = native_point_light_scale();
+        direct[12].w = clustered_light_residual(0.);
         let mut hemi_delta =
             (set.hemi_delta * crate::lighting::ENV_PER_UNIT).extend(crate::lighting::ENV_PER_UNIT);
         hemi_delta *= crate::lighting::scale("AMBIENT");
