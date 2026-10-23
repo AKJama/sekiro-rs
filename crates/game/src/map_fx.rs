@@ -348,6 +348,8 @@ fn update(
     } else {
         time.delta_secs()
     };
+    // Effects built this step take their level of detail from this frame's camera (#273).
+    player.set_eye(camera.translation());
     player.advance_map(dt.min(1. / 15.));
     let culled = collision.as_ref().map_or(0, |collision| {
         let _timer = crate::perf_log::SystemTimer::start("weather cover");

@@ -212,9 +212,10 @@ pub struct FxrLib {
     compiled: HashMap<i64, Arc<NodeDef>>,
     /// Effect files read and parsed by this library (not adopted ones).
     pub parses: usize,
-    /// The camera's position, for the levels of detail ([`lod_level`]), as of the last drawn
-    /// frame; none shows the first level.
-    pub(crate) cam: Option<Vec3>,
+    /// The camera's position the levels of detail pick by ([`lod_level`]): set by the map FX
+    /// step before it advances (`FxrPlayer::set_eye`) and by the FXR render system; none shows
+    /// the first level.
+    pub(crate) eye: Option<Vec3>,
 }
 
 impl FxrLib {
@@ -474,11 +475,15 @@ pub struct NodeInst {
     gained: Vec2,
     /// A LevelsOfDetail node's (2002) levels, of which only the shown one is built.
     lod: Option<Lod>,
+    /// A level its LevelsOfDetail parent no longer shows: it emits no more and ends once its
+    /// particles have.
+    retired: bool,
 }
 
 /// A LevelsOfDetail node's (2002) levels: the one for the camera's distance ([`lod_level`]) is
-/// built as the node's only child, and replaced when the distance reaches another level. Once
-/// that level ends, or the node stops, it keeps what it has and no other level is built.
+/// built as the node's child; when the distance reaches another level, that one is built and the
+/// old one retires (emits no more, its particles die out), so a fire does not vanish and restart
+/// at a threshold. Once the shown level ends, or the node stops, no other level is built.
 struct Lod {
     thresholds: Arc<[f32]>,
     levels: Vec<Arc<NodeDef>>,
@@ -492,9 +497,13 @@ struct Lod {
 /// LevelsOfDetailThresholds "distance threshold for child node i"). Threshold 0 is always 1 and
 /// the detailed level the first; the far levels are mostly empty (the ground fire 800140: detail
 /// to 165 m, a lighter level to 200 m, nothing past), a few far glows only (811052: from 400 m).
-/// Nearer than the first threshold is the first level (#273).
-pub fn lod_level(thresholds: &[f32], dist: f32) -> usize {
-    thresholds.iter().rposition(|&t| dist >= t).unwrap_or(0)
+/// Nearer than the first threshold is the first level (#273). Only the node's `levels` children
+/// have a threshold of their own.
+pub fn lod_level(thresholds: &[f32], levels: usize, dist: f32) -> usize {
+    thresholds[..levels.min(thresholds.len())]
+        .iter()
+        .rposition(|&t| dist >= t)
+        .unwrap_or(0)
 }
 
 pub struct Config {
@@ -666,6 +675,7 @@ pub fn make_node(lib: &mut FxrLib, node: &NodeDef, seed: u32, depth: u32) -> Opt
         detached: None,
         offset: Vec3::ZERO,
         gained: Vec2::ZERO,
+        retired: false,
         lod: node.lod.clone().map(|thresholds| Lod {
             thresholds,
             levels: kids.clone(),
@@ -789,24 +799,13 @@ pub fn step_node(n: &mut NodeInst, lib: &mut FxrLib, parent: Transform, dt: f32,
         Some(w) => w * n.local,
         None => parent * n.local,
     };
-    if let Some(lod) = &mut n.lod {
-        let dist = lib.cam.map_or(0., |c| c.distance(n.world.translation));
-        let level = lod_level(&lod.thresholds, dist);
-        if lod.shown != Some(level) {
-            lod.shown = Some(level);
-            let seed = lod.seed.wrapping_mul(31).wrapping_add(level as u32 + 1);
-            n.children = lod
-                .levels
-                .get(level)
-                .and_then(|def| make_node(lib, def, seed, lod.depth + 1))
-                .into_iter()
-                .collect();
-        }
+    if !stop {
+        show_level(n, lib, dt);
     }
     if n.time < n.delay {
         n.time += dt;
         for c in &mut n.children {
-            step_node(c, lib, n.world, dt, stop);
+            step_node(c, lib, n.world, dt, stop || c.retired);
         }
         return;
     }
@@ -904,12 +903,12 @@ pub fn step_node(n: &mut NodeInst, lib: &mut FxrLib, parent: Transform, dt: f32,
     n.time += dt;
     let world = n.world;
     for ch in &mut n.children {
-        step_node(ch, lib, world, dt, stop || !alive);
+        step_node(ch, lib, world, dt, stop || !alive || ch.retired);
     }
-    let had = !n.children.is_empty();
+    let had = n.children.iter().any(|c| !c.retired);
     n.children.retain(|c| !c.finished);
     // A level that ended, or a stopped node, builds no other level ([`Lod`]).
-    if stop || !alive || had && n.children.is_empty() {
+    if stop || !alive || had && n.children.iter().all(|c| c.retired) {
         n.lod = None;
     }
     let emitting = alive && n.cfg.is_some();
@@ -917,6 +916,39 @@ pub fn step_node(n: &mut NodeInst, lib: &mut FxrLib, parent: Transform, dt: f32,
         && n.particles.is_empty()
         && n.children.is_empty()
         && (stop || n.duration >= 0.0 && n.time - n.delay >= n.duration || n.cfg.is_none());
+}
+
+/// Shows a LevelsOfDetail node's (2002) level for the camera's distance to the node ([`Lod`]).
+/// The switch is at the thresholds themselves, with no hysteresis: none is known from the data
+/// or the exe. With the clock stopped (`dt` 0: render gates, paused map effects) nothing ages,
+/// so the old level goes at once and the new one is warmed up for 2 s, as a new map effect is.
+fn show_level(n: &mut NodeInst, lib: &mut FxrLib, dt: f32) {
+    let Some(lod) = &mut n.lod else { return };
+    let dist = lib.eye.map_or(0., |eye| eye.distance(n.world.translation));
+    let level = lod_level(&lod.thresholds, lod.levels.len(), dist);
+    if lod.shown == Some(level) {
+        return;
+    }
+    lod.shown = Some(level);
+    for c in &mut n.children {
+        c.retired = true;
+    }
+    let seed = lod.seed.wrapping_mul(31).wrapping_add(level as u32 + 1);
+    if let Some(c) = lod
+        .levels
+        .get(level)
+        .and_then(|def| make_node(lib, def, seed, lod.depth + 1))
+    {
+        n.children.push(c);
+    }
+    if dt == 0. {
+        n.children.retain(|c| !c.retired);
+        for c in &mut n.children {
+            for _ in 0..60 {
+                step_node(c, lib, n.world, 1. / 30., false);
+            }
+        }
+    }
 }
 
 /// CPU fallback for GPUStandardParticle. Integer durations/intervals use the FXR 30 Hz clock.
@@ -1750,13 +1782,20 @@ mod tests {
     /// 200 m, by the camera's distance; one level at a time.
     #[test]
     fn ground_fire_level_follows_the_camera_distance() {
+        let t = [1., 165., 200., 1000., 1000.];
         assert_eq!(
-            [0., 50., 170., 250., 1500.].map(|d| lod_level(&[1., 165., 200., 1000., 1000.], d)),
+            [0., 50., 170., 250., 1500.].map(|d| lod_level(&t, 5, d)),
             [0, 0, 1, 2, 4]
         );
-        fn shown(n: &NodeInst) -> Option<(Option<usize>, usize)> {
+        // A threshold past the node's children never picks a level it doesn't have.
+        assert_eq!(lod_level(&t, 2, 1500.), 1);
+        // (shown level, its live levels, the retired ones still dying out)
+        fn shown(n: &NodeInst) -> Option<(Option<usize>, usize, usize)> {
             match &n.lod {
-                Some(lod) => Some((lod.shown, n.children.len())),
+                Some(lod) => {
+                    let retired = n.children.iter().filter(|c| c.retired).count();
+                    Some((lod.shown, n.children.len() - retired, retired))
+                }
                 None => n.children.iter().find_map(shown),
             }
         }
@@ -1766,11 +1805,33 @@ mod tests {
         };
         let mut n = make_node(&mut lib, &def, 1, 0).unwrap();
         let place = ground_fire_place();
-        for (d, want) in [(20., 0), (180., 1), (400., 2)] {
-            lib.cam = Some(place.translation + Vec3::Z * d);
-            step_node(&mut n, &mut lib, place, 1. / 30., false);
-            assert_eq!(shown(&n), Some((Some(want), 1)), "at {d} m");
+        let mut at = |lib: &mut FxrLib, d: f32, dt: f32| {
+            lib.eye = Some(place.translation + Vec3::Z * d);
+            step_node(&mut n, lib, place, dt, false);
+            shown(&n)
+        };
+        for _ in 0..90 {
+            at(&mut lib, 20., 1. / 30.);
         }
+        assert_eq!(at(&mut lib, 20., 1. / 30.), Some((Some(0), 1, 0)));
+        // The detailed level's fire dies out behind the lighter one instead of vanishing.
+        assert_eq!(
+            at(&mut lib, 180., 1. / 30.),
+            Some((Some(1), 1, 1)),
+            "at 180 m"
+        );
+        // (its ground glows 603 live 18 and 20 s)
+        for _ in 0..700 {
+            at(&mut lib, 180., 1. / 30.);
+        }
+        assert_eq!(
+            at(&mut lib, 180., 1. / 30.),
+            Some((Some(1), 1, 0)),
+            "died out"
+        );
+        // With the clock stopped (render gates) the old level goes at once and the new one is
+        // warmed up.
+        assert_eq!(at(&mut lib, 20., 0.), Some((Some(0), 1, 0)), "paused");
     }
 
     /// #273: a level that ends is not replaced by another when the camera moves: a one-shot
@@ -1787,7 +1848,7 @@ mod tests {
         let mut n = make_node(&mut lib, &NodeDef::new(&node), 1, 0).unwrap();
         step_node(&mut n, &mut lib, Transform::IDENTITY, 1. / 30., false);
         assert!(n.lod.is_none() && n.children.is_empty());
-        lib.cam = Some(Vec3::Z * 20.);
+        lib.eye = Some(Vec3::Z * 20.);
         step_node(&mut n, &mut lib, Transform::IDENTITY, 1. / 30., false);
         assert!(n.children.is_empty());
     }

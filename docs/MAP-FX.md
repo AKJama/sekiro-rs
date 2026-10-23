@@ -413,6 +413,9 @@ Effects touched: 62 common effects have a 2002 node with more than one level and
 The torch 300163, the fog wall 11 and the snow 839500 have neither and are unchanged.
 The switch distances apply since #273: child i shows from its LevelsOfDetailThresholds (133) `threshold<i>` to the next, by the camera's distance to the node (`fxr_tree::lod_level`; `threshold0` is 1 in all 62 effects, `threshold1` 10 to 165).
 So 800140 draws its detail to 165 m, a lighter level to 200 m and nothing past, and the far-only glow 811052 appears from 400 m.
+The camera position comes from the map FX step before it advances (`FxrPlayer::set_eye`), so an effect built at load starts on its right level.
+A level the camera leaves retires: it emits no more and its particles die out (the ground fire's glows live 18 to 20 s), so a fire does not vanish and restart at a threshold.
+With the clock stopped (render gates, a paused map) the old level goes at once and the new one is warmed up for 2 s, as a new map effect is.
 
 ## Soft sprite pull and uniformScale, 2026-10-22 (#78)
 
