@@ -136,7 +136,7 @@ Each node keeps at most 2048 particles; when the steady population (count per em
 The camera snow 839500 wants 40 flakes every 1/30 s for 6 s (7200), so it keeps about 28 percent of them.
 Before #84 the pool filled in 1.7 s and then emitted nothing until that batch expired, so a running Wolf left the snow behind for about two seconds in every six.
 The game keeps camera weather up with a moving camera in its update shader `CS_VFX_StandardParticle` (#334): when the root has moved this frame and a particle lies behind it, farther than `m_cs_attachParam.x`, the particle is mirrored through the root to the same distance ahead.
-We apply that rule to the 10000 nodes under a camera-following node (movement 46), with half the emitter box's widest horizontal extent as the distance (7.5 m for 839500).
+We apply that rule to the 10000 nodes under a camera-following node (movement 46), with an untraced stand-in for the distance: half the emitter box's widest horizontal extent (7.5 m for 839500).
 The exe code that fills `m_cs_attachParam` is not traced; 7.5 m keeps the density within 5 m of a camera sprinting at 8 to 12 m/s at that of a standing one (about 790 against 730 flakes), where without the rule it fell to a fifth.
 This fallback does not yet reproduce GPU collision, all emitter shapes, random turns, angular motion or every acceleration/growth field.
 Camera-follow detection comes from native node movement 46 in the FXR tree, including effect references.
