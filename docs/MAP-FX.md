@@ -481,3 +481,30 @@ That is the main change for the fog wall: its sprites were 5.3 to 10.5 m square 
 Every soft or uniform-scale 603 / 604 effect changes the same way.
 In the common effects, 603 nodes with (0.25, 0) as in FXR 11 are the second most common setting (609 nodes after 1897 with (1, 0)), and at least 95 depth-blended nodes have a non-zero `unkDepthBlend2` (for example (0.5, -0.5) in 56 nodes such as FXR 222001), which now pull the other way.
 A negative soft distance (for example `unkDepthBlend2` 1.5 with a small sprite) means no fade, as in the shader.
+
+## Lit particles, 2026-10-24 (#324)
+
+Symptom: the Outskirts gatehouse brazier smoke (FXR 839530, opening shot 31) was near black; in the game it is grey.
+Cause: lit particles (lighting -2 / 0) were drawn unlit at 1/8 of their rgbMultiplier, a stand-in from the 48 lit/unlit config pairs.
+The grey smoke (0.5 x colour3 2.0, hue-squared 0.58 per channel) came out at 0.07 native units.
+
+### What the game's shaders do (disassembled with d3dcompiler_47)
+
+`GXFfxtessellateSoftTexture.gpo` (the same body in its `_quad` / `_octed` domain shaders) writes a per-vertex light into `TEXCOORD6` when `g_ds_bEnableLighting`:
+- the irradiance volume's constant band, `g_IrradianceVolumeW` decoded `2 (rgb - 0.5) 2^(20 (a - 0.5))`, clamped at 0, times `g_ds_irradianceVolumeDiffuseColorScale`, volumes A and B blended by `g_ds_irradianceVolumeInterpRatio` (with `g_ds_isIVUpper` it instead evaluates the Y and W bands toward up);
+- plus every tile point light, `Diff.rgb x saturate(1 - d^2 / R^2) / (1 + 0.7 (d b)^2) x (0.75 t^2 + 0.25)` with `t = 1.4 / (1.4 + d b)`, which is the deferred point light's wrap term with N.L taken as 0 (no normal);
+- plus the tile spot lights, the same curve times the cone.
+
+`GXFfxtessellateBlendSoftTexture.ppo` then, when `g_ps_bEnableLighting`, outputs `saturate(colour) x (sun x shadow + TEXCOORD6)`.
+The colour is the hue-squared texture x vertex colour x `g_vColorScale`.
+The sun is `FC_DirLight[g_ps_envCbIndex].Col_0` (the light set's directional colour 0) times `g_ps_envCbColScale` and `saturate(g_vLightMask.x (1 - v) + v)`; there is no N.L.
+The shadow is `1 + g_ps_BillboardShadowIntensity (shadowVolume - 1)`.
+
+### What changed
+
+`particle_color` clamps a lit particle's colour to 1 and `collect_node` multiplies it by the native light at the particle (`fx_lighting.rs`), evaluated once per particle on the CPU.
+That light is the light set's sun (`direct[1]`, the map's own sun, re-read only when the light set changes), the GIIV W band at the particle (a CPU copy kept by `install_irradiance`) and the scene's point lights (map BTL and FXR 609, read back from their Bevy lights with the map shader's scale).
+Each lit node first culls the point lights and volumes to the bounds of its particles, so a particle only loops over what can reach it.
+Only lit nodes change: in 839530 the flames and embers (603, blend 4, lighting -1) are unlit and draw as before, and only the smoke node (603, blend 2, lighting -2) is lit.
+Inferred or open: the light mask, `g_ps_envCbColScale` and the volume colour scale are taken as 1 (their uploads are not traced); the sun is not shadowed; overlapping volumes blend by edge fade, not the A/B ratio; the upper-hemisphere branch and spot lights are left out; the clamp is on the colour, not texture x colour, which differs only for colours above 1.
+The castle vista chimney plume (opening shot 23) is not addressed: its effect source is not found.
