@@ -983,7 +983,7 @@ struct Frame<'a> {
 /// builders): full while the light's near edge (`depth - radius`, `depth` along the camera's
 /// view axis) is within `view_distance`, then a linear ramp to zero over 7 percent of it, at
 /// most 10 m (`.rdata` 0.07 and 10.0). A light without a view distance never fades (#83).
-fn light_view_fade(view_distance: f32, depth: f32, radius: f32) -> f32 {
+pub(crate) fn light_view_fade(view_distance: f32, depth: f32, radius: f32) -> f32 {
     if view_distance <= 0. {
         return 1.;
     }
