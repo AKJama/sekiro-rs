@@ -113,7 +113,10 @@ const GROUND_SLOTS: [&[u8]; 34] = [
     &[3, 8],
 ];
 
-pub fn game_params(d: &mtd::Mtd, kind: u8) -> [[f32; 4]; 16] {
+/// Rows of packed shader constants per layered material ([`game_params`]).
+pub const PARAM_ROWS: usize = 17;
+
+pub fn game_params(d: &mtd::Mtd, kind: u8) -> [[f32; 4]; PARAM_ROWS] {
     let prefix = if kind == 3 {
         "M_LandScape__Mountain_snp_0_"
     } else if kind == 2 {
@@ -147,9 +150,9 @@ pub fn game_params(d: &mtd::Mtd, kind: u8) -> [[f32; 4]; 16] {
     };
     let w = |a: [f32; 3], x: f32| [a[0], a[1], a[2], x];
     let one = [1.0, 1.0, 1.0, 0.0];
-    let p: [[f32; 4]; 16] = if kind == 3 {
+    let p: [[f32; 4]; PARAM_ROWS] = if kind == 3 {
         // Native Mountain Gbuf/Fwd: two albedos and three mask lookups.
-        let mut p = [[0.; 4]; 16];
+        let mut p = [[0.; 4]; PARAM_ROWS];
         p[0] = col("color_0");
         p[1] = col("color_1");
         p[2] = [f("float_0"), f("float_2"), f("float_3"), f("float_6")];
@@ -181,10 +184,13 @@ pub fn game_params(d: &mtd::Mtd, kind: u8) -> [[f32; 4]; 16] {
             w(v3("float3_3"), 0.0),
             w(snow, 0.0),
             [wet[0], wet[1], 0.0, 0.0],
+            [0.0; 4],
         ]
     } else {
         let snow = mirror(v3("float3_7"));
         let (l, wet) = (v2("float2_0"), v2("float2_1"));
+        // Variant 18's slot-17 metal mask: base R at uv * float2_10, overlay G at uv * float2_11.
+        let (metal, metal_overlay) = (v2("float2_10"), v2("float2_11"));
         [
             col("color_1"),
             col("color_7"),
@@ -202,6 +208,7 @@ pub fn game_params(d: &mtd::Mtd, kind: u8) -> [[f32; 4]; 16] {
             w(v3("float3_5"), 0.0),
             w(snow, 0.0),
             [wet[0], wet[1], 0.0, 0.0],
+            [metal[0], metal[1], metal_overlay[0], metal_overlay[1]],
         ]
     };
     p

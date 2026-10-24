@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::ui_widgets::{Activate, ActivateOnPress, Button};
 use bevy::window::{CursorGrabMode, CursorOptions};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 static NEXT: Mutex<Option<Vec<String>>> = Mutex::new(None);
@@ -70,6 +70,8 @@ pub(crate) const KEPT_SWITCHES: &[&str] = &[
     "--no-fxr",
     "--no-fog",
     "--no-fog-surfaces",
+    "--no-dof",
+    "--no-sun-glow",
     "--no-shadow",
     "--no-bloom",
     "--no-auto-exposure",
@@ -110,6 +112,25 @@ pub(crate) fn kept_args(args: &[String]) -> Vec<String> {
         }
     }
     out
+}
+/// The relaunch of Back to start menu: the title for a session it started (with the kept flags
+/// of the `launch` arguments), else the developer panel with its choices.
+fn back_to_start(state: &PanelState, launch: &[String]) -> Vec<String> {
+    if state.title {
+        let mut args = vec!["--title".into()];
+        args.extend(kept_args(launch));
+        return args;
+    }
+    let mut args = vec![
+        "--menu".into(),
+        "--menu-choices".into(),
+        serde_json::to_string(&state.choices.values).unwrap(),
+    ];
+    args.extend(kept_args(&state.extras));
+    if let Some(script) = &state.return_script {
+        args.extend(["--menu-script".into(), script.clone()]);
+    }
+    args
 }
 /// Starts the game again with `args` once this run exits ([`relaunch`]).
 pub(crate) fn relaunch_with(args: Vec<String>) {
@@ -162,6 +183,58 @@ pub(crate) fn test_click(world: &mut World, entity: Entity, hit: Entity) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A plain launch's New Game falls back to the first extracted map, at its first start,
+    /// when the default map is not extracted (#8).
+    #[test]
+    fn title_new_game_falls_back_to_an_extracted_map() {
+        let cache = std::env::temp_dir().join(format!("sekiro-title-maps-{}", std::process::id()));
+        std::fs::create_dir_all(cache.join("maps/m15_00_00_00")).unwrap();
+        let choices = Choices::for_title(&cache);
+        std::fs::remove_dir_all(&cache).unwrap();
+        assert_eq!(
+            (choices.values[3].as_str(), choices.values[4].as_str()),
+            ("m15_00_00_00", "0")
+        );
+        assert_ne!(Choices::default().values[3], "m15_00_00_00");
+    }
+
+    /// Back to start menu returns a title-started session to the title with its kept flags,
+    /// and a panel-started one to the developer panel (#8).
+    #[test]
+    fn back_to_start_menu_returns_to_where_the_session_started() {
+        let mut state = PanelState::new(false, &[]);
+        let launch = ["--title".to_string(), "--perf".into()];
+        assert_eq!(back_to_start(&state, &launch)[0], "--menu");
+        state.title = true;
+        assert_eq!(back_to_start(&state, &launch), ["--title", "--perf"]);
+    }
+
+    /// While the title is up its Esc (and pad Start) is the title's own: play's pause does not
+    /// toggle, nor lock the cursor, until play takes over (#8).
+    #[test]
+    fn the_title_keeps_play_paused_off() {
+        let mut app = App::new();
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<Time<Virtual>>()
+            .add_message::<KeyboardInput>()
+            .add_message::<AppExit>()
+            .insert_resource(PanelState::new(false, &[]))
+            .insert_resource(crate::title::Title::for_test());
+        install_input(&mut app);
+        let escape = |app: &mut App| {
+            let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            keys.clear();
+            keys.release(KeyCode::Escape);
+            keys.press(KeyCode::Escape);
+            app.update();
+            app.world().resource::<PanelState>().paused
+        };
+        assert!(!escape(&mut app));
+        assert!(!escape(&mut app));
+        crate::title::leave(app.world_mut());
+        assert!(escape(&mut app));
+    }
 
     #[test]
     fn keys_held_through_a_menu_wait_for_release() {
@@ -272,9 +345,10 @@ mod tests {
             (a.enemy, a.enemy_present, a.god, a.immortal, a.attack_power),
             (b.enemy, b.enemy_present, b.god, b.immortal, b.attack_power)
         );
+        let (a_brain, b_brain) = (a.brain.unwrap(), b.brain.unwrap());
         assert_eq!(
-            (a.brain.name, a.brain_label, a.brain_overlay, a.player),
-            (b.brain.name, b.brain_label, b.brain_overlay, b.player)
+            (a_brain.name, a.brain_label, a.brain_overlay, a.player),
+            (b_brain.name, b.brain_label, b.brain_overlay, b.player)
         );
         assert_eq!(
             (a.window_size, a.coach_interval),
@@ -322,23 +396,23 @@ mod tests {
             (a.spawn, a.enemy_distance, a.gparam),
             (b.spawn, b.enemy_distance, b.gparam)
         );
-        assert_eq!((a.brain.model, a.brain.chr), (b.brain.model, b.brain.chr));
+        assert_eq!((a_brain.model, a_brain.chr), (b_brain.model, b_brain.chr));
         assert_eq!(
             (
-                a.brain.coach.backend,
-                a.brain.coach.model,
-                a.brain.coach.effort,
-                a.brain.coach.checkpoint,
-                a.brain.coach.budget_usd,
-                a.brain.coach.token_budget
+                a_brain.coach.backend,
+                a_brain.coach.model,
+                a_brain.coach.effort,
+                a_brain.coach.checkpoint,
+                a_brain.coach.budget_usd,
+                a_brain.coach.token_budget
             ),
             (
-                b.brain.coach.backend,
-                b.brain.coach.model,
-                b.brain.coach.effort,
-                b.brain.coach.checkpoint,
-                b.brain.coach.budget_usd,
-                b.brain.coach.token_budget
+                b_brain.coach.backend,
+                b_brain.coach.model,
+                b_brain.coach.effort,
+                b_brain.coach.checkpoint,
+                b_brain.coach.budget_usd,
+                b_brain.coach.token_budget
             )
         );
         match (a.brain_memory, b.brain_memory) {
@@ -846,6 +920,34 @@ impl Choices {
                     .next()
                     .is_some_and(|v| v.eq_ignore_ascii_case("c5060")))
     }
+    /// These choices on an extracted map: the first extracted of [`MAPS`] at its first start
+    /// when the chosen map is not extracted, and the first start when the map has no such one.
+    fn available(mut self, cache: &Path) -> Self {
+        if let Some(id) = MAPS.iter().find(|id| id.starts_with(&self.values[3])) {
+            self.values[3] = (*id).into();
+        }
+        if crate::map::map_dir(cache, &self.values[3]).is_err()
+            && let Some(id) = MAPS
+                .iter()
+                .find(|id| crate::map::map_dir(cache, id).is_ok())
+        {
+            self.values[3] = (*id).into();
+            self.values[4] = "0".into();
+        }
+        if crate::map::map_dir(cache, &self.values[3])
+            .and_then(|dir| crate::map::player_start(&dir, self.values[4].parse().unwrap_or(0)))
+            .is_err()
+        {
+            self.values[4] = "0".into();
+        }
+        self
+    }
+
+    /// New Game's choices on the title (#8): the defaults, on a map that is extracted.
+    pub(crate) fn for_title(cache: &Path) -> Self {
+        Self::default().available(cache)
+    }
+
     pub fn args(&self) -> Vec<String> {
         let v = &self.values;
         let mut args = vec!["--play".into()];
@@ -1030,6 +1132,9 @@ pub struct PanelState {
     script: Vec<(usize, String)>,
     stick: IVec2,
     activations: Vec<usize>,
+    /// The session was started from the title ([`crate::title`]): Back to start menu returns
+    /// there, not to this developer panel.
+    pub title: bool,
 }
 impl PanelState {
     fn new(start: bool, args: &[String]) -> Self {
@@ -1074,24 +1179,7 @@ impl PanelState {
                 .map(PathBuf::from)
                 .as_deref(),
         );
-        let mut choices = choices;
-        if let Some(id) = MAPS.iter().find(|id| id.starts_with(&choices.values[3])) {
-            choices.values[3] = (*id).into();
-        }
-        if crate::map::map_dir(&cache, &choices.values[3]).is_err()
-            && let Some(id) = MAPS
-                .iter()
-                .find(|id| crate::map::map_dir(&cache, id).is_ok())
-        {
-            choices.values[3] = (*id).into();
-            choices.values[4] = "0".into();
-        }
-        if crate::map::map_dir(&cache, &choices.values[3])
-            .and_then(|dir| crate::map::player_start(&dir, choices.values[4].parse().unwrap_or(0)))
-            .is_err()
-        {
-            choices.values[4] = "0".into();
-        }
+        let choices = choices.available(&cache);
         let selected = if choices.explore() { 3 } else { 0 };
         Self {
             paused: start,
@@ -1107,6 +1195,7 @@ impl PanelState {
             script,
             stick: IVec2::ZERO,
             activations: Vec::new(),
+            title: false,
         }
     }
 }
@@ -1241,7 +1330,9 @@ fn install_input(app: &mut App) {
     app.init_resource::<HeldThroughMenu>().add_systems(
         PreUpdate,
         (
+            // The title takes Esc and Start for itself; play's pause starts with play.
             update
+                .run_if(not(crate::title::up))
                 .in_set(PauseSystems)
                 .after(bevy::input::InputSystems)
                 .after(bevy::picking::PickingSystems::Last),
@@ -1708,16 +1799,8 @@ fn update(
                     }
                 }
                 1 => {
-                    let mut args = vec![
-                        "--menu".into(),
-                        "--menu-choices".into(),
-                        serde_json::to_string(&state.choices.values).unwrap(),
-                    ];
-                    args.extend(kept_args(&state.extras));
-                    if let Some(script) = &state.return_script {
-                        args.extend(["--menu-script".into(), script.clone()]);
-                    }
-                    *NEXT.lock().unwrap() = Some(args);
+                    let launch: Vec<String> = std::env::args().skip(1).collect();
+                    *NEXT.lock().unwrap() = Some(back_to_start(&state, &launch));
                     exit.write(AppExit::Success);
                 }
                 _ => {

@@ -103,6 +103,8 @@ import sekiro_rs::map_bindings::{
     wet,
     wet_sampler,
     map_light,
+    metal,
+    metal_sampler,
 };
 
 struct GiScatter { FssEss: vec3<f32>, FmsEms: vec3<f32>, Edss: vec3<f32>, }
@@ -322,8 +324,10 @@ fn point_light_shadow(light_id: u32, pbr: PbrInput, spot: bool) -> f32 {
 
 // Replaces Bevy's inverse-square point/spot response with the native one: Bevy's own
 // contribution (same inputs as apply_pbr_lighting's loops) is subtracted, the native one added.
+// A light without its own falloff distance (BTL) also takes the by-eye `btl_residual`; an FXR
+// light carries one and takes the traced `scale` alone (`clustered_light_residual`, #323).
 @if(NATIVE_DIRECT)
-fn native_point_lights(pbr: PbrInput, scale: f32) -> vec3<f32> {
+fn native_point_lights(pbr: PbrInput, scale: f32, btl_residual: f32) -> vec3<f32> {
     var li = base_lighting_input(pbr);
     let view_z = (view.view_from_world*pbr.world_position).z;
     var ranges = unpack_clusterable_object_index_ranges(view_fragment_cluster_index(pbr.frag_coord.xy,view_z,pbr.is_orthographic));
@@ -334,7 +338,8 @@ fn native_point_lights(pbr: PbrInput, scale: f32) -> vec3<f32> {
         var bevy = vec3(0.0);
         if spot { bevy = native_lighting::spot_light(light_id,&li,true); }
         else { bevy = native_lighting::point_light(light_id,&li,true,true); }
-        correction += (native_clustered_light(light_id,pbr,li,spot)*scale-bevy)*point_light_shadow(light_id,pbr,spot);
+        let residual = select(btl_residual,1.0,clustered_lights.data[light_id].position_radius.w>0.0);
+        correction += (native_clustered_light(light_id,pbr,li,spot)*scale*residual-bevy)*point_light_shadow(light_id,pbr,spot);
     }
     return correction*view.exposure;
 }
@@ -480,6 +485,12 @@ fn sample_wet(uv: vec2<f32>, slot: u32) -> vec4<f32> {
 return textureSample(bindless_textures_2d[layer_indices[slot].wet], bindless_samplers_filtering[layer_indices[slot].wet_sampler], uv);
 @if(!BINDLESS)
 return textureSample(wet, wet_sampler, uv);
+}
+fn sample_metal(uv: vec2<f32>, slot: u32) -> vec4<f32> {
+@if(BINDLESS)
+return textureSample(bindless_textures_2d[layer_indices[slot].metal], bindless_samplers_filtering[layer_indices[slot].metal_sampler], uv);
+@if(!BINDLESS)
+return textureSample(metal, metal_sampler, uv);
 }
 fn sample_base_albedo(uv: vec2<f32>, slot: u32) -> vec4<f32> {
 @if(BINDLESS)
@@ -720,6 +731,14 @@ fn game_layers(in: VertexOutput, b: vec4<f32>, b2: vec4<f32>, uv_scale: f32, is_
     }
     pbr_input.material.base_color = vec4(a, alpha);
     pbr_input.material.perceptual_roughness = clamp(1.0 - saturate(gloss), 0.089, 1.0);
+    if !ground && has(4096u, map_game) {
+        // Multiple variant 18 (#43): the slot-17 mask's R (base, uv * float2_10) and G (overlay,
+        // uv * float2_11) mixed by the overlay weight give a metalness; native writes albedo
+        // * (1 - metal) and F0 = lerp(0.03, albedo, metal), which is Bevy's metallic model.
+        let metal_base = sample_metal(uvs * p[16].xy * map_game.tiling[12].xy, slot).r;
+        let metal_overlay = sample_metal(uvs * p[16].zw * map_game.tiling[12].xy, slot).g;
+        pbr_input.material.metallic = saturate(mix(metal_base, metal_overlay, wOv));
+    }
 @if(VERTEX_TANGENTS)
     pbr_input.N = layer_world_normal(nt, in.world_normal, in.world_tangent, is_front);
     return pbr_input;
@@ -822,7 +841,7 @@ vertex: VertexOutput,
         if !unlit && light.direct[12].x>0.0 {
             out.color = vec4(out.color.rgb+native_direct(pbr,light),out.color.a);
             if light.direct[12].y>0.0 {
-                out.color = vec4(out.color.rgb+native_point_lights(pbr,light.direct[12].z),out.color.a);
+                out.color = vec4(out.color.rgb+native_point_lights(pbr,light.direct[12].z,light.direct[12].w),out.color.a);
             }
         }
     }

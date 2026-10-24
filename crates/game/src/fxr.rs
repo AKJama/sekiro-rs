@@ -32,9 +32,13 @@ use crate::fxr_tree::{
 
 #[path = "fxr_stream.rs"]
 mod stream;
+#[path = "fxr_warm.rs"]
+mod warm;
 
 /// Live effects and particles are bounded so a runaway effect cannot sink the frame.
 const EFFECT_CAP: usize = 192;
+/// Warmed textures added to the image assets per frame.
+const WARM_UPLOADS: usize = 4;
 const PARTICLE_CAP: usize = 8000;
 /// An effect with no end is stopped after this long, and dropped after [`EFFECT_DROP`].
 const EFFECT_STOP: f32 = 20.0;
@@ -118,6 +122,8 @@ struct Effect {
     root: Option<NodeInst>,
     age: f32,
     asleep: bool,
+    /// A map effect to run to its steady state when its tree is made ([`FxrPlayer::map_effect_primed`]).
+    prime: bool,
 }
 
 /// A stain a hit asks for: DecalParam row, contact point, blow direction on the floor plane.
@@ -145,6 +151,12 @@ pub struct FxrPlayer {
     preview: Option<i32>,
     steps: usize,
     cache: PathBuf,
+    /// The background warm-up of the fight's effects, while it runs.
+    warm: Option<std::sync::Mutex<std::sync::mpsc::Receiver<warm::Warmed>>>,
+    /// The characters (player and enemy chr ids) the last warm-up was for.
+    warmed_for: [String; 2],
+    /// Warmed textures not yet added to the image assets.
+    ready_images: HashMap<i64, Image>,
 }
 
 impl FxrPlayer {
@@ -197,6 +209,9 @@ impl FxrPlayer {
                 .and_then(|a| a[1].parse().ok()),
             steps: 0,
             cache,
+            warm: None,
+            warmed_for: Default::default(),
+            ready_images: HashMap::new(),
         }
     }
 
@@ -230,12 +245,72 @@ impl FxrPlayer {
         )
     }
 
-    /// Loads the hit tables (effects, stains) for this fight's NPC when they are not loaded yet.
+    /// Loads the hit tables (effects, stains) for this fight's NPC when they are not loaded yet,
+    /// and warms the effects the fighters' timelines can spawn.
     pub(crate) fn ensure_tables(&mut self, duel: &Duel) {
-        if self.enabled && (self.hit_fx.is_none() || self.npc_param != duel.spec.npc_param) {
+        if !self.enabled {
+            return;
+        }
+        if self.hit_fx.is_none() || self.npc_param != duel.spec.npc_param {
             self.npc_param = duel.spec.npc_param;
             self.hit_fx =
                 sekiro_sim::hit_fx::HitFx::load_from_cache(&self.cache, duel.spec.npc_param);
+        }
+        let chrs = [&duel.player.chr, &duel.enemy.chr];
+        if chrs != [&self.warmed_for[0], &self.warmed_for[1]] {
+            self.warmed_for = chrs.map(String::clone);
+            let ids = duel
+                .player
+                .tae
+                .effect_ids()
+                .into_iter()
+                .chain(duel.enemy.tae.effect_ids())
+                .map(i64::from)
+                .collect();
+            self.warm_up(ids);
+        }
+        self.adopt_warmed(false);
+    }
+
+    /// Starts warming these effects on a background thread (see `fxr_warm.rs`), in place of any
+    /// warm-up still running.
+    fn warm_up(&mut self, mut ids: Vec<i64>) {
+        ids.retain(|&id| id > 0 && !self.lib.is_compiled(id));
+        ids.sort_unstable();
+        ids.dedup();
+        self.warm = Some(std::sync::Mutex::new(warm::start(self.lib.index(), ids)));
+    }
+
+    /// Takes what the warm-up has finished; `wait` blocks until it is done.
+    fn adopt_warmed(&mut self, wait: bool) {
+        let Some(rx) = self.warm.as_mut() else {
+            return;
+        };
+        let rx = rx
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            let next = if wait {
+                rx.recv().ok()
+            } else {
+                match rx.try_recv() {
+                    Ok(warmed) => Some(warmed),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+                }
+            };
+            match next {
+                Some(warm::Warmed::Effect(id, tree, node)) => self.lib.adopt(id, tree, node),
+                Some(warm::Warmed::Texture(id, image)) => {
+                    if !self.textures.contains_key(&id) {
+                        self.ready_images.insert(id, *image);
+                    }
+                }
+                None => {
+                    self.warm = None;
+                    return;
+                }
+            }
         }
     }
 
@@ -292,6 +367,7 @@ impl FxrPlayer {
             root: None,
             age: 0.0,
             asleep: false,
+            prime: false,
         });
     }
 
@@ -324,11 +400,12 @@ impl FxrPlayer {
     }
 
     /// Removes the falling weather particles (GPUStandardParticle, world space) of map effect
-    /// `id` that lie under cover, so snow does not fall under a roof (#79). Returns how many.
+    /// `id` that `covered(serial, position)` says lie under cover, so snow does not fall under a
+    /// roof (#79). Returns how many.
     pub(crate) fn cull_map_weather(
         &mut self,
         id: i32,
-        covered: &mut impl FnMut(Vec3) -> bool,
+        covered: &mut impl FnMut(i32, Vec3) -> bool,
     ) -> usize {
         fn cull(n: &mut NodeInst, covered: &mut dyn FnMut(Vec3) -> bool) -> usize {
             let mut gone = 0;
@@ -349,8 +426,11 @@ impl FxrPlayer {
         self.effects
             .iter_mut()
             .filter(|e| e.key.0 == 5 && e.key.1 == id && !e.asleep)
-            .filter_map(|e| e.root.as_mut())
-            .map(|root| cull(root, covered))
+            .filter_map(|e| {
+                let serial = e.key.2;
+                Some((serial, e.root.as_mut()?))
+            })
+            .map(|(serial, root)| cull(root, &mut |p| covered(serial, p)))
             .sum()
     }
 
@@ -416,6 +496,13 @@ impl FxrPlayer {
     ) {
         let key = (5, id, serial);
         if let Some(e) = self.effects.iter_mut().find(|e| e.key == key) {
+            if awake && e.stop {
+                // Retired by [`Self::retire_map_effect`] and asked for again: start it afresh.
+                e.root = None;
+                e.age = 0.;
+                e.stop = false;
+                e.persistent = true;
+            }
             if frozen && awake && at.translation != e.at.translation {
                 e.root = None;
                 e.age = 0.;
@@ -435,6 +522,30 @@ impl FxrPlayer {
                 e.persistent = true;
             }
         }
+    }
+
+    /// [`Self::map_effect`] for an effect that, when its tree is made, runs six seconds (the falling
+    /// snow's particle lifetime) before it is first drawn, so it appears already full.
+    pub(crate) fn map_effect_primed(&mut self, id: i32, serial: i32, at: Transform, frozen: bool) {
+        self.map_effect(id, serial, at, true, frozen);
+        if let Some(e) = self.effects.iter_mut().find(|e| e.key == (5, id, serial)) {
+            e.prime = true;
+        }
+    }
+
+    /// Lets map effect `id`/`serial` stop emitting and end once its particles have expired.
+    pub(crate) fn retire_map_effect(&mut self, id: i32, serial: i32) {
+        if let Some(e) = self.effects.iter_mut().find(|e| e.key == (5, id, serial)) {
+            e.persistent = false;
+            e.stop = true;
+            e.asleep = false;
+            e.age = e.age.max(EFFECT_STOP);
+        }
+    }
+
+    /// Removes map effect `id`/`serial` at once.
+    pub(crate) fn drop_map_effect(&mut self, id: i32, serial: i32) {
+        self.effects.retain(|e| e.key != (5, id, serial));
     }
 
     pub(crate) fn advance_map(&mut self, dt: f32) {
@@ -610,10 +721,11 @@ impl FxrPlayer {
                     .wrapping_add(self.steps as u32 * 31);
                 e.root = make_node(lib, &def, seed, 0);
                 if map
-                    && dt == 0.
+                    && (dt == 0. || e.prime)
                     && let Some(root) = &mut e.root
                 {
-                    for _ in 0..60 {
+                    // Two seconds, or six for a primed effect (the falling snow's lifetime).
+                    for _ in 0..if e.prime { 180 } else { 60 } {
                         step_node(root, lib, e.at, 1. / 30., false);
                     }
                     e.age = 2.;
@@ -867,6 +979,36 @@ struct Frame<'a> {
     trail: &'a mut Vec<(Vec3, Vec3, f32)>,
 }
 
+/// The native view-distance fade of a local light (`20d9c0`, called by the point and spot light
+/// builders): full while the light's near edge (`depth - radius`, `depth` along the camera's
+/// view axis) is within `view_distance`, then a linear ramp to zero over 7 percent of it, at
+/// most 10 m (`.rdata` 0.07 and 10.0). A light without a view distance never fades (#83).
+fn light_view_fade(view_distance: f32, depth: f32, radius: f32) -> f32 {
+    if view_distance <= 0. {
+        return 1.;
+    }
+    let ramp = (view_distance * 0.07).min(10.);
+    ((view_distance + ramp - (depth - radius)) / ramp).clamp(0., 1.)
+}
+
+/// Shows every effect light of this frame, reusing the pooled entities. There is no count cap:
+/// Bevy's clustered culling bounds the cost, as for the BTL lights, and a nearest-N cap made
+/// farther lights pop in as nearer ones went out of range (#83).
+fn sync_lights(commands: &mut Commands, pool: &mut Vec<Entity>, lights: &[FxLight]) {
+    while pool.len() > lights.len() {
+        commands.entity(pool.pop().unwrap()).despawn();
+    }
+    for (i, fx_light) in lights.iter().enumerate() {
+        let light = fx_light.point_light();
+        let transform = Transform::from_translation(fx_light.position);
+        if let Some(&entity) = pool.get(i) {
+            commands.entity(entity).insert((light, transform));
+        } else {
+            pool.push(commands.spawn((light, transform)).id());
+        }
+    }
+}
+
 /// One FXR 609 point light of this frame.
 #[derive(Clone, Copy, Debug)]
 struct FxLight {
@@ -1027,13 +1169,12 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
             }
             609 => {
                 let limit = scalar(a, Field::MaxViewDistance, active_t, &mut rnd, -1.);
-                if limit > 0. && world.distance_squared(cam.translation()) > limit * limit {
-                    continue;
-                }
                 let color = prop(a.get(Field::DiffuseColor), p.age, &mut rnd, [1.; 4]);
                 let intensity =
                     scalar(a, Field::DiffuseMultiplier, active_t, &mut rnd, 1.) * color[3].max(0.);
                 let radius = scalar(a, Field::Radius, active_t, &mut rnd, 0.);
+                let depth = (world - cam.translation()).dot(cam.forward().as_vec3());
+                let intensity = intensity * light_view_fade(limit, depth, radius);
                 // The light object's falloff distance (object +0x90, 1.0 by default in
                 // 20d5f0); the builders store 1 / it as the diffuse w the shader's
                 // `1 / (1 + 0.7 (d / falloff)^2)` term uses (#141).
@@ -1533,7 +1674,11 @@ fn texture_handle(
     // The effect shaders sample the DDS as plain UNORM (BC1 and BC7 UNORM, never *_SRGB) and
     // square the texture colour themselves, so decoding it as sRGB first applied the gamma twice
     // and starved the soft body of every flame sprite, leaving only the over-bright core.
-    let handle = match load_texture(&player.lib, id, false) {
+    let image = player
+        .ready_images
+        .remove(&id)
+        .or_else(|| load_texture(&player.lib, id, false));
+    let handle = match image {
         Some(image) => images.add(image),
         None => {
             warn!("FXR texture {id} is not installed or cannot be decoded");
@@ -1769,6 +1914,16 @@ fn render(
             ))
         })
         .clone();
+    // A few warmed textures a frame, so their uploads do not all land in one frame.
+    let ready: Vec<i64> = player
+        .ready_images
+        .keys()
+        .take(WARM_UPLOADS)
+        .copied()
+        .collect();
+    for id in ready {
+        texture_handle(&mut player, &mut images, id, &white);
+    }
     let FrameBuffers {
         bufs,
         multi,
@@ -1796,35 +1951,13 @@ fn render(
             collect(root, &mut frame);
         }
     }
-    // The 16 nearest the camera (many alike, such as item glints, would tie on brightness).
-    let eye = frame.cam.translation();
-    frame.lights.sort_by(|a, b| {
-        a.position
-            .distance_squared(eye)
-            .total_cmp(&b.position.distance_squared(eye))
-            .then(b.intensity.total_cmp(&a.intensity))
-    });
-    frame.lights.truncate(16);
-    while lights.len() > frame.lights.len() {
-        commands.entity(lights.pop().unwrap()).despawn();
-    }
-    for (i, fx_light) in frame.lights.iter().enumerate() {
-        let light = fx_light.point_light();
-        let transform = Transform::from_translation(fx_light.position);
-        if let Some(&entity) = lights.get(i) {
-            commands.entity(entity).insert((light, transform));
-        } else {
-            lights.push(commands.spawn((light, transform)).id());
-        }
-    }
+    sync_lights(&mut commands, &mut lights, frame.lights);
     let (bufs, multi) = (frame.bufs, frame.multi);
     for key in frame.distort.keys() {
         if player.distort_batches.contains_key(key) {
             continue;
         }
-        let texture = load_texture(&player.lib, *key, false)
-            .map(|image| images.add(image))
-            .unwrap_or_else(|| white.clone());
+        let texture = texture_handle(&mut player, &mut images, *key, &white);
         let material = distort_materials.add(DistortMaterial { texture });
         let batch = new_batch(&mut commands, &mut meshes);
         commands
@@ -2093,6 +2226,27 @@ mod tests {
         assert!((t.rotation * Vec3::X - Vec3::NEG_Z).length() < 1e-5);
     }
 
+    /// #313: a warmed effect's first spawn reads and parses no file in the frame, and its
+    /// textures wait decoded for the renderer.
+    #[test]
+    fn a_warmed_effect_spawns_without_parsing_in_the_frame() {
+        let cache = sekiro_sim::cache::root();
+        if !cache.join("raw/sfx").is_dir() {
+            eprintln!("skipped: no extracted cache");
+            return;
+        }
+        let mut player = FxrPlayer::new(cache);
+        // Wolf's footstep dust (400) and step effect (410), both in his TAE.
+        player.warm_up(vec![400, 410]);
+        player.adopt_warmed(true);
+        assert!(player.warm.is_none(), "the warm-up did not finish");
+        player.request(400, (0, 400, 0), Transform::IDENTITY, true, false);
+        player.advance(1.0 / 60.0);
+        assert!(player.effects[0].root.is_some(), "effect 400 did not start");
+        assert_eq!(player.lib.parses, 0, "the first spawn parsed effect files");
+        assert!(!player.ready_images.is_empty(), "no warmed textures");
+    }
+
     #[test]
     fn a_requested_effect_plays_out_and_is_dropped() {
         let mut player = FxrPlayer::new(PathBuf::from("missing-fxr-test-cache"));
@@ -2241,6 +2395,75 @@ mod tests {
         assert!(quads > 2, "fog sprites drawn: {quads}");
     }
 
+    /// #83: the Outskirts lantern light (839531: radius 3, maxViewDistance 50) stays at full
+    /// power until its near edge is 50 m deep in the view, then fades out over 3.5 m, instead of
+    /// switching on at 50 m from the camera.
+    #[test]
+    fn lantern_light_fades_out_past_its_view_distance() {
+        let cache = sekiro_sim::cache::root();
+        if !cache
+            .join("raw/sfx/sfxbnd_commoneffects.ffxbnd.d/f000839531.fxr")
+            .exists()
+        {
+            eprintln!("skipping: cache not extracted");
+            return;
+        }
+        let mut player = FxrPlayer::new(cache);
+        player.hold(HELD, 839531, 0, Transform::IDENTITY, true);
+        for _ in 0..120 {
+            player.advance(1. / 60.);
+        }
+        let shown = |depth: f32| {
+            let cam = GlobalTransform::from(
+                Transform::from_xyz(0., 0., depth).looking_at(Vec3::ZERO, Vec3::Y),
+            );
+            let mut buffers = FrameBuffers::default();
+            let mut frame = Frame {
+                cam: &cam,
+                bufs: &mut buffers.bufs,
+                multi: &mut buffers.multi,
+                lights: &mut buffers.lights,
+                distort: &mut buffers.distort,
+                trail: &mut buffers.trail,
+            };
+            for e in &player.effects {
+                collect(e.root.as_ref().unwrap(), &mut frame);
+            }
+            buffers.lights.iter().map(|l| l.intensity).sum::<f32>()
+        };
+        // Authored multiplier 2.5 and colour alpha 1.
+        for (depth, want) in [(40., 2.5), (53., 2.5), (54.75, 2.5 * 0.5), (57., 0.)] {
+            let got = shown(depth);
+            assert!(
+                (got - want).abs() < 1e-3,
+                "depth {depth}: {got}, want {want}"
+            );
+        }
+    }
+
+    /// #83: every effect light gets an entity; a nearest-16 cap made farther lights beyond the
+    /// start-3 gate pop in as Wolf walked toward them.
+    #[test]
+    fn every_effect_light_is_shown() {
+        let lights: Vec<_> = (0..40)
+            .map(|i| FxLight {
+                position: Vec3::new(i as f32 * 5., 0., 0.),
+                color: Color::WHITE,
+                intensity: 1.,
+                range: 5.,
+                falloff: 1.,
+            })
+            .collect();
+        let mut world = World::new();
+        let mut pool = Vec::new();
+        sync_lights(&mut world.commands(), &mut pool, &lights);
+        world.flush();
+        assert_eq!(world.query::<&PointLight>().iter(&world).count(), 40);
+        sync_lights(&mut world.commands(), &mut pool, &lights[..3]);
+        world.flush();
+        assert_eq!(world.query::<&PointLight>().iter(&world).count(), 3);
+    }
+
     /// The native deferred point-light diffuse for a surface facing the light (N.L = 1), as
     /// `native_clustered_light` in `map_material.wesl` computes it.
     fn native_diffuse(light: &FxLight, d: f32) -> f32 {
@@ -2296,5 +2519,50 @@ mod tests {
             ..glint
         };
         assert!(native_diffuse(&fire, 2.) > 0.5 * native_diffuse(&fire, 0.));
+    }
+
+    /// #323: the Outskirts gatehouse torches (brazier 839530 on `o116000`) light a warm pool on
+    /// the ground below the flame. Their own falloff (0.625 m) is traced, so the BTL by-eye
+    /// residual, fitted when every light used `b = 1/R`, must not dim them a second time: with
+    /// it the ground 1.3 m under the flame got 0.53 native units, without it 1.48.
+    #[test]
+    fn torch_light_lights_the_ground_below_its_flame() {
+        let cache = sekiro_sim::cache::root();
+        if !cache
+            .join("raw/sfx/sfxbnd_commoneffects.ffxbnd.d/f000839530.fxr")
+            .exists()
+        {
+            eprintln!("skipping: cache not extracted");
+            return;
+        }
+        let mut player = FxrPlayer::new(cache);
+        player.hold(HELD, 839530, 0, Transform::IDENTITY, true);
+        for _ in 0..180 {
+            player.advance(1. / 60.);
+        }
+        let cam = GlobalTransform::from(Transform::from_xyz(0., 1.5, 8.));
+        let mut buffers = FrameBuffers::default();
+        let mut frame = Frame {
+            cam: &cam,
+            bufs: &mut buffers.bufs,
+            multi: &mut buffers.multi,
+            lights: &mut buffers.lights,
+            distort: &mut buffers.distort,
+            trail: &mut buffers.trail,
+        };
+        for e in &player.effects {
+            collect(e.root.as_ref().unwrap(), &mut frame);
+        }
+        let [torch] = buffers.lights[..] else {
+            panic!("one torch light, got {:?}", buffers.lights);
+        };
+        // Authored: radius 5, falloff 0.625, multiplier 0 to 6.4 over the first two seconds.
+        assert!((torch.range - 5.).abs() < 1e-4);
+        assert!((torch.falloff - 0.625).abs() < 1e-4);
+        assert!((torch.intensity - 6.4).abs() < 1e-3, "{}", torch.intensity);
+        let scale = crate::map::native_point_light_scale()
+            * crate::map::clustered_light_residual(torch.point_light().radius);
+        let ground = native_diffuse(&torch, 1.3) * scale;
+        assert!(ground > 1.2, "ground under the torch gets {ground}");
     }
 }

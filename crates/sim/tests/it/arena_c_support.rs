@@ -26,7 +26,7 @@ pub fn staged(name: &str, fog: usize) -> Option<(Arena, Duel)> {
     }
     let arena = Arena::load(&cache, spec, false).unwrap();
     assert_eq!(arena.fog_walls.len(), fog);
-    let enemy = sekiro_sim::collision::EnemyGround(arena.world.clone());
+    let enemy = sekiro_sim::collision::EnemyGround::new(arena.world.clone());
     for (who, spot, ground) in [
         ("Wolf", arena.layout.wolf, &*arena.world as &dyn Ground),
         ("boss", arena.layout.boss, &enemy),

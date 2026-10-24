@@ -43,6 +43,12 @@ pub mod screen_monkeys;
 
 /// Seconds between a death and both characters respawning at their start positions (a stand-in
 /// for the game's death screen and reload).
+/// The exe's fall-return point: a ring of the last 5 grounded positions (FUN_140a75f00 every
+/// frame), and the fall-dead warp (CSFallDeadStep::STEP_WarpPlayer, FUN_1411d70e0) takes the
+/// oldest, so a ledge Wolf only lands on for a moment on the way down is not where he comes
+/// back (#201).
+const SAFE_RING: usize = 5;
+
 pub const RESPAWN_DELAY: f32 = 6.0;
 
 /// Seed for the AI's random numbers (fixed, so runs repeat).
@@ -252,8 +258,9 @@ pub struct Duel {
     /// which Wolf is returned to where he last stood; `None` disables the return.
     pub fall_respawn_depth: Option<f32>,
     fall_materials: std::collections::HashMap<u32, FallMaterial>,
-    /// Where Wolf last stood on collision, for the return after a fall into the void.
-    last_safe: Option<([f32; 3], f32)>,
+    /// Where Wolf stood on collision these last [`SAFE_RING`] ticks, oldest first: the return
+    /// after a fall into the void puts him at the oldest.
+    last_safe: std::collections::VecDeque<([f32; 3], f32)>,
     /// Seconds into the fall return's model fade, after Wolf touched a filter-15 event wall.
     fall_return_fade: Option<f32>,
     /// The filter-15 wall that started that fade, whose [`HelperEvent`] gets the return; walls
@@ -722,6 +729,19 @@ fn anim_id(clip: &str) -> Option<i32> {
 }
 
 impl Duel {
+    /// `world` as the enemy collides with it: enemy-only walls and water, and its own map body,
+    /// NpcParam `hitRadius` by `hitHeight` (#191).
+    pub fn enemy_ground(
+        &self,
+        world: &std::sync::Arc<crate::collision::CollisionWorld>,
+    ) -> crate::collision::EnemyGround {
+        let hit = &self.fighters[1];
+        crate::collision::EnemyGround(
+            world.clone(),
+            crate::collision::BodySize::of_npc(hit.radius, hit.height),
+        )
+    }
+
     /// Wolf at the origin facing -Z and an Ashina soldier (`c1010`, NpcParam 10100000) `distance`
     /// metres in front of him, facing him.
     pub fn load(cache: &Path, distance: f32) -> Result<Self, LoadError> {
@@ -825,7 +845,7 @@ impl Duel {
             fall_respawn_depth: None,
             fog_gate: None,
             fall_materials: load_fall_materials(cache),
-            last_safe: None,
+            last_safe: std::collections::VecDeque::new(),
             fall_return_fade: None,
             fall_return_part: None,
             touching: Vec::new(),
@@ -2961,7 +2981,10 @@ impl Duel {
             .floor(x, z, y + 0.5)
             .is_some_and(|floor| (y - floor).abs() < 0.3);
         if was_grounded && b.grounded && on_floor {
-            self.last_safe = Some((b.position, b.yaw));
+            if self.last_safe.len() == SAFE_RING {
+                self.last_safe.pop_front();
+            }
+            self.last_safe.push_back((b.position, b.yaw));
         }
         // A map action event wall in the path: filter 15 starts the fall return (its model
         // fade, then the return below); other filters' reactions are only recorded.
@@ -3021,6 +3044,8 @@ impl Duel {
             // traced yet, so none is taken here.
             let (position, yaw) = self
                 .last_safe
+                .front()
+                .copied()
                 .or_else(|| self.spawn.map(|s| (s[0].position, s[0].yaw)))
                 .unwrap_or((b.position, b.yaw));
             let started = self.fall_return_part.take();

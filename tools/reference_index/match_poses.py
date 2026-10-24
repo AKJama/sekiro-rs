@@ -25,9 +25,11 @@ from scipy import ndimage as ndi
 from scipy.signal import fftconvolve
 
 if __package__:
+    from . import collection
     from .pose_collision import CameraCollision
     from .report_parity import require_story
 else:
+    import collection
     from pose_collision import CameraCollision
     from report_parity import require_story
 
@@ -377,7 +379,7 @@ def main():
     parser.add_argument('--limit-spots', type=int)
     parser.add_argument('--map', choices=['m11_00', 'm11_01'])
     parser.add_argument('--render-arg', action='append', default=[])
-    parser.add_argument('--story', default='genichiro-defeated', help='Event-flag preset, shared with accepted-pose regeneration')
+    parser.add_argument('--story', help='Event-flag preset; defaults to the collection.json story of --reference (genichiro-defeated without one)')
     parser.add_argument('--seeds', type=Path, help='External shot-number to yaw/pitch/distance review seeds')
     parser.add_argument('--only-shots', help='Comma-separated selected shot numbers for a review rerun')
     parser.add_argument('--force', action='store_true', help='Replace selected existing poses after successful capture')
@@ -390,12 +392,14 @@ def main():
     if args.wait_seeds and not args.seeds:
         parser.error('--wait-seeds requires an external --seeds file')
     args.reference, args.output = args.reference.resolve(), args.output.resolve()
+    args.story = collection.story(args.reference, args.story)
+    source = collection.images(args.reference).resolve()
     repo = Path(__file__).resolve().parents[2]
     if args.output == repo or repo in args.output.parents:
         parser.error('generated images and JSON must stay outside the source repository')
     index = json.loads((args.reference / 'index.json').read_text(encoding='utf-8'))
     spots = json.loads((args.reference / 'spots.json').read_text(encoding='utf-8'))
-    selected = select_shots(index, spots, args.reference / 'm11_00')
+    selected = select_shots(index, spots, source)
     manual_seeds = json.loads(args.seeds.read_text()) if args.seeds else {}
     if args.only_shots:
         wanted = {int(s) for s in re.split(r'[,\s]+', args.only_shots.strip())}
@@ -408,6 +412,9 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     pairs = args.output / 'pairs'
     pairs.mkdir(exist_ok=True)
+    if args.output != args.reference:
+        # The capture root declares its story so reports and replays read it back.
+        write_json(args.output / 'collection.json', {'story': args.story, 'images': str(source)})
     poses_path = args.output / 'poses.json'
     poses = json.loads(poses_path.read_text()) if poses_path.exists() else []
     poses = [r for r in poses if r.get('matcher_version') in (2, 3, 4)]
@@ -446,7 +453,7 @@ def main():
                 start = time.monotonic()
                 references = []
                 for row in rows:
-                    with Image.open(args.reference / 'm11_00' / row['file']) as image:
+                    with Image.open(source / row['file']) as image:
                         references.append(features(image))
                 player = spot['position']
                 coarse = None
@@ -519,7 +526,7 @@ def main():
                 for (row, score, candidate, improvement), (request, image, manifest) in zip(best, final):
                     stem = f'{spot["spot_id"]}-shot-{row["index"]:03}'
                     pair_path = pairs / f'{stem}.png'
-                    make_pair(args.reference / 'm11_00' / row['file'], image, pair_path,
+                    make_pair(source / row['file'], image, pair_path,
                               f'{stem} | yaw {candidate["yaw"]:.1f} pitch {candidate["pitch"]:.1f} distance {request["actual_distance"]:.2f} | structure cost {score:.3f}')
                     manifest_path = pairs / f'{stem}.visibility.json'
                     write_json(manifest_path, manifest)

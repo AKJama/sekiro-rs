@@ -50,6 +50,8 @@ fn authored_mask_selectors_intensity_and_snow_direction_survive_packing() {
             ("color_1-Intensity", vec![2.]),
             ("float_11", vec![0.25]),
             ("float_12", vec![0.75]),
+            ("float2_10", vec![2., 3.]),
+            ("float2_11", vec![4., 5.]),
         ] {
             d.params.push(Param {
                 name: format!("{prefix}__snp_0_{name}"),
@@ -62,6 +64,8 @@ fn authored_mask_selectors_intensity_and_snow_direction_survive_packing() {
             // Ground flow amplitude reads float_11 (cbMtdParam byte 448), not float_12.
             assert_eq!(p[6][3], 0.25);
         }
+        // Multiple variant 18 samples its slot-17 metal mask at uv * float2_10 and float2_11.
+        assert_eq!(p[16], if kind == 1 { [2., 3., 4., 5.] } else { [0.; 4] });
         assert_eq!(&p[9][..3], &[0., 1., 0.]);
         assert_eq!(&p[13][..3], &[0., 0., 1.]);
         assert_eq!(&p[14][..3], &[0.3, 0.8, -0.3]);

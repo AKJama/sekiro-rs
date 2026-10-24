@@ -43,11 +43,13 @@ pub struct FogSurface {
 pub struct Layers {
     pub kind: u8,
     pub variant: Option<usize>,
-    pub params: [[f32; 4]; 16],
+    pub params: [[f32; 4]; sekiro_formats::map_layers::PARAM_ROWS],
     pub base_normal: Option<TexRef>,
     pub detail: Option<TexRef>,
     pub mask_l: Option<TexRef>,
     pub wet: Option<TexRef>,
+    /// Multiple variant 18's slot-17 metal mask (base R, overlay G).
+    pub metal: Option<TexRef>,
     pub overlay: Option<TexRef>,
     pub overlay_normal: Option<TexRef>,
     pub snow: Option<TexRef>,
@@ -275,6 +277,11 @@ pub fn choose_material(material: &flver::Material, mtd: Option<&mtd::Mtd>) -> Ma
                 ),
                 mask_l: if ground { None } else { slot(6, "Mask") },
                 wet: slot(if ground { 0 } else { 16 }, "NormalMap"),
+                metal: if ground || mountain {
+                    None
+                } else {
+                    slot(17, "Mask")
+                },
                 overlay: slot(5, "AlbedoMap"),
                 overlay_normal: slot(4, "NormalMap"),
                 snow: slot(
@@ -578,6 +585,7 @@ pub fn build(
                 ("detail", &layers.detail),
                 ("mask_l", &layers.mask_l),
                 ("wet", &layers.wet),
+                ("metal", &layers.metal),
             ] {
                 if let Some(r) = r
                     && let Some(uri) = texture_uri(&game_texture_name(
@@ -785,6 +793,7 @@ pub fn wanted_textures(flver: &flver::Flver, mtds: &Mtds) -> Vec<(String, bool)>
                 (l.detail, true),
                 (l.mask_l, false),
                 (l.wet, true),
+                (l.metal, false),
             ] {
                 if let Some(r) = r {
                     out.push((game_texture_name(&r, normal), false));
@@ -967,6 +976,41 @@ mod tests {
         assert_eq!(choice.albedo.unwrap().path, "leaves_a.tif");
         assert_eq!(choice.alpha_mode.unwrap().0, "MASK");
         assert!(choice.double_sided);
+    }
+
+    #[test]
+    fn only_multiple_variant_18_exports_the_slot_17_metal_mask() {
+        let mat = flver::Material {
+            name: "statue".into(),
+            mtd: "statue.mtd".into(),
+            index: 0,
+            textures: vec![],
+        };
+        for (switch, metal) in [(18, Some("metal_3m.tif")), (17, None)] {
+            let mtd = mtd::Mtd {
+                shader: "M[Multiple].spx".into(),
+                description: String::new(),
+                params: vec![mtd::Param {
+                    name: "GXFT_SATStaticSwitch".into(),
+                    kind: "int".into(),
+                    value: mtd::ParamValue::Ints(vec![switch]),
+                }],
+                textures: [
+                    (8, "AlbedoMap", "wood_a.tif"),
+                    (17, "Mask3Map", "metal_3m.tif"),
+                ]
+                .into_iter()
+                .map(|(slot, semantic, path)| mtd::Texture {
+                    kind: format!("M_Multiple__snp_Texture2D_{slot}_{semantic}_05"),
+                    uv_number: 1,
+                    shader_data_index: 0,
+                    path: path.into(),
+                })
+                .collect(),
+            };
+            let layers = choose_material(&mat, Some(&mtd)).layers.unwrap();
+            assert_eq!(layers.metal.map(|r| r.path).as_deref(), metal, "{switch}");
+        }
     }
 
     #[test]

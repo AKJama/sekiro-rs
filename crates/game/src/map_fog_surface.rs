@@ -64,6 +64,8 @@ pub(super) struct FogMaterial {
     diffuse: Option<Handle<Image>>,
     double_sided: bool,
     diagnostic: bool,
+    /// The owning part's own LightSet row, `None` for the collision row (#67).
+    own_light_set: Option<i32>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -162,7 +164,8 @@ struct Settings {
     prefix: String,
     enabled: bool,
     empty_gi: Handle<bevy::render::storage::ShaderBuffer>,
-    materials: HashMap<AssetId<StandardMaterial>, Handle<FogMaterial>>,
+    /// Fog materials by source material and the owning part's own light set row.
+    materials: HashMap<(AssetId<StandardMaterial>, Option<i32>), Handle<FogMaterial>>,
     definitions: HashMap<AssetId<StandardMaterial>, Option<Value>>,
 }
 
@@ -261,13 +264,15 @@ fn replace(
         &MeshMaterial3d<StandardMaterial>,
         &GltfMaterialExtras,
     )>,
+    parents: Query<&ChildOf>,
+    part_light_sets: Query<&crate::map::PartLightSet>,
     irradiance: Option<Res<crate::lighting::MapIrradiance>>,
     mut changed: MessageReader<AssetEvent<StandardMaterial>>,
 ) {
     for event in changed.read() {
         if let AssetEvent::Modified { id } | AssetEvent::Removed { id } = event {
             settings.definitions.remove(id);
-            settings.materials.remove(id);
+            settings.materials.retain(|(source, _), _| source != id);
         }
     }
     for (entity, original, extras) in &meshes {
@@ -295,11 +300,16 @@ fn replace(
                 .insert(Visibility::Hidden);
             continue;
         }
+        // A fog card is lit with its part's own light set row, as the terrain under it (#67).
+        let part = std::iter::once(entity)
+            .chain(parents.iter_ancestors(entity))
+            .find_map(|e| part_light_sets.get(e).ok());
+        let own_light_set = crate::lighting::own_light_set(part.map(|p| p.0));
         let prefix = settings.prefix.clone();
         let empty_gi = settings.empty_gi.clone();
         let handle = settings
             .materials
-            .entry(original.0.id())
+            .entry((original.0.id(), own_light_set))
             .or_insert_with(|| {
                 let mut inputs = inputs(&data);
                 let textures = data["textures"].as_array();
@@ -355,6 +365,7 @@ fn replace(
                     diffuse: irradiance.as_ref().map(|i| i.diffuse.clone()),
                     double_sided: standard.get(&original.0).is_some_and(|m| m.double_sided),
                     diagnostic: false,
+                    own_light_set,
                 })
             })
             .clone();
@@ -375,34 +386,39 @@ fn update_lighting(
     if !lighting.is_changed() && !ambient_light.is_changed() && !materials.is_changed() {
         return;
     }
-    let set =
-        crate::lighting::LightSet::from_gparam(&lighting.gparam, lighting.light_set, lighting.hour);
     let rgb = |color: Color| {
         let c = color.to_linear();
         Vec3::new(c.red, c.green, c.blue)
     };
-    let direct = rgb(set.sun_color) * set.sun_lux / std::f32::consts::PI;
-    let ambient = rgb(set.ambient) * ambient_light.brightness;
-    // CloudFog/GroundFog Fwd read FC_DirLightSpc_0 independently of
-    // FC_DirLightCol_0. Diffuse W is not a substitute for SpecColor0 W.
-    let values = LightingInputs {
-        sun: set.sun_toward.extend(0.),
-        direct: direct.extend(0.),
-        specular: set.direct[2] / std::f32::consts::PI,
-        ambient: ambient.extend(0.),
-        hemi_axis: set.hemi_axis.extend(0.),
-        hemi_delta: (set.hemi_delta * ambient_light.brightness).extend(0.),
+    let mut rows = HashMap::new();
+    let mut values = |own: Option<i32>| {
+        *rows.entry(own).or_insert_with(|| {
+            let set = lighting.surface_light(own);
+            let direct = rgb(set.sun_color) * set.sun_lux / std::f32::consts::PI;
+            let ambient = rgb(set.ambient) * ambient_light.brightness;
+            // CloudFog/GroundFog Fwd read FC_DirLightSpc_0 independently of
+            // FC_DirLightCol_0. Diffuse W is not a substitute for SpecColor0 W.
+            LightingInputs {
+                sun: set.sun_toward.extend(0.),
+                direct: direct.extend(0.),
+                specular: set.direct[2] / std::f32::consts::PI,
+                ambient: ambient.extend(0.),
+                hemi_axis: set.hemi_axis.extend(0.),
+                hemi_delta: (set.hemi_delta * ambient_light.brightness).extend(0.),
+            }
+        })
     };
     // iter_mut marks every visited asset modified, even when no field changes.
     let changed: Vec<_> = materials
         .iter()
-        .filter(|(_, material)| {
+        .filter_map(|(id, material)| {
             let inputs = &material.inputs;
-            inputs.control.w != crate::lighting::ENV_PER_UNIT || inputs.lighting != values
+            let values = values(material.own_light_set);
+            (inputs.control.w != crate::lighting::ENV_PER_UNIT || inputs.lighting != values)
+                .then_some((id, values))
         })
-        .map(|(id, _)| id)
         .collect();
-    for id in changed {
+    for (id, values) in changed {
         let Some(mut material) = materials.get_mut(id) else {
             continue;
         };
@@ -414,6 +430,54 @@ fn update_lighting(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fog cards over the Outskirts terrain are lit with their part's row 0, like the ground
+    /// under them, not the row-100 collision Wolf stands on (#67).
+    #[test]
+    fn fog_cards_read_their_part_light_set_row() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<FogMaterial>()
+            .insert_resource(crate::lighting::MapLighting {
+                gparam: crate::lighting::sun_rows(&[(0, 1.), (100, 2.)]),
+                hour: 12.,
+                light_set: 100,
+                ..default()
+            })
+            .init_resource::<bevy::light::GlobalAmbientLight>()
+            .add_systems(Update, update_lighting);
+        let handles = [Some(0), None].map(|own_light_set| {
+            app.world_mut()
+                .resource_mut::<Assets<FogMaterial>>()
+                .add(FogMaterial {
+                    inputs: inputs(&serde_json::json!({})),
+                    mask: default(),
+                    flow: default(),
+                    ground: default(),
+                    height: default(),
+                    irradiance: default(),
+                    voxels: None,
+                    diffuse: None,
+                    double_sided: false,
+                    diagnostic: false,
+                    own_light_set,
+                })
+        });
+        app.update();
+        let [part, scene] = handles.map(|h| {
+            app.world()
+                .resource::<Assets<FogMaterial>>()
+                .get(&h)
+                .unwrap()
+                .inputs
+                .lighting
+                .direct
+        });
+        assert!(
+            part.x > 0. && scene.x > part.x,
+            "part {part}, scene {scene}"
+        );
+    }
 
     #[test]
     fn fog_materials_upload_only_for_new_materials_or_changed_lighting() {
@@ -442,6 +506,7 @@ mod tests {
             diffuse: None,
             double_sided: false,
             diagnostic: false,
+            own_light_set: None,
         };
         let modified = |app: &mut App| {
             app.world_mut()

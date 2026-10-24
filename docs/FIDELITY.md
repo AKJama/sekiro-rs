@@ -13,6 +13,8 @@ Our scheduling policy keeps near (20 m), engaged and locked foes at the full fix
 Engagement wakes immediately without a backlog step; the LOD thresholds and rate are our policy, not recovered engine values.
 Sight rays run at FwLo's recovered 0.2 + rand*0.2 second search interval (FUN_140623ca0), with damage and nose distance checked immediately.
 Population presentation skips far offscreen pose/cloth uploads, updates distant visible poses with their simulation, and limits foe shadows to 30 m from the camera.
+Each foe is hidden and unskinned past its LodParam `draw_BorderDist` from the camera (row = NpcParam `defaultLodParamId`, since every shipped Enemy part authors LOD ID 255), with `draw_PlayDist` as hysteresis (#312); its simulation keeps running.
+That the distance is measured from the camera, and the row-0 fallback for a negative ID, follow the map-piece LOD rule and are not traced for characters.
 Cloth uses the 15 m camera range from FwLo's RustSekiro (`SHINOBI_CLOTH_RANGE`), is carried in its restart pose outside that range, and runs one parallel task per character.
 CPU cloth writes its actual output bounds; other foe meshes use dynamic skinned bounds when the pose changes.
 Compiled Lua script prototypes and model mesh/material handles are shared across actors; mutable VM globals and cloth buffers remain separate.
@@ -41,6 +43,15 @@ Intermediate-hour LUT resource blending and the renderer-global bloom-quality sc
 The scene-to-Bevy unit bridge remains inferred.
 Matched captures still show excess brightness and blue saturation, so this correction does not close L1 or M1 and supplies no replacement tint or multiplier.
 See [EXPOSURE.md](EXPOSURE.md) for the native evidence and measured limits.
+
+## Sun glow halo, issue #288
+
+The Glow Filter port takes its GPARAM fields and normaliser from the exe (see [LIGHTING.md](LIGHTING.md#glow-filter-sun-glow-halo-288-2026-10-23)).
+Untraced stand-ins: additive ONE+ONE for the final add into the glare, and a standard 13-tap Gaussian (sigma 2 texels) in place of the game's 13-tap glow weights.
+Only the sky dome feeds the glow: sky pixels (depth at infinity) of the fogged HDR scene times the dome's `g_GlowScale`, so clouds and fog in-scatter in front of the dome leak in at the dome's weight, and emissive map materials do not glow yet.
+Known gap: alpha-blended draws that write no depth (FXR sparks and fire, blended foliage) over the sky also pass the depth test and feed the glow at the dome's weight.
+The game avoids this because only materials with a glow output write its glow target; the port has no such target yet, and the cheap fix (reading the scene before the transparent pass) needs a copy of the HDR target per frame.
+The global fade is taken as 1, and each glow level halves the previous one; the downsample helper 1ca700's sizes are not traced.
 
 ## Distant mountain materials
 

@@ -15,11 +15,21 @@ An offline environment can use already installed Pillow and NumPy with `uv run -
 
 ## Reference story and exact replay
 
-Pose matching defaults to `--story genichiro-defeated`, using boss progression flags rather than an hour override.
+The original collection is matched with story `genichiro-defeated` (see Collections below), using boss progression flags rather than an hour override.
 Gyoubu alone (`gyoubu-defeated`, flag 9301) retains morning at 06:00.
 Genichiro (`genichiro-defeated`, flags 9301 and 9303) raises 9800 through the event-820 rule and selects afternoon at 12:00 in both Ashina areas.
 The reference's Castle Tower Lookout travel destination, Attack Power 3 and overcast sky support the latter candidate; playtime alone cannot identify flags.
 Unknown quest, pickup and interaction flags remain unset.
+
+## Collections and their story
+
+A reference root may hold `collection.json` declaring the story its shots were taken in and where its screenshots live, for example `{"story": "morning", "images": "../reference/m11_00"}`.
+A relative `images` path is relative to the root.
+Without the file a root is the original post-Genichiro collection, with story `genichiro-defeated` and screenshots in `m11_00/`, so that collection behaves as before.
+`match_poses`, `regenerate_pairs` and `report_parity` take the story from the collection and treat `--story` only as an explicit override.
+Capture roots written by `match_poses` and `regenerate_pairs` get their own `collection.json` with the story used and the absolute screenshot folder, so a later report reads the same story back.
+A second collection can therefore reuse the read-only screenshot folder with its own `index.json` and `spots.json`.
+Screenshots taken without the practice-tool overlay have no coordinates; give such entries an estimated `position` with a `position_source` note, and treat their pairs as rough until reviewed.
 
 Replay accepted cameras without searching again into a fresh external collection:
 

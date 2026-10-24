@@ -337,22 +337,21 @@ impl Plugin for GameAudioPlugin {
 /// Prepare sound tables and project metadata behind the loading screen.
 /// Loading every character's event data exhausts FMOD resources (error 43), preventing
 /// even Wolf's footsteps from starting. Warm only active kinds and evict them on dormancy.
-pub(crate) fn prepare_population(app: &mut App, foes: &[(String, i32, bool)]) {
+pub(crate) fn prepare_population(world: &mut World, foes: &[(String, i32, bool)]) {
     {
-        let mut library = app.world_mut().resource_mut::<SoundLibrary>();
+        let mut library = world.resource_mut::<SoundLibrary>();
         for (chr, npc, _) in foes {
             library.hit_sounds(*npc);
             library.require_project(chr);
         }
     }
-    let mut projects = app
-        .world_mut()
+    let mut projects = world
         .resource_mut::<SoundLibrary>()
         .enemy_projects
         .drain()
         .collect::<Vec<_>>();
     projects.sort(); // Preserve lookup order when projects share an event key.
-    if let Some(mut fmod) = app.world_mut().get_non_send_mut::<FmodAudio>() {
+    if let Some(mut fmod) = world.get_non_send_mut::<FmodAudio>() {
         for chr in projects {
             fmod.load_project(&chr, false);
         }
@@ -672,7 +671,7 @@ mod tests {
             "c1360", "c5020",
         ]
         .map(|chr| (chr.to_owned(), 10100000, matches!(chr, "c1010" | "c1150")));
-        prepare_population(&mut app, &foes);
+        prepare_population(app.world_mut(), &foes);
         let mut fmod = app.world_mut().non_send_mut::<FmodAudio>();
         assert_eq!(fmod.system.projects().len(), 18);
         assert_eq!(fmod.population_resident.len(), 2);

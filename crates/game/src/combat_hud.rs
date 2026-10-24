@@ -17,6 +17,7 @@
 //! SB_Boss) are not extracted, so plain framed nodes stand in for them.
 
 use bevy::prelude::*;
+use bevy::text::FontSize;
 use sekiro_sim::deathblow::MAX_BAR_MARKS;
 
 use crate::brain_overlay::{PANEL_INSET, PANEL_WIDTH};
@@ -114,6 +115,8 @@ pub enum HudPart {
     DeathblowMark,
     /// An item cluster slot: 0 the quick item, 1 the prosthetic tool.
     ItemSlot(usize),
+    /// The box holding the debug and controls text (see [`debug_text_area`]).
+    DebugText,
 }
 
 /// Wolf's status line.
@@ -134,6 +137,36 @@ pub(crate) const VITALITY: Color = Color::srgb(180.0 / 255.0, 70.0 / 255.0, 48.0
 /// The damage trail's light, desaturated red (about 165, 130, 120 in captures).
 const TRAIL: Color = Color::srgb(165.0 / 255.0, 130.0 / 255.0, 120.0 / 255.0);
 const POISON_WIDTH: f32 = 160.0;
+
+/// Where the boss HUD sits, percent of the screen. These are FwLo's values measured from
+/// captures; the HUD movie (`menu/01_000_FE.gfx`, the first item of its `BossList` on the
+/// 1920 x 1080 stage) agrees: the deathblow orbs' origin is at y 49 (4.5 %), the vitality
+/// gauge's at x 112, y 99 (5.9 %, 9.2 %; its art is not extracted, so not its top edge), and
+/// the name's text field (MenuFont_01 at 25 px) spans x 121 and y 116 to 155 (6.3 %, 10.7 % to
+/// 14.4 %).
+const BOSS_ORBS_TOP: f32 = 4.6;
+const BOSS_HP_TOP: f32 = 8.3;
+const BOSS_HP_HEIGHT_VH: f32 = 1.25;
+const BOSS_NAME_TOP: f32 = 11.0;
+/// The boss name's size: the movie's 25 px of 1080, so it scales with the screen as the movie
+/// does.
+const BOSS_NAME_VH: f32 = 25.0 / 10.8;
+/// The bottom of the boss HUD: the name field's bottom edge in the movie.
+const BOSS_HUD_BOTTOM: f32 = 14.4;
+/// The reward panel's top, over the item cluster.
+const REWARD_TOP: f32 = 75.6;
+/// The item cluster's boxes: left, top, width, height.
+const ITEM_SLOTS: [(f32, f32, f32, f32); 2] = [(79.1, 87.2, 4.2, 7.3), (84.2, 83.1, 6.3, 11.3)];
+/// Wolf's posture bar: its bottom edge (percent of the screen from the bottom) and height.
+const WOLF_POSTURE_BOTTOM: f32 = 12.6;
+const WOLF_POSTURE_HEIGHT_VH: f32 = 1.3;
+/// The debug text's inset from the top left corner, pixels.
+const DEBUG_TEXT_INSET: f32 = 12.0;
+/// The debug text's top while the boss HUD shows: just under it.
+const DEBUG_TEXT_UNDER_BOSS: f32 = BOSS_HUD_BOTTOM + 0.6;
+/// The debug text's bottom edge, percent of the screen from the bottom: above the reward panel,
+/// the item cluster and Wolf's bars, so long text is cut off rather than drawn over them.
+const DEBUG_TEXT_BOTTOM: f32 = 100.0 - REWARD_TOP + 1.0;
 
 /// Wolf's vitality bar width (percent of the screen width) at [`HP_BAR_BASE`] maximum
 /// vitality (level 1); it grows in proportion, as the game's does with each Vitality level.
@@ -351,11 +384,11 @@ fn dots(parent: &mut ChildSpawnerCommands, node: Node, size: Val, gap: Val) {
         });
 }
 
-fn text(s: &str, size: f32) -> impl Bundle {
+fn text(s: &str, font_size: FontSize) -> impl Bundle {
     (
         Text::new(s),
         TextFont {
-            font_size: bevy::text::FontSize::Px(size),
+            font_size,
             ..default()
         },
         TextColor(CREAM),
@@ -364,6 +397,32 @@ fn text(s: &str, size: f32) -> impl Bundle {
             color: Color::BLACK,
         },
     )
+}
+
+/// The box for the debug and controls text, at the top left: [`update`] moves it under the boss
+/// HUD while that shows, and it ends above the HUD at the bottom of the screen, clipping
+/// whatever text runs past.
+pub(crate) fn debug_text_area() -> impl Bundle {
+    (
+        HudPart::DebugText,
+        Node {
+            position_type: PositionType::Absolute,
+            top: debug_text_top(false),
+            left: px(DEBUG_TEXT_INSET),
+            bottom: percent(DEBUG_TEXT_BOTTOM),
+            overflow: Overflow::clip(),
+            ..default()
+        },
+    )
+}
+
+/// The debug text box's top: the corner, or under the boss HUD while it shows.
+fn debug_text_top(boss: bool) -> Val {
+    if boss {
+        percent(DEBUG_TEXT_UNDER_BOSS)
+    } else {
+        px(DEBUG_TEXT_INSET)
+    }
 }
 
 /// Spawns the bars (call once at startup).
@@ -399,11 +458,16 @@ pub fn spawn(commands: &mut Commands) {
         .spawn(Node {
             position_type: PositionType::Absolute,
             width: percent(100),
-            bottom: percent(12.6),
+            bottom: percent(WOLF_POSTURE_BOTTOM),
             ..default()
         })
         .with_children(|p| {
-            posture_row(p, 0, Node::default(), (Val::Vw(27.0), Val::Vh(1.3)));
+            posture_row(
+                p,
+                0,
+                Node::default(),
+                (Val::Vw(27.0), Val::Vh(WOLF_POSTURE_HEIGHT_VH)),
+            );
         });
     // A plain enemy: deathblow dots, vitality over posture, above its head.
     commands
@@ -457,7 +521,7 @@ pub fn spawn(commands: &mut Commands) {
                 Node {
                     position_type: PositionType::Absolute,
                     left: percent(5.5),
-                    top: percent(4.6),
+                    top: percent(BOSS_ORBS_TOP),
                     align_items: AlignItems::Center,
                     ..default()
                 },
@@ -470,10 +534,10 @@ pub fn spawn(commands: &mut Commands) {
                     Node {
                         position_type: PositionType::Absolute,
                         left: percent(5.7),
-                        top: percent(8.3),
+                        top: percent(BOSS_HP_TOP),
                         ..default()
                     },
-                    (Val::Vw(21.6), Val::Vh(1.25)),
+                    (Val::Vw(21.6), Val::Vh(BOSS_HP_HEIGHT_VH)),
                 ),
                 (
                     Node {
@@ -502,11 +566,11 @@ pub fn spawn(commands: &mut Commands) {
             });
             c.spawn((
                 HudPart::BossName,
-                text("", 15.0),
+                text("", FontSize::Vh(BOSS_NAME_VH)),
                 Node {
                     position_type: PositionType::Absolute,
                     left: percent(6.3),
-                    top: percent(11.0),
+                    top: percent(BOSS_NAME_TOP),
                     ..default()
                 },
             ));
@@ -517,7 +581,7 @@ pub fn spawn(commands: &mut Commands) {
     // The item cluster, bottom right: the quick item's box, then the prosthetic tool's bigger
     // one (percent of the screen). No items are equipped in our game yet, so each box shows only
     // its button and lights its edge while it is held.
-    for (slot, ((left, top, w, h), key)) in [(79.1, 87.2, 4.2, 7.3), (84.2, 83.1, 6.3, 11.3)]
+    for (slot, ((left, top, w, h), key)) in ITEM_SLOTS
         .into_iter()
         .zip(crate::play::ITEM_KEY_LABELS)
         .enumerate()
@@ -542,7 +606,7 @@ pub fn spawn(commands: &mut Commands) {
                 BorderColor::all(EDGE),
             ))
             .with_children(|b| {
-                b.spawn(text(key, 13.0));
+                b.spawn(text(key, FontSize::Px(13.0)));
             });
     }
 }
@@ -568,7 +632,7 @@ pub fn spawn_reward(mut commands: Commands, fonts: Res<GameFonts>, art: Res<Menu
             Node {
                 position_type: PositionType::Absolute,
                 right: percent(9.5),
-                top: percent(75.6),
+                top: percent(REWARD_TOP),
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::FlexEnd,
                 row_gap: Val::Vh(0.5),
@@ -778,6 +842,7 @@ pub fn update(
                 }
             }
             HudPart::BossPanel => display(&mut node, boss),
+            HudPart::DebugText => set(&mut node, |n| &mut n.top, debug_text_top(boss)),
             HudPart::DeathblowDot(i) => display(&mut node, i < gauges.enemy_marks),
             HudPart::BossName => {
                 if let Some(mut t) = text
@@ -909,6 +974,58 @@ const PERILOUS_SIZE: f32 = 96.0;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Vertical extents (top, bottom) in percent of the screen height, at a 16:9 screen
+    /// (viewport-width units turned into height units by 16 / 9). Text lines are 1.2 em.
+    #[test]
+    fn debug_text_stays_clear_of_the_boss_hud_and_the_bottom_hud() {
+        let name = (BOSS_NAME_TOP, BOSS_NAME_TOP + 1.2 * BOSS_NAME_VH);
+        let boss = [
+            (BOSS_ORBS_TOP, BOSS_ORBS_TOP + 1.4 * 16.0 / 9.0),
+            (BOSS_HP_TOP, BOSS_HP_TOP + BOSS_HP_HEIGHT_VH),
+            name,
+        ];
+        for (top, bottom) in boss {
+            assert!(top < bottom && bottom <= BOSS_HUD_BOTTOM, "{top}..{bottom}");
+        }
+        // The name lies inside the movie's name field (10.7 % to 14.4 %).
+        assert!(name.0 >= 10.7 && name.1 <= 14.4, "{name:?}");
+        let debug = (DEBUG_TEXT_UNDER_BOSS, 100.0 - DEBUG_TEXT_BOTTOM);
+        assert!(debug.0 >= BOSS_HUD_BOTTOM);
+        let bottom_hud = [
+            REWARD_TOP,
+            100.0 - WOLF_POSTURE_BOTTOM - WOLF_POSTURE_HEIGHT_VH,
+            ITEM_SLOTS[0].1,
+            ITEM_SLOTS[1].1,
+        ];
+        for top in bottom_hud {
+            assert!(debug.1 <= top, "debug text ends at {} below {top}", debug.1);
+        }
+        // Enough room left for the debug lines: over 25 lines of 15 px at 1080 p.
+        assert!((debug.1 - debug.0) / 100.0 * 1080.0 > 25.0 * 18.0);
+    }
+
+    #[test]
+    fn debug_text_moves_under_the_boss_hud_while_it_shows() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<Gauges>()
+            .add_systems(Update, update);
+        let area = app.world_mut().spawn(debug_text_area()).id();
+        for (boss_bar, enemy_alive, top) in [
+            (false, false, px(DEBUG_TEXT_INSET)),
+            (true, true, percent(DEBUG_TEXT_UNDER_BOSS)),
+            (true, false, px(DEBUG_TEXT_INSET)),
+        ] {
+            let mut gauges = app.world_mut().resource_mut::<Gauges>();
+            gauges.boss_bar = boss_bar;
+            gauges.enemy_alive = enemy_alive;
+            app.update();
+            let node = app.world().get::<Node>(area).unwrap();
+            assert_eq!(node.top, top, "boss bar {boss_bar}, alive {enemy_alive}");
+            assert_eq!(node.overflow, Overflow::clip());
+        }
+    }
 
     #[test]
     fn vitality_bar_length_follows_max_hp() {

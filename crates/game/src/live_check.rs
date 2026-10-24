@@ -716,6 +716,7 @@ pub(super) fn observe(
         "frames": frames.len(),
         "frame_ms_median": pick(0.5),
         "frame_ms_p95": pick(0.95),
+        "frame_ms_p99": pick(0.99),
         "frame_ms_max": longest,
         "longest_loading_frame_ms": check.longest_loading_ms,
         "longest_start_frame_ms": check.longest_start_ms,
@@ -734,7 +735,7 @@ pub(super) fn observe(
         "samples": check.samples,
     });
     info!(
-        "live check: summary first frame {:?} s, rig {:?} s, ready {:?} s, ground {:?} s, sim {:?} s, map {:?} s, frame median {:?} ms p95 {:?} ms max {:?} ms, longest loading frame {:.0} ms, holes {}/{}, stop holes {}/{}, min floor coverage {:.2}",
+        "live check: summary first frame {:?} s, rig {:?} s, ready {:?} s, ground {:?} s, sim {:?} s, map {:?} s, frame median {:?} ms p95 {:?} ms p99 {:?} ms max {:?} ms, longest loading frame {:.0} ms, holes {}/{}, stop holes {}/{}, min floor coverage {:.2}",
         check.first_frame,
         check.rig_bound,
         check.play_ready,
@@ -743,6 +744,7 @@ pub(super) fn observe(
         check.map_loaded,
         pick(0.5),
         pick(0.95),
+        pick(0.99),
         longest,
         check.longest_loading_ms,
         check.holes,

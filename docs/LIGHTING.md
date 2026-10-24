@@ -369,6 +369,24 @@ All eight requested-name PNGs are ready under `target/alt-gi/captures/2026-10-15
 Copying them to `D:/sekiro-rs-media/progress/2026-10-15/` was denied by filesystem permissions, so that export remains blocked.
 Comparison against the read-only retail pairs confirms L1's hard blue-white illumination, cold cast and dark shrine/hall remain; this optimisation does not close L1 or justify an exposure/tint adjustment.
 
+## Glow Filter (sun glow halo, #288), 2026-10-23
+
+The game's `GXGlowFilter` blurs a second "glow" colour that forward materials write and adds it to the glare before tone mapping; `crates/game/src/sun_glow.rs` ports it for the sky dome.
+Traced from the exe (RVAs, image base 0x140000000):
+- `GXGlowFilterParam` (binder 3b7a10, constructor 3b7820) holds Enable, NumLevels (1 to 8), Blur Smoothness, FinalColorScale, SampleScale, RgbScale and AlphaScale.
+- The exe defaults are NumLevels 6, Smoothness 1 and FinalColorScale 10; the GPARAM files override them (`default.gparam` FinalColorScale 0.1, `mapbase.gparam` 1.0).
+- The scheduler 2d7bb0 forces SampleScale, RgbScale and AlphaScale to 1, so mapbase's Blur RgbScale 1.5 has no effect.
+- Forward materials write `colour * g_GlowScale.rgb * saturate(g_GlowScale.w)` to the glow target; the morning dome m900000 has w 0.2, afternoon m900010 has 1.
+- `GXGlowFilter::Draw` 2451f0: `EmissiveToGlowPS` premultiplies by alpha and zeroes NaNs, NumLevels downsamples follow, the levels fold back from the smallest with blend constant (Smoothness, 1), and `GlowCompositeSinglePS` scales level 0 by `FinalColorScale * fade / sum_{i<NumLevels} s^i`.
+- The tone-map job (helper 255c90, called at 251a8d in 2508b0) draws the result into the glare accumulation, which reaches the scene as `glare * g_GlareLuminance` like the bloom.
+
+Two details are stand-ins, not traced:
+- The composite's blend Dest/Op (blend state +0x380, built at 24f03f) is taken as additive ONE+ONE.
+- The CPU-generated 13-tap `Sample13WeightforGlow` weights are replaced by a standard 13-tap separable Gaussian with sigma 2 texels at every level.
+
+`--no-sun-glow` turns the pass off.
+The glow reaches the scene only through the glare, times the bloom's final colour, so a camera with no bloom (`--no-bloom`, or an authored bloom gain of 0) gets no glow pass and no depth sampling for it.
+
 ## Verification
 
 ### Shared sky selection correction (2026-10-15)
@@ -1297,7 +1315,7 @@ No L1 or E1 spot count is declared resolved from this limited camera sample.
 Map point and spot lights (BTL and FXR 609) no longer use Bevy's inverse-square response in `map_material.wgsl`.
 The native deferred shaders use `saturate(1 - d^2/R^2) * max(t^2 + (1 - t^2) N.L, 0) / (1 + 0.7 d^2/R^2)` with `t = 1.4/(1.4 + d/R)`, and the spot adds `max(1 - (tan/tan_outer)^2, 0)`.
 `DiffColor.w` is `1/range` (builder `3892e0` offset 0x4c), so the light range already carried by Bevy is the only extra input.
-The full derivation, the specular term, the untraced inputs and the traced unit factor `NATIVE_LIGHT_BUFFER_SCALE` (1.0) with the separate `NATIVE_POINT_LIGHT_UNEXPLAINED_RESIDUAL` are in `docs/MAP-FX.md` ("Native point-light falloff and flame colour").
+The full derivation, the specular term, the untraced inputs and the traced unit factor `NATIVE_LIGHT_BUFFER_SCALE` (1.0) with the separate BTL-only `BTL_POINT_LIGHT_UNEXPLAINED_RESIDUAL` (#323) are in `docs/MAP-FX.md` ("Native point-light falloff and flame colour").
 FXR 609 diffuse colour is squared like the BTL colour, because both go through `3892e0`.
 `SEKIRO_MAP_POINT_LIGHTS_BEVY=1` restores the previous curve for matched-camera controls and `SEKIRO_MAP_POINT_LIGHT_SCALE` overrides the unit constant.
 
@@ -1399,7 +1417,16 @@ Every cached map authors light set 0 on its map pieces and objects, -1 on enemie
 In the Outskirts at hour 6, row 0 authors its LocalLight colours with W 0 and half the row-100 sun.
 We now draw map pieces and objects with row 0, and characters and the few parts authoring another set with the collision-selected row.
 The collision row still drives post, fog, sky and the shadowed sun direction, which matches row 0 at hour 6.
-Parts authoring a set above 0 probably use their own row natively; we give them the collision row for now.
+
+Since #67 every map part uses its own row, including the few authoring a set above 0, by the same per-instance rule:
+
+- m11_00 has two parts on 100 (`m605100_6000`, the empty `o110000_4000`) and two on 110 (`m015012_6000`, `o115120_1800`); m11_01 has one on 100 (`m500010_5900`) and three on 110 (`m002152_5000`, `m012610_6700`, `m610100_6700`).
+- Each part root carries its raw MSB light set id (`PartLightSet`), and the map material keeps one shared light buffer per row in use.
+- Authored fog cards (`map_fog_surface.rs`) read their part's row too, so fog over the Outskirts terrain is lit with row 0 like the ground under it, not the collision row.
+- Characters and parts authoring -1 keep the collision row.
+- In a doorway fade (#52) only the collision row starts from the old row's values, which is what characters see.
+  A part's own row is a fixed record, so it only blends between the old and new layer stacks, also when it is the row being entered.
+  This follows from the per-instance rule above; the native fade itself was not traced per instance.
 
 `SEKIRO_ABLATE=scenelight` restores the old single scene set, and `SEKIRO_LIGHT_SET=<id>` now forces that row on every surface.
 
@@ -1431,3 +1458,28 @@ The fade (`MapLighting::fade_to`, `gparam::blend`):
 
 Open (#81): whether the native game also changes exposure and the row-0 sun for the outdoor geometry seen from inside.
 Our steady states follow the data above, which applies `0500` to the whole frame once Wolf is on the porch; the native rule for what a camera inside sees was not traced.
+
+## Distance depth of field, 2026-10-23
+
+Issue #99: past about 50 m the cliffs, buildings and far hills were sharper in our renders than in the real game.
+At the Outskirts cliff ledge (reference shot 34, spot 009), haze already matched; the remaining gap was blur.
+The reference's own Advanced Settings shot has Depth of Field at Max.
+
+What the data says:
+
+- `default.gparam` leaves `[GS]Lens Simulation` off; `mapbase.gparam` turns it on with a linear far circle of confusion (CoC).
+- `mapbase` sets FarStart 100 m, FarEnd 500 m, `LinearCoCFactorFar` 0.1, `SkyMaskRate` 0.25; the Outskirts base file `m11_00_0000` keeps them.
+- Block file 2 (`m11_00_0200`, `m11_01_0200`) overrides them to 50 m, 500 m and 0.5, but no Outskirts collision selects overlay 2, so our stack does not use it.
+- `LensSimu2_ComputeCoC` (disassembled with `d3dcompiler_47`) computes the far CoC as `saturate(saturate((z - FarStart) / (FarEnd - FarStart)) * LinearCoCFactorFar)` in view depth.
+- `LensSimu2_MakeBlurBuffer` multiplies the sky's far CoC by `1 - SkyMaskRate`, skips radii under a quarter pixel and averages 16 taps at the radius and 8 at half of it.
+
+The pass (`lens_dof.rs`, `lens_dof.wesl`) runs in HDR after fog and before bloom and tone mapping, at full resolution.
+Taps nearer than the pixel only count as far as their own blur reaches, so sharp outlines do not bleed into the distance behind them.
+The near CoC (physical lens mode, focus 6 m on the camera target) and the native half-resolution buffers and composite are not ported.
+`--no-dof` turns the pass off.
+
+The scale from CoC to pixels comes from the CPU constant `g_vSampleScale`, which is not traced.
+`MAX_RADIUS` (30 px at 1440 lines for CoC 1) is fitted to reference shot 34, not traced.
+On a far-hill patch (2560x1440, X 1330-1550, Y 330-450) the edge-filter spread is 5.4 in retail (snowflakes included), 22.8 before, and 11.9, 9.5, 8.2 and 7.2 at radii 8, 12, 20 and 30.
+The patch's luminance mean and contrast stay within 2 percent and 7 percent of before.
+If the game does use block file 2 here, the CoC is five times larger and the true scale correspondingly smaller; the blur at this spot would be the same.

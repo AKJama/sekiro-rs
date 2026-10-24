@@ -374,7 +374,51 @@ pub const HEAD_TOP: f32 = CAPSULE_HEIGHT;
 /// sphere's top is the capsule's, so Wolf passes under anything over 1.5 m, as in the game:
 /// the broken-wall gap past the Outskirts Wall - Gate Path idol has planks down to 1.77 m
 /// above the floor (#146), which a top sphere reaching 1.95 m ran into.
-const SPHERES: [f32; 2] = [STEP_HEIGHT + RADIUS, HEAD_TOP - RADIUS];
+/// The size of the body a slide moves ([`CollisionWorld::slide`]): its radius and its spheres'
+/// centres' heights over the feet. Wolf's is [`BodySize::WOLF`]; an NPC's map
+/// proxy is NpcParam `hitRadius` wide and `hitHeight` tall (the exe builds it from those,
+/// row `+0x14` / `+0x10`, `FUN_140bc2e00` -> `FUN_140bc1b20`), #191.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BodySize {
+    pub radius: f32,
+    spheres: [f32; 2],
+}
+
+impl BodySize {
+    /// Wolf's 0.4 m by 1.5 m capsule ([`RADIUS`], [`CAPSULE_HEIGHT`]).
+    pub const WOLF: Self = Self {
+        radius: RADIUS,
+        spheres: [STEP_HEIGHT + RADIUS, HEAD_TOP - RADIUS],
+    };
+
+    /// A body `radius` wide and `height` tall, its low sphere's bottom at the step height as
+    /// Wolf's (so stairs stay the floor query's), its top sphere's top at `height` (or the low
+    /// sphere's top, for a body shorter than that).
+    pub fn new(radius: f32, height: f32) -> Self {
+        let radius = radius.max(0.05);
+        let low = STEP_HEIGHT + radius;
+        let high = (height - radius).max(low);
+        Self {
+            radius,
+            spheres: [low, high],
+        }
+    }
+
+    /// An NPC's NpcParam `hitRadius` and `hitHeight` ([`crate::hits`] loads them); Wolf's size
+    /// when either is missing.
+    pub fn of_npc(radius: f32, height: f32) -> Self {
+        if radius > 0.0 && height > 0.0 {
+            Self::new(radius, height)
+        } else {
+            Self::WOLF
+        }
+    }
+
+    /// The top of the body over its feet.
+    fn top(&self) -> f32 {
+        self.spheres[1] + self.radius
+    }
+}
 /// How close the fall-prevention assist lets a body come to its walls: `FallAssistMinRadius`,
 /// physics module `+0xaec`, 0.16 m from the constructor `FUN_140bbb010` (`+0xae8`,
 /// `FallAssistMaxRadius`, is 0.4). `FUN_140bc68d0` slides the body's move along the walls its
@@ -1374,11 +1418,12 @@ impl CollisionWorld {
     /// body is pressed against, nor one it first meets lower on the sphere than [`CEILING_UP`]
     /// allows, such as a rock lip over the wall it is jumping up. When `Some`, it is below
     /// `feet.y + rise`.
-    fn ceiling_for(&self, feet: Vec3, rise: f32, who: u8) -> Option<f32> {
-        let centre = feet + Vec3::Y * (HEAD_TOP - RADIUS);
+    /// `size` is the body's ([`BodySize`]): its top sphere is the one swept.
+    fn ceiling_for(&self, feet: Vec3, rise: f32, who: u8, size: BodySize) -> Option<f32> {
+        let centre = feet + Vec3::Y * size.spheres[1];
         let mut best: Option<f32> = None;
-        self.ceiling_candidates(feet, rise, who, |t| {
-            if let Some(up) = self.rise_into(t, centre, rise) {
+        self.ceiling_candidates(feet, rise, who, size, |t| {
+            if let Some(up) = self.rise_into(t, centre, rise, size.radius) {
                 best = Some(best.map_or(up, |b| b.min(up)));
             }
         });
@@ -1388,8 +1433,15 @@ impl CollisionWorld {
     /// Calls `f` with the triangles [`CollisionWorld::ceiling_for`] sweeps the head sphere
     /// against, each once: those [`CollisionWorld::ceiling_keeps`] keeps, among the floors of
     /// the sweep's cells in its bands.
-    fn ceiling_candidates(&self, feet: Vec3, rise: f32, who: u8, mut f: impl FnMut(u32)) {
-        let sweep = CeilingSweep::new(feet, rise);
+    fn ceiling_candidates(
+        &self,
+        feet: Vec3,
+        rise: f32,
+        who: u8,
+        size: BodySize,
+        mut f: impl FnMut(u32),
+    ) {
+        let sweep = CeilingSweep::new(feet, rise, size);
         let (x0, z0) = cell_of(sweep.min.x, sweep.min.y);
         let (x1, z1) = cell_of(sweep.max.x, sweep.max.y);
         let (b0, b1) = (band_of(sweep.centre), band_of(sweep.high));
@@ -1424,23 +1476,23 @@ impl CollisionWorld {
     fn ceiling_keeps(&self, t: u32, sweep: &CeilingSweep, who: u8) -> bool {
         let [lo, hi] = self.bounds[t as usize];
         let (lo2, hi2) = (Vec2::new(lo.x, lo.z), Vec2::new(hi.x, hi.z));
-        let reach = ceiling_reach();
+        let reach = ceiling_reach(sweep.radius);
         hi.y >= sweep.centre
             && lo.y <= sweep.high
             && sweep.line.distance_squared(sweep.line.clamp(lo2, hi2)) < reach * reach
             && self.walkable(t, who)
     }
 
-    /// How far the sphere of [`RADIUS`] at `centre` rises, less than `rise`, before it first
+    /// How far the sphere of `radius` at `centre` rises, less than `rise`, before it first
     /// touches triangle `t`: the least rise at which it meets the face's interior, one of its
     /// edges or one of its corners, 0 if it touches it already. `None` when it does not touch it
     /// within `rise`, when it is already more than [`CEILING_GRAZE`] into it, or when the touch
     /// is lower on the sphere than [`CEILING_UP`] allows (which a face reaching no further than
     /// [`ceiling_reach`] from its centre line, seen from above, always is).
-    fn rise_into(&self, t: u32, centre: Vec3, rise: f32) -> Option<f32> {
+    fn rise_into(&self, t: u32, centre: Vec3, rise: f32, radius: f32) -> Option<f32> {
         let [a, b, c] = self.corners(t);
         let line = centre.with_y(0.0);
-        let reach = ceiling_reach();
+        let reach = ceiling_reach(radius);
         let q = closest_on_triangle(line, a.with_y(0.0), b.with_y(0.0), c.with_y(0.0));
         if q.distance_squared(line) >= reach * reach {
             return None;
@@ -1456,7 +1508,7 @@ impl CollisionWorld {
         let to = q - at;
         // Already touching: within the graze it stops the rise now; deeper, the body is in the
         // face already (a slope it walked under), and rising carries it out.
-        let graze = RADIUS - CEILING_GRAZE;
+        let graze = radius - CEILING_GRAZE;
         if touching && to.length_squared() < graze * graze {
             return None;
         }
@@ -1470,7 +1522,9 @@ impl CollisionWorld {
     #[doc(hidden)]
     pub fn ceiling_triangle_count(&self, feet: [f32; 3], rise: f32) -> usize {
         let mut count = 0;
-        self.ceiling_candidates(Vec3::from(feet), rise, PLAYER, |_| count += 1);
+        self.ceiling_candidates(Vec3::from(feet), rise, PLAYER, BodySize::WOLF, |_| {
+            count += 1
+        });
         count
     }
 
@@ -1549,11 +1603,12 @@ impl CollisionWorld {
     /// can have come into the head by the rise; one at its side was there at the slide's height
     /// too, and the slide has cleared it already. In open air, or rising beside a wall, there is
     /// nothing to push. It stops at the first face it finds.
-    fn head_contact_for(&self, feet: Vec3, who: u8) -> bool {
-        let centre = feet + Vec3::Y * (HEAD_TOP - RADIUS);
+    fn head_contact_for(&self, feet: Vec3, who: u8, size: BodySize) -> bool {
+        let radius = size.radius;
+        let centre = feet + Vec3::Y * size.spheres[1];
         let (lo, hi) = (
-            centre - Vec3::new(RADIUS, 0.0, RADIUS),
-            centre + Vec3::splat(RADIUS),
+            centre - Vec3::new(radius, 0.0, radius),
+            centre + Vec3::splat(radius),
         );
         let (x0, z0) = cell_of(lo.x, lo.z);
         let (x1, z1) = cell_of(hi.x, hi.z);
@@ -1567,7 +1622,7 @@ impl CollisionWorld {
                     for &t in list {
                         let [tlo, thi] = self.bounds[t as usize];
                         if thi.y <= centre.y
-                            || centre.distance_squared(centre.clamp(tlo, thi)) >= RADIUS * RADIUS
+                            || centre.distance_squared(centre.clamp(tlo, thi)) >= radius * radius
                             || !self.solid(t)
                             || !self.live(t, who)
                         {
@@ -1575,7 +1630,7 @@ impl CollisionWorld {
                         }
                         let [a, b, c] = self.corners(t);
                         let to = closest_on_triangle(centre, a, b, c) - centre;
-                        if to.y > 1e-4 && to.length_squared() < RADIUS * RADIUS {
+                        if to.y > 1e-4 && to.length_squared() < radius * radius {
                             return true;
                         }
                     }
@@ -1727,7 +1782,7 @@ impl CollisionWorld {
     /// Moves a body standing at `feet` by the horizontal `delta`, stopping at walls and
     /// sliding along them. Returns the horizontal displacement actually made.
     pub fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
-        self.slide_for(feet, delta, PLAYER, 0, true)
+        self.slide_for(feet, delta, PLAYER, 0, true, BodySize::WOLF)
     }
 
     /// [`CollisionWorld::slide`] without the horizontal cull of [`CollisionWorld::gather_slide`]
@@ -1736,7 +1791,7 @@ impl CollisionWorld {
     /// slide (#161, #167).
     #[doc(hidden)]
     pub fn slide_uncull(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
-        self.slide_for(feet, delta, PLAYER, 0, false)
+        self.slide_for(feet, delta, PLAYER, 0, false, BodySize::WOLF)
     }
 
     /// How many triangles a [`CollisionWorld::slide`] of `delta` from `feet` tests the body
@@ -1752,6 +1807,7 @@ impl CollisionWorld {
             &mut tris,
             &mut walls,
             true,
+            BodySize::WOLF,
         );
         tris.len()
     }
@@ -1770,6 +1826,7 @@ impl CollisionWorld {
             &mut tris,
             &mut walls,
             true,
+            BodySize::WOLF,
         );
         [
             slide_steps(coarse, d.length(), walls.is_empty()),
@@ -1787,6 +1844,7 @@ impl CollisionWorld {
     /// reach. Only the assist bits of `who[1]` count: the walls are triangles only the assist
     /// collides with, and with a body's bit every ordinary triangle near the feet would be one.
     /// `cull` false skips the horizontal keep box, for [`CollisionWorld::slide_uncull`].
+    #[allow(clippy::too_many_arguments)]
     fn gather_slide(
         &self,
         start: Vec3,
@@ -1795,8 +1853,9 @@ impl CollisionWorld {
         body: &mut Vec<u32>,
         walls: &mut Vec<u32>,
         cull: bool,
+        size: BodySize,
     ) -> usize {
-        let reach = SlideReach::new(start, d, cull);
+        let reach = SlideReach::new(start, d, cull, size);
         let assist = assist & !BODIES;
         body.clear();
         walls.clear();
@@ -1865,7 +1924,7 @@ impl CollisionWorld {
     /// [`CollisionWorld::slide`] for `who` that also keeps the body [`FALL_ASSIST_RADIUS`]
     /// from the fall-prevention walls in `assist` ([`crate::hit_filter::FALL_ASSIST_MOVE`],
     /// `FALL_ASSIST_ACTION` bits), which nothing else collides with.
-    /// `cull` is [`CollisionWorld::gather_slide`]'s.
+    /// `cull` is [`CollisionWorld::gather_slide`]'s; `size` the body's.
     fn slide_for(
         &self,
         feet: [f32; 3],
@@ -1873,6 +1932,7 @@ impl CollisionWorld {
         who: u8,
         assist: u8,
         cull: bool,
+        size: BodySize,
     ) -> [f32; 2] {
         thread_local! {
             static SCRATCH: std::cell::RefCell<(Vec<u32>, Vec<u32>, Contacts)> =
@@ -1881,7 +1941,8 @@ impl CollisionWorld {
         let start = Vec3::from(feet);
         let d = Vec2::from(delta);
         SCRATCH.with_borrow_mut(|(tris, walls, contacts)| {
-            let coarse = self.gather_slide(start, d, [who, assist], tris, walls, cull);
+            let coarse = self.gather_slide(start, d, [who, assist], tris, walls, cull, size);
+            contacts.size = size;
             self.slide_among(start, d, coarse, tris, walls, contacts, cull)
         })
     }
@@ -1905,7 +1966,7 @@ impl CollisionWorld {
                 const { std::cell::RefCell::new(FanScratch::new()) };
         }
         let start = Vec3::from(feet);
-        let reaches = deltas.map(|d| SlideReach::new(start, Vec2::from(d), true));
+        let reaches = deltas.map(|d| SlideReach::new(start, Vec2::from(d), true, BodySize::WOLF));
         let Some(mut all) = reaches.first().cloned() else {
             return deltas;
         };
@@ -2005,7 +2066,7 @@ impl CollisionWorld {
                     }
                     let mut moved = wedged_move(step, contacts);
                     if started_wedged {
-                        moved += escape(&contacts.found);
+                        moved += escape(&contacts.found, contacts.size.radius);
                     }
                     p = before + Vec3::new(moved.x, 0.0, moved.y);
                     break;
@@ -2070,27 +2131,29 @@ impl CollisionWorld {
         contacts.found.clear();
         let mut near = std::mem::take(&mut contacts.near);
         let cull = near.on;
-        let tris = near.around(self, feet, tris);
-        for h in SPHERES {
+        let size = contacts.size;
+        let radius = size.radius;
+        let tris = near.around(self, feet, tris, size);
+        for h in size.spheres {
             let centre = feet + Vec3::Y * h;
             for &t in tris {
                 // The horizontal grid includes stacked floors and walls from other heights.
                 // Exact sphere/AABB rejection preserves the narrow-phase result and avoids
                 // expensive closest-point tests on geometry this capsule cannot touch.
                 let [min, max] = self.bounds[t as usize];
-                if centre.distance_squared(centre.clamp(min, max)) >= RADIUS * RADIUS {
+                if centre.distance_squared(centre.clamp(min, max)) >= radius * radius {
                     continue;
                 }
                 let [a, b, c] = self.corners(t);
                 // Nor any whose plane is a radius away (and a millimetre for roundoff): the
                 // closest point is no nearer (#167).
-                if cull && self.normals[t as usize].dot(centre - a).abs() >= RADIUS + 1e-3 {
+                if cull && self.normals[t as usize].dot(centre - a).abs() >= radius + 1e-3 {
                     continue;
                 }
                 let q = closest_on_triangle(centre, a, b, c);
                 let away = centre - q;
                 let dist = away.length();
-                if dist >= RADIUS {
+                if dist >= radius {
                     continue;
                 }
                 // Push horizontally only; a contact straight above or below (beam, floor) has
@@ -2107,7 +2170,7 @@ impl CollisionWorld {
                     nf.normalize()
                 };
                 // Depth along the horizontal direction needed to clear the triangle point.
-                let needed = (RADIUS * RADIUS - away.y * away.y).max(0.0).sqrt();
+                let needed = (radius * radius - away.y * away.y).max(0.0).sqrt();
                 // The face's own way out, seen from above, on the body's side; none for a face
                 // too flat to wall the body in (the threshold is `hold_inside`'s).
                 let face = if nf.length_squared() < 0.09 {
@@ -2124,7 +2187,7 @@ impl CollisionWorld {
             }
         }
         contacts.near = near;
-        least_push(&contacts.found, RADIUS)
+        least_push(&contacts.found, radius)
     }
 }
 
@@ -2165,8 +2228,14 @@ impl Nearby {
         self.centre = None;
     }
 
-    /// The triangles of the slide's `tris` a body at `feet` can touch.
-    fn around<'a>(&'a mut self, world: &CollisionWorld, feet: Vec3, tris: &'a [u32]) -> &'a [u32] {
+    /// The triangles of the slide's `tris` a body of `size` at `feet` can touch.
+    fn around<'a>(
+        &'a mut self,
+        world: &CollisionWorld,
+        feet: Vec3,
+        tris: &'a [u32],
+        size: BodySize,
+    ) -> &'a [u32] {
         if !self.on {
             return tris;
         }
@@ -2176,8 +2245,8 @@ impl Nearby {
                     <= NEARBY_MARGIN * NEARBY_MARGIN
         });
         if !kept {
-            let reach = RADIUS + NEARBY_MARGIN + 0.001;
-            let [low, high] = SPHERES.map(|h| feet.y + h);
+            let reach = size.radius + NEARBY_MARGIN + 0.001;
+            let [low, high] = size.spheres.map(|h| feet.y + h);
             self.tris.clear();
             self.tris.extend(tris.iter().copied().filter(|&t| {
                 let [min, max] = world.bounds[t as usize];
@@ -2210,6 +2279,8 @@ struct Contacts {
     found: Vec<Contact>,
     toward: Vec<Contact>,
     near: Nearby,
+    /// The size of the body being slid.
+    size: BodySize,
 }
 
 impl Contacts {
@@ -2218,6 +2289,7 @@ impl Contacts {
             found: Vec::new(),
             toward: Vec::new(),
             near: Nearby::new(),
+            size: BodySize::WOLF,
         }
     }
 
@@ -2370,11 +2442,11 @@ fn wedged_move(step: Vec2, contacts: &mut Contacts) -> Vec2 {
 
 /// The push for a body that was already wedged by `contacts` before it moved, so taking the
 /// move back cannot free it (#176 review): the shortest push that clears them all, at most
-/// [`RADIUS`] of it a sub-step, when there is one; otherwise the push that leaves them all
+/// `radius` (the body's) of it a sub-step, when there is one; otherwise the push that leaves them all
 /// equally deep (a few rounds of moving by the mean of the remaining depths). Either is cut
 /// short so the body never passes half way to any contact's triangle point, so it is never
 /// pushed through a face it is in front of.
-fn escape(contacts: &[Contact]) -> Vec2 {
+fn escape(contacts: &[Contact], radius: f32) -> Vec2 {
     let mut push = least_push(contacts, f32::INFINITY).unwrap_or_else(|| {
         let mut p = Vec2::ZERO;
         for _ in 0..16 {
@@ -2386,8 +2458,8 @@ fn escape(contacts: &[Contact]) -> Vec2 {
         }
         p
     });
-    if push.length_squared() > RADIUS * RADIUS {
-        push = push.normalize() * RADIUS;
+    if push.length_squared() > radius * radius {
+        push = push.normalize() * radius;
     }
     let mut keep = 1.0f32;
     for c in contacts {
@@ -2403,6 +2475,8 @@ fn escape(contacts: &[Contact]) -> Vec2 {
 struct View<'a> {
     world: &'a CollisionWorld,
     who: u8,
+    /// The body's size for its slides ([`BodySize`]).
+    size: BodySize,
 }
 
 impl Ground for View<'_> {
@@ -2448,16 +2522,19 @@ impl Ground for View<'_> {
         View {
             world: self.world,
             who: self.who | crate::hit_filter::WALL_HUG,
+            size: self.size,
         }
         .floor(x, z, top)
     }
 
     fn ceiling(&self, feet: [f32; 3], rise: f32) -> Option<f32> {
-        self.world.ceiling_for(feet.into(), rise, self.who)
+        self.world
+            .ceiling_for(feet.into(), rise, self.who, self.size)
     }
 
     fn head_contact(&self, feet: [f32; 3]) -> bool {
-        self.world.head_contact_for(feet.into(), self.who)
+        self.world
+            .head_contact_for(feet.into(), self.who, self.size)
     }
 
     fn slide(&self, feet: [f32; 3], delta: [f32; 2]) -> [f32; 2] {
@@ -2465,7 +2542,8 @@ impl Ground for View<'_> {
     }
 
     fn slide_assisted(&self, feet: [f32; 3], delta: [f32; 2], walls: u8) -> [f32; 2] {
-        self.world.slide_for(feet, delta, self.who, walls, true)
+        self.world
+            .slide_for(feet, delta, self.who, walls, true, self.size)
     }
 
     fn slide_fan(&self, feet: [f32; 3], deltas: [[f32; 2]; 8]) -> [[f32; 2]; 8] {
@@ -2591,6 +2669,7 @@ impl CollisionWorld {
         View {
             world: self,
             who: PLAYER,
+            size: BodySize::WOLF,
         }
     }
 }
@@ -2598,15 +2677,22 @@ impl CollisionWorld {
 ground_via_view!(CollisionWorld, player_view);
 
 /// A shared world as enemies and bosses see it: they also stand on water surfaces and stop at
-/// enemy-only walls (hit filters 11, 16 and 19, [`crate::hit_filter`]).
+/// enemy-only walls (hit filters 11, 16 and 19, [`crate::hit_filter`]). Their slides take the
+/// body's own size (#191).
 #[derive(Clone)]
-pub struct EnemyGround(pub std::sync::Arc<CollisionWorld>);
+pub struct EnemyGround(pub std::sync::Arc<CollisionWorld>, pub BodySize);
 
 impl EnemyGround {
+    /// The world for a body of Wolf's size ([`BodySize::WOLF`]).
+    pub fn new(world: std::sync::Arc<CollisionWorld>) -> Self {
+        Self(world, BodySize::WOLF)
+    }
+
     fn enemy_view(&self) -> View<'_> {
         View {
             world: &self.0,
             who: ENEMY,
+            size: self.1,
         }
     }
 }
@@ -2738,21 +2824,22 @@ struct SlideReach {
 }
 
 impl SlideReach {
-    fn new(start: Vec3, d: Vec2, cull: bool) -> Self {
+    fn new(start: Vec3, d: Vec2, cull: bool, size: BodySize) -> Self {
         let len = d.length();
-        let coarse = ((len / (RADIUS * 0.5)).ceil() as usize).clamp(1, 32);
-        let reach = RADIUS + len / coarse as f32 + 0.05;
+        let radius = size.radius;
+        let coarse = ((len / (radius * 0.5)).ceil() as usize).clamp(1, 32);
+        let reach = radius + len / coarse as f32 + 0.05;
         let min = Vec2::new(start.x.min(start.x + d.x), start.z.min(start.z + d.y)) - reach;
         let max = Vec2::new(start.x.max(start.x + d.x), start.z.max(start.z + d.y)) + reach;
-        let pad = RADIUS + len;
+        let pad = radius + len;
         Self {
             coarse,
             min,
             max,
             near: cull.then_some([min - pad, max + pad]),
             body: [
-                start.y + SPHERES[0] - RADIUS - 0.01,
-                start.y + HEAD_TOP + 0.01,
+                start.y + size.spheres[0] - radius - 0.01,
+                start.y + size.top() + 0.01,
             ],
             feet: [start.y - FALL_ASSIST_RADIUS, start.y + FALL_ASSIST_RADIUS],
         }
@@ -2774,20 +2861,23 @@ struct CeilingSweep {
     high: f32,
     /// The sphere's centre line, seen from above.
     line: Vec2,
+    /// The sphere's radius (the body's, [`BodySize`]).
+    radius: f32,
     /// The box of the cells to read.
     min: Vec2,
     max: Vec2,
 }
 
 impl CeilingSweep {
-    fn new(feet: Vec3, rise: f32) -> Self {
+    fn new(feet: Vec3, rise: f32, size: BodySize) -> Self {
         let line = Vec2::new(feet.x, feet.z);
         Self {
-            centre: feet.y + HEAD_TOP - RADIUS,
-            high: feet.y + HEAD_TOP + rise,
+            centre: feet.y + size.spheres[1],
+            high: feet.y + size.top() + rise,
             line,
-            min: line - RADIUS,
-            max: line + RADIUS,
+            radius: size.radius,
+            min: line - size.radius,
+            max: line + size.radius,
         }
     }
 }
@@ -2830,8 +2920,8 @@ pub fn ray_triangle(o: Vec3, d: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> 
 
 /// The furthest off the head sphere's centre line, seen from above, a touch that stops a rise
 /// can be: where [`CEILING_UP`] puts it on the sphere's surface.
-fn ceiling_reach() -> f32 {
-    RADIUS * (1.0 - CEILING_UP * CEILING_UP).sqrt()
+fn ceiling_reach(radius: f32) -> f32 {
+    radius * (1.0 - CEILING_UP * CEILING_UP).sqrt()
 }
 
 /// How far a sphere of [`RADIUS`] at `centre` moves along the unit `dir` before it first
@@ -3045,6 +3135,46 @@ mod tests {
         assert!(b.position[2] < -2.5, "{:?}", b.position);
     }
 
+    /// Where a body of `size` stops walking +X from the origin in 0.1 m steps for 6 m.
+    fn walk_x(world: &std::sync::Arc<CollisionWorld>, size: BodySize) -> f32 {
+        let ground = EnemyGround(world.clone(), size);
+        (0..60).fold(0.0, |x, _| x + ground.slide([x, 0.0, 0.0], [0.1, 0.0])[0])
+    }
+
+    /// #191: an NPC's map body is its own NpcParam size: a 0.7 m wide one stops 0.7 m short of
+    /// the wall where Wolf's 0.4 m body stops 0.4 m short, and NpcParam's 0.4 by 1.5 is Wolf's;
+    /// a beam 1.8 m up lets Wolf's 1.5 m body under it and stops a 2.5 m tall one.
+    #[test]
+    fn an_enemy_collides_with_its_own_body_size() {
+        assert_eq!(BodySize::new(RADIUS, CAPSULE_HEIGHT), BodySize::WOLF);
+        let wall = std::sync::Arc::new(test_world());
+        assert!((walk_x(&wall, BodySize::WOLF) - (3.0 - RADIUS)).abs() < 0.02);
+        assert!((walk_x(&wall, BodySize::new(0.7, 2.5)) - 2.3).abs() < 0.02);
+        // The beam's face toward the body and its underside: x 2 to 2.5, 1.8 to 2.2 m up.
+        let beam = std::sync::Arc::new(quads(&[
+            [
+                [-5.0, 0.0, 5.0],
+                [10.0, 0.0, 5.0],
+                [10.0, 0.0, -5.0],
+                [-5.0, 0.0, -5.0],
+            ],
+            [
+                [2.0, 1.8, 5.0],
+                [2.0, 1.8, -5.0],
+                [2.0, 2.2, -5.0],
+                [2.0, 2.2, 5.0],
+            ],
+            [
+                [2.0, 1.8, 5.0],
+                [2.5, 1.8, 5.0],
+                [2.5, 1.8, -5.0],
+                [2.0, 1.8, -5.0],
+            ],
+        ]));
+        assert!(walk_x(&beam, BodySize::WOLF) > 4.0);
+        assert!(walk_x(&beam, BodySize::new(0.5, 2.5)) < 2.0);
+    }
+
     #[test]
     fn walks_off_edges_and_falls() {
         let world = test_world();
@@ -3150,7 +3280,7 @@ mod tests {
         m.indices.extend([0, 1, 2, 0, 2, 3]);
         m.materials.extend([0, 0]);
         let world = CollisionWorld::from_mesh(&m);
-        let top = world.ceiling_for(Vec3::ZERO, 1.0, PLAYER);
+        let top = world.ceiling_for(Vec3::ZERO, 1.0, PLAYER, BodySize::WOLF);
         let want = y - (RADIUS * RADIUS - 0.2 * 0.2).sqrt() - (HEAD_TOP - RADIUS);
         assert!(
             top.is_some_and(|t| (t - want).abs() < 1e-4),
@@ -3158,7 +3288,7 @@ mod tests {
         );
         for z in [0.1, 0.21] {
             assert_eq!(
-                world.ceiling_for(Vec3::new(0.0, 0.0, z), 1.0, PLAYER),
+                world.ceiling_for(Vec3::new(0.0, 0.0, z), 1.0, PLAYER, BodySize::WOLF),
                 None,
                 "{z}"
             );
@@ -3193,7 +3323,7 @@ mod tests {
         let face = y0 + 0.1 * k - RADIUS * (1.0 + k * k).sqrt() - head;
         let edge = y0 - (RADIUS * RADIUS - 0.1 * 0.1).sqrt() - head;
         assert!(face < edge - 0.02, "{face} {edge}");
-        let top = world.ceiling_for(Vec3::ZERO, 1.0, PLAYER);
+        let top = world.ceiling_for(Vec3::ZERO, 1.0, PLAYER, BodySize::WOLF);
         assert!(
             top.is_some_and(|t| (t - face).abs() < 1e-4),
             "{top:?}, want {face}"
@@ -3231,11 +3361,15 @@ mod tests {
         let pressed = Vec3::new(0.3 + dx, 0.0, 1.0 + dz);
         assert!((pressed.z - RADIUS).abs() < 1e-3, "{pressed}");
         for feet in [pressed, Vec3::new(0.3, 0.0, RADIUS)] {
-            assert_eq!(world.ceiling_for(feet, 1.0, PLAYER), None, "{feet}");
+            assert_eq!(
+                world.ceiling_for(feet, 1.0, PLAYER, BodySize::WOLF),
+                None,
+                "{feet}"
+            );
         }
         assert!(
             world
-                .ceiling_for(Vec3::new(0.3, 0.0, 0.2), 1.0, PLAYER)
+                .ceiling_for(Vec3::new(0.3, 0.0, 0.2), 1.0, PLAYER, BodySize::WOLF)
                 .is_some()
         );
     }

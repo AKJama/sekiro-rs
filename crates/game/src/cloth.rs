@@ -16,7 +16,10 @@
 //!    bones (skirt and hakama plates, the ponytail) follow theirs.
 //!
 //! Everything is solved in Havok world space, the game's world mirrored in X, so the exported
-//! locals apply unchanged and the world-space solve gives the cloth its inertia. The display meshes
+//! locals apply unchanged. As in the exe, the particles ride along with the model root every frame
+//! (`carry`), so the character's own motion gives the cloth no inertia, and a frame runs as many
+//! ~1/60 s steps as it lasts (`frame_steps`); both rules are from FwLo's RustSekiro
+//! (`docs/kb/visuals.md`, 2026-10-13 and 2026-10-15). The display meshes
 //! are taken off the GPU skin: each is replaced by a per-character copy without joint attributes
 //! whose vertices are skinned on the CPU every frame (the cloth's own vertices then follow the
 //! simulation instead). `--no-cloth` turns the whole thing off.
@@ -385,6 +388,8 @@ struct ClothInst {
     x: Vec<Vec3>,
     prev: Vec<Vec3>,
     started: bool,
+    /// The model root last frame (Havok space), for [`carry`].
+    root_m: Option<Mat4>,
     /// Last substep length (time-corrected Verlet).
     last_h: f32,
     blowups: u32,
@@ -500,6 +505,7 @@ fn attach(
                 x: Vec::new(),
                 prev: Vec::new(),
                 started: false,
+                root_m: None,
                 last_h: 0.0,
                 blowups: 0,
                 rigid: false,
@@ -603,6 +609,36 @@ fn attach(
 /// Game space <-> Havok space: mirror X (an involution, so the same both ways).
 const MIRROR: Mat4 = Mat4::from_cols(Vec4::new(-1.0, 0.0, 0.0, 0.0), Vec4::Y, Vec4::Z, Vec4::W);
 
+impl ClothInst {
+    /// Carries the particles from last frame's model root to `root` (Havok space) and keeps it.
+    fn follow(&mut self, root: Mat4, culled: bool) {
+        if let Some(old) = self.root_m.filter(|_| self.started && !culled) {
+            carry(&mut self.x, &mut self.prev, old, root);
+        }
+        self.root_m = Some(root);
+    }
+}
+
+/// Model-space simulation: the particles (current and previous, so their velocity relative to the
+/// model is kept) move with the model root from `old` to `new` (world, Havok space). The exe stores
+/// the character's world matrix every frame and the pose-space cloth never sees the character's
+/// own motion (FwLo's RustSekiro `docs/kb/visuals.md`, from FUN_14261cf10 / FUN_14265bed0).
+fn carry(x: &mut [Vec3], prev: &mut [Vec3], old: Mat4, new: Mat4) {
+    let d = new * old.inverse();
+    for p in x.iter_mut().chain(prev.iter_mut()) {
+        *p = d.transform_point3(*p);
+    }
+}
+
+/// Sim steps a frame of `dt` seconds runs: the nearest count of 1/60 s steps, 1 to 3 (`dt` is
+/// capped at [`MAX_DT`]). The game steps its cloth once per frame at its locked 60 fps, and the
+/// constraint strengths act per step, so a slow frame taken as one long step left the cloth 2-3x
+/// weaker per second (FwLo's RustSekiro `frame_steps`). Faster frames stay one step (gap: stiffer
+/// than the game there).
+fn frame_steps(dt: f32) -> u32 {
+    ((dt * 60.0).round() as u32).clamp(1, 3)
+}
+
 fn havok(m: Mat4) -> Mat4 {
     MIRROR * m * MIRROR
 }
@@ -663,6 +699,11 @@ fn solve_bend_stiffness(
     }
 }
 
+/// One distance link. The exported standard and bend link stiffness is already the user
+/// stiffness over `invMassA + invMassB` (Owl's ponytail 4.375 = 0.7 / 0.16, Wolf's coat 0.089 at
+/// inverse masses near 5.6), so it applies as stored; dividing it again made Wolf's links ~10x
+/// too soft and the Owl's ponytail overshoot ~4x per solve and flail (#39). Stretch link
+/// stiffness is stored plain. Found by FwLo (RustSekiro docs/kb/visuals.md, 2026-10-16).
 fn solve_link(x: &mut [Vec3], w: &[f32], l: &Link, stretch_only: bool) {
     let (wa, wb) = (w[l.a], w[l.b]);
     if wa + wb <= 0.0 {
@@ -673,7 +714,12 @@ fn solve_link(x: &mut [Vec3], w: &[f32], l: &Link, stretch_only: bool) {
     if len < 1e-6 || (stretch_only && len <= l.rest) {
         return;
     }
-    let corr = d * ((len - l.rest) / len * l.stiffness / (wa + wb));
+    let k = if stretch_only {
+        l.stiffness / (wa + wb)
+    } else {
+        l.stiffness
+    };
+    let corr = d * ((len - l.rest) / len * k);
     x[l.a] += corr * wa;
     x[l.b] -= corr * wb;
 }
@@ -745,7 +791,8 @@ fn solve(
     if culled {
         return;
     }
-    let h = dt / def.substeps as f32;
+    let total = def.substeps * frame_steps(dt);
+    let h = dt / total as f32;
     let keep = (1.0 - def.damping).clamp(0.0, 1.0).powf(h);
     // Time-corrected Verlet: the last step's displacement covered last_h; scale it to this
     // step's h, or uneven frame times jitter the cloth.
@@ -755,8 +802,8 @@ fn solve(
         1.0
     };
     c.last_h = h;
-    for step in 0..def.substeps {
-        let f = (step + 1) as f32 / def.substeps as f32;
+    for step in 0..total {
+        let f = (step + 1) as f32 / total as f32;
         for &(p, from, to) in &fixed {
             c.x[p] = from.lerp(to, f);
             c.prev[p] = c.x[p];
@@ -951,6 +998,11 @@ fn step(
         })
         .collect();
     let Some(root) = root else { return };
+    let root_m = havok(root.to_matrix());
+    // The particles ride along with the model root (the exe's pose space): the character's motion
+    // gives the cloth no inertia, only the animation relative to the root moves it. Carried before
+    // the teleport check, so a fast run or fall does not count as a jump.
+    c.follow(root_m, culled);
     // First frame or a teleport (a fixed particle jumped): restart from the rest pose placed on
     // the model root. The jump that counts scales with the cloth (half its extent, 1 m at
     // least): a 4 m fur restarted every few frames when its owner just turned.
@@ -968,8 +1020,11 @@ fn step(
         if jumped {
             info!("cloth {}: restart (fixed particle jumped)", def.name);
         }
-        let m = havok(root.to_matrix());
-        c.x = def.rest.iter().map(|&p| m.transform_point3(p)).collect();
+        c.x = def
+            .rest
+            .iter()
+            .map(|&p| root_m.transform_point3(p))
+            .collect();
         c.prev = c.x.clone();
         c.started = true;
     }
@@ -1360,12 +1415,13 @@ mod tests {
         let x: Vec<Vec3> = (0..n).map(|i| Vec3::new(i as f32, 0.0, 0.0)).collect();
         let mut w = vec![1.0; n];
         w[0] = 0.0;
+        // Full strength, stored as the data stores it: over the pair's inverse masses.
         let links = (0..n - 1)
             .map(|i| Link {
                 a: i,
                 b: i + 1,
                 rest: 1.0,
-                stiffness: 1.0,
+                stiffness: 1.0 / (w[i] + w[i + 1]),
             })
             .collect();
         (x, w, links)
@@ -1439,6 +1495,149 @@ mod tests {
         for (i, p) in x.iter().enumerate().skip(1) {
             assert!(p.y < -0.5 * i as f32, "particle {i} at {p:?}");
             assert!((p.distance(x[i - 1]) - 1.0).abs() < 1e-2);
+        }
+    }
+
+    /// The extracted cloths of a character (none when it is not extracted).
+    fn cloths(id: &str) -> Option<Arc<Vec<ClothDef>>> {
+        let path = sekiro_sim::cache::root().join(format!("models/{id}.cloth.bin"));
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("skipping: {} is not extracted", path.display());
+            return None;
+        };
+        Some(Arc::new(
+            data::ClothSet::from_bytes(&bytes)
+                .unwrap()
+                .cloths
+                .iter()
+                .map(ClothDef::new)
+                .collect(),
+        ))
+    }
+
+    /// A cloth in its rest pose with the model root at the origin, and its reference vertices in
+    /// the bind pose (each on its particle).
+    fn at_rest(defs: &Arc<Vec<ClothDef>>, which: usize) -> (ClothInst, Vec<Option<(Vec3, Vec3)>>) {
+        let def = &defs[which];
+        let mut refs: Vec<Option<(Vec3, Vec3)>> = vec![None; def.refs.len()];
+        let ranged = def.sets.iter().flat_map(|s| match s {
+            Set::LocalRange { items, .. } => items.iter().map(|&(p, r, ..)| (r, p)).collect(),
+            _ => Vec::new(),
+        });
+        for (r, p) in def.moves.iter().copied().chain(ranged) {
+            if let (Some(slot), Some(&q)) = (refs.get_mut(r), def.rest.get(p)) {
+                slot.get_or_insert((q, Vec3::ZERO));
+            }
+        }
+        let c = ClothInst {
+            owner: Entity::PLACEHOLDER,
+            def: Arc::clone(defs),
+            which,
+            ref_ents: Vec::new(),
+            capsule_ents: Vec::new(),
+            bone_ents: Vec::new(),
+            displays: Vec::new(),
+            x: def.rest.clone(),
+            prev: def.rest.clone(),
+            started: true,
+            root_m: Some(Mat4::IDENTITY),
+            last_h: 0.0,
+            blowups: 0,
+            rigid: false,
+            out: ClothOut::default(),
+        };
+        (c, refs)
+    }
+
+    /// Three seconds of an idle character at 60 fps, the skeleton held in its bind pose: every
+    /// cloth settles. With the link stiffness divided twice the Owl's ponytail still moved at
+    /// ~37 m/s after two seconds, its links stretched to twice their length (#39); now the
+    /// fastest is the undamped haori at ~0.4 m/s.
+    #[test]
+    fn idle_cloth_settles() {
+        for id in ["c5060", "c0000"] {
+            let Some(defs) = cloths(id) else { continue };
+            for (which, def) in defs.iter().enumerate() {
+                let (mut c, refs) = at_rest(&defs, which);
+                // The fastest particle over the last second.
+                let mut speed = 0f32;
+                for frame in 0..180 {
+                    let before = c.x.clone();
+                    solve(&mut c, &refs, &[], 1.0 / 60.0, false, frame == 0);
+                    if frame >= 120 {
+                        for (a, b) in before.iter().zip(&c.x) {
+                            speed = speed.max(a.distance(*b) * 60.0);
+                        }
+                    }
+                }
+                assert!(
+                    speed < 1.0,
+                    "{id} {}: still moving at {speed:.2} m/s after two idle seconds",
+                    def.name
+                );
+            }
+        }
+    }
+
+    /// A character sprinting at a constant 8 m/s for two seconds, the skeleton in its bind pose:
+    /// its cloth ends where it ends on a character standing still, relative to the root (the
+    /// exe's pose-space cloth has no world inertia, #305). In world space Wolf's damping of 0.99
+    /// per second trailed his coat behind him.
+    #[test]
+    fn cloth_moving_at_constant_speed_rests_relative_to_its_character() {
+        let v = Vec3::new(8.0, 0.0, 0.0);
+        for id in ["c5060", "c0000"] {
+            let Some(defs) = cloths(id) else { continue };
+            for (which, def) in defs.iter().enumerate() {
+                let (mut still, refs) = at_rest(&defs, which);
+                let mut moving = at_rest(&defs, which).0;
+                for frame in 1..=120 {
+                    let at = v * frame as f32 / 60.0;
+                    let moved: Vec<_> = refs.iter().map(|r| r.map(|(q, n)| (q + at, n))).collect();
+                    solve(&mut still, &refs, &[], 1.0 / 60.0, false, false);
+                    moving.follow(Mat4::from_translation(at), false);
+                    solve(&mut moving, &moved, &[], 1.0 / 60.0, false, false);
+                }
+                let at = v * 2.0;
+                let off = still
+                    .x
+                    .iter()
+                    .zip(&moving.x)
+                    .map(|(a, b)| a.distance(*b - at))
+                    .fold(0.0, f32::max);
+                assert!(
+                    off < 1e-3,
+                    "{id} {}: {off:.3} m off the still cloth",
+                    def.name
+                );
+            }
+        }
+    }
+
+    /// A 1/30 s frame solves the same as two 1/60 s frames (the game's cloth steps at 60 fps).
+    #[test]
+    fn a_thirtieth_second_frame_is_two_sixtieth_second_steps() {
+        for id in ["c5060", "c0000"] {
+            let Some(defs) = cloths(id) else { continue };
+            for (which, def) in defs.iter().enumerate() {
+                let (mut one, refs) = at_rest(&defs, which);
+                // A few frames in, so the cloth is moving under gravity.
+                for frame in 0..10 {
+                    solve(&mut one, &refs, &[], 1.0 / 60.0, false, frame == 0);
+                }
+                let mut two = at_rest(&defs, which).0;
+                (two.x, two.prev, two.last_h) = (one.x.clone(), one.prev.clone(), one.last_h);
+                solve(&mut one, &refs, &[], 1.0 / 30.0, false, false);
+                solve(&mut two, &refs, &[], 1.0 / 60.0, false, false);
+                solve(&mut two, &refs, &[], 1.0 / 60.0, false, false);
+                let off = one
+                    .x
+                    .iter()
+                    .zip(&two.x)
+                    .map(|(a, b)| a.distance(*b))
+                    .fold(0.0, f32::max);
+                assert!(off < 1e-4, "{id} {}: {off:.4} m apart", def.name);
+            }
         }
     }
 }

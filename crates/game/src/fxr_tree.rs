@@ -210,6 +210,8 @@ pub struct FxrLib {
     textures: HashMap<i64, PathBuf>,
     cache: HashMap<i64, Option<Arc<Value>>>,
     compiled: HashMap<i64, Arc<NodeDef>>,
+    /// Effect files read and parsed by this library (not adopted ones).
+    pub parses: usize,
 }
 
 impl FxrLib {
@@ -266,6 +268,7 @@ impl FxrLib {
         if let Some(hit) = self.cache.get(&id) {
             return hit.clone();
         }
+        self.parses += 1;
         let tree = self
             .files
             .get(&id)
@@ -289,6 +292,72 @@ impl FxrLib {
         let node = Arc::new(NodeDef::new(&tree["root"]));
         self.compiled.insert(id, node.clone());
         Some(node)
+    }
+
+    pub fn is_compiled(&self, id: i64) -> bool {
+        self.compiled.contains_key(&id)
+    }
+
+    /// The same file index with nothing parsed yet, for a background warm-up.
+    pub fn index(&self) -> Self {
+        Self {
+            files: self.files.clone(),
+            textures: self.textures.clone(),
+            ..Self::default()
+        }
+    }
+
+    /// Every effect this library has parsed: its tree and, when it parses, its compiled root.
+    pub fn parsed(&self) -> impl Iterator<Item = (i64, Option<Arc<Value>>, Option<Arc<NodeDef>>)> {
+        self.cache
+            .iter()
+            .map(|(&id, tree)| (id, tree.clone(), self.compiled.get(&id).cloned()))
+    }
+
+    /// Takes an effect parsed elsewhere (see [`Self::parsed`]), unless this library has it.
+    pub fn adopt(&mut self, id: i64, tree: Option<Arc<Value>>, compiled: Option<Arc<NodeDef>>) {
+        self.cache.entry(id).or_insert(tree);
+        if let Some(node) = compiled {
+            self.compiled.entry(id).or_insert(node);
+        }
+    }
+
+    /// The texture ids the effect's appearances draw with, through the effects it references.
+    /// Compiles every effect on the way.
+    pub fn texture_ids(&mut self, id: i64) -> Vec<i64> {
+        fn walk(lib: &mut FxrLib, node: &NodeDef, out: &mut Vec<i64>, depth: u32) {
+            if depth > 12 {
+                return;
+            }
+            if node.kind == 2001 {
+                if let Some(r) = lib.compiled(node.reference) {
+                    walk(lib, &r, out, depth + 1);
+                }
+                return;
+            }
+            if let Some(c) = &node.cfg {
+                for field in [
+                    Field::Texture,
+                    Field::Layer1,
+                    Field::Layer2,
+                    Field::Layer3,
+                    Field::NormalMap,
+                ] {
+                    let t = int(&c.appearance, field, 0);
+                    if t > 0 && !out.contains(&t) {
+                        out.push(t);
+                    }
+                }
+            }
+            for child in &node.children {
+                walk(lib, child, out, depth + 1);
+            }
+        }
+        let mut out = Vec::new();
+        if let Some(root) = self.compiled(id) {
+            walk(self, &root, &mut out, 0);
+        }
+        out
     }
 
     pub fn uses_action(&mut self, id: i64, slot: &str, action: i64) -> bool {

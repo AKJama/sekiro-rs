@@ -175,6 +175,31 @@ struct Surface {
     backread: Mask,
     /// The player stands on this part (`sekiro_sim::hit_filter::player_collides`).
     player: bool,
+    lighting: Option<CollisionLighting>,
+}
+
+/// A collision part's lighting configuration, read from its layout row once at load: looking
+/// the row up among the block's thousands of parts at each part change cost 3 to 9 ms, and
+/// 73 ms under memory pressure (#311).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CollisionLighting {
+    /// MSB GparamConfig ids (light, fog, scattering, env map), -1 when absent.
+    pub(crate) gparam: [i32; 4],
+    /// `SceneGparam` overlay layers ([`crate::lighting_selection::scene_overlays`]).
+    pub(crate) overlays: [i8; 4],
+    /// `SceneGparam` transition time, -1 when absent.
+    pub(crate) transition: f32,
+}
+
+impl CollisionLighting {
+    /// The row's configuration, when it authors a GparamConfig.
+    pub(crate) fn from_row(row: &Value) -> Option<Self> {
+        row["gparam"].is_array().then(|| Self {
+            gparam: super::gparam_config(row),
+            overlays: crate::lighting_selection::scene_overlays(&row["scene_gparam"]),
+            transition: super::scene_transition(&row["scene_gparam"]),
+        })
+    }
 }
 
 /// How far above a player-collidable part Wolf's feet may be and still stand on it. A
@@ -194,6 +219,8 @@ pub(crate) struct MapWorld {
     pub(crate) blocks: BTreeMap<String, Block>,
     pub(crate) primary: String,
     pub(crate) selected: Option<(String, String)>,
+    /// The lighting configuration of [`Self::selected`].
+    pub(crate) selected_lighting: Option<CollisionLighting>,
     /// The collision part (block, index into its surfaces) the player last stood on, and
     /// whether he really stood on it rather than it standing in before his first landing.
     standing: Option<(String, usize)>,
@@ -645,6 +672,7 @@ impl MapWorld {
                     // Rows without a hit filter are ordinary map collision.
                     player: sekiro_sim::hit_filter::row_filter(row)
                         .is_none_or(sekiro_sim::hit_filter::player_collides),
+                    lighting: CollisionLighting::from_row(row),
                 });
             }
             let block_prefix = if id == primary {
@@ -739,6 +767,7 @@ impl MapWorld {
             blocks,
             primary: primary.to_string(),
             selected: None,
+            selected_lighting: None,
             standing: None,
             stood: false,
             last_feet: None,
@@ -873,6 +902,7 @@ impl MapWorld {
         let mut contributions = Vec::new();
         let mut participating = BTreeMap::<String, BTreeSet<String>>::new();
         self.selected = None;
+        self.selected_lighting = None;
         for (id, index) in sources {
             let block = &self.blocks[id];
             let surface = &block.collisions[*index];
@@ -882,6 +912,7 @@ impl MapWorld {
                 .insert(surface.name.clone());
             if self.selected.is_none() {
                 self.selected = Some((id.clone(), surface.name.clone()));
+                self.selected_lighting = surface.lighting;
             }
             contributions.push((id.clone(), surface.demand, surface.backread));
             for row in block.json["connections"].as_array().into_iter().flatten() {
@@ -1213,13 +1244,11 @@ pub(crate) fn spawn(
                     part_index: row["part_index"].as_u64().unwrap_or(0) as usize,
                 },
                 super::DrawGroups(draw),
+                super::part_light_set(row),
                 transform,
                 Visibility::Hidden,
             ))
             .id();
-        if super::follows_scene_light(row) {
-            commands.entity(root).insert(super::FollowsSceneLight);
-        }
         if row["entity_data"]["is_shadow_src"].as_bool() == Some(false) {
             commands.entity(root).insert(AuthoredNoShadow);
         }
@@ -2029,6 +2058,7 @@ mod tests {
                 demand: [bit, 0, 0, 0, 0, 0, 0, 0],
                 backread: [32, 0, 0, 0, 0, 0, 0, 0],
                 player: true,
+                lighting: None,
             }];
             block.json = json!({"connections":[]});
         }
@@ -2114,6 +2144,18 @@ mod tests {
         // Normal ground: the ledge's own part, and a jump's apex keeps it.
         assert!(world.stand(ledge, true, None));
         assert_eq!(world.selected, ledge_part);
+        // The selection carries the part's lighting, parsed at load (#311).
+        let ledge_row = world.blocks[ASHINA[0]].json["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == "h023300")
+            .unwrap();
+        assert!(world.selected_lighting.is_some());
+        assert_eq!(
+            world.selected_lighting,
+            CollisionLighting::from_row(ledge_row)
+        );
         let ledge_mask = world.blocks[ASHINA[0]].normal;
         assert_ne!(ledge_mask, [0; 8]);
         assert!(!world.stand(ledge + Vec3::Y * 1.5, false, None));

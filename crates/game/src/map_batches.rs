@@ -91,13 +91,9 @@ impl StaticBatches {
         self.started && self.jobs.is_empty()
     }
 
-    /// The fraction of planned merges installed, from 0 to 1, for the loading bar.
-    pub(crate) fn progress(&self) -> f32 {
-        if !self.started {
-            0.0
-        } else {
-            crate::play::fraction(self.planned - self.jobs.len(), self.planned)
-        }
+    /// The merges installed, of those planned so far, for the loading bar.
+    pub(crate) fn merged(&self) -> (usize, usize) {
+        (self.planned - self.jobs.len(), self.planned)
     }
 }
 

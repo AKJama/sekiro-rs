@@ -217,7 +217,8 @@ The most specific structural gaps found in the deferred pipeline, none proven to
 3. `FC_SsaoWeight` for the four slots comes from LightSet fields that default to 0 in `default.gparam`; whether the engine takes that default for a map file that omits them was not traced.
 4. The GI scale uploads `g_envMapDiffuseColorScale` and `g_giLightingScale` are CPU values that were not found, so the absolute ambient scale could still differ from ours by a common factor.
 
-The point-light residual (`NATIVE_POINT_LIGHT_UNEXPLAINED_RESIDUAL`) is in the same range as the slot excess (0.15 to 0.35 of the traced native value), so it is probably the same missing factor.
+The point-light residual (now `BTL_POINT_LIGHT_UNEXPLAINED_RESIDUAL`) is in the same range as the slot excess (0.15 to 0.35 of the traced native value).
+For FXR lights it turned out to be the over-wide `b = 1/R` falloff it was fitted with, so since #323 it applies to BTL lights only (see MAP-FX.md).
 It is kept as the earlier by-eye total, rewritten relative to the corrected bridge (0.25 * 4500 / 3135.61 = 0.359).
 
 ### Result

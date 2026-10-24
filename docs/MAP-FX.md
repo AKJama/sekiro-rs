@@ -59,6 +59,13 @@ That reproduces what the game shows (no snow under the hall roof, snow in the op
 Columns are looked up lazily from `CollisionWorld::surfaces_at` and cached until the collision world changes.
 A flake falling under an eave is removed rather than hidden; for straight-falling snow the two look the same.
 Only the play mode has the collision; the map viewer and its render gates keep uncovered snow.
+Seen from under a roof, the open sky keeps its snow (#281).
+The camera snow's emitter is a 15 x 15 x 5 m box (emitterSize, turned 90 degrees about X) centred on the camera, its flakes live 6 s and fall at about 1 m/s, so every flake is within about 8.5 m of the camera horizontally.
+From start 0 in the Sculptor's hall the whole box is under the roof, while the door seen to the right of the start view opens on the yard 15 m away, so no snow fell there (measured: 0 flakes per square metre of open yard 16 to 23 m ahead, against 7.9 within 5 m of a camera standing in the yard).
+While the camera is under cover, `SkyFill` in `crates/game/src/map_fx.rs` places one more instance of the same effect, fixed in the world, 7.5 m past the first uncovered column straight ahead (snapped to a 7.5 m grid), primed six seconds so it appears full; its flakes inside the camera's own box are removed, so the two never overlap, and the roof cover applies as before (now 7.1 per square metre in that yard).
+Turning away puts that instance to sleep (up to six are kept to wake again); stepping into the open retires it, so its flakes fall out over 6 s instead of vanishing.
+Open sky is judged by the same play collision, so a room whose roof has no collision counts as open (the lower room south of the hall start, with the carved statues, has none over it).
+This is our approximation; how the game shows snow beyond the camera box is not traced.
 The underwater SpEffect 110040 condition is not implemented.
 The rooftop ordinary-fight and Tomoe transitions are described in LIGHTING.md's Genichiro snow audit.
 
@@ -121,7 +128,7 @@ SEKIRO_NO_MAP_FX disables this module at runtime while retaining the same execut
 Effects farther than 120 metres sleep and submit no particles or lights; sleeping trees can be evicted when the shared 192-effect budget fills.
 The player retains its global particle budget and per-node pool bounds.
 Effect meshes remain transparent, omit prepass/shadow rendering and stay off the geometry/collision diagnostic layers.
-Effect lights reuse a bounded pool of sixteen entities and the existing scene-to-lumens bridge.
+Effect lights reuse a pool of entities and the existing scene-to-lumens bridge, with no count cap: Bevy's clustered culling bounds the cost, and the former nearest-16 cap made farther lights pop in on approach (#83).
 
 Action 10000 has a bounded CPU implementation using the authored texture, colour, size variation, velocity variation, emission volume, follow factor and duration fields.
 The integer emission/duration fields are interpreted on the FXR 30 Hz clock; the native GPU scheduler's exact count semantics remain unverified.
@@ -299,13 +306,15 @@ w   = 1 / R
 
 `c` and `power` are the diffuse colour and its alpha (property block offsets 0x70 and 0x7c).
 `blink` is object offset 0x258 (spot) or 0x1dc (point), constructed as 1.0 and rewritten by the effect's flicker (FXR 609 `flickerBrightness`, `flickerIntervalMin/Max`).
-`distFade` is `20d9c0`: 1 inside the view distance, a linear ramp to 0 at `ViewDist`.
+`distFade` is `20d9c0`: 1 while `depth - radius` is within the view distance (object +0xbc, FXR 609 `maxViewDistance`), then a linear ramp to 0 over `min(0.07 * ViewDist, 10)` metres (`.rdata` 0x32890bc and 0x32892a0).
+`depth` is a dot product with a camera plane, taken to be the view axis (inferred, not traced).
+Until #83 effect lights were cut off hard at `maxViewDistance` from the camera, so the Outskirts lanterns (839531, 50 m) switched on as Wolf walked toward them; `light_view_fade` in `fxr.rs` now applies this ramp.
 Offsets 0xf8 (`ScatteringScale`, FXR `volumeDensity`) and 0xfc (`ScatteringBlinkInfluence`) are read only when the first flag is set, which is the volumetric-fog scattering pass; the deferred pass never uses them.
 Offset 0x108 is `AntiExposureRate` (FXR `adaptationExponent`, default 0, 0 in 800140, 800150 and the brazier effects).
 The factor is `powf(2, -(rate * ctx[0x458]))`; `ctx[0x458]` is the scene EV, which `SHADER-INPUTS.md` records as 0 in shipped builds (`SC_PreExposure = 2^EV = 1`).
 So the native buffer is in the same units as the directional light and the unit factor is exactly 1 (`NATIVE_LIGHT_BUFFER_SCALE`).
 The FXR 800140 light also ramps its multiplier from 0 to 19.2 over 2 s, and the flicker (brightness 0.75 to 1 every 0.125 to 0.25 s) is not modelled; both only lower the mean.
-Nothing traced explains the 3 to 5 times excess at the former 4500 bridge, so the earlier by-eye 0.25 stays as `NATIVE_POINT_LIGHT_UNEXPLAINED_RESIDUAL` (override `SEKIRO_MAP_POINT_LIGHT_SCALE` for the total).
+Nothing traced explains the 3 to 5 times excess at the former 4500 bridge, so the earlier by-eye 0.25 stays as `BTL_POINT_LIGHT_UNEXPLAINED_RESIDUAL`, for BTL lights only since #323 (see "Torch pools" below; `SEKIRO_MAP_POINT_LIGHT_SCALE` overrides the unit factor).
 The bridge itself is now traced as `pi / exposure = 3135.61` (see [EXPOSURE.md](EXPOSURE.md#brightness-audit-2026-10-15)), which is 0.697 of 4500, so the constant is rewritten as 0.25 * 4500 / 3135.61 = 0.359 to keep the same by-eye total.
 The same audit found the sun, fill and local directional slots 4 to 7 times too bright against retail, so the point-light residual is probably the same unexplained direct-light factor rather than a point-light unit.
 
@@ -339,7 +348,7 @@ For FXR 609 lights `+0x90` is taken to be the property `unk_ds3_p2_0`: across al
 The glint has R 1.5 and falloff 0.25, so its `1 / (1 + 0.7 (d/0.25)^2)` term drops to 0.26 at 0.5 m and 0.08 at 1 m, where `b = 1/R` gave 0.86 and 0.76.
 `fxr.rs` now reads the falloff and passes it in Bevy's `PointLight::radius`; `native_clustered_light` uses it for `b` when it is positive.
 BTL lights keep radius 0 and therefore `b = 1/R`; which BTL field feeds `+0x90` is not traced.
-Fire lights also fall off faster now (brazier 839530: R 5, falloff 0.625; ground fire 800140: R 5, falloff 1.25), so `NATIVE_POINT_LIGHT_UNEXPLAINED_RESIDUAL`, fitted by eye with `b = 1/R`, may need refitting at spot-022 and spot-056.
+Fire lights also fall off faster now (brazier 839530: R 5, falloff 0.625; ground fire 800140: R 5, falloff 1.25), so `NATIVE_POINT_LIGHT_UNEXPLAINED_RESIDUAL`, fitted by eye with `b = 1/R`, may need refitting at spot-022 and spot-056 (done in #323: FXR lights no longer take it).
 The other unused 609 fields do not explain the pool: `adaptationExponent` (0.6 here) scales by `2^(-rate * EV)` with EV 0 in shipped builds, `volumeDensity` is read only in the volumetric scattering pass, and the flicker (`flickerBrightness` 0.5 every 2 to 2.5 s) only lowers the mean; flicker is still not modelled.
 Live check at Item_宝_02 (`--hour 1`): mean pixel value of the lantern base 1 m from the item fell from 108 to 53 and of the plants from 123 to 52 (ambient), and the item itself from 193 to 118.
 Fire check at spot-022 (ground fire 800140, `--hour 1`, mean red): the ground at the fire went from 223 to 140, the ground between the fire and Wolf from 167 to 55, the dark side stayed at 28 to 26.
@@ -348,6 +357,18 @@ The residual is left unchanged: the remaining gap is mostly our darker ambient (
 The light radius also feeds Bevy's sphere-light model, but only its specular (roughness widening and a solid-angle term); diffuse uses the light centre.
 Map pieces and characters (both `LayeredMaterial` with `NATIVE_DIRECT`, on by default) subtract Bevy's own point-light term with the same radius and add the native one, so it cancels there.
 Only plain `StandardMaterial` meshes (blood decals, debug markers, the arena floor) see it: for the glint (radius 0.25) at 1 m with roughness 0.7 the specular peak drops to 0.63 of a point light with a wider lobe, which is not visible.
+
+## Torch pools: the residual no longer dims FXR lights (#323), 2026-10-23
+
+At the Outskirts gatehouse (opening shots 29 and 31, morning) the real torches throw strong warm pools on the gate wall and the ground; ours barely lit anything.
+The torches are brazier 839530 on the `o116000` stands (ModelSfxParam 116000000, dummy 200); there is no BTL light near the gatehouse.
+A light log at the matched camera showed every torch light spawned and drawn at full strength: multiplier 6.4, radius 5, falloff 0.625, squared colour (1, 0.40, 0.14), with the left torch's flame 1.3 m above its stand's base.
+So the data and the spawn are right, and the weak pool came from the scale.
+The 0.25 residual was fitted by eye at spot-056 on this same brazier while every light used `b = 1/R`, which gives 0.84 at 2 m where the traced falloff gives 0.12.
+It therefore made up for the over-wide falloff, and since #141 it dimmed the FXR lights a second time: the ground 1.3 m under the torch got 0.53 native units instead of 1.48.
+FXR lights now take the traced unit factor alone; BTL lights, which still use the untraced `b = 1/R`, keep the residual (`clustered_light_residual` in `map_material.rs`, mirrored in `native_point_lights`).
+The falloff mapping itself was checked again: `unk_ds3_p2_0` is a distance, not a ratio, since it scales with the radius across the map effects (R 40 with 10, R 640 with 320), and EvenTorset's FXR notes describe it as making the falloff stronger below 1 and the surface normal matter less above it, which is what the `t` wrap term does.
+The candle-lamp glow next to the left torch in shot 31 is not fixed: no light, effect or emissive object was found for it within the time-box.
 
 ## Flame height and rising sparks, 2026-10-15
 

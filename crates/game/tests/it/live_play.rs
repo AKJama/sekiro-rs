@@ -15,6 +15,11 @@ const READY_SECONDS: f64 = 90.0;
 const LOADING_FRAME_MS: f64 = 2000.0;
 const FRAME_MEDIAN_MS: f64 = 20.0;
 const FRAME_P95_MS: f64 = 40.0;
+/// Frame drops in play (#10): the walk's p99 and worst frame after play starts. The Outskirts
+/// walk with map enemies measured p99 26.8 ms and worst 86.8 ms (one main-thread hitch) on
+/// 2026-10-23.
+const FRAME_P99_MS: f64 = 45.0;
+const FRAME_MAX_MS: f64 = 100.0;
 
 /// Explore mode's arguments for the Outskirts, exactly as `menu.rs` builds them.
 const EXPLORE: [&str; 16] = [
@@ -169,11 +174,13 @@ fn outskirts_loads_then_plays_smoothly_on_drawn_ground() {
         &["--script", walk.to_str().unwrap()],
     );
     println!(
-        "walk: ready {:.1} s, longest loading frame {:.0} ms, frames median {:.1} ms p95 {:.1} ms, holes {}/{}",
+        "walk: ready {:.1} s, longest loading frame {:.0} ms, frames median {:.1} ms p95 {:.1} ms p99 {:.1} ms max {:.1} ms, holes {}/{}",
         number(&s, "play_ready_s"),
         number(&s, "longest_loading_frame_ms"),
         number(&s, "frame_ms_median"),
         number(&s, "frame_ms_p95"),
+        number(&s, "frame_ms_p99"),
+        number(&s, "frame_ms_max"),
         number(&s, "ground_holes"),
         number(&s, "grounded_samples")
     );
@@ -189,6 +196,14 @@ fn outskirts_loads_then_plays_smoothly_on_drawn_ground() {
     assert!(
         number(&s, "frame_ms_p95") <= FRAME_P95_MS,
         "frame spikes in play"
+    );
+    assert!(
+        number(&s, "frame_ms_p99") <= FRAME_P99_MS,
+        "frame drops in play"
+    );
+    assert!(
+        number(&s, "frame_ms_max") <= FRAME_MAX_MS,
+        "a hitch in play"
     );
     assert!(number(&s, "grounded_samples") >= 20.0, "Wolf never walked");
     assert_eq!(number(&s, "ground_holes"), 0.0, "walked on undrawn ground");

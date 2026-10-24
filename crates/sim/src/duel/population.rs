@@ -209,7 +209,7 @@ impl Population {
                 foe.initial_patrol.clone_from(&ai.state.patrol);
                 ai.state.map_regions = Some(crate::lua_ai::regions::MapRegions::new(cache, map));
             }
-            foe.duel.enemy.ground = Box::new(crate::collision::EnemyGround(world.clone()));
+            foe.duel.enemy.ground = Box::new(foe.duel.enemy_ground(&world));
             foe.duel.enemy.navmesh.clone_from(&navmesh);
             if let Some(row) = registry.npc_row(foe.duel.spec.npc_param) {
                 let border = row["activateBorderDist"].as_f64().unwrap_or(0.0) as f32;

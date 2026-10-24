@@ -9,6 +9,11 @@ from collections import Counter
 import json
 from pathlib import Path
 
+if __package__:
+    from . import collection
+else:
+    import collection
+
 
 def require_story(poses, story):
     captured_stories = {p.get('render_settings', {}).get('story', 'unrecorded') for p in poses}
@@ -16,8 +21,9 @@ def require_story(poses, story):
         raise ValueError(f'Expected {story} captures, found {sorted(captured_stories)}; regenerate pairs in a fresh output directory or explicitly select their historical --story')
 
 
-def report(root, output, annotation_path=None, story='genichiro-defeated'):
+def report(root, output, annotation_path=None, story=None):
     poses = json.loads((root / 'poses.json').read_text())
+    story = collection.story(root, story)
     require_story(poses, story)
     annotation_path = annotation_path or (root / 'triage.json' if (root / 'triage.json').exists()
                                           else root / 'pairs' / 'triage.json')
@@ -157,7 +163,7 @@ def main():
     parser.add_argument('--reference', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--annotations', type=Path, help='External review ledger; defaults to pairs/triage.json')
-    parser.add_argument('--story', default='genichiro-defeated', help='Expected captured preset; explicitly override for historical reports')
+    parser.add_argument('--story', help='Expected captured preset; defaults to the collection.json story (genichiro-defeated without one)')
     args = parser.parse_args()
     report(args.reference, args.output, args.annotations, args.story)
 
