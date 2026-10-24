@@ -40,10 +40,10 @@ use bevy::world_serialization::{WorldInstance, WorldInstanceSpawner};
 use serde_json::Value;
 
 #[path = "map_story.rs"]
-pub(crate) mod story;
+pub mod story;
 
 #[path = "map_visibility.rs"]
-pub(crate) mod visibility;
+pub mod visibility;
 
 #[path = "map_lod.rs"]
 pub(crate) mod lod;
@@ -62,7 +62,7 @@ pub(crate) mod sky;
 #[path = "map_sweep.rs"]
 pub(crate) mod sweep;
 #[path = "map_world.rs"]
-pub(crate) mod world;
+pub mod world;
 
 #[path = "map_lights.rs"]
 mod local_lights;
@@ -71,7 +71,7 @@ use local_lights::{LocalLights, update_local_lights};
 #[path = "map_capture.rs"]
 mod capture;
 #[path = "capture_ready.rs"]
-pub(crate) mod ready;
+pub mod ready;
 
 use crate::lighting::{
     MapLighting, MapProbes, ProbeRegion, ShadowSettings, apply_lighting, apply_probes, spawn_lights,
@@ -1108,6 +1108,13 @@ fn viewer_eye(pos: Vec3, eye: Vec3, collision: &sekiro_formats::hknp::CollisionM
     }
 }
 
+/// Setup another crate adds to the `--map` app (a game library on top of the map): the first
+/// runs before `DefaultPlugins` (asset sources), the second after the map's own plugins.
+pub static APP_HOOKS: std::sync::OnceLock<(AppHook, AppHook)> = std::sync::OnceLock::new();
+
+/// One setup step another crate adds to the `--map` app ([`APP_HOOKS`]).
+pub type AppHook = fn(&mut App);
+
 pub fn run(options: Options) -> Result<()> {
     let dir = map_dir(&options.cache, &options.id)?;
 
@@ -1125,6 +1132,9 @@ pub fn run(options: Options) -> Result<()> {
 
     raise_io_stack();
     let mut app = App::new();
+    if let Some((before, _)) = APP_HOOKS.get() {
+        before(&mut app);
+    }
     app.add_plugins((
         DefaultPlugins
             .set(crate::vram::render_plugin())
@@ -1216,6 +1226,9 @@ pub fn run(options: Options) -> Result<()> {
     }
     ready::install(&mut app);
     app.add_plugins(crate::presentation::PresentationPlugin);
+    if let Some((_, after)) = APP_HOOKS.get() {
+        after(&mut app);
+    }
     app.run();
     Ok(())
 }
@@ -1227,7 +1240,7 @@ const SKY: Color = Color::srgb(0.62, 0.68, 0.74);
 /// then reports the window as not responding).
 pub(crate) const UPLOAD_BYTES_PER_FRAME: usize = 96 << 20;
 
-pub(crate) fn upload_budget() -> bevy::render::render_asset::RenderAssetBytesPerFrame {
+pub fn upload_budget() -> bevy::render::render_asset::RenderAssetBytesPerFrame {
     bevy::render::render_asset::RenderAssetBytesPerFrame::new(UPLOAD_BYTES_PER_FRAME)
 }
 
@@ -1247,7 +1260,7 @@ pub(crate) fn texture_sampler() -> bevy::image::ImageSamplerDescriptor {
     }
 }
 
-pub(crate) fn layered_gltf_plugin() -> bevy::gltf::GltfPlugin {
+pub fn layered_gltf_plugin() -> bevy::gltf::GltfPlugin {
     bevy::gltf::GltfPlugin {
         default_sampler: texture_sampler(),
         ..default()

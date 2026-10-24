@@ -1124,7 +1124,7 @@ fn probe_light(
 
 /// Spatial reflection probes fade per receiver, so crossing boxes never cuts the whole view.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)] // Independent Bevy system parameters.
-pub fn apply_probes(
+pub(crate) fn apply_probes(
     mut commands: Commands,
     mut probes: ResMut<MapProbes>,
     assets: Res<AssetServer>,
