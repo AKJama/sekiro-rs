@@ -55,7 +55,7 @@ pub fn install(app: &mut App, cache: &Path, map: &str) -> anyhow::Result<()> {
         .init_resource::<ArenaVisibility>()
         .insert_resource(StoryHour {
             initial,
-            explicit: std::env::args().any(|a| a == "--hour"),
+            explicit: crate::ab::explicit_hour(&std::env::args().collect::<Vec<_>>()),
             legacy_sky: crate::map::sky::legacy_selection(),
         })
         .init_resource::<Scene>()

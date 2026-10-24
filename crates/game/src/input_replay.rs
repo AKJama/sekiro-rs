@@ -3,7 +3,7 @@
 //! cursor grab, camera orbit, stick building) instead of the simulation-level `--script`.
 //!
 //! One line per segment of rendered frames: `<frames> <keys> [<mouse_dx> <mouse_dy>]`, where
-//! keys is a comma list of `W A S D Q E Z X C V Space Shift Esc Enter Up Down Left Right F3 F8
+//! keys is a comma list of `W A S D Q E Z X C V Space Shift Esc Enter Up Down Left Right F3 F5 F8
 //! Click MMB` (`Click` is the left mouse button, `MMB` the middle one, the game's lock-on; a key
 //! named in consecutive segments stays held) or
 //! `-`, and the mouse moves by the given counts every frame. `#` starts a comment. Frames count
@@ -85,6 +85,7 @@ fn input(name: &str) -> Result<Input, String> {
         "Right" => KeyCode::ArrowRight,
         "F8" => KeyCode::F8,
         "F3" => KeyCode::F3,
+        "F5" => KeyCode::F5,
         other => return Err(format!("unknown key {other:?}")),
     }))
 }

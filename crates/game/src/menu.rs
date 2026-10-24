@@ -26,6 +26,7 @@ pub(crate) const KEPT_VALUES: &[&str] = &[
     "--attack-power",
     "--progression",
     "--hour",
+    "--ab",
     "--story",
     "--brain",
     "--brain-model",

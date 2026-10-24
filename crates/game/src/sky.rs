@@ -444,7 +444,7 @@ pub(super) fn install(app: &mut App, cache: &Path, id: &str, hour: f32) -> Resul
         horizons: BTreeMap::new(),
         missing: None,
         legacy: legacy_selection(),
-        clock_override: std::env::args().any(|a| a == "--hour"),
+        clock_override: crate::ab::explicit_hour(&std::env::args().collect::<Vec<_>>()),
     };
     let msb = sekiro_formats::msb::parse(&std::fs::read(
         cache.join("raw/map/mapstudio/m89_00_00_99.msb"),

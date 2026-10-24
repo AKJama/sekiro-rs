@@ -1406,6 +1406,7 @@ fn build(
         map_enemies::install(&mut app);
     }
     map::ready::install(&mut app);
+    crate::ab::install(&mut app, &std::env::args().collect::<Vec<_>>())?;
     app.add_plugins(crate::presentation::PresentationPlugin)
         .add_systems(Last, (capture, exit_fast).chain());
     let session_startup = engine_startup.map(|engine| take_session_startup(&mut app, engine));
