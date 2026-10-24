@@ -116,6 +116,14 @@ impl Gparam {
             .flat_map(|g| &g.params)
             .find(|p| p.name.contains(name))
     }
+
+    /// The first component of [`Self::param`] at `id` and `hour` ([`Param::at`]), if finite.
+    pub fn f32_at(&self, group: &str, name: &str, id: i32, hour: f32) -> Option<f32> {
+        self.param(group, name)
+            .and_then(|p| p.at(id, hour))
+            .and_then(|v| v.first().copied())
+            .filter(|v| v.is_finite())
+    }
 }
 
 /// Priority of each file kind in the engine's layer stack (the table at `0x142b54500`).

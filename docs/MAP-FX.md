@@ -135,6 +135,9 @@ The integer emission/duration fields are interpreted on the FXR 30 Hz clock; the
 Each node keeps at most 2048 particles; when the steady population (count per emission times emissions per lifetime) is larger, every emission is thinned by the same fraction so the population stays steady (#84).
 The camera snow 839500 wants 40 flakes every 1/30 s for 6 s (7200), so it keeps about 28 percent of them.
 Before #84 the pool filled in 1.7 s and then emitted nothing until that batch expired, so a running Wolf left the snow behind for about two seconds in every six.
+The game keeps camera weather up with a moving camera in its update shader `CS_VFX_StandardParticle` (#334): when the root has moved this frame and a particle lies behind it, farther than `m_cs_attachParam.x`, the particle is mirrored through the root to the same distance ahead.
+We apply that rule to the 10000 nodes under a camera-following node (movement 46), with an untraced stand-in for the distance: half the emitter box's widest horizontal extent (7.5 m for 839500).
+The exe code that fills `m_cs_attachParam` is not traced; 7.5 m keeps the density within 5 m of a camera sprinting at 8 to 12 m/s at that of a standing one (about 790 against 730 flakes), where without the rule it fell to a fifth.
 This fallback does not yet reproduce GPU collision, all emitter shapes, random turns, angular motion or every acceleration/growth field.
 Camera-follow detection comes from native node movement 46 in the FXR tree, including effect references.
 
@@ -307,8 +310,24 @@ w   = 1 / R
 `c` and `power` are the diffuse colour and its alpha (property block offsets 0x70 and 0x7c).
 `blink` is object offset 0x258 (spot) or 0x1dc (point), constructed as 1.0 and rewritten by the effect's flicker (FXR 609 `flickerBrightness`, `flickerIntervalMin/Max`).
 `distFade` is `20d9c0`: 1 while `depth - radius` is within the view distance (object +0xbc, FXR 609 `maxViewDistance`), then a linear ramp to 0 over `min(0.07 * ViewDist, 10)` metres (`.rdata` 0x32890bc and 0x32892a0).
-`depth` is a dot product with a camera plane, taken to be the view axis (inferred, not traced).
-Until #83 effect lights were cut off hard at `maxViewDistance` from the camera, so the Outskirts lanterns (839531, 50 m) switched on as Wolf walked toward them; `light_view_fade` in `fxr.rs` now applies this ramp.
+`depth` is the dot product with the camera matrix row at camera +0x130..+0x13c (traced, #339); that this row is the view axis is inferred, not traced.
+Until #83 effect lights were cut off hard at `maxViewDistance` from the camera, so the Outskirts lanterns (839531, 50 m) switched on as Wolf walked toward them; `light_view_fade` in `lighting.rs` now applies this ramp.
+
+BTL lights use the same cull (traced 2026-10-24, #339).
+The point builder `210010` (spot: `211610`) calls `20d9c0(light, camera, centre, radius, P)` with `radius = light+0x19c * 2.0`, and drops the light when the result is 0.
+A light that survives draws its shadow map when the scene allows local-light shadows; there is no separate shadow limit.
+Light +0x190..+0x19c is the bounding sphere from the point ctor `20fd20`; the loader `153ab0` fills +0x19c with the BTL range (record +88), so the radius is twice the range.
+The loader also writes light +0xbc from BTL record +196, a per-light view distance: 0 in Ashina (m11_00, m11_01, m17_00), 10 to 1000 m in 50 records elsewhere.
+The depth is the dot product of the centre with the camera matrix row at camera +0x130..+0x13c.
+When +0xbc is 0, `20d9c0` returns 1 (no cull) unless `P.auto` is set; otherwise the distance is `min(P.base + radius * P.scaler, P.max)`, and a non-zero +0xbc replaces it outright.
+Either distance is multiplied by `P.factor` and faded over `min(0.07 * dist, 10)` as above, and the result also scales the light's intensity (light +0xf4, 1.0).
+`142260` builds `P` from the record that the container at `DAT_143f3b490+0x118b0` returns for the current and next light-set keys, blended by the weight at +0x111b8: +0x68 base, +0x6c scaler, +0x70 max, +0x74 auto.
+`28e6d0` binds those four fields (at the same offsets plus 0xd0) to the `Setting Info[Yebis]` gparam params `SceneSetting- LightCollect- BaseDist`, `-DistScaler`, `-DistMax` and `- Auto Compute Enable`.
+`mapbase.gparam` sets them to 10, 10, 130 and true (`default.gparam` has auto off), and no Ashina map file overrides them.
+`P.factor` is `localLightDistFactor` at GConfig +0x4c, 1.0 at the High lighting quality.
+So a range-6 lantern keeps full intensity to 142 m of view depth and is gone by 151 m.
+`update_local_lights` in `map_lights.rs` applies this, reading the params from the shown gparam blend.
+Before, every light of a connected block was spawned, and the seven shadowed m17 lanterns about 380 m below the Castle gate drew 42 cube-face shadow views.
 Offsets 0xf8 (`ScatteringScale`, FXR `volumeDensity`) and 0xfc (`ScatteringBlinkInfluence`) are read only when the first flag is set, which is the volumetric-fog scattering pass; the deferred pass never uses them.
 Offset 0x108 is `AntiExposureRate` (FXR `adaptationExponent`, default 0, 0 in 800140, 800150 and the brazier effects).
 The factor is `powf(2, -(rate * ctx[0x458]))`; `ctx[0x458]` is the scene EV, which `SHADER-INPUTS.md` records as 0 in shipped builds (`SC_PreExposure = 2^EV = 1`).
@@ -462,3 +481,30 @@ That is the main change for the fog wall: its sprites were 5.3 to 10.5 m square 
 Every soft or uniform-scale 603 / 604 effect changes the same way.
 In the common effects, 603 nodes with (0.25, 0) as in FXR 11 are the second most common setting (609 nodes after 1897 with (1, 0)), and at least 95 depth-blended nodes have a non-zero `unkDepthBlend2` (for example (0.5, -0.5) in 56 nodes such as FXR 222001), which now pull the other way.
 A negative soft distance (for example `unkDepthBlend2` 1.5 with a small sprite) means no fade, as in the shader.
+
+## Lit particles, 2026-10-24 (#324)
+
+Symptom: the Outskirts gatehouse brazier smoke (FXR 839530, opening shot 31) was near black; in the game it is grey.
+Cause: lit particles (lighting -2 / 0) were drawn unlit at 1/8 of their rgbMultiplier, a stand-in from the 48 lit/unlit config pairs.
+The grey smoke (0.5 x colour3 2.0, hue-squared 0.58 per channel) came out at 0.07 native units.
+
+### What the game's shaders do (disassembled with d3dcompiler_47)
+
+`GXFfxtessellateSoftTexture.gpo` (the same body in its `_quad` / `_octed` domain shaders) writes a per-vertex light into `TEXCOORD6` when `g_ds_bEnableLighting`:
+- the irradiance volume's constant band, `g_IrradianceVolumeW` decoded `2 (rgb - 0.5) 2^(20 (a - 0.5))`, clamped at 0, times `g_ds_irradianceVolumeDiffuseColorScale`, volumes A and B blended by `g_ds_irradianceVolumeInterpRatio` (with `g_ds_isIVUpper` it instead evaluates the Y and W bands toward up);
+- plus every tile point light, `Diff.rgb x saturate(1 - d^2 / R^2) / (1 + 0.7 (d b)^2) x (0.75 t^2 + 0.25)` with `t = 1.4 / (1.4 + d b)`, which is the deferred point light's wrap term with N.L taken as 0 (no normal);
+- plus the tile spot lights, the same curve times the cone.
+
+`GXFfxtessellateBlendSoftTexture.ppo` then, when `g_ps_bEnableLighting`, outputs `saturate(colour) x (sun x shadow + TEXCOORD6)`.
+The colour is the hue-squared texture x vertex colour x `g_vColorScale`.
+The sun is `FC_DirLight[g_ps_envCbIndex].Col_0` (the light set's directional colour 0) times `g_ps_envCbColScale` and `saturate(g_vLightMask.x (1 - v) + v)`; there is no N.L.
+The shadow is `1 + g_ps_BillboardShadowIntensity (shadowVolume - 1)`.
+
+### What changed
+
+`particle_color` clamps a lit particle's colour to 1 and `collect_node` multiplies it by the native light at the particle (`fx_lighting.rs`), evaluated once per particle on the CPU.
+That light is the light set's sun (`direct[1]`, the map's own sun, re-read only when the light set changes), the GIIV W band at the particle (a CPU copy kept by `install_irradiance`) and the scene's point lights (map BTL and FXR 609, read back from their Bevy lights with the map shader's scale).
+Each lit node first culls the point lights and volumes to the bounds of its particles, so a particle only loops over what can reach it.
+Only lit nodes change: in 839530 the flames and embers (603, blend 4, lighting -1) are unlit and draw as before, and only the smoke node (603, blend 2, lighting -2) is lit.
+Inferred or open: the light mask, `g_ps_envCbColScale` and the volume colour scale are taken as 1 (their uploads are not traced); the sun is not shadowed; overlapping volumes blend by edge fade, not the A/B ratio; the upper-hemisphere branch and spot lights are left out; the clamp is on the colour, not texture x colour, which differs only for colours above 1.
+The castle vista chimney plume (opening shot 23) is not addressed: its effect source is not found.

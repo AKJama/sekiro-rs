@@ -469,6 +469,11 @@ pub struct NodeInst {
     /// NodeAcceleration (1 and kin): the speed gained along Z and the downward speed, each the
     /// running sum of its acceleration curve over the node's life.
     gained: Vec2,
+    /// Under a camera-following node (node movement 46), passed on to node-emitter children.
+    under_camera: bool,
+    /// GPUStandardParticle under the camera: how far a particle may fall behind before it is
+    /// mirrored ahead ([`untraced_mirror_distance`], #334).
+    mirror: Option<f32>,
 }
 
 pub struct Config {
@@ -543,14 +548,30 @@ impl NodeDef {
 }
 
 pub fn make_node(lib: &mut FxrLib, node: &NodeDef, seed: u32, depth: u32) -> Option<NodeInst> {
+    build_node(lib, node, seed, depth, false)
+}
+
+/// [`make_node`] for a node that may sit under a camera-following one (`under_camera`).
+fn build_node(
+    lib: &mut FxrLib,
+    node: &NodeDef,
+    seed: u32,
+    depth: u32,
+    under_camera: bool,
+) -> Option<NodeInst> {
     if depth > 12 {
         return None;
     }
     // ReferenceNode: another effect's root.
     if node.kind == 2001 {
         let r = lib.compiled(node.reference)?;
-        return make_node(lib, &r, seed ^ 0x55, depth + 1);
+        return build_node(lib, &r, seed ^ 0x55, depth + 1, under_camera);
     }
+    let under_camera = under_camera
+        || node
+            .cfg
+            .as_ref()
+            .is_some_and(|c| c.node_movement[Field::Type].as_i64() == Some(46));
     let cfg = node.cfg.clone();
     let mut rnd = Rnd { seed, k: 0 };
     let (mut local, mut delay, mut duration) = (Transform::IDENTITY, 0.0, -1.0);
@@ -587,17 +608,22 @@ pub fn make_node(lib: &mut FxrLib, node: &NodeDef, seed: u32, depth: u32) -> Opt
             kids.iter()
                 .enumerate()
                 .filter_map(|(i, k)| {
-                    make_node(
+                    build_node(
                         lib,
                         k,
                         seed.wrapping_mul(31).wrapping_add(i as u32 + 1),
                         depth + 1,
+                        under_camera,
                     )
                 })
                 .collect(),
             Vec::new(),
         )
     };
+    let mirror = cfg
+        .as_ref()
+        .filter(|c| under_camera && c.appearance[Field::Type].as_i64() == Some(10000))
+        .map(|c| untraced_mirror_distance(&c.appearance));
     Some(NodeInst {
         cfg,
         local,
@@ -616,6 +642,8 @@ pub fn make_node(lib: &mut FxrLib, node: &NodeDef, seed: u32, depth: u32) -> Opt
         detached: None,
         offset: Vec3::ZERO,
         gained: Vec2::ZERO,
+        under_camera,
+        mirror,
     })
 }
 
@@ -845,14 +873,29 @@ pub fn step_node(n: &mut NodeInst, lib: &mut FxrLib, parent: Transform, dt: f32,
 
 /// CPU fallback for GPUStandardParticle. Integer durations/intervals use the FXR 30 Hz clock.
 fn weather(n: &mut NodeInst, a: &Action, dt: f32, alive: bool, previous: Vec3) {
+    let root = n.world.translation;
+    let delta = root - previous;
+    // CS_VFX_StandardParticle: when the root moved more than 1 mm this frame, a particle behind it
+    // and farther than the mirror distance is mirrored through it, to the same distance ahead
+    // (#334). The first step has no particles yet, so its meaningless `previous` never counts.
+    let mirror = n
+        .mirror
+        .filter(|_| delta.length() > 0.001)
+        .map(|d| (delta.normalize(), d * d));
     for p in &mut n.particles {
         let mut rnd = Rnd { seed: p.seed, k: 0 };
         let follow = scalar(a, Field::ParticleFollowFactor, p.age, &mut rnd, 0.);
         if n.time > 0. {
-            p.pos += (n.world.translation - previous) * follow;
+            p.pos += delta * follow;
         }
         p.age += dt;
         p.pos += p.dir * p.speed * dt;
+        if let Some((ahead, far)) = mirror {
+            let behind = root - p.pos;
+            if ahead.dot(behind) > 0.001 && behind.length_squared() > far {
+                p.pos += 2. * behind;
+            }
+        }
     }
     n.particles.retain(|p| p.age < p.life);
     let mut rnd = Rnd {
@@ -867,8 +910,7 @@ fn weather(n: &mut NodeInst, a: &Action, dt: f32, alive: bool, previous: Vec3) {
         // The authored count, thinned evenly over emissions when the pool cannot hold it.
         let quota = |k: i64| (k as f64 * authored as f64 * thinning).floor() as usize;
         let count = quota(n.emissions + 1) - quota(n.emissions);
-        let size = game_vec(prop(a.get(Field::EmitterSize), 0., &mut rnd, [1.; 4]));
-        let rotation = game_rot(prop(a.get(Field::EmitterRotation), 0., &mut rnd, [0.; 4]));
+        let (size, rotation) = emitter_box(a, &mut rnd);
         for i in 0..count.min(WEATHER_POOL.saturating_sub(n.particles.len())) {
             let seed = n
                 .seed
@@ -902,6 +944,25 @@ fn weather(n: &mut NodeInst, a: &Action, dt: f32, alive: bool, previous: Vec3) {
         n.emit_next += interval;
         guard += 1;
     }
+}
+
+/// GPUStandardParticle's emitter box: its size and turn.
+fn emitter_box(a: &Action, rnd: &mut Rnd) -> (Vec3, Quat) {
+    (
+        game_vec(prop(a.get(Field::EmitterSize), 0., rnd, [1.; 4])),
+        game_rot(prop(a.get(Field::EmitterRotation), 0., rnd, [0.; 4])),
+    )
+}
+
+/// UNTRACED stand-in for the mirror distance the game's update shader reads from
+/// `m_cs_attachParam.x` (ccbSceneParam offset 0x210): the exe code that fills it is not found,
+/// and no FXR field of the snow holds a matching value. Half the emitter box's widest horizontal
+/// extent (7.5 m for the camera snow 839500's 15 x 15 m box) keeps the density around a sprinting
+/// camera at a standing one's, where 5 m overshoots and 10 m falls short.
+fn untraced_mirror_distance(a: &Action) -> f32 {
+    let (size, rotation) = emitter_box(a, &mut Rnd { seed: 0, k: 0 });
+    let half = Mat3::from_quat(rotation).abs() * size.abs() * 0.5;
+    half.x.max(half.z).max(0.01)
 }
 
 /// Particles one GPUStandardParticle node keeps on the CPU.
@@ -991,7 +1052,7 @@ fn emit(n: &mut NodeInst, c: &Config, active_t: f32, rnd: &mut Rnd, lib: &mut Fx
                 &n.templates[..]
             };
             for t in pick {
-                if let Some(mut child) = make_node(lib, t, pseed ^ 0x77, 1) {
+                if let Some(mut child) = build_node(lib, t, pseed ^ 0x77, 1, n.under_camera) {
                     let rot = Quat::from_rotation_arc(Vec3::Z, d.normalize_or(Vec3::Z));
                     child.local = Transform::from_translation(p).with_rotation(rot) * child.local;
                     n.children.push(child);
@@ -1163,10 +1224,12 @@ pub fn frame_uvs(
 }
 
 /// Particle colour: color1 * color2 * color3 * the node's particleModifier colour, rgbMultiplier,
-/// alphaMultiplier (HDR above 1 feeds the bloom). Lit particles (lighting -2 / 0) are drawn
-/// unlit at 1/8 of their rgbMultiplier: where the game ships a lit config next to an unlit one
-/// for the same node, the unlit one's rgbMultiplier is the lit one's x 0.125 in all 48 such pairs
-/// (FwLo's measurement).
+/// alphaMultiplier (HDR above 1 feeds the bloom). A lit particle's ([`is_lit`]) colour is clamped
+/// to 1, for the caller to multiply by the native light at the particle (#324,
+/// `fx_lighting.rs`): the game's lit effect pixel shader (`GXFfxtessellateBlendSoftTexture.ppo`)
+/// takes `saturate(texture x colour x g_vColorScale)` times the sun plus the vertex's ambient and
+/// local light. The clamp here is on the colour alone, the same for any colour up to 1 since the
+/// texture is at most 1.
 pub fn particle_color(
     a: &Action,
     c: &Config,
@@ -1183,17 +1246,20 @@ pub fn particle_color(
         rnd,
         [1.0; 4],
     );
-    let lit = matches!(a[Field::Lighting].as_i64(), Some(-2 | 0));
-    let rgbm = scalar(a, Field::RgbMultiplier, active_t, rnd, 1.0) * if lit { 0.125 } else { 1.0 };
+    let rgbm = scalar(a, Field::RgbMultiplier, active_t, rnd, 1.0);
     let am = scalar(a, Field::AlphaMultiplier, active_t, rnd, 1.0);
     let k: [f32; 4] = std::array::from_fn(|i| c1[i] * c2[i] * c3[i] * pm[i]);
-    let h = hue_squared([k[0], k[1], k[2]]);
-    [
-        h[0] * rgbm,
-        h[1] * rgbm,
-        h[2] * rgbm,
-        (k[3] * am).clamp(0.0, 1.0),
-    ]
+    let mut h = hue_squared([k[0], k[1], k[2]]).map(|v| v * rgbm);
+    if is_lit(a) {
+        h = h.map(|v| v.clamp(0.0, 1.0));
+    }
+    [h[0], h[1], h[2], (k[3] * am).clamp(0.0, 1.0)]
+}
+
+/// Whether the appearance is lit (lighting -2 / 0): the game's effect shaders then take the
+/// scene's light (`g_ps_bEnableLighting`, #324).
+pub fn is_lit(a: &Action) -> bool {
+    matches!(a[Field::Lighting].as_i64(), Some(-2 | 0))
 }
 
 /// The game's effect pixel shaders split the particle colour into its length and direction,
@@ -1429,42 +1495,54 @@ mod tests {
         assert!(n.finished && n.particles.is_empty());
     }
 
-    /// #84: the installed camera snow (839500) keeps falling around a camera that runs at
-    /// Wolf's 6 m/s. It used to fill its 2048-particle pool in 1.7 s, then emit nothing until
-    /// that batch expired at 6 s, leaving 2 s in every 6 with no flake within 5 m.
-    #[test]
-    fn camera_snow_falls_steadily_around_a_running_camera() {
-        fn near(n: &NodeInst, at: Vec3, out: &mut usize) {
-            *out += n
-                .particles
+    /// Flakes of `def` within 5 m of a camera moving along +X at `speed` m/s, every 0.1 s from
+    /// 8 s to 20 s.
+    fn near_counts(lib: &mut FxrLib, def: &NodeDef, speed: f32) -> Vec<usize> {
+        fn near(n: &NodeInst, at: Vec3) -> usize {
+            n.particles
                 .iter()
                 .filter(|p| (p.pos - at).xz().length() < 5.)
-                .count();
-            for c in &n.children {
-                near(c, at, out);
-            }
+                .count()
+                + n.children.iter().map(|c| near(c, at)).sum::<usize>()
         }
-        let mut lib = FxrLib::scan(&sekiro_sim::cache::root());
-        let def = lib.compiled(839500).expect("camera snow 839500 installed");
-        let mut n = make_node(&mut lib, &def, 1, 0).unwrap();
+        let mut n = make_node(lib, def, 1, 0).unwrap();
         let dt = 1. / 60.;
         let mut counts = Vec::new();
         for f in 0..60 * 20 {
-            let at = Vec3::new(6. * f as f32 * dt, 1.6, 0.);
-            step_node(&mut n, &mut lib, Transform::from_translation(at), dt, false);
+            let at = Vec3::new(speed * f as f32 * dt, 1.6, 0.);
+            step_node(&mut n, lib, Transform::from_translation(at), dt, false);
             if f >= 60 * 8 && f % 6 == 0 {
-                let mut c = 0;
-                near(&n, at, &mut c);
-                counts.push(c);
+                counts.push(near(&n, at));
             }
         }
-        let mean = counts.iter().sum::<usize>() as f32 / counts.len() as f32;
-        let (min, max) = (counts.iter().min().unwrap(), counts.iter().max().unwrap());
-        assert!(mean > 50., "mean {mean}");
-        assert!(
-            *min as f32 > 0.6 * mean && (*max as f32) < 1.4 * mean,
-            "near counts {min}..{max}, mean {mean}"
-        );
+        counts
+    }
+
+    /// #84 and #334: the installed camera snow (839500) keeps falling around a camera that
+    /// sprints at 8 m/s or flies at 12 m/s for 20 s, steadily and about as densely as around one
+    /// standing still. #84: it used to fill its 2048-particle pool in 1.7 s, then emit nothing
+    /// until that batch expired at 6 s. #334: flakes stayed where they fell, so a sprint left
+    /// them behind (a fifth of the standing density at 8 m/s) until the game's mirror-ahead rule.
+    #[test]
+    fn camera_snow_falls_steadily_around_a_running_camera() {
+        let mut lib = FxrLib::scan(&sekiro_sim::cache::root());
+        let def = lib.compiled(839500).expect("camera snow 839500 installed");
+        let mean = |c: &[usize]| c.iter().sum::<usize>() as f32 / c.len() as f32;
+        let standing = mean(&near_counts(&mut lib, &def, 0.));
+        assert!(standing > 50., "standing mean {standing}");
+        for speed in [8., 12.] {
+            let counts = near_counts(&mut lib, &def, speed);
+            let m = mean(&counts);
+            let (min, max) = (counts.iter().min().unwrap(), counts.iter().max().unwrap());
+            assert!(
+                m > 0.8 * standing,
+                "{speed} m/s: mean {m}, standing {standing}"
+            );
+            assert!(
+                *min as f32 > 0.6 * m && (*max as f32) < 1.4 * m,
+                "{speed} m/s: near counts {min}..{max}, mean {m}"
+            );
+        }
     }
 
     /// #60: InitialDirection 6 is the node's local +Z and 1 is world up, whatever the node's
