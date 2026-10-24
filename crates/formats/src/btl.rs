@@ -19,6 +19,9 @@ pub struct Light {
     pub near_clip: f32,
     pub sharpness: f32,
     pub width: f32,
+    /// Per-light view distance (record +196, light object +0xbc, set in `153ab0`); 0 takes the
+    /// scene's `LightCollect` auto distance in the cull `20d9c0`.
+    pub view_distance: f32,
     pub position: [f32; 3],
     pub rotation: [f32; 3],
     pub range: f32,
@@ -85,6 +88,11 @@ pub fn parse_record(raw: &[u8], name: String) -> Result<Light> {
     let sharpness = r.f32()?;
     r.seek(184);
     let width = r.f32()?;
+    r.seek(196);
+    // The game treats 0 as "no own distance"; a bad value is taken as that, not an error.
+    let view_distance = Some(r.f32()?)
+        .filter(|v| v.is_finite() && *v > 0.)
+        .unwrap_or(0.);
     if !intensity.is_finite()
         || intensity < 0.
         || !range.is_finite()
@@ -109,6 +117,7 @@ pub fn parse_record(raw: &[u8], name: String) -> Result<Light> {
         near_clip,
         sharpness,
         width,
+        view_distance,
         position,
         rotation,
         range,
@@ -136,6 +145,7 @@ mod tests {
         assert_eq!(spot.cone_angle, 8.);
         assert_eq!(spot.width, 90.);
         assert!(!spot.cast_shadows);
+        assert!(lights.iter().all(|l| l.view_distance == 0.));
         assert!((lights[0].position[0] + 344.742).abs() < 0.001);
         assert!(!lights[0].name.is_empty());
         for length in [0, 23, 59, 1580, data.len() - 1] {

@@ -979,18 +979,6 @@ struct Frame<'a> {
     trail: &'a mut Vec<(Vec3, Vec3, f32)>,
 }
 
-/// The native view-distance fade of a local light (`20d9c0`, called by the point and spot light
-/// builders): full while the light's near edge (`depth - radius`, `depth` along the camera's
-/// view axis) is within `view_distance`, then a linear ramp to zero over 7 percent of it, at
-/// most 10 m (`.rdata` 0.07 and 10.0). A light without a view distance never fades (#83).
-fn light_view_fade(view_distance: f32, depth: f32, radius: f32) -> f32 {
-    if view_distance <= 0. {
-        return 1.;
-    }
-    let ramp = (view_distance * 0.07).min(10.);
-    ((view_distance + ramp - (depth - radius)) / ramp).clamp(0., 1.)
-}
-
 /// Shows every effect light of this frame, reusing the pooled entities. There is no count cap:
 /// Bevy's clustered culling bounds the cost, as for the BTL lights, and a nearest-N cap made
 /// farther lights pop in as nearer ones went out of range (#83).
@@ -1174,7 +1162,7 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                     scalar(a, Field::DiffuseMultiplier, active_t, &mut rnd, 1.) * color[3].max(0.);
                 let radius = scalar(a, Field::Radius, active_t, &mut rnd, 0.);
                 let depth = (world - cam.translation()).dot(cam.forward().as_vec3());
-                let intensity = intensity * light_view_fade(limit, depth, radius);
+                let intensity = intensity * crate::lighting::light_view_fade(limit, depth, radius);
                 // The light object's falloff distance (object +0x90, 1.0 by default in
                 // 20d5f0); the builders store 1 / it as the diffuse w the shader's
                 // `1 / (1 + 0.7 (d / falloff)^2)` term uses (#141).

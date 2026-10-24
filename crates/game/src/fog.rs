@@ -659,10 +659,7 @@ mod tests {
 impl GameFog {
     pub fn from_gparam(g: &Gparam, id: i32, hour: f32, sun: Vec3) -> Option<Self> {
         let get = |name: &str, fallback: f32| {
-            g.param("VolumetricFog", name)
-                .and_then(|p| p.at(id, hour))
-                .and_then(|v| v.first().copied())
-                .filter(|v| v.is_finite())
+            g.f32_at("VolumetricFog", name, id, hour)
                 .unwrap_or(fallback)
         };
         // Renderer enable and analytical continuation are independent discrete switches.

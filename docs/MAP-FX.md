@@ -307,8 +307,24 @@ w   = 1 / R
 `c` and `power` are the diffuse colour and its alpha (property block offsets 0x70 and 0x7c).
 `blink` is object offset 0x258 (spot) or 0x1dc (point), constructed as 1.0 and rewritten by the effect's flicker (FXR 609 `flickerBrightness`, `flickerIntervalMin/Max`).
 `distFade` is `20d9c0`: 1 while `depth - radius` is within the view distance (object +0xbc, FXR 609 `maxViewDistance`), then a linear ramp to 0 over `min(0.07 * ViewDist, 10)` metres (`.rdata` 0x32890bc and 0x32892a0).
-`depth` is a dot product with a camera plane, taken to be the view axis (inferred, not traced).
-Until #83 effect lights were cut off hard at `maxViewDistance` from the camera, so the Outskirts lanterns (839531, 50 m) switched on as Wolf walked toward them; `light_view_fade` in `fxr.rs` now applies this ramp.
+`depth` is the dot product with the camera matrix row at camera +0x130..+0x13c (traced, #339); that this row is the view axis is inferred, not traced.
+Until #83 effect lights were cut off hard at `maxViewDistance` from the camera, so the Outskirts lanterns (839531, 50 m) switched on as Wolf walked toward them; `light_view_fade` in `lighting.rs` now applies this ramp.
+
+BTL lights use the same cull (traced 2026-10-24, #339).
+The point builder `210010` (spot: `211610`) calls `20d9c0(light, camera, centre, radius, P)` with `radius = light+0x19c * 2.0`, and drops the light when the result is 0.
+A light that survives draws its shadow map when the scene allows local-light shadows; there is no separate shadow limit.
+Light +0x190..+0x19c is the bounding sphere from the point ctor `20fd20`; the loader `153ab0` fills +0x19c with the BTL range (record +88), so the radius is twice the range.
+The loader also writes light +0xbc from BTL record +196, a per-light view distance: 0 in Ashina (m11_00, m11_01, m17_00), 10 to 1000 m in 50 records elsewhere.
+The depth is the dot product of the centre with the camera matrix row at camera +0x130..+0x13c.
+When +0xbc is 0, `20d9c0` returns 1 (no cull) unless `P.auto` is set; otherwise the distance is `min(P.base + radius * P.scaler, P.max)`, and a non-zero +0xbc replaces it outright.
+Either distance is multiplied by `P.factor` and faded over `min(0.07 * dist, 10)` as above, and the result also scales the light's intensity (light +0xf4, 1.0).
+`142260` builds `P` from the record that the container at `DAT_143f3b490+0x118b0` returns for the current and next light-set keys, blended by the weight at +0x111b8: +0x68 base, +0x6c scaler, +0x70 max, +0x74 auto.
+`28e6d0` binds those four fields (at the same offsets plus 0xd0) to the `Setting Info[Yebis]` gparam params `SceneSetting- LightCollect- BaseDist`, `-DistScaler`, `-DistMax` and `- Auto Compute Enable`.
+`mapbase.gparam` sets them to 10, 10, 130 and true (`default.gparam` has auto off), and no Ashina map file overrides them.
+`P.factor` is `localLightDistFactor` at GConfig +0x4c, 1.0 at the High lighting quality.
+So a range-6 lantern keeps full intensity to 142 m of view depth and is gone by 151 m.
+`update_local_lights` in `map_lights.rs` applies this, reading the params from the shown gparam blend.
+Before, every light of a connected block was spawned, and the seven shadowed m17 lanterns about 380 m below the Castle gate drew 42 cube-face shadow views.
 Offsets 0xf8 (`ScatteringScale`, FXR `volumeDensity`) and 0xfc (`ScatteringBlinkInfluence`) are read only when the first flag is set, which is the volumetric-fog scattering pass; the deferred pass never uses them.
 Offset 0x108 is `AntiExposureRate` (FXR `adaptationExponent`, default 0, 0 in 800140, 800150 and the brazier effects).
 The factor is `powf(2, -(rate * ctx[0x458]))`; `ctx[0x458]` is the scene EV, which `SHADER-INPUTS.md` records as 0 in shipped builds (`SC_PreExposure = 2^EV = 1`).

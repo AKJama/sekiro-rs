@@ -144,13 +144,7 @@ struct PostSettings {
 
 impl PostSettings {
     fn from_gparam(g: &Gparam, id: i32, hour: f32) -> Self {
-        let get = |group, name, fallback| {
-            g.param(group, name)
-                .and_then(|p| p.at(id, hour))
-                .and_then(|v| v.first().copied())
-                .filter(|v| v.is_finite())
-                .unwrap_or(fallback)
-        };
+        let get = |group, name, fallback| g.f32_at(group, name, id, hour).unwrap_or(fallback);
         let lut = (get("ColorGrading", "Enable", 0.) > 0.5).then(|| {
             g.param("ColorGrading", "LutSourceId")
                 .and_then(|p| p.nearest(id, hour))
@@ -438,6 +432,93 @@ pub const SCENE_TO_BEVY: f32 = 3_135.61;
 /// BTL candela mapping shares the bridge; BTL native units remain open.
 pub const LOCAL_LUMENS_PER_UNIT: f32 = SCENE_TO_BEVY * 4.0 * std::f32::consts::PI;
 
+/// The native view-distance fade of a local light (`20d9c0`, called by the point and spot light
+/// builders): full while the light's near edge (`depth - radius`, `depth` along the camera's
+/// view axis) is within `view_distance`, then a linear ramp to zero over 7 percent of it, at
+/// most 10 m (`.rdata` 0.07 and 10.0). A light without a view distance never fades (#83).
+pub(crate) fn light_view_fade(view_distance: f32, depth: f32, radius: f32) -> f32 {
+    if view_distance <= 0. {
+        return 1.;
+    }
+    let ramp = light_fade_band(view_distance);
+    ((view_distance + ramp - (depth - radius)) / ramp).clamp(0., 1.)
+}
+
+/// The width of the [`light_view_fade`] ramp.
+pub(crate) fn light_fade_band(view_distance: f32) -> f32 {
+    (view_distance * 0.07).min(10.)
+}
+
+/// `localLightDistFactor` (GConfig +0x4c, read by `142260`) at the High lighting quality.
+pub const LOCAL_LIGHT_DIST_FACTOR: f32 = 1.;
+
+/// The scene's `LightCollect` auto view distance for BTL lights without their own: the record
+/// `142260` reads at +0x68..+0x74, which `28e6d0` binds to the `Setting Info[Yebis]` params
+/// below (docs/MAP-FX.md).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LightCollect {
+    pub auto: bool,
+    pub base: f32,
+    pub scaler: f32,
+    pub max: f32,
+}
+
+impl LightCollect {
+    /// `mapbase.gparam`, which every map stacks over `default.gparam` and no Ashina file
+    /// overrides.
+    pub const MAPBASE: Self = Self {
+        auto: true,
+        base: 10.,
+        scaler: 10.,
+        max: 130.,
+    };
+
+    pub fn from_gparam(g: &Gparam, id: i32, hour: f32) -> Self {
+        let id = g.light_row(id);
+        let m = Self::MAPBASE;
+        let get = |name, fallback| g.f32_at("Setting Info", name, id, hour).unwrap_or(fallback);
+        let auto = g
+            .param("Setting Info", "LightCollect- Auto Compute Enable")
+            .and_then(|p| p.nearest(id, hour))
+            .and_then(|v| v.first().copied())
+            .map_or(m.auto, |v| v >= 0.5);
+        Self {
+            auto,
+            base: get("LightCollect- BaseDist", m.base),
+            scaler: get("LightCollect-DistScaler", m.scaler),
+            max: get("LightCollect-DistMax", m.max),
+        }
+        .ablated()
+    }
+
+    /// [`Self::MAPBASE`], for a scene without draw params.
+    pub fn fallback() -> Self {
+        Self::MAPBASE.ablated()
+    }
+
+    /// Diagnostic `SEKIRO_ABLATE=nolightcollect` turns the auto distance off, as before #339.
+    fn ablated(self) -> Self {
+        Self {
+            auto: !ablate("nolightcollect") && self.auto,
+            ..self
+        }
+    }
+
+    /// The view distance `20d9c0` culls a light of cull `radius` (twice the BTL range) at: its
+    /// own (BTL) view distance, else `min(base + radius * scaler, max)` when auto compute is on,
+    /// times [`LOCAL_LIGHT_DIST_FACTOR`]. `None` when neither applies: the light never culls.
+    pub fn distance(&self, own: f32, radius: f32) -> Option<f32> {
+        let distance = if own > 0. {
+            own
+        } else if self.auto {
+            (self.base + radius * self.scaler).min(self.max)
+        } else {
+            return None;
+        };
+        Some(distance * LOCAL_LIGHT_DIST_FACTOR)
+    }
+}
+
 #[derive(Resource, Clone, Debug, PartialEq)]
 pub struct ShadowSettings {
     pub enabled: bool,
@@ -529,10 +610,8 @@ impl ShadowSettings {
     /// a `--shadow` distance. Runs at start and on every light-file or hour change (#65).
     pub fn read_shadow_param(&mut self, g: &Gparam, hour: f32) {
         let shadow_param = |name: &str, fallback: f32| {
-            g.param("ShadowParam", name)
-                .and_then(|p| p.at(0, hour))
-                .and_then(|v| v.first().copied())
-                .filter(|v| v.is_finite() && *v > 0.)
+            g.f32_at("ShadowParam", name, 0, hour)
+                .filter(|v| *v > 0.)
                 .unwrap_or(fallback)
         };
         // Receivers keep the sun shadow lookup to the native far fade; see LIGHTING.md (#9).
