@@ -26,7 +26,7 @@ use bevy::{
 use sekiro_sim::duel::{Duel, DuelReport};
 
 use crate::fxr_tree::{
-    Action, Config, Field, FxrLib, NodeInst, Rnd, frame_uvs, grow_trails, int, make_node,
+    Action, Config, Field, FxrLib, NodeInst, Rnd, frame_uvs, grow_trails, int, is_lit, make_node,
     particle_color, prop, scalar, step_node, subdivide, view_fade,
 };
 
@@ -987,8 +987,7 @@ struct Frame<'a> {
     distort: &'a mut HashMap<i64, Buf>,
     trail: &'a mut Vec<(Vec3, Vec3, f32)>,
     /// What lights lit particles this frame (#324).
-    light: &'a crate::fx_lighting::ParticleLighting,
-    gi: Option<&'a crate::fx_lighting::IrradianceCpu>,
+    light: &'a mut crate::fx_lighting::ParticleLighting,
 }
 
 /// The native view-distance fade of a local light (`20d9c0`, called by the point and spot light
@@ -1051,6 +1050,25 @@ impl FxLight {
     }
 }
 
+impl crate::fx_lighting::NativeLight {
+    /// The inverse of [`FxLight::point_light`] for any Bevy point light (map BTL or FXR 609), at
+    /// the strength `native_clustered_light` in `map_material.wesl` gives it.
+    fn from_point_light(p: &PointLight, position: Vec3) -> Self {
+        let scale =
+            crate::map::native_point_light_scale() * crate::map::clustered_light_residual(p.radius);
+        let falloff = if p.radius > 0. { p.radius } else { p.range };
+        let c = p.color.to_linear();
+        Self {
+            position,
+            color: Vec3::new(c.red, c.green, c.blue) * p.intensity
+                / crate::lighting::LOCAL_LUMENS_PER_UNIT
+                * scale,
+            range: p.range,
+            b: 1. / falloff,
+        }
+    }
+}
+
 #[derive(Default)]
 struct FrameBuffers {
     bufs: HashMap<(i64, bool), Buf>,
@@ -1058,6 +1076,7 @@ struct FrameBuffers {
     lights: Vec<FxLight>,
     distort: HashMap<i64, Buf>,
     trail: Vec<(Vec3, Vec3, f32)>,
+    light: crate::fx_lighting::ParticleLighting,
 }
 
 fn collect(n: &NodeInst, f: &mut Frame) {
@@ -1114,23 +1133,42 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
         }
         return;
     }
+    let world_pos = |p: &crate::fxr_tree::Particle| {
+        if p.attached {
+            n.world.transform_point(p.pos)
+        } else {
+            p.pos
+        }
+    };
+    // Lit particles take only the lights and volumes reaching this node's particles (#324).
+    let lit = is_lit(a) && !n.particles.is_empty();
+    if lit {
+        let (min, max) = n
+            .particles
+            .iter()
+            .map(world_pos)
+            .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(min, max), w| {
+                (min.min(w), max.max(w))
+            });
+        f.light.cull(min, max);
+    }
     for p in &n.particles {
         let mut rnd = Rnd {
             seed: p.seed ^ 0x9999,
             k: 0,
         };
-        let world = if p.attached {
-            n.world.transform_point(p.pos)
-        } else {
-            p.pos
-        };
+        let world = world_pos(p);
         let fade = view_fade(a, world.distance(cam.translation()));
         if fade <= 0.0 {
             continue;
         }
-        let mut col = particle_color(a, c, p, active_t, &mut rnd, || {
-            f.light.at(world, f.gi).to_array()
-        });
+        let mut col = particle_color(a, c, p, active_t, &mut rnd);
+        if lit {
+            let l = f.light.at(world);
+            for (v, l) in col.iter_mut().zip(l.to_array()) {
+                *v *= l;
+            }
+        }
         col[3] *= fade;
         for v in &mut col[..3] {
             *v *= env;
@@ -1945,6 +1983,7 @@ fn render(
         lights: frame_lights,
         distort,
         trail,
+        light,
     } = &mut *buffers;
     for b in bufs.values_mut().chain(distort.values_mut()) {
         b.clear();
@@ -1953,9 +1992,13 @@ fn render(
         b.clear();
     }
     frame_lights.clear();
-    let light = crate::fx_lighting::gather(
+    light.gather(
         lit.lighting.as_deref(),
-        lit.points.iter().map(|(p, t)| (*p, t.translation())),
+        lit.gi.as_deref(),
+        lit.points
+            .iter()
+            .filter(|(p, _)| p.intensity > 0. && p.range > 0.)
+            .map(|(p, t)| crate::fx_lighting::NativeLight::from_point_light(p, t.translation())),
     );
     let mut frame = Frame {
         cam,
@@ -1964,8 +2007,7 @@ fn render(
         lights: frame_lights,
         distort,
         trail,
-        light: &light,
-        gi: lit.gi.as_deref(),
+        light,
     };
     for e in player.effects.iter().filter(|e| !e.asleep) {
         if let Some(root) = &e.root {
@@ -2081,6 +2123,36 @@ fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Collects every effect of `player` as `render` does, with `light` on lit particles.
+    fn collect_all(
+        player: &FxrPlayer,
+        cam: &GlobalTransform,
+        light: crate::fx_lighting::ParticleLighting,
+    ) -> FrameBuffers {
+        let mut buffers = FrameBuffers { light, ..default() };
+        let FrameBuffers {
+            bufs,
+            multi,
+            lights,
+            distort,
+            trail,
+            light,
+        } = &mut buffers;
+        let mut frame = Frame {
+            cam,
+            bufs,
+            multi,
+            lights,
+            distort,
+            trail,
+            light,
+        };
+        for e in &player.effects {
+            collect(e.root.as_ref().unwrap(), &mut frame);
+        }
+        buffers
+    }
 
     fn batch_test_app() -> App {
         let mut app = App::new();
@@ -2387,20 +2459,7 @@ mod tests {
         // Far away, so the pull barely changes the quads' projected size.
         const D: f32 = 1000.0;
         let cam = GlobalTransform::from(Transform::from_xyz(0., 2.5, D));
-        let mut buffers = FrameBuffers::default();
-        let mut frame = Frame {
-            cam: &cam,
-            bufs: &mut buffers.bufs,
-            multi: &mut buffers.multi,
-            lights: &mut buffers.lights,
-            distort: &mut buffers.distort,
-            trail: &mut buffers.trail,
-            light: &Default::default(),
-            gi: None,
-        };
-        for e in &player.effects {
-            collect(e.root.as_ref().unwrap(), &mut frame);
-        }
+        let buffers = collect_all(&player, &cam, Default::default());
         let mut quads = 0;
         for b in buffers.bufs.values() {
             for (q, t) in b.pos.chunks(6).zip(b.tan.chunks(6)) {
@@ -2440,20 +2499,7 @@ mod tests {
             let cam = GlobalTransform::from(
                 Transform::from_xyz(0., 0., depth).looking_at(Vec3::ZERO, Vec3::Y),
             );
-            let mut buffers = FrameBuffers::default();
-            let mut frame = Frame {
-                cam: &cam,
-                bufs: &mut buffers.bufs,
-                multi: &mut buffers.multi,
-                lights: &mut buffers.lights,
-                distort: &mut buffers.distort,
-                trail: &mut buffers.trail,
-                light: &Default::default(),
-                gi: None,
-            };
-            for e in &player.effects {
-                collect(e.root.as_ref().unwrap(), &mut frame);
-            }
+            let buffers = collect_all(&player, &cam, Default::default());
             buffers.lights.iter().map(|l| l.intensity).sum::<f32>()
         };
         // Authored multiplier 2.5 and colour alpha 1.
@@ -2492,9 +2538,9 @@ mod tests {
     /// The native deferred point-light diffuse for a surface facing the light (N.L = 1), as
     /// `native_clustered_light` in `map_material.wesl` computes it.
     fn native_diffuse(light: &FxLight, d: f32) -> f32 {
-        let fall = (1. - (d / light.range).powi(2)).clamp(0., 1.);
-        let x = (d / light.falloff).powi(2);
-        light.intensity * fall / (1. + 0.7 * x)
+        let native =
+            crate::fx_lighting::NativeLight::from_point_light(&light.point_light(), Vec3::ZERO);
+        light.intensity * native.falloff(d)
     }
 
     /// #141: the item glint (FFX 61) lights a small spot, not a 1.5 m pool, while a typical
@@ -2515,20 +2561,7 @@ mod tests {
             player.advance(1. / 60.);
         }
         let cam = GlobalTransform::from(Transform::from_xyz(0., 1.5, 3.));
-        let mut buffers = FrameBuffers::default();
-        let mut frame = Frame {
-            cam: &cam,
-            bufs: &mut buffers.bufs,
-            multi: &mut buffers.multi,
-            lights: &mut buffers.lights,
-            distort: &mut buffers.distort,
-            trail: &mut buffers.trail,
-            light: &Default::default(),
-            gi: None,
-        };
-        for e in &player.effects {
-            collect(e.root.as_ref().unwrap(), &mut frame);
-        }
+        let buffers = collect_all(&player, &cam, Default::default());
         let [glint] = buffers.lights[..] else {
             panic!("one glint light, got {:?}", buffers.lights);
         };
@@ -2568,24 +2601,9 @@ mod tests {
         let cam = GlobalTransform::from(Transform::from_xyz(0., 1.5, 8.));
         // Summed rgb of the alpha-blended (smoke) sprites under a grey native sun of `sun`.
         let smoke = |sun: f32| -> f32 {
-            let mut buffers = FrameBuffers::default();
-            let light = crate::fx_lighting::ParticleLighting {
-                sun: Vec3::splat(sun),
-                lights: Vec::new(),
-            };
-            let mut frame = Frame {
-                cam: &cam,
-                bufs: &mut buffers.bufs,
-                multi: &mut buffers.multi,
-                lights: &mut buffers.lights,
-                distort: &mut buffers.distort,
-                trail: &mut buffers.trail,
-                light: &light,
-                gi: None,
-            };
-            for e in &player.effects {
-                collect(e.root.as_ref().unwrap(), &mut frame);
-            }
+            let mut light = crate::fx_lighting::ParticleLighting::default();
+            light.sun = Vec3::splat(sun);
+            let buffers = collect_all(&player, &cam, light);
             let sprites = buffers
                 .bufs
                 .iter()
@@ -2627,20 +2645,7 @@ mod tests {
             player.advance(1. / 60.);
         }
         let cam = GlobalTransform::from(Transform::from_xyz(0., 1.5, 8.));
-        let mut buffers = FrameBuffers::default();
-        let mut frame = Frame {
-            cam: &cam,
-            bufs: &mut buffers.bufs,
-            multi: &mut buffers.multi,
-            lights: &mut buffers.lights,
-            distort: &mut buffers.distort,
-            trail: &mut buffers.trail,
-            light: &Default::default(),
-            gi: None,
-        };
-        for e in &player.effects {
-            collect(e.root.as_ref().unwrap(), &mut frame);
-        }
+        let buffers = collect_all(&player, &cam, Default::default());
         let [torch] = buffers.lights[..] else {
             panic!("one torch light, got {:?}", buffers.lights);
         };

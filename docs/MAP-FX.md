@@ -483,7 +483,9 @@ The shadow is `1 + g_ps_BillboardShadowIntensity (shadowVolume - 1)`.
 
 ### What changed
 
-`particle_color` clamps a lit particle's colour to 1 and multiplies it by the native light at the particle (`fx_lighting.rs`), evaluated once per particle on the CPU.
-That light is the light set's sun (`direct[1]`, the map's own sun), the GIIV W band at the particle (a CPU copy kept by `install_irradiance`) and the scene's point lights (map BTL and FXR 609, read back from their Bevy lights with the map shader's scale).
+`particle_color` clamps a lit particle's colour to 1 and `collect_node` multiplies it by the native light at the particle (`fx_lighting.rs`), evaluated once per particle on the CPU.
+That light is the light set's sun (`direct[1]`, the map's own sun, re-read only when the light set changes), the GIIV W band at the particle (a CPU copy kept by `install_irradiance`) and the scene's point lights (map BTL and FXR 609, read back from their Bevy lights with the map shader's scale).
+Each lit node first culls the point lights and volumes to the bounds of its particles, so a particle only loops over what can reach it.
+Only lit nodes change: in 839530 the flames and embers (603, blend 4, lighting -1) are unlit and draw as before, and only the smoke node (603, blend 2, lighting -2) is lit.
 Inferred or open: the light mask, `g_ps_envCbColScale` and the volume colour scale are taken as 1 (their uploads are not traced); the sun is not shadowed; overlapping volumes blend by edge fade, not the A/B ratio; the upper-hemisphere branch and spot lights are left out; the clamp is on the colour, not texture x colour, which differs only for colours above 1.
 The castle vista chimney plume (opening shot 23) is not addressed: its effect source is not found.

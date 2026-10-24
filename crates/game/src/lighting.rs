@@ -858,6 +858,7 @@ pub fn install_irradiance(
         .collect();
     let mut records = Vec::<[u32; 52]>::new();
     let mut voxels = Vec::new();
+    let mut cpu = Vec::new();
     {
         for region in regions {
             let Some(cube) = indices.get(&region.probe) else {
@@ -938,36 +939,24 @@ pub fn install_irradiance(
                 .map_or(center, |r| r.position);
             record[36..39].copy_from_slice(&origin.to_array().map(f32::to_bits));
             records.push(record);
+            // The constant band on the CPU for lit FXR particles (#324).
+            if enabled {
+                cpu.push(crate::fx_lighting::GiVolume {
+                    uv,
+                    min: center - extent,
+                    max: center + extent,
+                    dims: UVec3::from_array(dimensions),
+                    w_dims: UVec3::from_array(axis_dimensions[3]),
+                    w: coefficients[offsets[3] as usize..].to_vec(),
+                });
+            }
             voxels.extend(coefficients);
         }
     }
     let count = records.len();
-    // The constant band on the CPU for lit FXR particles (#324), read before the atlas
-    // overwrites the records' voxel offsets.
-    let cpu = crate::fx_lighting::IrradianceCpu {
-        volumes: if enabled {
-            records
-                .iter()
-                .map(|r| {
-                    let f = |i: usize| f32::from_bits(r[i]);
-                    let w_dims = UVec3::new(r[49], r[50], r[51]);
-                    let start = r[23] as usize;
-                    let len = (w_dims.x * w_dims.y * w_dims.z) as usize;
-                    crate::fx_lighting::GiVolume {
-                        uv: Mat4::from_cols_array(&std::array::from_fn(f)),
-                        min: Vec3::new(f(24), f(25), f(26)),
-                        max: Vec3::new(f(28), f(29), f(30)),
-                        dims: UVec3::new(r[16], r[17], r[18]),
-                        w_dims,
-                        w: voxels[start..start + len].to_vec(),
-                    }
-                })
-                .collect()
-        } else {
-            Vec::new()
-        },
-    };
-    app.insert_resource(cpu);
+    app.insert_resource(crate::fx_lighting::IrradianceCpu {
+        volumes: cpu.into(),
+    });
     let atlas = irradiance_atlas(&mut records, &voxels)?;
     let mut data = vec![count as u32, u32::from(enabled), 0, 0];
     for record in &records {
