@@ -1,24 +1,34 @@
 //! Shader-derived global fog, integrated in HDR before bloom and tone mapping.
 use bevy::asset::{embedded_asset, load_embedded_asset};
-use bevy::camera::{Exposure, visibility::NoFrustumCulling};
+use bevy::camera::{
+    Exposure,
+    visibility::{NoFrustumCulling, RenderLayers},
+};
 use bevy::core_pipeline::{
     FullscreenShader,
     schedule::{Core3d, Core3dSystems},
 };
+use bevy::diagnostic::FrameCount;
+use bevy::ecs::entity::EntityHashMap;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::mesh::VertexAttributeValues;
+use bevy::pbr::{
+    ExtractedDirectionalLight, GpuLights, LightMeta, MAX_DIRECTIONAL_LIGHTS, ShadowSamplers,
+    ViewLightsUniformOffset, ViewShadowBindings,
+};
 use bevy::prelude::*;
 use bevy::render::renderer::RenderContext;
 use bevy::render::view::ViewDepthStencilTexture;
 use bevy::render::{
-    RenderApp, RenderStartup,
+    Render, RenderApp, RenderStartup, RenderSystems,
     extract_component::{
         ComponentUniforms, DynamicUniformIndex, ExtractComponent, ExtractComponentPlugin,
         UniformComponentPlugin,
     },
+    extract_resource::{ExtractResource, ExtractResourcePlugin},
     render_resource::{binding_types::*, *},
-    renderer::ViewQuery,
-    view::{ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
+    renderer::{RenderQueue, ViewQuery},
+    view::{ExtractedView, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
 };
 use sekiro_formats::gparam::Gparam;
 
@@ -46,6 +56,13 @@ pub struct GameFog {
     background: [Vec4; 16],
     // Native scene radiance to the camera's HDR colour space.
     radiance_scale: Vec4,
+    // DirLight ShadowSampleCount, DirLight ShadowDither, VolumeWidth (the shadow volume's
+    // vertical cell count), and the render world's GpuLights index of the shadow-casting sun
+    // (-1 when there is none; see `shadow_light`).
+    shadow: Vec4,
+    // DirLight JitterCount, JitterXYSize, FeedbackWeight and EnableReproj (the PreShadowed
+    // reprojection, read on the CPU by `fog`).
+    reproj: Vec4,
 }
 
 #[cfg(test)]
@@ -99,6 +116,155 @@ mod tests {
             }
             let fog = GameFog::from_gparam(&fixture(values), 100, hour, Vec3::Y);
             assert_eq!(fog.map(|fog| fog.slices.w), expected);
+        }
+    }
+
+    #[test]
+    fn sun_shadow_taps_follow_authored_count_and_dither() {
+        // Omitted rows keep constructor 1402a0740's 8 taps and 0.4 dither.
+        let fog = GameFog::from_gparam(&fixture(vec![]), 0, 6., Vec3::Y).unwrap();
+        assert_eq!(fog.shadow, Vec4::new(8., 0.4, 160., 0.));
+        let g = fixture(vec![
+            (
+                "VolumetricFog DirLight ShadowSampleCount",
+                0,
+                0.,
+                Value::Int(3),
+            ),
+            (
+                "VolumetricFog DirLight ShadowDither",
+                0,
+                0.,
+                Value::Float(1.),
+            ),
+        ]);
+        let fog = GameFog::from_gparam(&g, 0, 6., Vec3::Y).unwrap();
+        assert_eq!(fog.shadow.truncate().truncate(), Vec2::new(3., 1.));
+    }
+
+    #[test]
+    fn shadow_reprojection_follows_the_authored_switch_jitter_and_feedback() {
+        // Omitted rows: EnableReproj on (constructor 1402a0740), the Ashina jitter and feedback.
+        let fog = GameFog::from_gparam(&fixture(vec![]), 0, 6., Vec3::Y).unwrap();
+        assert_eq!(fog.reproj, Vec4::new(4., 1., 0.8, 1.));
+        let g = fixture(vec![
+            ("VolumetricFog DirLight JitterCount", 0, 0., Value::Int(2)),
+            (
+                "VolumetricFog DirLight JitterXYSize",
+                0,
+                0.,
+                Value::Float(0.5),
+            ),
+            (
+                "VolumetricFog DirLight FeedbackWeight",
+                0,
+                0.,
+                Value::Float(0.9),
+            ),
+            (
+                "VolumetricFog DirLight EnableReproj",
+                0,
+                0.,
+                Value::Bool(false),
+            ),
+        ]);
+        let fog = GameFog::from_gparam(&g, 0, 6., Vec3::Y).unwrap();
+        assert_eq!(fog.reproj, Vec4::new(2., 0.5, 0.9, 0.));
+    }
+
+    #[test]
+    fn shadow_jitter_cycles_distinct_cell_positions_and_dither_offsets() {
+        // The user's blocky fog shadows (#345): one fixed ray and dither per cell showed the cell
+        // grid and the 4x4 dither tile. Each of the JitterCount frames must move both.
+        let frames: Vec<Vec3> = (0..4).map(|i| shadow_jitter(i, 4, 1.)).collect();
+        for (i, a) in frames.iter().enumerate() {
+            assert!(a.cmpge(Vec3::ZERO).all() && a.cmplt(Vec3::ONE).all(), "{a}");
+            assert_eq!(a.z, i as f32 / 4.);
+            for b in &frames[i + 1..] {
+                assert!(a.truncate().distance(b.truncate()) > 0.1, "{a} {b}");
+            }
+        }
+        assert_eq!(shadow_jitter(5, 4, 1.), frames[1]);
+        // The sequence averages near the cell centre, and JitterXYSize scales the spread.
+        let mean = frames.iter().map(|f| f.truncate()).sum::<Vec2>() / 4.;
+        assert!(mean.distance(Vec2::splat(0.5)) < 1e-6, "{mean}");
+        assert_eq!(shadow_jitter(1, 4, 0.).truncate(), Vec2::splat(0.5));
+        assert_eq!(shadow_jitter(3, 1, 1.), Vec3::new(0.5, 0.5, 0.));
+    }
+
+    #[test]
+    fn shadow_history_is_used_only_right_after_a_same_size_write() {
+        let reproj = Vec4::new(4., 1., 0.8, 1.);
+        let size = Extent3d {
+            width: 144,
+            height: 80,
+            depth_or_array_layers: 4,
+        };
+        assert_eq!(history_weight(reproj, Some((9, size)), 10, size), 0.8);
+        // First frame, a skipped frame, a resize, or reprojection switched off.
+        assert_eq!(history_weight(reproj, None, 10, size), 0.);
+        assert_eq!(history_weight(reproj, Some((8, size)), 10, size), 0.);
+        let resized = Extent3d { width: 152, ..size };
+        assert_eq!(history_weight(reproj, Some((9, size)), 10, resized), 0.);
+        assert_eq!(
+            history_weight(reproj.with_w(0.), Some((9, size)), 10, size),
+            0.
+        );
+        assert_eq!(history_weight(reproj, Some((u32::MAX, size)), 0, size), 0.8);
+    }
+
+    #[test]
+    fn shadow_volume_follows_the_native_froxel_grid() {
+        // 1080p, VolumeWidth 160: Y = 160, X = 160 * 16/9 = 284.4 rounded up to 288; 32 slices
+        // pack four to a texel.
+        let size = shadow_volume_size(UVec2::new(1920, 1080), 160., 32.);
+        assert_eq!(
+            (size.width, size.height, size.depth_or_array_layers),
+            (288, 160, 8)
+        );
+        // Both axes cap at a quarter of the viewport before rounding up to a multiple of 8, and a
+        // partial group of slices still gets its texel.
+        let size = shadow_volume_size(UVec2::new(640, 360), 160., 33.);
+        assert_eq!(
+            (size.width, size.height, size.depth_or_array_layers),
+            (160, 96, 9)
+        );
+    }
+
+    #[test]
+    fn shadow_light_index_follows_the_gpu_lights_order() {
+        let e = |i| Entity::from_raw_u32(i).unwrap();
+        // Sorted (volumetric, shadow maps, entity): the shadowless light sorts first, so the sun
+        // is GpuLights index 1 although it was listed first.
+        let sun = ((false, true, e(1)), true, true);
+        let fill = ((false, false, e(2)), true, false);
+        assert_eq!(shadow_light_index(vec![sun, fill]), Some(1));
+        // Lights outside the camera's layers take no GpuLights slot.
+        let hidden = ((false, false, e(0)), false, false);
+        assert_eq!(shadow_light_index(vec![sun, hidden]), Some(0));
+        // No caster, or a caster past MAX_DIRECTIONAL_LIGHTS: the plain form runs.
+        assert_eq!(shadow_light_index(vec![fill]), None);
+        let mut many: Vec<_> = (10..10 + MAX_DIRECTIONAL_LIGHTS as u32)
+            .map(|i| ((false, false, e(i)), true, false))
+            .collect();
+        many.push(sun);
+        assert_eq!(shadow_light_index(many), None);
+    }
+
+    #[test]
+    fn gates_and_the_switch_run_plain_fog() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(FogShadows::from_args(&args(&["sekiro-rs", "--play"])).0);
+        for off in [
+            "--no-fog-shadow",
+            "--sweep",
+            "--render-gate",
+            "--reference-gate",
+        ] {
+            assert!(
+                !FogShadows::from_args(&args(&["sekiro-rs", off])).0,
+                "{off}"
+            );
         }
     }
 
@@ -726,6 +892,26 @@ impl GameFog {
             background_control: Vec4::ZERO,
             background: [Vec4::ZERO; 16],
             radiance_scale: Vec4::X,
+            // Constructor 1402a0740 defaults: ShadowSampleCount 8 (+0xc8), ShadowDither 0.4
+            // (+0xcc); the debug menu (1403a5820) bounds the count to 1..32.
+            shadow: Vec4::new(
+                get("DirLight ShadowSampleCount", 8.).round().clamp(1., 32.),
+                get("DirLight ShadowDither", 0.4).clamp(0., 1.),
+                // Authored 80..320; the 160 fallback is not traced in the constructor.
+                get("VolumeWidth", 160.).clamp(8., 640.),
+                0.,
+            ),
+            // Constructor 1402a0740 defaults EnableReproj to true; the other three defaults were
+            // not traced, so the fallbacks are the Ashina GPARAM values (4, 1.0, 0.8).
+            reproj: Vec4::new(
+                get("DirLight JitterCount", 4.).round().clamp(1., 64.),
+                get("DirLight JitterXYSize", 1.).clamp(0., 1.),
+                get("DirLight FeedbackWeight", 0.8).clamp(0., 1.),
+                fog_param_exact(g, "DirLight EnableReproj")
+                    .and_then(|p| p.nearest(id, hour))
+                    .and_then(|v| v.first().copied())
+                    .unwrap_or(1.),
+            ),
         })
     }
 }
@@ -1004,19 +1190,37 @@ type BackgroundMeshes<'w, 's> = Query<
     ),
 >;
 
+/// Whether fog sun in-scatter may follow the sun shadows (#345), fixed at launch.
+#[derive(Resource, Clone, Copy, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
+pub(crate) struct FogShadows(pub bool);
+impl FogShadows {
+    fn from_args(args: &[String]) -> Self {
+        // `--no-fog-shadow` runs the game's plain WriteInScattering, for A/B checks.
+        // The gates run plain fog too: the render gate's pop-in metric compares a normal pass with
+        // an all-visible pass, where hidden draw groups cast extra sun shadows into the fog over
+        // sky and haze and read as pop-in. Pop-in is a geometry check.
+        Self(!args.iter().any(|a| a == "--no-fog-shadow") && !crate::sweep_mode(args))
+    }
+}
+
 pub struct FogPlugin;
 impl Plugin for FogPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "fog.wesl");
-        app.add_plugins((
-            ExtractComponentPlugin::<GameFog>::default(),
-            UniformComponentPlugin::<GameFog>::default(),
-        ))
-        .add_systems(Update, configure.after(super::apply_lighting))
-        .add_systems(PostUpdate, update_background);
+        let args: Vec<String> = std::env::args().collect();
+        app.insert_resource(FogShadows::from_args(&args))
+            .add_plugins((
+                ExtractComponentPlugin::<GameFog>::default(),
+                UniformComponentPlugin::<GameFog>::default(),
+                ExtractResourcePlugin::<FogShadows>::default(),
+            ))
+            .add_systems(Update, configure.after(super::apply_lighting))
+            .add_systems(PostUpdate, update_background);
         if let Some(render) = app.get_sub_app_mut(RenderApp) {
             render
                 .add_systems(RenderStartup, init_pipeline)
+                .add_systems(Render, shadow_light.in_set(RenderSystems::Queue))
                 .add_systems(
                     Core3d,
                     fog.before(Core3dSystems::EarlyPostProcess)
@@ -1156,10 +1360,58 @@ fn update_background(
 }
 
 #[derive(Resource)]
-pub(crate) struct FogPipeline(Vec<Option<FogVariant>>);
+pub(crate) struct FogPipeline {
+    /// Per MSAA sample count: the plain WriteInScattering form and the FOG_SHADOW form.
+    variants: Vec<Option<[FogVariant; 2]>>,
+    // DirLightShadow: the per-cell sun shadow volume the FOG_SHADOW variants read (#345).
+    shadow_layout: BindGroupLayoutDescriptor,
+    shadow: CachedComputePipelineId,
+    volume_sampler: Sampler,
+}
 struct FogVariant {
     layout: BindGroupLayoutDescriptor,
     pipelines: Vec<CachedRenderPipelineId>,
+}
+/// The compiled pipelines one fog frame uses.
+struct ReadyFog<'a> {
+    variant: &'a FogVariant,
+    psos: Vec<&'a RenderPipeline>,
+    /// The DirLightShadow pass; `None` runs the plain form.
+    shadow: Option<&'a ComputePipeline>,
+}
+impl FogPipeline {
+    /// The shadowed set when it is wanted and fully compiled, otherwise the plain set, so fog
+    /// never waits on the shadow pipelines.
+    fn ready<'a>(
+        &'a self,
+        cache: &'a PipelineCache,
+        samples: u32,
+        shadowed: bool,
+    ) -> Option<ReadyFog<'a>> {
+        let [plain, shadow_variant] = self.variants.get(samples.ilog2() as usize)?.as_ref()?;
+        let psos = |variant: &'a FogVariant| {
+            variant
+                .pipelines
+                .iter()
+                .map(|id| cache.get_render_pipeline(*id))
+                .collect::<Option<Vec<_>>>()
+        };
+        if shadowed
+            && let Some(shadow) = cache.get_compute_pipeline(self.shadow)
+            && let Some(psos) = psos(shadow_variant)
+        {
+            return Some(ReadyFog {
+                variant: shadow_variant,
+                psos,
+                shadow: Some(shadow),
+            });
+        }
+        Some(ReadyFog {
+            variant: plain,
+            psos: psos(plain)?,
+            shadow: None,
+        })
+    }
 }
 fn init_pipeline(
     mut commands: Commands,
@@ -1167,114 +1419,314 @@ fn init_pipeline(
     fullscreen: Res<FullscreenShader>,
     cache: Res<PipelineCache>,
     adapter: Res<bevy::render::renderer::RenderAdapter>,
+    device: Res<bevy::render::renderer::RenderDevice>,
 ) {
     let supported = adapter
         .get_texture_format_features(TextureFormat::Rgba16Float)
         .flags;
+    let variant = |samples: u32, shadowed: bool| {
+        let multisampled = samples > 1;
+        let mut entries = if multisampled {
+            BindGroupLayoutEntries::sequential(
+                ShaderStages::FRAGMENT,
+                (
+                    texture_depth_2d_multisampled(),
+                    uniform_buffer::<ViewUniform>(true),
+                    uniform_buffer::<GameFog>(true),
+                ),
+            )
+            .to_vec()
+        } else {
+            BindGroupLayoutEntries::sequential(
+                ShaderStages::FRAGMENT,
+                (
+                    texture_2d(TextureSampleType::Float { filterable: false }),
+                    texture_depth_2d(),
+                    uniform_buffer::<ViewUniform>(true),
+                    uniform_buffer::<GameFog>(true),
+                ),
+            )
+            .to_vec()
+        };
+        if shadowed {
+            let next = entries.len() as u32;
+            entries.extend_from_slice(&BindGroupLayoutEntries::with_indices(
+                ShaderStages::FRAGMENT,
+                (
+                    (
+                        next,
+                        texture_3d(TextureSampleType::Float { filterable: true }),
+                    ),
+                    (next + 1, sampler(SamplerBindingType::Filtering)),
+                ),
+            ));
+        }
+        let layout = BindGroupLayoutDescriptor::new("game fog", &entries);
+        let pipelines = (0..if multisampled { 2 } else { 1 })
+            .map(|step| {
+                let blend = multisampled.then_some(BlendState {
+                    color: BlendComponent {
+                        src_factor: if step == 0 {
+                            BlendFactor::Zero
+                        } else {
+                            BlendFactor::One
+                        },
+                        dst_factor: if step == 0 {
+                            BlendFactor::Src
+                        } else {
+                            BlendFactor::One
+                        },
+                        operation: BlendOperation::Add,
+                    },
+                    alpha: BlendComponent {
+                        src_factor: BlendFactor::Zero,
+                        dst_factor: BlendFactor::One,
+                        operation: BlendOperation::Add,
+                    },
+                });
+                let mut shader_defs = Vec::new();
+                if multisampled {
+                    shader_defs.push("MULTISAMPLED_DEPTH".into());
+                    if step == 0 {
+                        shader_defs.push("FOG_ATTENUATION".into());
+                    }
+                }
+                if shadowed {
+                    shader_defs.push("FOG_SHADOW".into());
+                }
+                cache.queue_render_pipeline(RenderPipelineDescriptor {
+                    label: Some("Sekiro global fog".into()),
+                    layout: vec![layout.clone()],
+                    vertex: fullscreen.to_vertex_state(),
+                    fragment: Some(FragmentState {
+                        shader: load_embedded_asset!(assets.as_ref(), "fog.wesl"),
+                        shader_defs,
+                        targets: vec![Some(ColorTargetState {
+                            format: TextureFormat::Rgba16Float,
+                            blend,
+                            write_mask: ColorWrites::ALL,
+                        })],
+                        ..default()
+                    }),
+                    multisample: MultisampleState {
+                        count: samples,
+                        ..default()
+                    },
+                    ..default()
+                })
+            })
+            .collect();
+        FogVariant { layout, pipelines }
+    };
     let variants = [1, 2, 4, 8]
         .into_iter()
         .map(|samples| {
-            if !supported.sample_count_supported(samples) {
-                return None;
-            }
-            let multisampled = samples > 1;
-            let layout = BindGroupLayoutDescriptor::new(
-                "game fog",
-                &if multisampled {
-                    BindGroupLayoutEntries::sequential(
-                        ShaderStages::FRAGMENT,
-                        (
-                            texture_depth_2d_multisampled(),
-                            uniform_buffer::<ViewUniform>(true),
-                            uniform_buffer::<GameFog>(true),
-                        ),
-                    )
-                    .to_vec()
-                } else {
-                    BindGroupLayoutEntries::sequential(
-                        ShaderStages::FRAGMENT,
-                        (
-                            texture_2d(TextureSampleType::Float { filterable: false }),
-                            texture_depth_2d(),
-                            uniform_buffer::<ViewUniform>(true),
-                            uniform_buffer::<GameFog>(true),
-                        ),
-                    )
-                    .to_vec()
-                },
-            );
-            let pipelines = (0..if multisampled { 2 } else { 1 })
-                .map(|step| {
-                    let blend = multisampled.then_some(BlendState {
-                        color: BlendComponent {
-                            src_factor: if step == 0 {
-                                BlendFactor::Zero
-                            } else {
-                                BlendFactor::One
-                            },
-                            dst_factor: if step == 0 {
-                                BlendFactor::Src
-                            } else {
-                                BlendFactor::One
-                            },
-                            operation: BlendOperation::Add,
-                        },
-                        alpha: BlendComponent {
-                            src_factor: BlendFactor::Zero,
-                            dst_factor: BlendFactor::One,
-                            operation: BlendOperation::Add,
-                        },
-                    });
-                    let mut shader_defs = Vec::new();
-                    if multisampled {
-                        shader_defs.push("MULTISAMPLED_DEPTH".into());
-                        if step == 0 {
-                            shader_defs.push("FOG_ATTENUATION".into());
-                        }
-                    }
-                    cache.queue_render_pipeline(RenderPipelineDescriptor {
-                        label: Some("Sekiro global fog".into()),
-                        layout: vec![layout.clone()],
-                        vertex: fullscreen.to_vertex_state(),
-                        fragment: Some(FragmentState {
-                            shader: load_embedded_asset!(assets.as_ref(), "fog.wesl"),
-                            shader_defs,
-                            targets: vec![Some(ColorTargetState {
-                                format: TextureFormat::Rgba16Float,
-                                blend,
-                                write_mask: ColorWrites::ALL,
-                            })],
-                            ..default()
-                        }),
-                        multisample: MultisampleState {
-                            count: samples,
-                            ..default()
-                        },
-                        ..default()
-                    })
-                })
-                .collect();
-            Some(FogVariant { layout, pipelines })
+            supported
+                .sample_count_supported(samples)
+                .then(|| [variant(samples, false), variant(samples, true)])
         })
         .collect();
-    commands.insert_resource(FogPipeline(variants));
+    let shadow_layout = BindGroupLayoutDescriptor::new(
+        "game fog shadow volume",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                uniform_buffer::<ViewUniform>(true),
+                uniform_buffer::<GameFog>(true),
+                uniform_buffer::<GpuLights>(true),
+                texture_2d_array(TextureSampleType::Depth),
+                sampler(SamplerBindingType::Comparison),
+                texture_storage_3d(SHADOW_VOLUME_FORMAT, StorageTextureAccess::WriteOnly),
+                uniform_buffer::<ShadowFrame>(false),
+                texture_3d(TextureSampleType::Float { filterable: true }),
+                sampler(SamplerBindingType::Filtering),
+            ),
+        ),
+    );
+    let shadow = cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("Sekiro fog DirLightShadow".into()),
+        layout: vec![shadow_layout.clone()],
+        shader: load_embedded_asset!(assets.as_ref(), "fog.wesl"),
+        shader_defs: vec!["SHADOW_VOLUME".into()],
+        entry_point: Some("shadow_volume_cells".into()),
+        ..default()
+    });
+    let volume_sampler = device.create_sampler(&SamplerDescriptor {
+        mag_filter: FilterMode::Linear,
+        min_filter: FilterMode::Linear,
+        ..default()
+    });
+    commands.insert_resource(FogPipeline {
+        variants,
+        shadow_layout,
+        shadow,
+        volume_sampler,
+    });
 }
+/// Rgba16Float is the smallest filterable format WebGPU also allows as a storage texture; each
+/// texel packs four consecutive slices' shadow means into rgba.
+const SHADOW_VOLUME_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+/// Froxel grid size after `3a2be0` (inferred, docs/SHADER-INPUTS.md): Y is VolumeWidth, X is
+/// Y*aspect, both capped at a quarter of the viewport and at 640 and rounded up to a multiple of 8.
+/// Depth is one texel per four slices.
+fn shadow_volume_size(target: UVec2, volume_width: f32, slices: f32) -> Extent3d {
+    let target = target.max(UVec2::ONE);
+    let axis = |n: f32, viewport: u32| {
+        let cap = (viewport / 4).clamp(1, 640) as f32;
+        (n.min(cap).ceil() as u32).next_multiple_of(8)
+    };
+    let height = axis(volume_width, target.y);
+    Extent3d {
+        width: axis(height as f32 * target.x as f32 / target.y as f32, target.x),
+        height,
+        depth_or_array_layers: (slices as u32).div_ceil(4).max(1),
+    }
+}
+/// One frame of `GXVolumetricFog_DirLightShadowReproj`: last frame's view for the reprojection
+/// (native mtxNowToPrevView and PrevLogDepthRangeInfo), this frame's ShadowSubpixelOffset and the
+/// history weight (ReprojectionFeedback, zero when there is no valid history).
+#[derive(ShaderType, Clone, Copy, Default)]
+struct ShadowFrame {
+    prev_clip_from_world: Mat4,
+    prev_view_from_world: Mat4,
+    // Cell-space ray position xy (0..1 across the cell), dither offset, history weight.
+    jitter: Vec4,
+}
+/// A fog camera's two shadow volumes: the DirLightShadowReproj pass reads last frame's and writes
+/// the other, which the fog then reads.
+pub(crate) struct ShadowHistory {
+    size: Extent3d,
+    volumes: [TextureView; 2],
+    frame: UniformBuffer<ShadowFrame>,
+    /// The volume written last.
+    last: usize,
+    /// FrameCount and views of the last write.
+    written: (u32, Mat4, Mat4),
+    /// Frames written so far, which steps the jitter sequence.
+    writes: u32,
+}
+/// ShadowSubpixelOffset for the `index`th shadow frame: the cell's ray position in xy and the
+/// dither offset, which cycle over JitterCount frames so the history averages them.
+/// 0x14039fa70 adds per-frame offsets to a constant; neither was traced, so this is inferred: a
+/// rank-1 lattice of JitterCount points (one per row and column stratum, centred on the cell
+/// centre and scaled by JitterXYSize), and dither offsets k/JitterCount.
+fn shadow_jitter(index: u32, count: u32, xy_size: f32) -> Vec3 {
+    let n = count.max(1);
+    let k = index % n;
+    // The generator nearest the golden ratio of n that is coprime with n spreads the points.
+    let gcd = |mut a: u32, mut b: u32| {
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        a
+    };
+    let g = ((n as f32 * 0.618).round() as u32..)
+        .find(|&g| gcd(g, n) == 1)
+        .unwrap_or(1);
+    let stratum = |i: u32| (i as f32 + 0.5) / n as f32 - 0.5;
+    Vec3::new(
+        0.5 + stratum(k) * xy_size,
+        0.5 + stratum(k * g % n) * xy_size,
+        k as f32 / n as f32,
+    )
+}
+/// The history weight: FeedbackWeight when reprojection is on and last frame wrote a volume of
+/// this size, else zero (the first frame, after a resize or after frames of plain fog).
+fn history_weight(
+    reproj: Vec4,
+    history: Option<(u32, Extent3d)>,
+    frame: u32,
+    size: Extent3d,
+) -> f32 {
+    let valid = history.is_some_and(|(written, s)| written.wrapping_add(1) == frame && s == size);
+    if reproj.w > 0.5 && valid {
+        reproj.z
+    } else {
+        0.
+    }
+}
+/// The GpuLights index of the first shadow-casting sun in the order bevy_pbr's `prepare_lights`
+/// fills GpuLights: sorted by (volumetric, shadow maps, entity), filtered to the camera's render
+/// layers and capped at MAX_DIRECTIONAL_LIGHTS. Each light is its sort key, whether it shares the
+/// camera's layers and whether it casts cascaded shadows.
+fn shadow_light_index(mut lights: Vec<((bool, bool, Entity), bool, bool)>) -> Option<usize> {
+    lights.sort_by_key(|(key, ..)| *key);
+    lights
+        .iter()
+        .filter(|(_, visible, _)| *visible)
+        .take(MAX_DIRECTIONAL_LIGHTS)
+        .position(|(_, _, casts)| *casts)
+}
+/// Stores each fog camera's shadow-casting sun index in `shadow.w` (-1 for none) before the fog
+/// uniforms upload, so the DirLightShadow pass does not search the lights per thread.
+fn shadow_light(
+    lights: Query<(Entity, &ExtractedDirectionalLight, &RenderLayers)>,
+    mut views: Query<(&mut GameFog, Option<&RenderLayers>)>,
+) {
+    for (mut fog, view_layers) in &mut views {
+        let view_layers = view_layers.cloned().unwrap_or_default();
+        let index = shadow_light_index(
+            lights
+                .iter()
+                .map(|(entity, light, layers)| {
+                    (
+                        (light.volumetric, light.shadow_maps_enabled, entity),
+                        layers.intersects(&view_layers),
+                        light.shadow_maps_enabled && !light.cascade_shadow_config.bounds.is_empty(),
+                    )
+                })
+                .collect(),
+        );
+        fog.shadow.w = index.map_or(-1., |i| i as f32);
+    }
+}
+/// The fragment bindings, plus the shadow volume and its sampler for the FOG_SHADOW variants.
+fn with_volume<'a>(
+    base: &[BindGroupEntry<'a>],
+    volume: Option<(&'a TextureView, &'a Sampler)>,
+) -> Vec<BindGroupEntry<'a>> {
+    let mut entries = base.to_vec();
+    if let Some((view, sampler)) = volume {
+        let next = entries.len() as u32;
+        entries.extend_from_slice(&BindGroupEntries::with_indices((
+            (next, view),
+            (next + 1, sampler),
+        )));
+    }
+    entries
+}
+/// The camera's targets and uniform offsets, and the sun shadow maps when it has them.
+type FogView = (
+    &'static GameFog,
+    &'static ViewTarget,
+    &'static ViewDepthStencilTexture,
+    &'static Msaa,
+    &'static ViewUniformOffset,
+    &'static DynamicUniformIndex<GameFog>,
+    Option<&'static ViewShadowBindings>,
+    Option<&'static ViewLightsUniformOffset>,
+    &'static ExtractedView,
+);
+/// The sun shadow and per-frame resources the fog node reads.
+type FogFrame<'w> = (
+    Res<'w, LightMeta>,
+    Res<'w, ShadowSamplers>,
+    Res<'w, FogShadows>,
+    Res<'w, RenderQueue>,
+    Res<'w, FrameCount>,
+);
 pub(crate) fn fog(
-    view: ViewQuery<(
-        &ViewTarget,
-        &ViewDepthStencilTexture,
-        &Msaa,
-        &ViewUniformOffset,
-        &DynamicUniformIndex<GameFog>,
-    )>,
+    view: ViewQuery<FogView>,
     pipeline: Res<FogPipeline>,
     cache: Res<PipelineCache>,
-    views: Res<ViewUniforms>,
-    uniforms: Res<ComponentUniforms<GameFog>>,
+    (views, uniforms): (Res<ViewUniforms>, Res<ComponentUniforms<GameFog>>),
+    (light_meta, shadow_samplers, fog_shadows, queue, frame_count): FogFrame,
     mut ctx: RenderContext,
-    mut warned_depth: Local<bool>,
+    (mut warned_depth, mut histories): (Local<bool>, Local<EntityHashMap<ShadowHistory>>),
 ) {
-    let (target, depth, msaa, offset, index) = view.into_inner();
+    let view_entity = view.entity();
+    let (settings, target, depth, msaa, offset, index, shadows, lights_offset, extracted) =
+        view.into_inner();
     let Some(depth_view) = depth.attachment.depth_stencil_views().depth_only_view() else {
         if !*warned_depth {
             warn!("global fog skipped: depth-only view is unavailable");
@@ -1290,10 +1742,6 @@ pub(crate) fn fog(
     {
         return;
     }
-    let multisampled = msaa.samples() > 1;
-    let Some(pipeline) = &pipeline.0[msaa.samples().ilog2() as usize] else {
-        return;
-    };
     let (Some(view_binding), Some(fog_binding)) =
         (views.uniforms.binding(), uniforms.uniforms().binding())
     else {
@@ -1302,27 +1750,140 @@ pub(crate) fn fog(
     if target.main_texture_format() != TextureFormat::Rgba16Float {
         return;
     }
-    let psos: Vec<_> = pipeline
-        .pipelines
-        .iter()
-        .filter_map(|id| cache.get_render_pipeline(*id))
-        .collect();
-    if psos.len() != pipeline.pipelines.len() {
+    // Variant pick 0x1403a1d10: the shadowed form only when the frame has a sun shadow map.
+    let sun = (fog_shadows.0 && settings.shadow.x > 0. && settings.shadow.w >= 0.)
+        .then_some(shadows.zip(lights_offset))
+        .flatten()
+        .zip(light_meta.view_gpu_lights.binding());
+    let Some(ready) = pipeline.ready(&cache, msaa.samples(), sun.is_some()) else {
         return;
-    }
+    };
+    let offsets = [
+        offset.offset,
+        index.index(),
+        lights_offset.map_or(0, |l| l.offset),
+    ];
     use bevy::render::diagnostic::RecordDiagnostics;
     let diagnostics = ctx.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();
     let span = diagnostics.time_span(ctx.command_encoder(), "game_fog");
-    if multisampled {
+    // DirLightShadowReproj: the sun cascades the map shading uses, tapped once per froxel cell at
+    // a per-frame jittered position and blended with last frame's volume (#345).
+    let frame = frame_count.0;
+    let mut volume = None;
+    if let (Some(shadow_pso), Some(((shadows, _), lights_binding))) = (ready.shadow, sun) {
+        let device = ctx.render_device().clone();
+        let size = shadow_volume_size(
+            UVec2::new(
+                target.main_texture().width(),
+                target.main_texture().height(),
+            ),
+            settings.shadow.z,
+            settings.slices.y,
+        );
+        let world_from_view = extracted.world_from_view.to_matrix();
+        let view_from_world = world_from_view.inverse();
+        let clip_from_world = extracted
+            .clip_from_world
+            .unwrap_or(extracted.clip_from_view * view_from_world);
+        // Forget cameras that stopped drawing shadowed fog.
+        histories.retain(|_, h| frame.wrapping_sub(h.written.0) < 600);
+        let previous = histories.get(&view_entity).map(|h| (h.written.0, h.size));
+        let weight = history_weight(settings.reproj, previous, frame, size);
+        if previous.is_none_or(|(_, s)| s != size) {
+            let new_volume = || {
+                device
+                    .create_texture(&TextureDescriptor {
+                        label: Some("game fog shadow volume"),
+                        size,
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: TextureDimension::D3,
+                        format: SHADOW_VOLUME_FORMAT,
+                        usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    })
+                    .create_view(&TextureViewDescriptor::default())
+            };
+            histories.insert(
+                view_entity,
+                ShadowHistory {
+                    size,
+                    volumes: [new_volume(), new_volume()],
+                    frame: UniformBuffer::default(),
+                    last: 0,
+                    written: (frame, Mat4::IDENTITY, Mat4::IDENTITY),
+                    writes: 0,
+                },
+            );
+        }
+        let history = histories.get_mut(&view_entity).expect("inserted above");
+        let reproj = settings.reproj.w > 0.5;
+        let jitter = if reproj {
+            shadow_jitter(history.writes, settings.reproj.x as u32, settings.reproj.y)
+        } else {
+            Vec3::new(0.5, 0.5, 0.)
+        };
+        history.frame.set(ShadowFrame {
+            prev_clip_from_world: history.written.1,
+            prev_view_from_world: history.written.2,
+            jitter: jitter.extend(weight),
+        });
+        history.frame.write_buffer(&device, &queue);
+        let (read, write) = (history.last, 1 - history.last);
+        let bindings = device.create_bind_group(
+            "game fog shadow volume",
+            &cache.get_bind_group_layout(&pipeline.shadow_layout),
+            &BindGroupEntries::sequential((
+                view_binding.clone(),
+                fog_binding.clone(),
+                lights_binding,
+                &shadows.directional_light_depth_texture_view,
+                &shadow_samplers.directional_light_comparison_sampler,
+                &history.volumes[write],
+                history.frame.binding().expect("written above"),
+                &history.volumes[read],
+                &pipeline.volume_sampler,
+            )),
+        );
+        let mut pass = ctx
+            .command_encoder()
+            .begin_compute_pass(&ComputePassDescriptor {
+                label: Some("game fog shadow volume"),
+                ..default()
+            });
+        pass.set_pipeline(shadow_pso);
+        pass.set_bind_group(0, &bindings, &offsets);
+        pass.dispatch_workgroups(
+            size.width.div_ceil(8),
+            size.height.div_ceil(8),
+            size.depth_or_array_layers,
+        );
+        drop(pass);
+        history.last = write;
+        history.written = (frame, clip_from_world, view_from_world);
+        history.writes = history.writes.wrapping_add(1);
+        volume = Some(write);
+    }
+    let volume = volume.map(|write| {
+        (
+            &histories[&view_entity].volumes[write],
+            &pipeline.volume_sampler,
+        )
+    });
+    let layout = cache.get_bind_group_layout(&ready.variant.layout);
+    if msaa.samples() > 1 {
         // Preserve per-sample colour/depth correspondence through attenuation and
         // inscattering, then let the existing main attachment resolve the result.
         let bindings = ctx.render_device().create_bind_group(
             "game fog samples",
-            &cache.get_bind_group_layout(&pipeline.layout),
-            &BindGroupEntries::sequential((depth_view, view_binding, fog_binding)),
+            &layout,
+            &with_volume(
+                &BindGroupEntries::sequential((depth_view, view_binding, fog_binding)),
+                volume,
+            ),
         );
-        for pso in psos {
+        for pso in ready.psos {
             let mut attachment = target.get_color_attachment();
             attachment.ops.load = LoadOp::Load;
             let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
@@ -1331,7 +1892,7 @@ pub(crate) fn fog(
                 ..default()
             });
             pass.set_render_pipeline(pso);
-            pass.set_bind_group(0, &bindings, &[offset.offset, index.index()]);
+            pass.set_bind_group(0, &bindings, &offsets[..2]);
             pass.draw(0..3, 0..1);
         }
         span.end(ctx.command_encoder());
@@ -1340,8 +1901,11 @@ pub(crate) fn fog(
     let post = target.post_process_write();
     let bindings = ctx.render_device().create_bind_group(
         "game fog",
-        &cache.get_bind_group_layout(&pipeline.layout),
-        &BindGroupEntries::sequential((post.source, depth_view, view_binding, fog_binding)),
+        &layout,
+        &with_volume(
+            &BindGroupEntries::sequential((post.source, depth_view, view_binding, fog_binding)),
+            volume,
+        ),
     );
     let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("game fog"),
@@ -1356,8 +1920,8 @@ pub(crate) fn fog(
         })],
         ..default()
     });
-    pass.set_render_pipeline(psos[0]);
-    pass.set_bind_group(0, &bindings, &[offset.offset, index.index()]);
+    pass.set_render_pipeline(ready.psos[0]);
+    pass.set_bind_group(0, &bindings, &offsets[..2]);
     pass.draw(0..3, 0..1);
     drop(pass);
     span.end(ctx.command_encoder());
