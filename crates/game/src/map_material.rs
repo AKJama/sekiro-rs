@@ -283,6 +283,14 @@ pub(crate) const ATTR_MAP_BLEND2: bevy::mesh::MeshVertexAttribute =
         bevy::render::render_resource::VertexFormat::Float32x4,
     );
 
+/// The FLVER's second vertex colour on layered map pieces (`_MAP_COLOR1`).
+pub(crate) const ATTR_MAP_COLOR1: bevy::mesh::MeshVertexAttribute =
+    bevy::mesh::MeshVertexAttribute::new(
+        "MapColor1",
+        0x5ec1_0a03,
+        bevy::render::render_resource::VertexFormat::Float32x4,
+    );
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct MapPipelineKey {
     camera_fade: bool,
