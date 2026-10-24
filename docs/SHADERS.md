@@ -253,7 +253,25 @@ Authored sample offset selects density evaluation within each segment and Enable
 Round-to-nearest byte quantization and direct ray integration in place of a padded froxel texture remain implementation assumptions.
 
 This is global shader-derived fog rather than the complete native froxel renderer.
-Local density boxes and point/spot fog sources are currently zero, and shadowed/reprojected source variants, native pre-exposure packing and local/global write ordering are not implemented.
+Local density boxes and point/spot fog sources are currently zero, and the reprojected shadow variant, native pre-exposure packing and local/global write ordering are not implemented.
+
+Sun shadows in fog (#345) follow `GXVolumetricFog_WriteInScatteringShadowed.cpo` and `GXVolumetricFog_DirLightShadow.cpo`.
+For each cell the shader takes `DirLightShadowSampleCount` taps on the cell-centre ray, tap `i` at `(i + 0.5 + (dither - 0.5) * DirLightShadowDither) / count` of the way from the cell's near slice depth to its far slice depth.
+`dither` is the `.w` of `g_DitherTex` at `cell.xy & 3`, so the tap pattern repeats over 4x4 cells.
+Each tap picks its cascade as the number of `vCascadeParam.xyz` cut points nearer than its view depth (so 0..3, and taps past the last cut stay in cascade 3), projects with `mtxViewToShadowMap[cascade]`, divides by w and does one `sample_c_lz` with the comparison sampler `SS_Shadow`; there is no bias in the shader.
+The mean of the taps multiplies only the DirectColor/OppositeColor term, after the height attenuation and density and together with the DirLight StartDist gate; sky light and the ambient term are not shadowed.
+`DirLightShadow.cpo` computes the same mean into a 3D texture, adding a per-frame xy jitter and a dither offset that wraps at 1, and `WriteInScatteringPreShadowed.cpo` reads it instead of tapping.
+Executable function `0x1403a1d10` picks the variant: plain when the frame has no sun shadow map, otherwise Shadowed, or PreShadowed when the frame's EnableReproj byte (or a debug flag at `0x143f3b6f1`) is set.
+Constructor `0x1402a0740` defaults ShadowSampleCount to 8, ShadowDither to 0.4 and EnableReproj to true; the Ashina GPARAMs author 8, 1.0 and true, so the castle runs PreShadowed with JitterCount 4 and FeedbackWeight 0.8.
+A renderer quality value `FogShadowSampleCountBias` (registered at `0x1402fd350`, range -16..16) exists; where it is added to the count was not traced.
+Our `fog.wesl` does the Shadowed math in a compute pass (`SHADOW_VOLUME`, one thread per froxel column of four cells on the cell-centre ray, like the native `vThreadID` cells) with our sun cascades and a 4x4 Bayer tile standing in for the unexported `g_DitherTex`.
+A cell's taps share the first tap's cascade and lerp between the cell's two projected ends, unless the cell crosses a cascade cut.
+It writes the per-cell mean into a 3D texture sized like the native grid in xy (Y = VolumeWidth, X = Y * aspect, inferred from `3a2be0`, see [SHADER-INPUTS.md](SHADER-INPUTS.md)), with four consecutive slices packed into each RGBA texel; the ray march reads it back filtered in xy, as PreShadowed reads its volume.
+The VolumeWidth fallback of 160 when a GPARAM omits it was not traced in the constructor.
+It has no temporal jitter or reprojection, so its shadow edges are blockier and more dithered than the PreShadowed result, and taps past our last cascade or outside its map count as lit, like our sun receivers.
+Like `0x1403a1d10`, the CPU picks the variant per frame: the plain fragment pipelines (no `FOG_SHADOW`, no volume) run when the view has no shadow-casting sun or its shadow maps, or while the shadowed pipelines compile.
+`--no-fog-shadow` runs the plain WriteInScattering form for A/B checks.
+The render gates and sweeps also run plain fog, since the all-visible pop-in pass casts extra shadows from hidden draw groups into the fog and pop-in is a geometry check.
 The exporter retains GroundFog and CloudFog cards with their authored masks, scrolling constants and coverage, rendered by `map_fog_surface.rs`; the inventory and validation are in [MAP-COMPLETENESS.md](MAP-COMPLETENESS.md#fog-surface-inventory-14-october-2026).
 Transparent surfaces share the opaque scene depth used by this post pass, so they do not yet receive an independent forward-material fog lookup.
 The direct ray pass uses authored depth slices but does not allocate the native padded 3D volume.
@@ -599,7 +617,7 @@ Still open:
 
 - BTL native colour/intensity units, LightBankId/LightId routing and the native time-blend factor.
 - Renderer quality scalars for local fog collection distance and bloom, frame-delta units, and confirmation of the shipped CPU versus GPU adaptation path.
-- Scene-composite blend state, native froxel allocation/padding and local/global write scheduling, local fog, directional shadow/reprojection and independent transparent fog depth.
+- Scene-composite blend state, native froxel allocation/padding and local/global write scheduling, local fog, directional shadow reprojection (the per-cell shadow taps are done, #345) and independent transparent fog depth.
 - Exact GIIV/GILM CPU binding, independent irradiance/PCC transforms, authored fade distances/scales and native overlap blend state; separate diffuse/specular material response and directional hemisphere on FX meshes.
 - LUT ID resolution/blending, colour matrix/vignette producers, exact tone-table/reduction layouts, full bloom/temporal scheduling and HDR display output.
 

@@ -102,6 +102,12 @@ fn arg_f32(args: &[String], name: &str, default: f32) -> anyhow::Result<f32> {
     }
 }
 
+/// The offscreen survey and gate modes, which `map::sweep::run` drives.
+pub(crate) fn sweep_mode(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| matches!(a.as_str(), "--sweep" | "--render-gate" | "--reference-gate"))
+}
+
 fn dispatch() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     vram::validate_args(&args)?;
@@ -114,10 +120,7 @@ fn dispatch() -> anyhow::Result<()> {
         anyhow::bail!("--cache requires a directory");
     }
     sekiro_sim::cache::init(cache.as_deref());
-    if args
-        .iter()
-        .any(|a| matches!(a.as_str(), "--sweep" | "--render-gate" | "--reference-gate"))
-    {
+    if sweep_mode(&args) {
         return map::sweep::run(&args);
     }
     // The developer start panel (enemies, arenas, brains); it launches `--play`.
