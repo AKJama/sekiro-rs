@@ -2,9 +2,6 @@ use bevy::shader::ShaderDefVal;
 
 #[test]
 fn snow_coverage_matches_native_height_and_wet_operations() {
-    use std::borrow::Cow;
-    use wgpu::util::DeviceExt;
-
     // Native Ground Gbuf 16/18 and Multiple Gbuf 20: fixed instruction-derived
     // samples guard the order of wet exclusion, height subtraction and saturation.
     let production = include_str!("../../src/map_material.wesl");
@@ -31,67 +28,12 @@ fn main() {{
 }}
 "#
     );
-    let instance = wgpu::Instance::default();
-    let adapter = bevy::tasks::block_on(instance.request_adapter(&Default::default())).unwrap();
-    let (device, queue) =
-        bevy::tasks::block_on(adapter.request_device(&Default::default())).unwrap();
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("native snow coverage"),
-        source: wgpu::ShaderSource::Wgsl(Cow::Owned(source)),
-    });
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: None,
-        layout: None,
-        module: &shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-    let output = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: None,
-        contents: &[0; 24],
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-    });
-    let readback = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: 24,
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &pipeline.get_bind_group_layout(0),
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: output.as_entire_binding(),
-        }],
-    });
-    let mut encoder = device.create_command_encoder(&Default::default());
-    {
-        let mut pass = encoder.begin_compute_pass(&Default::default());
-        pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &bindings, &[]);
-        pass.dispatch_workgroups(1, 1, 1);
-    }
-    encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, 24);
-    queue.submit([encoder.finish()]);
-    let (sender, receiver) = std::sync::mpsc::channel();
-    readback
-        .slice(..)
-        .map_async(wgpu::MapMode::Read, move |r| sender.send(r).unwrap());
-    device
-        .poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: Some(std::time::Duration::from_secs(10)),
-        })
-        .unwrap();
-    receiver.recv().unwrap().unwrap();
-    let bytes = readback.slice(..).get_mapped_range().unwrap();
+    let values = super::shader_support::run_compute(source, 6);
     for (i, expected) in [0.5812, 0.0, 0.0, 0.64, 0.055, 0.7218655]
         .into_iter()
         .enumerate()
     {
-        let actual = f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
+        let actual = values[i];
         assert!(
             (actual - expected).abs() < 0.000002,
             "sample {i}: {actual} vs {expected}"
@@ -145,14 +87,12 @@ fn layered_map_forward_depth_and_motion_shaders_validate() {
             .collect();
             for (key, n) in [
                 ("MATERIAL_BIND_GROUP", 3),
-                ("MAX_DIRECTIONAL_LIGHTS", 10),
-                ("MAX_CASCADES_PER_LIGHT", 4),
-                ("MAX_RECT_LIGHTS", 64),
                 ("AVAILABLE_STORAGE_BUFFER_BINDINGS", 8),
                 ("MSAA_SAMPLES", 1),
             ] {
                 defs.push(ShaderDefVal::UInt(key.into(), n));
             }
+            defs.extend(super::shader_support::bevy_light_defs());
             cache
                 .get(0, id, &defs)
                 .unwrap_or_else(|e| panic!("sweep collision shader: {e:?}"));
@@ -176,14 +116,12 @@ fn layered_map_forward_depth_and_motion_shaders_validate() {
                     .collect();
                     for (key, n) in [
                         ("MATERIAL_BIND_GROUP", 3),
-                        ("MAX_DIRECTIONAL_LIGHTS", 10),
-                        ("MAX_CASCADES_PER_LIGHT", 4),
-                        ("MAX_RECT_LIGHTS", 64),
                         ("AVAILABLE_STORAGE_BUFFER_BINDINGS", 8),
                         ("MSAA_SAMPLES", msaa),
                     ] {
                         defs.push(ShaderDefVal::UInt(key.into(), n));
                     }
+                    defs.extend(super::shader_support::bevy_light_defs());
                     if msaa > 1 {
                         defs.push("MULTISAMPLED".into());
                     }

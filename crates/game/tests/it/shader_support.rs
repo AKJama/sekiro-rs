@@ -1,7 +1,9 @@
 //! Compose production WESL with Cargo's Bevy sources, then validate the resulting WGSL.
 use bevy::{
     asset::{AssetId, Assets},
-    shader::{Shader, ShaderCache, ShaderCacheError, ShaderCacheSource, ValidateShader},
+    shader::{
+        Shader, ShaderCache, ShaderCacheError, ShaderCacheSource, ShaderDefVal, ValidateShader,
+    },
 };
 use std::path::{Path, PathBuf};
 
@@ -105,4 +107,84 @@ pub fn cache() -> (ShaderCache<(), ()>, Assets<Shader>) {
         cache.set_shader(id, shader);
     }
     (cache, assets)
+}
+
+/// The light-array sizes Bevy's MeshRenderPlugin gives `mesh_view_types`.
+pub fn bevy_light_defs() -> Vec<ShaderDefVal> {
+    [
+        ("MAX_DIRECTIONAL_LIGHTS", bevy::pbr::MAX_DIRECTIONAL_LIGHTS),
+        ("MAX_CASCADES_PER_LIGHT", bevy::pbr::MAX_CASCADES_PER_LIGHT),
+        ("MAX_RECT_LIGHTS", bevy::pbr::MAX_RECT_LIGHTS),
+    ]
+    .into_iter()
+    .map(|(key, n)| ShaderDefVal::UInt(key.into(), n as u32))
+    .collect()
+}
+
+/// Runs a one-thread WGSL compute shader whose `main` writes `floats` f32 values to the
+/// storage buffer at group 0 binding 0, and reads them back.
+pub fn run_compute(source: String, floats: usize) -> Vec<f32> {
+    use std::borrow::Cow;
+    use wgpu::util::DeviceExt;
+
+    let instance = wgpu::Instance::default();
+    let adapter = bevy::tasks::block_on(instance.request_adapter(&Default::default()))
+        .expect("shader regression needs a GPU adapter");
+    let (device, queue) = bevy::tasks::block_on(adapter.request_device(&Default::default()))
+        .expect("shader regression device");
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("shader regression"),
+        source: wgpu::ShaderSource::Wgsl(Cow::Owned(source)),
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("shader regression"),
+        layout: None,
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let size = (floats * 4) as u64;
+    let output = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: None,
+        contents: &vec![0; floats * 4],
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+    });
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: output.as_entire_binding(),
+        }],
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bindings, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, size);
+    queue.submit([encoder.finish()]);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    readback
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, move |r| sender.send(r).unwrap());
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(std::time::Duration::from_secs(10)),
+        })
+        .unwrap();
+    receiver.recv().unwrap().unwrap();
+    let bytes = readback.slice(..).get_mapped_range().unwrap();
+    let (values, _) = bytes.as_chunks::<4>();
+    values.iter().map(|v| f32::from_le_bytes(*v)).collect()
 }

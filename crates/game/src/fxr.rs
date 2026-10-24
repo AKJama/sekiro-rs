@@ -1076,6 +1076,20 @@ fn collect(n: &NodeInst, f: &mut Frame) {
     }
 }
 
+/// The sprite's (X, Y) axes for OrientationMode 7, after case 7 in the 603 / 604 draws
+/// (`436d70`, `440a60`, #356): X is the particle's vector `v`, Y is `v x d` with `d` the line to
+/// the camera across `v`, so the sprite faces the camera round `v` (the runtime constant at
+/// `143f085d0` is `(0, 0, 1)`, its zero-cross fallback `(1, 0, 0)`). A zero `v` takes `fallback`.
+fn orientation_7(v: Vec3, fallback: Vec3, to_cam: Vec3, cam_f: Vec3) -> (Vec3, Vec3) {
+    let axis = v.try_normalize().unwrap_or(fallback);
+    let y = to_cam
+        .reject_from_normalized(axis)
+        .try_normalize()
+        .or_else(|| (-cam_f).reject_from_normalized(axis).try_normalize())
+        .map_or_else(|| axis.any_orthonormal_vector(), |d| axis.cross(d));
+    (axis, y)
+}
+
 fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
     let a = &c.appearance;
     let at = a[Field::Type].as_i64().unwrap_or(0);
@@ -1128,6 +1142,17 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
             p.pos
         }
     };
+    let world_dir = |p: &crate::fxr_tree::Particle| {
+        if p.attached {
+            n.world.rotation * p.dir
+        } else {
+            p.dir
+        }
+    };
+    const OFFSETS: [Field; 3] = [Field::OffsetX, Field::OffsetY, Field::OffsetZ];
+    let has_offset = OFFSETS.iter().any(|&k| a.get(k).is_some());
+    let orientation = int(a, Field::Orientation, 1);
+    let node_y = n.world.rotation * Vec3::Y;
     // Lit particles take only the lights and volumes reaching this node's particles (#324).
     let lit = is_lit(a) && !n.particles.is_empty();
     if lit {
@@ -1257,36 +1282,43 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                         * scalar(a, Field::AngularSpeedMultiplierZ, p.age, &mut rnd, 1.0)
                         * p.age)
                     .to_radians();
-                // OrientationMode: 1 / 6 camera, 7 / 4 yaw toward the camera, 2 the node's
-                // frame, 0 / 3 global.
-                let (right, up) = match int(a, Field::Orientation, 1) {
+                // OrientationMode: 1 / 6 camera, 4 yaw, 2 node frame, 0 / 3 global, 7 round the vector.
+                let (right, up) = match orientation {
                     0 | 3 => (Vec3::X, Vec3::Y),
                     2 => (n.world.rotation * Vec3::X, n.world.rotation * Vec3::Y),
-                    o @ (4 | 7) => {
-                        let axis = if o == 7 {
-                            n.world.rotation * Vec3::Y
-                        } else {
-                            Vec3::Y
-                        };
+                    4 => {
                         let to_cam = (cam.translation() - world)
-                            .reject_from(axis)
+                            .reject_from(Vec3::Y)
                             .normalize_or(cam_f);
-                        (axis.cross(to_cam).normalize_or(cam_r), axis)
+                        (Vec3::Y.cross(to_cam).normalize_or(cam_r), Vec3::Y)
                     }
+                    7 => orientation_7(world_dir(p), node_y, cam.translation() - world, cam_f),
                     _ => (cam_r, cam_u),
                 };
                 let (cr, sr) = (rz.cos(), rz.sin());
                 let (r2, u2) = (right * cr + up * sr, up * cr - right * sr);
                 let (hw, hh) = (r2 * w * 0.5, u2 * h * 0.5);
+                // offsetX / Y / Z move the unit quad before its size scales it: sprite widths and
+                // heights along its own axes (#356), on their own random stream.
+                let centre = if !has_offset {
+                    world
+                } else {
+                    let mut orng = Rnd {
+                        seed: p.seed ^ 0x0ff5,
+                        k: 0,
+                    };
+                    let o = OFFSETS.map(|k| scalar(a, k, p.age, &mut orng, 0.0));
+                    world + r2 * (w * o[0]) + u2 * (h * o[1]) + r2.cross(u2) * o[2]
+                };
                 let (corners, soft) = soften(
                     a,
                     (w.abs() + h.abs()) * 0.5,
                     cam,
                     [
-                        world - hw - hh,
-                        world + hw - hh,
-                        world + hw + hh,
-                        world - hw + hh,
+                        centre - hw - hh,
+                        centre + hw - hh,
+                        centre + hw + hh,
+                        centre - hw + hh,
                     ],
                 );
                 let l2 = int(a, Field::Layer2, 0);
@@ -1380,11 +1412,7 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                 let len = scalar(a, Field::Length, p.emit_t, &mut rnd, 1.0)
                     * scalar(a, Field::LengthMultiplier, p.age, &mut rnd, 1.0)
                     * sy;
-                let d = if p.attached {
-                    n.world.rotation * p.dir
-                } else {
-                    p.dir
-                };
+                let d = world_dir(p);
                 let side = d.cross(cam_f).normalize_or(cam_r) * wl * 0.5;
                 let tail = world - d * len;
                 f.bufs.entry((-1, additive(blend))).or_default().quad(
@@ -2531,23 +2559,31 @@ mod tests {
         light.intensity * native.falloff(d)
     }
 
-    /// #141: the item glint (FFX 61) lights a small spot, not a 1.5 m pool, while a typical
-    /// fire light (radius 5, falloff 2.5, the most common pair) still reaches the walls.
-    #[test]
-    fn item_glint_light_falls_off_within_half_a_metre() {
+    /// FFX 61 (the item glint) held 1.5 s at the origin, or None when the cache is missing.
+    fn held_item_glint() -> Option<FxrPlayer> {
         let cache = sekiro_sim::cache::root();
         if !cache
             .join("raw/sfx/sfxbnd_commoneffects.ffxbnd.d/f000000061.fxr")
             .exists()
         {
             eprintln!("skipping: cache not extracted");
-            return;
+            return None;
         }
         let mut player = FxrPlayer::new(cache);
         player.hold(GLINTS, 61, 0, Transform::IDENTITY, true);
         for _ in 0..90 {
             player.advance(1. / 60.);
         }
+        Some(player)
+    }
+
+    /// #141: the item glint (FFX 61) lights a small spot, not a 1.5 m pool, while a typical
+    /// fire light (radius 5, falloff 2.5, the most common pair) still reaches the walls.
+    #[test]
+    fn item_glint_light_falls_off_within_half_a_metre() {
+        let Some(player) = held_item_glint() else {
+            return;
+        };
         let cam = GlobalTransform::from(Transform::from_xyz(0., 1.5, 3.));
         let buffers = collect_all(&player, &cam, Default::default());
         let [glint] = buffers.lights[..] else {
@@ -2567,6 +2603,74 @@ mod tests {
             ..glint
         };
         assert!(native_diffuse(&fire, 2.) > 0.5 * native_diffuse(&fire, 0.));
+    }
+
+    /// #356: the item glint's rays (FFX 61, 603 on texture 10056, orientation 7, offsetX 0.4)
+    /// rise from the item along their particle's vector, within the emitter's 8 degree spread,
+    /// instead of lying across the floor centred on the item, seen from any side or above.
+    #[test]
+    fn item_glint_rays_rise_from_the_item() {
+        let Some(player) = held_item_glint() else {
+            return;
+        };
+        for eye in [
+            Vec3::new(0., 1.5, 3.),
+            Vec3::new(2.5, 1., -1.),
+            Vec3::new(0.3, 3., 0.8),
+        ] {
+            let cam = GlobalTransform::from(
+                Transform::from_translation(eye).looking_at(Vec3::ZERO, Vec3::Y),
+            );
+            let buffers = collect_all(&player, &cam, Default::default());
+            let rays = &buffers.bufs[&(10056, true)];
+            assert!(!rays.pos.is_empty());
+            for q in rays.pos.chunks(6) {
+                let [c0, c1, c2] = [q[0], q[1], q[2]].map(Vec3::from_array);
+                // Corners 0 -> 1 run along the sprite's X (its width), 1 -> 2 along its Y.
+                let along = c1 - c0;
+                let across = c2 - c1;
+                assert!(along.length() > across.length(), "{along} {across}");
+                assert!(
+                    along.normalize().y > 15f32.to_radians().cos(),
+                    "ray leans: {along} from {eye}"
+                );
+                let lo = q.iter().map(|v| v[1]).fold(f32::MAX, f32::min);
+                let hi = q.iter().map(|v| v[1]).fold(f32::MIN, f32::max);
+                assert!(lo > -0.2 && lo < 0.05, "ray starts at {lo} from {eye}");
+                assert!(hi > 0.5, "ray ends at {hi} from {eye}");
+            }
+        }
+    }
+
+    /// Orientation 7 faces the camera round the particle's vector, which is the sprite's X.
+    #[test]
+    fn orientation_7_turns_round_the_particle_vector() {
+        let v = Vec3::new(0.2, 1., 0.1).normalize();
+        for to_cam in [Vec3::X, Vec3::new(-1., 2., 0.5), Vec3::new(0.3, 0., -4.)] {
+            let (x, y) = orientation_7(v, Vec3::Y, to_cam, -to_cam.normalize());
+            assert!(x.distance(v) < 1e-5);
+            assert!(x.dot(y).abs() < 1e-5 && (y.length() - 1.).abs() < 1e-5);
+            assert!(y.dot(to_cam).abs() < 1e-4, "{y} {to_cam}");
+            assert!(
+                x.cross(y).dot(to_cam) < 0.,
+                "the sprite's Z points away from the camera"
+            );
+        }
+    }
+
+    /// Orientation 7 never gives a Y along the axis: a zero vector takes the fallback, and a
+    /// camera looking straight along the vector still gets a Y across it.
+    #[test]
+    fn orientation_7_degenerate_cases() {
+        let (x, y) = orientation_7(Vec3::ZERO, Vec3::Y, Vec3::Z, Vec3::NEG_Z);
+        assert_eq!(x, Vec3::Y);
+        assert!(x.dot(y).abs() < 1e-5 && (y.length() - 1.).abs() < 1e-5);
+        for v in [Vec3::Y, Vec3::new(0.3, -1., 0.2).normalize()] {
+            let (x, y) = orientation_7(v, Vec3::Y, v * 3., -v);
+            assert!(x.distance(v) < 1e-5);
+            assert!(x.dot(y).abs() < 1e-5, "{y} along {x}");
+            assert!((y.length() - 1.).abs() < 1e-5, "{y}");
+        }
     }
 
     /// #324: the gatehouse brazier's smoke (839530, lit, alpha blend) takes the sun's colour

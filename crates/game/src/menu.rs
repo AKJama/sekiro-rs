@@ -70,6 +70,7 @@ pub(crate) const KEPT_SWITCHES: &[&str] = &[
     "--no-cloth",
     "--no-fxr",
     "--no-fog",
+    "--no-fog-shadow",
     "--no-fog-surfaces",
     "--no-dof",
     "--no-sun-glow",
