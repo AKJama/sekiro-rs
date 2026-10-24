@@ -1716,7 +1716,7 @@ fn spawn_floor_stage(
 #[derive(Default)]
 struct MouseCapture {
     focus_requested: bool,
-    first_click_grabbed: bool,
+    /// The held left press took the mouse, so it is not an attack until released.
     grab_click: bool,
 }
 
@@ -1791,6 +1791,14 @@ fn gather_input(
     mut windows: Query<(&mut Window, &mut CursorOptions)>,
     mut capture: Local<MouseCapture>,
 ) {
+    if capture.focus_requested
+        && let Ok((window, mut c)) = windows.single_mut()
+        && !window.focused
+        && c.grab_mode == CursorGrabMode::Locked
+    {
+        c.grab_mode = CursorGrabMode::None;
+        c.visible = true;
+    }
     if fade.alpha > 0.0 {
         live.frame = InputFrame::default();
         return;
@@ -1803,8 +1811,10 @@ fn gather_input(
         c.visible = false;
         capture.focus_requested = true;
     }
-    // A click while the cursor is free (after Esc) takes the mouse back for the camera; that
-    // click is not an attack. Not while a screen over the game (the idol menu) has the mouse.
+    // Leaving the window frees the cursor (above). A click while the cursor is free (after Esc,
+    // or back from another window) takes the mouse for the camera; that click is not an attack.
+    // Any other click attacks, the first one after loading too, as play captures the cursor when
+    // it starts. Not while a screen over the game (the idol menu) has the mouse.
     if !mouse.pressed(MouseButton::Left) {
         capture.grab_click = false;
     }
@@ -1813,11 +1823,10 @@ fn gather_input(
         && let Ok((window, mut c)) = windows.single_mut()
         && window.focused
         && window.cursor_position().is_some()
-        && (!capture.first_click_grabbed || c.grab_mode != CursorGrabMode::Locked)
+        && c.grab_mode != CursorGrabMode::Locked
     {
         c.grab_mode = CursorGrabMode::Locked;
         c.visible = false;
-        capture.first_click_grabbed = true;
         capture.grab_click = true;
     }
     // Keys still held from a menu that just closed wait for their release.
@@ -3571,5 +3580,78 @@ mod tests {
         }
         assert!(route.steer(Vec2::ZERO).is_none());
         assert!(route.done());
+    }
+
+    /// Left clicks through `gather_input`: the first click after loading attacks, as play
+    /// captured the cursor when it started; leaving the window frees the cursor, so the click
+    /// that brings it back and a click after Esc only take the mouse.
+    #[test]
+    fn first_click_after_loading_attacks() {
+        use bevy::input::{ButtonState, InputPlugin, mouse::MouseButtonInput};
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, InputPlugin))
+            .init_resource::<cinematic_fade::Fade>()
+            .init_resource::<crate::menu::HeldThroughMenu>()
+            .init_resource::<LiveInput>()
+            .insert_resource(Orbit {
+                focus: Vec3::ZERO,
+                yaw: 0.0,
+                pitch: 0.0,
+                distance: 4.5,
+                look: Default::default(),
+            })
+            .add_systems(Update, gather_input);
+        let mut window = Window {
+            focused: true,
+            ..default()
+        };
+        window.set_physical_cursor_position(Some(bevy::math::DVec2::new(400.0, 300.0)));
+        let window = app
+            .world_mut()
+            .spawn((window, CursorOptions::default()))
+            .id();
+        // One frame with the left button `state` changed (or not); whether Wolf's attack is down.
+        let frame = |app: &mut App, state: Option<ButtonState>| {
+            if let Some(state) = state {
+                app.world_mut().write_message(MouseButtonInput {
+                    button: MouseButton::Left,
+                    state,
+                    window,
+                });
+            }
+            app.update();
+            app.world().resource::<LiveInput>().frame.buttons.attack
+        };
+        let (press, release) = (Some(ButtonState::Pressed), Some(ButtonState::Released));
+        let grab = |app: &App| app.world().get::<CursorOptions>(window).unwrap().grab_mode;
+        let set_focus = |app: &mut App, focused: bool| {
+            app.world_mut().get_mut::<Window>(window).unwrap().focused = focused;
+        };
+        // Play starts with the cursor captured, then loading takes a while.
+        for _ in 0..10 {
+            frame(&mut app, None);
+        }
+        assert_eq!(grab(&app), CursorGrabMode::Locked);
+        assert!(frame(&mut app, press), "the first click attacks");
+        assert!(!frame(&mut app, release));
+        // Another window takes the focus: the cursor is freed.
+        set_focus(&mut app, false);
+        frame(&mut app, None);
+        assert_eq!(grab(&app), CursorGrabMode::None);
+        // The click back takes the mouse without attacking, also while held; the next attacks.
+        set_focus(&mut app, true);
+        assert!(!frame(&mut app, press));
+        assert_eq!(grab(&app), CursorGrabMode::Locked);
+        assert!(!frame(&mut app, None));
+        assert!(!frame(&mut app, release));
+        assert!(frame(&mut app, press));
+        assert!(!frame(&mut app, release));
+        // After Esc the cursor is free: the click takes it back without attacking.
+        app.world_mut()
+            .get_mut::<CursorOptions>(window)
+            .unwrap()
+            .grab_mode = CursorGrabMode::None;
+        assert!(!frame(&mut app, press));
+        assert_eq!(grab(&app), CursorGrabMode::Locked);
     }
 }
