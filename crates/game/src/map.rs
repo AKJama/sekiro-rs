@@ -54,7 +54,7 @@ pub(crate) use map_material::batches::StaticBatches;
 mod mesh_merge;
 pub(crate) use mesh_merge::{merge_meshes, opaque};
 
-pub(crate) use map_material::{ATTR_MAP_BLEND2, LayeredMaterial, MaterialStats};
+pub(crate) use map_material::{ATTR_MAP_BLEND2, ATTR_MAP_COLOR1, LayeredMaterial, MaterialStats};
 pub(crate) use map_material::{clustered_light_residual, native_point_light_scale};
 #[path = "sky.rs"]
 pub(crate) mod sky;
@@ -1276,27 +1276,19 @@ pub fn layered_gltf_plugin() -> bevy::gltf::GltfPlugin {
     .add_custom_vertex_attribute("MAP_COLOR1", ATTR_MAP_COLOR1)
 }
 
-/// The FLVER's second vertex colour on layered map pieces (`_MAP_COLOR1`).
-const ATTR_MAP_COLOR1: bevy::mesh::MeshVertexAttribute = bevy::mesh::MeshVertexAttribute::new(
-    "MapColor1",
-    0x5ec1_0a03,
-    bevy::render::render_resource::VertexFormat::Float32x4,
-);
-
 /// How map GLBs are packed on load. Sekiro's map FLVERs keep 16-bit indices and their colours
 /// and blend streams as UByte4Norm, which the export widens to floats: 16-bit indices (where a
 /// primitive has under 65536 vertices) and Unorm8 for those streams give back the game's own
 /// precision, with no shader change.
-pub(crate) fn map_mesh_compression() -> bevy::mesh::MeshCompressionArgs {
+fn map_mesh_compression() -> bevy::mesh::MeshCompressionArgs {
     use bevy::mesh::AttributeQuantization::Unorm8;
     bevy::mesh::MeshCompressionArgs {
         compress_indices: true,
-        quantize_attributes: vec![
+        quantize_attributes: std::borrow::Cow::Borrowed(&[
             (Mesh::ATTRIBUTE_COLOR.id, Unorm8),
             (ATTR_MAP_BLEND2.id, Unorm8),
             (ATTR_MAP_COLOR1.id, Unorm8),
-        ]
-        .into(),
+        ]),
         compress_attributes: bevy::mesh::MeshAttributeCompressionFlags::empty(),
     }
 }
