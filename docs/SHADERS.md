@@ -264,11 +264,14 @@ The mean of the taps multiplies only the DirectColor/OppositeColor term, after t
 Executable function `0x1403a1d10` picks the variant: plain when the frame has no sun shadow map, otherwise Shadowed, or PreShadowed when the frame's EnableReproj byte (or a debug flag at `0x143f3b6f1`) is set.
 Constructor `0x1402a0740` defaults ShadowSampleCount to 8, ShadowDither to 0.4 and EnableReproj to true; the Ashina GPARAMs author 8, 1.0 and true, so the castle runs PreShadowed with JitterCount 4 and FeedbackWeight 0.8.
 A renderer quality value `FogShadowSampleCountBias` (registered at `0x1402fd350`, range -16..16) exists; where it is added to the count was not traced.
-Our `fog.wesl` does the Shadowed math in a compute pass (`SHADOW_VOLUME`, one thread per froxel cell on the cell-centre ray, like the native `vThreadID` cells) with our sun cascades and a 4x4 Bayer tile standing in for the unexported `g_DitherTex`.
-It writes the per-cell mean into a 3D texture sized like the native grid (Y = VolumeWidth, X = Y * aspect, inferred from `3a2be0`, see [SHADER-INPUTS.md](SHADER-INPUTS.md)); the ray march reads it back filtered in xy, as PreShadowed reads its volume.
+Our `fog.wesl` does the Shadowed math in a compute pass (`SHADOW_VOLUME`, one thread per froxel column of four cells on the cell-centre ray, like the native `vThreadID` cells) with our sun cascades and a 4x4 Bayer tile standing in for the unexported `g_DitherTex`.
+A cell's taps share the first tap's cascade and lerp between the cell's two projected ends, unless the cell crosses a cascade cut.
+It writes the per-cell mean into a 3D texture sized like the native grid in xy (Y = VolumeWidth, X = Y * aspect, inferred from `3a2be0`, see [SHADER-INPUTS.md](SHADER-INPUTS.md)), with four consecutive slices packed into each RGBA texel; the ray march reads it back filtered in xy, as PreShadowed reads its volume.
 The VolumeWidth fallback of 160 when a GPARAM omits it was not traced in the constructor.
 It has no temporal jitter or reprojection, so its shadow edges are blockier and more dithered than the PreShadowed result, and taps past our last cascade or outside its map count as lit, like our sun receivers.
+Like `0x1403a1d10`, the CPU picks the variant per frame: the plain fragment pipelines (no `FOG_SHADOW`, no volume) run when the view has no shadow-casting sun or its shadow maps, or while the shadowed pipelines compile.
 `--no-fog-shadow` runs the plain WriteInScattering form for A/B checks.
+The render gates and sweeps also run plain fog, since the all-visible pop-in pass casts extra shadows from hidden draw groups into the fog and pop-in is a geometry check.
 The exporter retains GroundFog and CloudFog cards with their authored masks, scrolling constants and coverage, rendered by `map_fog_surface.rs`; the inventory and validation are in [MAP-COMPLETENESS.md](MAP-COMPLETENESS.md#fog-surface-inventory-14-october-2026).
 Transparent surfaces share the opaque scene depth used by this post pass, so they do not yet receive an independent forward-material fog lookup.
 The direct ray pass uses authored depth slices but does not allocate the native padded 3D volume.

@@ -14,8 +14,11 @@ fn native_post_shaders_compose_and_validate() {
             include_str!("../../src/fog.wesl"),
             vec![
                 vec![],
+                vec!["FOG_SHADOW"],
                 vec!["MULTISAMPLED_DEPTH"],
+                vec!["MULTISAMPLED_DEPTH", "FOG_SHADOW"],
                 vec!["MULTISAMPLED_DEPTH", "FOG_ATTENUATION"],
+                vec!["MULTISAMPLED_DEPTH", "FOG_ATTENUATION", "FOG_SHADOW"],
                 vec!["SHADOW_VOLUME"],
             ],
         ),
@@ -41,91 +44,13 @@ fn native_post_shaders_compose_and_validate() {
         for variant in variants {
             let mut defs: Vec<bevy::shader::ShaderDefVal> =
                 variant.iter().copied().map(Into::into).collect();
-            // Bevy's MeshRenderPlugin gives mesh_view_types these; fog reads its Lights (#345).
-            for (key, n) in [
-                ("MAX_DIRECTIONAL_LIGHTS", bevy::pbr::MAX_DIRECTIONAL_LIGHTS),
-                ("MAX_CASCADES_PER_LIGHT", bevy::pbr::MAX_CASCADES_PER_LIGHT),
-                ("MAX_RECT_LIGHTS", bevy::pbr::MAX_RECT_LIGHTS),
-            ] {
-                defs.push(bevy::shader::ShaderDefVal::UInt(key.into(), n as u32));
-            }
+            // Fog's shadow volume reads mesh_view_types' Lights (#345).
+            defs.extend(super::shader_support::bevy_light_defs());
             cache
                 .get(0, id, &defs)
                 .unwrap_or_else(|e| panic!("{name} {variant:?}: {e:?}"));
         }
     }
-}
-
-/// Runs a one-thread compute shader that writes `count` vec4 results and reads them back.
-fn run_compute(source: String, count: usize) -> Vec<[f32; 4]> {
-    use std::borrow::Cow;
-    use wgpu::util::DeviceExt;
-
-    let instance = wgpu::Instance::default();
-    let adapter = bevy::tasks::block_on(instance.request_adapter(&Default::default()))
-        .expect("shader regression needs a GPU adapter");
-    let (device, queue) = bevy::tasks::block_on(adapter.request_device(&Default::default()))
-        .expect("shader regression device");
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("shader regression"),
-        source: wgpu::ShaderSource::Wgsl(Cow::Owned(source)),
-    });
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("shader regression"),
-        layout: None,
-        module: &shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-    let size = (count * 16) as u64;
-    let output = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: None,
-        contents: &vec![0; count * 16],
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-    });
-    let readback = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size,
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &pipeline.get_bind_group_layout(0),
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: output.as_entire_binding(),
-        }],
-    });
-    let mut encoder = device.create_command_encoder(&Default::default());
-    {
-        let mut pass = encoder.begin_compute_pass(&Default::default());
-        pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &bindings, &[]);
-        pass.dispatch_workgroups(1, 1, 1);
-    }
-    encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, size);
-    queue.submit([encoder.finish()]);
-    let (sender, receiver) = std::sync::mpsc::channel();
-    readback
-        .slice(..)
-        .map_async(wgpu::MapMode::Read, move |r| sender.send(r).unwrap());
-    device
-        .poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: Some(std::time::Duration::from_secs(10)),
-        })
-        .unwrap();
-    receiver.recv().unwrap().unwrap();
-    let bytes = readback.slice(..).get_mapped_range().unwrap();
-    let (texels, _) = bytes.as_chunks::<16>();
-    texels
-        .iter()
-        .map(|v| {
-            std::array::from_fn(|i| f32::from_le_bytes(v[i * 4..i * 4 + 4].try_into().unwrap()))
-        })
-        .collect()
 }
 
 /// WriteInScatteringShadowed scales only the sun (DirectColor/OppositeColor) in-scatter by the
@@ -159,8 +84,14 @@ fn main() {{
 "#
         )
     };
-    let lit = run_compute(source_for("0.2, 0.3, 0.4", "1.0, 0.6, 0.3"), 3);
-    let sky_only = run_compute(source_for("0.2, 0.3, 0.4", "0.0, 0.0, 0.0"), 3);
+    let run = |sky: &str, direct: &str| {
+        super::shader_support::run_compute(source_for(sky, direct), 12)
+            .as_chunks::<4>()
+            .0
+            .to_vec()
+    };
+    let lit = run("0.2, 0.3, 0.4", "1.0, 0.6, 0.3");
+    let sky_only = run("0.2, 0.3, 0.4", "0.0, 0.0, 0.0");
     for channel in 0..3 {
         let sky = sky_only[0][channel];
         assert!(sky > 0.0, "sky light must reach the cell");
@@ -182,14 +113,6 @@ fn main() {{
 /// DXBC `exp` is base two; a natural exponential passes shader validation but fails here.
 #[test]
 fn sensitometric_curve_matches_native_table_samples() {
-    use std::borrow::Cow;
-    use wgpu::util::DeviceExt;
-
-    let instance = wgpu::Instance::default();
-    let adapter = bevy::tasks::block_on(instance.request_adapter(&Default::default()))
-        .expect("native tone regression needs a GPU adapter");
-    let (device, queue) = bevy::tasks::block_on(adapter.request_device(&Default::default()))
-        .expect("native tone regression device");
     let production = include_str!("../../src/tonemap.wesl");
     let curve = production.split("fn tone(").nth(1).unwrap();
     let curve = curve.split("@fragment").next().unwrap();
@@ -206,65 +129,13 @@ fn main() {{
 }}
 "#
     );
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("native sensitometric regression"),
-        source: wgpu::ShaderSource::Wgsl(Cow::Owned(source)),
-    });
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("native sensitometric regression"),
-        layout: None,
-        module: &shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-    let output = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: None,
-        contents: &[0; 80],
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-    });
-    let readback = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: 80,
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &pipeline.get_bind_group_layout(0),
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: output.as_entire_binding(),
-        }],
-    });
-    let mut encoder = device.create_command_encoder(&Default::default());
-    {
-        let mut pass = encoder.begin_compute_pass(&Default::default());
-        pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &bindings, &[]);
-        pass.dispatch_workgroups(1, 1, 1);
-    }
-    encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, 80);
-    queue.submit([encoder.finish()]);
-    let (sender, receiver) = std::sync::mpsc::channel();
-    readback
-        .slice(..)
-        .map_async(wgpu::MapMode::Read, move |r| sender.send(r).unwrap());
-    device
-        .poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: Some(std::time::Duration::from_secs(10)),
-        })
-        .unwrap();
-    receiver.recv().unwrap().unwrap();
-    let bytes = readback.slice(..).get_mapped_range().unwrap();
+    let values = super::shader_support::run_compute(source, 20);
     for (i, expected) in [0.0, 0.0049891566, 0.1211626855, 0.7508116073, 0.9908357271]
         .into_iter()
         .enumerate()
     {
         for channel in 0..3 {
-            let offset = i * 16 + channel * 4;
-            let actual = f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+            let actual = values[i * 4 + channel];
             assert!(
                 (f64::from(actual) - expected).abs() < 0.000002,
                 "native tone sample {i} channel {channel}: {actual} vs {expected}"
