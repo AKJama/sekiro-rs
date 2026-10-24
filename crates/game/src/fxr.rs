@@ -1955,7 +1955,7 @@ fn render(
     frame_lights.clear();
     let light = crate::fx_lighting::gather(
         lit.lighting.as_deref(),
-        lit.points.iter().map(|(p, t)| (p.clone(), t.translation())),
+        lit.points.iter().map(|(p, t)| (*p, t.translation())),
     );
     let mut frame = Frame {
         cam,
