@@ -10,14 +10,14 @@ import bevy_pbr::render::view_transformations::depth_ndc_to_view_z;
 //   (interpolateFrames), times layer1Color; alpha = its alpha.
 // - layers 2 / 3 (g_multiTexture1 / 2) times layer2Color / layer3Color. g_ps_TexBlendType
 //   (modes.x, FXR unk_ds3_f2_10): 1 makes layers 2 and 3, 2 only layer 2, act on the alpha by their
-//   brightness (sum of the normalised colour / 3) instead of on the colour. The op per layer is
+//   brightness (saturate of the colour sum / 3, not normalised) instead of on the colour. The op per layer is
 //   g_ps_TexBlendType2 / 3 (modes.y / .z, unk_ds3_f2_11 / 12): 0 multiply (lerp(1, layer, layer
 //   alpha)), 1 add (layer x its alpha), 2 overlay (lerp by the layer alpha), else none.
 // - g_ps_bPreAlphaMult (flags.x, premultiplyAlpha): each layer's colour times its alpha first.
 // - out = (vertex colour direction x layers)^2 x |vertex colour|, alpha = vertex alpha x layer alpha
 //   (the vertex colour arrives hue-squared from fxr.rs particle_color, so here only the layers are
 //   squared). The textures are sRGB-decoded on load (~x^2.2); their square root stands in for the
-//   game's raw values. Layers wrap (fract: the game's wrap sampler; they scroll).
+//   game's raw values. Layers wrap through the Repeat sampler (the game's wrap sampler; they scroll).
 // gap: g_ps_ColorBlendType (unk_ds3_f2_13) 1 / 2 (all extracted 604s: 0), the alpha offset (v3.z),
 // the motion-vector UV bend (cb0[11].w == 1), fog, shadow volume, lighting.
 // Soft (GXFfxtessellateSoftMultiTexture.ppo): alpha x saturate(min(scene depth - own depth, soft) /
@@ -100,9 +100,10 @@ fn color_op(pb: vec3<f32>, c: vec3<f32>, la: f32, mode: u32) -> vec3<f32> {
 
 // A layer on the alpha by its brightness.
 fn alpha_op(a: f32, c: vec3<f32>, la: f32, mode: u32) -> f32 {
-    let len = length(c);
-    let n = select(c / len, vec3(0.0), len <= 0.00001);
-    let lum = clamp((n.x + n.y + n.z) / 3.0, 0.0, 1.0);
+    // mul_sat (r + g + b) x 1/3 in the game's pixel shader: the plain colour, not its direction.
+    // Normalising stepped from 0.577 to 0 where a layer's filtered colour reached zero, which cut
+    // stair-stepped dark holes along the texels of the 604 haze sheets.
+    let lum = clamp((c.x + c.y + c.z) / 3.0, 0.0, 1.0);
     switch mode {
         case 0u: { return a * (1.0 + la * (lum - 1.0)); }
         case 1u: { return a + la * lum; }
@@ -116,14 +117,14 @@ fn alpha_op(a: f32, c: vec3<f32>, la: f32, mode: u32) -> f32 {
 
 @fragment
 fn fragment(in: VOut) -> @location(0) vec4<f32> {
-    let f0 = raw(textureSample(t0, s0, fract(in.uv1)));
-    let f1 = raw(textureSample(t0, s0, fract(in.uv3n.zw)));
+    let f0 = raw(textureSample(t0, s0, in.uv1));
+    let f1 = raw(textureSample(t0, s0, in.uv3n.zw));
     let b = mix(f0, f1, in.c1.w);
     var a = clamp(b.a, 0.0, 1.0);
     let pre = flags.x != 0u;
     var rgb = b.rgb * in.c1.rgb * select(1.0, a, pre);
-    let l2 = raw(textureSample(t1, s1, fract(in.uv2))) * in.c2;
-    let l3 = raw(textureSample(t2, s2, fract(in.uv3n.xy))) * in.c3;
+    let l2 = raw(textureSample(t1, s1, in.uv2)) * in.c2;
+    let l3 = raw(textureSample(t2, s2, in.uv3n.xy)) * in.c3;
     let c2 = l2.rgb * select(1.0, l2.a, pre);
     let c3 = l3.rgb * select(1.0, l3.a, pre);
     if modes.x == 1u || modes.x == 2u {
