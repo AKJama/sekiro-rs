@@ -469,6 +469,9 @@ pub struct NodeInst {
     /// NodeAcceleration (1 and kin): the speed gained along Z and the downward speed, each the
     /// running sum of its acceleration curve over the node's life.
     gained: Vec2,
+    /// Under a camera-following node (node movement 46): its GPU weather keeps up with the
+    /// camera ([`keep_up_radius`], #334).
+    follows_camera: bool,
 }
 
 pub struct Config {
@@ -598,7 +601,10 @@ pub fn make_node(lib: &mut FxrLib, node: &NodeDef, seed: u32, depth: u32) -> Opt
             Vec::new(),
         )
     };
-    Some(NodeInst {
+    let follows_camera = cfg
+        .as_ref()
+        .is_some_and(|c| c.node_movement[Field::Type].as_i64() == Some(46));
+    let mut n = NodeInst {
         cfg,
         local,
         world: Transform::IDENTITY,
@@ -616,7 +622,17 @@ pub fn make_node(lib: &mut FxrLib, node: &NodeDef, seed: u32, depth: u32) -> Opt
         detached: None,
         offset: Vec3::ZERO,
         gained: Vec2::ZERO,
-    })
+        follows_camera: false,
+    };
+    if follows_camera {
+        mark_camera(&mut n);
+    }
+    Some(n)
+}
+
+fn mark_camera(n: &mut NodeInst) {
+    n.follows_camera = true;
+    n.children.iter_mut().for_each(mark_camera);
 }
 
 /// A direction inside a cone of `angle` degrees around `n`.
@@ -845,6 +861,9 @@ pub fn step_node(n: &mut NodeInst, lib: &mut FxrLib, parent: Transform, dt: f32,
 
 /// CPU fallback for GPUStandardParticle. Integer durations/intervals use the FXR 30 Hz clock.
 fn weather(n: &mut NodeInst, a: &Action, dt: f32, alive: bool, previous: Vec3) {
+    let moved = (n.world.translation - previous).normalize_or_zero();
+    let keep_up =
+        (n.follows_camera && n.time > 0. && moved != Vec3::ZERO).then(|| keep_up_radius(a));
     for p in &mut n.particles {
         let mut rnd = Rnd { seed: p.seed, k: 0 };
         let follow = scalar(a, Field::ParticleFollowFactor, p.age, &mut rnd, 0.);
@@ -853,6 +872,14 @@ fn weather(n: &mut NodeInst, a: &Action, dt: f32, alive: bool, previous: Vec3) {
         }
         p.age += dt;
         p.pos += p.dir * p.speed * dt;
+        if let Some(radius) = keep_up {
+            // CS_VFX_StandardParticle: a flake left more than `radius` behind the moving root is
+            // mirrored through it, to the same distance ahead (#334).
+            let behind = n.world.translation - p.pos;
+            if moved.dot(behind) > 0.001 && behind.length() > radius {
+                p.pos += 2. * behind;
+            }
+        }
     }
     n.particles.retain(|p| p.age < p.life);
     let mut rnd = Rnd {
@@ -902,6 +929,23 @@ fn weather(n: &mut NodeInst, a: &Action, dt: f32, alive: bool, previous: Vec3) {
         n.emit_next += interval;
         guard += 1;
     }
+}
+
+/// How far a camera-attached weather flake may fall behind before it is mirrored ahead: half the
+/// emitter box's widest horizontal extent (7.5 m for the camera snow 839500's 15 x 15 m box).
+/// The game's update shader reads this distance from `m_cs_attachParam.x`; the exe code that
+/// fills it is not traced, and half the box keeps a running camera's density at a standing one's.
+fn keep_up_radius(a: &Action) -> f32 {
+    let mut rnd = Rnd { seed: 0, k: 0 };
+    let size = game_vec(prop(a.get(Field::EmitterSize), 0., &mut rnd, [1.; 4])).abs();
+    let rotation = game_rot(prop(a.get(Field::EmitterRotation), 0., &mut rnd, [0.; 4]));
+    let m = Mat3::from_quat(rotation);
+    let half = Vec3::new(
+        m.row(0).abs().dot(size),
+        m.row(1).abs().dot(size),
+        m.row(2).abs().dot(size),
+    ) * 0.5;
+    half.x.max(half.z).max(0.01)
 }
 
 /// Particles one GPUStandardParticle node keeps on the CPU.
@@ -1429,9 +1473,11 @@ mod tests {
         assert!(n.finished && n.particles.is_empty());
     }
 
-    /// #84: the installed camera snow (839500) keeps falling around a camera that runs at
-    /// Wolf's 6 m/s. It used to fill its 2048-particle pool in 1.7 s, then emit nothing until
-    /// that batch expired at 6 s, leaving 2 s in every 6 with no flake within 5 m.
+    /// #84 and #334: the installed camera snow (839500) keeps falling around a camera that walks,
+    /// runs at Wolf's 6 m/s or sprints at 8 to 12 m/s for 20 s, as densely as around one standing
+    /// still. #84: it used to fill its 2048-particle pool in 1.7 s, then emit nothing until that
+    /// batch expired at 6 s. #334: flakes stayed where they fell, so a sprint left them behind
+    /// (a fifth of the standing density at 8 m/s) until the game's mirror-ahead rule was added.
     #[test]
     fn camera_snow_falls_steadily_around_a_running_camera() {
         fn near(n: &NodeInst, at: Vec3, out: &mut usize) {
@@ -1446,25 +1492,34 @@ mod tests {
         }
         let mut lib = FxrLib::scan(&sekiro_sim::cache::root());
         let def = lib.compiled(839500).expect("camera snow 839500 installed");
-        let mut n = make_node(&mut lib, &def, 1, 0).unwrap();
-        let dt = 1. / 60.;
-        let mut counts = Vec::new();
-        for f in 0..60 * 20 {
-            let at = Vec3::new(6. * f as f32 * dt, 1.6, 0.);
-            step_node(&mut n, &mut lib, Transform::from_translation(at), dt, false);
-            if f >= 60 * 8 && f % 6 == 0 {
-                let mut c = 0;
-                near(&n, at, &mut c);
-                counts.push(c);
+        let mut standing = 0.;
+        for speed in [0., 6., 8., 12.] {
+            let mut n = make_node(&mut lib, &def, 1, 0).unwrap();
+            let dt = 1. / 60.;
+            let mut counts = Vec::new();
+            for f in 0..60 * 20 {
+                let at = Vec3::new(speed * f as f32 * dt, 1.6, 0.);
+                step_node(&mut n, &mut lib, Transform::from_translation(at), dt, false);
+                if f >= 60 * 8 && f % 6 == 0 {
+                    let mut c = 0;
+                    near(&n, at, &mut c);
+                    counts.push(c);
+                }
             }
+            let mean = counts.iter().sum::<usize>() as f32 / counts.len() as f32;
+            let (min, max) = (counts.iter().min().unwrap(), counts.iter().max().unwrap());
+            if speed == 0. {
+                standing = mean;
+            }
+            assert!(
+                mean > 0.8 * standing,
+                "{speed} m/s: mean {mean}, standing {standing}"
+            );
+            assert!(
+                *min as f32 > 0.6 * mean && (*max as f32) < 1.4 * mean,
+                "{speed} m/s: near counts {min}..{max}, mean {mean}"
+            );
         }
-        let mean = counts.iter().sum::<usize>() as f32 / counts.len() as f32;
-        let (min, max) = (counts.iter().min().unwrap(), counts.iter().max().unwrap());
-        assert!(mean > 50., "mean {mean}");
-        assert!(
-            *min as f32 > 0.6 * mean && (*max as f32) < 1.4 * mean,
-            "near counts {min}..{max}, mean {mean}"
-        );
     }
 
     /// #60: InitialDirection 6 is the node's local +Z and 1 is world up, whatever the node's
