@@ -93,6 +93,12 @@ fn layout_key(mesh: &Mesh) -> Option<u64> {
     Some(hasher.finish())
 }
 
+/// Whether `id` is its layout's representative for the warmup (the first seen of that layout),
+/// recording it if the layout is new. Meshes without CPU data always go up.
+fn first_of_layout(reps: &mut HashMap<u64, AssetId<Mesh>>, id: AssetId<Mesh>, mesh: &Mesh) -> bool {
+    layout_key(mesh).is_none_or(|key| *reps.entry(key).or_insert(id) == id)
+}
+
 pub(crate) fn install(app: &mut App) {
     let off_gpu = OffGpuMeshes::default();
     app.insert_resource(off_gpu.clone())
@@ -238,6 +244,8 @@ fn extract(
             }
         }
         resident.retirement_started = true;
+        // The warmup is done, so the layout representatives are no longer needed.
+        resident.layout_reps = HashMap::new();
     }
     reconcile(
         &assets,
@@ -272,11 +280,10 @@ fn reconcile(
     // Before the warmup is done only the first mesh of each layout goes up besides the
     // referenced ones: uploading every LOD and motion-blur primitive of every warm block
     // (31k meshes, 8 GB at m11's Ashina Castle idol) ran 10 GB cards out of memory.
-    let reps = &mut resident.layout_reps;
     extracted.extracted.retain(|(id, mesh)| {
         let keep = !mesh.asset_usage.contains(RenderAssetUsages::MAIN_WORLD)
             || resident.referenced.contains(id)
-            || !ready && layout_key(mesh).is_none_or(|key| *reps.entry(key).or_insert(*id) == *id);
+            || (!ready && first_of_layout(&mut resident.layout_reps, *id, mesh));
         if !keep {
             resident.suspended.insert(*id);
             extracted.added.remove(id);
@@ -396,7 +403,9 @@ mod tests {
         let mut resident = Resident::default();
         let mut extracted = ExtractedAssets::<RenderMesh>::default();
         for id in [first, same, other] {
-            extracted.extracted.push((id, assets.get(id).unwrap().clone()));
+            extracted
+                .extracted
+                .push((id, assets.get(id).unwrap().clone()));
             extracted.added.insert(id);
         }
         reconcile(&assets, &mut resident, &mut extracted, true, false);
