@@ -15,6 +15,7 @@
 //!   `sekiro-extract map`.
 //!
 //! Map lighting: `--story NAME` selects map event states; `--hour H` overrides their clock.
+//! `--ab hour=6,6.25` (repeatable, see `ab.rs`) lists playtest variants that F5 cycles live.
 //! `--no-env-probe` for hemisphere fallback,
 //! `--probe-sky` to show the environment probe capture as the sky (debug only).
 //! `--no-grading`, `--no-bloom`, `--no-auto-exposure` disable individual map post effects.
@@ -27,6 +28,7 @@
 //! `--no-cloth` disables the Havok cloth simulation (characters keep their rigid skin).
 //! `--fxr-preview <id>` repeats an installed effect between the actors every two seconds.
 
+mod ab;
 mod arena;
 mod arena_b;
 mod audio;
@@ -103,6 +105,12 @@ fn arg_f32(args: &[String], name: &str, default: f32) -> anyhow::Result<f32> {
     }
 }
 
+/// The offscreen survey and gate modes, which `map::sweep::run` drives.
+pub(crate) fn sweep_mode(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| matches!(a.as_str(), "--sweep" | "--render-gate" | "--reference-gate"))
+}
+
 fn dispatch() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     vram::validate_args(&args)?;
@@ -115,10 +123,7 @@ fn dispatch() -> anyhow::Result<()> {
         anyhow::bail!("--cache requires a directory");
     }
     sekiro_sim::cache::init(cache.as_deref());
-    if args
-        .iter()
-        .any(|a| matches!(a.as_str(), "--sweep" | "--render-gate" | "--reference-gate"))
-    {
+    if sweep_mode(&args) {
         return map::sweep::run(&args);
     }
     // The developer start panel (enemies, arenas, brains); it launches `--play`.
@@ -140,6 +145,7 @@ fn dispatch() -> anyhow::Result<()> {
         "--brain-stage",
         "--window-size",
         "--hour",
+        "--ab",
         "--story",
         "--present-mode",
     ] {
@@ -366,10 +372,14 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
         .unwrap_or((1600, 900));
     // Sekiro's time of day follows the story, not a clock: an arena defaults to the hour of the
     // light, probes and sky the game's own flags select at that point (`--hour` overrides).
+    // `--ab hour=...` starts on its first hour (#358).
+    let ab_hour = ab::AbSwitch::parse(args)?.first("hour");
+    anyhow::ensure!(
+        ab_hour.is_none() || arg_value(args, "--hour").is_none(),
+        "--hour and --ab hour=... both set the clock; give one"
+    );
     let default_hour = match boss_arena {
-        Some(arena)
-            if arg_value(args, "--hour").is_none() && arg_value(args, "--story").is_none() =>
-        {
+        Some(arena) if !ab::explicit_hour(args) && arg_value(args, "--story").is_none() => {
             let time = arena.story_time(&opponent);
             eprintln!(
                 "arena {}: story time {} ({} h), set --hour to override",
@@ -452,7 +462,7 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
         spawn: map::parse_camera(arg_value(args, "--spawn").as_deref())?
             .map(|[x, y, z, yaw, _]| [x, y, z, yaw]),
         enemy_distance: arg_f32(args, "--enemy-distance", 5.0)?,
-        hour: arg_f32(args, "--hour", default_hour)?,
+        hour: arg_f32(args, "--hour", ab_hour.unwrap_or(default_hour))?,
         gparam: arg_value(args, "--gparam"),
         at_idol: arg_value(args, "--at-idol")
             .map(|v| v.parse())

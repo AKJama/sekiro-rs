@@ -540,6 +540,12 @@ impl LightingSelection {
         }
     }
 
+    /// The initial file resolved through its layer stack, as the map loads it.
+    #[cfg(test)]
+    pub fn initial_gparam(&self) -> Gparam {
+        self.resolve_initial(&self.initial.source, self.base.clone())
+    }
+
     pub fn environment_for_hour(&self, hour: f32) -> u32 {
         if self.fixed_environment {
             self.initial.environment
