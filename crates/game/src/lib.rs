@@ -42,6 +42,7 @@ mod deathblow_demo;
 mod decals;
 mod draw_mask;
 mod foot_ik;
+mod fx_lighting;
 mod fxr;
 mod fxr_tree;
 mod game_ui;

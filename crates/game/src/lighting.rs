@@ -858,6 +858,7 @@ pub fn install_irradiance(
         .collect();
     let mut records = Vec::<[u32; 52]>::new();
     let mut voxels = Vec::new();
+    let mut cpu = Vec::new();
     {
         for region in regions {
             let Some(cube) = indices.get(&region.probe) else {
@@ -938,10 +939,24 @@ pub fn install_irradiance(
                 .map_or(center, |r| r.position);
             record[36..39].copy_from_slice(&origin.to_array().map(f32::to_bits));
             records.push(record);
+            // The constant band on the CPU for lit FXR particles (#324).
+            if enabled {
+                cpu.push(crate::fx_lighting::GiVolume {
+                    uv,
+                    min: center - extent,
+                    max: center + extent,
+                    dims: UVec3::from_array(dimensions),
+                    w_dims: UVec3::from_array(axis_dimensions[3]),
+                    w: coefficients[offsets[3] as usize..].to_vec(),
+                });
+            }
             voxels.extend(coefficients);
         }
     }
     let count = records.len();
+    app.insert_resource(crate::fx_lighting::IrradianceCpu {
+        volumes: cpu.into(),
+    });
     let atlas = irradiance_atlas(&mut records, &voxels)?;
     let mut data = vec![count as u32, u32::from(enabled), 0, 0];
     for record in &records {
