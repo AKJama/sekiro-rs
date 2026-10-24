@@ -970,6 +970,15 @@ impl Material for DistortMaterial {
     }
 }
 
+/// The lights a lit particle takes (#324): the light set in force, the map's irradiance volumes
+/// and every point light (map BTL and last frame's FXR 609 lights).
+#[derive(bevy::ecs::system::SystemParam)]
+struct ParticleLightInputs<'w, 's> {
+    lighting: Option<Res<'w, crate::lighting::MapLighting>>,
+    gi: Option<Res<'w, crate::fx_lighting::IrradianceCpu>>,
+    points: Query<'w, 's, (&'static PointLight, &'static GlobalTransform)>,
+}
+
 struct Frame<'a> {
     cam: &'a GlobalTransform,
     bufs: &'a mut HashMap<(i64, bool), Buf>,
@@ -977,6 +986,9 @@ struct Frame<'a> {
     lights: &'a mut Vec<FxLight>,
     distort: &'a mut HashMap<i64, Buf>,
     trail: &'a mut Vec<(Vec3, Vec3, f32)>,
+    /// What lights lit particles this frame (#324).
+    light: &'a crate::fx_lighting::ParticleLighting,
+    gi: Option<&'a crate::fx_lighting::IrradianceCpu>,
 }
 
 /// The native view-distance fade of a local light (`20d9c0`, called by the point and spot light
@@ -1116,7 +1128,9 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
         if fade <= 0.0 {
             continue;
         }
-        let mut col = particle_color(a, c, p, active_t, &mut rnd);
+        let mut col = particle_color(a, c, p, active_t, &mut rnd, || {
+            f.light.at(world, f.gi).to_array()
+        });
         col[3] *= fade;
         for v in &mut col[..3] {
             *v *= env;
@@ -1891,6 +1905,7 @@ fn render(
     mut lights: Local<Vec<Entity>>,
     mut buffers: Local<FrameBuffers>,
     mut streams: Option<ResMut<stream::VertexStreams>>,
+    lit: ParticleLightInputs,
 ) {
     if !player.enabled {
         return;
@@ -1938,6 +1953,10 @@ fn render(
         b.clear();
     }
     frame_lights.clear();
+    let light = crate::fx_lighting::gather(
+        lit.lighting.as_deref(),
+        lit.points.iter().map(|(p, t)| (p.clone(), t.translation())),
+    );
     let mut frame = Frame {
         cam,
         bufs,
@@ -1945,6 +1964,8 @@ fn render(
         lights: frame_lights,
         distort,
         trail,
+        light: &light,
+        gi: lit.gi.as_deref(),
     };
     for e in player.effects.iter().filter(|e| !e.asleep) {
         if let Some(root) = &e.root {
@@ -2374,6 +2395,8 @@ mod tests {
             lights: &mut buffers.lights,
             distort: &mut buffers.distort,
             trail: &mut buffers.trail,
+            light: &Default::default(),
+            gi: None,
         };
         for e in &player.effects {
             collect(e.root.as_ref().unwrap(), &mut frame);
@@ -2425,6 +2448,8 @@ mod tests {
                 lights: &mut buffers.lights,
                 distort: &mut buffers.distort,
                 trail: &mut buffers.trail,
+                light: &Default::default(),
+                gi: None,
             };
             for e in &player.effects {
                 collect(e.root.as_ref().unwrap(), &mut frame);
@@ -2498,6 +2523,8 @@ mod tests {
             lights: &mut buffers.lights,
             distort: &mut buffers.distort,
             trail: &mut buffers.trail,
+            light: &Default::default(),
+            gi: None,
         };
         for e in &player.effects {
             collect(e.root.as_ref().unwrap(), &mut frame);
@@ -2519,6 +2546,65 @@ mod tests {
             ..glint
         };
         assert!(native_diffuse(&fire, 2.) > 0.5 * native_diffuse(&fire, 0.));
+    }
+
+    /// #324: the gatehouse brazier's smoke (839530, lit, alpha blend) takes the sun's colour
+    /// rather than being drawn unlit at 1/8 whatever the light: its colour scales with the sun.
+    #[test]
+    fn lit_smoke_takes_the_sun() {
+        let cache = sekiro_sim::cache::root();
+        if !cache
+            .join("raw/sfx/sfxbnd_commoneffects.ffxbnd.d/f000839530.fxr")
+            .exists()
+        {
+            eprintln!("skipping: cache not extracted");
+            return;
+        }
+        let mut player = FxrPlayer::new(cache);
+        player.hold(HELD, 839530, 0, Transform::IDENTITY, true);
+        for _ in 0..300 {
+            player.advance(1. / 60.);
+        }
+        let cam = GlobalTransform::from(Transform::from_xyz(0., 1.5, 8.));
+        // Summed rgb of the alpha-blended (smoke) sprites under a grey native sun of `sun`.
+        let smoke = |sun: f32| -> f32 {
+            let mut buffers = FrameBuffers::default();
+            let light = crate::fx_lighting::ParticleLighting {
+                sun: Vec3::splat(sun),
+                lights: Vec::new(),
+            };
+            let mut frame = Frame {
+                cam: &cam,
+                bufs: &mut buffers.bufs,
+                multi: &mut buffers.multi,
+                lights: &mut buffers.lights,
+                distort: &mut buffers.distort,
+                trail: &mut buffers.trail,
+                light: &light,
+                gi: None,
+            };
+            for e in &player.effects {
+                collect(e.root.as_ref().unwrap(), &mut frame);
+            }
+            let sprites = buffers
+                .bufs
+                .iter()
+                .filter(|((_, additive), _)| !additive)
+                .flat_map(|(_, b)| b.col.iter());
+            let multi = buffers.multi.values().flat_map(|b| b.col.iter());
+            sprites
+                .chain(multi)
+                .map(|c| c[0] + c[1] + c[2])
+                .sum::<f32>()
+                / crate::lighting::ENV_PER_UNIT
+        };
+        let (dark, one, two) = (smoke(0.), smoke(1.), smoke(2.));
+        let lit = one - dark;
+        assert!(lit > 0., "lit smoke ignores the sun: {dark} {one} {two}");
+        assert!(
+            ((two - dark) - 2. * lit).abs() < 1e-3 * lit,
+            "{dark} {one} {two}"
+        );
     }
 
     /// #323: the Outskirts gatehouse torches (brazier 839530 on `o116000`) light a warm pool on
@@ -2549,6 +2635,8 @@ mod tests {
             lights: &mut buffers.lights,
             distort: &mut buffers.distort,
             trail: &mut buffers.trail,
+            light: &Default::default(),
+            gi: None,
         };
         for e in &player.effects {
             collect(e.root.as_ref().unwrap(), &mut frame);

@@ -942,6 +942,32 @@ pub fn install_irradiance(
         }
     }
     let count = records.len();
+    // The constant band on the CPU for lit FXR particles (#324), read before the atlas
+    // overwrites the records' voxel offsets.
+    let cpu = crate::fx_lighting::IrradianceCpu {
+        volumes: if enabled {
+            records
+                .iter()
+                .map(|r| {
+                    let f = |i: usize| f32::from_bits(r[i]);
+                    let w_dims = UVec3::new(r[49], r[50], r[51]);
+                    let start = r[23] as usize;
+                    let len = (w_dims.x * w_dims.y * w_dims.z) as usize;
+                    crate::fx_lighting::GiVolume {
+                        uv: Mat4::from_cols_array(&std::array::from_fn(f)),
+                        min: Vec3::new(f(24), f(25), f(26)),
+                        max: Vec3::new(f(28), f(29), f(30)),
+                        dims: UVec3::new(r[16], r[17], r[18]),
+                        w_dims,
+                        w: voxels[start..start + len].to_vec(),
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
+    };
+    app.insert_resource(cpu);
     let atlas = irradiance_atlas(&mut records, &voxels)?;
     let mut data = vec![count as u32, u32::from(enabled), 0, 0];
     for record in &records {

@@ -1163,16 +1163,19 @@ pub fn frame_uvs(
 }
 
 /// Particle colour: color1 * color2 * color3 * the node's particleModifier colour, rgbMultiplier,
-/// alphaMultiplier (HDR above 1 feeds the bloom). Lit particles (lighting -2 / 0) are drawn
-/// unlit at 1/8 of their rgbMultiplier: where the game ships a lit config next to an unlit one
-/// for the same node, the unlit one's rgbMultiplier is the lit one's x 0.125 in all 48 such pairs
-/// (FwLo's measurement).
+/// alphaMultiplier (HDR above 1 feeds the bloom). Lit particles (lighting -2 / 0) are clamped
+/// to 1 and multiplied by `light()`, the native light at the particle (#324, `fx_lighting.rs`):
+/// the game's lit effect pixel shader (`GXFfxtessellateBlendSoftTexture.ppo`) takes
+/// `saturate(texture x colour x g_vColorScale)` times the sun plus the vertex's ambient and local
+/// light. The clamp here is on the colour alone, the same for any colour up to 1 since the
+/// texture is at most 1.
 pub fn particle_color(
     a: &Action,
     c: &Config,
     p: &Particle,
     active_t: f32,
     rnd: &mut Rnd,
+    light: impl FnOnce() -> [f32; 3],
 ) -> [f32; 4] {
     let c1 = prop(a.get(Field::Color1), p.age, rnd, [1.0; 4]).map(|v| v.clamp(0.0, 1.0));
     let c2 = prop(a.get(Field::Color2), p.emit_t, rnd, [1.0; 4]).map(|v| v.clamp(0.0, 1.0));
@@ -1184,16 +1187,17 @@ pub fn particle_color(
         [1.0; 4],
     );
     let lit = matches!(a[Field::Lighting].as_i64(), Some(-2 | 0));
-    let rgbm = scalar(a, Field::RgbMultiplier, active_t, rnd, 1.0) * if lit { 0.125 } else { 1.0 };
+    let rgbm = scalar(a, Field::RgbMultiplier, active_t, rnd, 1.0);
     let am = scalar(a, Field::AlphaMultiplier, active_t, rnd, 1.0);
     let k: [f32; 4] = std::array::from_fn(|i| c1[i] * c2[i] * c3[i] * pm[i]);
-    let h = hue_squared([k[0], k[1], k[2]]);
-    [
-        h[0] * rgbm,
-        h[1] * rgbm,
-        h[2] * rgbm,
-        (k[3] * am).clamp(0.0, 1.0),
-    ]
+    let h = hue_squared([k[0], k[1], k[2]]).map(|v| v * rgbm);
+    let rgb = if lit {
+        let l = light();
+        std::array::from_fn(|i| h[i].clamp(0.0, 1.0) * l[i])
+    } else {
+        h
+    };
+    [rgb[0], rgb[1], rgb[2], (k[3] * am).clamp(0.0, 1.0)]
 }
 
 /// The game's effect pixel shaders split the particle colour into its length and direction,
