@@ -1,5 +1,6 @@
 //! Authored BTL local lights, shared by map capture and play.
 use super::*;
+use crate::lighting::LightCollect;
 
 #[derive(Clone)]
 struct LocalLight {
@@ -17,76 +18,23 @@ struct LocalLight {
 #[derive(Resource, Default)]
 pub(super) struct LocalLights {
     lights: Vec<LocalLight>,
-    /// Spawned lights with the view fade their intensity carries.
-    active: std::collections::BTreeMap<usize, (Entity, f32)>,
+    active: std::collections::BTreeMap<usize, Entity>,
 }
 
-/// `localLightDistFactor` (GConfig +0x4c, read by `142260`) at the High lighting quality.
-const LOCAL_LIGHT_DIST_FACTOR: f32 = 1.;
+/// What [`LightCollect`] was last read from: `MapLighting` revision, light set, hour, source.
+type CollectKey = (u32, i32, f32, String);
 
-/// The scene's `LightCollect` auto view distance (`Setting Info` group, blended per light set
-/// and hour like the record `142260` reads at +0x68..+0x74; fields bound in `28e6d0`).
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct LightCollect {
-    auto: bool,
-    base: f32,
-    scaler: f32,
-    max: f32,
-}
-
-impl LightCollect {
-    /// `mapbase.gparam`, which every map stacks over `default.gparam` and no Ashina file
-    /// overrides.
-    const MAPBASE: Self = Self {
-        auto: true,
-        base: 10.,
-        scaler: 10.,
-        max: 130.,
+/// A light's `20d9c0` view fade as the point (`210010`) and spot (`211610`) builders call it, with
+/// the radius twice the BTL range. `None` once its near edge is half its distance again past
+/// the fade band, where the entity is despawned; a light at 0 is only hidden, so the
+/// cull edge does not churn entities, and a hidden light draws no shadow map.
+fn view_fade(collect: &LightCollect, light: &LocalLight, depth: f32) -> Option<f32> {
+    let radius = light.range * 2.;
+    let Some(distance) = collect.distance(light.view_distance, radius) else {
+        return Some(1.);
     };
-
-    fn from_lighting(lighting: Option<&crate::lighting::MapLighting>) -> Self {
-        // Diagnostic `SEKIRO_ABLATE=nolightcollect` turns the auto distance off, as before #339.
-        if crate::lighting::ablate("nolightcollect") {
-            return Self {
-                auto: false,
-                ..Self::MAPBASE
-            };
-        }
-        let Some(l) = lighting else {
-            return Self::MAPBASE;
-        };
-        let get = |name: &str, fallback: f32| {
-            l.gparam
-                .param("Setting Info", name)
-                .and_then(|p| p.at(l.light_set, l.hour))
-                .and_then(|v| v.first().copied())
-                .unwrap_or(fallback)
-        };
-        let m = Self::MAPBASE;
-        Self {
-            auto: get("LightCollect- Auto Compute Enable", m.auto as i32 as f32) >= 0.5,
-            base: get("LightCollect- BaseDist", m.base),
-            scaler: get("LightCollect-DistScaler", m.scaler),
-            max: get("LightCollect-DistMax", m.max),
-        }
-    }
-
-    /// The light's view fade, `20d9c0` as the point (`210010`) and spot (`211610`) builders call
-    /// it: the radius is twice the BTL range, the distance the light's own view distance or
-    /// `min(base + radius * scaler, max)`, both times [`LOCAL_LIGHT_DIST_FACTOR`]. Without
-    /// either, the light never culls. A light at 0 is not built, so it draws no shadow map.
-    fn fade(&self, light: &LocalLight, depth: f32) -> f32 {
-        if !self.auto && light.view_distance == 0. {
-            return 1.;
-        }
-        let radius = light.range * 2.;
-        let distance = if light.view_distance != 0. {
-            light.view_distance
-        } else {
-            (self.base + radius * self.scaler).min(self.max)
-        } * LOCAL_LIGHT_DIST_FACTOR;
-        crate::fxr::light_view_fade(distance, depth, radius)
-    }
+    let far = distance * 1.5 + crate::lighting::light_fade_band(distance);
+    (depth - radius <= far).then(|| crate::lighting::light_view_fade(distance, depth, radius))
 }
 
 impl LocalLights {
@@ -251,7 +199,7 @@ impl LocalLights {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(super) fn update_local_lights(
     mut commands: Commands,
     time: Res<Time>,
@@ -260,8 +208,8 @@ pub(super) fn update_local_lights(
     camera: Query<&GlobalTransform, With<Camera3d>>,
     world: Option<Res<world::MapWorld>>,
     lighting: Option<Res<crate::lighting::MapLighting>>,
-    mut points: Query<&mut PointLight>,
-    mut spots: Query<&mut SpotLight>,
+    mut shown: Query<(AnyOf<(&mut PointLight, &mut SpotLight)>, &mut Visibility)>,
+    mut collect: Local<Option<(Option<CollectKey>, LightCollect)>>,
     mut last: Local<f32>,
 ) {
     let _timer = crate::perf_log::SystemTimer::start("update_local_lights");
@@ -280,7 +228,16 @@ pub(super) fn update_local_lights(
         .iter()
         .next()
         .map(|c| (c.translation(), c.forward().as_vec3()));
-    let collect = LightCollect::from_lighting(lighting.as_deref());
+    let key = lighting
+        .as_ref()
+        .map(|l| (l.revision, l.light_set, l.hour, l.source.clone()));
+    if collect.as_ref().is_none_or(|(k, _)| *k != key) {
+        let value = lighting.as_ref().map_or_else(LightCollect::fallback, |l| {
+            LightCollect::from_gparam(&l.gparam, l.light_set, l.hour)
+        });
+        *collect = Some((key, value));
+    }
+    let collect = collect.as_ref().unwrap().1;
     let mut candidates: Vec<_> = lights
         .lights
         .iter()
@@ -296,58 +253,64 @@ pub(super) fn update_local_lights(
             {
                 return None;
             }
-            let distance = l.position.distance_squared(position);
             if l.intensity <= 0. || l.range <= 0. {
                 return None;
             }
-            let fade = if legacy {
-                if distance > (60. + l.range).powi(2) {
-                    return None;
-                }
-                1.
-            } else {
-                let depth = match view {
-                    Some((eye, forward)) => (l.position - eye).dot(forward),
-                    None => distance.sqrt(),
-                };
-                collect.fade(l, depth)
+            let distance = l.position.distance_squared(position);
+            if legacy {
+                return (distance <= (60. + l.range).powi(2)).then_some((i, distance, 1.));
+            }
+            let depth = match view {
+                Some((eye, forward)) => (l.position - eye).dot(forward),
+                None => distance.sqrt(),
             };
-            (fade > 0.).then_some((i, distance, fade))
+            let fade = view_fade(&collect, l, depth)?;
+            // A light reaching 0 is hidden; only one already shown keeps its entity.
+            (fade > 0. || lights.active.contains_key(&i)).then_some((i, distance, fade))
         })
         .collect();
-    candidates.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+    if legacy {
+        candidates.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+        candidates.truncate(64);
+    }
     let wanted: std::collections::BTreeMap<_, _> = candidates
         .into_iter()
-        .take(if legacy { 64 } else { usize::MAX })
         .map(|(i, _, fade)| (i, fade))
         .collect();
     let old_count = lights.active.len();
-    let removed: Vec<_> = lights
-        .active
-        .keys()
-        .copied()
-        .filter(|i| !wanted.contains_key(i))
-        .collect();
-    for i in removed {
-        commands
-            .entity(lights.active.remove(&i).unwrap().0)
-            .despawn();
-    }
+    lights.active.retain(|i, entity| {
+        let keep = wanted.contains_key(i);
+        if !keep {
+            commands.entity(*entity).despawn();
+        }
+        keep
+    });
     for (i, fade) in wanted {
         let light = &lights.lights[i];
         let intensity = light.intensity * fade * crate::lighting::LOCAL_LUMENS_PER_UNIT;
-        if let Some((entity, shown)) = lights.active.get_mut(&i) {
-            if *shown != fade {
-                *shown = fade;
-                if let Ok(mut point) = points.get_mut(*entity) {
-                    point.intensity = intensity;
-                } else if let Ok(mut spot) = spots.get_mut(*entity) {
-                    spot.intensity = intensity;
+        let visibility = if fade > 0. {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if let Some(&entity) = lights.active.get(&i) {
+            if let Ok(((point, spot), mut shown)) = shown.get_mut(entity) {
+                shown.set_if_neq(visibility);
+                if fade > 0. {
+                    if let Some(mut point) = point {
+                        if point.intensity != intensity {
+                            point.intensity = intensity;
+                        }
+                    } else if let Some(mut spot) = spot
+                        && spot.intensity != intensity
+                    {
+                        spot.intensity = intensity;
+                    }
                 }
             }
             continue;
         }
-        let mut entity = commands.spawn(Transform::from_translation(light.position));
+        let mut entity = commands.spawn((Transform::from_translation(light.position), visibility));
         if let Some((rotation, cone)) = light.spot {
             entity.insert((
                 SpotLight {
@@ -372,7 +335,7 @@ pub(super) fn update_local_lights(
                 ..default()
             });
         }
-        lights.active.insert(i, (entity.id(), fade));
+        lights.active.insert(i, entity.id());
     }
     if lights.active.len() != old_count {
         let shadowed = lights
@@ -440,97 +403,78 @@ mod tests {
     #[test]
     fn view_distance_follows_20d9c0() {
         let c = LightCollect::MAPBASE;
-        // Range 6: radius 12, distance min(10 + 12 * 10, 130) = 130, band min(9.1, 10).
-        let l = light(0., 6., true);
-        assert_eq!(c.fade(&l, 141.), 1.);
-        assert!((c.fade(&l, 142. + 4.55) - 0.5).abs() < 1e-4);
-        assert_eq!(c.fade(&l, 151.2), 0.);
-        // Range 1: radius 2, distance 10 + 2 * 10 = 30.
-        assert_eq!(c.fade(&light(0., 1., false), 31.), 1.);
-        assert_eq!(c.fade(&light(0., 1., false), 34.2), 0.);
-        // A BTL view distance replaces the auto distance and holds without auto compute.
-        let own = LocalLight {
-            view_distance: 20.,
-            ..light(0., 6., false)
-        };
-        assert_eq!(c.fade(&own, 31.), 1.);
-        assert_eq!(c.fade(&own, 33.5), 0.);
+        // Auto: min(10 + radius * 10, 130), radius twice the range.
+        assert_eq!(c.distance(0., 12.), Some(130.));
+        assert_eq!(c.distance(0., 2.), Some(30.));
+        // A BTL view distance replaces it, and holds without auto compute.
+        assert_eq!(c.distance(20., 12.), Some(20.));
         let off = LightCollect { auto: false, ..c };
-        assert_eq!(off.fade(&own, 33.5), 0.);
-        assert_eq!(off.fade(&light(0., 6., true), 1e4), 1.);
+        assert_eq!(off.distance(20., 12.), Some(20.));
+        assert_eq!(off.distance(0., 12.), None);
+        assert_eq!(view_fade(&off, &light(0., 6., true), 1e4), Some(1.));
+        // Hidden past the band (151.1 m for range 6), despawned past 1.5 times the distance.
+        assert_eq!(view_fade(&c, &light(0., 6., true), 160.), Some(0.));
+        assert_eq!(view_fade(&c, &light(0., 6., true), 220.), None);
     }
     #[test]
-    fn far_lights_cull_and_draw_no_shadow_map() {
+    fn far_lights_hide_then_despawn_and_draw_no_shadow_map() {
         let mut app = App::new();
         let mut lights: Vec<_> = (0..100).map(|i| light(i as f32 * 0.1, 4., false)).collect();
-        // Like the m17 lanterns seen from the castle forest: shadowed, range 6, 380 m away.
-        lights.push(light(380., 6., true));
-        lights.push(light(10., 6., true));
-        lights.push(light(142. + 4.55, 6., false));
+        // 100: like the m17 lanterns seen from the castle gate, shadowed, range 6, 380 m away.
+        // 101: a near shadowed light. 102: one in the hide band (151 to 204 m of depth).
+        lights.extend([
+            light(380., 6., true),
+            light(10., 6., true),
+            light(180., 6., true),
+        ]);
         app.insert_resource(Time::<()>::default())
             .insert_resource(LocalLights {
                 lights,
                 active: default(),
             })
             .add_systems(Update, update_local_lights);
-        let focus = app
-            .world_mut()
-            .spawn((MapFocus, GlobalTransform::default()))
-            .id();
+        app.world_mut()
+            .spawn((MapFocus, GlobalTransform::default()));
         let camera = app
             .world_mut()
-            .spawn((
-                Camera3d::default(),
-                GlobalTransform::from(Transform::default().looking_at(Vec3::X, Vec3::Y)),
-            ))
+            .spawn((Camera3d::default(), GlobalTransform::default()))
             .id();
-        app.world_mut()
-            .resource_mut::<Time>()
-            .advance_by(Duration::from_secs(1));
-        app.update();
-        let lights = app.world().resource::<LocalLights>();
+        let look = |app: &mut App, from: f32, to: f32| {
+            *app.world_mut().get_mut::<GlobalTransform>(camera).unwrap() = GlobalTransform::from(
+                Transform::from_xyz(from, 0., 0.).looking_at(Vec3::X * to, Vec3::Y),
+            );
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(Duration::from_secs(1));
+            app.update();
+            app.world().resource::<LocalLights>().active.clone()
+        };
+        let active = look(&mut app, 0., 1.);
         let mut kept: Vec<_> = (0..100).collect();
-        kept.extend([101, 102]);
-        assert_eq!(lights.active.keys().copied().collect::<Vec<_>>(), kept);
-        let point = |i: usize| app.world().get::<PointLight>(lights.active[&i].0).unwrap();
-        assert!(point(101).shadow_maps_enabled);
-        assert!((0..100).all(|i| !point(i).shadow_maps_enabled));
-        let full = crate::lighting::LOCAL_LUMENS_PER_UNIT;
-        assert_eq!(point(0).intensity, full);
-        assert!((point(102).intensity / full - 0.5).abs() < 1e-4);
+        kept.push(101);
+        assert_eq!(active.keys().copied().collect::<Vec<_>>(), kept);
+        let point =
+            |app: &App, i: usize| app.world().get::<PointLight>(active[&i]).copied().unwrap();
+        assert!(point(&app, 101).shadow_maps_enabled);
+        assert!((0..100).all(|i| !point(&app, i).shadow_maps_enabled));
         assert_eq!(
-            app.world_mut()
-                .query::<&PointLight>()
-                .iter(app.world())
-                .filter(|l| l.shadow_maps_enabled)
-                .count(),
-            1
+            point(&app, 0).intensity,
+            crate::lighting::LOCAL_LUMENS_PER_UNIT
         );
-        // Turning away keeps lights behind the view plane; walking off culls them all.
-        *app.world_mut().get_mut::<GlobalTransform>(camera).unwrap() = GlobalTransform::from(
-            Transform::from_xyz(1000., 0., 0.).looking_at(Vec3::X * 2000., Vec3::Y),
-        );
-        *app.world_mut().get_mut::<GlobalTransform>(focus).unwrap() =
-            GlobalTransform::from_translation(Vec3::X * 1000.);
-        app.world_mut()
-            .resource_mut::<Time>()
-            .advance_by(Duration::from_secs(1));
-        app.update();
-        assert_eq!(app.world().resource::<LocalLights>().active.len(), 103);
-        *app.world_mut().get_mut::<GlobalTransform>(camera).unwrap() = GlobalTransform::from(
-            Transform::from_xyz(1000., 0., 0.).looking_at(Vec3::ZERO, Vec3::Y),
-        );
-        app.world_mut()
-            .resource_mut::<Time>()
-            .advance_by(Duration::from_secs(1));
-        app.update();
-        assert!(app.world().resource::<LocalLights>().active.is_empty());
-        assert_eq!(
-            app.world_mut()
-                .query::<&PointLight>()
-                .iter(app.world())
-                .count(),
-            0
-        );
+        // Behind the view plane every light is kept, as in 20d9c0.
+        let behind = look(&mut app, 0., -1.);
+        assert_eq!(behind.len(), 103);
+        let visibility = |app: &App, e: Entity| *app.world().get::<Visibility>(e).unwrap();
+        assert_eq!(visibility(&app, behind[&102]), Visibility::Inherited);
+        // Turning back hides the band light on the same entity, so it draws no shadow map,
+        // and despawns the one far past it.
+        let ahead = look(&mut app, 0., 1.);
+        assert_eq!(ahead.get(&102), Some(&behind[&102]));
+        assert_eq!(visibility(&app, ahead[&102]), Visibility::Hidden);
+        assert!(!ahead.contains_key(&100));
+        // Walking away despawns it too.
+        let away = look(&mut app, -100., 1.);
+        assert!(!away.contains_key(&102));
+        assert!(app.world().get_entity(behind[&102]).is_err());
     }
 }

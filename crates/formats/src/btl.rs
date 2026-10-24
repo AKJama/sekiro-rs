@@ -89,13 +89,14 @@ pub fn parse_record(raw: &[u8], name: String) -> Result<Light> {
     r.seek(184);
     let width = r.f32()?;
     r.seek(196);
-    let view_distance = r.f32()?;
+    // The game treats 0 as "no own distance"; a bad value is taken as that, not an error.
+    let view_distance = Some(r.f32()?)
+        .filter(|v| v.is_finite() && *v > 0.)
+        .unwrap_or(0.);
     if !intensity.is_finite()
         || intensity < 0.
         || !range.is_finite()
         || range < 0.
-        || !view_distance.is_finite()
-        || view_distance < 0.
         || position
             .iter()
             .chain(rotation.iter())

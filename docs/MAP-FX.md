@@ -307,8 +307,8 @@ w   = 1 / R
 `c` and `power` are the diffuse colour and its alpha (property block offsets 0x70 and 0x7c).
 `blink` is object offset 0x258 (spot) or 0x1dc (point), constructed as 1.0 and rewritten by the effect's flicker (FXR 609 `flickerBrightness`, `flickerIntervalMin/Max`).
 `distFade` is `20d9c0`: 1 while `depth - radius` is within the view distance (object +0xbc, FXR 609 `maxViewDistance`), then a linear ramp to 0 over `min(0.07 * ViewDist, 10)` metres (`.rdata` 0x32890bc and 0x32892a0).
-`depth` is a dot product with a camera plane, taken to be the view axis (inferred, not traced).
-Until #83 effect lights were cut off hard at `maxViewDistance` from the camera, so the Outskirts lanterns (839531, 50 m) switched on as Wolf walked toward them; `light_view_fade` in `fxr.rs` now applies this ramp.
+`depth` is the dot product with the camera matrix row at camera +0x130..+0x13c (traced, #339); that this row is the view axis is inferred, not traced.
+Until #83 effect lights were cut off hard at `maxViewDistance` from the camera, so the Outskirts lanterns (839531, 50 m) switched on as Wolf walked toward them; `light_view_fade` in `lighting.rs` now applies this ramp.
 
 BTL lights use the same cull (traced 2026-10-24, #339).
 The point builder `210010` (spot: `211610`) calls `20d9c0(light, camera, centre, radius, P)` with `radius = light+0x19c * 2.0`, and drops the light when the result is 0.
