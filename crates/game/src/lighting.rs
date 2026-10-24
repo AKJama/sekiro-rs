@@ -1113,6 +1113,15 @@ pub struct MapProbes {
 }
 
 impl MapProbes {
+    /// Switches to the probes of environment `variant`, reloading them when it changes.
+    pub(crate) fn set_variant(&mut self, variant: u32) {
+        if self.variant != variant {
+            self.variant = variant;
+            self.active = None;
+            self.handles.clear();
+        }
+    }
+
     fn choose(&self, point: Vec3) -> Option<u32> {
         let candidates = self
             .regions
@@ -1351,6 +1360,15 @@ pub struct MapLighting {
 }
 
 impl MapLighting {
+    /// Moves the clock to `hour`, so the light set and every user keyed on the lighting rebuild.
+    pub fn set_hour(&mut self, hour: f32) {
+        if self.hour != hour {
+            self.hour = hour;
+            self.applied = None;
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
     /// Moves from what is shown now to the draw params `to` (the current target when `None`) and
     /// the row `row` over `seconds` of game time; at once when `seconds` is not positive.
     ///

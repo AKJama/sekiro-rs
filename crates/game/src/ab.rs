@@ -28,7 +28,14 @@ const KNOBS: &[Knob] = &[
         name: "fog-shadow",
         parse: on_off,
         apply: |world, v| {
-            world.insert_resource(crate::lighting::fog::FogShadows(v > 0.5));
+            let on = v > 0.5;
+            if world
+                .get_resource::<crate::lighting::fog::FogShadows>()
+                .map(|f| f.0)
+                != Some(on)
+            {
+                world.insert_resource(crate::lighting::fog::FogShadows(on));
+            }
         },
     },
 ];
@@ -53,21 +60,14 @@ fn set_hour(world: &mut World, hour: f32) {
     let environment = world
         .get_resource::<crate::lighting_selection::LightingSelection>()
         .map(|s| s.environment_for_hour(hour));
-    if let Some(mut light) = world.get_resource_mut::<crate::lighting::MapLighting>()
-        && light.hour != hour
-    {
-        light.hour = hour;
-        light.applied = None;
-        light.revision = light.revision.wrapping_add(1);
+    if let Some(mut light) = world.get_resource_mut::<crate::lighting::MapLighting>() {
+        light.set_hour(hour);
     }
     if let (Some(variant), Some(mut probes)) = (
         environment,
         world.get_resource_mut::<crate::lighting::MapProbes>(),
-    ) && probes.variant != variant
-    {
-        probes.variant = variant;
-        probes.active = None;
-        probes.handles.clear();
+    ) {
+        probes.set_variant(variant);
     }
 }
 
@@ -83,8 +83,8 @@ struct Axis {
 pub struct AbSwitch {
     axes: Vec<Axis>,
     index: usize,
-    /// The combination last put in force; `None` until the first frame applies the start.
-    shown: Option<usize>,
+    /// Whether the combination showing is in force; false until the first frame applies it.
+    applied: bool,
 }
 
 impl AbSwitch {
@@ -101,11 +101,10 @@ impl AbSwitch {
             let (name, values) = spec
                 .split_once('=')
                 .ok_or_else(|| anyhow::anyhow!("--ab {spec}: wants <name>=<v1>,<v2>[,...]"))?;
-            let known = || KNOBS.iter().map(|k| k.name).collect::<Vec<_>>().join(", ");
-            let knob = KNOBS
-                .iter()
-                .position(|k| k.name == name)
-                .ok_or_else(|| anyhow::anyhow!("--ab {name}: unknown, known: {}", known()))?;
+            let knob = KNOBS.iter().position(|k| k.name == name).ok_or_else(|| {
+                let known: Vec<_> = KNOBS.iter().map(|k| k.name).collect();
+                anyhow::anyhow!("--ab {name}: unknown, known: {}", known.join(", "))
+            })?;
             anyhow::ensure!(
                 axes.iter().all(|a| a.knob != knob),
                 "--ab {name} given twice"
@@ -134,7 +133,8 @@ impl AbSwitch {
     }
 
     pub fn next(&mut self) {
-        self.index = (self.index + 1) % self.len().max(1);
+        self.index = (self.index + 1) % self.len();
+        self.applied = false;
     }
 
     /// The value of every knob in the combination showing; the first knob changes fastest.
@@ -173,7 +173,9 @@ impl AbSwitch {
 /// arena story hours leave it alone.
 pub fn explicit_hour(args: &[String]) -> bool {
     args.iter().any(|a| a == "--hour")
-        || AbSwitch::parse(args).is_ok_and(|s| s.first("hour").is_some())
+        || args
+            .windows(2)
+            .any(|w| w[0] == "--ab" && w[1].starts_with("hour="))
 }
 
 #[derive(Component)]
@@ -187,11 +189,12 @@ pub fn install(app: &mut App, args: &[String]) -> anyhow::Result<()> {
     }
     app.insert_resource(switch)
         .add_systems(Startup, spawn_label)
-        .add_systems(Update, step);
+        .add_systems(Update, step.run_if(switching));
     Ok(())
 }
 
-fn spawn_label(mut commands: Commands, switch: Res<AbSwitch>) {
+/// The text is written by [`step`] on the first frame.
+fn spawn_label(mut commands: Commands) {
     commands
         .spawn(Node {
             position_type: PositionType::Absolute,
@@ -203,7 +206,7 @@ fn spawn_label(mut commands: Commands, switch: Res<AbSwitch>) {
         .with_children(|p| {
             p.spawn((
                 Label,
-                Text::new(switch.label()),
+                Text::default(),
                 TextFont {
                     font_size: bevy::text::FontSize::Px(14.),
                     ..default()
@@ -218,18 +221,19 @@ fn spawn_label(mut commands: Commands, switch: Res<AbSwitch>) {
         });
 }
 
+/// Whether [`step`] has work: the first frame, or a [`KEY`] press. Keeps the exclusive system off
+/// every other frame.
+fn switching(keys: Option<Res<ButtonInput<KeyCode>>>, switch: Res<AbSwitch>) -> bool {
+    !switch.applied || keys.is_some_and(|keys| keys.just_pressed(KEY))
+}
+
 /// Puts the start combination in force on the first frame, and the next one on each [`KEY`].
 fn step(world: &mut World) {
-    let pressed = world
-        .get_resource::<ButtonInput<KeyCode>>()
-        .is_some_and(|keys| keys.just_pressed(KEY));
     let mut switch = world.resource_mut::<AbSwitch>();
-    if pressed {
+    if switch.applied {
         switch.next();
-    } else if switch.shown == Some(switch.index) {
-        return;
     }
-    switch.shown = Some(switch.index);
+    switch.applied = true;
     let picks: Vec<_> = switch.picks().map(|(k, (_, v))| (k.apply, *v)).collect();
     let label = switch.label();
     for (apply, value) in picks {
@@ -342,7 +346,7 @@ mod tests {
         .init_resource::<GlobalAmbientLight>()
         .init_resource::<ClearColor>()
         .insert_resource(AbSwitch::parse(&args(&["--ab", "hour=6,18"])).unwrap())
-        .add_systems(Update, (step, apply_lighting).chain());
+        .add_systems(Update, (step.run_if(switching), apply_lighting).chain());
         let sun = app
             .world_mut()
             .spawn((Sun, DirectionalLight::default(), Transform::default()))

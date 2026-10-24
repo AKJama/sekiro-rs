@@ -55,7 +55,7 @@ pub fn install(app: &mut App, cache: &Path, map: &str) -> anyhow::Result<()> {
         .init_resource::<ArenaVisibility>()
         .insert_resource(StoryHour {
             initial,
-            explicit: crate::ab::explicit_hour(&std::env::args().collect::<Vec<_>>()),
+            explicit: crate::ab::explicit_hour(crate::perf_log::args()),
             legacy_sky: crate::map::sky::legacy_selection(),
         })
         .init_resource::<Scene>()
@@ -152,12 +152,9 @@ fn lighting(
         .and_then(sekiro_sim::story::StoryTime::from_variant)
         .map_or(story.initial, sekiro_sim::story::StoryTime::hour);
     if light.hour != hour {
-        light.hour = hour;
-        light.applied = None;
+        light.set_hour(hour);
         if story.legacy_sky {
-            probes.variant = selection.environment_for_hour(hour);
-            probes.active = None;
-            probes.handles.clear();
+            probes.set_variant(selection.environment_for_hour(hour));
         }
     }
     let environment = scene
@@ -165,12 +162,8 @@ fn lighting(
         .environment
         .map(u32::from)
         .or_else(|| (!story.legacy_sky).then_some(selection.initial.environment));
-    if let Some(variant) = environment
-        && probes.variant != variant
-    {
-        probes.variant = variant;
-        probes.active = None;
-        probes.handles.clear();
+    if let Some(variant) = environment {
+        probes.set_variant(variant);
     }
 }
 

@@ -374,12 +374,12 @@ fn play_options_with(args: &[String], datasets: &std::path::Path) -> anyhow::Res
     // light, probes and sky the game's own flags select at that point (`--hour` overrides).
     // `--ab hour=...` starts on its first hour (#358).
     let ab_hour = ab::AbSwitch::parse(args)?.first("hour");
+    anyhow::ensure!(
+        ab_hour.is_none() || arg_value(args, "--hour").is_none(),
+        "--hour and --ab hour=... both set the clock; give one"
+    );
     let default_hour = match boss_arena {
-        Some(arena)
-            if arg_value(args, "--hour").is_none()
-                && ab_hour.is_none()
-                && arg_value(args, "--story").is_none() =>
-        {
+        Some(arena) if !ab::explicit_hour(args) && arg_value(args, "--story").is_none() => {
             let time = arena.story_time(&opponent);
             eprintln!(
                 "arena {}: story time {} ({} h), set --hour to override",
