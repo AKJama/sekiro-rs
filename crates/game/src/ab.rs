@@ -18,18 +18,26 @@ struct Knob {
 }
 
 /// The knobs `--ab` accepts; adding a variant is one line here.
-const KNOBS: &[Knob] = &[Knob {
-    name: "hour",
-    parse: number,
-    apply: set_hour,
-}];
+const KNOBS: &[Knob] = &[
+    Knob {
+        name: "hour",
+        parse: number,
+        apply: set_hour,
+    },
+    Knob {
+        name: "fog-shadow",
+        parse: on_off,
+        apply: |world, v| {
+            world.insert_resource(crate::lighting::fog::FogShadows(v > 0.5));
+        },
+    },
+];
 
 fn number(v: &str) -> Option<f32> {
     v.parse().ok().filter(|v: &f32| v.is_finite())
 }
 
-/// `on`/`off` as 1/0, for switches such as a future `fog-shadow` knob.
-#[allow(dead_code)]
+/// `on`/`off` as 1/0.
 fn on_off(v: &str) -> Option<f32> {
     match v {
         "on" => Some(1.),
@@ -270,6 +278,18 @@ mod tests {
         }
         assert_eq!(on_off("on"), Some(1.));
         assert_eq!(on_off("maybe"), None);
+    }
+
+    /// The fog-shadow knob turns the per-frame fog shadow switch on and off.
+    #[test]
+    fn fog_shadow_knob_sets_the_switch() {
+        use crate::lighting::fog::FogShadows;
+        let knob = KNOBS.iter().find(|k| k.name == "fog-shadow").unwrap();
+        let mut world = World::new();
+        for (value, on) in [("off", false), ("on", true)] {
+            (knob.apply)(&mut world, (knob.parse)(value).unwrap());
+            assert_eq!(world.resource::<FogShadows>().0, on);
+        }
     }
 
     /// Two knobs step as a counter, the first changing fastest.
