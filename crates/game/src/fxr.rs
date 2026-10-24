@@ -1081,13 +1081,17 @@ fn collect(n: &NodeInst, f: &mut Frame) {
 /// to the camera is projected into the frame's XY plane (`d`), and the basis is
 /// `[z, z x d, -d]` in that frame. The orthonormal result needs the runtime constant it starts
 /// from to be the frame's Z, so the sprite X is `v` itself, Y is `v x d` and the sprite faces
-/// the camera round `v` (#356).
-fn orientation_7(v: Vec3, to_cam: Vec3, cam_f: Vec3) -> (Vec3, Vec3) {
-    let axis = v.normalize_or(Vec3::Z);
-    let d = to_cam
+/// the camera round `v` (#356). That constant is `(0, 0, 1)` (the static initialiser at rva
+/// `f1ca0` copies it from `3289cf0`). A zero `v` (an outward base at the shape centre) takes
+/// `fallback`, the node's Y; a camera looking straight along the vector takes any Y across it.
+fn orientation_7(v: Vec3, fallback: Vec3, to_cam: Vec3, cam_f: Vec3) -> (Vec3, Vec3) {
+    let axis = v.try_normalize().unwrap_or(fallback);
+    let y = to_cam
         .reject_from(axis)
-        .normalize_or(-cam_f.reject_from(axis));
-    (axis, axis.cross(d).normalize_or(Vec3::Y))
+        .try_normalize()
+        .or_else(|| (-cam_f).reject_from(axis).try_normalize())
+        .map_or_else(|| axis.any_orthonormal_vector(), |d| axis.cross(d));
+    (axis, y)
 }
 
 fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
@@ -1291,6 +1295,7 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                         } else {
                             p.dir
                         },
+                        n.world.rotation * Vec3::Y,
                         cam.translation() - world,
                         cam_f,
                     ),
@@ -1303,15 +1308,15 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                 // quad by them before its size scales it, so the shift is in sprite widths and
                 // heights along the sprite's own axes (#356). Their own random stream keeps the
                 // draws after them unchanged.
-                let centre = if at == 600 {
+                const OFFSETS: [Field; 3] = [Field::OffsetX, Field::OffsetY, Field::OffsetZ];
+                let centre = if at == 600 || OFFSETS.iter().all(|&k| a.get(k).is_none()) {
                     world
                 } else {
                     let mut orng = Rnd {
                         seed: p.seed ^ 0x0ff5,
                         k: 0,
                     };
-                    let o = [Field::OffsetX, Field::OffsetY, Field::OffsetZ]
-                        .map(|k| scalar(a, k, p.age, &mut orng, 0.0));
+                    let o = OFFSETS.map(|k| scalar(a, k, p.age, &mut orng, 0.0));
                     world + r2 * (w * o[0]) + u2 * (h * o[1]) + r2.cross(u2) * o[2]
                 };
                 let (corners, soft) = soften(
@@ -2659,7 +2664,7 @@ mod tests {
     fn orientation_7_turns_round_the_particle_vector() {
         let v = Vec3::new(0.2, 1., 0.1).normalize();
         for to_cam in [Vec3::X, Vec3::new(-1., 2., 0.5), Vec3::new(0.3, 0., -4.)] {
-            let (x, y) = orientation_7(v, to_cam, -to_cam.normalize());
+            let (x, y) = orientation_7(v, Vec3::Y, to_cam, -to_cam.normalize());
             assert!(x.distance(v) < 1e-5);
             assert!(x.dot(y).abs() < 1e-5 && (y.length() - 1.).abs() < 1e-5);
             assert!(y.dot(to_cam).abs() < 1e-4, "{y} {to_cam}");
@@ -2667,6 +2672,21 @@ mod tests {
                 x.cross(y).dot(to_cam) < 0.,
                 "the sprite's Z points away from the camera"
             );
+        }
+    }
+
+    /// Orientation 7 never gives a Y along the axis: a zero vector takes the fallback, and a
+    /// camera looking straight along the vector still gets a Y across it.
+    #[test]
+    fn orientation_7_degenerate_cases() {
+        let (x, y) = orientation_7(Vec3::ZERO, Vec3::Y, Vec3::Z, Vec3::NEG_Z);
+        assert_eq!(x, Vec3::Y);
+        assert!(x.dot(y).abs() < 1e-5 && (y.length() - 1.).abs() < 1e-5);
+        for v in [Vec3::Y, Vec3::new(0.3, -1., 0.2).normalize()] {
+            let (x, y) = orientation_7(v, Vec3::Y, v * 3., -v);
+            assert!(x.distance(v) < 1e-5);
+            assert!(x.dot(y).abs() < 1e-5, "{y} along {x}");
+            assert!((y.length() - 1.).abs() < 1e-5, "{y}");
         }
     }
 
