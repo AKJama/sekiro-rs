@@ -12,8 +12,17 @@ struct Fog {
     // DirLight ShadowSampleCount, DirLight ShadowDither, VolumeWidth, and the GpuLights index of
     // the shadow-casting sun, which the CPU resolves for the shadowed frames only.
     shadow: vec4<f32>,
+    // JitterCount, JitterXYSize, FeedbackWeight, EnableReproj (used on the CPU).
+    reproj: vec4<f32>,
 }
-// SHADOW_VOLUME is the DirLightShadow compute pass: one shadow mean per froxel cell, which the
+// One DirLightShadowReproj frame: last frame's view, the ShadowSubpixelOffset (cell-space ray
+// position xy and dither offset) and the history weight, zero without a valid history.
+struct ShadowFrame {
+    prev_clip_from_world: mat4x4<f32>,
+    prev_view_from_world: mat4x4<f32>,
+    jitter: vec4<f32>,
+}
+// SHADOW_VOLUME is the DirLightShadowReproj compute pass: one shadow mean per froxel cell, which the
 // FOG_SHADOW fragment variants read back filtered, as PreShadowed reads the native shadow volume.
 // Without FOG_SHADOW the fragment is the plain WriteInScattering form (variant pick 0x1403a1d10).
 @if(SHADOW_VOLUME) {
@@ -23,6 +32,9 @@ struct Fog {
     @group(0) @binding(3) var shadow_maps: texture_depth_2d_array;
     @group(0) @binding(4) var shadow_sampler: sampler_comparison;
     @group(0) @binding(5) var shadow_out: texture_storage_3d<rgba16float, write>;
+    @group(0) @binding(6) var<uniform> shadow_frame: ShadowFrame;
+    @group(0) @binding(7) var history: texture_3d<f32>;
+    @group(0) @binding(8) var history_sampler: sampler;
 }
 @if(MULTISAMPLED_DEPTH) {
     @group(0) @binding(0) var depth_texture: texture_depth_multisampled_2d;
@@ -113,25 +125,70 @@ fn slice_depth(t: f32) -> f32 {
     let base = max(fog.depths.x+offset, 0.000001);
     return base*pow((fog.depths.y+offset)/base,t/fog.slices.y)-offset;
 }
-// One thread per texel on the cell-centre ray; texel z packs slices 4z..4z+3 into rgba, each
-// spanning the whole slice like the native texel. Slices past the count stay lit.
+// Slice position (integer at slice boundaries) of a view depth: the inverse of slice_depth.
+@if(SHADOW_VOLUME)
+fn slice_position(depth: f32) -> f32 {
+    let offset = fog.slices.x;
+    let base = max(fog.depths.x+offset, 0.000001);
+    return fog.slices.y*log(max(depth+offset,0.000001)/base)/log((fog.depths.y+offset)/base);
+}
+// The view ray through volume uv, with its cosine to the view axis in w.
+@if(SHADOW_VOLUME)
+fn cell_ray(uv: vec2<f32>) -> vec4<f32> {
+    let near_point = view.world_from_clip*vec4(uv.x*2.0-1.0,1.0-uv.y*2.0,1.0,1.0);
+    let ray = normalize(near_point.xyz/near_point.w - view.world_position);
+    return vec4(ray,max(dot(ray,-view.world_from_view[2].xyz),0.0001));
+}
+// One slice of last frame's volume, filtered in xy; the slice picks its packed channel.
+@if(SHADOW_VOLUME)
+fn history_slice(uv: vec2<f32>, slice: u32) -> f32 {
+    let depth = f32(textureDimensions(history).z);
+    return textureSampleLevel(history,history_sampler,vec3(uv,(f32(slice/4u)+0.5)/depth),0.0)[slice%4u];
+}
+// DirLightShadowReproj: last frame's mean at a cell centre, reprojected with last frame's view
+// and filtered in xy and across slices; -1 when it falls within 0.45 cells of the old volume's
+// edge or before its near depth, where the native shader keeps the new mean alone.
+@if(SHADOW_VOLUME)
+fn history_shadow(point: vec3<f32>) -> f32 {
+    let clip = shadow_frame.prev_clip_from_world*vec4(point,1.0);
+    if clip.w <= 0.0 { return -1.0; }
+    let depth = -(shadow_frame.prev_view_from_world*vec4(point,1.0)).z;
+    let count = fog.slices.y;
+    let uvw = vec3(clip.xy/clip.w*vec2(0.5,-0.5) + vec2(0.5),slice_position(depth)/count);
+    let margin = 0.45/vec3(vec2<f32>(textureDimensions(history).xy),count);
+    if depth <= fog.depths.x || any(uvw < margin) || any(uvw > vec3(1.0) - margin) { return -1.0; }
+    let s = clamp(uvw.z*count - 0.5,0.0,count - 1.0);
+    let s0 = u32(s);
+    let s1 = min(s0 + 1u,u32(count) - 1u);
+    return mix(history_slice(uvw.xy,s0),history_slice(uvw.xy,s1),s - f32(s0));
+}
+// One thread per texel; texel z packs slices 4z..4z+3 into rgba, each spanning the whole slice
+// like the native texel. The taps follow the ray at the frame's jittered cell position, the
+// reprojection the cell-centre ray. Slices past the count stay lit.
 @if(SHADOW_VOLUME)
 @compute @workgroup_size(8,8,1)
 fn shadow_volume_cells(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = textureDimensions(shadow_out);
     if any(id >= size) { return; }
-    let uv = (vec2<f32>(id.xy) + 0.5)/vec2<f32>(size.xy);
-    let near_point = view.world_from_clip*vec4(uv.x*2.0-1.0,1.0-uv.y*2.0,1.0,1.0);
-    let ray = normalize(near_point.xyz/near_point.w - view.world_position);
-    let ray_cos = max(dot(ray,-view.world_from_view[2].xyz),0.0001);
+    let cell = vec2<f32>(id.xy);
+    let tap_ray = cell_ray((cell + shadow_frame.jitter.xy)/vec2<f32>(size.xy));
+    let centre_ray = cell_ray((cell + 0.5)/vec2<f32>(size.xy));
     let light = u32(fog.shadow.w);
-    let dither = bayer4(vec2<i32>(id.xy));
+    // Native: the g_DitherTex value plus ShadowSubpixelOffset.z, wrapped at 1.
+    let dither = fract(bayer4(vec2<i32>(id.xy)) + shadow_frame.jitter.z);
     let count = u32(fog.slices.y);
     var shadow = vec4(1.0);
     for (var c = 0u; c < 4u; c += 1u) {
         let slice = id.z*4u + c;
         if slice >= count { break; }
-        shadow[c] = cell_shadow(light,ray,ray_cos,slice_depth(f32(slice)),slice_depth(f32(slice+1u)),dither);
+        var mean = cell_shadow(light,tap_ray.xyz,tap_ray.w,slice_depth(f32(slice)),
+            slice_depth(f32(slice+1u)),dither);
+        if shadow_frame.jitter.w > 0.0 {
+            let centre = view.world_position + centre_ray.xyz*(slice_depth(f32(slice)+0.5)/centre_ray.w);
+            let previous = history_shadow(centre);
+            if previous >= 0.0 { mean = mix(mean,previous,shadow_frame.jitter.w); }
+        }
+        shadow[c] = mean;
     }
     textureStore(shadow_out,id,shadow);
 }

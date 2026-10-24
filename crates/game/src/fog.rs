@@ -8,6 +8,8 @@ use bevy::core_pipeline::{
     FullscreenShader,
     schedule::{Core3d, Core3dSystems},
 };
+use bevy::diagnostic::FrameCount;
+use bevy::ecs::entity::EntityHashMap;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::mesh::VertexAttributeValues;
 use bevy::pbr::{
@@ -25,9 +27,8 @@ use bevy::render::{
     },
     extract_resource::{ExtractResource, ExtractResourcePlugin},
     render_resource::{binding_types::*, *},
-    renderer::ViewQuery,
-    texture::TextureCache,
-    view::{ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
+    renderer::{RenderQueue, ViewQuery},
+    view::{ExtractedView, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
 };
 use sekiro_formats::gparam::Gparam;
 
@@ -59,6 +60,9 @@ pub struct GameFog {
     // vertical cell count), and the render world's GpuLights index of the shadow-casting sun
     // (-1 when there is none; see `shadow_light`).
     shadow: Vec4,
+    // DirLight JitterCount, JitterXYSize, FeedbackWeight and EnableReproj (the PreShadowed
+    // reprojection, read on the CPU by `fog`).
+    reproj: Vec4,
 }
 
 #[cfg(test)]
@@ -136,6 +140,77 @@ mod tests {
         ]);
         let fog = GameFog::from_gparam(&g, 0, 6., Vec3::Y).unwrap();
         assert_eq!(fog.shadow.truncate().truncate(), Vec2::new(3., 1.));
+    }
+
+    #[test]
+    fn shadow_reprojection_follows_the_authored_switch_jitter_and_feedback() {
+        // Omitted rows: EnableReproj on (constructor 1402a0740), the Ashina jitter and feedback.
+        let fog = GameFog::from_gparam(&fixture(vec![]), 0, 6., Vec3::Y).unwrap();
+        assert_eq!(fog.reproj, Vec4::new(4., 1., 0.8, 1.));
+        let g = fixture(vec![
+            ("VolumetricFog DirLight JitterCount", 0, 0., Value::Int(2)),
+            (
+                "VolumetricFog DirLight JitterXYSize",
+                0,
+                0.,
+                Value::Float(0.5),
+            ),
+            (
+                "VolumetricFog DirLight FeedbackWeight",
+                0,
+                0.,
+                Value::Float(0.9),
+            ),
+            (
+                "VolumetricFog DirLight EnableReproj",
+                0,
+                0.,
+                Value::Bool(false),
+            ),
+        ]);
+        let fog = GameFog::from_gparam(&g, 0, 6., Vec3::Y).unwrap();
+        assert_eq!(fog.reproj, Vec4::new(2., 0.5, 0.9, 0.));
+    }
+
+    #[test]
+    fn shadow_jitter_cycles_distinct_cell_positions_and_dither_offsets() {
+        // The user's blocky fog shadows (#345): one fixed ray and dither per cell showed the cell
+        // grid and the 4x4 dither tile. Each of the JitterCount frames must move both.
+        let frames: Vec<Vec3> = (0..4).map(|i| shadow_jitter(i, 4, 1.)).collect();
+        for (i, a) in frames.iter().enumerate() {
+            assert!(a.cmpge(Vec3::ZERO).all() && a.cmplt(Vec3::ONE).all(), "{a}");
+            assert_eq!(a.z, i as f32 / 4.);
+            for b in &frames[i + 1..] {
+                assert!(a.truncate().distance(b.truncate()) > 0.1, "{a} {b}");
+            }
+        }
+        assert_eq!(shadow_jitter(5, 4, 1.), frames[1]);
+        // The sequence averages near the cell centre, and JitterXYSize scales the spread.
+        let mean = frames.iter().map(|f| f.truncate()).sum::<Vec2>() / 4.;
+        assert!(mean.distance(Vec2::splat(0.5)) < 1e-6, "{mean}");
+        assert_eq!(shadow_jitter(1, 4, 0.).truncate(), Vec2::splat(0.5));
+        assert_eq!(shadow_jitter(3, 1, 1.), Vec3::new(0.5, 0.5, 0.));
+    }
+
+    #[test]
+    fn shadow_history_is_used_only_right_after_a_same_size_write() {
+        let reproj = Vec4::new(4., 1., 0.8, 1.);
+        let size = Extent3d {
+            width: 144,
+            height: 80,
+            depth_or_array_layers: 4,
+        };
+        assert_eq!(history_weight(reproj, Some((9, size)), 10, size), 0.8);
+        // First frame, a skipped frame, a resize, or reprojection switched off.
+        assert_eq!(history_weight(reproj, None, 10, size), 0.);
+        assert_eq!(history_weight(reproj, Some((8, size)), 10, size), 0.);
+        let resized = Extent3d { width: 152, ..size };
+        assert_eq!(history_weight(reproj, Some((9, size)), 10, resized), 0.);
+        assert_eq!(
+            history_weight(reproj.with_w(0.), Some((9, size)), 10, size),
+            0.
+        );
+        assert_eq!(history_weight(reproj, Some((u32::MAX, size)), 0, size), 0.8);
     }
 
     #[test]
@@ -826,6 +901,17 @@ impl GameFog {
                 get("VolumeWidth", 160.).clamp(8., 640.),
                 0.,
             ),
+            // Constructor 1402a0740 defaults EnableReproj to true; the other three defaults were
+            // not traced, so the fallbacks are the Ashina GPARAM values (4, 1.0, 0.8).
+            reproj: Vec4::new(
+                get("DirLight JitterCount", 4.).round().clamp(1., 64.),
+                get("DirLight JitterXYSize", 1.).clamp(0., 1.),
+                get("DirLight FeedbackWeight", 0.8).clamp(0., 1.),
+                fog_param_exact(g, "DirLight EnableReproj")
+                    .and_then(|p| p.nearest(id, hour))
+                    .and_then(|v| v.first().copied())
+                    .unwrap_or(1.),
+            ),
         })
     }
 }
@@ -1451,6 +1537,9 @@ fn init_pipeline(
                 texture_2d_array(TextureSampleType::Depth),
                 sampler(SamplerBindingType::Comparison),
                 texture_storage_3d(SHADOW_VOLUME_FORMAT, StorageTextureAccess::WriteOnly),
+                uniform_buffer::<ShadowFrame>(false),
+                texture_3d(TextureSampleType::Float { filterable: true }),
+                sampler(SamplerBindingType::Filtering),
             ),
         ),
     );
@@ -1491,6 +1580,69 @@ fn shadow_volume_size(target: UVec2, volume_width: f32, slices: f32) -> Extent3d
         width: axis(height as f32 * target.x as f32 / target.y as f32, target.x),
         height,
         depth_or_array_layers: (slices as u32).div_ceil(4).max(1),
+    }
+}
+/// One frame of `GXVolumetricFog_DirLightShadowReproj`: last frame's view for the reprojection
+/// (native mtxNowToPrevView and PrevLogDepthRangeInfo), this frame's ShadowSubpixelOffset and the
+/// history weight (ReprojectionFeedback, zero when there is no valid history).
+#[derive(ShaderType, Clone, Copy, Default)]
+struct ShadowFrame {
+    prev_clip_from_world: Mat4,
+    prev_view_from_world: Mat4,
+    // Cell-space ray position xy (0..1 across the cell), dither offset, history weight.
+    jitter: Vec4,
+}
+/// A fog camera's two shadow volumes: the DirLightShadowReproj pass reads last frame's and writes
+/// the other, which the fog then reads.
+pub(crate) struct ShadowHistory {
+    size: Extent3d,
+    volumes: [TextureView; 2],
+    frame: UniformBuffer<ShadowFrame>,
+    /// The volume written last.
+    last: usize,
+    /// FrameCount and views of the last write.
+    written: (u32, Mat4, Mat4),
+    /// Frames written so far, which steps the jitter sequence.
+    writes: u32,
+}
+/// ShadowSubpixelOffset for the `index`th shadow frame: the cell's ray position in xy and the
+/// dither offset, which cycle over JitterCount frames so the history averages them.
+/// 0x14039fa70 adds per-frame offsets to a constant; neither was traced, so this is inferred: a
+/// rank-1 lattice of JitterCount points (one per row and column stratum, centred on the cell
+/// centre and scaled by JitterXYSize), and dither offsets k/JitterCount.
+fn shadow_jitter(index: u32, count: u32, xy_size: f32) -> Vec3 {
+    let n = count.max(1);
+    let k = index % n;
+    // The generator nearest the golden ratio of n that is coprime with n spreads the points.
+    let gcd = |mut a: u32, mut b: u32| {
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        a
+    };
+    let g = ((n as f32 * 0.618).round() as u32..)
+        .find(|&g| gcd(g, n) == 1)
+        .unwrap_or(1);
+    let stratum = |i: u32| (i as f32 + 0.5) / n as f32 - 0.5;
+    Vec3::new(
+        0.5 + stratum(k) * xy_size,
+        0.5 + stratum(k * g % n) * xy_size,
+        k as f32 / n as f32,
+    )
+}
+/// The history weight: FeedbackWeight when reprojection is on and last frame wrote a volume of
+/// this size, else zero (the first frame, after a resize or after frames of plain fog).
+fn history_weight(
+    reproj: Vec4,
+    history: Option<(u32, Extent3d)>,
+    frame: u32,
+    size: Extent3d,
+) -> f32 {
+    let valid = history.is_some_and(|(written, s)| written.wrapping_add(1) == frame && s == size);
+    if reproj.w > 0.5 && valid {
+        reproj.z
+    } else {
+        0.
     }
 }
 /// The GpuLights index of the first shadow-casting sun in the order bevy_pbr's `prepare_lights`
@@ -1553,22 +1705,28 @@ type FogView = (
     &'static DynamicUniformIndex<GameFog>,
     Option<&'static ViewShadowBindings>,
     Option<&'static ViewLightsUniformOffset>,
+    &'static ExtractedView,
+);
+/// The sun shadow and per-frame resources the fog node reads.
+type FogFrame<'w> = (
+    Res<'w, LightMeta>,
+    Res<'w, ShadowSamplers>,
+    Res<'w, FogShadows>,
+    Res<'w, RenderQueue>,
+    Res<'w, FrameCount>,
 );
 pub(crate) fn fog(
     view: ViewQuery<FogView>,
     pipeline: Res<FogPipeline>,
     cache: Res<PipelineCache>,
     (views, uniforms): (Res<ViewUniforms>, Res<ComponentUniforms<GameFog>>),
-    (light_meta, shadow_samplers, fog_shadows, mut textures): (
-        Res<LightMeta>,
-        Res<ShadowSamplers>,
-        Res<FogShadows>,
-        ResMut<TextureCache>,
-    ),
+    (light_meta, shadow_samplers, fog_shadows, queue, frame_count): FogFrame,
     mut ctx: RenderContext,
-    mut warned_depth: Local<bool>,
+    (mut warned_depth, mut histories): (Local<bool>, Local<EntityHashMap<ShadowHistory>>),
 ) {
-    let (settings, target, depth, msaa, offset, index, shadows, lights_offset) = view.into_inner();
+    let view_entity = view.entity();
+    let (settings, target, depth, msaa, offset, index, shadows, lights_offset, extracted) =
+        view.into_inner();
     let Some(depth_view) = depth.attachment.depth_stencil_views().depth_only_view() else {
         if !*warned_depth {
             warn!("global fog skipped: depth-only view is unavailable");
@@ -1609,62 +1767,110 @@ pub(crate) fn fog(
     let diagnostics = ctx.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();
     let span = diagnostics.time_span(ctx.command_encoder(), "game_fog");
-    // DirLightShadow: the sun cascades the map shading uses, tapped once per froxel cell (#345).
-    let volume = ready
-        .shadow
-        .zip(sun)
-        .map(|(shadow_pso, ((shadows, _), lights_binding))| {
-            let size = shadow_volume_size(
-                UVec2::new(
-                    target.main_texture().width(),
-                    target.main_texture().height(),
-                ),
-                settings.shadow.z,
-                settings.slices.y,
-            );
-            let volume = textures.get(
-                ctx.render_device(),
-                TextureDescriptor {
-                    label: Some("game fog shadow volume"),
+    // DirLightShadowReproj: the sun cascades the map shading uses, tapped once per froxel cell at
+    // a per-frame jittered position and blended with last frame's volume (#345).
+    let frame = frame_count.0;
+    let mut volume = None;
+    if let (Some(shadow_pso), Some(((shadows, _), lights_binding))) = (ready.shadow, sun) {
+        let device = ctx.render_device().clone();
+        let size = shadow_volume_size(
+            UVec2::new(
+                target.main_texture().width(),
+                target.main_texture().height(),
+            ),
+            settings.shadow.z,
+            settings.slices.y,
+        );
+        let world_from_view = extracted.world_from_view.to_matrix();
+        let view_from_world = world_from_view.inverse();
+        let clip_from_world = extracted
+            .clip_from_world
+            .unwrap_or(extracted.clip_from_view * view_from_world);
+        // Forget cameras that stopped drawing shadowed fog.
+        histories.retain(|_, h| frame.wrapping_sub(h.written.0) < 600);
+        let previous = histories.get(&view_entity).map(|h| (h.written.0, h.size));
+        let weight = history_weight(settings.reproj, previous, frame, size);
+        if previous.is_none_or(|(_, s)| s != size) {
+            let new_volume = || {
+                device
+                    .create_texture(&TextureDescriptor {
+                        label: Some("game fog shadow volume"),
+                        size,
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: TextureDimension::D3,
+                        format: SHADOW_VOLUME_FORMAT,
+                        usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    })
+                    .create_view(&TextureViewDescriptor::default())
+            };
+            histories.insert(
+                view_entity,
+                ShadowHistory {
                     size,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: TextureDimension::D3,
-                    format: SHADOW_VOLUME_FORMAT,
-                    usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
-                    view_formats: &[],
+                    volumes: [new_volume(), new_volume()],
+                    frame: UniformBuffer::default(),
+                    last: 0,
+                    written: (frame, Mat4::IDENTITY, Mat4::IDENTITY),
+                    writes: 0,
                 },
             );
-            let bindings = ctx.render_device().create_bind_group(
-                "game fog shadow volume",
-                &cache.get_bind_group_layout(&pipeline.shadow_layout),
-                &BindGroupEntries::sequential((
-                    view_binding.clone(),
-                    fog_binding.clone(),
-                    lights_binding,
-                    &shadows.directional_light_depth_texture_view,
-                    &shadow_samplers.directional_light_comparison_sampler,
-                    &volume.default_view,
-                )),
-            );
-            let mut pass = ctx
-                .command_encoder()
-                .begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("game fog shadow volume"),
-                    ..default()
-                });
-            pass.set_pipeline(shadow_pso);
-            pass.set_bind_group(0, &bindings, &offsets);
-            pass.dispatch_workgroups(
-                size.width.div_ceil(8),
-                size.height.div_ceil(8),
-                size.depth_or_array_layers,
-            );
-            volume
+        }
+        let history = histories.get_mut(&view_entity).expect("inserted above");
+        let reproj = settings.reproj.w > 0.5;
+        let jitter = if reproj {
+            shadow_jitter(history.writes, settings.reproj.x as u32, settings.reproj.y)
+        } else {
+            Vec3::new(0.5, 0.5, 0.)
+        };
+        history.frame.set(ShadowFrame {
+            prev_clip_from_world: history.written.1,
+            prev_view_from_world: history.written.2,
+            jitter: jitter.extend(weight),
         });
-    let volume = volume
-        .as_ref()
-        .map(|v| (&v.default_view, &pipeline.volume_sampler));
+        history.frame.write_buffer(&device, &queue);
+        let (read, write) = (history.last, 1 - history.last);
+        let bindings = device.create_bind_group(
+            "game fog shadow volume",
+            &cache.get_bind_group_layout(&pipeline.shadow_layout),
+            &BindGroupEntries::sequential((
+                view_binding.clone(),
+                fog_binding.clone(),
+                lights_binding,
+                &shadows.directional_light_depth_texture_view,
+                &shadow_samplers.directional_light_comparison_sampler,
+                &history.volumes[write],
+                history.frame.binding().expect("written above"),
+                &history.volumes[read],
+                &pipeline.volume_sampler,
+            )),
+        );
+        let mut pass = ctx
+            .command_encoder()
+            .begin_compute_pass(&ComputePassDescriptor {
+                label: Some("game fog shadow volume"),
+                ..default()
+            });
+        pass.set_pipeline(shadow_pso);
+        pass.set_bind_group(0, &bindings, &offsets);
+        pass.dispatch_workgroups(
+            size.width.div_ceil(8),
+            size.height.div_ceil(8),
+            size.depth_or_array_layers,
+        );
+        drop(pass);
+        history.last = write;
+        history.written = (frame, clip_from_world, view_from_world);
+        history.writes = history.writes.wrapping_add(1);
+        volume = Some(write);
+    }
+    let volume = volume.map(|write| {
+        (
+            &histories[&view_entity].volumes[write],
+            &pipeline.volume_sampler,
+        )
+    });
     let layout = cache.get_bind_group_layout(&ready.variant.layout);
     if msaa.samples() > 1 {
         // Preserve per-sample colour/depth correspondence through attenuation and

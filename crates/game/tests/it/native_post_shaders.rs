@@ -71,6 +71,7 @@ const fog = Fog(
     vec4(0.002, 0.01, 0.01, 0.0), vec4(0.1, 400.0, 0.0, 0.0), vec4({sky}, 0.0),
     vec4({direct}, 0.0), vec4({direct}, 0.0), vec4(0.0, 1.0, 0.0, 1.0), vec4(1.0, 1.0, 1.0, 1.0),
     vec4(1.0, 32.0, 0.0, 0.0), vec4(0.0), array<vec4<f32>,16>(), vec4(1.0), vec4(8.0, 0.4, 0.0, 0.0),
+    vec4(4.0, 1.0, 0.8, 1.0),
 );
 fn profile({functions}
 @group(0) @binding(0) var<storage, read_write> result: array<vec4<f32>, 3>;
