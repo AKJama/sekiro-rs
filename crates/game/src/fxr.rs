@@ -1076,20 +1076,16 @@ fn collect(n: &NodeInst, f: &mut Frame) {
     }
 }
 
-/// The sprite's (X, Y) axes for OrientationMode 7, after case 7 of the orientation switch in
-/// the 603 / 604 draws (`436d70`, `440a60`): the particle's vector `v` is the frame's Z, the line
-/// to the camera is projected into the frame's XY plane (`d`), and the basis is
-/// `[z, z x d, -d]` in that frame. The orthonormal result needs the runtime constant it starts
-/// from to be the frame's Z, so the sprite X is `v` itself, Y is `v x d` and the sprite faces
-/// the camera round `v` (#356). That constant is `(0, 0, 1)` (the static initialiser at rva
-/// `f1ca0` copies it from `3289cf0`). A zero `v` (an outward base at the shape centre) takes
-/// `fallback`, the node's Y; a camera looking straight along the vector takes any Y across it.
+/// The sprite's (X, Y) axes for OrientationMode 7, after case 7 in the 603 / 604 draws
+/// (`436d70`, `440a60`, #356): X is the particle's vector `v`, Y is `v x d` with `d` the line to
+/// the camera across `v`, so the sprite faces the camera round `v` (the runtime constant at
+/// `143f085d0` is `(0, 0, 1)`, its zero-cross fallback `(1, 0, 0)`). A zero `v` takes `fallback`.
 fn orientation_7(v: Vec3, fallback: Vec3, to_cam: Vec3, cam_f: Vec3) -> (Vec3, Vec3) {
     let axis = v.try_normalize().unwrap_or(fallback);
     let y = to_cam
-        .reject_from(axis)
+        .reject_from_normalized(axis)
         .try_normalize()
-        .or_else(|| (-cam_f).reject_from(axis).try_normalize())
+        .or_else(|| (-cam_f).reject_from_normalized(axis).try_normalize())
         .map_or_else(|| axis.any_orthonormal_vector(), |d| axis.cross(d));
     (axis, y)
 }
@@ -1146,6 +1142,17 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
             p.pos
         }
     };
+    let world_dir = |p: &crate::fxr_tree::Particle| {
+        if p.attached {
+            n.world.rotation * p.dir
+        } else {
+            p.dir
+        }
+    };
+    const OFFSETS: [Field; 3] = [Field::OffsetX, Field::OffsetY, Field::OffsetZ];
+    let has_offset = OFFSETS.iter().any(|&k| a.get(k).is_some());
+    let orientation = int(a, Field::Orientation, 1);
+    let node_y = n.world.rotation * Vec3::Y;
     // Lit particles take only the lights and volumes reaching this node's particles (#324).
     let lit = is_lit(a) && !n.particles.is_empty();
     if lit {
@@ -1275,12 +1282,8 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                         * scalar(a, Field::AngularSpeedMultiplierZ, p.age, &mut rnd, 1.0)
                         * p.age)
                     .to_radians();
-                // OrientationMode: 1 / 6 camera, 4 yaw toward the camera, 2 the node's frame,
-                // 0 / 3 global. 7 (the switch in the 603 / 604 draws `436d70` / `440a60`, #356):
-                // a cylinder about the particle's own vector, its X along that vector and its Y
-                // across it and the line to the camera, so the sprite's width runs along the
-                // particle (the item glint's rays rise from the item instead of lying across it).
-                let (right, up) = match int(a, Field::Orientation, 1) {
+                // OrientationMode: 1 / 6 camera, 4 yaw, 2 node frame, 0 / 3 global, 7 round the vector.
+                let (right, up) = match orientation {
                     0 | 3 => (Vec3::X, Vec3::Y),
                     2 => (n.world.rotation * Vec3::X, n.world.rotation * Vec3::Y),
                     4 => {
@@ -1289,27 +1292,15 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                             .normalize_or(cam_f);
                         (Vec3::Y.cross(to_cam).normalize_or(cam_r), Vec3::Y)
                     }
-                    7 => orientation_7(
-                        if p.attached {
-                            n.world.rotation * p.dir
-                        } else {
-                            p.dir
-                        },
-                        n.world.rotation * Vec3::Y,
-                        cam.translation() - world,
-                        cam_f,
-                    ),
+                    7 => orientation_7(world_dir(p), node_y, cam.translation() - world, cam_f),
                     _ => (cam_r, cam_u),
                 };
                 let (cr, sr) = (rz.cos(), rz.sin());
                 let (r2, u2) = (right * cr + up * sr, up * cr - right * sr);
                 let (hw, hh) = (r2 * w * 0.5, u2 * h * 0.5);
-                // offsetX / Y / Z (properties 2 to 4 of 603 and 604): the draws move the unit
-                // quad by them before its size scales it, so the shift is in sprite widths and
-                // heights along the sprite's own axes (#356). Their own random stream keeps the
-                // draws after them unchanged.
-                const OFFSETS: [Field; 3] = [Field::OffsetX, Field::OffsetY, Field::OffsetZ];
-                let centre = if at == 600 || OFFSETS.iter().all(|&k| a.get(k).is_none()) {
+                // offsetX / Y / Z move the unit quad before its size scales it: sprite widths and
+                // heights along its own axes (#356), on their own random stream.
+                let centre = if !has_offset {
                     world
                 } else {
                     let mut orng = Rnd {
@@ -1421,11 +1412,7 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                 let len = scalar(a, Field::Length, p.emit_t, &mut rnd, 1.0)
                     * scalar(a, Field::LengthMultiplier, p.age, &mut rnd, 1.0)
                     * sy;
-                let d = if p.attached {
-                    n.world.rotation * p.dir
-                } else {
-                    p.dir
-                };
+                let d = world_dir(p);
                 let side = d.cross(cam_f).normalize_or(cam_r) * wl * 0.5;
                 let tail = world - d * len;
                 f.bufs.entry((-1, additive(blend))).or_default().quad(
@@ -2572,23 +2559,31 @@ mod tests {
         light.intensity * native.falloff(d)
     }
 
-    /// #141: the item glint (FFX 61) lights a small spot, not a 1.5 m pool, while a typical
-    /// fire light (radius 5, falloff 2.5, the most common pair) still reaches the walls.
-    #[test]
-    fn item_glint_light_falls_off_within_half_a_metre() {
+    /// FFX 61 (the item glint) held 1.5 s at the origin, or None when the cache is missing.
+    fn held_item_glint() -> Option<FxrPlayer> {
         let cache = sekiro_sim::cache::root();
         if !cache
             .join("raw/sfx/sfxbnd_commoneffects.ffxbnd.d/f000000061.fxr")
             .exists()
         {
             eprintln!("skipping: cache not extracted");
-            return;
+            return None;
         }
         let mut player = FxrPlayer::new(cache);
         player.hold(GLINTS, 61, 0, Transform::IDENTITY, true);
         for _ in 0..90 {
             player.advance(1. / 60.);
         }
+        Some(player)
+    }
+
+    /// #141: the item glint (FFX 61) lights a small spot, not a 1.5 m pool, while a typical
+    /// fire light (radius 5, falloff 2.5, the most common pair) still reaches the walls.
+    #[test]
+    fn item_glint_light_falls_off_within_half_a_metre() {
+        let Some(player) = held_item_glint() else {
+            return;
+        };
         let cam = GlobalTransform::from(Transform::from_xyz(0., 1.5, 3.));
         let buffers = collect_all(&player, &cam, Default::default());
         let [glint] = buffers.lights[..] else {
@@ -2615,19 +2610,9 @@ mod tests {
     /// instead of lying across the floor centred on the item, seen from any side or above.
     #[test]
     fn item_glint_rays_rise_from_the_item() {
-        let cache = sekiro_sim::cache::root();
-        if !cache
-            .join("raw/sfx/sfxbnd_commoneffects.ffxbnd.d/f000000061.fxr")
-            .exists()
-        {
-            eprintln!("skipping: cache not extracted");
+        let Some(player) = held_item_glint() else {
             return;
-        }
-        let mut player = FxrPlayer::new(cache);
-        player.hold(GLINTS, 61, 0, Transform::IDENTITY, true);
-        for _ in 0..90 {
-            player.advance(1. / 60.);
-        }
+        };
         for eye in [
             Vec3::new(0., 1.5, 3.),
             Vec3::new(2.5, 1., -1.),
@@ -2649,10 +2634,8 @@ mod tests {
                     along.normalize().y > 15f32.to_radians().cos(),
                     "ray leans: {along} from {eye}"
                 );
-                let ys = [q[0][1], q[1][1], q[2][1], q[5][1]];
-                let (lo, hi) = ys
-                    .iter()
-                    .fold((f32::MAX, f32::MIN), |(lo, hi), &y| (lo.min(y), hi.max(y)));
+                let lo = q.iter().map(|v| v[1]).fold(f32::MAX, f32::min);
+                let hi = q.iter().map(|v| v[1]).fold(f32::MIN, f32::max);
                 assert!(lo > -0.2 && lo < 0.05, "ray starts at {lo} from {eye}");
                 assert!(hi > 0.5, "ray ends at {hi} from {eye}");
             }
