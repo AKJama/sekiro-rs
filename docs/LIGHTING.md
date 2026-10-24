@@ -428,7 +428,9 @@ Native SkyDome forward shaders sample finite mesh depth, so the post pass now in
 An independent triangle intersection regression checks the supported exported SkyDome meshes, including Hirata and the night variants.
 The native solver integrates view-depth slice thickness and writes far-plane scattering colour with alpha zero in its analytical padding layer; continuation now uses that source and the full added optical depth.
 Background uploads run after sky swaps without reintroducing fog on the sweep's diagnostic cameras.
-Clear pixels outside a supported finite dome use the terminal authored volume; separate transparent-surface depth, local fog sources and shadowed fog remain renderer fidelity work.
+Clear pixels outside a supported finite dome use the terminal authored volume; separate transparent-surface depth and local fog sources remain renderer fidelity work.
+Fog sun light is shadowed by the sun cascades as in the game's WriteInScatteringShadowed pass (#345): the mean of ShadowSampleCount taps across each cell scales only the DirectColor/OppositeColor in-scatter, so shaded valleys keep their sky-coloured haze but lose the sun-tinted part.
+The game runs the temporally reprojected PreShadowed form of the same taps on Ashina; we do not reproject, see [SHADERS.md](SHADERS.md).
 Captured inputs, source/binary hashes, before/after images, the review sheet and gate measurements are retained under `target/alt-fog/captures/`.
 The follow-up disproves the suspected normal/all-visible fog mismatch: both colour passes reuse one native camera, while only the independent depth and collision cameras strip fog.
 An Outskirts view-0 control with fog disabled in both colour renders measures grey/pop-in 5/8707, versus 17/8753 with identical fog uniforms in both renders, retaining void/depth-gap/untextured 0/75/0.
