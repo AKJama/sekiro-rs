@@ -36,7 +36,7 @@ use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::light::GlobalAmbientLight;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
-use bevy::window::{CursorGrabMode, CursorOptions};
+use bevy::window::{CursorGrabMode, CursorOptions, WindowFocused};
 use sekiro_sim::duel::{Duel, DuelReport};
 use sekiro_sim::enemy::EnemySpec;
 use sekiro_sim::{Buttons, InputFrame, StepReport, demo};
@@ -1716,8 +1716,36 @@ fn spawn_floor_stage(
 #[derive(Default)]
 struct MouseCapture {
     focus_requested: bool,
-    first_click_grabbed: bool,
+    /// Frames left in which a left press still counts as the click that brought the window to
+    /// the front ([`FOCUS_CLICK_FRAMES`]).
+    focus_click_frames: u8,
+    /// The held left press took the mouse, so it is not an attack until released.
     grab_click: bool,
+}
+
+/// How many frames after the window gains focus a left press still counts as the focusing
+/// click: the activation and the press may land either side of a frame boundary.
+const FOCUS_CLICK_FRAMES: u8 = 2;
+
+impl MouseCapture {
+    /// Takes this frame's focus change, `gained` when the window came to the front.
+    fn focus(&mut self, gained: bool) {
+        self.focus_click_frames = if gained {
+            FOCUS_CLICK_FRAMES
+        } else {
+            self.focus_click_frames.saturating_sub(1)
+        };
+    }
+
+    /// A left press in the focused window: whether it takes the mouse for the camera instead of
+    /// attacking. It does while the cursor is free (after Esc) and for the click that brought
+    /// the window to the front. Any other press attacks, the first one after loading too: play
+    /// captures the cursor as it starts, so that press has nothing to take (#336).
+    fn press_takes_mouse(&mut self, cursor_locked: bool) -> bool {
+        let takes = !cursor_locked || self.focus_click_frames > 0;
+        self.grab_click |= takes;
+        takes
+    }
 }
 
 /// Sekiro's PC defaults (DefaultKeyAssignParam00, as read by FwLo's RustSekiro) for the play
@@ -1789,8 +1817,10 @@ fn gather_input(
     orbit: Res<Orbit>,
     mut live: ResMut<LiveInput>,
     mut windows: Query<(&mut Window, &mut CursorOptions)>,
+    mut focus_changes: MessageReader<WindowFocused>,
     mut capture: Local<MouseCapture>,
 ) {
+    capture.focus(focus_changes.read().any(|f| f.focused));
     if fade.alpha > 0.0 {
         live.frame = InputFrame::default();
         return;
@@ -1803,8 +1833,9 @@ fn gather_input(
         c.visible = false;
         capture.focus_requested = true;
     }
-    // A click while the cursor is free (after Esc) takes the mouse back for the camera; that
-    // click is not an attack. Not while a screen over the game (the idol menu) has the mouse.
+    // A click while the cursor is free (after Esc) or that brings the window to the front takes
+    // the mouse for the camera; that click is not an attack. Not while a screen over the game
+    // (the idol menu) has the mouse.
     if !mouse.pressed(MouseButton::Left) {
         capture.grab_click = false;
     }
@@ -1813,12 +1844,10 @@ fn gather_input(
         && let Ok((window, mut c)) = windows.single_mut()
         && window.focused
         && window.cursor_position().is_some()
-        && (!capture.first_click_grabbed || c.grab_mode != CursorGrabMode::Locked)
+        && capture.press_takes_mouse(c.grab_mode == CursorGrabMode::Locked)
     {
         c.grab_mode = CursorGrabMode::Locked;
         c.visible = false;
-        capture.first_click_grabbed = true;
-        capture.grab_click = true;
     }
     // Keys still held from a menu that just closed wait for their release.
     let (mut stick, mut b) = keyboard_input(|k| held.key(&keys, k), |m| held.button(&mouse, m));
@@ -3571,5 +3600,82 @@ mod tests {
         }
         assert!(route.steer(Vec2::ZERO).is_none());
         assert!(route.done());
+    }
+
+    /// Left clicks through `gather_input` (#336): the first click after loading attacks, as the
+    /// cursor was captured when play started, while the click that brings the window to the
+    /// front and a click with the cursor free (after Esc) only take the mouse.
+    #[test]
+    fn first_click_after_loading_attacks() {
+        let mut world = World::new();
+        world.init_resource::<cinematic_fade::Fade>();
+        world.init_resource::<ButtonInput<KeyCode>>();
+        world.init_resource::<ButtonInput<MouseButton>>();
+        world.init_resource::<crate::menu::HeldThroughMenu>();
+        world.init_resource::<LiveInput>();
+        world.init_resource::<Messages<WindowFocused>>();
+        world.insert_resource(Orbit {
+            focus: Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.0,
+            distance: 4.5,
+            look: Default::default(),
+        });
+        let mut window = Window {
+            focused: true,
+            ..default()
+        };
+        window.set_physical_cursor_position(Some(bevy::math::DVec2::new(400.0, 300.0)));
+        let window = world.spawn((window, CursorOptions::default())).id();
+        let gather = world.register_system(gather_input);
+        // One rendered frame: the left button held or not, and whether the window came to the
+        // front. Returns whether Wolf's attack button is down.
+        let frame = |world: &mut World, held: bool, focused: bool| {
+            {
+                let mut mouse = world.resource_mut::<ButtonInput<MouseButton>>();
+                mouse.clear();
+                if held {
+                    mouse.press(MouseButton::Left);
+                } else {
+                    mouse.release(MouseButton::Left);
+                }
+            }
+            let mut messages = world.resource_mut::<Messages<WindowFocused>>();
+            messages.update();
+            if focused {
+                messages.write(WindowFocused {
+                    window,
+                    focused: true,
+                });
+            }
+            world.run_system(gather).unwrap();
+            world.resource::<LiveInput>().frame.buttons.attack
+        };
+        // Play starts: the window is focused and the cursor captured, then loading takes a
+        // while.
+        frame(&mut world, false, true);
+        for _ in 0..10 {
+            frame(&mut world, false, false);
+        }
+        assert_eq!(
+            world.get::<CursorOptions>(window).unwrap().grab_mode,
+            CursorGrabMode::Locked
+        );
+        assert!(frame(&mut world, true, false), "the first click attacks");
+        frame(&mut world, false, false);
+        // Back from another window: the click that focuses this one does not attack, also
+        // while held, and the next one does.
+        assert!(!frame(&mut world, true, true));
+        assert!(!frame(&mut world, true, false));
+        frame(&mut world, false, false);
+        assert!(frame(&mut world, true, false));
+        frame(&mut world, false, false);
+        // After Esc the cursor is free: the click takes it back without attacking.
+        world.get_mut::<CursorOptions>(window).unwrap().grab_mode = CursorGrabMode::None;
+        assert!(!frame(&mut world, true, false));
+        assert_eq!(
+            world.get::<CursorOptions>(window).unwrap().grab_mode,
+            CursorGrabMode::Locked
+        );
     }
 }
