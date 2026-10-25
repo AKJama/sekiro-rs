@@ -372,7 +372,8 @@ fn audit_map(
                     .any(|((n, _), ok)| n == name && *ok)
                     .then(|| format!("tex/{name}.dds"))
             };
-            match pieces::build(&f, mtds, &uri) {
+            let masks = super::textures::translucency_masks(store, &pieces::mask_keys(&f, mtds));
+            match pieces::build(&f, mtds, &uri, &masks) {
                 Ok(built) if built.primitives > 0 => {
                     std::fs::create_dir_all(out.join("models"))?;
                     std::fs::write(out.join(format!("models/{model}.glb")), &built.glb)?;

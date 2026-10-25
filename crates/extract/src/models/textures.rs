@@ -248,8 +248,14 @@ pub fn texture_stem(path: &str) -> &str {
 
 /// Decodes mip 0 of a DDS to tightly packed RGBA8.
 pub fn decode_rgba(header: &Dds, dds: &[u8]) -> Result<Vec<u8>> {
-    let (w, h) = (header.width as usize, header.height as usize);
-    let src = header.top_mip(dds)?;
+    decode_rgba_mip(header, dds, 0)
+}
+
+/// Decodes mip `level` of a DDS (its size is [`Dds::mip_size`]) to tightly packed RGBA8.
+pub fn decode_rgba_mip(header: &Dds, dds: &[u8], level: u32) -> Result<Vec<u8>> {
+    let (w, h) = header.mip_size(level);
+    let (w, h) = (w as usize, h as usize);
+    let src = header.mip(dds, level)?;
     let mut pixels = vec![0u32; w * h];
     let r = match header.format {
         DdsFormat::Bc1 => texture2ddecoder::decode_bc1a(src, w, h, &mut pixels),

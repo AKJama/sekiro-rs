@@ -45,6 +45,15 @@ impl Mtd {
             .find(|p| p.name == name)
             .map(|p| &p.value)
     }
+
+    /// The first parameter whose name ends with `suffix`, e.g. `_snp_0_float_0`, whose prefix
+    /// varies by shader.
+    pub fn param_suffix(&self, suffix: &str) -> Option<&ParamValue> {
+        self.params
+            .iter()
+            .find(|p| p.name.ends_with(suffix))
+            .map(|p| &p.value)
+    }
 }
 
 struct Mr<'a> {

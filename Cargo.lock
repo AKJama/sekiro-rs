@@ -5284,7 +5284,6 @@ dependencies = [
  "sekiro-formats",
  "sekiro-sim",
  "serde_json",
- "texture2ddecoder",
  "tracing",
  "wgpu",
  "windows",

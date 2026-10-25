@@ -574,18 +574,19 @@ pub fn export(game: &Path, cache: &Path, id: &str, selected_models: &[String]) -
         );
     }
 
-    // Pass 1: which textures do the pieces want?
-    let wanted: BTreeSet<(String, bool)> = used
+    // Pass 1: which textures do the pieces want, and which translucency masks?
+    let (wanted, mask_keys): (Vec<_>, Vec<_>) = used
         .par_iter()
         .filter_map(|(_, path)| {
             let data = std::fs::read(path).ok()?;
             let f = flver::parse(&data).ok()?;
-            Some(pieces::wanted_textures(&f, &mtds))
+            Some((
+                pieces::wanted_textures(&f, &mtds),
+                pieces::mask_keys(&f, &mtds),
+            ))
         })
-        .flatten()
-        .collect::<Vec<_>>()
-        .into_iter()
-        .collect();
+        .unzip();
+    let wanted: BTreeSet<(String, bool)> = wanted.into_iter().flatten().collect();
 
     // Pass 2: write the textures that exist.
     let mut store = MapTextures::open(&raw, oodle)?;
@@ -632,6 +633,9 @@ pub fn export(game: &Path, cache: &Path, id: &str, selected_models: &[String]) -
         .collect::<Vec<_>>()
         .into_iter()
         .collect();
+    // Read every time, including when the textures above were already on disk.
+    let masks = textures::translucency_masks(&store, mask_keys.iter().flatten());
+    eprintln!("  {} translucency masks", masks.len());
     let missing: Vec<&String> = wanted
         .iter()
         .map(|(n, _)| n)
@@ -673,7 +677,7 @@ pub fn export(game: &Path, cache: &Path, id: &str, selected_models: &[String]) -
                 let data =
                     std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
                 let f = flver::parse(&data)?;
-                let built = pieces::build(&f, &mtds, &uri)?;
+                let built = pieces::build(&f, &mtds, &uri, &masks)?;
                 if built.primitives == 0 {
                     return Ok((None, "no_exported_primitives".to_owned()));
                 }

@@ -356,6 +356,14 @@ pub(super) fn export(cache: &Path, id: &str, map: &msb::Msb, oodle: &'static Ood
         .values()
         .flat_map(|f| pieces::wanted_textures(f, &mtds))
         .collect();
+    let masks = textures::translucency_masks(
+        &store,
+        parsed
+            .values()
+            .flat_map(|f| pieces::mask_keys(f, &mtds))
+            .collect::<Vec<_>>()
+            .iter(),
+    );
     let mut written = BTreeSet::new();
     for (name, normal) in wanted {
         let dds = store
@@ -370,9 +378,12 @@ pub(super) fn export(cache: &Path, id: &str, map: &msb::Msb, oodle: &'static Ood
         written.insert(name);
     }
     for (name, f) in parsed {
-        let built = pieces::build(&f, &mtds, &|name| {
-            written.contains(name).then(|| format!("tex/{name}.dds"))
-        })?;
+        let built = pieces::build(
+            &f,
+            &mtds,
+            &|name| written.contains(name).then(|| format!("tex/{name}.dds")),
+            &masks,
+        )?;
         ensure!(built.primitives > 0, "grass model {name} has no geometry");
         std::fs::write(out.join(format!("models/{name}.glb")), built.glb)?;
     }

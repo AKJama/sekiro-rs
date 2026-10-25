@@ -124,12 +124,7 @@ fn decode(data: &[u8]) -> Result<Cube> {
         "expected unsigned BC6H, got {:?}",
         h.format
     );
-    let stride: usize = (0..h.mip_count)
-        .map(|m| {
-            let n = (128usize >> m).max(1);
-            n.div_ceil(4).pow(2) * 16
-        })
-        .sum();
+    let stride = h.image_len().context("BC6H cube face size")?;
     ensure!(
         data.len() >= h.data_offset + stride * 6,
         "truncated BC6H cube"

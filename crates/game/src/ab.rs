@@ -38,6 +38,16 @@ const KNOBS: &[Knob] = &[
             }
         },
     },
+    Knob {
+        name: "translucency",
+        parse: on_off,
+        apply: |world, v| {
+            let on = crate::map::FoliageTranslucency(v > 0.5);
+            if world.get_resource::<crate::map::FoliageTranslucency>() != Some(&on) {
+                world.insert_resource(on);
+            }
+        },
+    },
 ];
 
 fn number(v: &str) -> Option<f32> {
@@ -293,6 +303,21 @@ mod tests {
         for (value, on) in [("off", false), ("on", true)] {
             (knob.apply)(&mut world, (knob.parse)(value).unwrap());
             assert_eq!(world.resource::<FogShadows>().0, on);
+        }
+    }
+
+    /// The translucency knob turns the foliage translucency of the map light buffer on and off.
+    #[test]
+    fn translucency_knob_sets_the_switch() {
+        use crate::map::FoliageTranslucency;
+        let knob = KNOBS.iter().find(|k| k.name == "translucency").unwrap();
+        let mut world = World::new();
+        for (value, on) in [("off", false), ("on", true)] {
+            (knob.apply)(&mut world, (knob.parse)(value).unwrap());
+            assert_eq!(
+                *world.resource::<FoliageTranslucency>(),
+                FoliageTranslucency(on)
+            );
         }
     }
 

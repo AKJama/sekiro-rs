@@ -234,13 +234,45 @@ impl Dds {
 
     /// Byte length of mip level 0 of the first image.
     pub fn top_mip_len(&self) -> Option<usize> {
+        self.mip_len(0)
+    }
+
+    /// Width and height of mip `level`.
+    pub fn mip_size(&self, level: u32) -> (u32, u32) {
+        ((self.width >> level).max(1), (self.height >> level).max(1))
+    }
+
+    /// Byte length of mip `level` of one 2D image.
+    pub fn mip_len(&self, level: u32) -> Option<usize> {
         let (bytes, blocks) = self.format.block_bytes()?;
-        let (w, h) = (self.width as usize, self.height as usize);
+        let (w, h) = self.mip_size(level);
+        let (w, h) = (w as usize, h as usize);
         Some(if blocks {
             w.div_ceil(4) * h.div_ceil(4) * bytes
         } else {
             w * h * bytes
         })
+    }
+
+    /// Byte length of one 2D image with its whole mip chain: the stride between cubemap faces
+    /// and array slices.
+    pub fn image_len(&self) -> Option<usize> {
+        (0..self.mip_count).map(|m| self.mip_len(m)).sum()
+    }
+
+    /// The pixel data of mip `level` of the first image (first face for cubemaps).
+    pub fn mip<'a>(&self, data: &'a [u8], level: u32) -> Result<&'a [u8]> {
+        if level >= self.mip_count {
+            return bail(format!("DDS mip {level} of {}", self.mip_count));
+        }
+        let lens = (0..=level)
+            .map(|m| self.mip_len(m))
+            .collect::<Option<Vec<_>>>();
+        let Some(lens) = lens else {
+            return bail(format!("unsupported DDS format {:?}", self.format));
+        };
+        let offset = self.data_offset + lens[..level as usize].iter().sum::<usize>();
+        crate::reader::slice(data, offset, lens[level as usize])
     }
 
     /// The pixel data of mip level 0 of the first image (first face for cubemaps).
@@ -384,6 +416,27 @@ mod decode_tests {
         bytes[84..88].copy_from_slice(format_code);
         bytes.extend_from_slice(payload);
         bytes
+    }
+
+    #[test]
+    fn mips_follow_the_whole_chain_before_them() {
+        // BC1 16x8 with three mips: 4x2, 2x1 and 1x1 blocks of 8 bytes.
+        let payload: Vec<u8> = [(1u8, 64), (2, 16), (3, 8)]
+            .iter()
+            .flat_map(|&(v, n)| std::iter::repeat_n(v, n))
+            .collect();
+        let mut data = dds(b"DXT1", 16, 8, &payload);
+        data[28..32].copy_from_slice(&3u32.to_le_bytes());
+        let header = Dds::parse(&data).unwrap();
+        assert_eq!(header.mip_size(2), (4, 2));
+        assert_eq!(header.image_len(), Some(88));
+        for (level, value, len) in [(0, 1, 64), (1, 2, 16), (2, 3, 8)] {
+            let mip = header.mip(&data, level).unwrap();
+            assert_eq!(mip.len(), len);
+            assert!(mip.iter().all(|&b| b == value), "mip {level}");
+        }
+        assert!(header.mip(&data, 3).is_err());
+        assert!(header.mip(&data[..data.len() - 1], 2).is_err());
     }
 
     #[test]

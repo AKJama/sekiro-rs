@@ -345,15 +345,14 @@ fn native_point_lights(pbr: PbrInput, scale: f32, btl_residual: f32) -> vec3<f32
 }
 
 // Native diffuse response of the sun and fill slots (GXLightAcc_DDirLightShadowed1). A pixel with
-// G-buffer translucency k > 0 (M[Translucency]* foliage, translucency.rs) takes wrapped Lambert
-// max(N.L + k, 0) / (1 + 2k) plus a back-light lobe toward the light, saturate(L.-V)^32 *
-// ((N.V + 1) / 2)^2 * k / (1 + k); other pixels take plain saturate(N.L) (#367).
+// G-buffer translucency k (M[Translucency]* foliage, the extractor's `sekiro_translucency`) takes
+// wrapped Lambert max(N.L + k, 0) / (1 + 2k) plus a back-light lobe toward the light,
+// saturate(L.-V)^32 * ((N.V + 1) / 2)^2 * k / (1 + k); k = 0 is plain saturate(N.L) (#367).
+@if(NATIVE_DIRECT)
 fn translucent_diffuse(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, k: f32) -> f32 {
-    let nl = dot(n,l);
-    if k<=0.0 { return max(nl,0.0); }
     let facing = 0.5*max(dot(v,n)+1.0,0.0);
     let back = pow(saturate(dot(l,-v)),32.0)*facing*facing;
-    return max(nl+k,0.0)/(1.0+2.0*k)+back*k/(1.0+k);
+    return max(dot(n,l)+k,0.0)/(1.0+2.0*k)+back*k/(1.0+k);
 }
 
 // Native four-slot colour routing with the recovered directional accumulation.
@@ -383,11 +382,12 @@ fn native_direct(pbr: PbrInput, light: MapLight, translucency: f32) -> vec3<f32>
         // fill and to both local slots. The world X mirror and camera -Z conversion
         // cancel that rotation into the packed direction used here.
         if light.direct[i*3u].w>0.0 { direction = (view.world_from_view*vec4(direction,0.0)).xyz; }
-        var derived = derive_lighting_input(pbr.N,pbr.V,normalize(direction));
-        let nl = max(dot(pbr.N,normalize(direction)),0.0);
-        let h = normalize(pbr.V+normalize(direction));
+        let l = normalize(direction);
+        var derived = derive_lighting_input(pbr.N,pbr.V,l);
+        let nl = max(dot(pbr.N,l),0.0);
+        let h = normalize(pbr.V+l);
         let nh = max(dot(pbr.N,h),0.0);
-        let lh = max(dot(normalize(direction),h),0.0);
+        let lh = max(dot(l,h),0.0);
         // Native gloss is exported as 1 - perceptual roughness.
         let q = clamp(1.0-pbr.material.perceptual_roughness,0.0,1.0);
         let sharpness = max(light.direct[i*3u+1u].w,0.075);
@@ -397,8 +397,12 @@ fn native_direct(pbr: PbrInput, light: MapLight, translucency: f32) -> vec3<f32>
         let f0 = calculate_F0(pbr.material.base_color.rgb,pbr.material.metallic,pbr.material.reflectance);
         let f = f0+(1.0-f0)*pow(1.0-lh,5.0);
         let vis = 1.0/(max(nl,nv)*(1.0-a*0.5)+a*0.5);
-        var diffuse_angle = translucent_diffuse(pbr.N,pbr.V,normalize(direction),translucency);
-        if i>=2u { diffuse_angle = min(pow(0.5*dot(pbr.N,normalize(direction))+0.5,2.0),1.0); }
+        var diffuse_angle: f32;
+        if i<2u {
+            diffuse_angle = translucent_diffuse(pbr.N,pbr.V,l,translucency);
+        } else {
+            diffuse_angle = min(pow(0.5*dot(pbr.N,l)+0.5,2.0),1.0);
+        }
         // The packed colours carry SCENE_TO_BEVY = pi / exposure, so both terms take 1/pi;
         // native D (GXLightAcc_DDirLight1) already contains its own 1/pi, kept in d above (#7).
         correction += (li.diffuse_color*diffuse*diffuse_angle+f*d*nl*vis*specular_rgb)/3.14159265*select(1.0,sun_shadow,i==0u);
@@ -851,7 +855,7 @@ vertex: VertexOutput,
     if !unlit { out.color = apply_pbr_lighting(pbr); }
     @if(NATIVE_DIRECT) {
         if !unlit && light.direct[12].x>0.0 {
-            out.color = vec4(out.color.rgb+native_direct(pbr,light,layers.translucency.x),out.color.a);
+            out.color = vec4(out.color.rgb+native_direct(pbr,light,layers.camera_fade.w*light.switches.x),out.color.a);
             if light.direct[12].y>0.0 {
                 out.color = vec4(out.color.rgb+native_point_lights(pbr,light.direct[12].z,light.direct[12].w),out.color.a);
             }

@@ -6,9 +6,8 @@ struct Layers {
     albedo_uv: vec4<f32>,
     normal_uv: vec4<f32>,
     normal_enabled: vec4<f32>,
+    // xyz: camera fade (camera_fade.rs); w: native foliage translucency k (#367).
     camera_fade: vec4<f32>,
-    // x: native foliage translucency k (translucency.rs).
-    translucency: vec4<f32>,
     game: MapGame,
 }
 // LightSet values shared by every map material (MapLightBuffer).
@@ -16,6 +15,8 @@ struct MapLight {
     direct: array<vec4<f32>, 13>,
     hemi_axis: vec4<f32>,
     hemi_delta: vec4<f32>,
+    // x: foliage translucency scale, 1 or 0 (the `--ab translucency` knob).
+    switches: vec4<f32>,
 }
 @if(BINDLESS) {
     struct LayerIndices {
