@@ -108,6 +108,7 @@ pub(super) fn sweep_base(world: &World, entity: Entity) -> Option<SweepMaterial>
                 &layer.mask_l,
                 &layer.wet,
                 &layer.metal,
+                &layer.translucency_mask,
             ]
             .into_iter()
             .filter_map(|h| h.as_ref()),
@@ -206,7 +207,7 @@ fn release_materials(
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
 #[bind_group_data(MapPipelineKey)]
 #[data(50, MapLayersUniform, binding_array(101))]
-#[bindless(index_table(range(50..83), binding(100)))]
+#[bindless(index_table(range(50..84), binding(100)))]
 pub(crate) struct MapLayers {
     // xyz: enabled albedo layers; w: mask present.
     enabled: Vec4,
@@ -214,9 +215,10 @@ pub(crate) struct MapLayers {
     albedo_uv: Vec4,
     normal_uv: Vec4,
     normal_enabled: Vec4,
-    /// xyz: camera fade (`camera_fade.rs`); w: the native foliage translucency `k` of an
-    /// `M[Translucency]*` material (the extractor's `sekiro_translucency`), 0 for other surfaces.
     camera_fade: Vec4,
+    /// x: the `M[Translucency]*` scale (MTD `float_0`, the extractor's `sekiro_translucency`),
+    /// 0 for other surfaces; y: [`Self::translucency_mask`]'s UV channel (#367).
+    translucency: Vec4,
     game: MapGame,
     #[texture(51)]
     #[sampler(52)]
@@ -269,6 +271,10 @@ pub(crate) struct MapLayers {
     #[texture(81)]
     #[sampler(82)]
     metal: Option<Handle<Image>>,
+    /// The base normal map's alpha (`k = scale * mask`), sampled with that normal map's sampler,
+    /// so it adds no sampler binding (#367).
+    #[texture(83)]
+    translucency_mask: Option<Handle<Image>>,
 }
 
 #[derive(ShaderType, Reflect, Debug, Clone, Default)]
@@ -321,6 +327,7 @@ struct MapLayersUniform {
     normal_uv: Vec4,
     normal_enabled: Vec4,
     camera_fade: Vec4,
+    translucency: Vec4,
     game: MapGame,
 }
 
@@ -380,6 +387,7 @@ impl From<&MapLayers> for MapLayersUniform {
             normal_uv: layers.normal_uv,
             normal_enabled: layers.normal_enabled,
             camera_fade: layers.camera_fade,
+            translucency: layers.translucency,
             game: layers.game.clone(),
         }
     }
@@ -740,6 +748,66 @@ mod tests {
         }
     }
 
+    /// A map surface takes the extractor's `sekiro_translucency` mask and scale into its own
+    /// material fields; a surface without one, or an old export, keeps plain N.L (#367).
+    #[test]
+    fn translucent_foliage_loads_its_mask_and_scale() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<StandardMaterial>()
+            .init_asset::<LayeredMaterial>()
+            .init_asset::<Image>()
+            .insert_resource(crate::lighting::MapLighting::default())
+            .insert_resource(bevy::light::GlobalAmbientLight::default())
+            .insert_resource(LayerSettings {
+                prefix: String::new(),
+                primary_texture_prefix: false,
+                enabled: true,
+                debug: false,
+                materials: HashMap::new(),
+                interned: MaterialInterner::default(),
+                camera_fade: camera_fade::CameraFade::load(std::path::Path::new(""), false),
+            })
+            .add_systems(Update, replace_materials);
+        let root = app.world_mut().spawn(super::super::DrawGroups([0; 8])).id();
+        let surfaces = [
+            r#"{"sekiro_translucency": {"scale": 3.0, "uri": "tex/o007600_grass_n_t.dds", "uv": 1}}"#,
+            r#"{"sekiro_translucency": {"scale": 3.0}}"#,
+            "{}",
+        ]
+        .map(|extras| {
+            let handle = app
+                .world_mut()
+                .resource_mut::<Assets<StandardMaterial>>()
+                .add(StandardMaterial::default());
+            app.world_mut()
+                .spawn((
+                    MeshMaterial3d(handle),
+                    GltfMaterialExtras {
+                        value: extras.to_owned(),
+                    },
+                    ChildOf(root),
+                ))
+                .id()
+        });
+        app.update();
+        let layers = surfaces.map(|surface| {
+            let handle = &app
+                .world()
+                .get::<MeshMaterial3d<LayeredMaterial>>(surface)
+                .unwrap()
+                .0;
+            let material = app.world().resource::<Assets<LayeredMaterial>>();
+            material.get(handle).unwrap().extension.clone()
+        });
+        assert_eq!(layers[0].translucency, Vec4::new(3., 1., 0., 0.));
+        assert!(layers[0].translucency_mask.is_some());
+        for plain in &layers[1..] {
+            assert_eq!(plain.translucency.x, 0.);
+            assert!(plain.translucency_mask.is_none());
+        }
+    }
+
     #[test]
     fn light_set_change_writes_the_shared_buffer_not_the_materials() {
         use bevy::render::storage::ShaderBuffer;
@@ -748,6 +816,7 @@ mod tests {
             .init_asset::<LayeredMaterial>()
             .init_asset::<ShaderBuffer>()
             .init_resource::<MapLightBuffer>()
+            .init_resource::<FoliageTranslucency>()
             .insert_resource(crate::lighting::MapLighting {
                 gparam: Default::default(),
                 hour: 12.,
@@ -825,6 +894,7 @@ mod tests {
             .init_asset::<LayeredMaterial>()
             .init_asset::<ShaderBuffer>()
             .init_resource::<MapLightBuffer>()
+            .init_resource::<FoliageTranslucency>()
             .insert_resource(crate::lighting::MapLighting {
                 gparam: crate::lighting::sun_rows(&[(0, 1.), (100, 2.), (110, 3.)]),
                 hour: 12.,
@@ -1080,11 +1150,11 @@ fn update_hemisphere(
     lighting: Res<crate::lighting::MapLighting>,
     ambient: Res<bevy::light::GlobalAmbientLight>,
     light: Res<MapLightBuffer>,
-    translucency: Option<Res<FoliageTranslucency>>,
+    translucency: Res<FoliageTranslucency>,
     mut buffers: ResMut<Assets<bevy::render::storage::ShaderBuffer>>,
     mut last: Local<Option<HemisphereKey>>,
 ) {
-    let translucency = translucency.map_or_else(FoliageTranslucency::default, |t| *t);
+    let translucency = *translucency;
     let _timer = crate::perf_log::SystemTimer::start("update_hemisphere");
     let key = (
         lighting.light_set,
@@ -1204,22 +1274,13 @@ fn replace_materials(
                 .unwrap_or(Value::Null);
             let data = &extras["sekiro_layers"];
             let camera_fade = if map_surface {
-                let mut fade = settings
+                settings
                     .camera_fade
-                    .material(name.map_or("", |name| name.0.as_str()));
-                // Missing until the map is re-extracted, which keeps the old look.
-                fade.w = extras["sekiro_translucency"]
-                    .as_f64()
-                    .map_or(0., |k| k as f32);
-                fade
+                    .material(name.map_or("", |name| name.0.as_str()))
             } else {
                 Vec4::ZERO
             };
-            let load = |key: &str, srgb: bool| -> Option<Handle<Image>> {
-                if !settings.enabled {
-                    return None;
-                }
-                let uri = data[key]["uri"].as_str()?;
+            let load_uri = |uri: &str, srgb: bool| -> Option<Handle<Image>> {
                 // Exported paths are relative to the owning GLB, including neighbours.
                 if !uri.starts_with("tex/") || uri.contains("..") {
                     return None;
@@ -1246,6 +1307,27 @@ fn replace_materials(
                         ),
                 )
             };
+            let load = |key: &str, srgb: bool| -> Option<Handle<Image>> {
+                if !settings.enabled {
+                    return None;
+                }
+                load_uri(data[key]["uri"].as_str()?, srgb)
+            };
+            // Missing until the map is re-extracted, which keeps the plain N.L response.
+            let foliage = &extras["sekiro_translucency"];
+            let translucency_mask = foliage["uri"]
+                .as_str()
+                .filter(|_| map_surface)
+                .and_then(|uri| load_uri(uri, false));
+            let translucency = Vec4::new(
+                foliage["scale"]
+                    .as_f64()
+                    .filter(|_| translucency_mask.is_some())
+                    .map_or(0., |s| s as f32),
+                foliage["uv"].as_u64().unwrap_or(0) as f32,
+                0.,
+                0.,
+            );
             let uv = |key: &str| data[key]["uv"].as_u64().unwrap_or(0) as f32;
             let present = |key: &str| f32::from(data[key]["uri"].is_string() && settings.enabled);
             let mut game = MapGame::default();
@@ -1328,6 +1410,8 @@ fn replace_materials(
                     f32::from(settings.debug),
                 ),
                 camera_fade,
+                translucency,
+                translucency_mask,
                 overlay: load("overlay", true),
                 snow: load("snow", true),
                 c: load("c", true),

@@ -41,12 +41,7 @@ const KNOBS: &[Knob] = &[
     Knob {
         name: "translucency",
         parse: on_off,
-        apply: |world, v| {
-            let on = crate::map::FoliageTranslucency(v > 0.5);
-            if world.get_resource::<crate::map::FoliageTranslucency>() != Some(&on) {
-                world.insert_resource(on);
-            }
-        },
+        apply: |world, v| world.insert_resource(crate::map::FoliageTranslucency(v > 0.5)),
     },
 ];
 

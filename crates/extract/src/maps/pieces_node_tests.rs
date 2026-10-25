@@ -101,7 +101,7 @@ fn outskirts_bamboo_exports_leaves_on_the_stalks() {
     for model in ["o112400", "o112410", "o112420", "o112430", "o112440"] {
         let f =
             flver::parse(&std::fs::read(super::super::object_flver(&raw, model)).unwrap()).unwrap();
-        let doc = lod_doc(&build(&f, &mtds, &|_| None, &Masks::default()).unwrap().glb);
+        let doc = lod_doc(&build(&f, &mtds, &|_| None).unwrap().glb);
         let (mut lo, mut hi) = (Vec3::MAX, Vec3::MIN);
         for primitive in doc["meshes"][0]["primitives"].as_array().unwrap() {
             let accessor =

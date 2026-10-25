@@ -574,19 +574,18 @@ pub fn export(game: &Path, cache: &Path, id: &str, selected_models: &[String]) -
         );
     }
 
-    // Pass 1: which textures do the pieces want, and which translucency masks?
-    let (wanted, mask_keys): (Vec<_>, Vec<_>) = used
+    // Pass 1: which textures do the pieces want?
+    let wanted: BTreeSet<(String, pieces::TexKind)> = used
         .par_iter()
         .filter_map(|(_, path)| {
             let data = std::fs::read(path).ok()?;
             let f = flver::parse(&data).ok()?;
-            Some((
-                pieces::wanted_textures(&f, &mtds),
-                pieces::mask_keys(&f, &mtds),
-            ))
+            Some(pieces::wanted_textures(&f, &mtds))
         })
-        .unzip();
-    let wanted: BTreeSet<(String, bool)> = wanted.into_iter().flatten().collect();
+        .flatten()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect();
 
     // Pass 2: write the textures that exist.
     let mut store = MapTextures::open(&raw, oodle)?;
@@ -604,18 +603,12 @@ pub fn export(game: &Path, cache: &Path, id: &str, selected_models: &[String]) -
     );
     let written: BTreeSet<String> = wanted
         .par_iter()
-        .filter_map(|(name, is_normal)| {
+        .filter_map(|(name, kind)| {
             let path = out.join("models/tex").join(format!("{name}.dds"));
             if path.is_file() {
                 return Some(name.clone());
             }
-            let dds = store
-                .dds(name.strip_suffix("_map_raw").unwrap_or(name))
-                .and_then(|d| match d {
-                    Some(d) if *is_normal => textures::normal_to_bc5(&d).map(Some),
-                    other => Ok(other),
-                });
-            match dds {
+            match textures::export_dds(&store, name, *kind) {
                 Ok(Some(dds)) => match std::fs::write(&path, dds) {
                     Ok(()) => Some(name.clone()),
                     Err(e) => {
@@ -633,9 +626,6 @@ pub fn export(game: &Path, cache: &Path, id: &str, selected_models: &[String]) -
         .collect::<Vec<_>>()
         .into_iter()
         .collect();
-    // Read every time, including when the textures above were already on disk.
-    let masks = textures::translucency_masks(&store, mask_keys.iter().flatten());
-    eprintln!("  {} translucency masks", masks.len());
     let missing: Vec<&String> = wanted
         .iter()
         .map(|(n, _)| n)
@@ -677,7 +667,7 @@ pub fn export(game: &Path, cache: &Path, id: &str, selected_models: &[String]) -
                 let data =
                     std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
                 let f = flver::parse(&data)?;
-                let built = pieces::build(&f, &mtds, &uri, &masks)?;
+                let built = pieces::build(&f, &mtds, &uri)?;
                 if built.primitives == 0 {
                     return Ok((None, "no_exported_primitives".to_owned()));
                 }

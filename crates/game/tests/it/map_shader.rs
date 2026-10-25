@@ -41,6 +41,67 @@ fn main() {{
     }
 }
 
+/// Foliage translucency follows the normal-alpha mask per pixel (#367): `k = clamp(float_0 *
+/// mask, 0, 10)` times the A/B switch, and the sun/fill response takes that `k`.
+#[test]
+fn foliage_translucency_follows_the_mask_per_pixel() {
+    let production = include_str!("../../src/map_material.wesl");
+    let body = |name: &str| {
+        let rest = production
+            .split(&format!("fn {name}("))
+            .nth(1)
+            .unwrap_or_else(|| panic!("{name}"));
+        format!("fn {name}({}\n}}", rest.split("\n}").next().unwrap())
+    };
+    let source = format!(
+        r#"
+{}
+{}
+@group(0) @binding(0) var<storage, read_write> result: array<f32, 10>;
+@compute @workgroup_size(1)
+fn main() {{
+    // The gatehouse grass scale (MTD float_0 3) over four texels of its mask.
+    result[0] = foliage_translucency(3.0, 0.0, 1.0);
+    result[1] = foliage_translucency(3.0, 0.25, 1.0);
+    result[2] = foliage_translucency(3.0, 0.73, 1.0);
+    result[3] = foliage_translucency(3.0, 1.0, 1.0);
+    // Saturates at 10 like the UNORM G-buffer, and the knob turns it off.
+    result[4] = foliage_translucency(20.0, 1.0, 1.0);
+    result[5] = foliage_translucency(3.0, 0.73, 0.0);
+    // A blade lit from behind (N.L -0.5) seen against the light (L = -V): the response grows
+    // with the texel's k, and k = 0 is plain saturate(N.L).
+    for (var i = 0; i < 4; i++) {{
+        result[6 + i] = translucent_diffuse(-0.5, 1.0, -1.0, result[i]);
+    }}
+}}
+"#,
+        body("foliage_translucency"),
+        body("translucent_diffuse"),
+    );
+    let values = super::shader_support::run_compute(source, 10);
+    let back = |k: f32| (k - 0.5f32).max(0.) / (1. + 2. * k) + k / (1. + k);
+    let expected = [
+        0.,
+        0.75,
+        2.19,
+        3.,
+        10.,
+        0.,
+        back(0.),
+        back(0.75),
+        back(2.19),
+        back(3.),
+    ];
+    for (i, (actual, expected)) in values.iter().zip(expected).enumerate() {
+        assert!(
+            (actual - expected).abs() < 1e-5,
+            "sample {i}: {actual} vs {expected}"
+        );
+    }
+    assert_eq!(values[6], 0.);
+    assert!(values[7] < values[8] && values[8] < values[9], "{values:?}");
+}
+
 #[test]
 fn layered_map_forward_depth_and_motion_shaders_validate() {
     let (mut cache, mut assets) = super::shader_support::cache();

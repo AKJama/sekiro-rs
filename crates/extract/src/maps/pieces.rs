@@ -19,6 +19,13 @@ pub struct TexRef {
     pub scale: [f32; 2],
 }
 
+impl TexRef {
+    /// The texture name: its path's stem in lower case.
+    pub fn name(&self) -> String {
+        texture_stem(&self.path).to_ascii_lowercase()
+    }
+}
+
 /// What one FLVER material renders with.
 #[derive(Clone, Debug, Default)]
 pub struct MaterialChoice {
@@ -30,52 +37,38 @@ pub struct MaterialChoice {
     pub layers: Option<Layers>,
     pub double_sided: bool,
     pub fog_surface: Option<FogSurface>,
-    /// `M[Translucency]*` only: the MTD's `*_snp_0_float_0` and `g_AlphaRef`, which with the
-    /// normal map's alpha make the native translucency ([`translucency`]).
-    pub translucency: Option<(f32, u8)>,
+    /// `M[Translucency]*` only: the MTD's `*_snp_0_float_0`, which scales the normal map's
+    /// alpha into the native foliage translucency (`sekiro_translucency`, #367).
+    pub translucency: Option<f32>,
 }
 
-/// The textures a material's translucency mask is read from (lower-case names): the mean
-/// normal-map alpha over the texels the albedo alpha test (`alpha_ref`) keeps.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct MaskKey {
-    pub normal: String,
-    pub albedo: Option<String>,
-    pub alpha_ref: u8,
+/// How a wanted texture is exported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TexKind {
+    /// The original DDS as it is.
+    Plain,
+    /// A normal map, converted to BC5 (`textures::normal_to_bc5`).
+    Normal,
+    /// A normal map's alpha, the per-pixel foliage translucency mask, as BC4
+    /// (`textures::normal_alpha_to_bc4`); named [`translucency_mask_name`].
+    TranslucencyMask,
 }
 
-/// Translucency masks in 0..1 by their source textures (`textures::translucency_masks`).
-pub type Masks = HashMap<MaskKey, f32>;
-
-/// G-buffer 1 is UNORM and stores `k * 0.1`, so the native translucency `k` saturates at 10.
-const MAX_TRANSLUCENCY: f32 = 10.;
-
-impl MaterialChoice {
-    /// Where this material's translucency mask comes from, if it is translucent foliage.
-    pub fn mask_key(&self) -> Option<MaskKey> {
-        let (_, alpha_ref) = self.translucency?;
-        let name = |r: &TexRef| texture_stem(&r.path).to_ascii_lowercase();
-        Some(MaskKey {
-            normal: name(self.normal.as_ref()?),
-            albedo: self.albedo.as_ref().map(name),
-            alpha_ref,
-        })
+impl TexKind {
+    /// The source texture an exported texture `name` of this kind is made from.
+    pub fn source(self, name: &str) -> &str {
+        match self {
+            Self::Plain | Self::Normal => name.strip_suffix("_map_raw").unwrap_or(name),
+            Self::TranslucencyMask => name.strip_suffix(MASK_SUFFIX).unwrap_or(name),
+        }
     }
 }
 
-/// The native foliage translucency `k` of a material, or `None` for opaque surfaces.
-///
-/// Every `M[Translucency]*` G-buffer shader writes `max(normal.a * float_0, 0) *
-/// FC_TranslucencyScale * 0.1` to G-buffer 1 `.y`, and the deferred sun and fill
-/// (`GXLightAcc_DDirLightShadowed1`) read `k` (that value times 10) to light thin blades on both
-/// sides (#367). `normal.a` is the normal map's alpha, which the BC5 export drops, so `k` takes
-/// its mean over the texels the alpha test keeps. `FC_TranslucencyScale` is a CPU constant that
-/// is not traced; 1 is assumed.
-pub fn translucency(choice: &MaterialChoice, masks: &Masks) -> Option<f32> {
-    let (float_0, _) = choice.translucency?;
-    let mask = masks.get(&choice.mask_key()?)?;
-    let k = (mask * float_0).clamp(0., MAX_TRANSLUCENCY);
-    (k > 0.).then_some(k)
+const MASK_SUFFIX: &str = "_t";
+
+/// The exported translucency mask of normal map `normal`.
+pub fn translucency_mask_name(normal: &str) -> String {
+    format!("{normal}{MASK_SUFFIX}")
 }
 
 #[derive(Clone, Debug)]
@@ -269,8 +262,9 @@ pub fn choose_material(material: &flver::Material, mtd: Option<&mtd::Mtd>) -> Ma
         if texture_stem(&m.shader).starts_with("M[Translucency]")
             && let Some(mtd::ParamValue::Floats(v)) = m.param_suffix("_snp_0_float_0")
             && let Some(&float_0) = v.first()
+            && float_0 > 0.
         {
-            choice.translucency = Some((float_0, alpha_ref.clamp(0, 255) as u8));
+            choice.translucency = Some(float_0);
         }
         choice.double_sided = int("g_DoubleSided") != 0
             || matches!(m.param("g_DoubleSided"), Some(mtd::ParamValue::Bool(true)));
@@ -396,7 +390,6 @@ pub fn build(
     flver: &flver::Flver,
     mtds: &Mtds,
     texture_uri: &dyn Fn(&str) -> Option<String>,
-    masks: &Masks,
 ) -> Result<BuiltPiece> {
     let mut g = Glb::default();
     let mut levels: [Vec<Value>; 4] = std::array::from_fn(|_| Vec::new());
@@ -582,7 +575,7 @@ pub fn build(
 
         let mut pbr = json!({ "metallicFactor": 0.0, "roughnessFactor": 0.85 });
         let mut texture = |r: &TexRef, g: &mut Glb| -> Option<(usize, usize)> {
-            let name = texture_stem(&r.path).to_ascii_lowercase();
+            let name = r.name();
             let id = match texture_ids.get(&name) {
                 Some(&t) => t,
                 None => {
@@ -612,8 +605,8 @@ pub fn build(
                 .textures
                 .iter()
                 .map(|(slot, r)| {
-                    json!({"slot": slot, "name": texture_stem(&r.path).to_ascii_lowercase(),
-                    "uri": texture_uri(&texture_stem(&r.path).to_ascii_lowercase()),
+                    json!({"slot": slot, "name": r.name(),
+                    "uri": texture_uri(&r.name()),
                     "uv": r.uv, "scale": r.scale})
                 })
                 .collect();
@@ -653,8 +646,17 @@ pub fn build(
             }
             mat["extras"] = json!({"sekiro_layers": extras});
         }
-        if let Some(k) = translucency(&choice, masks) {
-            mat["extras"]["sekiro_translucency"] = json!(k);
+        // Every `M[Translucency]*` G-buffer shader writes `max(normal.a * float_0, 0) *
+        // FC_TranslucencyScale * 0.1` to G-buffer 1 `.y`; the deferred sun and fill
+        // (`GXLightAcc_DDirLightShadowed1`) read `k`, ten times that, to light thin blades on both
+        // sides (#367). The BC5 normal drops alpha, so it is exported as its own mask.
+        if let Some(scale) = choice.translucency
+            && choice.layers.is_none()
+            && let Some(r) = &choice.normal
+            && let Some(uri) = texture_uri(&translucency_mask_name(&r.name()))
+        {
+            mat["extras"]["sekiro_translucency"] =
+                json!({"scale": scale, "uri": uri, "uv": if uv_ok(r.uv) {r.uv} else {0}});
         }
         if choice.layers.is_none()
             && let Some(r) = &choice.normal
@@ -812,21 +814,8 @@ fn detail_scenes(glb: Vec<u8>, scenes: Vec<Value>) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// The translucency mask sources of a FLVER's visible materials.
-pub fn mask_keys(flver: &flver::Flver, mtds: &Mtds) -> Vec<MaskKey> {
-    flver
-        .meshes
-        .iter()
-        .map(|mesh| &flver.materials[mesh.material])
-        .map(|material| choose_material(material, mtds.get(&material.mtd)))
-        .filter(|choice| !skip_material(&choice.mtd))
-        .filter_map(|choice| choice.mask_key())
-        .collect()
-}
-
-/// Texture names (lower case) a FLVER's visible materials would use, and whether each is a
-/// normal map.
-pub fn wanted_textures(flver: &flver::Flver, mtds: &Mtds) -> Vec<(String, bool)> {
+/// Texture names (lower case) a FLVER's visible materials would use, and how each is exported.
+pub fn wanted_textures(flver: &flver::Flver, mtds: &Mtds) -> Vec<(String, TexKind)> {
     let mut out = Vec::new();
     for mesh in &flver.meshes {
         let material = &flver.materials[mesh.material];
@@ -835,19 +824,18 @@ pub fn wanted_textures(flver: &flver::Flver, mtds: &Mtds) -> Vec<(String, bool)>
             continue;
         }
         if let Some(fog) = &choice.fog_surface {
-            out.extend(
-                fog.textures
-                    .iter()
-                    .map(|(_, r)| (texture_stem(&r.path).to_ascii_lowercase(), false)),
-            );
+            out.extend(fog.textures.iter().map(|(_, r)| (r.name(), TexKind::Plain)));
         }
         if let Some(r) = choice.albedo {
-            out.push((texture_stem(&r.path).to_ascii_lowercase(), false));
+            out.push((r.name(), TexKind::Plain));
         }
         if choice.layers.is_none()
             && let Some(r) = choice.normal
         {
-            out.push((texture_stem(&r.path).to_ascii_lowercase(), true));
+            if choice.translucency.is_some() {
+                out.push((translucency_mask_name(&r.name()), TexKind::TranslucencyMask));
+            }
+            out.push((r.name(), TexKind::Normal));
         }
         if let Some(l) = choice.layers {
             for (r, normal) in [
@@ -865,7 +853,7 @@ pub fn wanted_textures(flver: &flver::Flver, mtds: &Mtds) -> Vec<(String, bool)>
                 (l.metal, false),
             ] {
                 if let Some(r) = r {
-                    out.push((game_texture_name(&r, normal), false));
+                    out.push((game_texture_name(&r, normal), TexKind::Plain));
                 }
             }
         }
@@ -874,7 +862,7 @@ pub fn wanted_textures(flver: &flver::Flver, mtds: &Mtds) -> Vec<(String, bool)>
 }
 
 fn game_texture_name(r: &TexRef, normal: bool) -> String {
-    let name = texture_stem(&r.path).to_ascii_lowercase();
+    let name = r.name();
     if normal {
         format!("{name}_map_raw")
     } else {
@@ -911,13 +899,7 @@ mod tests {
         ] {
             let path = super::super::piece_flver(&raw, map, model);
             let f = flver::parse(&std::fs::read(path).unwrap()).unwrap();
-            let built = build(
-                &f,
-                &mtds,
-                &|name| Some(format!("tex/{name}.dds")),
-                &Masks::default(),
-            )
-            .unwrap();
+            let built = build(&f, &mtds, &|name| Some(format!("tex/{name}.dds"))).unwrap();
             assert!(built.primitives > 0);
             let n = u32::from_le_bytes(built.glb[12..16].try_into().unwrap()) as usize;
             let doc: Value = serde_json::from_slice(&built.glb[20..20 + n]).unwrap();
@@ -1007,12 +989,7 @@ mod tests {
             for material in &f.materials {
                 if let Some(fog) = choose_material(material, mtds.get(&material.mtd)).fog_surface {
                     for (_, texture) in fog.textures {
-                        assert!(
-                            wanted.contains(&(
-                                texture_stem(&texture.path).to_ascii_lowercase(),
-                                false
-                            ))
-                        );
+                        assert!(wanted.contains(&(texture.name(), TexKind::Plain)));
                     }
                 }
             }
@@ -1222,7 +1199,7 @@ mod tests {
             }
             let f = flver::parse(&std::fs::read(path).unwrap()).unwrap();
             if model == "101100" {
-                let built = build(&f, &mtds, &|_| None, &Masks::default()).unwrap();
+                let built = build(&f, &mtds, &|_| None).unwrap();
                 let len = u32::from_le_bytes(built.glb[12..16].try_into().unwrap()) as usize;
                 let doc: Value = serde_json::from_slice(&built.glb[20..20 + len]).unwrap();
                 let bin = &built.glb[28 + len..];
@@ -1295,10 +1272,10 @@ mod tests {
                         }
                     }
                     if let Some(a) = choice.albedo {
-                        let path = raw.parent().unwrap().join(format!(
-                            "maps/m17_00_00_00/models/tex/{}.dds",
-                            texture_stem(&a.path).to_ascii_lowercase()
-                        ));
+                        let path = raw
+                            .parent()
+                            .unwrap()
+                            .join(format!("maps/m17_00_00_00/models/tex/{}.dds", a.name()));
                         if path.is_file() {
                             let dds = std::fs::read(path).unwrap();
                             let h = sekiro_formats::tpf::Dds::parse(&dds).unwrap();

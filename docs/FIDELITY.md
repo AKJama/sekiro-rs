@@ -79,6 +79,13 @@ For example, Outskirts authors its local angles only in bank 120, so banks 100/1
 Direct lighting still uses Bevy's material BRDF and sun shadow filtering; native light sharpness, per-light SSAO weights, separate ambient-reflection composition and exact angle construction remain unrecovered.
 The existing HDR unit bridge, exposure and tone mappings are unchanged, so this does not close visual-parity item L1.
 
+## Foliage translucency, issue #367
+
+`M[Translucency]*` foliage writes `max(normal.a * float_0, 0) * FC_TranslucencyScale * 0.1` to G-buffer 1, and the deferred sun and fill light both sides of thin blades from it.
+The extractor exports each such normal map's alpha as a BC4 mask (`{normal}_t.dds`) and the MTD `*_snp_0_float_0` as `sekiro_translucency.scale`, and the map shader samples the mask per pixel with the normal map's sampler and UV.
+`FC_TranslucencyScale` is a CPU constant that is not traced; 1 is assumed, so `k = clamp(float_0 * mask, 0, 10)`.
+Point and spot lights still treat translucency as zero (`TransLightParam` is not recovered), and layered translucent materials, if any, take no mask.
+
 ## Folding Screen Monkeys
 
 Independent monkey combat, screen deaths, shared controller health and map victory run from installed params, animations, Lua and EMEVD.

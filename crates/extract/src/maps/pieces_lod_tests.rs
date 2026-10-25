@@ -32,13 +32,7 @@ fn mountain_retains_native_snow_mask_and_baked_occlusion() {
     assert!(layers.snow.is_some() && layers.mask.is_some() && layers.detail.is_some());
     let wanted = wanted_textures(&f, &mtds);
     assert!(wanted.iter().any(|(name, _)| name == "m99_snow_00_a"));
-    let built = build(
-        &f,
-        &mtds,
-        &|name| Some(format!("tex/{name}.dds")),
-        &Masks::default(),
-    )
-    .unwrap();
+    let built = build(&f, &mtds, &|name| Some(format!("tex/{name}.dds"))).unwrap();
     let d = document(&built.glb);
     assert!(d["materials"][0]["extras"]["sekiro_layers"]["snow"]["uri"].is_string());
     let primitive = &d["meshes"][0]["primitives"][0];
@@ -95,7 +89,7 @@ fn detail_scenes_do_not_draw_other_levels_or_motion_blur_together() {
         meshes: vec![mesh],
         layouts: vec![],
     };
-    let built = build(&f, &Mtds(HashMap::new()), &|_| None, &Masks::default()).unwrap();
+    let built = build(&f, &Mtds(HashMap::new()), &|_| None).unwrap();
     let doc = document(&built.glb);
     assert_eq!(built.primitives, 4);
     assert_eq!(doc["scene"], 0);
@@ -187,7 +181,7 @@ fn alternate_levels_reuse_legacy_materials_and_append_culling_variants() {
             mesh(1, &[(0, true), (LOD1, true)]),
         ],
     };
-    let built = build(&f, &Mtds(HashMap::new()), &|_| None, &Masks::default()).unwrap();
+    let built = build(&f, &Mtds(HashMap::new()), &|_| None).unwrap();
     let doc = document(&built.glb);
     assert_eq!(doc["materials"].as_array().unwrap().len(), 3);
     for level in 0..2 {
@@ -229,7 +223,7 @@ fn all_eight_outskirts_models_keep_separate_authored_detail_meshes() {
             .unwrap(),
         )
         .unwrap();
-        let built = build(&f, &mtds, &|_| None, &Masks::default()).unwrap();
+        let built = build(&f, &mtds, &|_| None).unwrap();
         let doc = document(&built.glb);
         assert_eq!(doc["scenes"].as_array().unwrap().len(), 4);
         let mut exported = 0;

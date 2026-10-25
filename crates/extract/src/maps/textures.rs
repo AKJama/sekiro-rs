@@ -2,14 +2,14 @@
 //! object, character and shared banks.
 //! DDS payloads preserve the original compressed data and mip chains.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use memmap2::Mmap;
 use sekiro_formats::{bxf4, dcx::Oodle, tpf};
 
-use super::pieces;
+use super::pieces::TexKind;
 
 enum Source {
     /// Entry `entry` of split binder `binder`.
@@ -255,169 +255,6 @@ mod resolution_tests {
     }
 }
 
-/// The translucency mask of every key (see `pieces::translucency`), read from the original
-/// textures; keys whose textures are missing or undecodable are left out with a warning.
-pub fn translucency_masks<'a>(
-    store: &MapTextures,
-    keys: impl IntoIterator<Item = &'a pieces::MaskKey>,
-) -> pieces::Masks {
-    use rayon::prelude::*;
-    let keys: BTreeSet<&pieces::MaskKey> = keys.into_iter().collect();
-    keys.into_par_iter()
-        .filter_map(|key| match translucency_mask(store, key) {
-            Ok(Some(mask)) => Some((key.clone(), mask)),
-            Ok(None) => None,
-            Err(e) => {
-                eprintln!("  warning: translucency mask {}: {e:#}", key.normal);
-                None
-            }
-        })
-        .collect()
-}
-
-/// Mean normal-map alpha in 0..1 over the texels whose albedo alpha passes the alpha test.
-fn translucency_mask(store: &MapTextures, key: &pieces::MaskKey) -> Result<Option<f32>> {
-    let Some(normal) = store.dds(&key.normal)? else {
-        return Ok(None);
-    };
-    let normal = small_rgba(&normal)?;
-    let albedo = match &key.albedo {
-        Some(name) if key.alpha_ref > 0 => store.dds(name)?.map(|d| small_rgba(&d)).transpose()?,
-        _ => None,
-    };
-    Ok(masked_mean(&normal, albedo.as_ref(), key.alpha_ref))
-}
-
-/// An RGBA8 image: width, height, texels.
-struct Rgba(usize, usize, Vec<u8>);
-
-/// The smallest mip at least 64 texels on each side (or mip 0 when smaller), decoded: the mean
-/// of a mask needs no more.
-fn small_rgba(dds: &[u8]) -> Result<Rgba> {
-    let header = tpf::Dds::parse(dds)?;
-    let level = (0..header.mip_count)
-        .take_while(|&m| {
-            let (w, h) = header.mip_size(m);
-            m == 0 || (w >= 64 && h >= 64)
-        })
-        .last()
-        .unwrap_or(0);
-    let (w, h) = header.mip_size(level);
-    let rgba = crate::models::textures::decode_rgba_mip(&header, dds, level)?;
-    Ok(Rgba(w as usize, h as usize, rgba))
-}
-
-/// Mean `normal` alpha in 0..1 over texels whose `albedo` alpha is at least `alpha_ref`
-/// (sampled at the same UV); `None` when the test keeps nothing.
-fn masked_mean(normal: &Rgba, albedo: Option<&Rgba>, alpha_ref: u8) -> Option<f32> {
-    let Rgba(w, h, texels) = normal;
-    let (mut sum, mut count) = (0u64, 0u64);
-    for y in 0..*h {
-        for x in 0..*w {
-            let kept = albedo.is_none_or(|Rgba(aw, ah, a)| {
-                a[((y * ah / h) * aw + x * aw / w) * 4 + 3] >= alpha_ref
-            });
-            if kept {
-                sum += u64::from(texels[(y * w + x) * 4 + 3]);
-                count += 1;
-            }
-        }
-    }
-    (count > 0).then(|| sum as f32 / count as f32 / 255.)
-}
-
-#[cfg(test)]
-mod translucency_tests {
-    use super::*;
-
-    fn rgba(w: usize, h: usize, alphas: &[u8]) -> Rgba {
-        Rgba(w, h, alphas.iter().flat_map(|&a| [0, 0, 0, a]).collect())
-    }
-
-    #[test]
-    fn mask_mean_counts_only_texels_the_alpha_test_keeps() {
-        let normal = rgba(2, 2, &[255, 0, 51, 102]);
-        let albedo = rgba(1, 2, &[0, 255]);
-        let mean = masked_mean(&normal, Some(&albedo), 128).unwrap();
-        assert!((mean - 153. / 2. / 255.).abs() < 1e-6);
-        assert!((masked_mean(&normal, None, 128).unwrap() - 408. / 4. / 255.).abs() < 1e-6);
-        assert_eq!(masked_mean(&normal, Some(&rgba(1, 1, &[0])), 128), None);
-    }
-
-    /// Translucent foliage takes its native translucency from the MTD float_0 and the original
-    /// normal map's alpha (#367): the gatehouse dead grass, whose textures are its object's, and
-    /// map-texture foliage of the Outskirts both get k. Reads the raw cache only.
-    #[test]
-    fn translucent_foliage_takes_its_native_translucency() {
-        let raw = sekiro_formats::cache::root().join("raw");
-        let game = std::env::var_os("SEKIRO_DIR").map_or_else(
-            || PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Sekiro"),
-            PathBuf::from,
-        );
-        let map = raw.join("map/m11_00_00_00");
-        let (true, Ok(oodle)) = (map.is_dir(), Oodle::load(&game)) else {
-            eprintln!("skipped: no raw m11_00_00_00 or no Oodle");
-            return;
-        };
-        let mtds = super::super::load_mtds(&raw).unwrap();
-        let mut store = MapTextures::open(&raw, oodle).unwrap();
-        let k = |store: &MapTextures, flver: &sekiro_formats::flver::Flver| {
-            let keys = pieces::mask_keys(flver, &mtds);
-            let masks = translucency_masks(store, &keys);
-            flver
-                .materials
-                .iter()
-                .map(|m| pieces::choose_material(m, mtds.get(&m.mtd)))
-                .filter_map(|c| Some((c.mask_key()?, pieces::translucency(&c, &masks)?)))
-                .collect::<Vec<_>>()
-        };
-        // The gatehouse dead grass: float_0 3, masks of about 0.73 and 0.54 on its blades.
-        let grass = super::super::object_flver(&raw, "o007600");
-        store.add_tpf(&grass.with_extension("tpf")).unwrap();
-        let grass = sekiro_formats::flver::parse(&std::fs::read(grass).unwrap()).unwrap();
-        let found = k(&store, &grass);
-        assert!(
-            !found.is_empty() && found.iter().all(|(_, k)| (1.2..3.).contains(k)),
-            "{found:?}"
-        );
-        // The GLB carries it for the game, beside `sekiro_layers`.
-        let masks = translucency_masks(&store, &pieces::mask_keys(&grass, &mtds));
-        let glb = pieces::build(&grass, &mtds, &|_| None, &masks).unwrap().glb;
-        let len = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
-        let doc: serde_json::Value = serde_json::from_slice(&glb[20..20 + len]).unwrap();
-        let written: Vec<_> = doc["materials"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|m| m["extras"]["sekiro_translucency"].as_f64())
-            .collect();
-        assert!(!written.is_empty(), "{}", doc["materials"]);
-        for w in written {
-            assert!(
-                found.iter().any(|(_, k)| (w as f32 - k).abs() < 1e-5),
-                "{w} {found:?}"
-            );
-        }
-        // Map pieces whose foliage textures are map textures, not object ones: a branch and
-        // paper, which took 0 before because their masks are not in an object TPF.
-        for (model, normal, range) in [
-            ("001363", "m11_branch_05_n", 0.2..1.),
-            ("130030", "m11_paper_00_n", 1.5..3.5),
-        ] {
-            let path = super::super::piece_flver(&raw, "m11_00_00_00", &format!("m{model}"));
-            let flver = sekiro_formats::flver::parse(&std::fs::read(path).unwrap()).unwrap();
-            let found = k(&store, &flver);
-            let (_, k) = found
-                .iter()
-                .find(|(key, _)| key.normal == normal)
-                .unwrap_or_else(|| panic!("{model}: {found:?}"));
-            assert!(range.contains(k), "{normal}: {k}");
-            let source = store.provenance(normal).unwrap().unwrap();
-            assert!(source.starts_with("map/m11/"), "{source}");
-        }
-    }
-}
-
 fn loose_tpfs(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     if !dir.is_dir() {
         return Ok(());
@@ -436,45 +273,73 @@ fn loose_tpfs(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// The DDS written for wanted texture `name` of `kind`, or `None` when its source is missing.
+pub fn export_dds(store: &MapTextures, name: &str, kind: TexKind) -> Result<Option<Vec<u8>>> {
+    let Some(dds) = store.dds(kind.source(name))? else {
+        return Ok(None);
+    };
+    Ok(Some(match kind {
+        TexKind::Plain => dds,
+        TexKind::Normal => normal_to_bc5(&dds)?,
+        TexKind::TranslucencyMask => normal_alpha_to_bc4(&dds)?,
+    }))
+}
+
 /// Converts a Sekiro normal map (X in red, Y in green, DirectX-style Y down, other channels
 /// unrelated) to a BC5 DDS with a full mip chain and glTF's Y-up convention. Bevy treats BC5
 /// normal maps as two-channel and rebuilds Z, which is exactly what the source data needs.
-pub fn normal_to_bc5(dds: &[u8]) -> anyhow::Result<Vec<u8>> {
+pub fn normal_to_bc5(dds: &[u8]) -> Result<Vec<u8>> {
     let header = tpf::Dds::parse(dds)?;
     let rgba = crate::models::textures::decode_rgba(&header, dds)?;
-    let (mut w, mut h) = (header.width as usize, header.height as usize);
     // Two 8-bit channels: X, and Y flipped to point up the texture.
-    let mut rg: Vec<[u8; 2]> = rgba
+    let rg = rgba
         .as_chunks::<4>()
         .0
         .iter()
         .map(|p| [p[0], 255 - p[1]])
         .collect();
+    Ok(mipped_dds(&header, rg))
+}
+
+/// A Sekiro normal map's alpha, the per-pixel foliage translucency mask of `M[Translucency]*`
+/// materials (#367), as a BC4 DDS with a full mip chain.
+pub fn normal_alpha_to_bc4(dds: &[u8]) -> Result<Vec<u8>> {
+    let header = tpf::Dds::parse(dds)?;
+    let rgba = crate::models::textures::decode_rgba(&header, dds)?;
+    let a = rgba.as_chunks::<4>().0.iter().map(|p| [p[3]]).collect();
+    Ok(mipped_dds(&header, a))
+}
+
+/// A BC4 (one channel) or BC5 (two channels) DDS of `texels`, `header`'s size, with a full
+/// box-filtered mip chain.
+fn mipped_dds<const C: usize>(header: &tpf::Dds, mut texels: Vec<[u8; C]>) -> Vec<u8> {
+    let (mut w, mut h) = (header.width as usize, header.height as usize);
     let mut body = Vec::new();
     let mut mips = 0u32;
     loop {
-        encode_bc5(&rg, w, h, &mut body);
+        encode_bc(&texels, w, h, &mut body);
         mips += 1;
         if w == 1 && h == 1 {
             break;
         }
         let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
-        let mut next = vec![[0u8; 2]; nw * nh];
+        let mut next = vec![[0u8; C]; nw * nh];
         for y in 0..nh {
             for x in 0..nw {
-                let mut sum = [0u32; 2];
+                let mut sum = [0u32; C];
                 for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
                     let (sx, sy) = ((2 * x + dx).min(w - 1), (2 * y + dy).min(h - 1));
-                    let p = rg[sy * w + sx];
-                    sum[0] += p[0] as u32;
-                    sum[1] += p[1] as u32;
+                    for (s, &v) in sum.iter_mut().zip(&texels[sy * w + sx]) {
+                        *s += u32::from(v);
+                    }
                 }
-                next[y * nw + x] = [(sum[0] / 4) as u8, (sum[1] / 4) as u8];
+                next[y * nw + x] = sum.map(|s| (s / 4) as u8);
             }
         }
-        rg = next;
+        texels = next;
         (w, h) = (nw, nh);
     }
+    let block = 8 * C as u32;
     let mut out = Vec::with_capacity(148 + body.len());
     let u32le = |out: &mut Vec<u8>, v: u32| out.extend_from_slice(&v.to_le_bytes());
     out.extend_from_slice(b"DDS ");
@@ -485,7 +350,7 @@ pub fn normal_to_bc5(dds: &[u8]) -> anyhow::Result<Vec<u8>> {
     u32le(&mut out, header.width);
     u32le(
         &mut out,
-        (header.width.div_ceil(4) * header.height.div_ceil(4) * 16).max(16),
+        (header.width.div_ceil(4) * header.height.div_ceil(4) * block).max(block),
     );
     u32le(&mut out, 0);
     u32le(&mut out, mips);
@@ -497,27 +362,26 @@ pub fn normal_to_bc5(dds: &[u8]) -> anyhow::Result<Vec<u8>> {
     out.extend_from_slice(&[0u8; 20]);
     u32le(&mut out, 0x1000 | 0x8 | 0x400000); // TEXTURE | COMPLEX | MIPMAP
     out.extend_from_slice(&[0u8; 16]);
-    // DX10 header: DXGI_FORMAT_BC5_UNORM, 2D texture, one array element.
-    u32le(&mut out, 83);
+    // DX10 header: DXGI_FORMAT_BC4_UNORM or BC5_UNORM, 2D texture, one array element.
+    u32le(&mut out, if C == 1 { 80 } else { 83 });
     u32le(&mut out, 3);
     u32le(&mut out, 0);
     u32le(&mut out, 1);
     u32le(&mut out, 0);
     out.extend_from_slice(&body);
-    Ok(out)
+    out
 }
 
-/// Appends one BC5 mip level (two BC4 blocks per 4x4 tile).
-fn encode_bc5(rg: &[[u8; 2]], w: usize, h: usize, out: &mut Vec<u8>) {
+/// Appends one BC4 (`C` = 1) or BC5 (`C` = 2) mip level: `C` BC4 blocks per 4x4 tile.
+fn encode_bc<const C: usize>(texels: &[[u8; C]], w: usize, h: usize, out: &mut Vec<u8>) {
     for by in 0..h.div_ceil(4) {
         for bx in 0..w.div_ceil(4) {
-            for c in [0usize, 1] {
-                let mut v = [0u8; 16];
-                for (i, t) in v.iter_mut().enumerate() {
-                    let (x, y) = ((bx * 4 + i % 4).min(w - 1), (by * 4 + i / 4).min(h - 1));
-                    *t = rg[y * w + x][c];
-                }
-                out.extend_from_slice(&encode_bc4(&v));
+            let tile: [[u8; C]; 16] = std::array::from_fn(|i| {
+                let (x, y) = ((bx * 4 + i % 4).min(w - 1), (by * 4 + i / 4).min(h - 1));
+                texels[y * w + x]
+            });
+            for c in 0..C {
+                out.extend_from_slice(&encode_bc4(&tile.map(|t| t[c])));
             }
         }
     }
@@ -594,6 +458,129 @@ pub fn export_grading(raw: &Path, out: &Path, id: &str) -> anyhow::Result<()> {
     }
     eprintln!("{id}: {count} display-space grading LUTs");
     Ok(())
+}
+
+#[cfg(test)]
+mod translucency_tests {
+    use super::*;
+    use crate::maps::pieces;
+
+    /// Translucent foliage exports its normal map's alpha as a per-pixel BC4 mask and its
+    /// MTD `float_0` as the scale (#367): the gatehouse dead grass, whose textures are its
+    /// object's, and map-texture foliage of the Outskirts. Reads the raw cache only.
+    #[test]
+    fn translucent_foliage_exports_its_normal_alpha_mask_and_scale() {
+        let raw = sekiro_formats::cache::root().join("raw");
+        let game = std::env::var_os("SEKIRO_DIR").map_or_else(
+            || PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Sekiro"),
+            PathBuf::from,
+        );
+        let map = raw.join("map/m11_00_00_00");
+        let (true, Ok(oodle)) = (map.is_dir(), Oodle::load(&game)) else {
+            eprintln!("skipped: no raw m11_00_00_00 or no Oodle");
+            return;
+        };
+        let mtds = super::super::load_mtds(&raw).unwrap();
+        let mut store = MapTextures::open(&raw, oodle).unwrap();
+        let masks = |flver: &sekiro_formats::flver::Flver| -> Vec<String> {
+            pieces::wanted_textures(flver, &mtds)
+                .into_iter()
+                .filter(|(_, kind)| *kind == TexKind::TranslucencyMask)
+                .map(|(name, _)| name)
+                .collect()
+        };
+        // Each mask is the source normal's alpha texel for texel, within BC4 error; returns the
+        // alpha range.
+        let check_mask = |store: &MapTextures, name: &str| -> (u8, u8) {
+            let normal = store
+                .dds(TexKind::TranslucencyMask.source(name))
+                .unwrap()
+                .unwrap();
+            let normal_header = tpf::Dds::parse(&normal).unwrap();
+            let normal = crate::models::textures::decode_rgba(&normal_header, &normal).unwrap();
+            let mask = export_dds(store, name, TexKind::TranslucencyMask)
+                .unwrap()
+                .unwrap();
+            let header = tpf::Dds::parse(&mask).unwrap();
+            assert_eq!(header.format, tpf::DdsFormat::Bc4, "{name}");
+            assert_eq!(
+                (header.width, header.height),
+                (normal_header.width, normal_header.height)
+            );
+            assert_eq!(
+                header.mip_count,
+                header.width.max(header.height).ilog2() + 1,
+                "{name}: full mip chain"
+            );
+            assert_eq!(
+                mask.len(),
+                header.data_offset + header.image_len().unwrap(),
+                "{name}"
+            );
+            let mask = crate::models::textures::decode_rgba(&header, &mask).unwrap();
+            let (alpha, decoded): (Vec<u8>, Vec<u8>) = normal
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(mask.as_chunks::<4>().0)
+                .map(|(n, m)| (n[3], m[0]))
+                .unzip();
+            let worst = alpha
+                .iter()
+                .zip(&decoded)
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap();
+            assert!(worst <= 24, "{name}: worst texel error {worst}");
+            (*alpha.iter().min().unwrap(), *alpha.iter().max().unwrap())
+        };
+        // The gatehouse dead grass: M[Translucency] with float_0 3.
+        let grass = super::super::object_flver(&raw, "o007600");
+        store.add_tpf(&grass.with_extension("tpf")).unwrap();
+        let grass = sekiro_formats::flver::parse(&std::fs::read(grass).unwrap()).unwrap();
+        let names = masks(&grass);
+        assert!(!names.is_empty());
+        for name in &names {
+            assert!(name.ends_with("_n_t"), "{name}");
+            // Not a constant: the blades' mask varies, which a per-material mean would lose.
+            let (lo, hi) = check_mask(&store, name);
+            assert!(hi - lo > 64, "{name}: alpha {lo}..{hi}");
+        }
+        // The GLB references the mask beside the MTD scale, for the game to sample per pixel.
+        let glb = pieces::build(&grass, &mtds, &|name| Some(format!("tex/{name}.dds")))
+            .unwrap()
+            .glb;
+        let len = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+        let doc: serde_json::Value = serde_json::from_slice(&glb[20..20 + len]).unwrap();
+        let written: Vec<_> = doc["materials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| &m["extras"]["sekiro_translucency"])
+            .filter(|t| t.is_object())
+            .collect();
+        assert!(!written.is_empty(), "{}", doc["materials"]);
+        for t in written {
+            assert_eq!(t["scale"].as_f64(), Some(3.), "{t}");
+            let uri = t["uri"].as_str().unwrap();
+            assert!(names.iter().any(|n| uri == format!("tex/{n}.dds")), "{uri}");
+        }
+        // Map pieces whose foliage textures are map textures, not object ones: a branch and
+        // paper.
+        for (model, normal) in [("001363", "m11_branch_05_n"), ("130030", "m11_paper_00_n")] {
+            let path = super::super::piece_flver(&raw, "m11_00_00_00", &format!("m{model}"));
+            let flver = sekiro_formats::flver::parse(&std::fs::read(path).unwrap()).unwrap();
+            let name = pieces::translucency_mask_name(normal);
+            assert!(
+                masks(&flver).contains(&name),
+                "{model}: {:?}",
+                masks(&flver)
+            );
+            check_mask(&store, &name);
+            let source = store.provenance(normal).unwrap().unwrap();
+            assert!(source.starts_with("map/m11/"), "{source}");
+        }
+    }
 }
 
 #[cfg(test)]

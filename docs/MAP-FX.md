@@ -293,7 +293,7 @@ So `x = d2 * (1/R^2)` is what Bevy already stores as `color_inverse_square_range
 The same builder squares the diffuse and specular RGB, so FXR 609 colour is now squared too (`fxr.rs`); the previous note that 609 colour is not squared was wrong.
 The builder's remaining inputs (object offsets 0x258, 0xf8, 0xfc and the `param_5` flag, which look like a time-of-day or story intensity modulation, and the random/flicker term at 0x108) are not traced and are left out.
 `TransLightParam` (the backlight term) and the G-buffer translucency channel are treated as zero for these point lights.
-The sun and fill do read the translucency channel: the extractor writes each `M[Translucency]*` material's `k` to `sekiro_translucency` (`pieces::translucency`, #367), and `--ab translucency=on,off` flips it live.
+The sun and fill do read the translucency channel: the extractor exports each `M[Translucency]*` normal map's alpha as a BC4 mask and its MTD `float_0` as `sekiro_translucency`, the shader samples `k = float_0 * mask` per pixel (#367, see FIDELITY.md), and `--ab translucency=on,off` flips it live.
 
 Implementation: `map_material.wgsl` `native_point_lights` loops the clustered point and spot lights of the fragment, subtracts Bevy's own `point_light`/`spot_light` result (same inputs as `apply_pbr_lighting`, same shadow) and adds the native one.
 It runs for the native direct path only (`direct[12].x`, the existing `SEKIRO_GI_NATIVE_LIGHTS` switch) and is controlled by `direct[12].y`, set in `map_material.rs`.
