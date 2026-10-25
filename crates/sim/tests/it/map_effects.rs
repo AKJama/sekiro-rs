@@ -1,7 +1,4 @@
-use sekiro_sim::{
-    map_effects::{self, IdolClip},
-    world_events,
-};
+use sekiro_sim::{map_effects, world_events};
 
 #[test]
 fn installed_map_effects_resolve_model_parameters_and_story_commands() {
@@ -136,21 +133,13 @@ fn every_idol_shows_its_flame_above_its_hands_once_lit() {
             assert!(
                 idle.iter()
                     .filter(|p| lit.contains(&p.effect))
-                    .all(|p| p.idol.unwrap().clip == IdolClip::Lit),
+                    .all(|p| p.idol.unwrap().lit),
                 "{map} idol {}: a lit idol still shows its unlit idle {lit:?}",
                 part.entity_id
             );
             if !idle[0].idol.unwrap().lit_at_start {
                 let unlit = shown(false);
                 assert!(!unlit.is_empty() && unlit.iter().all(|e| !lit.contains(e)));
-                // Lighting it plays the lighting clip's burst once (#360), never as an idle.
-                let bursts: Vec<i32> = idle
-                    .iter()
-                    .filter(|p| p.idol.unwrap().lights(false, true))
-                    .map(|p| p.effect)
-                    .collect();
-                assert_eq!(bursts, [1000], "{map} idol {}", part.entity_id);
-                assert!(!idle.iter().any(|p| p.idol.unwrap().lights(true, true)));
             }
             let model = &msb.models[part.model_index as usize].name;
             let flver = sekiro_formats::flver::parse(
@@ -171,10 +160,7 @@ fn every_idol_shows_its_flame_above_its_hands_once_lit() {
             let hands = raised.iter().sum::<glam::Vec3>() / raised.len() as f32;
             let hands = part.matrix().transform_point3(hands) * glam::Vec3::new(-1.0, 1.0, 1.0);
             let origin = glam::Vec3::new(-part.position[0], part.position[1], part.position[2]);
-            for p in idle
-                .iter()
-                .filter(|p| p.idol.unwrap().clip == IdolClip::Lit)
-            {
+            for p in idle.iter().filter(|p| p.idol.unwrap().lit) {
                 // Dummy 100 is the idol's origin; the flame's offset is the effect's own, in the
                 // dummy's frame, which faces the hands (#278).
                 assert_eq!(p.dummy, Some(100));
@@ -203,4 +189,50 @@ fn every_idol_shows_its_flame_above_its_hands_once_lit() {
         assert!(idols >= 7, "{map}: {idols} idols");
     }
     assert_eq!(pinned, PINNED.len());
+}
+
+/// #360: each idol model's lighting clip 10 bursts FFX [`LIGHTING_FFX`] once at
+/// [`LIGHTING_BURST`], on its dummy 100 (the origin the game plays it at) and in no TAE slot;
+/// its only other effect is the lit idle's flame, in the idles' slot 1.
+#[test]
+fn every_idol_lighting_clip_bursts_once_at_its_origin() {
+    use sekiro_sim::duel::idol::{LIGHTING_BURST, LIGHTING_FFX};
+    let cache = sekiro_sim::cache::root();
+    if !cache.join("refs/TAE.Template.SDT.xml").exists() {
+        eprintln!("skipping: cache not extracted");
+        return;
+    }
+    let template = sekiro_formats::tae::Template::parse_xml(
+        &std::fs::read_to_string(cache.join("refs/TAE.Template.SDT.xml")).unwrap(),
+    )
+    .unwrap();
+    for (model, flame) in [("o005000", 1011), ("o005500", 1011), ("o115040", 1012)] {
+        let tae = sekiro_formats::tae::parse(
+            &std::fs::read(cache.join(format!(
+                "raw/obj/{model}.objbnd.d/{model}.anibnd.d/{model}.tae"
+            )))
+            .unwrap(),
+        )
+        .unwrap();
+        let clip = tae.animations.iter().find(|a| a.id == 10).unwrap();
+        let mut effects: Vec<(i64, f32, i64, i64)> = clip
+            .events
+            .iter()
+            .filter_map(|e| {
+                let d = template.decode(e)?;
+                let int = |f| d.field(f).and_then(|v| v.as_int());
+                Some((int("FFXID")?, e.start, int("DummyPolyID")?, int("SlotID")?))
+            })
+            .filter(|e| e.0 > 0)
+            .collect();
+        effects.sort_by_key(|e| e.0);
+        assert_eq!(
+            effects,
+            [
+                (LIGHTING_FFX as i64, LIGHTING_BURST, 100, -1),
+                (flame, 0.0, 100, 1)
+            ],
+            "{model}"
+        );
+    }
 }

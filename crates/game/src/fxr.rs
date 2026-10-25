@@ -543,9 +543,12 @@ impl FxrPlayer {
         }
     }
 
-    /// Removes map effect `id`/`serial` at once.
+    /// Removes map effect `id`/`serial` at once, if it plays (its key is unique; far hidden idol
+    /// idles ask every frame, so the search stops at the match).
     pub(crate) fn drop_map_effect(&mut self, id: i32, serial: i32) {
-        self.effects.retain(|e| e.key != (5, id, serial));
+        if let Some(i) = self.effects.iter().position(|e| e.key == (5, id, serial)) {
+            self.effects.remove(i);
+        }
     }
 
     pub(crate) fn advance_map(&mut self, dt: f32) {

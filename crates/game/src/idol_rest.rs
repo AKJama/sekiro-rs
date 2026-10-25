@@ -10,9 +10,14 @@
 //! taken off the idol) lifts the dark from wherever it had got to at the same rate.
 //! gap: the screen dark is the effect's curve on a black overlay (docs/FIDELITY.md); the game's
 //! own fade for the rest request is not traced in the exe.
+//!
+//! Lighting an idol plays its lighting clip's burst the same way (#360): FFX [`LIGHTING_FFX`]
+//! once, at the idol's origin, as the sim's lighting clock (`Duel::idol_lighting`) passes
+//! [`LIGHTING_BURST`].
 use bevy::prelude::*;
 use sekiro_sim::duel::idol::{
-    REST_BURST, REST_DARK_HOLD, REST_DARK_OUT, REST_FFX, REST_RESET, RestClock, rest_dark,
+    LIGHTING_BURST, LIGHTING_FFX, REST_BURST, REST_DARK_HOLD, REST_DARK_OUT, REST_FFX, REST_RESET,
+    RestClock, rest_dark,
 };
 use sekiro_sim::kit::Kit;
 
@@ -67,11 +72,18 @@ fn shade(rest: Option<RestClock>, last: f32, dt: f32) -> f32 {
     }
 }
 
-/// What the rest's frame-to-frame state carries: the clock last seen, the shade, the bursts
-/// played and when the shade was last logged.
+/// Whether a clock (`now`, `before` it last frame) passes `at` this frame: the frame a burst
+/// at `at` plays, once per run of the clock.
+fn passes(before: Option<f32>, now: Option<f32>, at: f32) -> bool {
+    now.is_some_and(|s| s >= at) && before.is_none_or(|s| s < at)
+}
+
+/// What the idol's frame-to-frame state carries: the rest's and the lighting's clocks last
+/// seen, the shade, the bursts played and when the shade was last logged.
 #[derive(Default)]
 struct Seen {
     secs: Option<f32>,
+    lighting: Option<f32>,
     shade: f32,
     bursts: i32,
     logged_at: f32,
@@ -82,31 +94,35 @@ fn rest_effect(
     time: Res<Time>,
     sim: NonSend<Sim>,
     idols: Res<Idols>,
-    fxr: Option<ResMut<FxrPlayer>>,
+    mut fxr: Option<ResMut<FxrPlayer>>,
     mut before: ResMut<KitBefore>,
     mut seen: Local<Seen>,
     mut darks: Query<(&mut BackgroundColor, &mut Visibility), With<Dark>>,
 ) {
     let rest = sim.duel.idol_rest();
     let now = rest.map(|r| r.secs);
-    // The burst, once, the frame the clock passes it.
-    if let Some(secs) = now
-        && secs >= REST_BURST
-        && seen.secs.is_none_or(|s| s < REST_BURST)
-    {
-        let at = sim.duel.idol().and_then(|i| idols.origins.get(i)).copied();
-        match (at, fxr) {
-            (Some(at), Some(mut fxr)) => {
+    let lighting = sim.duel.idol_lighting();
+    let at = sim.duel.idol().and_then(|i| idols.origins.get(i)).copied();
+    // Each burst, once, the frame its clock passes it.
+    let bursts = [
+        passes(seen.lighting, lighting, LIGHTING_BURST)
+            .then(|| ("lighting", LIGHTING_FFX, lighting.unwrap_or_default())),
+        passes(seen.secs, now, REST_BURST).then(|| ("rest", REST_FFX, now.unwrap_or_default())),
+    ];
+    for (what, effect, clock) in bursts.into_iter().flatten() {
+        match (at, fxr.as_deref_mut()) {
+            (Some(at), Some(fxr)) => {
                 seen.bursts += 1;
-                fxr.one_shot(IDOL, REST_FFX, seen.bursts, at);
+                fxr.one_shot(IDOL, effect, seen.bursts, at);
                 info!(
-                    "idol: rest burst FFX {REST_FFX} at {:.2?} ({secs:.2} s)",
+                    "idol: {what} burst FFX {effect} at {:.2?} ({clock:.2} s)",
                     at.translation
                 );
             }
-            _ => warn!("idol: rest burst FFX {REST_FFX} not played (no idol or no FXR player)"),
+            _ => warn!("idol: {what} burst FFX {effect} not played (no idol or no FXR player)"),
         }
     }
+    seen.lighting = lighting;
     if let Some(r) = rest
         && r.reset
         && let Some(kit) = before.0.take()
@@ -146,6 +162,32 @@ fn rest_effect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #360: the lighting burst plays once per lighting, the frame the sim's lighting clock
+    /// starts, however many frames the clock then runs, and again at the next idol lit.
+    #[test]
+    fn the_lighting_burst_plays_once_per_lighting_from_the_clock_edge() {
+        let step = 1.0 / 30.0;
+        let lighting = |frames: usize| (0..frames).map(move |f| Some(f as f32 * step));
+        // Unlit, a lighting (seen first a step in, as a frame can run more than one sim step),
+        // praying, then a second idol lit.
+        let clocks: Vec<Option<f32>> = [None, None]
+            .into_iter()
+            .chain(lighting(100).skip(1))
+            .chain([None, None])
+            .chain(lighting(100))
+            .chain([None])
+            .collect();
+        let mut before = None;
+        let mut fired = Vec::new();
+        for (frame, &now) in clocks.iter().enumerate() {
+            if passes(before, now, LIGHTING_BURST) {
+                fired.push(frame);
+            }
+            before = now;
+        }
+        assert_eq!(fired, [2, 103]);
+    }
 
     #[test]
     fn the_dark_follows_the_rest_and_lifts_from_where_a_cut_left_it() {

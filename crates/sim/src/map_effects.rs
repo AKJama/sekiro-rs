@@ -21,56 +21,32 @@ pub struct Placement {
     pub dummy: Option<i32>,
     pub param: Option<i32>,
     pub source: Option<EffectWrite>,
-    /// A Sculptor's Idol's effect: one of the object's clips plays it, so an idle shows only
-    /// while the idol's lit state matches, and the lighting clip's burst plays once as it lights.
+    /// A Sculptor's Idol's idle effect: the object's idle clip (unlit or lit) plays it, so it
+    /// shows only while the idol's lit state matches.
     pub idol: Option<IdolIdle>,
 }
 
-/// Which clip of a Sculptor's Idol (a registered bonfire object) plays an effect: the unlit
-/// idle ([`UNLIT_IDLE`], the embers circling the idol), the lit one ([`LIT_IDLE`], the flame
-/// above its hands), or the lighting clip ([`LIGHTING`]) between them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum IdolClip {
-    Unlit,
-    Lit,
-    /// A one-shot of the lighting clip, outside the idles' slot: FFX 1000, the 1.3 s burst as
-    /// the idol lights.
-    Lighting,
-}
-
-/// An idol's effect: the clip that plays it and whether the story lights the idol already.
+/// Which idle clip of a Sculptor's Idol (a registered bonfire object) plays an effect: the
+/// unlit idle ([`UNLIT_IDLE`], the embers circling the idol) or the lit one ([`LIT_IDLE`], the
+/// flame above its hands).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct IdolIdle {
-    pub clip: IdolClip,
+    /// The lit idle's effect (else the unlit one's).
+    pub lit: bool,
     /// The story lights the idol already (its bonfire flag is on or it holds kindling).
     pub lit_at_start: bool,
 }
 
 impl IdolIdle {
-    /// Whether the effect shows as an idle, `found` saying whether Wolf has lit the idol in
-    /// play. The lighting burst never does; it plays once, when [`Self::lights`].
+    /// Whether the effect shows, `found` saying whether Wolf has lit the idol in play.
     pub fn shows(&self, found: bool) -> bool {
-        let lit = self.lit_at_start || found;
-        match self.clip {
-            IdolClip::Unlit => !lit,
-            IdolClip::Lit => lit,
-            IdolClip::Lighting => false,
-        }
-    }
-
-    /// Whether the lighting clip plays now: Wolf lit the idol in play (`found`, `was` before),
-    /// and the story had not lit it already.
-    pub fn lights(&self, was: bool, found: bool) -> bool {
-        self.clip == IdolClip::Lighting && !self.lit_at_start && found && !was
+        self.lit == (self.lit_at_start || found)
     }
 }
 
-/// The idol objects' clips (o005000, o005500, o115040 TAE): 1 unlit idle, 11 lit idle and 10
-/// the lighting between them, which starts the lit flame (1011, in the idles' slot 1) with a
-/// burst (1000, in no slot).
+/// The idol objects' idle clips (o005000, o005500, o115040 TAE): 1 unlit, 11 lit.
 pub const UNLIT_IDLE: i64 = 1;
 pub const LIT_IDLE: i64 = 11;
-pub const LIGHTING: i64 = 10;
 
 #[derive(Debug, Serialize)]
 pub struct Catalog {
@@ -169,13 +145,8 @@ pub fn load(cache: &Path, map: &str, state: &WorldState) -> Result<Catalog, Stri
                     model.name
                 ));
                 let tae = sekiro_formats::tae::parse(&std::fs::read(path)?)?;
-                // Both idles: lighting the idol in play swaps the unlit one for the lit one, and
-                // the lighting clip adds its burst.
-                for (animation, clip) in [
-                    (UNLIT_IDLE, IdolClip::Unlit),
-                    (LIT_IDLE, IdolClip::Lit),
-                    (LIGHTING, IdolClip::Lighting),
-                ] {
+                // Both idles: lighting the idol in play swaps the unlit one for the lit one.
+                for (animation, lit) in [(UNLIT_IDLE, false), (LIT_IDLE, true)] {
                     let Some(idle) = tae.animations.iter().find(|a| a.id == animation) else {
                         continue;
                     };
@@ -190,10 +161,7 @@ pub fn load(cache: &Path, map: &str, state: &WorldState) -> Result<Catalog, Stri
                         };
                         let effect = int("FFXID");
                         let dummy = int("DummyPolyID");
-                        // The lighting clip's lit flame is the lit idle's, in the same slot;
-                        // only its slotless burst is its own.
-                        let own = clip != IdolClip::Lighting || int("SlotID") < 0;
-                        if effect > 0 && own {
+                        if effect > 0 {
                             requests.push((
                                 effect,
                                 dummy,
@@ -207,7 +175,7 @@ pub fn load(cache: &Path, map: &str, state: &WorldState) -> Result<Catalog, Stri
                                     dummy,
                                     effect,
                                 }),
-                                Some(IdolIdle { clip, lit_at_start }),
+                                Some(IdolIdle { lit, lit_at_start }),
                             ));
                         }
                     }
