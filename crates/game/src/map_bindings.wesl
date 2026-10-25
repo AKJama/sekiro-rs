@@ -7,6 +7,8 @@ struct Layers {
     normal_uv: vec4<f32>,
     normal_enabled: vec4<f32>,
     camera_fade: vec4<f32>,
+    // x: native foliage translucency k (translucency.rs).
+    translucency: vec4<f32>,
     game: MapGame,
 }
 // LightSet values shared by every map material (MapLightBuffer).

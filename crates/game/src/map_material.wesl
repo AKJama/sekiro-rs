@@ -344,9 +344,21 @@ fn native_point_lights(pbr: PbrInput, scale: f32, btl_residual: f32) -> vec3<f32
     return correction*view.exposure;
 }
 
+// Native diffuse response of the sun and fill slots (GXLightAcc_DDirLightShadowed1). A pixel with
+// G-buffer translucency k > 0 (M[Translucency]* foliage, translucency.rs) takes wrapped Lambert
+// max(N.L + k, 0) / (1 + 2k) plus a back-light lobe toward the light, saturate(L.-V)^32 *
+// ((N.V + 1) / 2)^2 * k / (1 + k); other pixels take plain saturate(N.L) (#367).
+fn translucent_diffuse(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, k: f32) -> f32 {
+    let nl = dot(n,l);
+    if k<=0.0 { return max(nl,0.0); }
+    let facing = 0.5*max(dot(v,n)+1.0,0.0);
+    let back = pow(saturate(dot(l,-v)),32.0)*facing*facing;
+    return max(nl+k,0.0)/(1.0+2.0*k)+back*k/(1.0+k);
+}
+
 // Native four-slot colour routing with the recovered directional accumulation.
 @if(NATIVE_DIRECT)
-fn native_direct(pbr: PbrInput, light: MapLight) -> vec3<f32> {
+fn native_direct(pbr: PbrInput, light: MapLight, translucency: f32) -> vec3<f32> {
     var li = base_lighting_input(pbr);
     let nv = max(dot(pbr.N,pbr.V),0.0001);
     var correction = vec3(0.0);
@@ -385,7 +397,7 @@ fn native_direct(pbr: PbrInput, light: MapLight) -> vec3<f32> {
         let f0 = calculate_F0(pbr.material.base_color.rgb,pbr.material.metallic,pbr.material.reflectance);
         let f = f0+(1.0-f0)*pow(1.0-lh,5.0);
         let vis = 1.0/(max(nl,nv)*(1.0-a*0.5)+a*0.5);
-        var diffuse_angle = nl;
+        var diffuse_angle = translucent_diffuse(pbr.N,pbr.V,normalize(direction),translucency);
         if i>=2u { diffuse_angle = min(pow(0.5*dot(pbr.N,normalize(direction))+0.5,2.0),1.0); }
         // The packed colours carry SCENE_TO_BEVY = pi / exposure, so both terms take 1/pi;
         // native D (GXLightAcc_DDirLight1) already contains its own 1/pi, kept in d above (#7).
@@ -839,7 +851,7 @@ vertex: VertexOutput,
     if !unlit { out.color = apply_pbr_lighting(pbr); }
     @if(NATIVE_DIRECT) {
         if !unlit && light.direct[12].x>0.0 {
-            out.color = vec4(out.color.rgb+native_direct(pbr,light),out.color.a);
+            out.color = vec4(out.color.rgb+native_direct(pbr,light,layers.translucency.x),out.color.a);
             if light.direct[12].y>0.0 {
                 out.color = vec4(out.color.rgb+native_point_lights(pbr,light.direct[12].z,light.direct[12].w),out.color.a);
             }

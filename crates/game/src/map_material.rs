@@ -18,6 +18,8 @@ use serde_json::Value;
 
 #[path = "camera_fade.rs"]
 mod camera_fade;
+#[path = "translucency.rs"]
+mod translucency;
 
 pub(crate) type LayeredMaterial = ExtendedMaterial<StandardMaterial, MapLayers>;
 
@@ -215,6 +217,8 @@ pub(crate) struct MapLayers {
     normal_uv: Vec4,
     normal_enabled: Vec4,
     camera_fade: Vec4,
+    /// x: native foliage translucency `k` (`translucency.rs`), 0 for other surfaces.
+    translucency: Vec4,
     game: MapGame,
     #[texture(51)]
     #[sampler(52)]
@@ -319,6 +323,7 @@ struct MapLayersUniform {
     normal_uv: Vec4,
     normal_enabled: Vec4,
     camera_fade: Vec4,
+    translucency: Vec4,
     game: MapGame,
 }
 
@@ -378,6 +383,7 @@ impl From<&MapLayers> for MapLayersUniform {
             normal_uv: layers.normal_uv,
             normal_enabled: layers.normal_enabled,
             camera_fade: layers.camera_fade,
+            translucency: layers.translucency,
             game: layers.game.clone(),
         }
     }
@@ -597,6 +603,7 @@ mod tests {
                 materials: HashMap::new(),
                 interned: MaterialInterner::default(),
                 camera_fade: camera_fade::CameraFade::load(std::path::Path::new(""), false),
+                translucency: translucency::Translucency::load(std::path::Path::new(""), false),
             })
             .add_systems(Update, (release_materials, replace_materials).chain())
             .add_systems(PostUpdate, sync_actor_materials);
@@ -821,6 +828,7 @@ mod tests {
                 materials: HashMap::new(),
                 interned: MaterialInterner::default(),
                 camera_fade: camera_fade::CameraFade::load(std::path::Path::new(""), false),
+                translucency: translucency::Translucency::load(std::path::Path::new(""), false),
             })
             .add_systems(
                 Update,
@@ -975,6 +983,7 @@ struct LayerSettings {
     materials: HashMap<(AssetId<StandardMaterial>, Option<i32>, bool), Handle<LayeredMaterial>>,
     interned: MaterialInterner,
     camera_fade: camera_fade::CameraFade,
+    translucency: translucency::Translucency,
 }
 
 #[derive(bevy::ecs::system::SystemParam)]
@@ -1039,6 +1048,11 @@ pub(super) fn install(app: &mut App, prefix: &str, dir: &std::path::Path, args: 
         camera_fade: camera_fade::CameraFade::load(
             dir,
             !args.iter().any(|s| s == "--no-camera-fade"),
+        ),
+        // `SEKIRO_NO_TRANSLUCENCY=1` drops the foliage translucency for A/B captures (#367).
+        translucency: translucency::Translucency::load(
+            dir,
+            std::env::var_os("SEKIRO_NO_TRANSLUCENCY").is_none_or(|v| v != "1"),
         ),
     })
     .add_systems(
@@ -1184,6 +1198,18 @@ fn replace_materials(
             } else {
                 Vec4::ZERO
             };
+            let translucency = if map_surface {
+                Vec4::new(
+                    settings
+                        .translucency
+                        .material(name.map_or("", |name| name.0.as_str())),
+                    0.,
+                    0.,
+                    0.,
+                )
+            } else {
+                Vec4::ZERO
+            };
             let load = |key: &str, srgb: bool| -> Option<Handle<Image>> {
                 if !settings.enabled {
                     return None;
@@ -1297,6 +1323,7 @@ fn replace_materials(
                     f32::from(settings.debug),
                 ),
                 camera_fade,
+                translucency,
                 overlay: load("overlay", true),
                 snow: load("snow", true),
                 c: load("c", true),
