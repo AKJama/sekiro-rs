@@ -58,14 +58,13 @@ fn native_post_shaders_compose_and_validate() {
 #[test]
 fn shadowed_fog_cell_keeps_sky_light_and_loses_sun_light() {
     let production = include_str!("../../src/fog.wesl").replace("\r\n", "\n");
-    let fog_struct = production.split("struct Fog {").nth(1).unwrap();
-    let fog_struct = fog_struct.split("\n}\n").next().unwrap();
-    let functions = production.split("fn profile(").nth(1).unwrap();
-    let functions = functions.split("fn terminal_source(").next().unwrap();
+    use super::shader_support::wgsl_fn;
+    let fog_struct = wgsl_fn(&production, "struct Fog {", "\n}\n");
+    let functions = wgsl_fn(&production, "fn profile(", "fn terminal_source(");
     let source_for = |sky: &str, direct: &str| {
         format!(
             r#"
-struct Fog {{{fog_struct}
+{fog_struct}
 }}
 const fog = Fog(
     vec4(0.002, 0.01, 0.01, 0.0), vec4(0.1, 400.0, 0.0, 0.0), vec4({sky}, 0.0),
@@ -73,7 +72,7 @@ const fog = Fog(
     vec4(1.0, 32.0, 0.0, 0.0), vec4(0.0), array<vec4<f32>,16>(), vec4(1.0), vec4(8.0, 0.4, 0.0, 0.0),
     vec4(4.0, 1.0, 0.8, 1.0),
 );
-fn profile({functions}
+{functions}
 @group(0) @binding(0) var<storage, read_write> result: array<vec4<f32>, 3>;
 @compute @workgroup_size(1)
 fn main() {{
@@ -115,13 +114,12 @@ fn main() {{
 #[test]
 fn sensitometric_curve_matches_native_table_samples() {
     let production = include_str!("../../src/tonemap.wesl");
-    let curve = production.split("fn tone(").nth(1).unwrap();
-    let curve = curve.split("@fragment").next().unwrap();
+    let curve = super::shader_support::wgsl_fn(production, "fn tone(", "@fragment");
     let source = format!(
         r#"
 struct Settings {{ transfer: vec4<f32>, curve: vec4<f32>, reinhard: vec4<f32> }}
 const settings = Settings(vec4(1.0, 1.0, 7.0, 4.0), vec4(1.0, 0.5, 0.5, 1.6), vec4(1.7, 0.0, 0.0, 0.0));
-fn tone({curve}
+{curve}
 @group(0) @binding(0) var<storage, read_write> result: array<vec4<f32>, 5>;
 @compute @workgroup_size(1)
 fn main() {{

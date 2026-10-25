@@ -71,6 +71,7 @@ pub fn plugin(cache: PathBuf, bridge: impl Fn(&mut App) + Send + Sync + 'static)
             embedded_asset!(app, "fxr.wesl");
             embedded_asset!(app, "fxr_multi.wesl");
             embedded_asset!(app, "fxr_distort.wesl");
+            bevy::shader::load_shader_library!(app, "fx_shadow.wesl");
             app.add_plugins((
                 MaterialPlugin::<FxrMaterial>::default(),
                 MaterialPlugin::<MultiMaterial>::default(),
@@ -806,15 +807,30 @@ struct Buf {
     /// x: alpha fade threshold, y: hard alpha threshold (both 0..1), z: the soft distance
     /// (0 = hard edge).
     tan: Vec<[f32; 4]>,
+    /// Per channel, the share of `col` that is the sun the shader shadows (#366,
+    /// `fx_lighting::sun_shade`; 0 for unlit particles). Rides in the normal attribute.
+    shade: Vec<[f32; 3]>,
 }
 
 impl Buf {
     fn quad(&mut self, c: [Vec3; 4], uv: [[f32; 2]; 4], col: [f32; 4], tan: [f32; 4]) {
+        self.quad_shaded(c, uv, col, tan, [0.0; 3]);
+    }
+
+    fn quad_shaded(
+        &mut self,
+        c: [Vec3; 4],
+        uv: [[f32; 2]; 4],
+        col: [f32; 4],
+        tan: [f32; 4],
+        shade: [f32; 3],
+    ) {
         for i in [0, 1, 2, 0, 2, 3] {
             self.pos.push(c[i].to_array());
             self.uv.push(uv[i]);
             self.col.push(col);
             self.tan.push(tan);
+            self.shade.push(shade);
         }
     }
 }
@@ -831,6 +847,7 @@ struct MultiBuf {
     c2: Vec<[f32; 4]>,
     c3: Vec<[f32; 4]>,
     soft: Vec<f32>,
+    shade: Vec<[f32; 3]>,
 }
 
 struct MultiQuad {
@@ -844,6 +861,8 @@ struct MultiQuad {
     c2: [f32; 4],
     c3: [f32; 4],
     soft: f32,
+    /// See [`Buf::shade`].
+    shade: [f32; 3],
 }
 
 impl MultiBuf {
@@ -859,6 +878,7 @@ impl MultiBuf {
             self.c2.push(q.c2);
             self.c3.push(q.c3);
             self.soft.push(q.soft);
+            self.shade.push(q.shade);
         }
     }
 }
@@ -977,6 +997,7 @@ struct ParticleLightInputs<'w, 's> {
     lighting: Option<Res<'w, crate::lighting::MapLighting>>,
     gi: Option<Res<'w, crate::fx_lighting::IrradianceCpu>>,
     points: Query<'w, 's, (&'static PointLight, &'static GlobalTransform)>,
+    shadows: Option<Res<'w, crate::fx_lighting::ParticleShadows>>,
 }
 
 struct Frame<'a> {
@@ -1155,6 +1176,7 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
     let node_y = n.world.rotation * Vec3::Y;
     // Lit particles take only the lights and volumes reaching this node's particles (#324).
     let lit = is_lit(a) && !n.particles.is_empty();
+    let darkness = a[Field::ShadowDarkness].as_f64().unwrap_or(0.0) as f32;
     if lit {
         let (min, max) = n
             .particles
@@ -1176,11 +1198,13 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
             continue;
         }
         let mut col = particle_color(a, c, p, active_t, &mut rnd);
+        let mut shade = [0.0; 3];
         if lit {
             let l = f.light.at(world);
             for (v, l) in col.iter_mut().zip(l.to_array()) {
                 *v *= l;
             }
+            shade = f.light.shade(l, darkness).to_array();
         }
         col[3] *= fade;
         for v in &mut col[..3] {
@@ -1230,6 +1254,7 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                     buf.col.push([1., 1., 1., col[3]]);
                     buf.tan
                         .push([intensity, 1. / radius, QUAD_UV[i][0], QUAD_UV[i][1]]);
+                    buf.shade.push([0.; 3]);
                 }
             }
             609 => {
@@ -1384,6 +1409,7 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                         c2: lc(Field::Layer2Color, &mut rnd),
                         c3: lc(Field::Layer3Color, &mut rnd),
                         soft,
+                        shade,
                     };
                     f.multi
                         .entry((tex, l2, l3, modes, blend))
@@ -1403,7 +1429,7 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                 f.bufs
                     .entry((tex, additive(blend)))
                     .or_default()
-                    .quad(corners, uv, col, tan);
+                    .quad_shaded(corners, uv, col, tan, shade);
             }
             602 => {
                 let wl = scalar(a, Field::Width, p.emit_t, &mut rnd, 1.0)
@@ -1542,6 +1568,11 @@ const ATTR_SOFT: bevy::mesh::MeshVertexAttribute = bevy::mesh::MeshVertexAttribu
     0x5ec1_0650,
     bevy::render::render_resource::VertexFormat::Float32,
 );
+const ATTR_SHADE: bevy::mesh::MeshVertexAttribute = bevy::mesh::MeshVertexAttribute::new(
+    "FxSunShade",
+    0x5ec1_0651,
+    bevy::render::render_resource::VertexFormat::Float32x3,
+);
 
 /// MultiTextureBillboardEx (604): three texture layers blended as the game's
 /// GXFfxtessellateBlendMultiTexture shader does (`fxr_multi.wesl`, FwLo's port). Output is
@@ -1597,6 +1628,7 @@ impl Material for MultiMaterial {
             ATTR_C2.at_shader_location(6),
             ATTR_C3.at_shader_location(7),
             ATTR_SOFT.at_shader_location(8),
+            ATTR_SHADE.at_shader_location(9),
         ])?];
         descriptor.primitive.cull_mode = None;
         if let Some(depth) = &mut descriptor.depth_stencil {
@@ -1823,11 +1855,12 @@ macro_rules! batch_buffer {
     };
 }
 
-batch_buffer!(Buf, true,
+batch_buffer!(Buf, false,
     pos: Float32x3, Mesh::ATTRIBUTE_POSITION, PAD;
     uv: Float32x2, Mesh::ATTRIBUTE_UV_0, [0.0; 2];
     col: Float32x4, Mesh::ATTRIBUTE_COLOR, [0.0; 4];
     tan: Float32x4, Mesh::ATTRIBUTE_TANGENT, [0.0; 4];
+    shade: Float32x3, Mesh::ATTRIBUTE_NORMAL, [0.0; 3];
 );
 batch_buffer!(MultiBuf, false,
     pos: Float32x3, Mesh::ATTRIBUTE_POSITION, PAD;
@@ -1839,6 +1872,7 @@ batch_buffer!(MultiBuf, false,
     c2: Float32x4, ATTR_C2, [0.0; 4];
     c3: Float32x4, ATTR_C3, [0.0; 4];
     soft: Float32, ATTR_SOFT, 0.0;
+    shade: Float32x3, ATTR_SHADE, [0.0; 3];
 );
 
 struct Batch {
@@ -2015,6 +2049,7 @@ fn render(
             .iter()
             .filter(|(p, _)| p.intensity > 0. && p.range > 0.)
             .map(|(p, t)| crate::fx_lighting::NativeLight::from_point_light(p, t.translation())),
+        lit.shadows.as_deref().copied().unwrap_or_default().0,
     );
     let mut frame = Frame {
         cam,

@@ -2,28 +2,29 @@ import bevy_pbr::render::mesh_functions::get_world_from_local;
 import bevy_pbr::render::mesh_view_bindings::view;
 import bevy_pbr::render::view_transformations::position_world_to_clip;
 import bevy_pbr::render::view_transformations::depth_ndc_to_view_z;
+import sekiro_rs::fx_shadow::sun_shade;
 
-// FXR MultiTextureBillboardEx (604) particles (fxr.rs `MultiMaterial`; from FwLo's RustSekiro, MIT;
-// the output is scaled by the camera exposure, the colour arrives in scene units), after the game's pixel
-// shader GXFfxtessellateBlendMultiTexture.ppo (shader/gxffxshader.shaderbnd, d3dcompiler_47):
-// - layer 1 (g_multiTexture0): the flipbook frame, mixed with the next one by the frame's fraction
-//   (interpolateFrames), times layer1Color; alpha = its alpha.
+// FXR MultiTextureBillboardEx (604) particles (fxr.rs `MultiMaterial`; from FwLo's RustSekiro,
+// MIT), after the game's pixel shader GXFfxtessellateBlendMultiTexture.ppo
+// (shader/gxffxshader.shaderbnd, d3dcompiler_47). The colour arrives in scene units and the
+// output is scaled by the camera exposure.
+// - layer 1 (g_multiTexture0): the flipbook frame, mixed with the next one by the frame's
+//   fraction (interpolateFrames), times layer1Color; alpha = its alpha.
 // - layers 2 / 3 (g_multiTexture1 / 2) times layer2Color / layer3Color. g_ps_TexBlendType
-//   (modes.x, FXR unk_ds3_f2_10): 1 makes layers 2 and 3, 2 only layer 2, act on the alpha by their
-//   brightness (saturate of the colour sum / 3, not normalised) instead of on the colour. The op per layer is
-//   g_ps_TexBlendType2 / 3 (modes.y / .z, unk_ds3_f2_11 / 12): 0 multiply (lerp(1, layer, layer
-//   alpha)), 1 add (layer x its alpha), 2 overlay (lerp by the layer alpha), else none.
+//   (modes.x, FXR unk_ds3_f2_10): 1 makes layers 2 and 3, 2 only layer 2, act on the alpha
+//   (alpha_op) instead of on the colour. The op per layer is g_ps_TexBlendType2 / 3
+//   (modes.y / .z, unk_ds3_f2_11 / 12): 0 multiply (lerp(1, layer, layer alpha)), 1 add
+//   (layer x its alpha), 2 overlay (lerp by the layer alpha), else none.
 // - g_ps_bPreAlphaMult (flags.x, premultiplyAlpha): each layer's colour times its alpha first.
-// - out = (vertex colour direction x layers)^2 x |vertex colour|, alpha = vertex alpha x layer alpha
-//   (the vertex colour arrives hue-squared from fxr.rs particle_color, so here only the layers are
-//   squared). The textures load as UNORM (fxr.rs texture_handle), so the samples are the game's
-//   raw values (#366: a leftover square root from the sRGB days lifted every layer's brightness,
-//   and with it the haze sheets' alpha). Layers wrap through the Repeat sampler (the game's wrap
-//   sampler; they scroll).
-// gap: g_ps_ColorBlendType (unk_ds3_f2_13) 1 / 2 (all extracted 604s: 0), the alpha offset (v3.z),
-// the motion-vector UV bend (cb0[11].w == 1), fog, shadow volume, lighting.
-// Soft (GXFfxtessellateSoftMultiTexture.ppo): alpha x saturate(min(scene depth - own depth, soft) /
-// soft), soft = the per-vertex distance (location 8; 0 = off), as fx_soft.wgsl.
+// - out = (vertex colour direction x layers)^2 x |vertex colour|, alpha = vertex alpha x layer
+//   alpha (the vertex colour arrives hue-squared from fxr.rs particle_color, so here only the
+//   layers are squared). The textures load as UNORM (fxr.rs texture_handle), so the samples
+//   are the game's raw values. Layers wrap through the Repeat sampler (they scroll).
+// - lit particles: the sun's share of the vertex colour is shadowed (fx_shadow.wesl).
+// gap: g_ps_ColorBlendType (unk_ds3_f2_13) 1 / 2 (all extracted 604s: 0), the alpha offset
+// (v3.z), the motion-vector UV bend (cb0[11].w == 1), fog.
+// Soft (GXFfxtessellateSoftMultiTexture.ppo): alpha x saturate(min(scene depth - own
+// depth, soft) / soft), soft = the per-vertex distance (location 8; 0 = off), as fx_soft.wgsl.
 
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(0) var t0: texture_2d<f32>;
@@ -52,6 +53,8 @@ struct Vertex {
     @location(6) c2: vec4<f32>,
     @location(7) c3: vec4<f32>,
     @location(8) soft: f32,
+    // The sun's share of the colour to shadow (fx_shadow.wesl).
+    @location(9) shade: vec3<f32>,
 };
 
 struct VOut {
@@ -64,6 +67,8 @@ struct VOut {
     @location(5) c2: vec4<f32>,
     @location(6) c3: vec4<f32>,
     @location(7) soft: f32,
+    @location(8) world: vec4<f32>,
+    @location(9) shade: vec3<f32>,
 };
 
 @vertex
@@ -79,6 +84,8 @@ fn vertex(v: Vertex) -> VOut {
     o.c2 = v.c2;
     o.c3 = v.c3;
     o.soft = v.soft;
+    o.world = world;
+    o.shade = v.shade;
     return o;
 }
 
@@ -98,17 +105,12 @@ fn color_op(pb: vec3<f32>, c: vec3<f32>, la: f32, mode: u32) -> vec3<f32> {
 
 // A layer on the alpha by its brightness.
 fn alpha_op(a: f32, c: vec3<f32>, la: f32, mode: u32) -> f32 {
-    // mul_sat (r + g + b) x 1/3 in the game's pixel shader: the plain colour, not its direction.
-    // Normalising stepped from 0.577 to 0 where a layer's filtered colour reached zero, which cut
-    // stair-stepped dark holes along the texels of the 604 haze sheets.
-    let lum = clamp((c.x + c.y + c.z) / 3.0, 0.0, 1.0);
+    // The layer's brightness: mul_sat (r + g + b) x 1/3 of the plain colour.
+    let lum = saturate(dot(c, vec3(1.0 / 3.0)));
     switch mode {
         case 0u: { return a * (1.0 + la * (lum - 1.0)); }
         case 1u: { return a + la * lum; }
-        case 2u: {
-            let ov = select(1.0 - 2.0 * (1.0 - a) * (1.0 - lum), 2.0 * lum * a, a < 0.5);
-            return a + la * (ov - a);
-        }
+        case 2u: { return mix(a, overlay(vec3(a), vec3(lum)).x, la); }
         default: { return a; }
     }
 }
@@ -150,6 +152,7 @@ fn fragment(in: VOut) -> @location(0) vec4<f32> {
         let me = -depth_ndc_to_view_z(in.position.z);
         out_a *= clamp(min(scene - me, in.soft) / in.soft, 0.0, 1.0);
     }
-    let out_rgb = in.color.rgb * rgb * rgb * view.exposure;
+    let lit = in.color.rgb * sun_shade(in.shade, in.world, in.position.xy);
+    let out_rgb = lit * rgb * rgb * view.exposure;
     return vec4(max(out_rgb, vec3(0.0)) * out_a, select(out_a, 0.0, flags.y != 0u));
 }

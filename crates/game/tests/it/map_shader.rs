@@ -5,15 +5,14 @@ fn snow_coverage_matches_native_height_and_wet_operations() {
     // Native Ground Gbuf 16/18 and Multiple Gbuf 20: fixed instruction-derived
     // samples guard the order of wet exclusion, height subtraction and saturation.
     let production = include_str!("../../src/map_material.wesl");
-    let coverage = production.split("fn snow_coverage(").nth(1).unwrap();
-    let coverage = coverage.split("// FLV:").next().unwrap();
-    let normal = production.split("fn layer_world_normal(").nth(1).unwrap();
-    let normal = normal.split("fn has(").next().unwrap();
+    use super::shader_support::{assert_close, run_compute, wgsl_fn};
+    let coverage = wgsl_fn(production, "fn snow_coverage(", "// FLV:");
+    let normal = wgsl_fn(production, "fn layer_world_normal(", "fn has(");
     let source = format!(
         r#"
 fn saturate(x: f32) -> f32 {{ return clamp(x, 0.0, 1.0); }}
-fn snow_coverage({coverage}
-fn layer_world_normal({normal}
+{coverage}
+{normal}
 @group(0) @binding(0) var<storage, read_write> result: array<f32, 6>;
 @compute @workgroup_size(1)
 fn main() {{
@@ -28,17 +27,10 @@ fn main() {{
 }}
 "#
     );
-    let values = super::shader_support::run_compute(source, 6);
-    for (i, expected) in [0.5812, 0.0, 0.0, 0.64, 0.055, 0.7218655]
-        .into_iter()
-        .enumerate()
-    {
-        let actual = values[i];
-        assert!(
-            (actual - expected).abs() < 0.000002,
-            "sample {i}: {actual} vs {expected}"
-        );
-    }
+    assert_close(
+        &run_compute(source, 6),
+        &[0.5812, 0.0, 0.0, 0.64, 0.055, 0.7218655],
+    );
 }
 
 #[test]

@@ -38,6 +38,13 @@ const KNOBS: &[Knob] = &[
             }
         },
     },
+    Knob {
+        name: "particle-shadow",
+        parse: on_off,
+        apply: |world, v| {
+            world.insert_resource(crate::fx_lighting::ParticleShadows(v > 0.5));
+        },
+    },
 ];
 
 fn number(v: &str) -> Option<f32> {
