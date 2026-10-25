@@ -2,7 +2,7 @@ import bevy_pbr::render::mesh_functions::get_world_from_local;
 import bevy_pbr::render::mesh_view_bindings::view;
 import bevy_pbr::render::view_transformations::position_world_to_clip;
 import bevy_pbr::render::view_transformations::depth_ndc_to_view_z;
-import sekiro_rs::fx_shadow::sun_shade;
+import sekiro_rs::fx_shadow::sun_shade_factor;
 
 // FXR MultiTextureBillboardEx (604) particles (fxr.rs `MultiMaterial`; from FwLo's RustSekiro,
 // MIT), after the game's pixel shader GXFfxtessellateBlendMultiTexture.ppo
@@ -152,7 +152,11 @@ fn fragment(in: VOut) -> @location(0) vec4<f32> {
         let me = -depth_ndc_to_view_z(in.position.z);
         out_a *= clamp(min(scene - me, in.soft) / in.soft, 0.0, 1.0);
     }
-    let lit = in.color.rgb * sun_shade(in.shade, in.world, in.position.xy);
+    // The sun's shadow, only where the fragment still shows.
+    var lit = in.color.rgb;
+    if out_a > 1.0 / 255.0 {
+        lit *= sun_shade_factor(in.shade, in.world);
+    }
     let out_rgb = lit * rgb * rgb * view.exposure;
     return vec4(max(out_rgb, vec3(0.0)) * out_a, select(out_a, 0.0, flags.y != 0u));
 }

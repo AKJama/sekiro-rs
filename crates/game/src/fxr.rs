@@ -78,7 +78,9 @@ pub fn plugin(cache: PathBuf, bridge: impl Fn(&mut App) + Send + Sync + 'static)
                 MaterialPlugin::<DistortMaterial>::default(),
             ));
             stream::install(app);
+            let args: Vec<String> = std::env::args().collect();
             app.insert_resource(FxrPlayer::new(self.cache.clone()))
+                .insert_resource(crate::fx_lighting::ParticleShadows::from_args(&args))
                 .init_resource::<DepthCopy>()
                 .add_systems(Startup, setup_depth)
                 .add_systems(Update, (render, soft_depth));
@@ -813,11 +815,7 @@ struct Buf {
 }
 
 impl Buf {
-    fn quad(&mut self, c: [Vec3; 4], uv: [[f32; 2]; 4], col: [f32; 4], tan: [f32; 4]) {
-        self.quad_shaded(c, uv, col, tan, [0.0; 3]);
-    }
-
-    fn quad_shaded(
+    fn quad(
         &mut self,
         c: [Vec3; 4],
         uv: [[f32; 2]; 4],
@@ -997,7 +995,26 @@ struct ParticleLightInputs<'w, 's> {
     lighting: Option<Res<'w, crate::lighting::MapLighting>>,
     gi: Option<Res<'w, crate::fx_lighting::IrradianceCpu>>,
     points: Query<'w, 's, (&'static PointLight, &'static GlobalTransform)>,
-    shadows: Option<Res<'w, crate::fx_lighting::ParticleShadows>>,
+    shadows: Res<'w, crate::fx_lighting::ParticleShadows>,
+    fog_shadows: Option<Res<'w, crate::lighting::fog::FogShadows>>,
+    fog: Query<'w, 's, &'static crate::lighting::fog::GameFog, With<Camera3d>>,
+    suns: Query<'w, 's, &'static DirectionalLight>,
+}
+
+impl ParticleLightInputs<'_, '_> {
+    /// Whether lit particles take the sun shadowed this frame (#366). The game's particles read
+    /// the fog's sun-shadow volume, which exists only while the fog runs its shadowed form, so
+    /// this follows the main-world half of `fog.rs` `fog`'s pick: [`FogShadows`] on, the camera's
+    /// fog with a shadow sample count, and a sun casting shadows. Tying the particle shadow to the
+    /// fog's is inferred from the shared volume, not traced.
+    ///
+    /// [`FogShadows`]: crate::lighting::fog::FogShadows
+    fn sun_shadows(&self) -> bool {
+        self.shadows.0
+            && self.fog_shadows.as_deref().is_some_and(|f| f.0)
+            && self.fog.iter().next().is_some_and(|f| f.takes_sun_shadow())
+            && self.suns.iter().any(|s| s.shadow_maps_enabled)
+    }
 }
 
 struct Frame<'a> {
@@ -1009,6 +1026,8 @@ struct Frame<'a> {
     trail: &'a mut Vec<(Vec3, Vec3, f32)>,
     /// What lights lit particles this frame (#324).
     light: &'a mut crate::fx_lighting::ParticleLighting,
+    /// Whether lit particles take the sun shadowed this frame (#366, [`ParticleLightInputs::sun_shadows`]).
+    sun_shadows: bool,
 }
 
 /// Shows every effect light of this frame, reusing the pooled entities. There is no count cap:
@@ -1152,6 +1171,7 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                 QUAD_UV,
                 col,
                 [0., 0., size, 0.],
+                [0.0; 3],
             );
         }
         return;
@@ -1176,7 +1196,6 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
     let node_y = n.world.rotation * Vec3::Y;
     // Lit particles take only the lights and volumes reaching this node's particles (#324).
     let lit = is_lit(a) && !n.particles.is_empty();
-    let darkness = a[Field::ShadowDarkness].as_f64().unwrap_or(0.0) as f32;
     if lit {
         let (min, max) = n
             .particles
@@ -1204,7 +1223,12 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
             for (v, l) in col.iter_mut().zip(l.to_array()) {
                 *v *= l;
             }
-            shade = f.light.shade(l, darkness).to_array();
+            let darkness = if f.sun_shadows {
+                scalar(a, Field::ShadowDarkness, p.age, &mut rnd, 0.0)
+            } else {
+                0.0
+            };
+            shade = crate::fx_lighting::sun_shade(f.light.sun, l, darkness).to_array();
         }
         col[3] *= fade;
         for v in &mut col[..3] {
@@ -1429,7 +1453,7 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                 f.bufs
                     .entry((tex, additive(blend)))
                     .or_default()
-                    .quad_shaded(corners, uv, col, tan, shade);
+                    .quad(corners, uv, col, tan, shade);
             }
             602 => {
                 let wl = scalar(a, Field::Width, p.emit_t, &mut rnd, 1.0)
@@ -1446,6 +1470,7 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                     QUAD_UV,
                     col,
                     [0.0; 4],
+                    [0.0; 3],
                 );
             }
             606 | 10012 => {
@@ -1484,10 +1509,22 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                     let k = fade_at(u0).min(fade_at(u1));
                     let c0 = [col[0], col[1], col[2], col[3] * k];
                     let quv = [[u0, 1.0], [u1, 1.0], [u1, 0.0], [u0, 0.0]];
-                    buf.quad([a0 - s0, a1 - s1, a1 + s1, a0 + s0], quv, c0, [0.0; 4]);
+                    buf.quad(
+                        [a0 - s0, a1 - s1, a1 + s1, a0 + s0],
+                        quv,
+                        c0,
+                        [0.0; 4],
+                        [0.0; 3],
+                    );
                     if cross {
                         let cx = Vec3::X * w * 0.5;
-                        buf.quad([a0 - cx, a1 - cx, a1 + cx, a0 + cx], quv, c0, [0.0; 4]);
+                        buf.quad(
+                            [a0 - cx, a1 - cx, a1 + cx, a0 + cx],
+                            quv,
+                            c0,
+                            [0.0; 4],
+                            [0.0; 3],
+                        );
                     }
                 }
             }
@@ -1808,7 +1845,7 @@ trait BatchBuffer {
 
 // Keep the padding triangle and attribute layout identical across reused buffers.
 macro_rules! batch_buffer {
-    ($buffer:ty, $normals:expr, $( $field:ident: $variant:ident, $attribute:expr, $pad:expr );+ $(;)?) => {
+    ($buffer:ty, $( $field:ident: $variant:ident, $attribute:expr, $pad:expr );+ $(;)?) => {
         impl BatchBuffer for $buffer {
             fn clear(&mut self) {
                 $(self.$field.clear();)+
@@ -1837,13 +1874,6 @@ macro_rules! batch_buffer {
                     }
                 )+
                 let n = self.pos.len() + 3;
-                if $normals {
-                    if let Some(VertexAttributeValues::Float32x3(values)) = mesh.attribute_mut(Mesh::ATTRIBUTE_NORMAL) {
-                        values.resize(n, [0.0, 0.0, 1.0]);
-                    } else {
-                        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 0.0, 1.0]; n]);
-                    }
-                }
                 if let Some(Indices::U32(indices)) = mesh.indices_mut() {
                     indices.truncate(n);
                     indices.extend(indices.len() as u32..n as u32);
@@ -1855,14 +1885,14 @@ macro_rules! batch_buffer {
     };
 }
 
-batch_buffer!(Buf, false,
+batch_buffer!(Buf,
     pos: Float32x3, Mesh::ATTRIBUTE_POSITION, PAD;
     uv: Float32x2, Mesh::ATTRIBUTE_UV_0, [0.0; 2];
     col: Float32x4, Mesh::ATTRIBUTE_COLOR, [0.0; 4];
     tan: Float32x4, Mesh::ATTRIBUTE_TANGENT, [0.0; 4];
     shade: Float32x3, Mesh::ATTRIBUTE_NORMAL, [0.0; 3];
 );
-batch_buffer!(MultiBuf, false,
+batch_buffer!(MultiBuf,
     pos: Float32x3, Mesh::ATTRIBUTE_POSITION, PAD;
     uv1: Float32x2, Mesh::ATTRIBUTE_UV_0, [0.0; 2];
     uv2: Float32x2, Mesh::ATTRIBUTE_UV_1, [0.0; 2];
@@ -2049,7 +2079,6 @@ fn render(
             .iter()
             .filter(|(p, _)| p.intensity > 0. && p.range > 0.)
             .map(|(p, t)| crate::fx_lighting::NativeLight::from_point_light(p, t.translation())),
-        lit.shadows.as_deref().copied().unwrap_or_default().0,
     );
     let mut frame = Frame {
         cam,
@@ -2059,6 +2088,7 @@ fn render(
         distort,
         trail,
         light,
+        sun_shadows: lit.sun_shadows(),
     };
     for e in player.effects.iter().filter(|e| !e.asleep) {
         if let Some(root) = &e.root {
@@ -2198,6 +2228,7 @@ mod tests {
             distort,
             trail,
             light,
+            sun_shadows: true,
         };
         for e in &player.effects {
             collect(e.root.as_ref().unwrap(), &mut frame);
@@ -2214,6 +2245,7 @@ mod tests {
             .init_asset::<MultiMaterial>()
             .init_asset::<DistortMaterial>()
             .init_resource::<DepthCopy>()
+            .insert_resource(crate::fx_lighting::ParticleShadows(true))
             .add_systems(Update, render);
         let mut player = FxrPlayer::new(PathBuf::from("missing-fxr-test-cache"));
         player.enabled = true;
@@ -2445,7 +2477,7 @@ mod tests {
     #[test]
     fn batches_collect_six_vertices_per_quad() {
         let mut b = Buf::default();
-        b.quad([Vec3::ZERO; 4], QUAD_UV, [1.0; 4], [0.0; 4]);
+        b.quad([Vec3::ZERO; 4], QUAD_UV, [1.0; 4], [0.0; 4], [0.0; 3]);
         assert_eq!(b.pos.len(), 6);
         assert_eq!(b.tan.len(), 6);
     }

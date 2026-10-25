@@ -139,13 +139,16 @@ impl NativeLight {
     }
 }
 
-/// Whether lit particles take the sun shadowed (#366); `--ab particle-shadow=on,off` flips it.
+/// Whether lit particles may take the sun shadowed (#366); `--ab particle-shadow=on,off` flips it.
+/// They are shadowed only while the fog is too (`fxr.rs` `particle_shadows_on`).
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ParticleShadows(pub bool);
 
-impl Default for ParticleShadows {
-    fn default() -> Self {
-        Self(true)
+impl ParticleShadows {
+    /// `--no-particle-shadow` turns it off for A/B checks. The gates run without, as they run
+    /// plain fog (`fog.rs` `FogShadows`), whose shadow volume the game's particles read.
+    pub fn from_args(args: &[String]) -> Self {
+        Self(!args.iter().any(|a| a == "--no-particle-shadow") && !crate::sweep_mode(args))
     }
 }
 
@@ -157,8 +160,9 @@ impl Default for ParticleShadows {
 /// appearance's `shadowDarkness` is inferred (same meaning and range, not traced in the exe).
 /// Here the light reaches the shader already summed per particle, so each vertex carries, per
 /// channel, `shadowDarkness x sun / light`: the share of its colour the shader shadows
-/// (the tests check the product on the CPU). The shader takes the shadow from Bevy's sun
-/// cascades (`fxr.wesl` `sun_shadow_factor`), as the effect pass has no fog volume bound.
+/// (the tests check the product on the CPU). The shader (`fx_shadow.wesl` `sun_shade_factor`)
+/// takes one tap of Bevy's sun cascades in place of the fog volume, which the effect pass has
+/// not bound.
 pub fn sun_shade(sun: Vec3, light: Vec3, darkness: f32) -> Vec3 {
     let d = darkness.clamp(0., 1.);
     Vec3::from_array(std::array::from_fn(|i| {
@@ -188,8 +192,6 @@ pub struct ParticleLighting {
     /// The lights and volumes (indices into `gi`) reaching the node culled last.
     near: Vec<NativeLight>,
     near_gi: Vec<usize>,
-    /// [`ParticleShadows`] this frame.
-    pub shadowed: bool,
 }
 
 impl ParticleLighting {
@@ -200,9 +202,7 @@ impl ParticleLighting {
         lighting: Option<&crate::lighting::MapLighting>,
         gi: Option<&IrradianceCpu>,
         points: impl Iterator<Item = NativeLight>,
-        shadowed: bool,
     ) {
-        self.shadowed = shadowed;
         let key = lighting.map(|l| (l.light_set, l.hour, l.source.clone(), l.revision));
         if key != self.sun_key {
             self.sun = lighting.map_or(Vec3::ZERO, |l| {
@@ -234,16 +234,6 @@ impl ParticleLighting {
                 .filter(|(_, v)| v.overlaps(min, max))
                 .map(|(i, _)| i),
         );
-    }
-
-    /// Per channel, the share of `light` (from [`Self::at`]) the shader shadows, see [`sun_shade`];
-    /// zero when [`ParticleShadows`] is off.
-    pub fn shade(&self, light: Vec3, darkness: f32) -> Vec3 {
-        if self.shadowed {
-            sun_shade(self.sun, light, darkness)
-        } else {
-            Vec3::ZERO
-        }
     }
 
     /// The native light on a lit particle at `pos`, from what [`Self::cull`] picked.
@@ -320,7 +310,6 @@ mod tests {
             None,
             Some(&flat_volume()),
             [light(4.), light(20.)].into_iter(),
-            true,
         );
         let pos = Vec3::splat(5.);
         l.cull(pos, pos);
@@ -334,7 +323,7 @@ mod tests {
         assert_eq!(l.at(far), Vec3::ZERO);
     }
 
-    /// The light after the shader's shadowing (`fx_shadow.wesl` `sun_shadow_factor`),
+    /// The light after the shader's shadowing (`fx_shadow.wesl` `shadow_mix`),
     /// `light (1 + shade (shadow - 1))`.
     fn shaded_light(sun: Vec3, light: Vec3, darkness: f32, shadow: f32) -> Vec3 {
         light * (Vec3::ONE + sun_shade(sun, light, darkness) * (shadow - 1.))
@@ -355,14 +344,19 @@ mod tests {
         // No sun, or no light at all: nothing to shadow.
         assert_eq!(sun_shade(Vec3::ZERO, rest, 0.9), Vec3::ZERO);
         assert_eq!(sun_shade(sun, Vec3::ZERO, 0.9), Vec3::ZERO);
-        // The `--ab particle-shadow=off` switch leaves every channel unshaded.
-        let mut l = ParticleLighting {
-            sun,
-            shadowed: false,
-            ..Default::default()
-        };
-        assert_eq!(l.shade(light, 0.9), Vec3::ZERO);
-        l.shadowed = true;
-        assert!(near(l.shade(light, 0.9), sun_shade(sun, light, 0.9)));
+        // Shadows off (`fxr.rs` zeroes the darkness): every channel unshaded.
+        assert_eq!(sun_shade(sun, light, 0.), Vec3::ZERO);
+    }
+
+    #[test]
+    fn gates_and_the_switch_run_unshadowed_particles() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(ParticleShadows::from_args(&args(&["sekiro-rs", "--play"])).0);
+        for off in ["--no-particle-shadow", "--sweep", "--render-gate"] {
+            assert!(
+                !ParticleShadows::from_args(&args(&["sekiro-rs", off])).0,
+                "{off}"
+            );
+        }
     }
 }

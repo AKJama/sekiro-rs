@@ -27,25 +27,23 @@ const KNOBS: &[Knob] = &[
     Knob {
         name: "fog-shadow",
         parse: on_off,
-        apply: |world, v| {
-            let on = v > 0.5;
-            if world
-                .get_resource::<crate::lighting::fog::FogShadows>()
-                .map(|f| f.0)
-                != Some(on)
-            {
-                world.insert_resource(crate::lighting::fog::FogShadows(on));
-            }
-        },
+        apply: |world, v| set_if_changed(world, crate::lighting::fog::FogShadows(v > 0.5), |f| f.0),
     },
     Knob {
         name: "particle-shadow",
         parse: on_off,
         apply: |world, v| {
-            world.insert_resource(crate::fx_lighting::ParticleShadows(v > 0.5));
+            set_if_changed(world, crate::fx_lighting::ParticleShadows(v > 0.5), |p| p.0)
         },
     },
 ];
+
+/// Inserts an on/off switch only when it changes, so its readers see no change otherwise.
+fn set_if_changed<R: Resource>(world: &mut World, new: R, on: fn(&R) -> bool) {
+    if world.get_resource::<R>().map(on) != Some(on(&new)) {
+        world.insert_resource(new);
+    }
+}
 
 fn number(v: &str) -> Option<f32> {
     v.parse().ok().filter(|v: &f32| v.is_finite())
@@ -301,6 +299,21 @@ mod tests {
             (knob.apply)(&mut world, (knob.parse)(value).unwrap());
             assert_eq!(world.resource::<FogShadows>().0, on);
         }
+    }
+
+    /// The particle-shadow knob flips the particle shadow switch, inserting only on a change.
+    #[test]
+    fn particle_shadow_knob_sets_the_switch() {
+        use crate::fx_lighting::ParticleShadows;
+        let knob = KNOBS.iter().find(|k| k.name == "particle-shadow").unwrap();
+        let mut world = World::new();
+        for (value, on) in [("off", false), ("on", true)] {
+            (knob.apply)(&mut world, (knob.parse)(value).unwrap());
+            assert_eq!(world.resource::<ParticleShadows>().0, on);
+        }
+        world.clear_trackers();
+        (knob.apply)(&mut world, (knob.parse)("on").unwrap());
+        assert!(!world.is_resource_changed::<ParticleShadows>());
     }
 
     /// Two knobs step as a counter, the first changing fastest.

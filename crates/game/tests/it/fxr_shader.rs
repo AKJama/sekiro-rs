@@ -78,7 +78,11 @@ fn shadowed_sun_keeps_one_minus_shadow_darkness() {
     // `shade` is shadowDarkness x sun / light per channel.
     use super::shader_support::{assert_close, run_compute, wgsl_fn};
     let production = include_str!("../../src/fx_shadow.wesl");
-    let factor = wgsl_fn(production, "fn sun_shadow_factor(", "fn sun_shadow(");
+    let factor = wgsl_fn(
+        production,
+        "fn shadow_mix(",
+        "// The sun's shadow at a particle",
+    );
     let source = format!(
         r#"
 {factor}
@@ -86,13 +90,13 @@ fn shadowed_sun_keeps_one_minus_shadow_darkness() {
 @compute @workgroup_size(1)
 fn main() {{
     // All sun, shadowDarkness 0.9, full shadow: 10% of the sun is left.
-    result[0] = sun_shadow_factor(vec3(0.9), 0.0).x;
+    result[0] = shadow_mix(vec3(0.9), 0.0).x;
     // shadowDarkness 0: unchanged.
-    result[1] = sun_shadow_factor(vec3(0.0), 0.0).x;
+    result[1] = shadow_mix(vec3(0.0), 0.0).x;
     // Half sun at shadowDarkness 0.9, full shadow: 0.5 rest + 0.05 sun.
-    result[2] = sun_shadow_factor(vec3(0.45), 0.0).x;
+    result[2] = shadow_mix(vec3(0.45), 0.0).x;
     // In the light: unchanged.
-    result[3] = sun_shadow_factor(vec3(0.9), 1.0).x;
+    result[3] = shadow_mix(vec3(0.9), 1.0).x;
 }}
 "#
     );

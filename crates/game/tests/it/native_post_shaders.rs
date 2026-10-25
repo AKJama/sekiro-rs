@@ -128,17 +128,10 @@ fn main() {{
 }}
 "#
     );
-    let values = super::shader_support::run_compute(source, 20);
-    for (i, expected) in [0.0, 0.0049891566, 0.1211626855, 0.7508116073, 0.9908357271]
+    // Each sample is grey (r = g = b) with alpha 1.
+    let expected: Vec<f32> = [0.0, 0.004_989_157, 0.121_162_69, 0.750_811_64, 0.990_835_7]
         .into_iter()
-        .enumerate()
-    {
-        for channel in 0..3 {
-            let actual = values[i * 4 + channel];
-            assert!(
-                (f64::from(actual) - expected).abs() < 0.000002,
-                "native tone sample {i} channel {channel}: {actual} vs {expected}"
-            );
-        }
-    }
+        .flat_map(|v| [v, v, v, 1.0])
+        .collect();
+    super::shader_support::assert_close(&super::shader_support::run_compute(source, 20), &expected);
 }

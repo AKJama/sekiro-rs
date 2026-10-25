@@ -2,7 +2,7 @@ import bevy_pbr::render::forward_io::Vertex;
 import bevy_pbr::render::forward_io::VertexOutput;
 import bevy_pbr::render::mesh_view_bindings::view;
 import bevy_pbr::render::view_transformations::depth_ndc_to_view_z;
-import sekiro_rs::fx_shadow::sun_shade;
+import sekiro_rs::fx_shadow::sun_shade_factor;
 
 // FXR sprite and tracer batches: unlit texture x vertex colour, scaled by the camera exposure
 // (the colour arrives in scene units, see fxr.rs). Two alpha controls per vertex ride in the
@@ -44,7 +44,6 @@ fn fragment(v: VertexOutput) -> @location(0) vec4<f32> {
         texture_color = vec4(texture_color.rgb * texture_color.a * texture_color.a, texture_color.a);
     }
     var color = texture_color * v.color;
-    color = vec4(color.rgb * sun_shade(v.world_normal, v.world_position, v.position.xy), color.a);
     let soft = v.world_tangent.z;
     if soft > 0.0001 {
         // Single-sample captures (the map sweep and pose server) carry Bevy's depth prepass,
@@ -56,6 +55,10 @@ fn fragment(v: VertexOutput) -> @location(0) vec4<f32> {
         let scene = -depth_ndc_to_view_z(raw_depth);
         let me = -depth_ndc_to_view_z(v.position.z);
         color.a = color.a * clamp(min(scene - me, soft) / soft, 0.0, 1.0);
+    }
+    // The sun's shadow, only where the fragment still shows.
+    if color.a >= 1.0 / 255.0 {
+        color = vec4(color.rgb * sun_shade_factor(v.world_normal, v.world_position), color.a);
     }
     // Bevy routes AlphaMode::Add through premultiplied blending. Zero coverage keeps
     // the destination, while source alpha weights the emitted radiance.
