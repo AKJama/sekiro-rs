@@ -366,6 +366,31 @@ impl SkyFill {
     }
 }
 
+/// A Sculptor's Idol's idle effect `effect` (placement `serial`) at `at`: `shows` whether the
+/// idle matches the idol's lit state, `near` whether the placement shows at all (loaded, in
+/// range). The idle the idol gives way to as it lights stops emitting and its particles live
+/// out, as an effect replaced in its TAE slot does (the lighting clip 10 starts the lit flame in
+/// the unlit embers' slot 1, #360); out of range it goes at once. Before, the embers vanished at
+/// once and the new flame grew from nothing through the kneel. The lighting clip's own burst is
+/// played from the sim's lighting clock, as the rest burst is (`idol_rest`).
+fn play_idol(
+    player: &mut FxrPlayer,
+    effect: i32,
+    serial: i32,
+    at: Transform,
+    shows: bool,
+    near: bool,
+    frozen: bool,
+) {
+    if shows {
+        player.map_effect(effect, serial, at, near, frozen);
+    } else if near {
+        player.retire_map_effect(effect, serial);
+    } else {
+        player.drop_map_effect(effect, serial);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn update(
     fx: Res<MapEffects>,
@@ -433,12 +458,8 @@ fn update(
                 .regions
                 .get(&p.block)
                 .is_some_and(|regions| snow_off(regions, point));
-        let idle = p.idol.is_none_or(|(entity, idle)| {
-            idle.shows(found.as_ref().is_some_and(|f| f.0.contains(&entity)))
-        });
         let on = !disabled
             && p.enabled
-            && idle
             && ready
             && activation
             && !indoors
@@ -463,7 +484,12 @@ fn update(
         } else {
             p.transform
         };
-        player.map_effect(p.effect, i as i32, at, on, frozen);
+        if let Some((entity, idle)) = p.idol {
+            let shows = idle.shows(found.as_ref().is_some_and(|f| f.0.contains(&entity)));
+            play_idol(&mut player, p.effect, i as i32, at, shows, on, frozen);
+        } else {
+            player.map_effect(p.effect, i as i32, at, on, frozen);
+        }
     }
     sky.update(
         &mut player,
@@ -664,5 +690,61 @@ mod tests {
             "from inside {after}, outside {outside}"
         );
         assert_eq!(under, 0, "flakes under the hall roof");
+    }
+
+    /// #360: lighting an idol (Wolf's first kneel there) keeps fire at the idol all through the
+    /// kneel: the unlit embers 1010 live out, the lighting burst 1000 plays (from the sim's clock,
+    /// `idol_rest`) and the lit flame 1011 grows. Before, the embers were hidden at once and only
+    /// the new flame's first few particles were left until it had grown, as the kneel ended.
+    #[test]
+    fn lighting_an_idol_keeps_its_fire_through_the_kneel() {
+        use sekiro_sim::duel::idol::LIGHTING_FFX;
+        use sekiro_sim::map_effects::IdolIdle;
+        let cache = sekiro_sim::cache::root();
+        if !cache.join("raw/sfx").is_dir() {
+            eprintln!("skipped: no extracted cache");
+            return;
+        }
+        let mut player = FxrPlayer::new(cache);
+        let at = Transform::from_xyz(-164.4, -29.2, 23.0);
+        let idles = [(1010, false), (1011, true)];
+        let step = |player: &mut FxrPlayer, found: bool| {
+            for (serial, &(effect, lit)) in idles.iter().enumerate() {
+                let idle = IdolIdle {
+                    lit,
+                    lit_at_start: false,
+                };
+                play_idol(
+                    player,
+                    effect,
+                    serial as i32,
+                    at,
+                    idle.shows(found),
+                    true,
+                    false,
+                );
+            }
+            player.advance_map(1. / 30.);
+            player.advance(1. / 30.);
+            player.live_counts().2
+        };
+        let mut unlit = 0;
+        for _ in 0..240 {
+            unlit = step(&mut player, false);
+        }
+        assert!(unlit > 50, "the unlit embers: {unlit} particles");
+        assert_eq!(player.live_counts().0, 1, "only the unlit idle plays");
+        // Through the kneel's lighting (LIGHTING_SECS, 3.3 s) the fire never falls below half
+        // the embers' own count: the embers fade out over 6 s, the burst fills the first two
+        // seconds and the flame grows.
+        player.one_shot(crate::fxr::IDOL, LIGHTING_FFX, 1, at);
+        let mut least = usize::MAX;
+        for _ in 0..100 {
+            least = least.min(step(&mut player, true));
+        }
+        assert!(
+            least * 2 >= unlit,
+            "the idol's fire fell to {least} particles from {unlit} as it lit"
+        );
     }
 }
