@@ -45,14 +45,14 @@ const EFFECT_STOP: f32 = 20.0;
 const EFFECT_DROP: f32 = 30.0;
 /// Who asked: `(actor, effect id, dummy)` for TAE events, `(2, id, serial)` for bullets,
 /// `(3, id, n)` for hits, `(HELD, id, serial)` and `(GLINTS, id, item)` for
-/// [`FxrPlayer::hold`], `(5, id, serial)` for map effects, `(IDOL_REST, id, n)` for
+/// [`FxrPlayer::hold`], `(5, id, serial)` for map effects, `(IDOL, id, n)` for
 /// [`FxrPlayer::one_shot`].
 type Key = (usize, i32, i32);
 /// [`FxrPlayer::hold`] namespaces: map entities (fog walls), and the map items' glints.
 pub const HELD: usize = 4;
 pub const GLINTS: usize = 6;
-/// [`FxrPlayer::one_shot`] namespace: the burst of a rest at an idol.
-pub const IDOL_REST: usize = 7;
+/// [`FxrPlayer::one_shot`] namespace: an idol's bursts, as it is lit and as Wolf rests there.
+pub const IDOL: usize = 7;
 
 /// A plugin-supplied bridge keeps the simulation private to the play module.
 pub fn plugin(cache: PathBuf, bridge: impl Fn(&mut App) + Send + Sync + 'static) -> impl Plugin {

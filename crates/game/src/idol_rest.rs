@@ -18,7 +18,7 @@ use sekiro_sim::kit::Kit;
 
 use super::Sim;
 use super::idol::{Idols, kit_change};
-use crate::fxr::{FxrPlayer, IDOL_REST};
+use crate::fxr::{FxrPlayer, IDOL};
 
 /// The black's strongest alpha: FFX 1022's dark sprites' `alphaMultiplier`.
 const MOST: f32 = 0.99;
@@ -98,7 +98,7 @@ fn rest_effect(
         match (at, fxr) {
             (Some(at), Some(mut fxr)) => {
                 seen.bursts += 1;
-                fxr.one_shot(IDOL_REST, REST_FFX, seen.bursts, at);
+                fxr.one_shot(IDOL, REST_FFX, seen.bursts, at);
                 info!(
                     "idol: rest burst FFX {REST_FFX} at {:.2?} ({secs:.2} s)",
                     at.translation

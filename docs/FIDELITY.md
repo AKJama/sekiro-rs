@@ -310,7 +310,10 @@ No real-game capture of a rest was available to compare the timing against.
 An idol's idle effect is the one its object's idle clip plays: clip 1 (unlit) spawns FFX 1010 and clip 11 (lit) FFX 1011 (1012 for the temple's o115040), both on dummy 100, the idol's origin.
 FFX 1010 is embers that circle the idol 0.6 m out at 0.75 m up; FFX 1011 is the flame 1.1 m up, just above the hands of the 1.05 m idol.
 The map's effects used to be fixed at the first-visit story state, so an idol Wolf lit in play kept its circling embers; now the lit idle replaces the unlit one the step the idol is found (`Kit::found_idols`).
-Gap: the game's lighting clip 10 also plays FFX 1000 (a 1.3 s burst) as the idol lights; it is not played yet, and the idle swaps at once.
+Lighting an idol plays its lighting clip 10: the burst FFX 1000 (1.3 s, in no TAE slot) plays once, and the lit flame 1011 starts in the idles' slot 1 (#360).
+The unlit embers 1010 then stop emitting and their particles live out over about 6 s, while the new flame grows; before #360 they vanished at once and the idol had almost no fire until the kneel ended.
+Gap: that an effect replaced in its TAE slot stops softly, rather than at once, is inferred, not traced in the exe.
+Gap: the rest clip 100 also starts FFX 1011 in slot 1 again, which would restart the lit flame at each rest; it is not played (the flame carries on).
 Gap: which clip the game's bonfire controller picks is inferred from the clip numbers and their effects, not traced in the exe (see [MAP-FX.md](MAP-FX.md)).
 
 ## Edge hold, issue #203

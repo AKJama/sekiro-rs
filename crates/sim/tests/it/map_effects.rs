@@ -1,4 +1,7 @@
-use sekiro_sim::{map_effects, world_events};
+use sekiro_sim::{
+    map_effects::{self, IdolClip},
+    world_events,
+};
 
 #[test]
 fn installed_map_effects_resolve_model_parameters_and_story_commands() {
@@ -133,13 +136,21 @@ fn every_idol_shows_its_flame_above_its_hands_once_lit() {
             assert!(
                 idle.iter()
                     .filter(|p| lit.contains(&p.effect))
-                    .all(|p| p.idol.unwrap().lit),
+                    .all(|p| p.idol.unwrap().clip == IdolClip::Lit),
                 "{map} idol {}: a lit idol still shows its unlit idle {lit:?}",
                 part.entity_id
             );
             if !idle[0].idol.unwrap().lit_at_start {
                 let unlit = shown(false);
                 assert!(!unlit.is_empty() && unlit.iter().all(|e| !lit.contains(e)));
+                // Lighting it plays the lighting clip's burst once (#360), never as an idle.
+                let bursts: Vec<i32> = idle
+                    .iter()
+                    .filter(|p| p.idol.unwrap().lights(false, true))
+                    .map(|p| p.effect)
+                    .collect();
+                assert_eq!(bursts, [1000], "{map} idol {}", part.entity_id);
+                assert!(!idle.iter().any(|p| p.idol.unwrap().lights(true, true)));
             }
             let model = &msb.models[part.model_index as usize].name;
             let flver = sekiro_formats::flver::parse(
@@ -160,7 +171,10 @@ fn every_idol_shows_its_flame_above_its_hands_once_lit() {
             let hands = raised.iter().sum::<glam::Vec3>() / raised.len() as f32;
             let hands = part.matrix().transform_point3(hands) * glam::Vec3::new(-1.0, 1.0, 1.0);
             let origin = glam::Vec3::new(-part.position[0], part.position[1], part.position[2]);
-            for p in idle.iter().filter(|p| p.idol.unwrap().lit) {
+            for p in idle
+                .iter()
+                .filter(|p| p.idol.unwrap().clip == IdolClip::Lit)
+            {
                 // Dummy 100 is the idol's origin; the flame's offset is the effect's own, in the
                 // dummy's frame, which faces the hands (#278).
                 assert_eq!(p.dummy, Some(100));
