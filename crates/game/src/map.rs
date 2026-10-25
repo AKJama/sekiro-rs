@@ -876,7 +876,7 @@ pub fn add_map(app: &mut App, dir: &Path, scene: MapScene, stories: story::MapSt
     let story = story::selection(&args);
     let mut selection = crate::lighting_selection::select(cache, &id, story.as_deref(), arena)?;
     if scene.hour.is_finite() {
-        selection.override_hour(scene.hour, args.iter().any(|a| a == "--hour"));
+        selection.override_hour(scene.hour, crate::ab::explicit_hour(&args));
     }
     let hour = selection.hour;
     info!(
