@@ -16,8 +16,10 @@ import bevy_pbr::render::view_transformations::depth_ndc_to_view_z;
 // - g_ps_bPreAlphaMult (flags.x, premultiplyAlpha): each layer's colour times its alpha first.
 // - out = (vertex colour direction x layers)^2 x |vertex colour|, alpha = vertex alpha x layer alpha
 //   (the vertex colour arrives hue-squared from fxr.rs particle_color, so here only the layers are
-//   squared). The textures are sRGB-decoded on load (~x^2.2); their square root stands in for the
-//   game's raw values. Layers wrap through the Repeat sampler (the game's wrap sampler; they scroll).
+//   squared). The textures load as UNORM (fxr.rs texture_handle), so the samples are the game's
+//   raw values (#366: a leftover square root from the sRGB days lifted every layer's brightness,
+//   and with it the haze sheets' alpha). Layers wrap through the Repeat sampler (the game's wrap
+//   sampler; they scroll).
 // gap: g_ps_ColorBlendType (unk_ds3_f2_13) 1 / 2 (all extracted 604s: 0), the alpha offset (v3.z),
 // the motion-vector UV bend (cb0[11].w == 1), fog, shadow volume, lighting.
 // Soft (GXFfxtessellateSoftMultiTexture.ppo): alpha x saturate(min(scene depth - own depth, soft) /
@@ -80,10 +82,6 @@ fn vertex(v: Vertex) -> VOut {
     return o;
 }
 
-fn raw(c: vec4<f32>) -> vec4<f32> {
-    return vec4(sqrt(max(c.rgb, vec3(0.0))), c.a);
-}
-
 fn overlay(b: vec3<f32>, l: vec3<f32>) -> vec3<f32> {
     return select(1.0 - 2.0 * (1.0 - b) * (1.0 - l), 2.0 * b * l, b < vec3(0.5));
 }
@@ -117,14 +115,14 @@ fn alpha_op(a: f32, c: vec3<f32>, la: f32, mode: u32) -> f32 {
 
 @fragment
 fn fragment(in: VOut) -> @location(0) vec4<f32> {
-    let f0 = raw(textureSample(t0, s0, in.uv1));
-    let f1 = raw(textureSample(t0, s0, in.uv3n.zw));
+    let f0 = textureSample(t0, s0, in.uv1);
+    let f1 = textureSample(t0, s0, in.uv3n.zw);
     let b = mix(f0, f1, in.c1.w);
     var a = clamp(b.a, 0.0, 1.0);
     let pre = flags.x != 0u;
     var rgb = b.rgb * in.c1.rgb * select(1.0, a, pre);
-    let l2 = raw(textureSample(t1, s1, in.uv2)) * in.c2;
-    let l3 = raw(textureSample(t2, s2, in.uv3n.xy)) * in.c3;
+    let l2 = textureSample(t1, s1, in.uv2) * in.c2;
+    let l3 = textureSample(t2, s2, in.uv3n.xy) * in.c3;
     let c2 = l2.rgb * select(1.0, l2.a, pre);
     let c3 = l3.rgb * select(1.0, l3.a, pre);
     if modes.x == 1u || modes.x == 2u {
