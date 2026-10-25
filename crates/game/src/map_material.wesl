@@ -105,6 +105,7 @@ import sekiro_rs::map_bindings::{
     map_light,
     metal,
     metal_sampler,
+    translucency_mask,
 };
 
 struct GiScatter { FssEss: vec3<f32>, FmsEms: vec3<f32>, Edss: vec3<f32>, }
@@ -344,9 +345,27 @@ fn native_point_lights(pbr: PbrInput, scale: f32, btl_residual: f32) -> vec3<f32
     return correction*view.exposure;
 }
 
+// Native G-buffer translucency of M[Translucency]* foliage: max(normal.a * float_0, 0) *
+// FC_TranslucencyScale (assumed 1), stored as k * 0.1 in a UNORM channel so k saturates at 10.
+// `mask` is the normal alpha (the extractor's `sekiro_translucency` mask), `enabled` the
+// `--ab translucency` knob (#367).
+fn foliage_translucency(scale: f32, mask: f32, enabled: f32) -> f32 {
+    return clamp(scale*mask,0.0,10.0)*enabled;
+}
+
+// Native diffuse response of the sun and fill slots (GXLightAcc_DDirLightShadowed1) for a pixel
+// with G-buffer translucency k > 0: wrapped Lambert max(N.L + k, 0) / (1 + 2k) plus a back-light
+// lobe toward the light, saturate(L.-V)^32 * ((N.V + 1) / 2)^2 * k / (1 + k). k = 0 is plain
+// saturate(N.L), which callers use directly (#367).
+fn translucent_diffuse(nl: f32, nv: f32, lv: f32, k: f32) -> f32 {
+    let facing = 0.5*max(nv+1.0,0.0);
+    let back = pow(saturate(-lv),32.0)*facing*facing;
+    return max(nl+k,0.0)/(1.0+2.0*k)+back*k/(1.0+k);
+}
+
 // Native four-slot colour routing with the recovered directional accumulation.
 @if(NATIVE_DIRECT)
-fn native_direct(pbr: PbrInput, light: MapLight) -> vec3<f32> {
+fn native_direct(pbr: PbrInput, light: MapLight, translucency: f32) -> vec3<f32> {
     var li = base_lighting_input(pbr);
     let nv = max(dot(pbr.N,pbr.V),0.0001);
     var correction = vec3(0.0);
@@ -371,11 +390,13 @@ fn native_direct(pbr: PbrInput, light: MapLight) -> vec3<f32> {
         // fill and to both local slots. The world X mirror and camera -Z conversion
         // cancel that rotation into the packed direction used here.
         if light.direct[i*3u].w>0.0 { direction = (view.world_from_view*vec4(direction,0.0)).xyz; }
-        var derived = derive_lighting_input(pbr.N,pbr.V,normalize(direction));
-        let nl = max(dot(pbr.N,normalize(direction)),0.0);
-        let h = normalize(pbr.V+normalize(direction));
+        let l = normalize(direction);
+        var derived = derive_lighting_input(pbr.N,pbr.V,l);
+        let ndl = dot(pbr.N,l);
+        let nl = max(ndl,0.0);
+        let h = normalize(pbr.V+l);
         let nh = max(dot(pbr.N,h),0.0);
-        let lh = max(dot(normalize(direction),h),0.0);
+        let lh = max(dot(l,h),0.0);
         // Native gloss is exported as 1 - perceptual roughness.
         let q = clamp(1.0-pbr.material.perceptual_roughness,0.0,1.0);
         let sharpness = max(light.direct[i*3u+1u].w,0.075);
@@ -386,7 +407,11 @@ fn native_direct(pbr: PbrInput, light: MapLight) -> vec3<f32> {
         let f = f0+(1.0-f0)*pow(1.0-lh,5.0);
         let vis = 1.0/(max(nl,nv)*(1.0-a*0.5)+a*0.5);
         var diffuse_angle = nl;
-        if i>=2u { diffuse_angle = min(pow(0.5*dot(pbr.N,normalize(direction))+0.5,2.0),1.0); }
+        if i>=2u {
+            diffuse_angle = min(pow(0.5*ndl+0.5,2.0),1.0);
+        } else if translucency>0.0 {
+            diffuse_angle = translucent_diffuse(ndl,dot(pbr.V,pbr.N),dot(l,pbr.V),translucency);
+        }
         // The packed colours carry SCENE_TO_BEVY = pi / exposure, so both terms take 1/pi;
         // native D (GXLightAcc_DDirLight1) already contains its own 1/pi, kept in d above (#7).
         correction += (li.diffuse_color*diffuse*diffuse_angle+f*d*nl*vis*specular_rgb)/3.14159265*select(1.0,sun_shadow,i==0u);
@@ -491,6 +516,13 @@ fn sample_metal(uv: vec2<f32>, slot: u32) -> vec4<f32> {
 return textureSample(bindless_textures_2d[layer_indices[slot].metal], bindless_samplers_filtering[layer_indices[slot].metal_sampler], uv);
 @if(!BINDLESS)
 return textureSample(metal, metal_sampler, uv);
+}
+// Sampled with the base normal map's sampler: the mask is that normal's alpha.
+fn sample_translucency_mask(uv: vec2<f32>, slot: u32) -> f32 {
+@if(BINDLESS)
+return textureSample(bindless_textures_2d[layer_indices[slot].translucency_mask], bindless_samplers_filtering[material_indices[slot].normal_map_sampler], uv).r;
+@if(!BINDLESS)
+return textureSample(translucency_mask, pbr_bindings::normal_map_sampler, uv).r;
 }
 fn sample_base_albedo(uv: vec2<f32>, slot: u32) -> vec4<f32> {
 @if(BINDLESS)
@@ -839,7 +871,13 @@ vertex: VertexOutput,
     if !unlit { out.color = apply_pbr_lighting(pbr); }
     @if(NATIVE_DIRECT) {
         if !unlit && light.direct[12].x>0.0 {
-            out.color = vec4(out.color.rgb+native_direct(pbr,light),out.color.a);
+            // Uniform per draw: only translucent foliage samples the mask.
+            var translucency = 0.0;
+            if layers.translucency.x>0.0 {
+                let mask = sample_translucency_mask(layer_uv(input,layers.translucency.y),slot);
+                translucency = foliage_translucency(layers.translucency.x,mask,light.switches.x);
+            }
+            out.color = vec4(out.color.rgb+native_direct(pbr,light,translucency),out.color.a);
             if light.direct[12].y>0.0 {
                 out.color = vec4(out.color.rgb+native_point_lights(pbr,light.direct[12].z,light.direct[12].w),out.color.a);
             }

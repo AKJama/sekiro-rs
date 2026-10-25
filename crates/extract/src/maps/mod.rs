@@ -575,7 +575,7 @@ pub fn export(game: &Path, cache: &Path, id: &str, selected_models: &[String]) -
     }
 
     // Pass 1: which textures do the pieces want?
-    let wanted: BTreeSet<(String, bool)> = used
+    let wanted: BTreeSet<(String, pieces::TexKind)> = used
         .par_iter()
         .filter_map(|(_, path)| {
             let data = std::fs::read(path).ok()?;
@@ -603,18 +603,12 @@ pub fn export(game: &Path, cache: &Path, id: &str, selected_models: &[String]) -
     );
     let written: BTreeSet<String> = wanted
         .par_iter()
-        .filter_map(|(name, is_normal)| {
+        .filter_map(|(name, kind)| {
             let path = out.join("models/tex").join(format!("{name}.dds"));
             if path.is_file() {
                 return Some(name.clone());
             }
-            let dds = store
-                .dds(name.strip_suffix("_map_raw").unwrap_or(name))
-                .and_then(|d| match d {
-                    Some(d) if *is_normal => textures::normal_to_bc5(&d).map(Some),
-                    other => Ok(other),
-                });
-            match dds {
+            match textures::export_dds(&store, name, *kind) {
                 Ok(Some(dds)) => match std::fs::write(&path, dds) {
                     Ok(()) => Some(name.clone()),
                     Err(e) => {
