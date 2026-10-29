@@ -600,6 +600,44 @@ fn has(bit: u32, map_game: MapGame) -> bool {
     return (map_game.flags.x & bit) != 0u;
 }
 
+// Native WallTest_dobei_ver1 Gbuf (#355): base t1 (slot 12) and layer t0 (slot 11) are
+// height-blended on the slot-8 mask by TEXCOORD1.x (b.x), the normals (slots 6/7) by the layer
+// normal's z times the same weight, and the result is pulled toward the tinted base by the
+// base normal's z times TEXCOORD2.y (b.y). UVs are not scaled by the part's world scale.
+// p: 0 tint rgb + float_2, 1 (float_0, float_1, float_4, float_5), 2 float3_0 + F0,
+// 3 float3_1, 4 float3_3, 5 float3_4.
+@if(VERTEX_UVS_A)
+fn wall_dobei_ver1(in: VertexOutput, b: vec4<f32>, is_front: bool, pbr_in: PbrInput, map_game: MapGame, slot: u32) -> PbrInput {
+    var pbr_input = pbr_in;
+    let p = map_game.p;
+    let uv = in.uv;
+    let mask = sample_height_mask(uv * map_game.tiling[8].xy, slot).rgb;
+    let n0 = sample_base_normal(uv * map_game.tiling[1].xy, slot);
+    let n1 = sample_overlay_normal(uv * map_game.tiling[3].xy, slot);
+    let sharp = 1.0 + p[1].w;
+    let h = (dot(mask, p[5].xyz) + 0.01) * p[1].z;
+    let w_layer = saturate((b.x - h * (1.0 - b.x)) * sharp);
+    let s = dot(p[4].xyz, flv(n1)) * b.x;
+    let w_normal = saturate((s - h * (1.0 - s)) * sharp);
+    let h_tint = (dot(mask, p[2].xyz) + 0.01) * p[1].x;
+    let t = dot(p[3].xyz, flv(n0)) * b.y;
+    let w_tint = saturate((t - h_tint * (1.0 - t)) * (1.0 + p[1].y));
+    var base = vec3(1.0);
+    if has(2048u, map_game) { base = sample_base_albedo(uv * map_game.tiling[0].xy, slot).rgb; }
+    var a = base;
+    if has(2u, map_game) { a = mix(base, sample_overlay(uv * map_game.tiling[2].xy, slot).rgb, w_layer); }
+    a = saturate(mix(a, base * (p[0].rgb + p[0].w), w_tint));
+    if map_game.flags.z != 0u {
+        a = vec3(w_layer, w_tint, w_normal);
+    }
+    pbr_input.material.base_color = vec4(a, pbr_in.material.base_color.a);
+    let nb = mix(n0, n1, w_normal);
+    pbr_input.material.perceptual_roughness = clamp(1.0 - saturate(nb.b), 0.089, 1.0);
+@if(VERTEX_TANGENTS)
+    pbr_input.N = layer_world_normal(flv(nb), in.world_normal, in.world_tangent, is_front);
+    return pbr_input;
+}
+
 @if(VERTEX_UVS_A)
 fn game_layers(in: VertexOutput, b: vec4<f32>, b2: vec4<f32>, uv_scale: f32, is_front: bool, pbr_in: PbrInput, map_game: MapGame, slot: u32) -> PbrInput {
     var pbr_input = pbr_in;
@@ -630,6 +668,9 @@ fn game_layers(in: VertexOutput, b: vec4<f32>, b2: vec4<f32>, uv_scale: f32, is_
             pbr_input.N = normalize(nt.x*t+nt.y*bitangent+nt.z*n);
         }
         return pbr_input;
+    }
+    if map_game.flags.y == 4u {
+        return wall_dobei_ver1(in, b, is_front, pbr_input, map_game, slot);
     }
     let ground = map_game.flags.y == 2u;
     let uv0 = in.uv;

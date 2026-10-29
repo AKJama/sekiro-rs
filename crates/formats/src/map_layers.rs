@@ -12,9 +12,14 @@ pub fn family(shader: &str) -> u8 {
         "m[multiple].spx" => 1,
         "m[multipleground].spx" => 2,
         "m[landscape]_mountain.spx" => 3,
+        "walltest_dobei_ver1.spx" => WALL_DOBEI_VER1,
         _ => 0,
     }
 }
+
+/// `WallTest_dobei_ver1`: two albedo layers (slot 12 base, slot 11 layer) height-blended on the
+/// slot-8 blend mask by TEXCOORD1.x, and a tint of the base by TEXCOORD2.y (#355).
+pub const WALL_DOBEI_VER1: u8 = 4;
 
 pub fn variant(d: &mtd::Mtd) -> Option<usize> {
     match d.param("GXFT_SATStaticSwitch") {
@@ -150,6 +155,9 @@ pub fn game_params(d: &mtd::Mtd, kind: u8) -> [[f32; 4]; PARAM_ROWS] {
     };
     let w = |a: [f32; 3], x: f32| [a[0], a[1], a[2], x];
     let one = [1.0, 1.0, 1.0, 0.0];
+    if kind == WALL_DOBEI_VER1 {
+        return wall_dobei_ver1_params(d);
+    }
     let p: [[f32; 4]; PARAM_ROWS] = if kind == 3 {
         // Native Mountain Gbuf/Fwd: two albedos and three mask lookups.
         let mut p = [[0.; 4]; PARAM_ROWS];
@@ -211,5 +219,40 @@ pub fn game_params(d: &mtd::Mtd, kind: u8) -> [[f32; 4]; PARAM_ROWS] {
             [metal[0], metal[1], metal_overlay[0], metal_overlay[1]],
         ]
     };
+    p
+}
+
+/// Packed constants for [`WALL_DOBEI_VER1`], read by the game's layered map shader.
+///
+/// The only MTD on this shader (`M[Wall_dobei_ver1]`) sets none of its SAT constants, so the
+/// defaults are the shader's own, from `WallTest_dobei_ver1.metaparam`; an MTD value wins.
+/// Rows (the `cbMatDynParam` names of `WallTest_dobei_ver1_Gbuf.ppo`):
+/// 0 tint `color_0` rgb + `float_2`; 1 `float_0`, `float_1`, `float_4`, `float_5`;
+/// 2 `float3_0` + `float_10` (F0); 3 `float3_1`; 4 `float3_3`; 5 `float3_4`.
+fn wall_dobei_ver1_params(d: &mtd::Mtd) -> [[f32; 4]; PARAM_ROWS] {
+    let get = |n: &str, default: &[f32]| -> Vec<f32> {
+        match d.param(&format!("WallTest_dobei_ver1_snp_0_{n}")) {
+            Some(mtd::ParamValue::Floats(v)) if v.len() >= default.len() => v.clone(),
+            _ => default.to_vec(),
+        }
+    };
+    let f = |n: &str, default: f32| get(n, &[default])[0];
+    let v3 = |n: &str, default: [f32; 3]| {
+        let v = get(n, &default);
+        [v[0], v[1], v[2]]
+    };
+    let w = |a: [f32; 3], x: f32| [a[0], a[1], a[2], x];
+    let mut p = [[0.; 4]; PARAM_ROWS];
+    p[0] = w(v3("color_0", [0.248, 0.316, 0.056]), f("float_2", 0.0));
+    p[1] = [
+        f("float_0", 1.0),
+        f("float_1", 3.0),
+        f("float_4", 1.0),
+        f("float_5", 5.0),
+    ];
+    p[2] = w(v3("float3_0", [0.0, 0.0, 1.0]), f("float_10", 0.02));
+    p[3] = w(v3("float3_1", [0.0, 0.0, 0.5]), 0.0);
+    p[4] = w(v3("float3_3", [0.0, 0.0, 0.5]), 0.0);
+    p[5] = w(v3("float3_4", [1.0, 0.0, 0.0]), 0.0);
     p
 }
