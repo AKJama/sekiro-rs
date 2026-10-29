@@ -256,6 +256,23 @@ pub fn choose_material(material: &flver::Material, mtd: Option<&mtd::Mtd>) -> Ma
                         })
                     })
             };
+            if kind == sekiro_formats::map_layers::WALL_DOBEI_VER1 {
+                // Native t1 (slot 12) is the base, t0 (slot 11) the layer over it; slots 6 and 7
+                // are their normals and slot 8 the blend mask (#355).
+                choice.albedo = slot(12, "AlbedoMap");
+                choice.normal = slot(6, "NormalMap");
+                choice.layers = Some(Layers {
+                    kind,
+                    variant: None,
+                    params: sekiro_formats::map_layers::game_params(m, kind),
+                    base_normal: slot(6, "NormalMap"),
+                    overlay: slot(11, "AlbedoMap"),
+                    overlay_normal: slot(7, "NormalMap"),
+                    mask: slot(8, "BlendMask"),
+                    ..Layers::default()
+                });
+                return choice;
+            }
             let ground = kind == 2;
             let mountain = kind == 3;
             choice.albedo = slot(if mountain { 3 } else { 8 }, "AlbedoMap");
@@ -417,10 +434,13 @@ pub fn build(
                             .and_then(|b| b.get(i))
                             .map_or(0., |b| b[channel] as f32 / 255.)
                     };
-                    let ground = choice.layers.as_ref().is_some_and(|l| l.kind == 2);
+                    // Ground's layer L and WallTest_dobei_ver1's tint read TEXCOORD2.y.
+                    let y = choice.layers.as_ref().is_some_and(|l| {
+                        l.kind == 2 || l.kind == sekiro_formats::map_layers::WALL_DOBEI_VER1
+                    });
                     [
                         byte(0, 0),
-                        byte(1, if ground { 1 } else { 2 }),
+                        byte(1, if y { 1 } else { 2 }),
                         byte(4, 1),
                         byte(5, 2),
                     ]
