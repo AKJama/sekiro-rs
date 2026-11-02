@@ -357,15 +357,9 @@ pub(super) fn export(cache: &Path, id: &str, map: &msb::Msb, oodle: &'static Ood
         .flat_map(|f| pieces::wanted_textures(f, &mtds))
         .collect();
     let mut written = BTreeSet::new();
-    for (name, normal) in wanted {
-        let dds = store
-            .dds(&name)?
+    for (name, kind) in wanted {
+        let dds = textures::export_dds(&store, &name, kind)?
             .with_context(|| format!("missing grass texture {name}"))?;
-        let dds = if normal {
-            textures::normal_to_bc5(&dds)?
-        } else {
-            dds
-        };
         std::fs::write(out.join(format!("models/tex/{name}.dds")), dds)?;
         written.insert(name);
     }

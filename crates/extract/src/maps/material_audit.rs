@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use sekiro_formats::{bnd4, dcx::Oodle, flver, msb};
 use serde_json::{Value, json};
 
+use super::pieces::TexKind;
 use super::{MapTextures, Mtds, object_flver, piece_flver, pieces, read_msb};
 use crate::models::textures::texture_stem;
 
@@ -171,7 +172,7 @@ fn audit_map(
     let mut materials = Vec::new();
     let mut missing = BTreeSet::new();
     let mut errors = BTreeMap::new();
-    let mut checked = BTreeMap::<(String, bool), bool>::new();
+    let mut checked = BTreeMap::<(String, TexKind), bool>::new();
     let mut repaired_dds = BTreeSet::new();
     let mut repaired_models = 0usize;
     for (model, instances) in models {
@@ -198,12 +199,13 @@ fn audit_map(
             }
         };
         let wanted: BTreeSet<_> = pieces::wanted_textures(&f, mtds).into_iter().collect();
-        for (name, normal) in &wanted {
-            let key = (name.clone(), *normal);
+        for (name, kind) in &wanted {
+            let (kind, normal) = (*kind, *kind == TexKind::Normal);
+            let key = (name.clone(), kind);
             if checked.contains_key(&key) {
                 continue;
             }
-            let source_name = name.strip_suffix("_map_raw").unwrap_or(name);
+            let source_name = kind.source(name);
             let before = store.legacy_status(source_name, &legacy_names);
             if before == "missing" {
                 legacy_missing.insert(name.clone());
@@ -211,18 +213,20 @@ fn audit_map(
             if before == "wrong_first_texture" {
                 legacy_wrong_first.insert(name.clone());
             }
-            let result = store.dds(source_name).and_then(|d| match d {
-                Some(d) if *normal && repair => super::textures::normal_to_bc5(&d).map(Some),
-                other => Ok(other),
-            });
+            let result = if repair {
+                super::textures::export_dds(store, name, kind)
+            } else {
+                store.dds(source_name)
+            };
             let available = match result {
                 Ok(Some(dds)) => {
                     if repair {
-                        let file_name = if *normal && checked.contains_key(&(name.clone(), false)) {
-                            format!("{name}_normal_bc5")
-                        } else {
-                            name.clone()
-                        };
+                        let file_name =
+                            if normal && checked.contains_key(&(name.clone(), TexKind::Plain)) {
+                                format!("{name}_normal_bc5")
+                            } else {
+                                name.clone()
+                            };
                         let path = out.join(format!("models/tex/{file_name}.dds"));
                         if std::fs::read(&path).ok().as_deref() != Some(dds.as_slice()) {
                             std::fs::create_dir_all(path.parent().context("DDS parent")?)?;
@@ -323,7 +327,7 @@ fn audit_map(
                     Some("no selected albedo; exporter uses constant material colour")
                 } else if choice.albedo.as_ref().is_some_and(|t| {
                     let name = texture_stem(&t.path).to_ascii_lowercase();
-                    checked.get(&(name, false)) == Some(&false)
+                    checked.get(&(name, TexKind::Plain)) == Some(&false)
                 }) { Some("selected albedo is missing; exporter uses constant material colour") } else { None },
                 "selected_albedo": choice.albedo.as_ref().map(|t| &t.path),
                 "selected_normal": choice.normal.as_ref().map(|t| &t.path),
@@ -392,8 +396,10 @@ fn audit_map(
     }
     let role_conflicts: BTreeSet<String> = checked
         .iter()
-        .filter(|((name, normal), available)| {
-            *normal && **available && checked.get(&(name.clone(), false)) == Some(&true)
+        .filter(|((name, kind), available)| {
+            *kind == TexKind::Normal
+                && **available
+                && checked.get(&(name.clone(), TexKind::Plain)) == Some(&true)
         })
         .map(|((name, _), _)| name.clone())
         .collect();

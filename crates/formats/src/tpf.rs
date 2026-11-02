@@ -234,13 +234,30 @@ impl Dds {
 
     /// Byte length of mip level 0 of the first image.
     pub fn top_mip_len(&self) -> Option<usize> {
+        self.mip_len(0)
+    }
+
+    /// Width and height of mip `level`.
+    pub fn mip_size(&self, level: u32) -> (u32, u32) {
+        ((self.width >> level).max(1), (self.height >> level).max(1))
+    }
+
+    /// Byte length of mip `level` of one 2D image.
+    pub fn mip_len(&self, level: u32) -> Option<usize> {
         let (bytes, blocks) = self.format.block_bytes()?;
-        let (w, h) = (self.width as usize, self.height as usize);
+        let (w, h) = self.mip_size(level);
+        let (w, h) = (w as usize, h as usize);
         Some(if blocks {
             w.div_ceil(4) * h.div_ceil(4) * bytes
         } else {
             w * h * bytes
         })
+    }
+
+    /// Byte length of one 2D image with its whole mip chain: the stride between cubemap faces
+    /// and array slices.
+    pub fn image_len(&self) -> Option<usize> {
+        (0..self.mip_count).map(|m| self.mip_len(m)).sum()
     }
 
     /// The pixel data of mip level 0 of the first image (first face for cubemaps).
@@ -384,6 +401,20 @@ mod decode_tests {
         bytes[84..88].copy_from_slice(format_code);
         bytes.extend_from_slice(payload);
         bytes
+    }
+
+    #[test]
+    fn image_length_spans_the_whole_mip_chain() {
+        // BC1 16x8 with three mips: 4x2, 2x1 and 1x1 blocks of 8 bytes.
+        let mut data = dds(b"DXT1", 16, 8, &[0; 88]);
+        data[28..32].copy_from_slice(&3u32.to_le_bytes());
+        let header = Dds::parse(&data).unwrap();
+        assert_eq!(header.mip_size(2), (4, 2));
+        assert_eq!(
+            [0, 1, 2].map(|level| header.mip_len(level)),
+            [Some(64), Some(16), Some(8)]
+        );
+        assert_eq!(header.image_len(), Some(88));
     }
 
     #[test]

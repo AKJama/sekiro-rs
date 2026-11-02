@@ -7,6 +7,8 @@ struct Layers {
     normal_uv: vec4<f32>,
     normal_enabled: vec4<f32>,
     camera_fade: vec4<f32>,
+    // x: M[Translucency]* scale (MTD float_0, 0 for other surfaces); y: the mask's UV channel (#367).
+    translucency: vec4<f32>,
     game: MapGame,
 }
 // LightSet values shared by every map material (MapLightBuffer).
@@ -14,6 +16,8 @@ struct MapLight {
     direct: array<vec4<f32>, 13>,
     hemi_axis: vec4<f32>,
     hemi_delta: vec4<f32>,
+    // x: foliage translucency scale, 1 or 0 (the `--ab translucency` knob).
+    switches: vec4<f32>,
 }
 @if(BINDLESS) {
     struct LayerIndices {
@@ -50,6 +54,7 @@ struct MapLight {
         light: u32,
         metal: u32,
         metal_sampler: u32,
+        translucency_mask: u32,
     }
     @group(constants::MATERIAL_BIND_GROUP) @binding(102) var<storage, read> giiv_buffers: binding_array<GiivBuffer>;
     @group(constants::MATERIAL_BIND_GROUP) @binding(103) var<storage, read> light_buffers: binding_array<MapLight>;
@@ -90,5 +95,7 @@ struct MapLight {
     @group(constants::MATERIAL_BIND_GROUP) @binding(80) var<storage, read> map_light: MapLight;
     @group(constants::MATERIAL_BIND_GROUP) @binding(81) var metal: texture_2d<f32>;
     @group(constants::MATERIAL_BIND_GROUP) @binding(82) var metal_sampler: sampler;
+    // Sampled with the base normal map's sampler, like the normal alpha it comes from.
+    @group(constants::MATERIAL_BIND_GROUP) @binding(83) var translucency_mask: texture_2d<f32>;
 }
 
