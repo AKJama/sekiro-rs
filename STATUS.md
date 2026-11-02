@@ -1,5 +1,12 @@
 # Status
 
+## Issue link check is a reminder, not a gate (2026-11-02)
+
+The `issue-link` workflow no longer fails PRs: every failed run e-mailed the maintainer, and drafts often come before their issue.
+A missing `Fixes #N` or, once ready, an unfilled template section now gets the `needs-issue` label and one bot comment, edited in place and removed with the label once the body is fixed.
+Fork PRs run it under `pull_request_target` so they can be labelled; it never checks out their code.
+`issue-link` stays a required status check in the ruleset and now always passes, so nothing but the label stops a merge.
+
 ## Live play load, frame rate and exit (2026-10-16)
 
 Explore in Ashina Outskirts became playable about 125 s after launch, ran at 10 to 20 fps and hung about 27 s on close; the render gates never ran the live path.

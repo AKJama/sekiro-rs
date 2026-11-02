@@ -44,6 +44,7 @@ jobs:
         run: |
           set -euo pipefail
           PROBLEMS=$RUNNER_TEMP/problems.txt
+          echo "PROBLEMS=$PROBLEMS" >> "$GITHUB_ENV"
           : > "$PROBLEMS"
           problem() { echo "$*" >> "$PROBLEMS"; }
 
@@ -73,6 +74,7 @@ jobs:
           sparse-checkout-cone-mode: false
           persist-credentials: false
       - name: Check the PR follows the template
+        id: template
         if: ${{ !github.event.pull_request.draft }}
         continue-on-error: true
         run: |
@@ -108,7 +110,7 @@ jobs:
                   errors.append(f'Tick the checklist box "{box}".')
           if found.get("risk") and not re.match(r"[*_]*(Low|Medium|High)\b", found["risk"]):
               errors.append("Start the Risk section with Low, Medium or High.")
-          with open(os.path.join(os.environ["RUNNER_TEMP"], "problems.txt"), "a", encoding="utf-8") as out:
+          with open(os.environ["PROBLEMS"], "a", encoding="utf-8") as out:
               out.writelines(e + "\n" for e in errors)
           if not errors:
               print("PR body follows the template.")
@@ -119,13 +121,15 @@ jobs:
         shell: bash
         env:
           NUMBER: ${{ github.event.pull_request.number }}
+          TEMPLATE_CHECK: ${{ steps.template.outcome }}
         run: |
           set -euo pipefail
-          PROBLEMS=$RUNNER_TEMP/problems.txt
+          # A template check that crashed must not read as a clean body.
+          [[ $TEMPLATE_CHECK != failure ]] || echo "The template check could not run; see the workflow run." >> "$PROBLEMS"
           marker='<!-- issue-link-check -->'
           label=needs-issue
           comment=$(gh api --paginate "repos/$GH_REPO/issues/$NUMBER/comments" \
-            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$marker\"))) | .id" | head -n 1)
+            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$marker\"))) | .id" | tail -n 1)
 
           if [[ -s "$PROBLEMS" ]]; then
             while IFS= read -r line; do echo "::warning::$line"; done < "$PROBLEMS"
