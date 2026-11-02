@@ -33,7 +33,8 @@ Then fix it following the pr-flow skill, run its checks, and tell me what to tes
 
 ## The flow
 
-One PR fixes exactly one issue, and the `issue-link` check fails a PR that closes more than one.
+One PR fixes exactly one issue.
+The `issue-link` check never fails a PR: when the body links no open issue, or more than one, it adds the `needs-issue` label and one comment saying what is missing, and removes both once the body is fixed, so a draft can come before its issue.
 Keep each PR to one feature or fix that can be played and judged on its own.
 A big area (a whole menu system, all of parkour) becomes several issues first, for example "equip menu for prosthetic tools" and "ledge grab", and then one PR each.
 Use one branch per PR, named `<area>/<short-kebab-name>`, made from the latest `main`.
@@ -50,7 +51,7 @@ For rendering changes, also build the release binary and run both render gates l
 Play the game yourself following the live-test skill and describe what you saw.
 
 Keep new tests within the budget in [AGENTS.md](AGENTS.md#tests), because the test run is most of every PR's time.
-Fill in every section of the PR template; the `issue-link` check fails a ready PR that leaves one out, empty or unchanged.
+Fill in every section of the PR template; once the PR is ready, the `issue-link` check labels it `needs-issue` and lists any section left out, empty or unchanged, and the PR is not reviewed until that label is gone.
 
 Just before the step 4 checks, bring the branch up to date with `main`, so the slow checks run once:
 

@@ -101,7 +101,8 @@ Keep new shared data read-only; a test that changes state loads or clones its ow
 ## 1. Write the PR
 
 Create the branch, commit the change, push, and open the PR with the body from [`.github/pull_request_template.md`](../../../.github/pull_request_template.md), filling in every section.
-The `issue-link` check fails a ready PR whose body misses a section, leaves one empty or keeps a template line, so open it as a draft, fill in How it was tested as steps 2 to 4 finish, then mark it ready.
+The `issue-link` check never fails, but it labels a PR `needs-issue` and keeps one comment listing what is missing: the `Fixes #N` link, and once the PR is ready, any section that is missing, empty or still a template line.
+So open it as a draft, fill in How it was tested as steps 2 to 4 finish, then mark it ready; do not merge while the label is on.
 Screenshots stay off the repo: attach them in the PR conversation, or for maintainers give the path under `D:\sekiro-rs-media\progress\<date>\`.
 Do not paste game assets or personal paths beyond the media folder reference.
 Add the PR link to the matching row on the collab board (`sekiro-collab/WORK.md`).

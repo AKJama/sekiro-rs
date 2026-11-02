@@ -1,64 +1,83 @@
 name: Issue link
 
+# A reminder, never a gate: the job always passes, and a missing link or template section
+# gets the `needs-issue` label and one bot comment, edited in place and removed once fixed.
+# Failing runs e-mailed the maintainer on every push, and drafts often come before their issue.
 on:
+  # Same-repo PRs run the PR's own copy of this file, so changes to it can be tried on their PR.
   pull_request:
     types: [opened, edited, reopened, synchronize, ready_for_review]
     branches: [main]
+  # Fork PRs get a read-only token under pull_request, so they run main's copy here instead.
+  # It never checks out or runs the PR's code: it reads the body and main's template only.
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+    branches: [main]
 
-permissions: { issues: read, pull-requests: read, contents: read }
+permissions: { contents: read, issues: write, pull-requests: write }
 
 concurrency:
-  group: issue-link-${{ github.event.pull_request.number }}
+  group: issue-link-${{ github.event_name }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   issue-link:
     # Title or base edits can't change the result; body edits and pushes can.
-    if: github.event.action != 'edited' || github.event.changes.body != null
+    # Each PR runs under one event only: pull_request_target for forks, pull_request otherwise.
+    if: >-
+      (github.event.action != 'edited' || github.event.changes.body != null)
+      && ((github.event_name == 'pull_request_target')
+        == (github.event.pull_request.head.repo.full_name != github.repository))
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PR_BODY: ${{ github.event.pull_request.body }}
+      PROBLEMS: ${{ runner.temp }}/problems.txt
     steps:
+      # Every step is allowed to fail so that a hiccup never turns back into a failure e-mail;
+      # it still shows as a warning on the run.
       - name: Check linked issues
+        continue-on-error: true
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-          REPO: ${{ github.repository }}
           PR_URL: ${{ github.event.pull_request.url }}
         run: |
           set -euo pipefail
-          fail() {
-            echo "Error: $* See CONTRIBUTING.md."
-            exit 1
-          }
+          : > "$PROBLEMS"
+          problem() { echo "$*" >> "$PROBLEMS"; }
 
-          references=$(printf '%s\n' "$PR_BODY" | grep -Eio '\b(Fixes|Closes|Resolves)[[:blank:]]+#[0-9]+\b' || true)
-          [[ -n "$references" ]] || fail "Include a closing issue reference such as Fixes #123 in the PR body."
-          numbers=$(printf '%s\n' "$references" | grep -Eo '[0-9]+' | sort -u)
-          [[ $(wc -l <<< "$numbers") -eq 1 ]] || fail "One issue per PR: this PR closes $(echo $numbers | sed 's/ /, #/g; s/^/#/'). Split it into one PR per issue."
+          check() {
+            references=$(printf '%s\n' "$PR_BODY" | grep -Eio '\b(Fixes|Closes|Resolves)[[:blank:]]+#[0-9]+\b' || true)
+            [[ -n "$references" ]] || { problem "Link the issue with a closing reference such as \`Fixes #123\` in the PR body."; return; }
+            numbers=$(printf '%s\n' "$references" | grep -Eo '[0-9]+' | sort -u)
+            [[ $(wc -l <<< "$numbers") -eq 1 ]] || { problem "One issue per PR: this PR closes $(echo $numbers | sed 's/ /, #/g; s/^/#/'). Split it into one PR per issue."; return; }
 
-          while IFS= read -r number; do
-            issue=$(gh api "repos/$REPO/issues/$number") || fail "Could not read issue #$number."
-            jq -e 'has("pull_request") | not' <<< "$issue" > /dev/null || fail "#$number is a PR, not an issue."
+            issue=$(gh api "repos/$GH_REPO/issues/$numbers") || { problem "Could not read issue #$numbers."; return; }
+            jq -e 'has("pull_request") | not' <<< "$issue" > /dev/null || { problem "#$numbers is a PR, not an issue."; return; }
             # A run that starts after a fast merge sees the issue the merge just closed.
             jq -e '.state == "open"' <<< "$issue" > /dev/null \
               || [[ $(gh api "$PR_URL" --jq .merged) == true ]] \
-              || fail "Issue #$number must be open."
-          done <<< "$numbers"
-          echo "Linked issues are open: $(echo $numbers)."
+              || problem "Issue #$numbers must be open."
+          }
+          check
+          [[ -s "$PROBLEMS" ]] || echo "Linked issue is open."
 
       # Drafts are claims and may be empty; the template is checked once the PR is ready.
+      # The default ref is the PR's merge commit under pull_request and main under pull_request_target.
       - uses: actions/checkout@v4
         if: ${{ !github.event.pull_request.draft }}
+        continue-on-error: true
         with:
           sparse-checkout: .github/pull_request_template.md
           sparse-checkout-cone-mode: false
+          persist-credentials: false
       - name: Check the PR follows the template
         if: ${{ !github.event.pull_request.draft }}
-        env:
-          PR_BODY: ${{ github.event.pull_request.body }}
+        continue-on-error: true
         run: |
           python3 - <<'EOF'
-          import os, re, sys
+          import os, re
 
           def strip(text):
               return re.sub(r"<!--.*?-->", "", text, flags=re.S)
@@ -68,7 +87,7 @@ jobs:
               return {parts[i].strip().lower(): parts[i + 1].strip() for i in range(1, len(parts) - 1, 2)}
 
           # The template is the only source of truth: its headings must all be present and filled,
-          # and none of its own lines may be left unchanged (issue-link above checks `Fixes #N`).
+          # and none of its own lines may be left unchanged (the step above checks `Fixes #N`).
           template = strip(open(".github/pull_request_template.md", encoding="utf-8").read())
           body = strip(os.environ.get("PR_BODY") or "")
           found = sections(body)
@@ -76,9 +95,9 @@ jobs:
           for name in re.findall(r"^##[ \t]+(.+?)[ \t]*$", template, flags=re.M):
               text = found.get(name.lower())
               if text is None:
-                  errors.append(f'Missing the "## {name}" section.')
+                  errors.append(f'Add the "## {name}" section.')
               elif not text:
-                  errors.append(f'The "{name}" section is empty.')
+                  errors.append(f'Fill in the "{name}" section.')
           body_lines = {line.strip() for line in body.splitlines()}
           for line in template.splitlines():
               line = line.strip()
@@ -88,11 +107,46 @@ jobs:
               if not re.search(r"^\s*- \[[xX]\] " + re.escape(box) + r"\s*$", body, flags=re.M):
                   errors.append(f'Tick the checklist box "{box}".')
           if found.get("risk") and not re.match(r"[*_]*(Low|Medium|High)\b", found["risk"]):
-              errors.append("Risk must start with Low, Medium or High.")
-          for e in errors:
-              print(f"Error: {e}")
-          if errors:
-              print("Fill in the PR template, see CONTRIBUTING.md.")
-              sys.exit(1)
-          print("PR body follows the template.")
+              errors.append("Start the Risk section with Low, Medium or High.")
+          with open(os.environ["PROBLEMS"], "a", encoding="utf-8") as out:
+              out.writelines(e + "\n" for e in errors)
+          if not errors:
+              print("PR body follows the template.")
           EOF
+
+      - name: Label and comment
+        continue-on-error: true
+        shell: bash
+        env:
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          marker='<!-- issue-link-check -->'
+          label=needs-issue
+          comment=$(gh api --paginate "repos/$GH_REPO/issues/$NUMBER/comments" \
+            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$marker\"))) | .id" | head -n 1)
+
+          if [[ -s "$PROBLEMS" ]]; then
+            while IFS= read -r line; do echo "::warning::$line"; done < "$PROBLEMS"
+            gh api "repos/$GH_REPO/labels/$label" --silent 2> /dev/null \
+              || gh label create "$label" --color FBCA04 --description "PR body is missing its issue link or a template section"
+            gh api "repos/$GH_REPO/issues/$NUMBER/labels" -f "labels[]=$label" --silent
+            body=$(
+              echo "$marker"
+              echo "Before review, this PR still needs:"
+              echo
+              sed 's/^/- /' "$PROBLEMS"
+              echo
+              echo "This comment updates itself, and goes away with the \`$label\` label once the body is fixed. See CONTRIBUTING.md."
+            )
+            if [[ -n "$comment" ]]; then
+              gh api -X PATCH "repos/$GH_REPO/issues/comments/$comment" -f body="$body" --silent
+            else
+              gh api "repos/$GH_REPO/issues/$NUMBER/comments" -f body="$body" --silent
+            fi
+            { echo "### Still needed"; sed 's/^/- /' "$PROBLEMS"; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            gh api -X DELETE "repos/$GH_REPO/issues/$NUMBER/labels/$label" --silent 2> /dev/null || true
+            [[ -z "$comment" ]] || gh api -X DELETE "repos/$GH_REPO/issues/comments/$comment" --silent
+            echo "Issue link and template are in order." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
