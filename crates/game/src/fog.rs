@@ -1190,6 +1190,14 @@ type BackgroundMeshes<'w, 's> = Query<
     ),
 >;
 
+impl GameFog {
+    /// The main-world half of `fog`'s shadowed-form pick: a positive sun shadow sample count.
+    /// The render world adds the shadow-casting sun's index (`shadow.w`).
+    pub(crate) fn takes_sun_shadow(&self) -> bool {
+        self.shadow.x > 0.
+    }
+}
+
 /// Whether fog sun in-scatter may follow the sun shadows (#345), fixed at launch.
 #[derive(Resource, Clone, Copy, ExtractResource)]
 #[extract_app(bevy::render::RenderApp)]
@@ -1751,7 +1759,7 @@ pub(crate) fn fog(
         return;
     }
     // Variant pick 0x1403a1d10: the shadowed form only when the frame has a sun shadow map.
-    let sun = (fog_shadows.0 && settings.shadow.x > 0. && settings.shadow.w >= 0.)
+    let sun = (fog_shadows.0 && settings.takes_sun_shadow() && settings.shadow.w >= 0.)
         .then_some(shadows.zip(lights_offset))
         .flatten()
         .zip(light_meta.view_gpu_lights.binding());

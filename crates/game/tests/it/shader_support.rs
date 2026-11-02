@@ -121,6 +121,29 @@ pub fn bevy_light_defs() -> Vec<ShaderDefVal> {
     .collect()
 }
 
+/// The production WGSL from `start` (included) up to `end` (excluded, searched after `start`),
+/// so a test can run one function on its own.
+pub fn wgsl_fn<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+    let from = source
+        .find(start)
+        .unwrap_or_else(|| panic!("start marker {start:?} not in the shader"));
+    let len = source[from..]
+        .find(end)
+        .unwrap_or_else(|| panic!("end marker {end:?} not after {start:?} in the shader"));
+    &source[from..from + len]
+}
+
+/// Asserts each value matches its expected sample to 2e-6.
+pub fn assert_close(values: &[f32], expected: &[f32]) {
+    assert_eq!(values.len(), expected.len(), "sample count");
+    for (i, (actual, expected)) in values.iter().zip(expected).enumerate() {
+        assert!(
+            (actual - expected).abs() < 0.000002,
+            "sample {i}: {actual} vs {expected}"
+        );
+    }
+}
+
 /// Runs a one-thread WGSL compute shader whose `main` writes `floats` f32 values to the
 /// storage buffer at group 0 binding 0, and reads them back.
 pub fn run_compute(source: String, floats: usize) -> Vec<f32> {

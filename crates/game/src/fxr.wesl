@@ -2,12 +2,14 @@ import bevy_pbr::render::forward_io::Vertex;
 import bevy_pbr::render::forward_io::VertexOutput;
 import bevy_pbr::render::mesh_view_bindings::view;
 import bevy_pbr::render::view_transformations::depth_ndc_to_view_z;
+import sekiro_rs::fx_shadow::sun_shade_factor;
 
 // FXR sprite and tracer batches: unlit texture x vertex colour, scaled by the camera exposure
 // (the colour arrives in scene units, see fxr.rs). Two alpha controls per vertex ride in the
 // tangent: x the fade threshold, y the hard threshold. w is g_ps_bPreAlphaMult. z is the soft distance: where a particle
 // meets the scene its alpha fades over that distance (soft particles, after the game's soft
-// shaders as traced by FwLo's RustSekiro); 0 keeps a hard edge.
+// shaders as traced by FwLo's RustSekiro); 0 keeps a hard edge. The normal carries the sun's
+// share of a lit particle's colour to shadow (fx_shadow.wesl).
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(0) var particle_texture: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(1) var particle_sampler: sampler;
@@ -53,6 +55,10 @@ fn fragment(v: VertexOutput) -> @location(0) vec4<f32> {
         let scene = -depth_ndc_to_view_z(raw_depth);
         let me = -depth_ndc_to_view_z(v.position.z);
         color.a = color.a * clamp(min(scene - me, soft) / soft, 0.0, 1.0);
+    }
+    // The sun's shadow, only where the fragment still shows.
+    if color.a >= 1.0 / 255.0 {
+        color = vec4(color.rgb * sun_shade_factor(v.world_normal, v.world_position), color.a);
     }
     // Bevy routes AlphaMode::Add through premultiplied blending. Zero coverage keeps
     // the destination, while source alpha weights the emitted radiance.

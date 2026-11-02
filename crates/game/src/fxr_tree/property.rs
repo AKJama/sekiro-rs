@@ -383,6 +383,7 @@ fields! {
     SegmentDuration => "segmentDuration",
     SegmentInterval => "segmentInterval",
     SegmentSubdivision => "segmentSubdivision",
+    ShadowDarkness => "shadowDarkness",
     Size => "size",
     SizeX => "sizeX",
     SizeY => "sizeY",

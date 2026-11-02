@@ -71,13 +71,16 @@ pub fn plugin(cache: PathBuf, bridge: impl Fn(&mut App) + Send + Sync + 'static)
             embedded_asset!(app, "fxr.wesl");
             embedded_asset!(app, "fxr_multi.wesl");
             embedded_asset!(app, "fxr_distort.wesl");
+            bevy::shader::load_shader_library!(app, "fx_shadow.wesl");
             app.add_plugins((
                 MaterialPlugin::<FxrMaterial>::default(),
                 MaterialPlugin::<MultiMaterial>::default(),
                 MaterialPlugin::<DistortMaterial>::default(),
             ));
             stream::install(app);
+            let args: Vec<String> = std::env::args().collect();
             app.insert_resource(FxrPlayer::new(self.cache.clone()))
+                .insert_resource(crate::fx_lighting::ParticleShadows::from_args(&args))
                 .init_resource::<DepthCopy>()
                 .add_systems(Startup, setup_depth)
                 .add_systems(Update, (render, soft_depth));
@@ -806,15 +809,26 @@ struct Buf {
     /// x: alpha fade threshold, y: hard alpha threshold (both 0..1), z: the soft distance
     /// (0 = hard edge).
     tan: Vec<[f32; 4]>,
+    /// Per channel, the share of `col` that is the sun the shader shadows (#366,
+    /// `fx_lighting::sun_shade`; 0 for unlit particles). Rides in the normal attribute.
+    shade: Vec<[f32; 3]>,
 }
 
 impl Buf {
-    fn quad(&mut self, c: [Vec3; 4], uv: [[f32; 2]; 4], col: [f32; 4], tan: [f32; 4]) {
+    fn quad(
+        &mut self,
+        c: [Vec3; 4],
+        uv: [[f32; 2]; 4],
+        col: [f32; 4],
+        tan: [f32; 4],
+        shade: [f32; 3],
+    ) {
         for i in [0, 1, 2, 0, 2, 3] {
             self.pos.push(c[i].to_array());
             self.uv.push(uv[i]);
             self.col.push(col);
             self.tan.push(tan);
+            self.shade.push(shade);
         }
     }
 }
@@ -831,6 +845,7 @@ struct MultiBuf {
     c2: Vec<[f32; 4]>,
     c3: Vec<[f32; 4]>,
     soft: Vec<f32>,
+    shade: Vec<[f32; 3]>,
 }
 
 struct MultiQuad {
@@ -844,6 +859,8 @@ struct MultiQuad {
     c2: [f32; 4],
     c3: [f32; 4],
     soft: f32,
+    /// See [`Buf::shade`].
+    shade: [f32; 3],
 }
 
 impl MultiBuf {
@@ -859,6 +876,7 @@ impl MultiBuf {
             self.c2.push(q.c2);
             self.c3.push(q.c3);
             self.soft.push(q.soft);
+            self.shade.push(q.shade);
         }
     }
 }
@@ -977,6 +995,26 @@ struct ParticleLightInputs<'w, 's> {
     lighting: Option<Res<'w, crate::lighting::MapLighting>>,
     gi: Option<Res<'w, crate::fx_lighting::IrradianceCpu>>,
     points: Query<'w, 's, (&'static PointLight, &'static GlobalTransform)>,
+    shadows: Res<'w, crate::fx_lighting::ParticleShadows>,
+    fog_shadows: Option<Res<'w, crate::lighting::fog::FogShadows>>,
+    fog: Query<'w, 's, &'static crate::lighting::fog::GameFog, With<Camera3d>>,
+    suns: Query<'w, 's, &'static DirectionalLight>,
+}
+
+impl ParticleLightInputs<'_, '_> {
+    /// Whether lit particles take the sun shadowed this frame (#366). The game's particles read
+    /// the fog's sun-shadow volume, which exists only while the fog runs its shadowed form, so
+    /// this follows the main-world half of `fog.rs` `fog`'s pick: [`FogShadows`] on, the camera's
+    /// fog with a shadow sample count, and a sun casting shadows. Tying the particle shadow to the
+    /// fog's is inferred from the shared volume, not traced.
+    ///
+    /// [`FogShadows`]: crate::lighting::fog::FogShadows
+    fn sun_shadows(&self) -> bool {
+        self.shadows.0
+            && self.fog_shadows.as_deref().is_some_and(|f| f.0)
+            && self.fog.iter().next().is_some_and(|f| f.takes_sun_shadow())
+            && self.suns.iter().any(|s| s.shadow_maps_enabled)
+    }
 }
 
 struct Frame<'a> {
@@ -988,6 +1026,8 @@ struct Frame<'a> {
     trail: &'a mut Vec<(Vec3, Vec3, f32)>,
     /// What lights lit particles this frame (#324).
     light: &'a mut crate::fx_lighting::ParticleLighting,
+    /// Whether lit particles take the sun shadowed this frame (#366, [`ParticleLightInputs::sun_shadows`]).
+    sun_shadows: bool,
 }
 
 /// Shows every effect light of this frame, reusing the pooled entities. There is no count cap:
@@ -1131,6 +1171,7 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                 QUAD_UV,
                 col,
                 [0., 0., size, 0.],
+                [0.0; 3],
             );
         }
         return;
@@ -1176,11 +1217,18 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
             continue;
         }
         let mut col = particle_color(a, c, p, active_t, &mut rnd);
+        let mut shade = [0.0; 3];
         if lit {
             let l = f.light.at(world);
             for (v, l) in col.iter_mut().zip(l.to_array()) {
                 *v *= l;
             }
+            let darkness = if f.sun_shadows {
+                scalar(a, Field::ShadowDarkness, p.age, &mut rnd, 0.0)
+            } else {
+                0.0
+            };
+            shade = crate::fx_lighting::sun_shade(f.light.sun, l, darkness).to_array();
         }
         col[3] *= fade;
         for v in &mut col[..3] {
@@ -1230,6 +1278,7 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                     buf.col.push([1., 1., 1., col[3]]);
                     buf.tan
                         .push([intensity, 1. / radius, QUAD_UV[i][0], QUAD_UV[i][1]]);
+                    buf.shade.push([0.; 3]);
                 }
             }
             609 => {
@@ -1384,6 +1433,7 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                         c2: lc(Field::Layer2Color, &mut rnd),
                         c3: lc(Field::Layer3Color, &mut rnd),
                         soft,
+                        shade,
                     };
                     f.multi
                         .entry((tex, l2, l3, modes, blend))
@@ -1403,7 +1453,7 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                 f.bufs
                     .entry((tex, additive(blend)))
                     .or_default()
-                    .quad(corners, uv, col, tan);
+                    .quad(corners, uv, col, tan, shade);
             }
             602 => {
                 let wl = scalar(a, Field::Width, p.emit_t, &mut rnd, 1.0)
@@ -1420,6 +1470,7 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                     QUAD_UV,
                     col,
                     [0.0; 4],
+                    [0.0; 3],
                 );
             }
             606 | 10012 => {
@@ -1458,10 +1509,22 @@ fn collect_node(n: &NodeInst, c: &Config, f: &mut Frame) {
                     let k = fade_at(u0).min(fade_at(u1));
                     let c0 = [col[0], col[1], col[2], col[3] * k];
                     let quv = [[u0, 1.0], [u1, 1.0], [u1, 0.0], [u0, 0.0]];
-                    buf.quad([a0 - s0, a1 - s1, a1 + s1, a0 + s0], quv, c0, [0.0; 4]);
+                    buf.quad(
+                        [a0 - s0, a1 - s1, a1 + s1, a0 + s0],
+                        quv,
+                        c0,
+                        [0.0; 4],
+                        [0.0; 3],
+                    );
                     if cross {
                         let cx = Vec3::X * w * 0.5;
-                        buf.quad([a0 - cx, a1 - cx, a1 + cx, a0 + cx], quv, c0, [0.0; 4]);
+                        buf.quad(
+                            [a0 - cx, a1 - cx, a1 + cx, a0 + cx],
+                            quv,
+                            c0,
+                            [0.0; 4],
+                            [0.0; 3],
+                        );
                     }
                 }
             }
@@ -1542,6 +1605,11 @@ const ATTR_SOFT: bevy::mesh::MeshVertexAttribute = bevy::mesh::MeshVertexAttribu
     0x5ec1_0650,
     bevy::render::render_resource::VertexFormat::Float32,
 );
+const ATTR_SHADE: bevy::mesh::MeshVertexAttribute = bevy::mesh::MeshVertexAttribute::new(
+    "FxSunShade",
+    0x5ec1_0651,
+    bevy::render::render_resource::VertexFormat::Float32x3,
+);
 
 /// MultiTextureBillboardEx (604): three texture layers blended as the game's
 /// GXFfxtessellateBlendMultiTexture shader does (`fxr_multi.wesl`, FwLo's port). Output is
@@ -1597,6 +1665,7 @@ impl Material for MultiMaterial {
             ATTR_C2.at_shader_location(6),
             ATTR_C3.at_shader_location(7),
             ATTR_SOFT.at_shader_location(8),
+            ATTR_SHADE.at_shader_location(9),
         ])?];
         descriptor.primitive.cull_mode = None;
         if let Some(depth) = &mut descriptor.depth_stencil {
@@ -1776,7 +1845,7 @@ trait BatchBuffer {
 
 // Keep the padding triangle and attribute layout identical across reused buffers.
 macro_rules! batch_buffer {
-    ($buffer:ty, $normals:expr, $( $field:ident: $variant:ident, $attribute:expr, $pad:expr );+ $(;)?) => {
+    ($buffer:ty, $( $field:ident: $variant:ident, $attribute:expr, $pad:expr );+ $(;)?) => {
         impl BatchBuffer for $buffer {
             fn clear(&mut self) {
                 $(self.$field.clear();)+
@@ -1805,13 +1874,6 @@ macro_rules! batch_buffer {
                     }
                 )+
                 let n = self.pos.len() + 3;
-                if $normals {
-                    if let Some(VertexAttributeValues::Float32x3(values)) = mesh.attribute_mut(Mesh::ATTRIBUTE_NORMAL) {
-                        values.resize(n, [0.0, 0.0, 1.0]);
-                    } else {
-                        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 0.0, 1.0]; n]);
-                    }
-                }
                 if let Some(Indices::U32(indices)) = mesh.indices_mut() {
                     indices.truncate(n);
                     indices.extend(indices.len() as u32..n as u32);
@@ -1823,13 +1885,14 @@ macro_rules! batch_buffer {
     };
 }
 
-batch_buffer!(Buf, true,
+batch_buffer!(Buf,
     pos: Float32x3, Mesh::ATTRIBUTE_POSITION, PAD;
     uv: Float32x2, Mesh::ATTRIBUTE_UV_0, [0.0; 2];
     col: Float32x4, Mesh::ATTRIBUTE_COLOR, [0.0; 4];
     tan: Float32x4, Mesh::ATTRIBUTE_TANGENT, [0.0; 4];
+    shade: Float32x3, Mesh::ATTRIBUTE_NORMAL, [0.0; 3];
 );
-batch_buffer!(MultiBuf, false,
+batch_buffer!(MultiBuf,
     pos: Float32x3, Mesh::ATTRIBUTE_POSITION, PAD;
     uv1: Float32x2, Mesh::ATTRIBUTE_UV_0, [0.0; 2];
     uv2: Float32x2, Mesh::ATTRIBUTE_UV_1, [0.0; 2];
@@ -1839,6 +1902,7 @@ batch_buffer!(MultiBuf, false,
     c2: Float32x4, ATTR_C2, [0.0; 4];
     c3: Float32x4, ATTR_C3, [0.0; 4];
     soft: Float32, ATTR_SOFT, 0.0;
+    shade: Float32x3, ATTR_SHADE, [0.0; 3];
 );
 
 struct Batch {
@@ -2024,6 +2088,7 @@ fn render(
         distort,
         trail,
         light,
+        sun_shadows: lit.sun_shadows(),
     };
     for e in player.effects.iter().filter(|e| !e.asleep) {
         if let Some(root) = &e.root {
@@ -2163,6 +2228,7 @@ mod tests {
             distort,
             trail,
             light,
+            sun_shadows: true,
         };
         for e in &player.effects {
             collect(e.root.as_ref().unwrap(), &mut frame);
@@ -2179,6 +2245,7 @@ mod tests {
             .init_asset::<MultiMaterial>()
             .init_asset::<DistortMaterial>()
             .init_resource::<DepthCopy>()
+            .insert_resource(crate::fx_lighting::ParticleShadows(true))
             .add_systems(Update, render);
         let mut player = FxrPlayer::new(PathBuf::from("missing-fxr-test-cache"));
         player.enabled = true;
@@ -2410,7 +2477,7 @@ mod tests {
     #[test]
     fn batches_collect_six_vertices_per_quad() {
         let mut b = Buf::default();
-        b.quad([Vec3::ZERO; 4], QUAD_UV, [1.0; 4], [0.0; 4]);
+        b.quad([Vec3::ZERO; 4], QUAD_UV, [1.0; 4], [0.0; 4], [0.0; 3]);
         assert_eq!(b.pos.len(), 6);
         assert_eq!(b.tan.len(), 6);
     }
