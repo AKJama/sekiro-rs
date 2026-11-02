@@ -50,6 +50,15 @@ const REACH_Y: f32 = 0.6;
 /// second from its `Normal` label on frame 1 to its last frame, 197.
 pub const LIGHTING_SECS: f32 = (197.0 - 1.0) / 60.0;
 
+/// The burst as an idol lights (#360): the idol's lighting clip 10 (o005000, o005500, o115040
+/// TAE) spawns this one-shot FFX on its dummy 100, in no TAE slot, at [`LIGHTING_BURST`] into
+/// the clip. The clip's other effect, the lit flame (1011, 1012 at o115040) in the idles' slot
+/// 1, is the lit idle's own, which the map effects swap in as the idol is found.
+pub const LIGHTING_FFX: i32 = 1000;
+/// When the lighting burst plays, seconds into [`Duel::idol_lighting`]: at once (its TAE event
+/// starts at 0). gap: that the lighting clip starts as the kneel is taken is inferred, not traced.
+pub const LIGHTING_BURST: f32 = 0.0;
+
 /// How far into the warp clip (StatueAttachWarp, 6.3 s) Wolf leaves for the chosen idol (s):
 /// FwLo's RustSekiro `src/idol.rs` `WARP_CUT`, where the game cuts to its loading screen.
 pub const WARP_CUT: f32 = 2.0;
@@ -323,7 +332,7 @@ impl Duel {
     }
 
     /// Seconds since Wolf lit the idol he is at, while he is [`IdolPhase::Lighting`]: the
-    /// banner's clock.
+    /// banner's and the lighting burst's ([`LIGHTING_FFX`]) clock.
     pub fn idol_lighting(&self) -> Option<f32> {
         self.idols
             .lighting
