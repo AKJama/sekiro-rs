@@ -33,7 +33,6 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       PR_BODY: ${{ github.event.pull_request.body }}
-      PROBLEMS: ${{ runner.temp }}/problems.txt
     steps:
       # Every step is allowed to fail so that a hiccup never turns back into a failure e-mail;
       # it still shows as a warning on the run.
@@ -44,6 +43,7 @@ jobs:
           PR_URL: ${{ github.event.pull_request.url }}
         run: |
           set -euo pipefail
+          PROBLEMS=$RUNNER_TEMP/problems.txt
           : > "$PROBLEMS"
           problem() { echo "$*" >> "$PROBLEMS"; }
 
@@ -108,7 +108,7 @@ jobs:
                   errors.append(f'Tick the checklist box "{box}".')
           if found.get("risk") and not re.match(r"[*_]*(Low|Medium|High)\b", found["risk"]):
               errors.append("Start the Risk section with Low, Medium or High.")
-          with open(os.environ["PROBLEMS"], "a", encoding="utf-8") as out:
+          with open(os.path.join(os.environ["RUNNER_TEMP"], "problems.txt"), "a", encoding="utf-8") as out:
               out.writelines(e + "\n" for e in errors)
           if not errors:
               print("PR body follows the template.")
@@ -121,6 +121,7 @@ jobs:
           NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          PROBLEMS=$RUNNER_TEMP/problems.txt
           marker='<!-- issue-link-check -->'
           label=needs-issue
           comment=$(gh api --paginate "repos/$GH_REPO/issues/$NUMBER/comments" \
