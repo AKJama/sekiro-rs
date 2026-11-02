@@ -43,7 +43,8 @@ jobs:
           DRAFT: ${{ github.event.pull_request.draft }}
           LABELLED: ${{ contains(github.event.pull_request.labels.*.name, 'needs-issue') }}
         run: |
-          set -uo pipefail
+          # Actions runs bash with -e; every command here handles its own status instead.
+          set +e -uo pipefail
           problems=""
           problem() { problems+="$*"$'\n'; }
 
