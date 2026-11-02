@@ -561,6 +561,12 @@ mod tests {
         assert_eq!(surface(1, 18).reflectance, NATIVE_LAYERED_REFLECTANCE);
         assert_eq!(surface(2, 18).reflectance, NATIVE_LAYERED_REFLECTANCE);
         assert_eq!(surface(0, 0).reflectance, base.reflectance);
+        let dobei = native_surface(
+            &base,
+            &serde_json::json!({"version": 2, "kind": 4, "params": [[0.], [0.], [0., 0., 1., 0.02]]}),
+        );
+        let f0 = 0.16 * dobei.reflectance.powi(2);
+        assert!((f0 - 0.02).abs() < 1e-6, "WallTest_dobei_ver1 F0 {f0}");
         assert_eq!(
             native_surface(&base, &Value::Null).reflectance,
             base.reflectance
@@ -1100,6 +1106,11 @@ fn native_surface(base: &StandardMaterial, data: &Value) -> StandardMaterial {
     // shader feeds to Bevy's metallic, so its dielectric F0 is the same constant (#43).
     if (1..=3).contains(&kind) {
         base.reflectance = NATIVE_LAYERED_REFLECTANCE;
+    }
+    // WallTest_dobei_ver1 writes sqrt(float_10) and F0 = float_10, packed in params[2].w (#355).
+    if kind == u64::from(sekiro_formats::map_layers::WALL_DOBEI_VER1) {
+        let f0 = data["params"][2][3].as_f64().unwrap_or(0.02) as f32;
+        base.reflectance = (f0.max(0.) / 0.16).sqrt();
     }
     // Mountain writes gloss 0 and the shader's Mountain path leaves roughness to the base.
     if kind == 3 {

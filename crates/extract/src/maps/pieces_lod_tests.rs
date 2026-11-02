@@ -307,3 +307,79 @@ fn all_eight_outskirts_models_keep_separate_authored_detail_meshes() {
         .count();
     assert_eq!(instances, 154);
 }
+
+/// #355: the burnt corpse pile under the Gyoubu-arena bonfire is `M[Wall_dobei_ver1]`.
+/// Exporting only its first albedo drew bare skin; it must keep the charcoal layer, both
+/// normals and the blend mask, and COLOR_0.y must carry TEXCOORD2.y (the tint weight).
+#[test]
+fn wall_dobei_ver1_keeps_charcoal_layer_mask_and_tint_weight() {
+    let raw = sekiro_formats::cache::root().join("raw");
+    let source = super::super::piece_flver(&raw, "m11_00_00_00", "m006090");
+    if !source.is_file() {
+        return;
+    }
+    let f = flver::parse(&std::fs::read(source).unwrap()).unwrap();
+    let mtds = super::super::load_mtds(&raw).unwrap();
+    let body = f
+        .materials
+        .iter()
+        .position(|m| m.mtd.to_ascii_lowercase().contains("wall_dobei_ver1"))
+        .expect("m006090 has a Wall_dobei_ver1 material");
+    let choice = choose_material(&f.materials[body], mtds.get(&f.materials[body].mtd));
+    let layers = choice.layers.as_ref().expect("Wall_dobei_ver1 is layered");
+    assert_eq!(layers.kind, sekiro_formats::map_layers::WALL_DOBEI_VER1);
+    assert!(layers.base_normal.is_some() && layers.overlay_normal.is_some());
+    let overlay = layers.overlay.as_ref().expect("charcoal layer");
+    assert!(
+        overlay
+            .path
+            .to_ascii_lowercase()
+            .contains("m11_charcoal_01_a")
+    );
+    assert_eq!(overlay.scale, [2., 4.]);
+    let mask = layers.mask.as_ref().expect("blend mask");
+    assert!(mask.path.to_ascii_lowercase().contains("m11_mask_common_a"));
+    assert!(texture_stem(&choice.albedo.as_ref().unwrap().path).ends_with("body_a"));
+
+    let built = build(&f, &mtds, &|name| Some(format!("tex/{name}.dds"))).unwrap();
+    let d = document(&built.glb);
+    let bin = 28 + u32::from_le_bytes(built.glb[12..16].try_into().unwrap()) as usize;
+    let wanted: Vec<f32> = f
+        .meshes
+        .iter()
+        .filter(|m| m.material == body)
+        .flat_map(|m| m.vertices.blends[1].iter().map(|b| b[1] as f32 / 255.))
+        .collect();
+    let mut checked = 0;
+    for primitive in d["meshes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|m| m["primitives"].as_array().unwrap())
+    {
+        let material = &d["materials"][primitive["material"].as_u64().unwrap() as usize];
+        let extras = &material["extras"]["sekiro_layers"];
+        if extras["kind"] != 4 {
+            continue;
+        }
+        for key in ["overlay", "overlay_normal", "base_normal", "mask"] {
+            assert!(extras[key]["uri"].is_string(), "{key} missing");
+        }
+        let accessor =
+            &d["accessors"][primitive["attributes"]["COLOR_0"].as_u64().unwrap() as usize];
+        let view = &d["bufferViews"][accessor["bufferView"].as_u64().unwrap() as usize];
+        let offset = bin
+            + view["byteOffset"].as_u64().unwrap_or(0) as usize
+            + accessor["byteOffset"].as_u64().unwrap_or(0) as usize;
+        for i in 0..accessor["count"].as_u64().unwrap() as usize {
+            let start = offset + i * 16 + 4;
+            let y = f32::from_le_bytes(built.glb[start..start + 4].try_into().unwrap());
+            assert!(
+                wanted.contains(&y),
+                "COLOR_0.y {y} is not a TEXCOORD2.y weight"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "no Wall_dobei_ver1 primitive exported");
+}

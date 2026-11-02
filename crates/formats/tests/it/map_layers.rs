@@ -77,3 +77,34 @@ fn authored_mask_selectors_intensity_and_snow_direction_survive_packing() {
         assert_eq!(select(p[13]), 0.3);
     }
 }
+
+#[test]
+fn wall_dobei_ver1_is_its_own_family_with_shader_defaults() {
+    assert_eq!(
+        map_layers::family("N:\\shader\\WallTest_dobei_ver1.spx"),
+        map_layers::WALL_DOBEI_VER1
+    );
+    assert_eq!(map_layers::family("WallTest_dobei_ver2.spx"), 0);
+    let mut d = Mtd {
+        shader: String::new(),
+        description: String::new(),
+        textures: vec![],
+        params: vec![],
+    };
+    let p = map_layers::game_params(&d, map_layers::WALL_DOBEI_VER1);
+    assert_eq!(p[0], [0.248, 0.316, 0.056, 0.]);
+    assert_eq!(p[1], [1., 3., 1., 5.]);
+    assert_eq!(p[2], [0., 0., 1., 0.02]);
+    assert_eq!(p[3], [0., 0., 0.5, 0.]);
+    assert_eq!(p[4], [0., 0., 0.5, 0.]);
+    assert_eq!(p[5], [1., 0., 0., 0.]);
+    d.params.push(Param {
+        name: "WallTest_dobei_ver1_snp_0_float_5".into(),
+        kind: "float".into(),
+        value: ParamValue::Floats(vec![2.]),
+    });
+    assert_eq!(
+        map_layers::game_params(&d, map_layers::WALL_DOBEI_VER1)[1][3],
+        2.
+    );
+}
